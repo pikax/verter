@@ -3692,6 +3692,182 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
     }
 }
 
+/// Discriminating test: a cross-thread joiner of a **`cache_suppress`**
+/// (non-cacheable) winner still inherits the winner's carrier facts AND
+/// the winner's `cache_suppress` flag.
+///
+/// The winner's cold build returns a [`QueryBuildOutput`] with
+/// `cache_suppress == true` and a `graph_carrier` carrying one
+/// `FileWholeHash` fact — exactly the shape
+/// `finalise_traced_build_output` produces on its `Ok(traced)→None`
+/// suppress path (a torn / unrootable build whose traced cross-file deps
+/// are still valid). The memo refuses to admit the entry (suppression),
+/// but the broadcast to joiners MUST still carry the build's
+/// dependency + suppression state:
+///
+/// - The joiner thread's outer tracer MUST finalise containing the
+///   winner's carrier fact — so a joiner inside an outer cold query
+///   roots the outer entry on the suppressed child's transitive deps.
+/// - The joiner's `CacheRead.cache_suppress` MUST be `true` — so a
+///   composition helper that threaded the joiner's read propagates the
+///   non-cacheability to the outer build.
+///
+/// Discrimination property — pre-fix-4 this FAILS on BOTH assertions:
+/// the `cache_suppress` branch at the cold-winner broadcast path set
+/// `publish_carrier = None`, so `state.graph_carrier` was `None`
+/// (joiner bubbles nothing → outer tracer finalises `[]`) and the
+/// joiner returned the hard-coded `cache_suppress: false`. Post-fix-4
+/// the winner broadcasts the non-admitted carrier and records
+/// `state.cache_suppress`, so the joiner bubbles the fact and returns
+/// `cache_suppress: true`. The winner's memo entry is still NOT
+/// admitted (`cache_suppress` gates `warm_publish_one`).
+#[test]
+fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
+    use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    let store = Arc::new(SemanticGraphStore::new());
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope("/suppress_joiner/site.ts"),
+        name: Arc::from("Target"),
+    });
+
+    // The suppressed winner's transitive cross-file dep fact.
+    let winner_fact = FactVersionRef::FileWholeHash {
+        canonical_id: "suppressed_dep.ts".to_string(),
+        hash: [0x5cu8; 16],
+    };
+
+    let (tx_winner_in_build, rx_winner_in_build) = mpsc::channel::<()>();
+    let (tx_release_winner, rx_release_winner) = mpsc::channel::<()>();
+
+    let winner_store = Arc::clone(&store);
+    let winner_key = key.clone();
+    let winner_fact_for_build = winner_fact.clone();
+    let winner = thread::spawn(move || {
+        let host = ctx_host();
+        winner_store.execute_cooperative(
+            &host,
+            winner_key,
+            || winner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                tx_winner_in_build
+                    .send(())
+                    .expect("winner: signal in-build");
+                rx_release_winner
+                    .recv()
+                    .expect("winner: released by driver");
+                let id =
+                    winner_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                // A non-cacheable build that still carries valid traced
+                // cross-file deps: `cache_suppress == true` AND a
+                // populated `graph_carrier`. This is the shape
+                // `finalise_traced_build_output` emits when
+                // `semantic_graph_read_set_signature` returns `None`
+                // (e.g. a torn self-root observation) yet the traced
+                // fact set is intact.
+                let carrier = crate::fact_signature_helpers::ReadSetSignature::new(
+                    Arc::from(vec![winner_fact_for_build.clone()]),
+                    Arc::from(Vec::new().into_boxed_slice()),
+                );
+                crate::project_semantic_dispatch::walk::QueryBuildOutput {
+                    result: QueryResult::Value(id),
+                    dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                    walker_diagnostics: Vec::new(),
+                    cache_suppress: true,
+                    observed_self_roots: Vec::new(),
+                    graph_carrier: Some(Box::new(carrier)),
+                    self_root_canonicals: Arc::from([]),
+                    pending_prefix_backfills: Vec::new(),
+                }
+            },
+        )
+    });
+
+    rx_winner_in_build.recv().expect("winner entered build");
+
+    let joiner_store = Arc::clone(&store);
+    let joiner_key = key.clone();
+    let joiner = thread::spawn(move || {
+        let host = ctx_host();
+        // Outer tracer scope spans the whole dispatch so the
+        // joiner-bubble target is the cell the joiner returns into.
+        let (joiner_suppress, finalise) =
+            crate::fact_signature_helpers::install_fact_tracer(&host, || {
+                let cache_read = joiner_store.execute_cooperative(
+                    &host,
+                    joiner_key,
+                    || joiner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                    || {
+                        // This build MUST NOT run on the joiner.
+                        let id = joiner_store
+                            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+                        (
+                            QueryResult::Value(id),
+                            Arc::from(Vec::new().into_boxed_slice()),
+                        )
+                    },
+                );
+                cache_read.cache_suppress
+            });
+        (joiner_suppress, finalise)
+    });
+
+    thread::sleep(Duration::from_millis(50));
+    tx_release_winner.send(()).expect("release winner");
+
+    let _winner_read = winner.join().expect("winner joined");
+    let (joiner_suppress, joiner_finalise) = joiner.join().expect("joiner joined");
+
+    let snap = store.stats_snapshot();
+    assert!(
+        snap.joined_waits >= 1,
+        "joiner must have hit the cooperative wait branch \
+         (joined_waits={}); if this fails the joiner ran its own \
+         cold build instead of entering the wait branch.",
+        snap.joined_waits
+    );
+
+    assert!(
+        joiner_suppress,
+        "joiner of a `cache_suppress` winner MUST return \
+         `cache_suppress: true`. Pre-fix-4 the joiner returned the \
+         hard-coded `cache_suppress: false`, so a composition helper \
+         that threaded this read would publish the outer build's \
+         entry without inheriting the suppressed child's \
+         non-cacheability.",
+    );
+
+    match joiner_finalise {
+        FactReadSetFinalise::Ok(sig) => {
+            assert!(
+                sig.iter().any(|f| f == &winner_fact),
+                "joiner thread's outer tracer must contain the \
+                 suppressed winner's carrier fact (got {sig:?}; \
+                 expected to contain {winner_fact:?}). Pre-fix-4 the \
+                 `cache_suppress` branch dropped the carrier before \
+                 broadcasting, so `state.graph_carrier` was `None` \
+                 and the joiner bubbled nothing — the outer cold \
+                 query's tracer finalised without the suppressed \
+                 child's transitive deps and the outer entry was \
+                 admitted under-rooted.",
+            );
+        }
+        FactReadSetFinalise::Overflow => panic!("joiner outer tracer overflowed"),
+    }
+
+    // The suppressed winner's value is non-cacheable: the memo entry
+    // must NOT be admitted even though its carrier was broadcast.
+    assert!(
+        store.get_unvalidated(&key).is_none(),
+        "a `cache_suppress` winner must never warm-publish its memo \
+         entry — broadcasting the carrier to joiners is independent \
+         of memo admission, which `cache_suppress` still gates.",
+    );
+}
+
 /// `execute_cooperative_batch` over an empty key list returns an empty
 /// result vector — a non-admission probe, no cold builds, no panic.
 #[test]

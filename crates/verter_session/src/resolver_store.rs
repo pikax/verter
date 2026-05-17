@@ -191,41 +191,79 @@ impl HostStoreView {
         Self::build(host, snapshot_epoch, Some(session_id))
     }
 
-    /// Re-root this view's `whole_hashes` against a [`SessionView`]'s
-    /// overlay so warm-read validation observes the session's CURRENT
-    /// content identity rather than the base host's.
+    /// Re-root this view against a [`SessionView`]'s overlay so
+    /// warm-read validation observes the session's CURRENT content
+    /// identity rather than the base host's — across **every**
+    /// per-canonical / per-domain snapshot, not just `whole_hashes`.
     ///
-    /// `HostStoreView::build` snapshots `whole_hashes` from the
-    /// scheduler / `FileArtifactStore` — i.e. the **base** content
-    /// hash of every tracked canonical. A query executed under a
+    /// `HostStoreView::build` snapshots every per-canonical field from
+    /// the scheduler / `FileArtifactStore` — i.e. the **base** content
+    /// of every tracked canonical. A query executed under a
     /// [`crate::resolver_core::SessionResolverContext`] roots its
     /// cached values (semantic-graph `MemoEntry` self-roots, the
-    /// legacy whole-hash rail) on the **overlay** content hash for
-    /// every overlay-bearing canonical — `ensure_indexed_ready` under
-    /// a session resolves the overlay `IndexedReady`. A warm read
-    /// would then compare an overlay-rooted self-root against the base
-    /// hash and miss on every call.
+    /// path-precise fact rail, the legacy whole-hash rail) on the
+    /// **overlay** content for every overlay-bearing canonical —
+    /// `ensure_indexed_ready` under a session resolves the overlay
+    /// `IndexedReady`, and parse facts pin to the overlay content
+    /// version. A warm read whose validation routed through the base
+    /// view would compare overlay-rooted facts against base snapshots
+    /// and miss on every call.
     ///
-    /// This method overrides, for the session's overlay canonicals:
-    /// - an overlay-Upsert canonical → `whole_hashes[canonical]` is
-    ///   set to [`SessionView::overlay_content_hash_for`] (the
-    ///   session's current content identity for that file);
-    /// - a session-tombstoned canonical → its `whole_hashes` entry is
-    ///   removed, so `validates_self_root_whole_hash` rejects any
-    ///   entry rooted on it (the session deleted the file; there is no
-    ///   current content) and a base-content-rooted entry also misses.
+    /// Per-canonical / per-domain field treatment for the session's
+    /// overlay canonicals:
     ///
-    /// The override is **not** a blanket accept: a self-root validated
-    /// through the overlaid view still fails when the entry was rooted
-    /// on a *superseded* overlay hash (the overlay was edited since) or
-    /// on the *base* hash while an overlay now covers the canonical.
-    /// It validates against the session's current content, exactly as
-    /// the un-overlaid view validates against the base's current
-    /// content.
+    /// - **`whole_hashes`** — overlay-Upsert: set to
+    ///   [`SessionView::overlay_content_hash_for`]; tombstone: removed.
+    ///   The self-root `FileWholeHash` validator (`validates` /
+    ///   `validates_self_root_whole_hash`) and the `DirectSource`
+    ///   `DerivedFactHash` arm read this map; re-rooting it closes
+    ///   them. It is also the `content_hash` dimension the
+    ///   `resolve-imports` validator composes its
+    ///   `ResolvedImportFactsKey` from, so re-rooting steers that
+    ///   content-addressed `DashMap` lookup at the overlay slot.
+    /// - **`file_facts`** — overlay-Upsert: refreshed from the overlay
+    ///   `FileArtifacts` (via [`SessionView::parse_artifacts`], which
+    ///   is overlay-aware and content-pinned); tombstone: removed.
+    ///   `validates_parse_domain` reads this per-canonical
+    ///   `Arc<FileFacts>` snapshot — a `Parse` fact pinned to the
+    ///   overlay version validates against the overlay's `FileFacts`.
+    /// - **`derived_hashes`** (`Route` / `ImportRoute`) — overlay-Upsert:
+    ///   refreshed from the overlay `IndexedReady`
+    ///   (`hash_route_surface` over the overlay `shallow_state`, and the
+    ///   overlay `import_route_hash`); tombstone: removed alongside the
+    ///   `DirectSource` entry. `validates` reads these per-`(canonical,
+    ///   kind)` hashes; refreshing keeps an overlay-rooted
+    ///   `DerivedFactHash` validating against overlay content.
+    /// - **`resolved_import_facts`** / **`route_db`** — `Arc` clones of
+    ///   the project store's content-addressed `DashMap`s. They are
+    ///   shared and hold both the base and the overlay candidates; the
+    ///   overlay candidate is reached because `whole_hashes` (the
+    ///   `content_hash` key dimension) is re-rooted above. No
+    ///   per-canonical re-root needed on the handle itself.
+    /// - **`resolved_import_facts_known_miss_tags`** — the
+    ///   `known_miss_generation` key dimension is generation-scoped, not
+    ///   content-scoped; a pure overlay content edit does not advance
+    ///   the project generation, so the base snapshot is correct.
+    /// - **`route_surface_index_fingerprints`** — keyed by the
+    ///   structural augmentation-target shape, not by canonical /
+    ///   content hash; an overlay content edit does not move a target's
+    ///   structural identity, so the base snapshot is correct.
+    /// - **`import_routes`** — populated by `build` but read by no
+    ///   `HostStoreView` validator; nothing to re-root.
+    /// - **`env_hashes`** / **`project_identity`** / **`project_generation`**
+    ///   / **`compat_token`** / **`mutation_epoch`** / **`session_id`** —
+    ///   view-level identity, not per-canonical content; untouched.
     ///
-    /// Non-overlay canonicals are untouched — they keep the base hash,
-    /// so a session that overlays one file still validates every other
-    /// canonical against base content.
+    /// The override is **not** a blanket accept: every refreshed
+    /// snapshot validates against the session's CURRENT overlay
+    /// content. An entry rooted on a *superseded* overlay version, or
+    /// on the *base* content while an overlay now covers the canonical,
+    /// still misses — exactly as the un-overlaid view validates against
+    /// the base's current content.
+    ///
+    /// Non-overlay canonicals are untouched — they keep their base
+    /// snapshots, so a session that overlays one file still validates
+    /// every other canonical against base content.
     #[must_use]
     pub(crate) fn with_session_overlay(
         mut self,
@@ -233,14 +271,96 @@ impl HostStoreView {
     ) -> Self {
         for canonical in view.overlay_canonicals() {
             if view.is_tombstoned(&canonical) {
-                // The session deleted the file — drop the tracked
-                // hash so a strict self-root validation rejects any
-                // entry rooted on it and recomputes.
+                // The session deleted the file — drop every
+                // per-canonical / per-domain snapshot so a strict
+                // validation rejects any entry rooted on it and
+                // recomputes. There is no current content for a
+                // tombstoned canonical.
                 self.whole_hashes.remove(&canonical);
+                self.file_facts.remove(&canonical);
+                self.derived_hashes.remove(&(
+                    canonical.clone(),
+                    crate::resolver_core::DerivedFactKind::Route,
+                ));
+                self.derived_hashes.remove(&(
+                    canonical.clone(),
+                    crate::resolver_core::DerivedFactKind::ImportRoute,
+                ));
+                self.derived_hashes.remove(&(
+                    canonical.clone(),
+                    crate::resolver_core::DerivedFactKind::DirectSource,
+                ));
                 continue;
             }
-            if let Some(overlay_hash) = view.overlay_content_hash_for(&canonical) {
-                self.whole_hashes.insert(canonical, overlay_hash);
+            let Some(overlay_hash) = view.overlay_content_hash_for(&canonical) else {
+                continue;
+            };
+            // Re-root the self-root whole-hash rail.
+            self.whole_hashes.insert(canonical.clone(), overlay_hash);
+
+            // Refresh the per-domain parse-fact + derived-fact
+            // snapshots from the overlay artifact. `parse_artifacts`
+            // is overlay-aware (strict by the overlay `content_hash`)
+            // so it returns the overlay `FileArtifacts` candidate, not
+            // the base one.
+            match view.parse_artifacts(&canonical) {
+                Some(overlay_artifacts) => {
+                    self.file_facts.insert(
+                        canonical.clone(),
+                        std::sync::Arc::clone(&overlay_artifacts.facts),
+                    );
+                    let overlay_indexed = &overlay_artifacts.indexed;
+                    if overlay_indexed.shallow_state.has_resolvable_surface() {
+                        self.derived_hashes.insert(
+                            (
+                                canonical.clone(),
+                                crate::resolver_core::DerivedFactKind::Route,
+                            ),
+                            hash_route_surface(&overlay_indexed.shallow_state),
+                        );
+                    } else {
+                        self.derived_hashes.remove(&(
+                            canonical.clone(),
+                            crate::resolver_core::DerivedFactKind::Route,
+                        ));
+                    }
+                    match overlay_indexed.import_route_hash {
+                        Some(hash) => {
+                            self.derived_hashes.insert(
+                                (
+                                    canonical.clone(),
+                                    crate::resolver_core::DerivedFactKind::ImportRoute,
+                                ),
+                                hash,
+                            );
+                        }
+                        None => {
+                            self.derived_hashes.remove(&(
+                                canonical.clone(),
+                                crate::resolver_core::DerivedFactKind::ImportRoute,
+                            ));
+                        }
+                    }
+                }
+                None => {
+                    // The overlay artifact has not been materialised
+                    // yet. The base per-domain snapshots are stale
+                    // relative to the overlay content; drop them so
+                    // `validates_parse_domain` / the `DerivedFactHash`
+                    // validator reject any entry rooted on the overlay
+                    // and the consumer cold-recomputes (the correct R3
+                    // outcome under stale producer state — same shape
+                    // as an absent base snapshot).
+                    self.file_facts.remove(&canonical);
+                    self.derived_hashes.remove(&(
+                        canonical.clone(),
+                        crate::resolver_core::DerivedFactKind::Route,
+                    ));
+                    self.derived_hashes.remove(&(
+                        canonical.clone(),
+                        crate::resolver_core::DerivedFactKind::ImportRoute,
+                    ));
+                }
             }
         }
         self

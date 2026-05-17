@@ -50,6 +50,18 @@ pub(super) struct InflightState {
     /// walker queries.
     pub(super) walker_diagnostics:
         Option<std::sync::Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>>,
+    /// The winner build's `cache_suppress` flag. Set by the winner
+    /// alongside `completed`; a joiner that observes `aborted == false`
+    /// returns this verbatim in its `CacheRead.cache_suppress`. A
+    /// `cache_suppress` winner is non-cacheable (tracer overflow,
+    /// pathological input, or an unrootable / `None` signature); the
+    /// joiner MUST inherit the same non-cacheability so a joiner inside
+    /// an outer cold query cannot publish an outer entry that — through
+    /// a composition helper threading the joiner's read — would
+    /// otherwise be admitted despite a non-cacheable transitive child.
+    /// `false` for the abort/retry path (the sentinel result there is
+    /// not a real winner build).
+    pub(super) cache_suppress: bool,
     /// `true` once some thread owns the build. Subsequent threads wait on
     /// `ready` rather than trying to own it themselves.
     pub(super) claimed: bool,

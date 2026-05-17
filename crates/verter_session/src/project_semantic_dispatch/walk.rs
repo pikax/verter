@@ -151,12 +151,17 @@ pub struct QueryBuildOutput {
     ///
     /// `None` BEFORE the shared cold-build helper post-processes the
     /// raw build output (the build closures never set it). After
-    /// post-processing `None` means the entry is **non-cacheable** —
-    /// the helper sets `cache_suppress = true` so the memo refuses
-    /// admission while the value still flows to the caller. `Some`
-    /// carries the carrier `warm_publish_one` / the in-flight joiner
-    /// state / prefix-backfill all publish verbatim — they NEVER
-    /// reconstruct facts from the legacy fence.
+    /// post-processing, **memo admission is decided by
+    /// [`Self::cache_suppress`], not by the presence of this carrier**:
+    /// a cacheable build carries the self-version-rooted carrier the
+    /// memo publishes; a non-cacheable build whose self-rooting failed
+    /// (`semantic_graph_read_set_signature` → `None`) still carries a
+    /// NON-ADMITTED carrier holding its traced cross-file dep facts so
+    /// the cooperative-admission winner can broadcast them to joiners.
+    /// Only a tracer-overflow build (no bounded fact list) leaves this
+    /// `None`. Whatever carrier is present, `warm_publish_one` / the
+    /// in-flight joiner state / prefix-backfill publish or broadcast it
+    /// verbatim — they NEVER reconstruct facts from the legacy fence.
     ///
     /// `Box`ed so the in-line `None` case (the raw build-closure
     /// output, on every recursion frame of a deep type resolution)

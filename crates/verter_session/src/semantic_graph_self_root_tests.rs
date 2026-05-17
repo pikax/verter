@@ -1369,3 +1369,264 @@ fn session_overlay_warm_validation_matrix() {
         }
     }
 }
+
+/// `execute_cooperative`'s warm-hit fast path validates a session
+/// warm hit whose carrier carries a **`Parse` fact** against the
+/// **overlay** content identity, not the base host's.
+///
+/// `session_overlay_warm_validation_matrix` above covers a carrier
+/// whose only fact is the self-root `FileWholeHash`. That fact routes
+/// through `validates_self_root_whole_hash`, which fix-round-3 closed by
+/// re-rooting `HostStoreView.whole_hashes`. A `Parse` fact routes
+/// through a DIFFERENT validator — `validates_parse_domain`, which reads
+/// the per-canonical `Arc<FileFacts>` from `HostStoreView.file_facts`.
+/// `HostStoreView::build` snapshots `file_facts` from the **base**
+/// content; `with_session_overlay` (fix-round-3) re-rooted only
+/// `whole_hashes`. So a warm `MemoEntry` whose carrier holds a `Parse`
+/// fact for an overlaid canonical — the fact's `expected_hash` is the
+/// fact hash live in the **overlay** artifact, because a cold build
+/// under a session pins parse facts to the overlay content version —
+/// validated the overlay `expected_hash` against the **base**
+/// `FileFacts` snapshot and missed on every call.
+///
+/// This test discriminates the `Parse`-fact hit/miss matrix:
+///
+/// - **overlay-current (`Parse` fact)** — the carrier's self-root
+///   `FileWholeHash` AND its `Parse(SyntacticExportSet)` fact are both
+///   pinned to the current overlay version → **warm HIT**. RED
+///   pre-fix-4: the `Parse` fact validates against the base
+///   `FileFacts` snapshot (whose `SyntacticExportSet` hash differs),
+///   so the cold build re-runs even though `whole_hashes` is
+///   overlay-rooted.
+/// - **overlay-stale (`Parse` fact)** — the carrier's self-root is the
+///   current overlay hash but the `Parse` fact carries a *superseded*
+///   hash (the base version's `SyntacticExportSet` hash) → **MISS**.
+///   Proves the refreshed `file_facts` is not a blanket accept — it
+///   rejects a `Parse` fact pinned to a non-current content version.
+/// - **base/base (`Parse` fact)** — the carrier's self-root AND
+///   `Parse` fact are pinned to the base version, queried under the
+///   plain base host context → **warm HIT** (unchanged). Guards the
+///   `file_facts` refresh against leaking into non-session contexts.
+#[test]
+fn session_overlay_parse_fact_carrier_warm_validation() {
+    use crate::resolver_core::SessionResolverContext;
+    use crate::semantic_query::QueryResult;
+    use crate::session_view::{OverlaidView, SessionView};
+    use rustc_hash::FxHashMap;
+
+    let canonical = "/sg_overlay_parse/probe.ts";
+    let host = host();
+    // Base file. Export name set: { Probe, probe }.
+    upsert(
+        &host,
+        canonical,
+        "export interface Probe { base: number; }\nexport const probe = 1;\n",
+    );
+    let base_hash = host
+        .ensure_indexed_ready(canonical)
+        .expect("base IndexedReady must materialise")
+        .whole_hash;
+    let host = Arc::new(host);
+
+    // Overlay source: adds a third export (`extra`) so the
+    // `SyntacticExportSet` parse fact — the export NAME set — genuinely
+    // differs from the base. A members-only edit would leave the
+    // export-name set identical and the matrix cases indistinguishable.
+    let overlay_source: Arc<str> = Arc::from(
+        "export interface Probe { overlay: string; }\nexport const probe = 2;\nexport const extra = 3;\n",
+    );
+    let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+    overlays.insert(canonical.to_string(), Arc::clone(&overlay_source));
+    let view = OverlaidView::new(Arc::clone(&host), overlays);
+    let overlay_hash = view
+        .overlay_content_hash_for(canonical)
+        .expect("OverlaidView must report an overlay content hash");
+    assert_ne!(
+        overlay_hash, base_hash,
+        "fixture invariant: overlay differs"
+    );
+
+    // Publish the overlay `IndexedReady` + `FileArtifacts` candidate
+    // under the overlay hash (multi-candidate sibling of the base).
+    let _overlay_indexed = host
+        .materialize_overlay_indexed_ready(canonical, &overlay_source, overlay_hash)
+        .expect("overlay IndexedReady must materialise");
+
+    // Recover the `SyntacticExportSet` parse-fact hash for each content
+    // version directly from the content-addressed artifact store —
+    // exactly as `parse_fact_ref_for_observed_current_content` does for
+    // a cold build (provenance-pure, content-addressed at the observed
+    // hash). `base_ctx` is the plain host (any `ResolverContext` works —
+    // the helper is content-addressed, not view-dependent).
+    let base_ctx: &dyn ResolverContext = host.as_ref();
+    let base_parse_fact =
+        crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
+            base_ctx,
+            canonical,
+            base_hash,
+            FactKey::SyntacticExportSet,
+            FactLane::Semantic,
+        )
+        .expect("base SyntacticExportSet parse fact must resolve");
+    let overlay_parse_fact =
+        crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
+            base_ctx,
+            canonical,
+            overlay_hash,
+            FactKey::SyntacticExportSet,
+            FactLane::Semantic,
+        )
+        .expect("overlay SyntacticExportSet parse fact must resolve");
+    assert_ne!(
+        base_parse_fact.expected_hash, overlay_parse_fact.expected_hash,
+        "fixture invariant: the overlay adds an export, so its \
+         SyntacticExportSet parse-fact hash must differ from the base's \
+         — otherwise the overlay-current vs overlay-stale cases are \
+         indistinguishable and the test does not discriminate",
+    );
+
+    let key = SemanticQueryKey::ResolveDecl(resolve_decl_key(canonical, "Probe"));
+
+    // Publish a `MemoEntry` whose carrier's fact rail leads with the
+    // self-root `FileWholeHash` pinned to `root_hash` and ALSO carries a
+    // `Parse(SyntacticExportSet)` fact pinned to `parse_fact`. This is
+    // the carrier shape a cold build produces when its tracer observed a
+    // syntactic-export-set parse fact for the keyed canonical.
+    let publish_entry = |graph: &SemanticGraphStore,
+                         root_hash: [u8; 16],
+                         parse_fact: &crate::resolver_core::ParseFactRef| {
+        let node = graph.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String,
+        ));
+        let carrier = ReadSetSignature::new(
+            Arc::from(vec![
+                FactVersionRef::FileWholeHash {
+                    canonical_id: canonical.to_string(),
+                    hash: root_hash,
+                },
+                FactVersionRef::Parse(parse_fact.clone()),
+            ]),
+            Arc::from(Vec::new().into_boxed_slice()),
+        );
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(canonical)]);
+        let published = graph.publish_with_carrier_for_tests(
+            key.clone(),
+            QueryResult::Value(node),
+            carrier,
+            self_roots,
+        );
+        assert!(published > 0, "fixture invariant: the warm entry publishes");
+        node
+    };
+
+    let drive = |graph: &SemanticGraphStore, ctx: &dyn ResolverContext| {
+        let mut cold_ran = false;
+        let recompute_node = graph.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::Number,
+        ));
+        let read = graph.execute_cooperative(
+            ctx,
+            key.clone(),
+            || {
+                graph.intern_node(SemanticNodeData::Opaque(
+                    crate::semantic_query::QueryError::Miss,
+                ))
+            },
+            || {
+                cold_ran = true;
+                (
+                    QueryResult::Value(recompute_node),
+                    Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
+                )
+            },
+        );
+        (cold_ran, read.value, recompute_node)
+    };
+
+    // --- Case 1: overlay-current (Parse fact) → warm HIT -----------
+    {
+        let graph = SemanticGraphStore::new();
+        let published = publish_entry(&graph, overlay_hash, &overlay_parse_fact);
+        let session_ctx = SessionResolverContext::new(&host, &view);
+        let (cold_ran, value, _recompute) = drive(&graph, &session_ctx);
+        assert!(
+            !cold_ran,
+            "overlay-current (Parse fact): an entry whose carrier holds \
+             the self-root FileWholeHash AND a Parse(SyntacticExportSet) \
+             fact, both pinned to the CURRENT overlay version, MUST warm-HIT \
+             under a SessionResolverContext. Pre-fix-4 `with_session_overlay` \
+             re-rooted only `whole_hashes`; `file_facts` stayed snapshotted \
+             from the base content, so `validates_parse_domain` compared the \
+             overlay parse-fact hash against the base FileFacts and missed — \
+             every session-overlay warm read with a Parse-fact carrier \
+             cold-recomputed.",
+        );
+        match value {
+            QueryResult::Value(node) => assert_eq!(
+                node, published,
+                "overlay-current (Parse fact): the warm hit surfaces the PUBLISHED node",
+            ),
+            other => {
+                panic!("overlay-current (Parse fact): expected the published Value, got {other:?}")
+            }
+        }
+    }
+
+    // --- Case 2: overlay-stale (Parse fact) → MISS -----------------
+    {
+        let graph = SemanticGraphStore::new();
+        // Self-root on the current overlay hash, but the Parse fact
+        // carries the BASE version's SyntacticExportSet hash — a
+        // genuine superseded-version mismatch.
+        let stale_parse_fact = crate::resolver_core::ParseFactRef {
+            canonical_id: canonical.to_string(),
+            key: FactKey::SyntacticExportSet,
+            lane: FactLane::Semantic,
+            expected_hash: base_parse_fact.expected_hash,
+        };
+        let _published = publish_entry(&graph, overlay_hash, &stale_parse_fact);
+        let session_ctx = SessionResolverContext::new(&host, &view);
+        let (cold_ran, value, recompute) = drive(&graph, &session_ctx);
+        assert!(
+            cold_ran,
+            "overlay-stale (Parse fact): an entry whose self-root is the \
+             current overlay hash but whose Parse fact carries a SUPERSEDED \
+             SyntacticExportSet hash MUST MISS. The overlay-refreshed \
+             `file_facts` validates the Parse fact against the overlay's \
+             CURRENT FileFacts — it is NOT a blanket 'accept any Parse fact \
+             under a session overlay'.",
+        );
+        match value {
+            QueryResult::Value(node) => assert_eq!(
+                node, recompute,
+                "overlay-stale (Parse fact): the recomputed node must surface",
+            ),
+            other => {
+                panic!("overlay-stale (Parse fact): expected the recomputed Value, got {other:?}")
+            }
+        }
+    }
+
+    // --- Case 3: base/base (Parse fact) → warm HIT (unchanged) -----
+    {
+        let graph = SemanticGraphStore::new();
+        let published = publish_entry(&graph, base_hash, &base_parse_fact);
+        let base_ctx: &dyn ResolverContext = host.as_ref();
+        let (cold_ran, value, _recompute) = drive(&graph, base_ctx);
+        assert!(
+            !cold_ran,
+            "base/base (Parse fact): an entry whose self-root AND Parse fact \
+             are pinned to the base version, queried under the plain base \
+             host context, MUST warm-HIT — the base store view's `file_facts` \
+             holds the base FileFacts. Guards the overlay `file_facts` refresh \
+             against leaking into non-session contexts.",
+        );
+        match value {
+            QueryResult::Value(node) => assert_eq!(
+                node, published,
+                "base/base (Parse fact): the warm hit surfaces the PUBLISHED node",
+            ),
+            other => panic!("base/base (Parse fact): expected the published Value, got {other:?}"),
+        }
+    }
+}

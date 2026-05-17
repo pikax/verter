@@ -1823,6 +1823,16 @@ impl SemanticGraphStore {
                 });
                 let dep_signature = state.dep_signature.clone().unwrap_or_else(empty_signature);
                 let graph_carrier = state.graph_carrier.clone();
+                // Inherit the winner build's non-cacheability flag. A
+                // `cache_suppress` winner is non-cacheable (tracer
+                // overflow, pathological input, or an unrootable `None`
+                // signature); the joiner MUST return the SAME
+                // `cache_suppress` so a joiner inside an outer cold
+                // query cannot — through a composition helper threading
+                // this read — publish an outer entry that inherits
+                // neither the suppressed child's suppression nor (via
+                // the carrier bubble below) its dep facts.
+                let cache_suppress = state.cache_suppress;
                 let walker_diagnostics = state
                     .walker_diagnostics
                     .clone()
@@ -1836,7 +1846,10 @@ impl SemanticGraphStore {
                 // ensures that an outer cold-compute scope that spawned
                 // this joiner sees all the facts the winner observed,
                 // preserving completeness of the outer scope's
-                // accumulated observation set.
+                // accumulated observation set. The winner records
+                // `state.graph_carrier` for EVERY non-aborted build —
+                // cacheable or `cache_suppress` — so this bubble carries
+                // a suppressed child's transitive deps too.
                 // Abort-path guard: `state.aborted` was checked above; the
                 // `continue` path retries without reaching here, so we only
                 // bubble on the non-aborted joiner path.
@@ -1851,7 +1864,7 @@ impl SemanticGraphStore {
                     value: result,
                     dep_signature,
                     walker_diagnostics,
-                    cache_suppress: false,
+                    cache_suppress,
                 };
             }
             state.claimed = true;
@@ -1952,41 +1965,48 @@ impl SemanticGraphStore {
         // result still flows back to the caller, but the next request
         // re-runs cold so the suppression decision applies under the
         // current state of the world rather than being fossilised.
-        // The cold-build helper produced the COMPLETED self-version-rooted
-        // carrier on `graph_carrier` — `Some` iff the build is cacheable.
-        // A non-cacheable build (a `None` producer result or a tracer
-        // overflow) sets `cache_suppress = true` and leaves
-        // `graph_carrier == None`; the publish path is skipped without
-        // reconstructing facts from the legacy fence.
-        // Resolve the carrier the cacheable build publishes. The
-        // production cold-build path
-        // (`ProjectSemanticDispatch::execute_via_cold_build_helper`)
-        // always sets `graph_carrier` via `finalise_traced_build_output`
-        // → `semantic_graph_read_set_signature`, so the published entry
-        // is self-version-rooted. A direct `execute_cooperative` caller
-        // that bypasses the dispatch's `traced_build` wrapper (test /
-        // debug drivers) leaves `graph_carrier` unset and
-        // `cache_suppress` false; such a build is published with a
-        // synthetic carrier — the legacy `dep_signature` rail and an
-        // empty fact rail with no self-roots, so the entry validates
-        // vacuously on warm reads. This is NOT a fence-fact
-        // reconstruction: the fact rail is left empty rather than
-        // reverse-engineered from the legacy `WholeHash` entries. When
-        // `cache_suppress` is set the build is non-cacheable and no
-        // carrier is resolved.
-        let publish_carrier: Option<crate::fact_signature_helpers::ReadSetSignature> =
+        // Resolve TWO carriers from the build output:
+        //
+        // - `broadcast_carrier` — ALWAYS resolved. It is bubbled into
+        //   this winner thread's outer tracer AND recorded on the
+        //   in-flight state so cross-thread joiners bubble the SAME
+        //   fact rail. The production cold-build path
+        //   (`ProjectSemanticDispatch::execute_via_cold_build_helper`)
+        //   sets `graph_carrier` via `finalise_traced_build_output` —
+        //   for a cacheable build the self-version-rooted carrier, and
+        //   for a non-cacheable `Ok(traced)→None` build a non-admitted
+        //   carrier still carrying the traced cross-file dep facts (so
+        //   joiners inherit the suppressed child's transitive deps). A
+        //   direct `execute_cooperative` caller that bypasses the
+        //   dispatch's `traced_build` wrapper (test / debug drivers)
+        //   leaves `graph_carrier` unset; such a build broadcasts a
+        //   synthetic carrier — the legacy `dep_signature` rail and an
+        //   empty fact rail. This is NOT a fence-fact reconstruction:
+        //   the fact rail is left empty rather than reverse-engineered
+        //   from the legacy `WholeHash` entries.
+        //
+        // - `publish_carrier` — `Some` only when the build is
+        //   cacheable (`!cache_suppress`). A `cache_suppress` build
+        //   (tracer overflow, pathological input, or an unrootable
+        //   `None` signature) is non-cacheable: it is NEVER admitted to
+        //   the memo. But its `broadcast_carrier` is still bubbled to
+        //   joiners — broadcasting the build's dependency state is
+        //   independent of memo admission.
+        let broadcast_carrier: crate::fact_signature_helpers::ReadSetSignature = match graph_carrier
+        {
+            Some(boxed) => *boxed,
+            None => crate::fact_signature_helpers::ReadSetSignature::new(
+                crate::fact_signature_helpers::empty_fact_signature(),
+                dep_signature.clone(),
+            ),
+        };
+        let publish_carrier: Option<&crate::fact_signature_helpers::ReadSetSignature> =
             if cache_suppress {
                 None
             } else {
-                Some(match graph_carrier {
-                    Some(boxed) => *boxed,
-                    None => crate::fact_signature_helpers::ReadSetSignature::new(
-                        crate::fact_signature_helpers::empty_fact_signature(),
-                        dep_signature.clone(),
-                    ),
-                })
+                Some(&broadcast_carrier)
             };
-        if let Some(ref carrier) = publish_carrier {
+        if let Some(carrier) = publish_carrier {
             self.warm_publish_one(
                 &key,
                 &result,
@@ -1995,36 +2015,8 @@ impl SemanticGraphStore {
                 &self_root_canonicals,
                 &inflight,
             );
-            // Bubble the completed carrier's path-precise fact rail into
-            // this thread's still-active outer tracer (if any). When this
-            // cold owner build was nested under another semantic query,
-            // `build()` installed a fresh tracer for the child build and
-            // popped it before the carrier was available — so the child's
-            // synthesised self-root `FileWholeHash` facts (added by
-            // `semantic_graph_read_set_signature`, never observed onto the
-            // tracer) live ONLY on this carrier. Without this bubble the
-            // outer cold-compute scope's accumulated observation set would
-            // miss the child's self-roots, and a parent that cold-builds a
-            // child would publish with strictly fewer deps than a parent
-            // that warm-hit the same child (the warm-hit fast path and the
-            // joiner path both bubble the carrier). Bubbling here makes the
-            // parent's dep coverage path-independent: a cold-built child
-            // and a warm-hit child deliver the identical fact set to the
-            // parent, so an edit to the child's self-root file invalidates
-            // the parent entry regardless of the child's cache state.
-            carrier.bubble(ctx);
             // Prefix backfill: publish each accumulated backfill
-            // record AFTER the parent entry is warm so the
-            // sibling-share short-circuit at `find_longest_warm_prefix`
-            // sees the prefixes with the parent's authoritative
-            // self-version-rooted carrier. Each backfilled prefix
-            // entry stores the parent's completed carrier and its
-            // self-root canonicals verbatim — the prefix hops are
-            // sub-paths of the same `base`, so they share the same
-            // file self-roots and the same traced cross-file fact
-            // set as the parent. The publish uses the same
-            // `warm_publish_one_if_absent` substrate so the prefix
-            // entries land in the unified reverse index.
+            // record AFTER the parent entry is warm.
             for backfill in pending_prefix_backfills {
                 self.warm_publish_one_if_absent(
                     backfill.key,
@@ -2049,6 +2041,28 @@ impl SemanticGraphStore {
                 ctx.memo_publish_suppressed.fetch_add(1, Ordering::Relaxed);
             }
         }
+        {
+            // Bubble the build's carrier fact rail into this winner
+            // thread's still-active outer tracer (if any) —
+            // UNCONDITIONALLY, cacheable or not. When this cold owner
+            // build was nested under another semantic query, `build()`
+            // installed a fresh tracer for the child build and popped
+            // it before the carrier was available — so the child's
+            // synthesised self-root `FileWholeHash` facts (added by
+            // `semantic_graph_read_set_signature`, never observed onto
+            // the tracer) live ONLY on this carrier. Without this
+            // bubble the outer cold-compute scope's accumulated
+            // observation set would miss the child's deps, and a parent
+            // that cold-builds a child would publish with strictly
+            // fewer deps than a parent that warm-hit / joined the same
+            // child (the warm-hit fast path and the joiner path both
+            // bubble the carrier). Bubbling here — for the
+            // `cache_suppress` path too — makes a cold-built child, a
+            // warm-hit child, and a joined child deliver the identical
+            // fact set to the parent. The carrier is a poppable local;
+            // bubbling consumes only its borrowed `facts` rail.
+            broadcast_carrier.bubble(ctx);
+        }
 
         // 6. Finalize in-flight and wake joiners. The completed flag
         //    guarantees any thread that acquired the flight before step 7
@@ -2063,18 +2077,29 @@ impl SemanticGraphStore {
             if !state.aborted {
                 state.completed = Some(result.clone());
                 state.dep_signature = Some(dep_signature.clone());
-                // Publish the SAME resolved carrier `warm_publish_one`
-                // recorded onto the memo entry so cross-thread joiners
-                // bubble the winner's path-precise fact rail into their
-                // own active tracer stack. Winner and joiner therefore
-                // agree on the identical fact set. Only published on
+                // Publish the SAME `broadcast_carrier` this winner
+                // bubbled into its own outer tracer so cross-thread
+                // joiners bubble the IDENTICAL fact rail into their own
+                // active tracer stack. Winner and joiner therefore
+                // agree on the identical fact set — for the
+                // `cache_suppress` (non-cacheable) build too: the
+                // carrier is broadcast regardless of memo admission, so
+                // a joiner inside an outer cold query inherits the
+                // suppressed child's transitive deps exactly as a
+                // joiner of a cacheable child would. Only published on
                 // the non-aborted path; the abort/retry branch above
                 // (which executes `continue`) deliberately bypasses
                 // this so joiners awakened by an abort sweep re-enter
-                // dispatch rather than bubbling a stale carrier. `None`
-                // for a non-cacheable build — joiners then have no
-                // carrier to bubble.
-                state.graph_carrier = publish_carrier.clone().map(Box::new);
+                // dispatch rather than bubbling a stale carrier.
+                state.graph_carrier = Some(Box::new(broadcast_carrier.clone()));
+                // Propagate the build's non-cacheability flag so a
+                // joiner returns the SAME `cache_suppress` the winner
+                // returns. Without this a joiner of a `cache_suppress`
+                // build returned `cache_suppress: false`; a composition
+                // helper that threaded the joiner's read would then
+                // publish an outer entry despite a non-cacheable
+                // transitive child.
+                state.cache_suppress = cache_suppress;
                 state.walker_diagnostics = Some(std::sync::Arc::clone(&walker_diagnostics));
             }
         }

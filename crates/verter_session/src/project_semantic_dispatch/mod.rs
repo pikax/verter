@@ -753,9 +753,30 @@ fn finalise_traced_build_output(
                     output.self_root_canonicals = Arc::from(self_root_canonicals);
                 }
                 None => {
-                    // Non-cacheable: refuse memo admission, the value
-                    // still flows back to the caller.
+                    // Non-cacheable: refuse memo admission (the value
+                    // still flows back to the caller). The build's
+                    // traced cross-file dep facts are nonetheless
+                    // valid — `semantic_graph_read_set_signature`
+                    // refused only because the entry could not be
+                    // soundly SELF-rooted (a torn self-root
+                    // observation, or an unvalidatable
+                    // `RouteGeneration` legacy dep). Carry those
+                    // traced facts on a NON-ADMITTED carrier: the
+                    // cooperative-admission winner bubbles this
+                    // carrier into its own outer tracer AND broadcasts
+                    // it to cross-thread joiners, so a joiner inside
+                    // an outer cold query inherits the suppressed
+                    // child's transitive dependency facts exactly as
+                    // a joiner of a cacheable child would. Memo
+                    // admission stays gated by `cache_suppress` — this
+                    // carrier is broadcast, never published.
                     output.cache_suppress = true;
+                    output.graph_carrier = Some(Box::new(
+                        crate::fact_signature_helpers::ReadSetSignature::new(
+                            traced_facts,
+                            output.dep_signature.clone(),
+                        ),
+                    ));
                 }
             }
         }
@@ -763,6 +784,10 @@ fn finalise_traced_build_output(
             provenance
                 .memo_entry_overflow_refusals
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // A tracer overflow yields no bounded fact list, so no
+            // carrier can be broadcast — the joiner inherits the
+            // non-cacheability through the `cache_suppress` flag the
+            // cooperative-admission path propagates to joiners.
             output.cache_suppress = true;
         }
     }
