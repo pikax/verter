@@ -2686,6 +2686,172 @@ fn materialize_memo_db_scope_export_set_canonical_mismatch_refuses_admission() {
     );
 }
 
+/// The materialize-memo publish site lowers the scope's `TypeExpr`
+/// under the scope's REAL content version even for a scope reachable
+/// only through the artifact / shallow-state path (a foreign source or
+/// a test-seeded file with no live scheduler `DerivedRawState`).
+///
+/// Root cause this test guards: the publish site
+/// (`meta_resolve/materialize/field_types.rs`) sources the scope's
+/// content hash for two distinct consumers. The
+/// `NodeScopeId::File { whole_hash }` the materialiser LOWERS against
+/// identifies the lowered value's semantic identity — it must be the
+/// scope's real content version. The `MaterializeMemoDb` signature
+/// self-root gates view-correct shared-cache admission — it must be
+/// the view-aware `authoritative_current_content_hash`. A fix round
+/// that switched BOTH to `authoritative_current_content_hash` was
+/// correct for the signature but wrong for the `NodeScopeId`:
+/// `authoritative_current_content_hash` returns `None` for a scope
+/// with no live scheduler `DerivedRawState`, and the `.unwrap_or_default()`
+/// then lowers the expression under an all-zero scope hash.
+///
+/// ## Fixture — the two oracles deliberately diverge
+///
+/// The scope is upserted, its `IndexedReady` materialised (so
+/// `FileArtifactStore` holds the artifact and `shallow_file_state`
+/// carries the real `whole_hash`), its prepared-decl bundle warmed,
+/// then EVICTED. `evict` marks the `DerivedRawState` evicted without
+/// removing the `FileArtifactStore` artifact, so post-evict:
+///
+/// - `authoritative_current_content_hash(scope)` → `None` (the
+///   `DerivedRawState` eviction gate trips).
+/// - `shallow_file_state(scope).whole_hash` → the real, non-zero hash
+///   (the surviving content-addressed artifact).
+///
+/// The fixture asserts exactly this divergence before materialising.
+///
+/// ## Discrimination property
+///
+/// A 0-arg `Ref` to a same-file type lowers (in `Navigate` mode) to a
+/// `SemanticNodeData::DeclRef` carrier whose `NodeScopeId` scope is the
+/// lowering scope verbatim — the `NodeScopeId::File` the publish site
+/// builds. The test materialises `Probe` (a same-file interface) and
+/// scans the semantic graph for that `DeclRef` node:
+///
+/// - PRE-FIX (`NodeScopeId` hash ← `authoritative_current_content_hash`):
+///   the oracle returns `None`, `.unwrap_or_default()` yields `[0; 16]`,
+///   and the `DeclRef` node's scope `whole_hash` is all-zero — the
+///   `assert_ne!(.., [0; 16])` AND the `assert_eq!(.., real_hash)` both
+///   trip.
+/// - POST-FIX (`NodeScopeId` hash ← `shallow_file_state().whole_hash`):
+///   the `DeclRef` node's scope `whole_hash` is the real shallow-state
+///   hash and both assertions hold.
+///
+/// The `DeclRef`'s `DeclIdentity.whole_hash` is independently sourced
+/// from `shallow_file_state` inside the lowerer, so it stays correct
+/// in both trees — only the node's `NodeScopeId` *scope* discriminates
+/// the publish-site bug. Verified RED against the pre-fix tree (the
+/// `NodeScopeId` hash reverted to `authoritative_current_content_hash`)
+/// and GREEN against the post-fix tree.
+#[test]
+fn materialize_memo_db_artifact_only_scope_lowers_under_shallow_whole_hash() {
+    use crate::resolver_core::ComponentMetaQueryEngine;
+    use crate::semantic_query::{NodeScopeId, ProjectionMode, SemanticNodeId};
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let scope = "/self_root_race/memo_artifact_only_scope.ts";
+    upsert(&host, scope, "export interface Probe { a: number; }\n");
+    let real_hash = host
+        .ensure_indexed_ready(scope)
+        .expect("scope IndexedReady materialises")
+        .whole_hash;
+    assert_ne!(
+        real_hash, [0u8; 16],
+        "fixture invariant: the scope's real content hash is non-zero",
+    );
+
+    let ctx: &dyn ResolverContext = &host;
+    // Warm the scope's prepared-decl bundle BEFORE eviction so the
+    // materialise path's `scope_payload_for_scope` returns it from the
+    // warm cache and does NOT trigger an un-evicting `ensure_loaded`.
+    let _ = ctx.prepared_decl_bundle(scope);
+
+    // Evict the scope: the `DerivedRawState` is marked evicted; the
+    // `FileArtifactStore` artifact survives. This reproduces a scope
+    // reachable ONLY through the artifact / shallow-state path — codex
+    // P2's "foreign source or test-seeded file with no scheduler
+    // DerivedRawState".
+    host.evict(scope);
+
+    // The fixture's load-bearing divergence: the two content-hash
+    // oracles disagree for this artifact-only scope.
+    assert_eq!(
+        ctx.authoritative_current_content_hash(scope),
+        None,
+        "fixture invariant: an evicted scope has no authoritative current \
+         content hash — `authoritative_current_content_hash` returns None",
+    );
+    assert_eq!(
+        ctx.shallow_file_state(scope).map(|s| s.whole_hash),
+        Some(real_hash),
+        "fixture invariant: the evicted scope's `FileArtifactStore` artifact \
+         survives, so `shallow_file_state` still carries the real whole hash",
+    );
+
+    // Materialise a 0-arg `Ref` to the same-file `Probe` interface in
+    // `Navigate` mode. In `Navigate` mode a 0-arg local `Ref` lowers to
+    // a `DeclRef` carrier interned with the lowering `NodeScopeId`
+    // verbatim — the `NodeScopeId::File` the publish site builds.
+    let probe_expr = TypeExpr::Ref {
+        name: Arc::from("Probe"),
+        type_arguments: Arc::from(Vec::<TypeExpr>::new()),
+    };
+    let mut engine = ComponentMetaQueryEngine::new(&host);
+    let _materialized =
+        crate::meta_resolve::materialize::materialize_component_meta_type_expr_until_stable_full(
+            &probe_expr,
+            scope,
+            ProjectionMode::Navigate,
+            &mut engine,
+        );
+
+    // Scan the semantic graph for the lowered `DeclRef` node naming
+    // `Probe` in the scope file. Its `NodeScopeId` scope is the
+    // lowering scope the publish site constructed.
+    let graph = host.project_type_store().semantic_graph();
+    let decl_ref_scope_hash = (0..graph.node_count() as u64).find_map(|i| {
+        let id = SemanticNodeId(i);
+        let data = graph.node_data(id)?;
+        let names_probe = matches!(
+            &*data,
+            crate::semantic_query::SemanticNodeData::DeclRef { identity }
+                if identity.canonical_id.as_ref() == scope
+                    && identity.decl_name.as_ref() == "Probe"
+        );
+        if !names_probe {
+            return None;
+        }
+        match graph.node_scope(id)? {
+            NodeScopeId::File { whole_hash, .. } => Some(whole_hash),
+            NodeScopeId::Global => None,
+        }
+    });
+    let decl_ref_scope_hash = decl_ref_scope_hash.expect(
+        "the Navigate-mode materialisation of a same-file `Ref` MUST lower it to a \
+         `DeclRef` carrier interned with a `NodeScopeId::File` scope",
+    );
+
+    assert_ne!(
+        decl_ref_scope_hash, [0u8; 16],
+        "the materialise-memo publish site MUST NOT lower the scope's TypeExpr under an \
+         all-zero `NodeScopeId::File` whole hash. For an artifact-only scope (no live \
+         scheduler `DerivedRawState`), `authoritative_current_content_hash` returns None \
+         and `.unwrap_or_default()` yields `[0; 16]` — lowering under that all-zero scope \
+         corrupts the lowered value's semantic identity. The lowering scope hash must be \
+         sourced from `shallow_file_state`, which carries the real content version for \
+         every scope including artifact-only ones.",
+    );
+    assert_eq!(
+        decl_ref_scope_hash, real_hash,
+        "the lowered `DeclRef` node's `NodeScopeId::File` whole hash MUST equal the \
+         scope's real `shallow_file_state` whole hash — the version of the file actually \
+         being materialised. A publish site that sourced the `NodeScopeId` hash from the \
+         view-aware `authoritative_current_content_hash` oracle (correct for the signature \
+         self-root, wrong for the lowering scope) roots the lowered value on a scope \
+         identity that does not match the file version.",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Provenance-pure publish-race discriminators — one per live query cache.
 //

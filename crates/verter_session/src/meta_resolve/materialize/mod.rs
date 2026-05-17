@@ -25,6 +25,14 @@ pub(crate) use field_types::{
     type_expr_has_package_backed_object_like_root,
 };
 
+// Test-only re-export — `query_db_self_root_tests.rs` drives the
+// `_full` variant (the one that surfaces the producing `node_id`) to
+// assert the materialiser lowers the scope's `TypeExpr` under the
+// shallow-state whole hash. Production callers reach the `_full`
+// variant through the shell `materialize_component_meta_type_expr_until_stable`.
+#[cfg(test)]
+pub(crate) use field_types::materialize_component_meta_type_expr_until_stable_full;
+
 pub(crate) use macro_shapes::{
     collect_type_expr_ref_names, produce_macro_object_shapes_for_purpose,
 };
