@@ -149,10 +149,35 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     // `SessionResolverContext` pins the overlay `IndexedReady`, so an
     // overlay-derived memo entry roots on the overlay version (a base
     // request mismatches it rather than reusing it).
-    let observed_scope = ctx
-        .observe_materialize_scope(scope_canonical_id)
-        .expect("materialize scope must have a real indexed scope identity");
-    let observed_scope_whole_hash = observed_scope.whole_hash();
+    //
+    // A `None` observation is a legitimate outcome (a session
+    // tombstone, an evicted / unloaded scope, or no recoverable
+    // artifact): the materialiser still runs and returns a value, but
+    // there is no view-correct scope identity to self-root a shared
+    // `MaterializeMemoDb` entry with, so the shared-cache write-through
+    // below is skipped. The lowering then degrades exactly as the
+    // missing-`scope_payload` path already does — it sources the
+    // lowering `NodeScopeId`'s `whole_hash` from the scope's surviving
+    // `shallow_file_state` content version, NEVER a fabricated all-zero
+    // hash. When the scope has neither an observation nor a surviving
+    // shallow state there is genuinely no scope identity to lower
+    // against, so the materialiser returns the input expression
+    // unchanged — the no-op result the surrounding code already
+    // tolerates.
+    let observed_scope = ctx.observe_materialize_scope(scope_canonical_id);
+    let lowering_scope_whole_hash = match observed_scope.as_ref() {
+        Some(observation) => Some(observation.whole_hash()),
+        None => ctx
+            .shallow_file_state(scope_canonical_id)
+            .map(|state| state.whole_hash),
+    };
+    let Some(observed_scope_whole_hash) = lowering_scope_whole_hash else {
+        return MaterializedTypeExpr {
+            node_id: None,
+            type_expr: expr.clone(),
+            dep_signature: Arc::from(Vec::new()),
+        };
+    };
     let scope = NodeScopeId::File {
         canonical_id: Arc::from(scope_canonical_id),
         whole_hash: observed_scope_whole_hash,
@@ -219,7 +244,18 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     };
 
     // Step 3 closure: write-through to ctx-owned MaterializeMemoDb.
-    {
+    //
+    // Gated on a `Some` scope observation. A `None` observation (a
+    // session tombstone, an evicted / unloaded scope, or no recoverable
+    // artifact) has no view-correct scope identity to self-root a
+    // shared `MaterializeMemoDb` entry with, so shared-cache admission
+    // is skipped entirely — the freshly-computed `materialized` value
+    // is still returned to the caller below. The lowering above already
+    // degraded to the scope's surviving `shallow_file_state` version
+    // for that case; admitting a shared entry rooted on that lowering
+    // hash without the observation's pinned `SyntacticExportSet` parse
+    // fact would be a mis-rooted write.
+    if let Some(captured_scope_observation) = observed_scope {
         // Loop-5 instrumentation — count every publish attempt. The
         // get_or_compute path is a no-op on a concurrent winner but
         // we count the attempt because the bench is single-threaded.
@@ -233,15 +269,14 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         );
         let host_db = ctx.project_type_store().materialize_memo_db();
         let captured_value = materialized.clone();
-        // Thread the SINGLE tear-free scope observation taken above into
-        // the write-through. The signature builder is provenance-pure:
-        // it roots the keyed scope on the observation's `whole_hash` and
-        // pinned `SyntacticExportSet` parse fact, never on a re-read of
-        // current content. The lowering `NodeScopeId` was built from the
-        // SAME observation's `whole_hash`, so the memo value and its
-        // fact signature root on one identical scope hash — no torn
-        // read.
-        let captured_scope_observation = observed_scope;
+        // The SINGLE tear-free scope observation taken above is threaded
+        // into the write-through. The signature builder is
+        // provenance-pure: it roots the keyed scope on the observation's
+        // `whole_hash` and pinned `SyntacticExportSet` parse fact, never
+        // on a re-read of current content. The lowering `NodeScopeId`
+        // was built from the SAME observation's `whole_hash`, so the
+        // memo value and its fact signature root on one identical scope
+        // hash — no torn read.
         let _ = host_db.get_or_compute(&arc_key, ctx, move || {
             // The keyed scope canonical is the entry's self-root, rooted
             // on the observed materialisation-time content version;

@@ -720,19 +720,31 @@ impl VerterHost {
     /// returns `None` for it. This accessor answers for exactly those
     /// scopes WITHOUT widening the strict scheduler oracle.
     ///
-    /// It is NOT a content-agnostic `get_any`: it distinguishes a
-    /// **current** artifact-backed file from a **stale evicted
-    /// leftover**. The `FileArtifactStore` retains at most one artifact
-    /// per canonical (`insert` drains prior versions), so a stale
-    /// artifact only lingers after [`Self::evict`] — which marks the
-    /// canonical's `DerivedRawState` entry `evicted` while leaving the
-    /// `FileArtifactStore` artifact in place. The eviction flag is
-    /// therefore the current-vs-stale oracle:
+    /// It is NOT a content-agnostic `get_any`: it answers ONLY for a
+    /// canonical the scheduler does not track at all — a canonical with
+    /// **no `DerivedRawState` entry**. The presence of a `DerivedRawState`
+    /// entry is the oracle that splits the three possible states:
     ///
-    /// - `DerivedRawState` entry exists AND `evicted` → the artifact is
-    ///   a stale leftover → `None`.
-    /// - no `DerivedRawState` entry, OR an entry that is `!evicted` →
-    ///   the `FileArtifactStore` artifact is current → `Some`.
+    /// - **no `DerivedRawState` entry** → the canonical is genuinely
+    ///   artifact-only (foreign source / test seed); the scheduler is
+    ///   not its authority, so the single `FileArtifactStore` artifact
+    ///   (`insert` drains prior versions, so there is at most one) is
+    ///   the current artifact → `Some`. This is the case this accessor
+    ///   exists for.
+    /// - **a `DerivedRawState` entry that is `!evicted`** → the
+    ///   canonical is a **live scheduler scope**. The scheduler is its
+    ///   sole content authority and [`Self::current_content_pinned_indexed`]
+    ///   already answered for it (it is tried first). If that pinned
+    ///   read missed, the `FileArtifactStore` artifact — if any — is for
+    ///   an OLDER content hash than the scheduler's current one; with
+    ///   eager `evict_canonical` retired such a stale artifact can
+    ///   linger. A `get_any` here would self-root the materialized value
+    ///   under that stale hash. So this returns `None` rather than the
+    ///   stale artifact — a stale artifact must never be promoted as the
+    ///   live scope's current identity.
+    /// - **a `DerivedRawState` entry that is `evicted`** → the scope was
+    ///   evicted; any surviving `FileArtifactStore` artifact is a stale
+    ///   leftover → `None`.
     ///
     /// Returns `None` when no artifact is cached at all.
     #[must_use]
@@ -740,15 +752,15 @@ impl VerterHost {
         &self,
         canonical: &str,
     ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
-        // A stale `IndexedReady` only lingers in `FileArtifactStore`
-        // after `evict` — and `evict` always records the eviction on
-        // `DerivedRawState`. So an `evicted` entry means the surviving
-        // artifact is stale and must NOT answer as current.
-        let evicted = self
-            .derived_raw_cache()
-            .get(canonical)
-            .is_some_and(|d| d.evicted);
-        if evicted {
+        // The artifact-current authority answers ONLY for a canonical
+        // with no `DerivedRawState` entry — a genuinely artifact-only
+        // scope the scheduler never tracked. Any `DerivedRawState` entry
+        // (whether `evicted` or live) means the scheduler is the
+        // content authority: a live scope is served by
+        // `current_content_pinned_indexed` and a `get_any` artifact
+        // would risk self-rooting under a stale older hash; an evicted
+        // scope's surviving artifact is a stale leftover.
+        if self.derived_raw_cache().get(canonical).is_some() {
             return None;
         }
         self.project_type_store.indexed().get_any(canonical)
@@ -772,11 +784,18 @@ impl VerterHost {
     ///    authority, for a genuinely artifact-only scope (foreign
     ///    source / test seed) with no scheduler `DerivedRawState`.
     ///
-    /// Returns `None` when neither authority answers — an evicted /
-    /// deleted scope whose only `FileArtifactStore` artifact is a stale
-    /// leftover. A `None` observation makes the publish site skip
-    /// shared-cache admission while still returning the freshly-computed
-    /// value; it never lowers under a fabricated all-zero scope hash.
+    /// Returns `None` when neither authority answers:
+    ///
+    /// - a live (non-evicted) scheduler scope whose
+    ///   `current_content_pinned_indexed` missed — the scheduler is the
+    ///   authority and `artifact_current_indexed` deliberately declines
+    ///   (a `get_any` could surface a stale older artifact);
+    /// - an evicted / deleted scope whose only `FileArtifactStore`
+    ///   artifact is a stale leftover.
+    ///
+    /// A `None` observation makes the publish site skip shared-cache
+    /// admission while still returning the freshly-computed value; it
+    /// never lowers under a fabricated all-zero scope hash.
     #[must_use]
     pub(crate) fn observe_materialize_scope(
         &self,

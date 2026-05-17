@@ -3977,3 +3977,269 @@ fn observe_materialize_scope_refuses_evicted_stale_artifact() {
         "the refused-admission path still returns the freshly-computed value to the caller",
     );
 }
+
+/// `observe_materialize_scope` MUST NOT surface a STALE artifact for a
+/// **live** (non-evicted) scheduler scope whose scheduler-pinned
+/// authority merely missed.
+///
+/// Root cause this test guards: `artifact_current_indexed` (the
+/// artifact-current authority `observe_materialize_scope` falls back to
+/// after `current_content_pinned_indexed` misses) gated its
+/// `FileArtifactStore::get_any` read only on the `DerivedRawState`
+/// `evicted` flag. That lumped two distinct cases:
+///
+/// - a genuinely artifact-only scope with NO `DerivedRawState` entry at
+///   all (foreign source / test seed) — `get_any` is appropriate; and
+/// - a **live** scheduler scope (a non-evicted `DerivedRawState`) whose
+///   `current_content_pinned_indexed` transiently missed — here
+///   `get_any` is WRONG: with eager `evict_canonical` retired, a stale
+///   older `IndexedReady` can coexist with the live content, and
+///   `get_any` returns ANY cached candidate regardless of content hash.
+///
+/// For the live-scope case `observe_materialize_scope` would then lower
+/// and self-root the materialized value under the STALE artifact's
+/// `whole_hash` instead of the scheduler's current hash — admitting a
+/// mis-rooted `MaterializeMemoDb` entry.
+///
+/// ## Fixture — a live scope with a planted stale artifact
+///
+/// A real `.ts` file is upserted through the production path (creating
+/// a live, **non-evicted** `DerivedRawState` plus a current
+/// `FileArtifactStore` artifact). A synthetic STALE `IndexedReady`
+/// (doctored `whole_hash`) is then planted via `FileArtifactStore::insert`
+/// — `insert` drains every prior version, so afterwards the store holds
+/// ONLY the stale entry while the scheduler still reports the real
+/// `whole_hash`. The scope therefore has:
+///
+/// - a live, non-evicted `DerivedRawState` →
+///   `authoritative_current_content_hash` returns the REAL hash;
+/// - `current_content_pinned_indexed` pins to that real hash and MISSES
+///   (only the `STALE_HASH` artifact is stored);
+/// - a permissive `get_any` would surface the stale artifact.
+///
+/// ## Discrimination property
+///
+/// - PRE-FIX: `artifact_current_indexed` sees a non-evicted
+///   `DerivedRawState`, takes the `get_any` branch, and returns the
+///   STALE artifact; `observe_materialize_scope` returns `Some` whose
+///   `whole_hash()` is the doctored stale hash. The first assertion
+///   (`is_none`) FAILS; were it weakened, the second
+///   (`whole_hash() != STALE_HASH`) FAILS.
+/// - POST-FIX: `artifact_current_indexed` restricts the `get_any`
+///   fallback to canonicals with NO `DerivedRawState` entry at all; a
+///   live (non-evicted) entry yields `None`. `observe_materialize_scope`
+///   returns `None` — refusing shared-cache admission while the publish
+///   site still returns the freshly-computed value.
+///
+/// The companion `current_content_pinned_indexed_rejects_stale_artifact`
+/// pins only that `current_content_pinned_indexed` misses here; this
+/// test pins the distinct `observe_materialize_scope` /
+/// `artifact_current_indexed` fallback behavior.
+#[test]
+fn observe_materialize_scope_refuses_stale_artifact_for_live_scheduler_scope() {
+    /// Doctored content hash that no real content produces.
+    const STALE_HASH: [u8; 16] = [0xEE; 16];
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let scope = "/self_root_obs/live_scope_stale_artifact.ts";
+    upsert(
+        &host,
+        scope,
+        "export interface Probe { a: number; }\nexport const probe = 1;\n",
+    );
+    let real_indexed = host
+        .ensure_indexed_ready(scope)
+        .expect("scope IndexedReady materialises");
+    let real_hash = real_indexed.whole_hash;
+    assert_ne!(
+        real_hash, STALE_HASH,
+        "fixture invariant: the real content hash differs from the planted stale hash",
+    );
+
+    let ctx: &dyn ResolverContext = &host;
+    // Anchor non-vacuity: before planting, the live scope has a
+    // tear-free observation rooted on the REAL hash.
+    let pre_plant = ctx
+        .observe_materialize_scope(scope)
+        .expect("fixture invariant: a live scope has a tear-free observation before planting");
+    assert_eq!(
+        pre_plant.whole_hash(),
+        real_hash,
+        "fixture invariant: the pre-plant observation pins the real content version",
+    );
+
+    // Plant a synthetic STALE `IndexedReady`. `FileArtifactStore::insert`
+    // drains the real artifact, so the store now holds ONLY the stale
+    // entry while the scheduler still reports `real_hash` — the
+    // lingering-stale state. The `DerivedRawState` stays live (the file
+    // was never evicted).
+    let mut stale = (*real_indexed).clone();
+    stale.whole_hash = STALE_HASH;
+    host.project_type_store()
+        .indexed()
+        .insert(Arc::from(scope), Arc::new(stale));
+
+    // Fixture invariants: the live, non-evicted `DerivedRawState` makes
+    // the scheduler report the real hash; the scheduler-pinned authority
+    // misses (no artifact at `real_hash`); a permissive `get_any` would
+    // surface the planted stale artifact.
+    assert!(
+        host.derived_raw_cache()
+            .get(scope)
+            .is_some_and(|d| !d.evicted),
+        "fixture invariant: the scope has a live (non-evicted) DerivedRawState entry",
+    );
+    assert_eq!(
+        ctx.authoritative_current_content_hash(scope),
+        Some(real_hash),
+        "fixture invariant: the scheduler reports the real content hash for the live scope",
+    );
+    assert!(
+        host.current_content_pinned_indexed(scope).is_none(),
+        "fixture invariant: the scheduler-pinned authority misses — only the STALE_HASH \
+         artifact is stored, the pin resolves the real hash",
+    );
+    assert_eq!(
+        host.project_type_store()
+            .indexed()
+            .get_any(scope)
+            .expect("get_any still returns the planted stale entry")
+            .whole_hash,
+        STALE_HASH,
+        "fixture invariant: get_any surfaces the planted stale artifact — the pre-fix \
+         artifact-current fallback read shape",
+    );
+
+    // The discriminating assertion: `observe_materialize_scope` MUST NOT
+    // surface the stale artifact for a live scheduler scope.
+    let observation = ctx.observe_materialize_scope(scope);
+    assert!(
+        observation.is_none(),
+        "observe_materialize_scope MUST return None for a live (non-evicted) scheduler \
+         scope whose scheduler-pinned authority missed — the artifact-current `get_any` \
+         fallback is restricted to canonicals with NO DerivedRawState entry at all. A \
+         pre-fix tree takes the `get_any` branch (the DerivedRawState is merely \
+         non-evicted) and surfaces the stale artifact here.",
+    );
+    if let Some(observation) = observation {
+        assert_ne!(
+            observation.whole_hash(),
+            STALE_HASH,
+            "even were observe_materialize_scope to return Some, it MUST NOT self-root on \
+             the planted stale artifact's doctored whole hash",
+        );
+    }
+}
+
+/// The materialize-memo publish site DEGRADES — never panics — when
+/// `observe_materialize_scope` returns `None`.
+///
+/// Root cause this test guards: the publish site
+/// (`meta_resolve/materialize/field_types.rs`) called
+/// `observe_materialize_scope(scope).expect(..)`. A `None` observation
+/// is a LEGITIMATE outcome (a session tombstone, an evicted/unloaded
+/// scope, or no recoverable artifact) — the observation contract is
+/// "missing observation ⇒ skip shared-cache admission, still return a
+/// value." The `expect` turned that legitimate `None` into a panic
+/// *before* materialization.
+///
+/// ## Fixture — an evicted scope (a `None`-observation scope)
+///
+/// A real `.ts` file is upserted (live `DerivedRawState` + a
+/// `FileArtifactStore` artifact) then evicted. `evict` marks the
+/// `DerivedRawState` `evicted` while leaving the `FileArtifactStore`
+/// artifact in place. `observe_materialize_scope` returns `None` for
+/// such a scope (the scheduler authority refuses — the entry is
+/// evicted — AND the artifact-current authority refuses — the surviving
+/// artifact is a stale evicted leftover).
+///
+/// ## Discrimination property
+///
+/// - PRE-FIX: the publish site's `observe_materialize_scope(scope)
+///   .expect("materialize scope must have a real indexed scope
+///   identity")` PANICS — the `catch_unwind` below captures `Err`.
+/// - POST-FIX: the publish site degrades — it skips the
+///   `MaterializeMemoDb` `get_or_compute` admission (no view-correct
+///   scope identity to self-root with), lowers under the scope's
+///   surviving `shallow_file_state` content version (NOT a fabricated
+///   all-zero `NodeScopeId`), and returns the freshly-computed value.
+///   The `catch_unwind` captures `Ok`, and no `MaterializeMemoDb` entry
+///   is admitted.
+#[test]
+fn materialize_memo_publish_site_degrades_on_none_scope_observation() {
+    use crate::resolver_core::ComponentMetaQueryEngine;
+    use crate::semantic_query::ProjectionMode;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let scope = "/self_root_obs/publish_site_none_observation.ts";
+    upsert(&host, scope, "export interface Probe { a: number; }\n");
+    assert!(
+        host.ensure_indexed_ready(scope).is_some(),
+        "fixture invariant: the scope IndexedReady materialises",
+    );
+
+    // Evict the scope: `DerivedRawState` is marked evicted; the
+    // `FileArtifactStore` artifact survives as a stale leftover.
+    host.evict(scope);
+
+    let ctx: &dyn ResolverContext = &host;
+    // Fixture invariant: `observe_materialize_scope` returns `None` for
+    // the evicted scope — the exact `None`-observation outcome the
+    // publish site must tolerate.
+    assert!(
+        ctx.observe_materialize_scope(scope).is_none(),
+        "fixture invariant: observe_materialize_scope returns None for an evicted scope",
+    );
+
+    let db = host.project_type_store().materialize_memo_db();
+    let entries_before = db.live_count();
+
+    // Drive the production publish path. Pre-fix the `.expect()` inside
+    // `materialize_component_meta_type_expr_until_stable_full` panics on
+    // the `None` observation; post-fix it degrades and returns a value.
+    let probe_expr = TypeExpr::Ref {
+        name: Arc::from("Probe"),
+        type_arguments: Arc::from(Vec::<TypeExpr>::new()),
+    };
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut engine = ComponentMetaQueryEngine::new(&host);
+        crate::meta_resolve::materialize::materialize_component_meta_type_expr_until_stable_full(
+            &probe_expr,
+            scope,
+            ProjectionMode::Navigate,
+            &mut engine,
+        )
+    }));
+
+    // The discriminating assertion: the publish path MUST NOT panic on a
+    // `None` observation.
+    let materialized = match outcome {
+        Ok(materialized) => materialized,
+        Err(_) => panic!(
+            "the materialize-memo publish site MUST NOT panic on a None scope \
+             observation — a None observation (session tombstone, evicted/unloaded \
+             scope, no recoverable artifact) is a legitimate outcome and must degrade: \
+             skip shared-cache admission, still return the freshly-computed value. A \
+             pre-fix `observe_materialize_scope(scope).expect(..)` panics here.",
+        ),
+    };
+
+    // The degraded path still returns a freshly-computed value.
+    assert!(
+        matches!(
+            &materialized.type_expr,
+            TypeExpr::Ref { name, .. } if name.as_ref() == "Probe"
+        ) || !matches!(&materialized.type_expr, TypeExpr::Unknown { .. }),
+        "the degraded publish path still returns a freshly-computed value to the caller",
+    );
+
+    // The degraded path admits NO `MaterializeMemoDb` entry — there is
+    // no view-correct scope identity to self-root a shared entry with.
+    assert_eq!(
+        db.live_count(),
+        entries_before,
+        "the degraded publish path MUST NOT admit a MaterializeMemoDb entry — a None \
+         scope observation has no view-correct scope identity to self-root with, so \
+         shared-cache admission is skipped to avoid a mis-rooted entry",
+    );
+}
