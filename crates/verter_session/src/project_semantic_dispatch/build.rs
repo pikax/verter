@@ -2256,10 +2256,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// Resolve a Vue compiler macro's payload to a single
     /// `SemanticNodeId` representing the macro's effective TypeExpr.
-    /// Reuses the sidecar `AnalyzedMacro` for sidecar reads (§A14: no
-    /// AST re-walk; reads
-    /// `host.ensure_indexed_ready(canonical)?.script_analysis.as_ref()?.macros.get(macro_index)`
-    /// via the `analyzed_macro_snapshot` accessor).
+    /// The `DefineEmits` / `DefineSlots` / `DefineModel` arms read the
+    /// owner SFC's `AnalyzedMacro` sidecar (`macros.get(macro_index)`
+    /// off the owner artifact's `script_analysis`) rather than
+    /// re-walking the AST: the content-pinned `IndexedReady` lookup is
+    /// tried first, and on a cache miss the artifact is rematerialized
+    /// via `ensure_indexed_ready` only when `owner.whole_hash` is still
+    /// the owner's current content (see the arm body for the stale-key
+    /// guard).
     ///
     /// Per-arm logic mirrors §3.2 body sketch:
     /// - `DefineProps` / `WithDefaults`: 0 args → `Opaque(Miss)`;
@@ -2346,14 +2350,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | AnalyzedMacroKind::DefineModel => {
                 // Read the macro snapshot from the owner artifact pinned
                 // to `owner.whole_hash` — the content version the
-                // `ResolveMacroPayload` key names. A content-addressed
-                // `IndexedReady` lookup (NOT the current-content
-                // `analyzed_macro_snapshot` accessor) keeps the macro
-                // body the build reads consistent with the key identity:
-                // a key for an older owner version must read that older
-                // version's macros, not whatever is current. A miss on
-                // the pinned artifact (the keyed version is not cached)
-                // collapses to a Miss per the sketch.
+                // `ResolveMacroPayload` key names. The macro body the
+                // build reads must stay consistent with the key
+                // identity: a key for an older owner version must read
+                // that older version's macros, not whatever is current.
+                //
+                // The fast read is the content-pinned artifact lookup.
+                // It misses in two distinct situations that must NOT be
+                // conflated:
+                //   1. the owner file CHANGED — `owner.whole_hash` is a
+                //      stale content version. The key is stale; resolve
+                //      MUST NOT fall through to the newer content. Miss.
+                //   2. the owner file is UNCHANGED but its `IndexedReady`
+                //      was merely evicted from `FileArtifactStore`. The
+                //      key is still current; macro resolution must not
+                //      depend on cache residency, so the artifact is
+                //      rematerialized and the macro resolved from it.
+                // The owner's authoritative current content hash splits
+                // the two: observing it is a producer-side observation
+                // at value-compute time, not a signature-builder
+                // re-read, so it does not reopen the publish race.
                 let snapshot = match self
                     .ctx
                     .project_type_store()
@@ -2363,11 +2379,40 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 {
                     Some(s) => s,
                     None => {
-                        return (
-                            QueryResult::Error(QueryError::Miss),
-                            fence_to_dep_signature(local_fence),
-                        )
-                            .into();
+                        // Pinned read missed. Rematerialize ONLY when
+                        // `owner.whole_hash` is still the owner's current
+                        // content (case 2 — evicted-but-current). When
+                        // the hashes differ or the current hash is
+                        // unavailable (case 1 — the file changed, or the
+                        // owner was evicted/deleted) the key is stale:
+                        // `ensure_indexed_ready` would yield the NEWER
+                        // content, so it must NOT run for a stale key.
+                        let owner_current_hash = self
+                            .ctx
+                            .authoritative_current_content_hash(&owner.canonical_id);
+                        let rematerialized = match owner_current_hash {
+                            Some(current) if current == owner.whole_hash => self
+                                .ctx
+                                .ensure_indexed_ready(&owner.canonical_id)
+                                // Defend against a content edit racing
+                                // between the hash observation and the
+                                // rematerialization: the rematerialized
+                                // artifact's `whole_hash` must still
+                                // equal the keyed `owner.whole_hash`.
+                                .filter(|indexed| indexed.whole_hash == owner.whole_hash)
+                                .and_then(|indexed| indexed.script_analysis.clone()),
+                            _ => None,
+                        };
+                        match rematerialized {
+                            Some(s) => s,
+                            None => {
+                                return (
+                                    QueryResult::Error(QueryError::Miss),
+                                    fence_to_dep_signature(local_fence),
+                                )
+                                    .into();
+                            }
+                        }
                     }
                 };
                 if snapshot.macros.get(macro_index).is_none() {

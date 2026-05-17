@@ -35,6 +35,20 @@
 //! Re-introducing any forbidden token inside the builder flips this
 //! guard RED. A self-test exercises the scanner against a synthetic
 //! violation string so the scan cannot pass vacuously.
+//!
+//! # Scan scope — IMPORTANT
+//!
+//! This guard scans ONLY the brace-balanced body of
+//! `semantic_graph_read_set_signature`. It assumes that function
+//! builds the `ReadSetSignature` facts INLINE — it has no fact-building
+//! sub-helper today. If a future change factors fact construction into
+//! a sub-helper (or otherwise moves a current-content read out of this
+//! body), the scan would no longer cover it and a forbidden re-read
+//! could slip in unflagged. Any such refactor MUST extend the scan set
+//! here to include every helper the builder calls to build facts, so
+//! the provenance-purity invariant stays enforced end-to-end. The
+//! `arch-guard:graph-signature-builder-provenance-pure` source comment
+//! on the builder records the same obligation.
 
 use std::fs;
 use std::path::PathBuf;

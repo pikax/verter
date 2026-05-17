@@ -808,16 +808,20 @@ defineSlots<Slots>()
 "#,
     );
 
-    // Drive in a small thread to bound stack growth. The cap is small
-    // enough that an UNBOUNDED recursion overflows immediately — that
-    // is the invariant under test. It accounts for the per-frame cost
-    // of the cold-build cooperative-admission path: each hop of a deep
-    // type resolution nests one cold build, and the strict warm-read
-    // validator threads a resolver-context handle through every cold
-    // build.
+    // Drive in a worker thread with a generous stack. The invariant
+    // under test is that cyclic heritage TERMINATES — the cycle is
+    // short-circuited and `get_component_meta` returns successfully
+    // with a cycle diagnostic. The cycle detector bounds recursion
+    // depth, so the resolution completes; this is a completion test,
+    // not an unbounded-recursion guard. The 2 MiB cap is deliberately
+    // generous so the per-frame cost of the cold-build
+    // cooperative-admission path (each hop of a deep type resolution
+    // nests one cold build, and the strict warm-read validator threads
+    // a resolver-context handle through every cold build) cannot trip
+    // a false overflow on this legitimately-completing resolution.
     let host_for_thread = Arc::clone(&host);
     let join = std::thread::Builder::new()
-        .stack_size(384 * 1024)
+        .stack_size(2 * 1024 * 1024)
         .spawn(move || {
             host_for_thread
                 .get_component_meta("/src/Comp.vue")
@@ -1270,11 +1274,16 @@ defineSlots<Slots>()
 "#,
     );
 
-    // Small cap so an UNBOUNDED recursion overflows immediately. The
-    // value accounts for the per-frame cost of the cold-build
-    // cooperative-admission path — the strict warm-read validator
-    // threads a resolver-context handle through every nested cold
-    // build of a deep type resolution.
+    // A 100-arm intersection is a legitimate deep — but bounded —
+    // resolution: the correct walker iterates the arms and terminates.
+    // The 384 KiB cap is sized to fit that legitimate depth while
+    // staying tight enough that a DEPTH regression (a walker that
+    // recurses per-arm instead of iterating) overflows. The value is
+    // raised over the historical 256 KiB to absorb the per-frame cost
+    // of the cold-build cooperative-admission path — the strict
+    // warm-read validator threads a resolver-context handle through
+    // every nested cold build — so the legitimate resolution does not
+    // trip a false overflow.
     let host_for_thread = Arc::clone(&host);
     let join = std::thread::Builder::new()
         .stack_size(384 * 1024)

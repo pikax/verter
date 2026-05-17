@@ -5350,9 +5350,9 @@ fn resolve_macro_payload_define_model_branches_distinctly() {
         mode: ProjectionMode::Expanded,
     });
     // Without a real SFC sidecar, DefineModel collapses to Miss (the
-    // arm requires `analyzed_macro_snapshot` to succeed). This is
-    // distinct from `DefineExpose`/`DefineOptions` which would
-    // passthrough the arg.
+    // arm requires the owner artifact's `script_analysis` macro
+    // sidecar to resolve). This is distinct from
+    // `DefineExpose`/`DefineOptions` which would passthrough the arg.
     match result {
         QueryResult::Value(n) => {
             assert_ne!(
@@ -5544,6 +5544,183 @@ fn resolve_macro_payload_distinct_family_does_not_collapse() {
          If miss-delta=0, the family arm collapses distinct macro_kind values onto one entry — \
          a FamilyKey hashing bug that would cause cross-macro cache collision."
     );
+}
+
+/// Locate the `DefineEmits` macro's index inside the owner SFC's
+/// `script_analysis` macro sidecar. Used by the eviction discriminator
+/// below so the `ResolveMacroPayload` key names the real macro.
+fn define_emits_macro_index(host: &VerterHost, canonical: &str) -> usize {
+    let indexed = host
+        .ensure_indexed_ready(canonical)
+        .expect("owner SFC IndexedReady must materialise");
+    let script = indexed
+        .script_analysis
+        .as_ref()
+        .expect("owner SFC must carry script_analysis");
+    script
+        .macros
+        .iter()
+        .position(|m| m.kind == AnalyzedMacroKind::DefineEmits)
+        .expect("owner SFC must declare a defineEmits macro")
+}
+
+/// **Macro resolution must not depend on `IndexedReady` cache
+/// residency.** A `ResolveMacroPayload` for `DefineEmits` resolves the
+/// macro sidecar from the owner artifact pinned to `owner.whole_hash`.
+/// When that artifact is EVICTED from `FileArtifactStore` but the owner
+/// file is UNCHANGED (`owner.whole_hash` is still the current content
+/// hash), the macro must still resolve — the evicted artifact is
+/// rematerialized via `ensure_indexed_ready`.
+///
+/// Discrimination property: with the rematerialize-on-eviction branch
+/// reverted (i.e. the pinned-lookup miss returns `Error(Miss)`
+/// immediately), the evicted-but-current owner artifact yields a
+/// spurious `Miss` and this test FAILS at the post-eviction assertion.
+/// With the branch in place the cold rebuild rematerializes the
+/// artifact and resolves the macro — cache residency does not change
+/// the result.
+#[test]
+fn resolve_macro_payload_rematerializes_evicted_but_current_owner_artifact() {
+    let host = host();
+    let c = "/macro_evict/emits.vue";
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: c.to_string(),
+            source: Arc::from("<script setup lang=\"ts\">defineEmits<{ ping: [] }>()</script>\n"),
+            file_kind: FileKind::from_path(c),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let owner = synthetic_macro_owner(&host, c);
+    let macro_index = define_emits_macro_index(&host, c);
+    let key = SemanticQueryKey::ResolveMacroPayload {
+        owner,
+        macro_index,
+        macro_kind: AnalyzedMacroKind::DefineEmits,
+        type_args: Arc::from(vec![arg].into_boxed_slice()),
+        mode: ProjectionMode::Expanded,
+    };
+
+    // Warm the macro payload + the owner `IndexedReady`.
+    let primed = dispatch.execute(key.clone());
+    let primed_node = match primed {
+        QueryResult::Value(n) => n,
+        other => panic!("DefineEmits must resolve before eviction; got {other:?}"),
+    };
+
+    // Evict the owner `IndexedReady` WITHOUT touching the file content,
+    // and drop the warm memo entry so the next `execute` is a genuine
+    // cold rebuild. The scheduler still owns the (unchanged) source, so
+    // `owner.whole_hash` stays the current content hash.
+    host.project_type_store().indexed().remove(c);
+    let _ = graph.invalidate_canonical(c);
+
+    // Cold rebuild against the evicted-but-current owner artifact: the
+    // content-pinned lookup misses, the rematerialize branch observes
+    // `owner.whole_hash` is still current, rematerializes, and resolves
+    // the macro. A reverted branch would return `Error(Miss)` here.
+    let after_evict = dispatch.execute(key.clone());
+    match after_evict {
+        QueryResult::Value(n) => assert_eq!(
+            n, primed_node,
+            "DefineEmits over an evicted-but-current owner artifact must resolve to the \
+             same node as the warm result — cache residency must not change macro resolution"
+        ),
+        QueryResult::Error(QueryError::Miss) => panic!(
+            "DefineEmits over an evicted-but-current owner artifact MUST NOT return Miss — \
+             the artifact was merely evicted; `owner.whole_hash` is still the current \
+             content hash and the macro must rematerialize"
+        ),
+        other => panic!("expected Value after eviction, got {other:?}"),
+    }
+}
+
+/// **A stale `ResolveMacroPayload` key must NOT resolve against newer
+/// owner content.** When the owner SFC has CHANGED, a `ResolveMacroPayload`
+/// key still carrying the OLD `owner.whole_hash` is stale: macro
+/// resolution must return `Miss` rather than reading the newer
+/// content's macros.
+///
+/// Discrimination property: the rematerialize-on-eviction branch is
+/// gated on `authoritative_current_content_hash(owner) == owner.whole_hash`.
+/// For a stale key the hashes differ, so the branch does NOT
+/// rematerialize (rematerializing would yield the NEWER content). A
+/// branch that rematerialized unconditionally would resolve the stale
+/// key against the post-edit macros and this test FAILS.
+#[test]
+fn resolve_macro_payload_stale_owner_key_does_not_resolve_against_newer_content() {
+    let host = host();
+    let c = "/macro_evict/stale.vue";
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: c.to_string(),
+            source: Arc::from("<script setup lang=\"ts\">defineEmits<{ ping: [] }>()</script>\n"),
+            file_kind: FileKind::from_path(c),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+
+    // Capture the v1 owner identity (the now-soon-to-be-stale hash).
+    let stale_owner = synthetic_macro_owner(&host, c);
+    let stale_macro_index = define_emits_macro_index(&host, c);
+
+    // Change the SFC content: `owner.whole_hash` from v1 is now stale.
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: c.to_string(),
+            source: Arc::from(
+                "<script setup lang=\"ts\">defineEmits<{ ping: []; pong: [] }>()</script>\n",
+            ),
+            file_kind: FileKind::from_path(c),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    let current_owner = synthetic_macro_owner(&host, c);
+    assert_ne!(
+        stale_owner.whole_hash, current_owner.whole_hash,
+        "fixture invariant: the SFC edit must shift the owner whole hash"
+    );
+
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    // A `ResolveMacroPayload` key carrying the STALE v1 `whole_hash`.
+    let stale_key = SemanticQueryKey::ResolveMacroPayload {
+        owner: stale_owner,
+        macro_index: stale_macro_index,
+        macro_kind: AnalyzedMacroKind::DefineEmits,
+        type_args: Arc::from(vec![arg].into_boxed_slice()),
+        mode: ProjectionMode::Expanded,
+    };
+
+    // The stale key's pinned lookup misses (only v2's artifact is
+    // cached). The rematerialize branch observes the current hash !=
+    // the stale `owner.whole_hash` and refuses to rematerialize — the
+    // result is `Miss`, NOT a resolution against the v2 macros.
+    let result = dispatch.execute(stale_key);
+    match result {
+        QueryResult::Error(QueryError::Miss) => { /* expected */ }
+        QueryResult::Value(n) => {
+            let d = host
+                .project_type_store()
+                .semantic_graph()
+                .node_data(n)
+                .unwrap();
+            assert!(
+                matches!(&*d, SemanticNodeData::Opaque(QueryError::Miss)),
+                "a stale ResolveMacroPayload key MUST NOT resolve against newer owner \
+                 content — expected a Miss, got {d:?}"
+            );
+        }
+        other => panic!("expected Miss for a stale owner key, got {other:?}"),
+    }
 }
 
 /// **Class A dispatch parity (invisibility proof).** Verifies that

@@ -837,13 +837,15 @@ impl std::fmt::Display for StackOverflow {
 
 impl std::error::Error for StackOverflow {}
 
-/// Run `f` on a thread with a 256 KB stack. Returns `Err(StackOverflow)`
+/// Run `f` on a thread with a 384 KiB stack. Returns `Err(StackOverflow)`
 /// when the closure panics with a payload that names "stack overflow"
 /// (or its Windows-style `STATUS_STACK_OVERFLOW` form). Used by
 /// (cycle guard) tests to assert recursive codepaths terminate before
 /// running out of stack — when the guard is wrongly keyed, the closure
 /// will recurse unboundedly and the small stack hits OS-level overflow
-/// quickly.
+/// quickly. The cap is small enough that an unbounded recursion still
+/// overflows fast, yet generous enough that a legitimate deep
+/// resolution (which nests one cold build per hop) does not false-trip.
 ///
 /// # Platform behavior
 ///

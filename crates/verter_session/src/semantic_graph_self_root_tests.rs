@@ -174,13 +174,21 @@ fn typeof_same_canonical_edit_rejects_warm_entry() {
         },
     };
 
-    let _ = dispatch.execute(key.clone());
+    let primed = dispatch.execute(key.clone());
+    assert!(
+        matches!(primed, crate::semantic_query::QueryResult::Value(_)),
+        "TypeOf must resolve before the edit"
+    );
     let graph = host.project_type_store().semantic_graph();
-    if graph.get_unvalidated(&key).is_none() {
-        // `TypeOf` resolution can decline to publish for some shapes;
-        // the discriminator only applies when an entry was warmed.
-        return;
-    }
+    // Hard fixture invariant: `TypeOf` of a value with an object
+    // initializer MUST warm a memo entry. An early `return` here would
+    // make the test pass vacuously if the `TypeOf` kind ever stopped
+    // publishing — the discrimination is the validator rejecting the
+    // entry, not its absence.
+    assert!(
+        graph.get_unvalidated(&key).is_some(),
+        "fixture invariant: the warm TypeOf memo entry must exist after priming"
+    );
 
     upsert_skip_drain(&host, c, "export const val = { a: 1, b: 2 };\n");
 
@@ -739,7 +747,6 @@ fn structural_node_kind_publishes_no_file_self_root() {
             "a structural KeyOf entry (no file self-root) must warm-validate vacuously",
         );
     }
-    let _ = SemanticNodeId(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -803,12 +810,20 @@ fn key_of_same_canonical_edit_rejects_warm_entry() {
     let graph = host.project_type_store().semantic_graph();
 
     let key = SemanticQueryKey::KeyOf { base };
-    let _ = dispatch.execute(key.clone());
-    if graph.get_unvalidated(&key).is_none() {
-        // `KeyOf` over a non-Object base does not publish; the
-        // discriminator only applies when an entry was warmed.
-        return;
-    }
+    let primed = dispatch.execute(key.clone());
+    assert!(
+        matches!(primed, crate::semantic_query::QueryResult::Value(_)),
+        "KeyOf over a file-derived Object base must resolve before the edit"
+    );
+    // Hard fixture invariant: `KeyOf` over the file-derived Object node
+    // built by `file_derived_object_node` MUST warm a memo entry. An
+    // early `return` here would make the test pass vacuously if the
+    // `KeyOf` kind ever stopped publishing — the discrimination is the
+    // validator rejecting the entry, not its absence.
+    assert!(
+        graph.get_unvalidated(&key).is_some(),
+        "fixture invariant: the warm KeyOf memo entry must exist after priming"
+    );
 
     // Edit the base node's originating file through the skip-own-drain
     // hook so the own-canonical drain does not remove the `KeyOf`
@@ -858,10 +873,21 @@ fn project_path_same_canonical_edit_rejects_warm_entry() {
         ),
         mode: crate::semantic_query::ProjectionMode::Navigate,
     };
-    let _ = dispatch.execute(key.clone());
-    if graph.get_unvalidated(&key).is_none() {
-        return;
-    }
+    let primed = dispatch.execute(key.clone());
+    assert!(
+        matches!(primed, crate::semantic_query::QueryResult::Value(_)),
+        "ProjectPath `.a` over a file-derived Object base must resolve before the edit"
+    );
+    // Hard fixture invariant: projecting member `a` of the file-derived
+    // Object node built by `file_derived_object_node` MUST warm a memo
+    // entry. An early `return` here would make the test pass vacuously
+    // if the `ProjectPath` kind ever stopped publishing — the
+    // discrimination is the validator rejecting the entry, not its
+    // absence.
+    assert!(
+        graph.get_unvalidated(&key).is_some(),
+        "fixture invariant: the warm ProjectPath memo entry must exist after priming"
+    );
 
     upsert_skip_drain(
         &host,
