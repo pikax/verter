@@ -255,9 +255,29 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         self.inner.observe_materialize_scope(canonical)
     }
 
+    /// Overlay-aware resolver store view.
+    ///
+    /// The base-host [`HostStoreView`] snapshots `whole_hashes` from
+    /// the scheduler / `FileArtifactStore` — the *base* content hash
+    /// of every tracked canonical. A query executed under this session
+    /// context roots its cached values (the semantic-graph
+    /// `MemoEntry` self-roots, the legacy whole-hash rail) on the
+    /// *overlay* content hash for every overlay-bearing canonical:
+    /// `ensure_indexed_ready` here resolves the overlay `IndexedReady`.
+    /// A warm read whose strict self-root validation routed through the
+    /// base view would compare an overlay-rooted self-root against the
+    /// base hash and miss on every call.
+    ///
+    /// [`HostStoreView::with_session_overlay`] re-roots the view's
+    /// `whole_hashes` against this session's overlay: an overlay-Upsert
+    /// canonical takes the overlay content hash; a session-tombstoned
+    /// canonical is dropped from the map. The result validates a
+    /// self-root against the session's CURRENT content identity — an
+    /// entry rooted on a superseded overlay hash, or on the base hash
+    /// while an overlay now covers the canonical, still misses.
     #[inline]
     fn resolver_store_view(&self) -> HostStoreView {
-        ResolverContext::resolver_store_view(self.inner)
+        ResolverContext::resolver_store_view(self.inner).with_session_overlay(self.view)
     }
 
     #[inline]
@@ -405,9 +425,22 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
 
     // -------- Cache validation -------------------------------------
 
+    /// Overlay-aware legacy dep-signature validation.
+    ///
+    /// The base-host `validate_dep_signature` binds a base-only
+    /// `HostViewRef`, so its `WholeHash` arm validates against base
+    /// content. A value computed under this session roots its legacy
+    /// whole-hash rail on the overlay content hash for overlay-bearing
+    /// canonicals; validating that rail through the base view would
+    /// reject every session-warm hit. Routing through
+    /// [`crate::host_manage::dep_signature_valid_for_view`] binds the
+    /// session view, so the legacy rail validates against the
+    /// session's overlay identity in lockstep with the fact rail
+    /// ([`Self::resolver_store_view`]). Non-overlay canonicals fall
+    /// through to base content unchanged.
     #[inline]
     fn validate_dep_signature(&self, signature: &DepSignature) -> bool {
-        ResolverContext::validate_dep_signature(self.inner, signature)
+        crate::host_manage::dep_signature_valid_for_view(signature, self.view, self.inner)
     }
 
     // -------- Component-meta-tier bridges --------------------------

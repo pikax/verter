@@ -512,6 +512,38 @@ pub(crate) fn dep_signature_valid_for_host(
         .all(|(canonical, version)| validator.validate(canonical.as_ref(), version))
 }
 
+/// Overlay-aware counterpart of [`dep_signature_valid_for_host`].
+///
+/// Validates `signature` against a caller-supplied [`SessionView`]
+/// rather than the base host. The `WholeHash` arm of
+/// [`HostFenceValidator`] consults `view.content_hash_for(canonical)`,
+/// which carries the **overlay** content hash for an overlay-bearing
+/// canonical and falls through to the base host's
+/// `FileArtifactStore`-derived hash for every untouched canonical —
+/// so a value's legacy whole-hash rail rooted on an overlay edit
+/// validates under the session that produced it. `ProjectGeneration`
+/// and ambient-lib facts are project-wide (overlay-invariant) and the
+/// retained `host` reference covers them unchanged.
+///
+/// This is the body of
+/// [`crate::resolver_core::SessionResolverContext`]'s
+/// `validate_dep_signature`, so the session-warm legacy rail
+/// validates against the bound session view in lockstep with the
+/// fact rail ([`crate::resolver_store::HostStoreView::with_session_overlay`]).
+/// Two concurrent sessions on conflicting overlays validate
+/// independently — each binds its own view.
+pub(crate) fn dep_signature_valid_for_view(
+    signature: &crate::semantic_query::DepSignature,
+    view: &dyn crate::session_view::SessionView,
+    host: &VerterHost,
+) -> bool {
+    use crate::completion_fence::FenceValidator;
+    let validator = HostFenceValidator { host, view };
+    signature
+        .iter()
+        .all(|(canonical, version)| validator.validate(canonical.as_ref(), version))
+}
+
 /// [`FenceValidator`](crate::completion_fence::FenceValidator) backed by a
 /// live [`VerterHost`] **and a [`SessionView`]**.
 ///

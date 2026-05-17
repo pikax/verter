@@ -1554,9 +1554,13 @@ impl SemanticGraphStore {
     ///
     /// **Lock discipline.** Acquires `self.entries` directly (no
     /// `entries_lock_diagnosed` Instant::now/capture-token wrapping).
-    /// Holds the lock only for the slot read + clone, drops before
-    /// instrumentation. parking_lot::Mutex is uncontended on the
-    /// warm-read hot path.
+    /// Holds the lock ONLY for the slot read + `MemoEntry` clone, then
+    /// releases it. Carrier validation (`entry.validate` — builds a
+    /// resolver store view, walks the legacy dep-signature rail), the
+    /// TLS fact-rail bubble, and instrumentation all run AFTER the
+    /// lock is dropped, so an unrelated warm read or cold publish does
+    /// not serialise on the single global memo mutex for the duration
+    /// of validation. Mirrors the relation memo's `get_relation`.
     #[inline]
     fn try_warm_hit_fast_path(
         &self,
@@ -1564,7 +1568,20 @@ impl SemanticGraphStore {
         key: &SemanticQueryKey,
     ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
         let (family, slot) = family_and_slot(key);
-        let hit = {
+
+        // Clone the `MemoEntry` OUT of the `entries` lock before
+        // validating. `entry.validate(ctx)` builds a resolver store
+        // view and walks the legacy dep-signature rail; holding the
+        // single global `entries` mutex across that work would
+        // serialise every unrelated warm read and cold publish on the
+        // memo mutex for the duration of validation. The clone is a
+        // handful of `Arc::clone`s (`ReadSetSignature` rails,
+        // `self_root_canonicals`, `walker_diagnostics`) — far cheaper
+        // than holding the lock through validation. This mirrors the
+        // relation memo's `get_relation`, which clones the
+        // `RelationMemoEntry` out of its `DashMap` shard guard before
+        // validating + bubbling.
+        let entry: MemoEntry = {
             // Single non-diagnosed lock acquisition. The
             // `entries_lock_diagnosed` wrapper that adds Instant::now
             // wait+hold timing under capture-token is intentionally
@@ -1573,37 +1590,35 @@ impl SemanticGraphStore {
             // wrapper's per-acquisition cost dominates the warm-hit
             // wall-clock.
             let entries = self.entries.lock();
-            entries.get(&family).and_then(|slots| {
-                slots.slot(slot).cloned().and_then(|entry| {
-                    // Strict warm-read validation BEFORE bubbling: the
-                    // entry's carrier is validated against the live
-                    // store view, validating every self-root canonical's
-                    // `FileWholeHash` strictly. A stale entry — a
-                    // same-canonical content edit, or a self-root the
-                    // live store view no longer tracks — fails and the
-                    // fast path reports a miss WITHOUT bubbling: a stale
-                    // entry must not pollute an outer tracer with
-                    // observations that no longer reflect current state.
-                    if !entry.validate(ctx) {
-                        return None;
-                    }
-                    // R3/R26/R28 - bubble the entry path-precise fact
-                    // observation set into any outer cold-compute scope
-                    // so transitive memo hits do not lose the
-                    // contributing fact identities.
-                    entry.read_set_signature.bubble_via_tls();
-                    let dep_signature = Arc::clone(&entry.read_set_signature.legacy);
-                    Some(CacheRead {
-                        value: entry.result,
-                        dep_signature,
-                        walker_diagnostics: entry.walker_diagnostics,
-                        cache_suppress: false,
-                    })
-                })
-            })
+            entries
+                .get(&family)
+                .and_then(|slots| slots.slot(slot).cloned())?
         };
 
-        let hit = hit?;
+        // Validate + bubble OUTSIDE the critical section.
+        //
+        // Strict warm-read validation BEFORE bubbling: the entry's
+        // carrier is validated against the live store view, validating
+        // every self-root canonical's `FileWholeHash` strictly. A
+        // stale entry — a same-canonical content edit, or a self-root
+        // the live store view no longer tracks — fails and the fast
+        // path reports a miss WITHOUT bubbling: a stale entry must not
+        // pollute an outer tracer with observations that no longer
+        // reflect current state, and the cooperative slow path
+        // cold-recomputes.
+        if !entry.validate(ctx) {
+            return None;
+        }
+        // R3/R26/R28 - bubble the entry path-precise fact observation
+        // set into any outer cold-compute scope so transitive memo
+        // hits do not lose the contributing fact identities.
+        entry.read_set_signature.bubble_via_tls();
+        let hit = CacheRead {
+            value: entry.result,
+            dep_signature: Arc::clone(&entry.read_set_signature.legacy),
+            walker_diagnostics: entry.walker_diagnostics,
+            cache_suppress: false,
+        };
 
         // Instrumentation — fast-path attribution.
         crate::loop5_instrumentation::WARM_HIT_FAST_PATH_HITS

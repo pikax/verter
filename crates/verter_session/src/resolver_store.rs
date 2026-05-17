@@ -191,6 +191,61 @@ impl HostStoreView {
         Self::build(host, snapshot_epoch, Some(session_id))
     }
 
+    /// Re-root this view's `whole_hashes` against a [`SessionView`]'s
+    /// overlay so warm-read validation observes the session's CURRENT
+    /// content identity rather than the base host's.
+    ///
+    /// `HostStoreView::build` snapshots `whole_hashes` from the
+    /// scheduler / `FileArtifactStore` — i.e. the **base** content
+    /// hash of every tracked canonical. A query executed under a
+    /// [`crate::resolver_core::SessionResolverContext`] roots its
+    /// cached values (semantic-graph `MemoEntry` self-roots, the
+    /// legacy whole-hash rail) on the **overlay** content hash for
+    /// every overlay-bearing canonical — `ensure_indexed_ready` under
+    /// a session resolves the overlay `IndexedReady`. A warm read
+    /// would then compare an overlay-rooted self-root against the base
+    /// hash and miss on every call.
+    ///
+    /// This method overrides, for the session's overlay canonicals:
+    /// - an overlay-Upsert canonical → `whole_hashes[canonical]` is
+    ///   set to [`SessionView::overlay_content_hash_for`] (the
+    ///   session's current content identity for that file);
+    /// - a session-tombstoned canonical → its `whole_hashes` entry is
+    ///   removed, so `validates_self_root_whole_hash` rejects any
+    ///   entry rooted on it (the session deleted the file; there is no
+    ///   current content) and a base-content-rooted entry also misses.
+    ///
+    /// The override is **not** a blanket accept: a self-root validated
+    /// through the overlaid view still fails when the entry was rooted
+    /// on a *superseded* overlay hash (the overlay was edited since) or
+    /// on the *base* hash while an overlay now covers the canonical.
+    /// It validates against the session's current content, exactly as
+    /// the un-overlaid view validates against the base's current
+    /// content.
+    ///
+    /// Non-overlay canonicals are untouched — they keep the base hash,
+    /// so a session that overlays one file still validates every other
+    /// canonical against base content.
+    #[must_use]
+    pub(crate) fn with_session_overlay(
+        mut self,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Self {
+        for canonical in view.overlay_canonicals() {
+            if view.is_tombstoned(&canonical) {
+                // The session deleted the file — drop the tracked
+                // hash so a strict self-root validation rejects any
+                // entry rooted on it and recomputes.
+                self.whole_hashes.remove(&canonical);
+                continue;
+            }
+            if let Some(overlay_hash) = view.overlay_content_hash_for(&canonical) {
+                self.whole_hashes.insert(canonical, overlay_hash);
+            }
+        }
+        self
+    }
+
     fn build(host: &VerterHost, snapshot_epoch: u64, session_id: Option<u64>) -> Self {
         let mut view = Self {
             mutation_epoch: snapshot_epoch,

@@ -1105,3 +1105,267 @@ fn builtin_utility_instantiation_roots_on_argument_file() {
          argument's file via `observed_self_roots_from_nodes` over the `args` node set",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Session-overlay warm-hit validation matrix.
+// ---------------------------------------------------------------------------
+
+/// `execute_cooperative`'s warm-hit fast path validates a session
+/// warm hit against the **overlay** content identity, not the base
+/// host's.
+///
+/// A cold build under a [`SessionResolverContext`] roots the
+/// semantic-graph `MemoEntry`'s self-root `FileWholeHash` on the
+/// OVERLAY content hash — `build_resolve_decl` / `build_typeof`
+/// observe `ensure_indexed_ready`, which under a session resolves the
+/// overlay `IndexedReady` (`overlay_hash`). The warm-hit validator
+/// (`MemoEntry::validate` → `validate_with_self_roots` →
+/// `validate_fact_signature_with_self_roots` →
+/// `view.validates_self_root_whole_hash`) routes the self-root through
+/// `ctx.resolver_store_view()`. Pre-fix `SessionResolverContext::
+/// resolver_store_view` delegated straight to the base host, whose
+/// `HostStoreView.whole_hashes` records the BASE content hash — so an
+/// overlay-rooted self-root never matched and every session-overlay
+/// warm read cold-recomputed. Post-fix `resolver_store_view` applies
+/// `HostStoreView::with_session_overlay`, which overrides
+/// `whole_hashes[canonical]` with the overlay content hash for every
+/// overlay-bearing canonical.
+///
+/// This single test discriminates the full hit/miss matrix the fix
+/// must satisfy. Each case publishes one `MemoEntry` whose carrier and
+/// `self_root_canonicals` mirror exactly what the cold build produces
+/// (a leading self-root `FileWholeHash` for the keyed canonical), then
+/// drives `execute_cooperative` and observes the `cold_ran` closure
+/// flag:
+///
+/// - **overlay-current** — entry rooted on the *current* overlay hash,
+///   queried under the session context → **warm HIT** (`cold_ran`
+///   stays false). This assertion is RED pre-fix: the base store view
+///   rejects the overlay-rooted self-root, so the cold build re-runs.
+/// - **overlay-stale** — entry rooted on a *superseded* overlay hash
+///   (the overlay was edited since), queried under the session context
+///   → **MISS** (`cold_ran` becomes true). Proves the overlay-aware
+///   view is not a blanket accept — it validates against the session's
+///   *current* overlay identity.
+/// - **base-rooted-under-overlay** — entry rooted on the *base* content
+///   hash, queried under a session that NOW has an overlay for that
+///   canonical → **MISS**. The base-content value is stale relative to
+///   the overlay.
+/// - **base/base** — entry rooted on the base hash, queried under the
+///   plain base host context (no session) → **warm HIT** (unchanged).
+#[test]
+fn session_overlay_warm_validation_matrix() {
+    use crate::resolver_core::SessionResolverContext;
+    use crate::semantic_query::QueryResult;
+    use crate::session_view::{OverlaidView, SessionView};
+    use rustc_hash::FxHashMap;
+
+    let canonical = "/sg_overlay/probe.ts";
+    // Base file: materialised on the host under the base content hash.
+    let host = host();
+    upsert(
+        &host,
+        canonical,
+        "export interface Probe { base: number; }\nexport const probe = 1;\n",
+    );
+    let base_hash = host
+        .ensure_indexed_ready(canonical)
+        .expect("base IndexedReady must materialise for the upserted file")
+        .whole_hash;
+    let host = Arc::new(host);
+
+    // Overlay source: deliberately different bytes → different content
+    // hash, so the base and overlay artifacts are distinguishable.
+    let overlay_source: Arc<str> =
+        Arc::from("export interface Probe { overlay: string; }\nexport const probe = 2;\n");
+    let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+    overlays.insert(canonical.to_string(), Arc::clone(&overlay_source));
+    let view = OverlaidView::new(Arc::clone(&host), overlays);
+    let overlay_hash = view
+        .overlay_content_hash_for(canonical)
+        .expect("OverlaidView must report an overlay content hash for the masked canonical");
+    assert_ne!(
+        overlay_hash, base_hash,
+        "fixture invariant: the overlay source differs from the base, so its content hash \
+         must differ — otherwise the matrix cases are indistinguishable",
+    );
+
+    // Publish the overlay `IndexedReady` candidate under the overlay
+    // hash so the session view tracks an overlay artifact for the
+    // canonical (multi-candidate sibling of the base artifact).
+    let overlay_indexed = host
+        .materialize_overlay_indexed_ready(canonical, &overlay_source, overlay_hash)
+        .expect("overlay IndexedReady must materialise");
+    assert_eq!(
+        overlay_indexed.whole_hash, overlay_hash,
+        "fixture invariant: the overlay artifact is keyed by the overlay hash",
+    );
+
+    // A genuinely-different *superseded* overlay hash — the content
+    // hash of an older overlay source. Distinct from both the current
+    // overlay hash and the base hash, so the overlay-stale case is a
+    // real stale-version mismatch, not a synthetic sentinel.
+    let stale_overlay_hash = crate::hash::hash_16(
+        b"export interface Probe { overlay: boolean; }\nexport const probe = 0;\n",
+    );
+    assert_ne!(stale_overlay_hash, overlay_hash);
+    assert_ne!(stale_overlay_hash, base_hash);
+
+    // The `ResolveDecl` key for the keyed canonical — the family-memo
+    // key shape `build_resolve_decl` cold-publishes.
+    let key = SemanticQueryKey::ResolveDecl(resolve_decl_key(canonical, "Probe"));
+
+    // Build a `MemoEntry` carrier self-rooted on `root_hash`, exactly
+    // as `semantic_graph_read_set_signature` does for a cold build:
+    // the fact rail leads with the keyed canonical's self-root
+    // `FileWholeHash`, and `self_root_canonicals` lists that canonical.
+    let publish_entry_rooted_on = |graph: &SemanticGraphStore, root_hash: [u8; 16]| {
+        let node = graph.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String,
+        ));
+        let carrier = ReadSetSignature::new(
+            Arc::from(vec![FactVersionRef::FileWholeHash {
+                canonical_id: canonical.to_string(),
+                hash: root_hash,
+            }]),
+            Arc::from(Vec::new().into_boxed_slice()),
+        );
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(canonical)]);
+        let published = graph.publish_with_carrier_for_tests(
+            key.clone(),
+            QueryResult::Value(node),
+            carrier,
+            self_roots,
+        );
+        assert!(
+            published > 0,
+            "fixture invariant: the warm memo entry must be published",
+        );
+        node
+    };
+
+    // `execute_cooperative` driver: returns `(cold_ran, node)`. The
+    // cold build interns and returns a *fresh* recompute node so the
+    // caller can tell a warm hit (returns the published node) from a
+    // cold recompute (returns the recompute node) independently of the
+    // `cold_ran` flag.
+    let drive = |graph: &SemanticGraphStore, ctx: &dyn ResolverContext| {
+        let mut cold_ran = false;
+        let recompute_node = graph.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::Number,
+        ));
+        let read = graph.execute_cooperative(
+            ctx,
+            key.clone(),
+            || {
+                graph.intern_node(SemanticNodeData::Opaque(
+                    crate::semantic_query::QueryError::Miss,
+                ))
+            },
+            || {
+                cold_ran = true;
+                (
+                    QueryResult::Value(recompute_node),
+                    Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
+                )
+            },
+        );
+        (cold_ran, read.value, recompute_node)
+    };
+
+    // --- Case 1: overlay-current → warm HIT ------------------------
+    {
+        let graph = SemanticGraphStore::new();
+        let published = publish_entry_rooted_on(&graph, overlay_hash);
+        let session_ctx = SessionResolverContext::new(&host, &view);
+        let (cold_ran, value, _recompute) = drive(&graph, &session_ctx);
+        assert!(
+            !cold_ran,
+            "overlay-current: an entry self-rooted on the CURRENT overlay hash, queried \
+             under a SessionResolverContext that overlays the canonical, MUST warm-HIT. \
+             Pre-fix `SessionResolverContext::resolver_store_view` delegates to the base \
+             host, whose store view records the BASE hash for the canonical — the strict \
+             self-root validator then rejects the overlay-rooted entry and the cold build \
+             re-runs. This is the exact codex P1 defect: every session-overlay warm read \
+             cold-recomputes.",
+        );
+        match value {
+            QueryResult::Value(node) => assert_eq!(
+                node, published,
+                "overlay-current: the warm hit must surface the PUBLISHED node",
+            ),
+            other => panic!("overlay-current: expected the published Value, got {other:?}"),
+        }
+    }
+
+    // --- Case 2: overlay-stale → MISS ------------------------------
+    {
+        let graph = SemanticGraphStore::new();
+        let _published = publish_entry_rooted_on(&graph, stale_overlay_hash);
+        let session_ctx = SessionResolverContext::new(&host, &view);
+        let (cold_ran, value, recompute) = drive(&graph, &session_ctx);
+        assert!(
+            cold_ran,
+            "overlay-stale: an entry self-rooted on a SUPERSEDED overlay hash (the overlay \
+             was edited since) MUST MISS and re-run cold. The overlay-aware store view \
+             validates the self-root against the session's CURRENT overlay content hash — \
+             it is NOT a blanket 'accept anything under a session'. A warm hit here would \
+             reintroduce stale-serving.",
+        );
+        match value {
+            QueryResult::Value(node) => assert_eq!(
+                node, recompute,
+                "overlay-stale: the recomputed node must surface, not the stale entry",
+            ),
+            other => panic!("overlay-stale: expected the recomputed Value, got {other:?}"),
+        }
+    }
+
+    // --- Case 3: base-rooted-under-overlay → MISS ------------------
+    {
+        let graph = SemanticGraphStore::new();
+        let _published = publish_entry_rooted_on(&graph, base_hash);
+        let session_ctx = SessionResolverContext::new(&host, &view);
+        let (cold_ran, value, recompute) = drive(&graph, &session_ctx);
+        assert!(
+            cold_ran,
+            "base-rooted-under-overlay: an entry self-rooted on the BASE content hash, \
+             queried under a session that NOW has an overlay for that canonical, MUST \
+             MISS — the base-content value is stale relative to the overlay. The \
+             overlay-aware view records the overlay hash for the canonical, so the \
+             base-rooted self-root no longer validates.",
+        );
+        match value {
+            QueryResult::Value(node) => assert_eq!(
+                node, recompute,
+                "base-rooted-under-overlay: the recomputed node must surface",
+            ),
+            other => {
+                panic!("base-rooted-under-overlay: expected the recomputed Value, got {other:?}")
+            }
+        }
+    }
+
+    // --- Case 4: base/base → warm HIT (unchanged) ------------------
+    {
+        let graph = SemanticGraphStore::new();
+        let published = publish_entry_rooted_on(&graph, base_hash);
+        // Plain base host context — no session overlay.
+        let base_ctx: &dyn ResolverContext = host.as_ref();
+        let (cold_ran, value, _recompute) = drive(&graph, base_ctx);
+        assert!(
+            !cold_ran,
+            "base/base: an entry self-rooted on the base hash, queried under the plain \
+             base host context, MUST warm-HIT — the base store view records the base \
+             hash for the canonical. This case is unchanged by the fix; it guards \
+             against the overlay-aware path leaking into non-session contexts.",
+        );
+        match value {
+            QueryResult::Value(node) => assert_eq!(
+                node, published,
+                "base/base: the warm hit must surface the PUBLISHED node",
+            ),
+            other => panic!("base/base: expected the published Value, got {other:?}"),
+        }
+    }
+}
