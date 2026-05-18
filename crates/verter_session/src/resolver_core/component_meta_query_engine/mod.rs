@@ -397,12 +397,13 @@ pub(crate) struct ObservedPreparedTypeDecl {
 ///   not bump the generation, so this fact does not over-invalidate.
 /// - `DepVersion::RouteGeneration(_)` — route generation is not a
 ///   real validating fact: there is no authoritative route-generation
-///   counter and no production emitter, and `HostFenceValidator`
-///   treats `RouteGeneration` as always-valid. Rooting it would be
+///   counter and no production emitter. `HostFenceValidator` rejects
+///   it fail-safe (the `RouteGeneration` arm returns `false`) so a
+///   stale entry rooted on it cannot survive. Rooting it would be
 ///   unsound (it cannot detect a content edit to the observed file).
 ///   The function therefore returns `None` so the entry is NOT
-///   admitted to the shared `MaterializeMemoDb` until route generation
-///   has a real validating source.
+///   admitted to the shared `MaterializeMemoDb`; no production path
+///   constructs the variant.
 pub(crate) fn engine_fact_signature_for_materialize_memo(
     observed_scope: &crate::resolver_core::MaterializeScopeObservation,
     observed_scope_syntactic_export_set: crate::resolver_core::ParseFactRef,

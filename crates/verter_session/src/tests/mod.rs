@@ -9,3 +9,4 @@
 //! test-only entry points easy to grep and audit.
 
 pub mod audit_tls_harness;
+pub mod dispatch_bridges;

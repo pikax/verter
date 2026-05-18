@@ -238,31 +238,22 @@ fn n_owners_via_materialize_surface_dispatch_collapse_to_one_entry() {
         "/workspace/src/Header.vue",
     ];
 
-    // Use a fresh hermetic project. Every owner scope must be an
-    // observable file: a `MaterializeStructureDb` entry self-roots on
-    // its materialise scope, and the structural-carrier producer routes
-    // the value through `ReturnOnly` (non-cacheable) when the scope has
-    // no recoverable `IndexedReady`. Inject all four owner SFCs (plus
-    // the substrate-bootstrap file) so the cold build can admit an
-    // entry; the cross-owner reuse property is then observable on the
-    // production cache.
-    let mut files: Vec<(&str, &str)> = vec![("/workspace/x.ts", "export const x = 1;")];
-    for scope in &owners {
-        files.push((*scope, "<script setup lang=\"ts\">const x = 1;</script>\n"));
-    }
-    let project = build_hermetic_project(&files);
+    // A fresh hermetic project with only the substrate-bootstrap file.
+    // The N `materialize_surface` calls below all use the NULL base
+    // node `SemanticNodeId(0)`, whose origin is `Global` — a
+    // `MaterializeStructureDb` entry self-roots ONLY its `base` node's
+    // declaration-origin file, so a `Global`-origin base is a
+    // zero-self-root entry that is always `Cacheable`. The consumer
+    // materialise scope is NOT a self-root (R7 cross-owner reuse), so
+    // the owner scopes need not be observable files for the cold build
+    // to admit an entry; only the differing `scope_canonical_id` is
+    // exercised here.
+    let project = build_hermetic_project(&[("/workspace/x.ts", "export const x = 1;")]);
     let host = project.host();
     let db = host.project_type_store().materialize_structure_db();
 
-    let baseline = db.entry_count();
-    assert_eq!(baseline, 0, "control: fresh DB has 0 entries");
-
-    // Index every owner scope through the public `get_component_meta`
-    // entry point so each scope has a current `IndexedReady` the
-    // materialiser's `observe_materialize_scope` can pin against.
-    for scope in &owners {
-        let _ = host.get_component_meta(scope);
-    }
+    let count_before = db.entry_count();
+    assert_eq!(count_before, 0, "control: fresh DB has 0 entries");
 
     // Note: we use `SemanticNodeId(0)` (the NULL node id). The
     // materialiser fast-paths it to a no-op outcome, but the cache
@@ -270,12 +261,6 @@ fn n_owners_via_materialize_surface_dispatch_collapse_to_one_entry() {
     // structural property we want to discriminate: N keys differing
     // ONLY in `scope_canonical_id` collapse to ONE entry.
     let base = SemanticNodeId(0);
-
-    // Capture the entry count AFTER the `get_component_meta` indexing
-    // calls above (which may themselves admit unrelated entries) so the
-    // assertion measures ONLY the delta from the N `materialize_surface`
-    // calls below.
-    let count_before = db.entry_count();
 
     let dispatch = host.semantic_dispatch();
     for scope in &owners {

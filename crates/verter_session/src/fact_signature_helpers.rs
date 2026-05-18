@@ -621,11 +621,17 @@ impl ReadSetSignature {
         }
     }
 
-    /// Construct a fact-only carrier. The legacy rail is empty. Used
-    /// by producers that gate validation entirely on the fact
-    /// signature.
+    /// Construct a fact-only carrier — the legacy rail is empty.
+    ///
+    /// Test-support only: no production producer composes a carrier
+    /// this way (production producers build the carrier via
+    /// `ReadSetSignature::new` with the traced legacy rail, or via
+    /// `overflow` / `empty`). The self-root substrate test suites
+    /// (`fact_signature_helpers` unit tests, `query_db_self_root_tests`)
+    /// use it to plant synthetic fact-only entries.
+    #[cfg(test)]
     #[inline]
-    pub fn facts_only(facts: Arc<[FactVersionRef]>) -> Self {
+    pub(crate) fn facts_only(facts: Arc<[FactVersionRef]>) -> Self {
         Self {
             facts,
             legacy: Arc::from(Vec::<(Arc<str>, DepVersion)>::new()),

@@ -870,18 +870,25 @@ pub fn merge_dep_signature_into_local_fence(
 /// is installed).
 ///
 /// R24 contract — observations are silent when no tracer is on the
-/// caller's thread. The translation is purely structural:
-/// `DepVersion::WholeHash(h)` maps to
-/// `FactVersionRef::FileWholeHash { canonical_id, hash: h }`. Route
-/// and project generation entries (`RouteGeneration` /
-/// `ProjectGeneration`) do not have a per-fact peer in the
-/// fact-based substrate; they are skipped (the fence-merge path
-/// continues to record them on the legacy `local_fence`).
+/// caller's thread. The translation matches the sibling bridge
+/// [`crate::fact_signature_helpers::dep_signature_to_fact_signature`]:
 ///
-/// Sub-task E wiring point — used by materialiser-tier cold computes
-/// alongside the existing `local_fence.push` so an observe-equipped
-/// cold compute records both legacy and fact-based signatures
-/// without duplicating the producer call.
+/// - `DepVersion::WholeHash(h)` → `FactVersionRef::FileWholeHash`.
+/// - `DepVersion::ProjectGeneration(g)` →
+///   `FactVersionRef::ProjectGeneration` — the project-wide
+///   generation a sub-result depended on. An outer entry that
+///   observes this sub-result through the tracer must root the
+///   project generation so it rejects on a project-shape change;
+///   dropping it would lose that dependency.
+/// - `DepVersion::RouteGeneration(_)` has no `FactVersionRef` peer
+///   and no authoritative validating source — it is skipped (the
+///   fence-merge path continues to record it on the legacy
+///   `local_fence` for legacy-validator consumers).
+///
+/// Used by materialiser-tier cold computes alongside the existing
+/// `local_fence.push` so an observe-equipped cold compute records
+/// both legacy and fact-based signatures without duplicating the
+/// producer call.
 pub(crate) fn observe_fence_entry(
     ctx: &dyn crate::resolver_core::ResolverContext,
     canonical: &Arc<str>,
@@ -889,15 +896,24 @@ pub(crate) fn observe_fence_entry(
 ) {
     use crate::resolver_core::FactVersionRef;
     use crate::semantic_query::DepVersion;
-    if let DepVersion::WholeHash(hash) = version {
-        ctx.observe(FactVersionRef::FileWholeHash {
-            canonical_id: canonical.as_ref().to_string(),
-            hash: *hash,
-        });
+    match version {
+        DepVersion::WholeHash(hash) => {
+            ctx.observe(FactVersionRef::FileWholeHash {
+                canonical_id: canonical.as_ref().to_string(),
+                hash: *hash,
+            });
+        }
+        DepVersion::ProjectGeneration(generation) => {
+            ctx.observe(FactVersionRef::ProjectGeneration {
+                generation: *generation,
+            });
+        }
+        DepVersion::RouteGeneration(_) => {
+            // Route generation has no `FactVersionRef` peer; the
+            // legacy fence still records it for legacy-validator
+            // consumers.
+        }
     }
-    // Route / Project generation entries do not map to a fact-based
-    // ref directly; the legacy fence still records them for
-    // legacy-validator consumers.
 }
 
 /// Translate every entry of a legacy dep signature into fact-based

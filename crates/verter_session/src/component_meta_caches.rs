@@ -1979,10 +1979,13 @@ use crate::component_meta_materialize::{MaterializeOutcome, MaterializeStructure
 /// the cold build (the materialiser's traced read set) plus the
 /// legacy whole-hash rail kept for `validate_dep_signature` bubbling.
 /// `self_root_canonicals` lists the canonicals whose `FileWholeHash`
-/// fact the warm-read validator must check **strictly** — the
-/// materialise scope and the `base` node's declaration-origin file.
-/// A same-canonical content edit, or a self-root canonical the live
-/// store view no longer tracks, rejects the entry through
+/// fact the warm-read validator must check **strictly** — ONLY the
+/// `base` node's declaration-origin file. The consumer materialise
+/// scope is NOT a self-root: a value's identity does not depend on
+/// which consumer reached it (R7 cross-owner reuse). A `Global`-origin
+/// base yields an empty `self_root_canonicals`. A same-canonical
+/// content edit, or a self-root canonical the live store view no
+/// longer tracks, rejects the entry through
 /// [`crate::fact_signature_helpers::ReadSetSignature::validate_with_self_roots`].
 #[derive(Clone)]
 pub struct MaterializeStructureEntry {
@@ -1997,9 +2000,11 @@ pub struct MaterializeStructureEntry {
     /// drives the unified reverse-index registration.
     pub read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
     /// Canonicals validated **strictly** as self-roots on every warm
-    /// read and post-compute revalidation: the materialise scope plus
-    /// the `base` node's declaration-origin file. An untracked or
-    /// hash-mismatched self-root rejects the entry.
+    /// read and post-compute revalidation: ONLY the `base` node's
+    /// declaration-origin file (empty for a `Global`-origin base). The
+    /// consumer materialise scope is NOT a self-root (R7 cross-owner
+    /// reuse). An untracked or hash-mismatched self-root rejects the
+    /// entry.
     pub self_root_canonicals: Arc<[Arc<str>]>,
 }
 
@@ -2088,12 +2093,13 @@ impl MaterializeStructureDb {
         let result = (|| -> Option<crate::semantic_query::CacheRead<MaterializeOutcome>> {
             let entry_arc = self.entries.get(key).map(|e| e.clone())?;
             // Carrier-aware validate-before-bubble. The entry's
-            // self-root canonicals (the materialise scope and the
-            // `base` node's declaration-origin file) validate
-            // **strictly** — an untracked or hash-mismatched self-root
-            // rejects the entry; every other fact keeps the lazy
-            // cross-file permissiveness. A stale entry never bubbles
-            // into the active outer tracer.
+            // self-root canonicals (ONLY the `base` node's
+            // declaration-origin file — NOT the consumer materialise
+            // scope, R7 cross-owner reuse) validate **strictly** — an
+            // untracked or hash-mismatched self-root rejects the
+            // entry; every other fact keeps the lazy cross-file
+            // permissiveness. A stale entry never bubbles into the
+            // active outer tracer.
             if !entry_arc
                 .read_set_signature
                 .validate_with_self_roots(ctx, &entry_arc.self_root_canonicals)

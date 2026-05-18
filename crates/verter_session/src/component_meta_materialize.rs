@@ -1304,9 +1304,10 @@ pub(crate) fn materialize_component_meta_structure(
         key.clone(),
         |entry: &MaterializeStructureEntry| {
             // Carrier-aware validate-before-bubble. The entry's
-            // self-root canonicals (the materialise scope and the
-            // `base` node's declaration-origin file) validate
-            // **strictly**; every other fact keeps the lazy cross-file
+            // self-root canonicals (ONLY the `base` node's
+            // declaration-origin file — NOT the consumer materialise
+            // scope, R7 cross-owner reuse) validate **strictly**;
+            // every other fact keeps the lazy cross-file
             // permissiveness. Stale entries never bubble.
             if entry
                 .read_set_signature

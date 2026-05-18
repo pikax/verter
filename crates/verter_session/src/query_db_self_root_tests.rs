@@ -5165,17 +5165,19 @@ fn imported_registry_removal_cleanup_preserves_fresh_reverse_index_registration(
 // Structural carriers — `MaterializeStructureDb` and `RefCycleResultDb`.
 //
 // These two query-identity caches carry an explicit `self_root_canonicals`
-// set: `MaterializeStructureDb` roots the materialise scope (and the `base`
-// node's declaration-origin file); `RefCycleResultDb` roots the BFS root
+// set: `MaterializeStructureDb` roots ONLY the `base` node's
+// declaration-origin file (the consumer materialise scope is NOT a
+// self-root — R7 cross-owner reuse); `RefCycleResultDb` roots the BFS root
 // file plus every visited declaration's file. Every warm read validates
 // those self-roots strictly via `ReadSetSignature::validate_with_self_roots`,
 // so a same-canonical / visited-canonical content edit — or an untracked
 // self-root canonical — rejects the entry. The tests below discriminate the
-// strict warm-read validator against the pre-self-root tree (which validated
-// structural carriers with the lax `validate(ctx)`), and confirm that a
-// content edit to the scope / root / a visited canonical rejects the warm
-// entry under the skip-own-drain hook — the property that makes deleting the
-// own-canonical drain sound (the carrier rejects the edit on its own).
+// strict warm-read validator against the lax `validate(ctx)`, and confirm
+// that a content edit to the base origin / root / a visited canonical
+// rejects the warm entry under the skip-own-drain hook — the property that
+// makes deleting the own-canonical drain sound (the carrier rejects the
+// edit on its own). The strict-validator mechanism itself is exercised by a
+// planted-self-root entry below.
 // ===========================================================================
 
 /// Intern a stable scope-less `Object` node — a `base` whose identity
@@ -5196,21 +5198,26 @@ fn intern_global_object(host: &VerterHost) -> crate::semantic_query::SemanticNod
         }))
 }
 
-/// `MaterializeStructureDb` validates the materialise scope's self-root
-/// strictly.
+/// `MaterializeStructureDb::peek` runs its self-root canonicals
+/// through the **strict** whole-hash validator, not the lax one.
 ///
-/// Discriminating property: a synthetic entry is planted with a
-/// `FileWholeHash` self-root for an UNTRACKED scope canonical and
-/// `self_root_canonicals = [scope]`. The lax `validate(ctx)` routes the
+/// This exercises the strict-validator MECHANISM in isolation: the
+/// production materialiser never roots the consumer materialise scope
+/// (it self-roots ONLY the `base` node's declaration-origin file — R7
+/// cross-owner reuse), so to drive the strict path deterministically a
+/// synthetic entry is PLANTED with a `FileWholeHash` self-root for an
+/// untracked canonical and `self_root_canonicals = [canonical]`.
+///
+/// Discriminating property: the lax `validate(ctx)` routes the
 /// untracked `FileWholeHash` through `StoreView::validates`, whose
-/// untracked-accept arm returns `true` — the pre-self-root tree serves
-/// the entry warm. The strict `validate_with_self_roots(ctx, [scope])`
-/// routes it through `validates_self_root_whole_hash`, which rejects an
-/// untracked self-root. The peek misses iff the validator is strict;
-/// reverting `MaterializeStructureDb::peek` to `validate(ctx)` flips
-/// this test.
+/// untracked-accept arm returns `true` — a lax validator serves the
+/// planted entry warm. The strict `validate_with_self_roots` routes a
+/// listed self-root through `validates_self_root_whole_hash`, which
+/// rejects an untracked self-root. The peek misses iff the validator
+/// is strict; reverting `MaterializeStructureDb::peek` to
+/// `validate(ctx)` flips this test.
 #[test]
-fn materialize_structure_db_untracked_self_root_rejects_warm_entry() {
+fn materialize_structure_db_planted_untracked_self_root_rejects_warm_entry() {
     use crate::component_meta_caches::MaterializeStructureEntry;
     use crate::component_meta_materialize::{
         MaterializationScope, MaterializeOutcome, MaterializeStructureCacheKey,

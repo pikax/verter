@@ -567,7 +567,8 @@ fn semantic_memo_warm_hit_validates_before_bubble() {
 /// The carrier-aware peek calls
 /// `entry.read_set_signature.validate_with_self_roots(ctx, ...)` which
 /// AND-gates both rails AND validates the entry's self-root canonicals
-/// (the materialise scope + the `base` node's declaration-origin file)
+/// (ONLY the `base` node's declaration-origin file — the consumer
+/// materialise scope is NOT a self-root, R7 cross-owner reuse)
 /// **strictly** — a strictly stronger gate than the plain
 /// `validate(ctx)` the pre-self-root tree used.
 /// `register_post_publish` keys the reverse index under the carrier's
@@ -605,9 +606,10 @@ fn materialize_structure_peek_and_register_use_carrier() {
         "MaterializeStructureDb::peek must AND-gate via the carrier's strict \
          `validate_with_self_roots(ctx, &entry_arc.self_root_canonicals)` so the carrier's \
          facts rail invalidates a stale entry even when the legacy DepSignature still \
-         validates, AND a same-canonical edit to a self-root (the materialise scope / \
-         `base` node's declaration-origin file) rejects the entry strictly. Pre-fix peek \
-         validated only the legacy rail; the pre-self-root tree used the lax `validate`."
+         validates, AND a same-canonical edit to a self-root (ONLY the `base` node's \
+         declaration-origin file — NOT the consumer materialise scope) rejects the entry \
+         strictly. Pre-fix peek validated only the legacy rail; the pre-self-root tree \
+         used the lax `validate`."
     );
 
     // register_post_publish must key the reverse index under the

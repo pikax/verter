@@ -19209,3 +19209,149 @@ defineProps<{
         ),
     }
 }
+
+/// End-to-end discriminator for the dispatch-bridge `ProjectGeneration`
+/// conversion.
+///
+/// A cross-file `defineProps<Foo>()` drives the projector +
+/// materialiser dispatch reads. Every dispatch round-trip's
+/// `DepSignature` carries a `DepVersion::ProjectGeneration` (built by
+/// `ProjectSemanticDispatch::dep_signature_for` /
+/// `project_generation_signature`). Those signatures fan through
+/// `emit_dispatch_dep_signature_facts` → `accumulate_dispatch_dep_signature`
+/// into the per-request accumulator, which `compute_component_meta_state_inner`
+/// drains and merges into `ResolvedComponentMetaState.fact_versions`.
+///
+/// `fact_versions` is the signature stored on the fact-only
+/// `cached_resolved_meta` sidecar (on `DerivedRawState`); a warm read
+/// through `try_get_cached_resolved_meta` validates it via
+/// `StoreView::validates_fact_signature` alone — no legacy rail.
+/// `current_dependency_fact_versions` only emits `FileWholeHash` /
+/// `DerivedFactHash` facts, NEVER a `ProjectGeneration` fact, so the
+/// dispatch-accumulator drain is the only path that can root the
+/// project generation on the sidecar.
+///
+/// Discrimination: against the pre-fix tree
+/// `accumulate_dispatch_dep_signature` DROPS `ProjectGeneration`, so
+/// the sidecar's `fact_versions` carry no `ProjectGeneration` fact and
+/// a `bump_project_generation()` with unchanged file content leaves
+/// the fact-only sidecar warm (stale). The first assertion below
+/// FAILS pre-fix. Post-fix the bridge converts `ProjectGeneration`,
+/// the sidecar roots it, and a project-generation bump misses.
+#[test]
+fn dispatch_project_generation_roots_fact_only_resolved_meta_sidecar() {
+    use crate::resolver_core::FactVersionRef;
+    use crate::types::ProjectionMode;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            "export type Foo = { value: number; label: string }",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Comp.vue",
+            r#"<script setup lang="ts">
+import type { Foo } from './types'
+defineProps<{ data: Foo }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    // Cold compute: populates the `cached_resolved_meta` sidecar.
+    let session = project.open_session_batch().unwrap();
+    let meta = session
+        .get_component_meta("/src/Comp.vue")
+        .unwrap()
+        .expect("component meta resolves for the cross-file Foo fixture");
+    assert!(
+        meta.props.iter().any(|p| p.name == "data"),
+        "fixture must publish a `data` prop so the projector + \
+         materialiser dispatch reads ran — props={:?}",
+        meta.props
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // Inspect the fact-only sidecar's stored `fact_versions`.
+    let host = project.host();
+    let entry = host
+        .derived_raw_cache()
+        .get("/src/Comp.vue")
+        .expect("derived-raw entry must exist after a cold component-meta compute");
+    let cached = entry
+        .cached_resolved_meta
+        .iter()
+        .find(|((mode, _view_fp), _)| *mode == ProjectionMode::Expanded)
+        .map(|(_, cached)| cached.clone())
+        .expect("cached_resolved_meta must hold an Expanded slot after cold compute");
+    drop(entry);
+
+    let project_generation_facts: Vec<u64> = cached
+        .fact_versions
+        .iter()
+        .filter_map(|fact| match fact {
+            FactVersionRef::ProjectGeneration { generation } => Some(*generation),
+            _ => None,
+        })
+        .collect();
+    // DISCRIMINATING ASSERTION: pre-fix the dispatch accumulator drops
+    // `ProjectGeneration`, so no `ProjectGeneration` fact reaches the
+    // sidecar and this fails.
+    assert!(
+        !project_generation_facts.is_empty(),
+        "the fact-only `cached_resolved_meta` sidecar MUST carry a \
+         FactVersionRef::ProjectGeneration fact after a cold \
+         component-meta compute whose dispatch reads observed the \
+         project generation — `accumulate_dispatch_dep_signature` \
+         must CONVERT `DepVersion::ProjectGeneration`, not drop it. \
+         sidecar fact_versions={:?}",
+        cached.fact_versions
+    );
+    // The dispatch reads observe the live project generation at
+    // compute time; the sidecar must root that exact value.
+    let live_generation = host.project_type_store().project_generation();
+    assert!(
+        project_generation_facts.contains(&live_generation),
+        "the sidecar's ProjectGeneration fact must carry the project \
+         generation live at cold-compute time ({live_generation}); \
+         got {project_generation_facts:?}"
+    );
+
+    // Stale-serve proof: drop the runtime singleflight slot so the
+    // fact-only sidecar is the sole survivor, bump the project
+    // generation WITHOUT touching any file, and confirm the fact-only
+    // warm read misses. Pre-fix (no ProjectGeneration fact) the
+    // sidecar would validate vacuously and serve the stale state.
+    host.resolver_runtime()
+        .component_meta
+        .remove(&crate::host_manage::component_meta_request_impl::resolved_meta_cache_key_with_view_fingerprint(
+            "/src/Comp.vue",
+            ProjectionMode::Expanded,
+            0,
+        ));
+    let warm_before_bump =
+        host.try_get_cached_resolved_meta("/src/Comp.vue", ProjectionMode::Expanded);
+    assert!(
+        warm_before_bump.is_some(),
+        "before the bump the fact-only sidecar must still validate \
+         (file content unchanged, project generation unchanged)"
+    );
+
+    host.project_type_store().bump_project_generation();
+
+    let warm_after_bump =
+        host.try_get_cached_resolved_meta("/src/Comp.vue", ProjectionMode::Expanded);
+    assert!(
+        warm_after_bump.is_none(),
+        "after a `bump_project_generation()` with unchanged file \
+         content the fact-only `cached_resolved_meta` sidecar MUST \
+         miss — the rooted ProjectGeneration fact no longer matches \
+         the live project generation. A warm hit here means the \
+         project-shape dependency was dropped at the dispatch bridge."
+    );
+}

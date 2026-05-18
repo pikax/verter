@@ -60,6 +60,13 @@ pub(crate) use dep_signature::{
     drain_dispatch_dep_signature_accumulator, emit_dispatch_dep_signature_facts,
     reset_dispatch_dep_signature_accumulator,
 };
+// `accumulate_dispatch_dep_signature` is re-exported only for the
+// `for_tests` bridge shim that exercises the dispatch accumulator
+// directly; production callers route through
+// `emit_dispatch_dep_signature_facts`, enforced by the
+// `no_accumulate_dispatch_dep_signature_outside_helpers` guard.
+#[cfg(any(test, debug_assertions))]
+pub(crate) use dep_signature::accumulate_dispatch_dep_signature;
 pub(crate) use dispatch_helpers::{
     instantiate_local_generic_ref_via_dispatch, lower_and_project_to_expanded_via_host_threaded,
     pick_via_dispatch_pick_helper, project_expr_class_a_via_dispatch,

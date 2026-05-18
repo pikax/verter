@@ -2700,10 +2700,12 @@ pub(crate) type ObservedGraphSelfRoot = (Arc<str>, crate::types::Hash16);
 ///   dependency rail and the observed self-root disagree on the keyed
 ///   file's version), or
 /// - the legacy rail carries a `RouteGeneration` dependency: route
-///   generation has no authoritative validating source
-///   (`HostFenceValidator` treats it as always-valid and there is no
-///   production emitter), so an entry rooted on it could not detect a
-///   content edit to the route-observed file.
+///   generation has no authoritative validating source — there is no
+///   production emitter, and `HostFenceValidator` rejects it fail-safe
+///   (the `RouteGeneration` arm returns `false`) — so an entry rooted
+///   on it could not detect a content edit to the route-observed file.
+///   No production path constructs the variant; producers refuse
+///   admission so no entry's legacy rail carries it.
 ///
 /// The traced fact set is merged after the self-roots: a self-root
 /// `FileWholeHash` already emitted is not duplicated, but every other

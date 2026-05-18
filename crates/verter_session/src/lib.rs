@@ -476,6 +476,14 @@ pub mod for_tests {
         resolved_opt?;
         Some(read_set.finalise())
     }
+
+    /// Discriminating probes for the dispatch DepSignature→fact
+    /// bridges (`accumulate_dispatch_dep_signature` /
+    /// `observe_fence_entry`). Used by
+    /// `tests/dispatch_bridges_convert_project_generation.rs`.
+    pub use crate::tests::dispatch_bridges::{
+        accumulate_dispatch_dep_signature_for_tests, observe_fence_entry_for_tests,
+    };
 }
 
 pub use host_audit_runtime::{

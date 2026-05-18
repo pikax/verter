@@ -151,14 +151,28 @@ fn route_db_writes_record_fact_dep_signatures() {
 /// tracer, and the resulting cache entry MUST root on its observed
 /// facts.
 ///
-/// The arch-guard counts the observe / tracer call sites in the
-/// materialiser. A regression below the threshold means a dispatch
-/// family is missing its observe pairing, or the cold-compute carrier
-/// is no longer re-based on the `install_fact_tracer` observation set —
-/// the fact-based tracer would record an incomplete signature and the
-/// strict admission guard would either refuse the resulting cache
-/// candidate or admit a candidate that misses some of its real
-/// dependencies (silent staleness on later edits).
+/// The arch-guard counts call sites in the materialiser. The three
+/// discriminations differ in strength:
+///
+/// - **Discrimination 1** (`observe_dep_signature` `>= 6`) is a
+///   per-dispatch-family floor: there is one expected `observe_dep_signature`
+///   site per dispatch family, so a count below 6 means a family
+///   dropped its observe pairing.
+/// - **Discriminations 2 and 3** (`install_fact_tracer`,
+///   `merge_traced_facts_into_materialize_carrier`,
+///   `base_node_origin_self_root`, each `>= 1`) are
+///   wiring-existence floors: each names a single cold-compute wiring
+///   point, so the `>= 1` threshold catches **total deletion** of
+///   that wiring — not a per-family gap. They are intentionally not
+///   exact-count assertions: a legitimate refactor may add or fold
+///   call sites, and an exact count would break the guard
+///   spuriously.
+///
+/// A regression that trips any check means the fact-based tracer
+/// would record an incomplete signature and the strict admission
+/// guard would either refuse the resulting cache candidate or admit a
+/// candidate that misses some of its real dependencies (silent
+/// staleness on later edits).
 #[test]
 fn materialiser_pipeline_observes_dep_signatures_on_every_dispatch_family() {
     let path = crates_dir()

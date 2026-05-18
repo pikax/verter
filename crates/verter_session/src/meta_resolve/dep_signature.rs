@@ -70,6 +70,22 @@ pub(crate) fn drain_dispatch_dep_signature_accumulator() -> Vec<crate::resolver_
 /// thread-local accumulator. Deduplicates against entries already in
 /// the accumulator on the way in (linear scan; the accumulator is
 /// short for a typical request).
+///
+/// Per-`DepVersion` mapping — identical to the sibling bridge
+/// [`crate::fact_signature_helpers::dep_signature_to_fact_signature`]:
+///
+/// - `WholeHash` → `FileWholeHash`.
+/// - `ProjectGeneration` → `FactVersionRef::ProjectGeneration` — the
+///   project-wide generation a sub-result depended on. The accumulator
+///   drains into `ResolvedComponentMetaState.fact_versions`, the
+///   signature on the fact-only `cached_resolved_meta` sidecar;
+///   dropping the project generation would let that sidecar validate a
+///   stale result against a superseded project shape.
+/// - `RouteGeneration` is **not expressible** as a `FactVersionRef` —
+///   there is no `FactVersionRef::RouteGeneration` variant and no
+///   authoritative validating source — so it is skipped. No production
+///   path constructs `DepVersion::RouteGeneration`; this arm is the
+///   defensive floor.
 pub(crate) fn accumulate_dispatch_dep_signature(sig: &crate::semantic_query::DepSignature) {
     use crate::resolver_core::FactVersionRef;
     use crate::semantic_query::DepVersion;
@@ -77,19 +93,17 @@ pub(crate) fn accumulate_dispatch_dep_signature(sig: &crate::semantic_query::Dep
     DISPATCH_DEP_SIGNATURE_ACCUMULATOR.with(|cell| {
         let mut accumulator = cell.borrow_mut();
         for (canonical, version) in sig.iter() {
-            let canonical_id = canonical.as_ref().to_string();
             let fact = match version {
                 DepVersion::WholeHash(hash) => FactVersionRef::FileWholeHash {
-                    canonical_id,
+                    canonical_id: canonical.as_ref().to_string(),
                     hash: *hash,
                 },
-                DepVersion::RouteGeneration(_) | DepVersion::ProjectGeneration(_) => {
-                    // Route / project generation are coarse-grained
-                    // counters; they don't map to a content-hash and
-                    // would force the warm-cache validator to invalidate
-                    // on unrelated activity. Skip them at the merge
-                    // point — `HostFenceValidator`'s revalidation
-                    // covers the project-generation lifecycle directly.
+                DepVersion::ProjectGeneration(generation) => FactVersionRef::ProjectGeneration {
+                    generation: *generation,
+                },
+                DepVersion::RouteGeneration(_) => {
+                    // Route generation has no `FactVersionRef` peer and
+                    // no authoritative validating source — skip it.
                     continue;
                 }
             };

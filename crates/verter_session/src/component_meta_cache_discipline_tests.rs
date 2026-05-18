@@ -172,11 +172,12 @@ fn cache_discipline_materialize_surface_repeated_keys_warm() {
     use crate::{FileKind, UpsertRequest};
 
     let host = build_test_host();
-    // The materialise scope canonical must be an observable file: a
-    // `MaterializeStructureDb` entry self-roots on its scope, and the
-    // structural-carrier producer routes the value through `ReturnOnly`
-    // (non-cacheable) when the scope has no recoverable `IndexedReady`.
-    // Load both scope files so the cold build can admit an entry.
+    // Load both scope files so the materialiser's dispatch reads have
+    // a real `IndexedReady` to walk. The `MaterializeStructureDb`
+    // entry does NOT self-root the consumer materialise scope (R7
+    // cross-owner reuse); a `Global`-origin `base` (here
+    // `intern_empty_object`) yields a zero-self-root entry that is
+    // always `Cacheable`.
     for scope in ["/test.vue", "/other.vue"] {
         let _ = host
             .upsert(UpsertRequest {

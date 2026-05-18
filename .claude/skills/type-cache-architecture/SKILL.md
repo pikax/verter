@@ -115,19 +115,22 @@ that self-root is checked:
   `ref_cycle_db` — validate their self-root **strictly**. Each entry
   carries an explicit `self_root_canonicals` set checked via
   `ReadSetSignature::validate_with_self_roots` on every warm read AND
-  post-compute revalidation. `MaterializeStructureDb` roots the
-  materialise scope (observed once via
-  `ResolverContext::observe_materialize_scope`) and the `base` node's
-  declaration-origin file (`SemanticGraphStore::node_scope`'s
-  `NodeScopeId::File`); `RefCycleResultDb` roots the BFS root file plus
-  every visited declaration's file (each visited `DeclIdentity`'s
-  embedded `(canonical_id, whole_hash)`). The provenance-pure producers
-  `materialize_structure_read_set` / `ref_cycle_read_set` lead the
-  carrier with one observed-hash `FileWholeHash` per self-root and
-  merge the traced fact set on top; an unrecoverable scope observation,
-  a torn observation, or a `RouteGeneration` dependency routes the
-  value through `ComputeAdmission::ReturnOnly` (valid result, no shared
-  admission). `RefCycleResultDb` has no generation-equal fast return —
+  post-compute revalidation. `MaterializeStructureDb` roots ONLY the
+  `base` node's declaration-origin file (`SemanticGraphStore::node_scope`'s
+  `NodeScopeId::File`); the consumer materialise scope is explicitly
+  NOT a self-root — a value's identity does not depend on which
+  consumer reached it (R7 cross-owner reuse), so `scope_canonical_id`
+  is excluded from `MaterializeStructureCacheKey`. A `Global`-origin
+  base is a zero-self-root entry. `RefCycleResultDb` roots the BFS root
+  file plus every visited declaration's file (each visited
+  `DeclIdentity`'s embedded `(canonical_id, whole_hash)`). The
+  provenance-pure producers `materialize_structure_read_set` /
+  `ref_cycle_read_set` lead the carrier with one observed-hash
+  `FileWholeHash` per self-root and merge the traced fact set on top; a
+  fence `RouteGeneration` dependency, or a fence `WholeHash` that
+  conflicts with the observed base self-root, routes the value through
+  `ComputeAdmission::ReturnOnly` (valid result, no shared admission).
+  `RefCycleResultDb` has no generation-equal fast return —
   every `peek` validates strictly. `route_owned_shallow` is a
   route-only artifact cache, not a self-rooted query-identity cache;
   its `route_owned_entry_is_fresh` tiered gate stays the route-owned
