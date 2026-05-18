@@ -174,6 +174,35 @@ impl FileArtifactKey {
     pub fn legacy_for_test(canonical: Arc<str>, content_hash: Hash16) -> Self {
         Self::legacy(canonical, content_hash)
     }
+
+    /// `true` when this key is a [`Self::legacy`]-shape key — the
+    /// base-artifact identity (`parse_env_hash == `[`LEGACY_PARSE_ENV_HASH`]
+    /// and `parser_version == `[`LEGACY_PARSER_VERSION`]).
+    ///
+    /// A non-legacy key carries a session-overlay **discriminator** in
+    /// the `parse_env_hash` dimension ([`Self::overlay_scoped`]) — its
+    /// `IndexedReady` can hold session-specific import routes resolved
+    /// against an overlay-only helper the base workspace cannot see.
+    ///
+    /// The store's **base canonical-wide scans**
+    /// ([`FileArtifactStore::get_any`], [`FileArtifactStore::get_artifacts_any`],
+    /// [`FileArtifactStore::content_hash_for_canonical`],
+    /// [`FileArtifactStore::snapshot_all`]) filter their iteration on
+    /// this predicate so a base `HostView` / `HostStoreView` reader can
+    /// never observe an overlay-scoped artifact and derive base cache
+    /// keys / route facts from another session's routes. A session-view
+    /// reader reaches its overlay artifact through the exact-key /
+    /// view-aware accessors ([`FileArtifactStore::get_overlay_scoped`],
+    /// `OverlaidView::parse_artifacts`) instead — they key on the full
+    /// `FileArtifactKey` including the discriminator. Lifecycle / removal
+    /// scans ([`FileArtifactStore::remove`],
+    /// [`FileArtifactStore::remove_canonical`]) do NOT filter on this —
+    /// an eviction must drain every key for a canonical, overlay-scoped
+    /// keys included.
+    #[must_use]
+    pub(crate) fn is_legacy(&self) -> bool {
+        self.parse_env_hash == LEGACY_PARSE_ENV_HASH && self.parser_version == LEGACY_PARSER_VERSION
+    }
 }
 
 /// Parser version for legacy-shape inserts. Bumps invalidate every
@@ -612,7 +641,15 @@ impl FileArtifactStore {
         result
     }
 
-    /// Look up the cached artifact for `canonical_id` without hash check.
+    /// Look up the cached **base** artifact for `canonical_id` without
+    /// hash check.
+    ///
+    /// This is a base canonical-wide scan: it matches `canonical` and
+    /// filters to [`FileArtifactKey::is_legacy`] entries, so a
+    /// session-overlay artifact published under an
+    /// [`FileArtifactKey::overlay_scoped`] key is never surfaced to a
+    /// base reader. A session-view reader that wants its overlay
+    /// artifact uses [`Self::get_overlay_scoped`] (exact key) instead.
     #[must_use]
     pub fn get_any(&self, canonical_id: &str) -> Option<Arc<IndexedReady>> {
         if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
@@ -621,7 +658,7 @@ impl FileArtifactStore {
         let mut result: Option<Arc<IndexedReady>> = None;
         let mut matched_key: Option<FileArtifactKey> = None;
         for entry in self.artifacts.iter() {
-            if entry.key().canonical.as_ref() == canonical_id {
+            if entry.key().canonical.as_ref() == canonical_id && entry.key().is_legacy() {
                 result = Some(Arc::clone(&entry.value().indexed));
                 matched_key = Some(entry.key().clone());
                 break;
@@ -820,13 +857,23 @@ impl FileArtifactStore {
         }
     }
 
-    /// Snapshot every live entry for auditing / diagnostics, in
-    /// `(canonical, indexed)` shape (matches the legacy `FileArtifactStore`
-    /// API).
+    /// Snapshot every live **base** entry in `(canonical, indexed)`
+    /// shape (matches the legacy `FileArtifactStore` API).
+    ///
+    /// This is a base canonical-wide scan: it yields only
+    /// [`FileArtifactKey::is_legacy`] entries. The `(canonical,
+    /// indexed)` shape discards the key, so a consumer cannot tell a
+    /// base artifact from a session-overlay one — filtering to legacy
+    /// keys keeps the consumer (`HostStoreView::build`, which derives
+    /// base `Route` / `ImportRoute` facts from `indexed`) off
+    /// session-specific overlay routes. Diagnostics that need every
+    /// keyed entry use [`Self::snapshot_artifacts`] (which returns the
+    /// full [`FileArtifactKey`]) instead.
     #[must_use]
     pub fn snapshot_all(&self) -> Vec<(Arc<str>, Arc<IndexedReady>)> {
         self.artifacts
             .iter()
+            .filter(|entry| entry.key().is_legacy())
             .map(|entry| {
                 (
                     entry.key().canonical.clone(),
@@ -995,15 +1042,23 @@ impl FileArtifactStore {
         None
     }
 
-    /// Look up the latest `FileArtifacts` payload for `canonical`
-    /// regardless of the other key dimensions.
+    /// Look up the latest **base** `FileArtifacts` payload for
+    /// `canonical`.
+    ///
+    /// This is a base canonical-wide scan: it matches `canonical` and
+    /// filters to [`FileArtifactKey::is_legacy`] entries, so a
+    /// session-overlay artifact published under an
+    /// [`FileArtifactKey::overlay_scoped`] key is never surfaced to a
+    /// base reader (which would otherwise read the overlay's
+    /// session-specific `IndexedReady` import routes). A session-view
+    /// reader uses `OverlaidView::parse_artifacts` (exact key) instead.
     #[must_use]
     pub fn get_artifacts_any(&self, canonical: &str) -> Option<Arc<FileArtifacts>> {
         if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         for entry in self.artifacts.iter() {
-            if entry.key().canonical.as_ref() == canonical {
+            if entry.key().canonical.as_ref() == canonical && entry.key().is_legacy() {
                 let matched_key = entry.key().clone();
                 let value = entry.value().clone();
                 drop(entry);
@@ -1014,33 +1069,48 @@ impl FileArtifactStore {
         None
     }
 
-    /// Return the content hash of the latest cached artifacts entry
-    /// for `canonical`, or `None` if no artifact has been ingested yet.
+    /// Return the content hash of the latest cached **base** artifacts
+    /// entry for `canonical`, or `None` if no base artifact has been
+    /// ingested yet.
     ///
     /// Used by [`crate::session_view::SessionView`] impls to surface
-    /// the content hash that backs the cached parse artifacts. The
+    /// the content hash that backs the cached parse artifacts.
+    ///
+    /// This is a base canonical-wide scan: it filters to
+    /// [`FileArtifactKey::is_legacy`] entries. A session-overlay
+    /// artifact ([`FileArtifactKey::overlay_scoped`]) is never
+    /// surfaced — the `OverlaidView` impls only fall through to this
+    /// method for canonicals their overlay map does NOT cover, so they
+    /// genuinely want the base content hash; an overlay-scoped
+    /// candidate here would be another session's artifact. The
     /// returned hash is the `content_hash` dimension of whichever
-    /// `FileArtifactKey` matches `canonical` — concurrent entries
-    /// under different `parse_env_hash` collapse to the same
-    /// content hash here.
+    /// legacy `FileArtifactKey` matches `canonical`.
     #[must_use]
     pub fn content_hash_for_canonical(&self, canonical: &str) -> Option<Hash16> {
         if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         for entry in self.artifacts.iter() {
-            if entry.key().canonical.as_ref() == canonical {
+            if entry.key().canonical.as_ref() == canonical && entry.key().is_legacy() {
                 return Some(entry.key().content_hash);
             }
         }
         None
     }
 
-    /// Alias of [`Self::get_artifacts_any`] used by
-    /// [`crate::session_view::SessionView`] impls. Exists as a named
-    /// accessor so the session-view read path stays explicit about
-    /// "latest artifact for this canonical" semantics; version-aware
-    /// variants live alongside this helper.
+    /// Alias of [`Self::get_artifacts_any`] — the latest **base**
+    /// `FileArtifacts` for `canonical`. Exists as a named accessor so
+    /// callers stay explicit about "latest base artifact for this
+    /// canonical" semantics; version-aware variants live alongside this
+    /// helper.
+    ///
+    /// Inherits `get_artifacts_any`'s base canonical-wide scan
+    /// semantics — overlay-scoped artifacts are not surfaced. The
+    /// augmentation-stitching consumer
+    /// (`RouteDb::get_or_compute_effective_export_set`) re-fetches an
+    /// augmenter's `.augmentations` through here; the augmenter set it
+    /// iterates was itself built from a base-only scan, so a base
+    /// artifact for that canonical always exists.
     #[must_use]
     pub fn latest_artifacts_for_canonical(&self, canonical: &str) -> Option<Arc<FileArtifacts>> {
         self.get_artifacts_any(canonical)
@@ -1237,9 +1307,20 @@ impl FileArtifactStore {
         // matching `ModuleAugmentationFact` for the queried target.
         // Dedup by canonical so a file with multiple matching facts
         // contributes only once.
+        //
+        // The scan filters to base ([`FileArtifactKey::is_legacy`])
+        // artifacts: the augmentation index is keyed by a base
+        // resolve-domain identity (`project_identity`,
+        // `resolve_env_hash`, `lib_env_hash`) and feeds the base
+        // `EffectiveExportSet`. A session-overlay artifact
+        // ([`FileArtifactKey::overlay_scoped`]) carries session-divergent
+        // augmentations and must not poison that base index.
         let mut matched: Vec<(Arc<str>, Hash16)> = Vec::new();
         let mut seen_canonicals: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
         for artifact_entry in self.artifacts.iter() {
+            if !artifact_entry.key().is_legacy() {
+                continue;
+            }
             let augmenter_canonical = Arc::clone(&artifact_entry.key().canonical);
             let artifacts: &FileArtifacts = artifact_entry.value();
             for fact in artifacts.augmentations.iter() {
@@ -1303,6 +1384,13 @@ impl FileArtifactStore {
     ) where
         R: Fn(&str, &str) -> Option<Arc<str>>,
     {
+        // The augmentation index is a base resolve-domain structure
+        // (see `ensure_augmentation_index_populated`). A session-overlay
+        // artifact ([`FileArtifactKey::overlay_scoped`]) must not refresh
+        // it — its augmentations are session-divergent.
+        if !new_artifact_key.is_legacy() {
+            return;
+        }
         if new_artifacts.augmentations.is_empty() {
             return;
         }
@@ -1332,11 +1420,16 @@ impl FileArtifactStore {
                 continue;
             }
 
-            // Rebuild the set with the new artifact folded in.
+            // Rebuild the set with the new artifact folded in. Same
+            // base-only filter as `ensure_augmentation_index_populated`'s
+            // cold scan — overlay-scoped artifacts never contribute.
             let mut matched: Vec<(Arc<str>, Hash16)> = Vec::new();
             let mut seen_canonicals: rustc_hash::FxHashSet<Arc<str>> =
                 rustc_hash::FxHashSet::default();
             for artifact_entry in self.artifacts.iter() {
+                if !artifact_entry.key().is_legacy() {
+                    continue;
+                }
                 let augmenter_canon = Arc::clone(&artifact_entry.key().canonical);
                 let artifacts: &FileArtifacts = artifact_entry.value();
                 for fact in artifacts.augmentations.iter() {
