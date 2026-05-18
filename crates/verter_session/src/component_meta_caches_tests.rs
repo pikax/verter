@@ -369,3 +369,210 @@ defineProps<{ x: Lib }>()
         "evict_canonical must not increase live cache count"
     );
 }
+
+// ===========================================================================
+// Retention-ledger identity-scoped removal
+// ===========================================================================
+//
+// `unregister_post_publish` is the removal-side counterpart of
+// `register_post_publish`. In the documented `remove_if` → cleanup race
+// a fresh winner can republish the same key before the cleanup of the
+// OLD entry runs. The reverse-index removal is `Arc::ptr_eq`-guarded so
+// it cannot steal the fresh winner's registration; the retention-ledger
+// removal must be guarded symmetrically — by the OLD entry's unique
+// admission sequence number — or it drops EVERY ledger record for the
+// key, including the fresh winner's. The fresh entry then escapes the
+// `GlobalRetentionBudget` count and repeated races grow the cache past
+// `MAX_ENTRIES`.
+//
+// Both tests below admit two distinct entries under ONE key (an old
+// entry, then a fresh winner that republished the same key), run the
+// OLD entry's `unregister_post_publish`, and assert the fresh winner's
+// ledger record SURVIVES — `retention_tracked_len()` is exactly the
+// count `GlobalRetentionBudget::record_admission` compares against
+// `MAX_ENTRIES`, so a surviving record is a counted record.
+//
+// DISCRIMINATION: against a key-only `forget(key)` the OLD entry's
+// cleanup drops both ledger records, so `retention_tracked_len()` reads
+// 0 and the assertion FAILS. With the identity-scoped `forget_seq`
+// removal only the OLD entry's record is dropped, so it reads 1 and the
+// assertion PASSES.
+
+/// `MaterializeStructureDb::unregister_post_publish` removes ONLY the
+/// old entry's retention-ledger record — a fresh winner that
+/// republished the same key keeps its admission counted.
+#[test]
+fn materialize_structure_unregister_preserves_fresh_admission() {
+    use crate::component_meta_caches::{MaterializeStructureDb, MaterializeStructureEntry};
+    use crate::component_meta_materialize::{
+        MaterializationScope, MaterializeOutcome, MaterializeStructureCacheKey,
+    };
+    use crate::fact_signature_helpers::ReadSetSignature;
+    use crate::semantic_query::{DepVersion, ProjectionMode, SemanticNodeId};
+
+    // One shared content-free cache key — both the old entry and the
+    // fresh winner key here.
+    let key = MaterializeStructureCacheKey {
+        scope_canonical_id: Arc::from("/owner.ts"),
+        base: SemanticNodeId(0),
+        scope_axis: MaterializationScope::TopLevel,
+        mode: ProjectionMode::Shallow,
+    };
+
+    // A legacy rail naming one canonical, so `register_post_publish`
+    // populates the reverse index. Each entry gets a DISTINCT `Arc`
+    // (distinct content version) so the reverse-index `Arc::ptr_eq`
+    // guard correctly tells the two apart.
+    let make_entry = |canonical: &str, version: u8| {
+        let legacy: crate::semantic_query::DepSignature = Arc::from(
+            vec![(
+                Arc::<str>::from(canonical),
+                DepVersion::WholeHash([version; 16]),
+            )]
+            .into_boxed_slice(),
+        );
+        MaterializeStructureEntry {
+            outcome: MaterializeOutcome::Miss(SemanticNodeId(0)),
+            read_set_signature: ReadSetSignature::new(
+                crate::fact_signature_helpers::empty_fact_signature(),
+                legacy,
+            ),
+            self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
+            admission_seq: crate::bounded_query_retention::next_retention_seq(),
+        }
+    };
+
+    let db = MaterializeStructureDb::new();
+
+    // Old entry — publish + register under the shared key.
+    let old_entry = Arc::new(make_entry("/dep-a.ts", 1));
+    db.entries().insert(key.clone(), Arc::clone(&old_entry));
+    db.register_post_publish(
+        key.clone(),
+        &old_entry.read_set_signature,
+        old_entry.admission_seq,
+    );
+    assert_eq!(
+        db.retention_tracked_len(),
+        1,
+        "old entry's admission must be in the retention ledger",
+    );
+
+    // Fresh winner republishes the SAME key in the race window —
+    // overwrites the entries slot and records its own admission.
+    let fresh_entry = Arc::new(make_entry("/dep-b.ts", 2));
+    db.entries().insert(key.clone(), Arc::clone(&fresh_entry));
+    db.register_post_publish(
+        key.clone(),
+        &fresh_entry.read_set_signature,
+        fresh_entry.admission_seq,
+    );
+    assert_eq!(
+        db.retention_tracked_len(),
+        2,
+        "both the old and the fresh admission are now in the ledger",
+    );
+    assert_ne!(
+        old_entry.admission_seq, fresh_entry.admission_seq,
+        "the two admissions must carry distinct identities",
+    );
+
+    // The OLD entry's cleanup runs (the documented `remove_if` →
+    // cleanup race). It must drop ONLY the old entry's ledger record.
+    db.unregister_post_publish(&key, &old_entry.read_set_signature, old_entry.admission_seq);
+
+    assert_eq!(
+        db.retention_tracked_len(),
+        1,
+        "UNDERCOUNT BUG: unregister_post_publish of the OLD entry must \
+         leave the fresh winner's admission in the retention ledger — a \
+         key-only `forget` drops every record for the key, so the fresh \
+         entry escapes the GlobalRetentionBudget count and repeated \
+         races grow the cache past MAX_ENTRIES",
+    );
+}
+
+/// `RefCycleResultDb::unregister_post_publish` removes ONLY the old
+/// entry's retention-ledger record — a fresh winner that republished
+/// the same key keeps its admission counted.
+#[test]
+fn ref_cycle_unregister_preserves_fresh_admission() {
+    use crate::component_meta_caches::{RefCycleEntry, RefCycleResultDb};
+    use crate::fact_signature_helpers::ReadSetSignature;
+    use crate::semantic_query::{DeclIdentity, DepVersion, HashValue};
+
+    // One shared content-free cache key — both the old entry and the
+    // fresh winner key here.
+    let key = DeclIdentity {
+        canonical_id: Arc::from("/owner.ts"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("RootHelper"),
+    };
+
+    let make_entry = |canonical: &str, version: u8| {
+        let legacy: crate::semantic_query::DepSignature = Arc::from(
+            vec![(
+                Arc::<str>::from(canonical),
+                DepVersion::WholeHash([version; 16]),
+            )]
+            .into_boxed_slice(),
+        );
+        RefCycleEntry {
+            result: false,
+            read_set_signature: ReadSetSignature::new(
+                crate::fact_signature_helpers::empty_fact_signature(),
+                legacy,
+            ),
+            self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
+            admission_seq: crate::bounded_query_retention::next_retention_seq(),
+        }
+    };
+
+    let db = RefCycleResultDb::new();
+
+    // Old entry — publish + register under the shared key.
+    let old_entry = Arc::new(make_entry("/dep-a.ts", 1));
+    db.entries().insert(key.clone(), Arc::clone(&old_entry));
+    db.register_post_publish(
+        key.clone(),
+        &old_entry.read_set_signature,
+        old_entry.admission_seq,
+    );
+    assert_eq!(
+        db.retention_tracked_len(),
+        1,
+        "old entry's admission must be in the retention ledger",
+    );
+
+    // Fresh winner republishes the SAME key in the race window.
+    let fresh_entry = Arc::new(make_entry("/dep-b.ts", 2));
+    db.entries().insert(key.clone(), Arc::clone(&fresh_entry));
+    db.register_post_publish(
+        key.clone(),
+        &fresh_entry.read_set_signature,
+        fresh_entry.admission_seq,
+    );
+    assert_eq!(
+        db.retention_tracked_len(),
+        2,
+        "both the old and the fresh admission are now in the ledger",
+    );
+    assert_ne!(
+        old_entry.admission_seq, fresh_entry.admission_seq,
+        "the two admissions must carry distinct identities",
+    );
+
+    // The OLD entry's cleanup runs. It must drop ONLY the old entry's
+    // ledger record.
+    db.unregister_post_publish(&key, &old_entry.read_set_signature, old_entry.admission_seq);
+
+    assert_eq!(
+        db.retention_tracked_len(),
+        1,
+        "UNDERCOUNT BUG: unregister_post_publish of the OLD entry must \
+         leave the fresh winner's admission in the retention ledger — a \
+         key-only `forget` drops every record for the key, so the fresh \
+         entry escapes the GlobalRetentionBudget count and repeated \
+         races grow the cache past MAX_ENTRIES",
+    );
+}

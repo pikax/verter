@@ -5231,6 +5231,7 @@ fn materialize_structure_db_planted_untracked_self_root_rejects_warm_entry() {
         outcome: MaterializeOutcome::Value(base),
         read_set_signature: crate::fact_signature_helpers::ReadSetSignature::facts_only(facts),
         self_root_canonicals: planted_self_root_canonicals(scope),
+        admission_seq: crate::bounded_query_retention::next_retention_seq(),
     });
     db.entries().insert(key.clone(), planted);
 
@@ -5639,6 +5640,7 @@ fn ref_cycle_db_untracked_self_root_rejects_warm_entry() {
         result: true,
         read_set_signature: crate::fact_signature_helpers::ReadSetSignature::facts_only(facts),
         self_root_canonicals: planted_self_root_canonicals(root),
+        admission_seq: crate::bounded_query_retention::next_retention_seq(),
     });
     db.entries().insert(id.clone(), planted);
 

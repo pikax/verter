@@ -496,6 +496,7 @@ fn finish_materialize_admission(
                     facts, legacy,
                 ),
                 self_root_canonicals,
+                admission_seq: crate::bounded_query_retention::next_retention_seq(),
             })
         }
         None => {
@@ -1349,13 +1350,21 @@ pub(crate) fn materialize_component_meta_structure(
         move |removed_key: &MaterializeStructureCacheKey,
               removed_entry: &Arc<MaterializeStructureEntry>| {
             db_for_removal.decrement_live_counter();
-            db_for_removal.unregister_post_publish(removed_key, &removed_entry.read_set_signature);
+            db_for_removal.unregister_post_publish(
+                removed_key,
+                &removed_entry.read_set_signature,
+                removed_entry.admission_seq,
+            );
         },
         // post_publish — register reverse-index AFTER
         // entries.insert AND AFTER successful revalidation.
         move |entry_arc: &Arc<MaterializeStructureEntry>, k: &MaterializeStructureCacheKey| {
             db.bump_live_counter();
-            db.register_post_publish(key_for_register.clone(), &entry_arc.read_set_signature);
+            db.register_post_publish(
+                key_for_register.clone(),
+                &entry_arc.read_set_signature,
+                entry_arc.admission_seq,
+            );
             let _ = k; // unused — key_for_register is the same key
         },
     );
@@ -2586,6 +2595,7 @@ export type C<T> = A<T>
             // store view's real hash rejects via
             // `validate_dep_signature`).
             self_root_canonicals: StdArc::from(Vec::<StdArc<str>>::new()),
+            admission_seq: crate::bounded_query_retention::next_retention_seq(),
         });
         let db = host.project_type_store().materialize_structure_db();
         db.entries().insert(key.clone(), stale_entry);
@@ -2930,6 +2940,7 @@ export type C<T> = A<T>
             // (a whole-hash for `/nonexistent.ts`, a canonical the
             // host's `FileArtifactStore` does not track).
             self_root_canonicals: std::sync::Arc::from(Vec::<std::sync::Arc<str>>::new()),
+            admission_seq: crate::bounded_query_retention::next_retention_seq(),
         });
         let db = host.project_type_store().ref_cycle_db();
         db.entries().insert(id.clone(), stale_entry);

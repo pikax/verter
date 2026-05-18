@@ -2006,6 +2006,16 @@ pub struct MaterializeStructureEntry {
     /// reuse). An untracked or hash-mismatched self-root rejects the
     /// entry.
     pub self_root_canonicals: Arc<[Arc<str>]>,
+    /// Retention-ledger admission identity — the unique sequence number
+    /// this entry is recorded under in the `GlobalRetentionBudget`
+    /// ledger. Allocated once at entry construction; `register_post_publish`
+    /// records the entry under it, and every removal path forgets exactly
+    /// this ledger record via `forget_seq`. Scoping the ledger removal to
+    /// this seq (rather than the cache key) means a concurrently-admitted
+    /// fresh entry that republished the same key keeps its own ledger
+    /// record — symmetric with the `Arc::ptr_eq` guard on the
+    /// reverse-index removal.
+    pub admission_seq: u64,
 }
 
 /// Final-result cache for the structural
@@ -2089,6 +2099,15 @@ impl MaterializeStructureDb {
         self.retention_budget.cap()
     }
 
+    /// Test-only — number of admission records currently in the
+    /// retention ledger. The budget evicts the oldest once this exceeds
+    /// [`Self::MAX_ENTRIES`], so it is the count that bounds the cache.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn retention_tracked_len(&self) -> usize {
+        self.retention_budget.tracked_len()
+    }
+
     /// Read-only test accessor for the shared
     /// live_counter. Used by `materialize_publish_after_invalidation_*`
     /// tests to verify that revalidation failures do NOT increment the
@@ -2137,8 +2156,10 @@ impl MaterializeStructureDb {
                     .remove_if(key, |_, e| Arc::ptr_eq(e, &entry_arc));
                 if removed.is_some() {
                     self.live_counter.fetch_sub(1, Ordering::Relaxed);
-                    // Stale entry reaped — drop its retention ledger record.
-                    self.retention_budget.forget(key);
+                    // Stale entry reaped — drop exactly its ledger
+                    // record (`forget_seq`), leaving a fresh
+                    // re-admission of the same key counted.
+                    self.retention_budget.forget_seq(entry_arc.admission_seq);
                 }
                 return None;
             }
@@ -2182,10 +2203,13 @@ impl MaterializeStructureDb {
             let removed = self.entries.remove_if(key, move |_, entry_arc| {
                 Arc::ptr_eq(&entry_arc.read_set_signature.legacy, &registered)
             });
-            if removed.is_some() {
+            if let Some((_, removed_entry)) = removed {
                 self.live_counter.fetch_sub(1, Ordering::Relaxed);
-                // Entry gone — drop its retention-budget ledger record.
-                self.retention_budget.forget(key);
+                // Entry gone — drop exactly its ledger record
+                // (`forget_seq`), leaving a fresh re-admission of the
+                // same key counted.
+                self.retention_budget
+                    .forget_seq(removed_entry.admission_seq);
                 // Cross-canonical cleanup with ptr_eq — drop the
                 // matching registration in every other canonical's
                 // shard.
@@ -2270,6 +2294,7 @@ impl MaterializeStructureDb {
             outcome: MaterializeOutcome::Miss(SemanticNodeId(0)),
             read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
+            admission_seq: crate::bounded_query_retention::next_retention_seq(),
         });
         self.entries.insert(key, entry);
         self.live_counter.fetch_add(1, Ordering::Relaxed);
@@ -2288,10 +2313,18 @@ impl MaterializeStructureDb {
     /// and FIFO-evicts the oldest entries once the total exceeds
     /// [`Self::MAX_ENTRIES`]. Evicting a still-valid entry only causes
     /// a later recompute; it never produces an incorrect result.
+    ///
+    /// `admission_seq` is the published entry's
+    /// [`MaterializeStructureEntry::admission_seq`] — the ledger records
+    /// this entry under that exact identity, so a later removal path can
+    /// forget precisely this ledger record (`forget_seq`) without
+    /// dropping a concurrently-admitted fresh entry that republished the
+    /// same key.
     pub(crate) fn register_post_publish(
         &self,
         key: MaterializeStructureCacheKey,
         read_set_signature: &crate::fact_signature_helpers::ReadSetSignature,
+        admission_seq: u64,
     ) {
         let timing_on = verter_scheduler::request_context::current_timing_enabled();
         let registered_legacy = Arc::clone(&read_set_signature.legacy);
@@ -2312,10 +2345,10 @@ impl MaterializeStructureDb {
             crate::host_manage::record_family_map_lock_acquisition(lock_wait);
             map.insert(key.clone(), Arc::clone(&registered_legacy));
         }
-        // Global retention budget: record this admission, FIFO-evict the
-        // oldest entries past the total cap.
-        let seq = crate::bounded_query_retention::next_retention_seq();
-        let victims = self.retention_budget.record_admission(seq, key);
+        // Global retention budget: record this admission under the
+        // entry's own seq, FIFO-evict the oldest entries past the total
+        // cap.
+        let victims = self.retention_budget.record_admission(admission_seq, key);
         for victim in victims {
             self.evict_budget_victim(&victim);
         }
@@ -2381,10 +2414,21 @@ impl MaterializeStructureDb {
     /// per-canonical `register_post_publish` insert. `Arc::ptr_eq`
     /// against the entry's `legacy` rail discriminates "our
     /// registration" from a concurrent fresh winner's.
+    ///
+    /// `admission_seq` is the removed entry's
+    /// [`MaterializeStructureEntry::admission_seq`]. The retention-ledger
+    /// removal is scoped to that exact seq via `forget_seq` — a key-only
+    /// `forget` would also drop a concurrently-admitted fresh entry's
+    /// ledger record (a fresh winner can republish the same key in the
+    /// `remove_if` → cleanup window), letting the fresh entry escape the
+    /// budget count and the cache grow past `MAX_ENTRIES`. Identity
+    /// scoping here mirrors the `Arc::ptr_eq` guard on the reverse-index
+    /// removal above.
     pub(crate) fn unregister_post_publish(
         &self,
         key: &MaterializeStructureCacheKey,
         read_set_signature: &crate::fact_signature_helpers::ReadSetSignature,
+        admission_seq: u64,
     ) {
         for canonical in read_set_signature.canonical_ids() {
             if let Some(shard) = self.canonical_to_keys.get(&canonical) {
@@ -2396,9 +2440,10 @@ impl MaterializeStructureDb {
                 }
             }
         }
-        // Keep the retention ledger consistent: the entry is gone, so
-        // the budget must not later return its key for eviction.
-        self.retention_budget.forget(key);
+        // Keep the retention ledger consistent: drop exactly this
+        // entry's ledger record, leaving a fresh re-admission of the
+        // same key intact.
+        self.retention_budget.forget_seq(admission_seq);
     }
 }
 
@@ -2463,6 +2508,16 @@ pub struct RefCycleEntry {
     /// read: the BFS root file plus every visited declaration's file.
     /// An untracked or hash-mismatched self-root rejects the entry.
     pub self_root_canonicals: Arc<[Arc<str>]>,
+    /// Retention-ledger admission identity — the unique sequence number
+    /// this entry is recorded under in the `GlobalRetentionBudget`
+    /// ledger. Allocated once at entry construction; `register_post_publish`
+    /// records the entry under it, and every removal path forgets exactly
+    /// this ledger record via `forget_seq`. Scoping the ledger removal to
+    /// this seq (rather than the cache key) means a concurrently-admitted
+    /// fresh entry that republished the same key keeps its own ledger
+    /// record — symmetric with the `Arc::ptr_eq` guard on the
+    /// reverse-index removal.
+    pub admission_seq: u64,
 }
 
 /// R — host-owned cache for transitive
@@ -2536,6 +2591,15 @@ impl RefCycleResultDb {
         self.retention_budget.cap()
     }
 
+    /// Test-only — number of admission records currently in the
+    /// retention ledger. The budget evicts the oldest once this exceeds
+    /// [`Self::MAX_ENTRIES`], so it is the count that bounds the cache.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn retention_tracked_len(&self) -> usize {
+        self.retention_budget.tracked_len()
+    }
+
     /// Internal — get the entries map. Used by the BFS-cache compute
     /// closure for `cooperative_get_or_insert_with_post_publish`.
     pub(crate) fn entries(&self) -> &DashMap<DeclIdentity, Arc<RefCycleEntry>> {
@@ -2584,10 +2648,17 @@ impl RefCycleResultDb {
     /// and FIFO-evicts the oldest entries once the total exceeds
     /// [`Self::MAX_ENTRIES`]. Evicting a still-valid entry only causes
     /// a later recompute; it never produces an incorrect result.
+    ///
+    /// `admission_seq` is the published entry's
+    /// [`RefCycleEntry::admission_seq`] — the ledger records this entry
+    /// under that exact identity, so a later removal path can forget
+    /// precisely this ledger record (`forget_seq`) without dropping a
+    /// concurrently-admitted fresh entry that republished the same key.
     pub(crate) fn register_post_publish(
         &self,
         key: DeclIdentity,
         read_set_signature: &crate::fact_signature_helpers::ReadSetSignature,
+        admission_seq: u64,
     ) {
         let timing_on = verter_scheduler::request_context::current_timing_enabled();
         let registered_legacy = Arc::clone(&read_set_signature.legacy);
@@ -2608,10 +2679,10 @@ impl RefCycleResultDb {
             crate::host_manage::record_family_map_lock_acquisition(lock_wait);
             map.insert(key.clone(), Arc::clone(&registered_legacy));
         }
-        // Global retention budget: record this admission, FIFO-evict the
-        // oldest entries past the total cap.
-        let seq = crate::bounded_query_retention::next_retention_seq();
-        let victims = self.retention_budget.record_admission(seq, key);
+        // Global retention budget: record this admission under the
+        // entry's own seq, FIFO-evict the oldest entries past the total
+        // cap.
+        let victims = self.retention_budget.record_admission(admission_seq, key);
         for victim in victims {
             self.evict_budget_victim(&victim);
         }
@@ -2648,10 +2719,21 @@ impl RefCycleResultDb {
     /// against the entry's `legacy` rail discriminates "our
     /// registration" from a concurrent fresh winner's so a
     /// re-published entry's registration is not stolen.
+    ///
+    /// `admission_seq` is the removed entry's
+    /// [`RefCycleEntry::admission_seq`]. The retention-ledger removal is
+    /// scoped to that exact seq via `forget_seq` — a key-only `forget`
+    /// would also drop a concurrently-admitted fresh entry's ledger
+    /// record (a fresh winner can republish the same key in the
+    /// `remove_if` → cleanup window), letting the fresh entry escape the
+    /// budget count and the cache grow past `MAX_ENTRIES`. Identity
+    /// scoping here mirrors the `Arc::ptr_eq` guard on the reverse-index
+    /// removal above.
     pub(crate) fn unregister_post_publish(
         &self,
         key: &DeclIdentity,
         read_set_signature: &crate::fact_signature_helpers::ReadSetSignature,
+        admission_seq: u64,
     ) {
         for canonical in read_set_signature.canonical_ids() {
             if let Some(shard) = self.canonical_to_keys.get(&canonical) {
@@ -2663,9 +2745,10 @@ impl RefCycleResultDb {
                 }
             }
         }
-        // Keep the retention ledger consistent: the entry is gone, so
-        // the budget must not later return its key for eviction.
-        self.retention_budget.forget(key);
+        // Keep the retention ledger consistent: drop exactly this
+        // entry's ledger record, leaving a fresh re-admission of the
+        // same key intact.
+        self.retention_budget.forget_seq(admission_seq);
     }
 
     /// Strict-validation peek.
@@ -2700,8 +2783,10 @@ impl RefCycleResultDb {
                     .remove_if(id, |_, e| Arc::ptr_eq(e, &entry_arc));
                 if removed.is_some() {
                     self.live_counter.fetch_sub(1, Ordering::Relaxed);
-                    // Stale entry reaped — drop its retention ledger record.
-                    self.retention_budget.forget(id);
+                    // Stale entry reaped — drop exactly its ledger
+                    // record (`forget_seq`), leaving a fresh
+                    // re-admission of the same key counted.
+                    self.retention_budget.forget_seq(entry_arc.admission_seq);
                 }
                 return None;
             }
@@ -2744,10 +2829,13 @@ impl RefCycleResultDb {
             let removed = self.entries.remove_if(key, move |_, entry_arc| {
                 Arc::ptr_eq(&entry_arc.read_set_signature.legacy, &registered)
             });
-            if removed.is_some() {
+            if let Some((_, removed_entry)) = removed {
                 self.live_counter.fetch_sub(1, Ordering::Relaxed);
-                // Entry gone — drop its retention-budget ledger record.
-                self.retention_budget.forget(key);
+                // Entry gone — drop exactly its ledger record
+                // (`forget_seq`), leaving a fresh re-admission of the
+                // same key counted.
+                self.retention_budget
+                    .forget_seq(removed_entry.admission_seq);
                 // Cross-canonical cleanup with ptr_eq — drop the
                 // matching registration in every other canonical's
                 // shard so subsequent invalidations do not double-free.
@@ -3242,6 +3330,7 @@ where
                                         facts, legacy,
                                     ),
                                 self_root_canonicals,
+                                admission_seq: crate::bounded_query_retention::next_retention_seq(),
                             })
                         }
                         None => {
@@ -3293,12 +3382,20 @@ where
         // symmetric with the `post_publish` bump + register.
         move |removed_key: &DeclIdentity, removed_entry: &Arc<RefCycleEntry>| {
             db_for_removal.decrement_live_counter();
-            db_for_removal.unregister_post_publish(removed_key, &removed_entry.read_set_signature);
+            db_for_removal.unregister_post_publish(
+                removed_key,
+                &removed_entry.read_set_signature,
+                removed_entry.admission_seq,
+            );
         },
         // post_publish(&Arc<Entry>, &K)
         move |entry_arc: &Arc<RefCycleEntry>, _k: &DeclIdentity| {
             db.bump_live_counter();
-            db.register_post_publish(key_for_register.clone(), &entry_arc.read_set_signature);
+            db.register_post_publish(
+                key_for_register.clone(),
+                &entry_arc.read_set_signature,
+                entry_arc.admission_seq,
+            );
         },
     )
 }
