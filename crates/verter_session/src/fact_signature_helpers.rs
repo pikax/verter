@@ -294,11 +294,36 @@ fn zero_hash() -> Hash16 {
 /// hash that was live when the producer observed the file, regardless
 /// of any edit that has landed since.
 ///
+/// ## Two-identity recovery — raw owner vs analysis canonical
+///
+/// `canonical_id` is the **raw** owner the caller observed. Two ids are
+/// in play and they MUST NOT be conflated:
+///
+/// * The **artifact-store lookup** is keyed by
+///   `normalized_analysis_canonical(canonical_id)` — every
+///   `FileArtifactStore` artifact (base via [`ResolverContext::ensure_indexed_ready`],
+///   overlay via the overlay materialiser) is published under the
+///   normalised analysis canonical as `FileArtifactKey::canonical`. A
+///   lookup keyed by the raw owner misses the artifact whenever
+///   `normalize(raw) != raw` (a runtime `.js` with a `.d.ts`
+///   companion) — the recovery would then return `None` even though the
+///   observed parse facts exist.
+/// * The emitted **`ParseFactRef.canonical_id`** stays the RAW owner the
+///   caller passed. The parse-domain validator
+///   ([`crate::resolver_core::StoreView::validates_parse_domain`]) keys
+///   the per-file `FileFacts` snapshot by the canonical the view tracks:
+///   an overlay-bearing canonical is re-rooted in
+///   [`crate::resolver_store::HostStoreView::with_session_overlay`] under
+///   the RAW overlay owner, and the materialize-memo signature builder
+///   (`engine_fact_signature_for_materialize_memo`) requires the parse
+///   fact's id to equal the observation's raw scope id. Normalising the
+///   emitted id would break both.
+///
 /// `None` is returned when no artifact is cached for the
-/// `(canonical_id, observed_content_hash)` identity — the observed
-/// version's parse facts cannot be recovered, so the caller must
-/// refuse shared-cache admission rather than emit a fact rooted on a
-/// guessed hash.
+/// `(analysis_canonical, observed_content_hash)` identity — the observed
+/// version's parse facts cannot be recovered, so the caller must refuse
+/// shared-cache admission rather than emit a fact rooted on a guessed
+/// hash.
 ///
 /// This is the construction primitive for a cache entry whose value
 /// was materialised against a specific observed file version: the
@@ -315,8 +340,8 @@ pub(crate) fn parse_fact_ref_for_observed_current_content(
     key: FactKey,
     lane: FactLane,
 ) -> Option<ParseFactRef> {
-    // Content-addressed by `(canonical, observed_content_hash)` —
-    // explicitly NOT view-dependent. The looked-up `FileFacts`
+    // Content-addressed by `(analysis_canonical, observed_content_hash)`
+    // — explicitly NOT view-dependent. The looked-up `FileFacts`
     // registry is parse-domain and content-derived: a base artifact
     // (legacy key) and a session-overlay artifact (overlay-scoped key)
     // for the SAME content version carry an identical parse-fact
@@ -325,10 +350,18 @@ pub(crate) fn parse_fact_ref_for_observed_current_content(
     // matching the `(canonical, content_hash)` pair regardless of
     // `parse_env_hash`, so a producer recovers the same observed parse
     // fact whether or not it ran under a session view.
+    //
+    // The lookup is keyed by the NORMALISED analysis canonical — the
+    // `FileArtifactKey::canonical` identity every artifact is published
+    // under. Keying by the raw `canonical_id` misses the artifact when
+    // `normalize(raw) != raw` (a `.js` with a `.d.ts` companion); the
+    // emitted `ParseFactRef.canonical_id` below stays the raw owner the
+    // validator expects.
+    let analysis_canonical = ctx.normalized_analysis_canonical(canonical_id);
     let artifacts = ctx
         .project_type_store()
         .indexed()
-        .get_artifacts_for_content(canonical_id, observed_content_hash)?;
+        .get_artifacts_for_content(analysis_canonical.as_ref(), observed_content_hash)?;
     let expected_hash = match artifacts.facts.lookup(&key) {
         Some(fact) => match lane {
             FactLane::Semantic => fact.semantic_hash,

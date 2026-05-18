@@ -620,3 +620,179 @@ fn overlay_artifact_downstream_reachable_for_normalised_js() {
         "the content-pinned read must NOT surface the base `.d.ts` companion",
     );
 }
+
+/// A `SessionResolverContext::observe_materialize_scope` observation
+/// RECOVERS the scope's `SyntacticExportSet` parse fact for an overlay
+/// whose canonical normalises non-identically (a `.js` runtime file
+/// with a `.d.ts` companion).
+///
+/// ## The defect this test pins
+///
+/// `observe_materialize_scope` reads the overlay `IndexedReady` through
+/// [`crate::host_manage::overlay_materialize::OverlayArtifactIdentity`]
+/// (the normalised analysis canonical keys the `FileArtifactStore`
+/// artifact), but the subsequent
+/// [`crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content`]
+/// call recovered the parse facts through a `FileArtifactStore` lookup
+/// keyed by the RAW canonical. The only overlay artifact is keyed by the
+/// NORMALISED canonical (`/pkg/index.d.ts` for `/pkg/index.js`), so the
+/// raw-keyed `get_artifacts_for_content` missed → the helper returned
+/// `None` → `MaterializeScopeObservation::syntactic_export_set` was
+/// `None`. The `MaterializeMemoDb` write-through `?`-returns on a `None`
+/// `syntactic_export_set`, so shared-cache admission was silently
+/// skipped on every such overlay.
+///
+/// ## Fixture
+///
+/// Base workspace carries `/pkg/index.js` AND its `/pkg/index.d.ts`
+/// companion, so `normalized_analysis_canonical("/pkg/index.js")`
+/// rewrites to `/pkg/index.d.ts` (asserted as a fixture invariant). The
+/// `OverlaidView` overlays `/pkg/index.js` with bytes carrying real
+/// exports (`export const runtime`, `export interface OverlayOnly`), so
+/// the overlay artifact's `SyntacticExportSet` parse fact has a non-zero
+/// semantic hash — a value distinguishable from the absent-fact zero
+/// sentinel.
+///
+/// ## Discrimination property
+///
+/// Post-fix `observe_materialize_scope("/pkg/index.js")` carries a
+/// `Some` `syntactic_export_set` whose `expected_hash` is the overlay
+/// artifact's real `SyntacticExportSet` semantic hash (non-zero). The
+/// `ParseFactRef.canonical_id` stays the raw `/pkg/index.js` scope —
+/// `engine_fact_signature_for_materialize_memo` requires it to equal the
+/// observation's `canonical_id`, and `OverlaidView::with_session_overlay`
+/// keys the parse-domain validator (`file_facts`) by the raw overlay
+/// owner. Pre-fix (`f9e6016c4`) the raw-keyed `get_artifacts_for_content`
+/// misses the normalised-keyed publish → `syntactic_export_set` is
+/// `None`. The `is_some()` assertion FAILS against the pre-fix tree and
+/// the non-zero-hash assertion PASSES only post-fix.
+#[test]
+fn observe_materialize_scope_recovers_parse_facts_for_normalised_js_overlay() {
+    use crate::resolver_core::{ResolverContext, SessionResolverContext};
+
+    // Base `.js` runtime stub.
+    const BASE_JS: &str = "export const runtime = 1;\n";
+    // Base `.d.ts` companion — the non-identity normalisation target.
+    const BASE_DTS: &str = "export declare const runtime: number;\n";
+    // Overlaid `/pkg/index.js` body — real exports so the overlay
+    // artifact's `SyntacticExportSet` fact is non-empty (non-zero hash).
+    const OVERLAY_JS: &str =
+        "export const runtime = 42;\nexport interface OverlayOnly { tag: string; }\n";
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    for (path, source) in [("/pkg/index.js", BASE_JS), ("/pkg/index.d.ts", BASE_DTS)] {
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some(path.to_string()),
+                input_id: path.to_string(),
+                source: Arc::from(source),
+                file_kind: crate::FileKind::from_path(path),
+                aliases: Vec::new(),
+            })
+            .expect("base seed upsert succeeds");
+    }
+    let host = Arc::new(host);
+
+    // Fixture invariant: the `.d.ts` companion exists, so the runtime
+    // `.js` canonical normalises to a NON-IDENTITY analysis target.
+    // Without this the bug cannot reproduce (identity normalisation
+    // makes the raw and normalised lookup keys coincide).
+    let normalized = host.normalized_analysis_canonical("/pkg/index.js");
+    assert_eq!(
+        normalized.as_ref(),
+        "/pkg/index.d.ts",
+        "fixture invariant: `/pkg/index.js` with a `.d.ts` companion must \
+         normalise to `/pkg/index.d.ts` — this non-identity rewrite is the \
+         precondition the parse-fact-recovery bug needs",
+    );
+
+    // Overlay `/pkg/index.js`. The overlay map is keyed by the RAW
+    // `.js` canonical.
+    let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+    overlays.insert("/pkg/index.js".to_string(), Arc::from(OVERLAY_JS));
+    let view = OverlaidView::new(Arc::clone(&host), overlays);
+
+    let overlay_hash = view
+        .overlay_content_hash_for("/pkg/index.js")
+        .expect("OverlaidView must report an overlay content hash for the masked `.js`");
+
+    // Materialise + publish the overlay `IndexedReady` candidate under
+    // the NORMALISED `/pkg/index.d.ts` analysis canonical (RAW-derived
+    // overlay hash + discriminator).
+    let materialised = host
+        .materialize_overlay_indexed_ready_with_view("/pkg/index.js", &view)
+        .expect("the overlay materialiser produces an IndexedReady for the overlaid `.js`");
+    assert_eq!(
+        materialised.whole_hash, overlay_hash,
+        "fixture invariant: the overlay artifact is keyed by the overlay content hash",
+    );
+
+    // Recover the overlay artifact's REAL `SyntacticExportSet` fact hash
+    // directly — the value `observe_materialize_scope` must reproduce.
+    // The lookup is keyed by the NORMALISED canonical (the artifact-store
+    // identity) so it reaches the published overlay artifact.
+    let overlay_facts = host
+        .project_type_store()
+        .indexed()
+        .get_artifacts_for_content(normalized.as_ref(), overlay_hash)
+        .expect("the overlay artifact's FileArtifacts are reachable under the normalised key");
+    let expected_export_set_hash = overlay_facts
+        .facts
+        .syntactic_export_set()
+        .expect("the overlay artifact carries a SyntacticExportSet parse fact")
+        .semantic_hash;
+    assert_ne!(
+        expected_export_set_hash, [0u8; 16],
+        "fixture invariant: the overlaid `.js` has real exports, so its \
+         SyntacticExportSet fact has a non-zero semantic hash — a zero hash \
+         would make the recovered-vs-sentinel distinction undetectable",
+    );
+
+    // Drive the materialize-scope observation through the session
+    // context — the codex-named parse-fact-recovery site.
+    let ctx = SessionResolverContext::new(&host, &view);
+    let observation = ctx.observe_materialize_scope("/pkg/index.js").expect(
+        "observe_materialize_scope MUST return an observation for the overlaid `.js` — \
+         the overlay IndexedReady is reachable via OverlayArtifactIdentity",
+    );
+
+    // The discriminating assertion: the observation's
+    // `syntactic_export_set` MUST be `Some`. Pre-fix the parse-fact
+    // recovery keys `get_artifacts_for_content` by the raw `/pkg/index.js`
+    // canonical, misses the `/pkg/index.d.ts`-keyed overlay artifact, and
+    // returns `None` → the memo write-through skips shared-cache
+    // admission on every such overlay.
+    let recovered = observation.syntactic_export_set.as_ref().expect(
+        "observe_materialize_scope MUST RECOVER the scope's SyntacticExportSet \
+         parse fact for a `.js` overlay whose `.d.ts` companion makes \
+         `normalized_analysis_canonical` non-identity — a `None` here means the \
+         parse-fact recovery built its `FileArtifactStore` lookup key under the \
+         raw `.js` id and missed the normalised-keyed overlay artifact, so \
+         MaterializeMemoDb shared-cache admission is silently skipped",
+    );
+    assert_eq!(
+        recovered.expected_hash, expected_export_set_hash,
+        "the recovered parse fact MUST carry the overlay artifact's REAL \
+         SyntacticExportSet semantic hash — a zero sentinel means the recovery \
+         lookup missed the overlay artifact entirely",
+    );
+    // The `ParseFactRef.canonical_id` stays the RAW scope:
+    // `engine_fact_signature_for_materialize_memo` requires it to equal
+    // the observation's `canonical_id`, and `OverlaidView::with_session_overlay`
+    // keys the parse-domain validator (`file_facts`) by the raw overlay
+    // owner — so the emitted fact's id must NOT be normalised.
+    assert_eq!(
+        recovered.canonical_id.as_str(),
+        "/pkg/index.js",
+        "the recovered ParseFactRef MUST stay rooted on the raw overlay scope — \
+         the materialize-memo signature builder requires `ParseFactRef.canonical_id == \
+         observation.canonical_id`, and the OverlaidView parse-domain validator keys \
+         `file_facts` by the raw overlay owner",
+    );
+    assert_eq!(
+        observation.canonical_id.as_ref(),
+        "/pkg/index.js",
+        "the observation's `canonical_id` is the raw overlay scope — the \
+         materialize-memo self-root and the ParseFactRef must agree on it",
+    );
+}

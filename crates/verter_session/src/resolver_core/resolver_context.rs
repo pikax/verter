@@ -516,6 +516,32 @@ pub(crate) trait ResolverContext: sealed::Sealed {
         None
     }
 
+    /// Rewrite a raw canonical to its analysis canonical — the identity
+    /// every `FileArtifactStore` artifact (base and overlay) is keyed by.
+    ///
+    /// A raw canonical has two forms: the form the session edited /
+    /// requested, and the `normalized_analysis_canonical` rewrite (a
+    /// runtime `.js` whose `.d.ts` companion is the analysis target). The
+    /// two coincide for an ordinary `.ts` / `.tsx` / `.d.ts` file. The
+    /// overlay materialiser publishes under the normalised id, and the
+    /// base [`Self::ensure_indexed_ready`] normalises before publishing,
+    /// so `FileArtifactKey::canonical` is always the normalised id.
+    ///
+    /// Content-addressed `FileArtifactStore` lookups (parse-fact
+    /// recovery in particular) MUST normalise the canonical before
+    /// keying the store — a raw-keyed lookup misses the artifact
+    /// whenever `normalize(raw) != raw`. The default impl delegates to
+    /// [`crate::VerterHost::normalized_analysis_canonical`]; both
+    /// implementers ([`crate::VerterHost`] and the overlay-aware
+    /// `SessionResolverContext`) resolve through the same host method.
+    fn normalized_analysis_canonical<'a>(
+        &self,
+        raw_canonical: &'a str,
+    ) -> std::borrow::Cow<'a, str> {
+        self.host_for_fact_tracer_install()
+            .normalized_analysis_canonical(raw_canonical)
+    }
+
     /// Reach the concrete `VerterHost` underneath this context.
     ///
     /// Used by Block 1.H Family B/C/D producers
