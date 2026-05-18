@@ -124,13 +124,43 @@ impl VerterHost {
     /// covers. Returns `None` when the view carries no source for the
     /// canonical or no current content hash for it (unloaded / evicted
     /// / deleted).
+    ///
+    /// The `SessionView` overlay maps are keyed by the RAW canonical
+    /// the caller requested, so every `view.*` lookup uses that raw id.
+    /// The artifact-store key and the build / parse / resolve target
+    /// use the `normalized_analysis_canonical` rewrite instead (e.g. a
+    /// runtime `.js` whose `.d.ts` companion is the analysis target) —
+    /// see the in-body comment for the split.
     pub(crate) fn materialize_overlay_indexed_ready_with_view(
         &self,
         canonical_id: &str,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
+        // Two canonical ids are in play and MUST NOT be conflated:
+        //
+        // * `canonical_id` — the RAW, un-normalised canonical the
+        //   caller requested. The `SessionView` overlay maps
+        //   (`source` / `content_hash_for` /
+        //   `overlay_artifact_discriminator`) are keyed by exactly this
+        //   string, so every `view.*` lookup below uses it. The
+        //   overlay-priority callers gate on
+        //   `view.overlay_content_hash_for(canonical)` under the same
+        //   raw id, so the overlay content lives under the raw id and
+        //   nowhere else.
+        // * `analysis_canonical_id` — the
+        //   `normalized_analysis_canonical` rewrite (e.g. a runtime
+        //   `.js` whose `.d.ts` companion is the analysis target). It
+        //   is the artifact-store key identity and the build / parse /
+        //   resolve target, so it is what `FileArtifactStore` lookups,
+        //   `build_snapshot_from_source_state`, workspace import
+        //   resolution and the publish key use.
+        //
+        // Normalising before the view lookups (the prior shape) read
+        // the BASE companion source — or `None` — for any canonical
+        // whose normalisation is non-identity, silently dropping the
+        // overlay. The split keeps view reads on the raw id.
         let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
-        let canonical_id = normalized_canonical_id.as_ref();
+        let analysis_canonical_id = normalized_canonical_id.as_ref();
 
         // Derive the overlay source + its content hash from the view —
         // ONE authority. `content_hash_for` is the view-authoritative
@@ -139,15 +169,12 @@ impl VerterHost {
         // covers. Resolving both here removes the caller-supplied-hash
         // failure mode entirely.
         //
-        // Both the view source/hash lookups and the artifact-store
-        // fast-path key below are keyed by the NORMALISED canonical.
-        // For `.ts`/`.tsx`/`.vue` ids `normalized_analysis_canonical`
-        // is identity, so today this matches what the scheduler keyed
-        // the source under. A future virtual / synthetic overlay ID
-        // whose normalisation is non-identity must ensure the view is
-        // populated under the normalised id (or the source/hash must
-        // be looked up under the raw id), or the fast-path key and the
-        // view lookup would diverge silently.
+        // The view source/hash/discriminator lookups are keyed by the
+        // RAW `canonical_id` — the `SessionView` overlay maps are keyed
+        // by the requested canonical, so a normalised id would miss the
+        // overlay. The artifact-store fast-path key below uses the
+        // NORMALISED `analysis_canonical_id` instead (the artifact
+        // identity / analysis target).
         let overlay_source = view.source(canonical_id)?;
         let overlay_whole_hash = view.content_hash_for(canonical_id)?;
 
@@ -161,7 +188,8 @@ impl VerterHost {
         // (no overlay for the canonical) yields `None` → the legacy
         // key, which is correct: without an overlay the materialiser
         // has no overlay-only route discovery, so its artifact is
-        // base-equivalent.
+        // base-equivalent. Keyed by the RAW `canonical_id` to match the
+        // overlay map.
         let overlay_discriminator = view.overlay_artifact_discriminator(canonical_id);
 
         // Fast path: an overlay materialisation for the same content
@@ -169,23 +197,24 @@ impl VerterHost {
         // overlay-scoped key (or the legacy key when the bound view
         // carries no overlay for this canonical). Multi-candidate
         // storage keeps base and overlay candidates separate, so this
-        // lookup serves only the overlay.
+        // lookup serves only the overlay. Keyed by the NORMALISED
+        // `analysis_canonical_id` — the artifact-store identity.
         let fast_hit = match overlay_discriminator {
             Some(discriminator) => self.project_type_store.indexed().get_overlay_scoped(
-                canonical_id,
+                analysis_canonical_id,
                 overlay_whole_hash,
                 discriminator,
             ),
             None => self
                 .project_type_store
                 .indexed()
-                .get(canonical_id, overlay_whole_hash),
+                .get(analysis_canonical_id, overlay_whole_hash),
         };
         if let Some(indexed) = fast_hit {
             return Some(indexed);
         }
 
-        if canonical_id.is_empty() || is_raw_import_specifier_id(canonical_id) {
+        if analysis_canonical_id.is_empty() || is_raw_import_specifier_id(analysis_canonical_id) {
             return None;
         }
 
@@ -199,7 +228,7 @@ impl VerterHost {
         let cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>> = None;
         let whole_hash = overlay_whole_hash;
         let snapshot = Arc::new(self.build_snapshot_from_source_state(
-            canonical_id,
+            analysis_canonical_id,
             &raw_source,
             cached_parse.as_deref(),
         ));
@@ -208,9 +237,9 @@ impl VerterHost {
             raw_source.as_ref(),
             cached_parse.as_deref(),
         ));
-        let declaration_file = canonical_id.ends_with(".d.ts")
-            || canonical_id.ends_with(".d.mts")
-            || canonical_id.ends_with(".d.cts");
+        let declaration_file = analysis_canonical_id.ends_with(".d.ts")
+            || analysis_canonical_id.ends_with(".d.mts")
+            || analysis_canonical_id.ends_with(".d.cts");
 
         // Seed import routes from the host's DerivedRawState if the
         // session-side caller pre-populated them. Overlays use the
@@ -218,7 +247,7 @@ impl VerterHost {
         // overlay-specific deps land here when explicitly set.
         let mut import_routes: rustc_hash::FxHashMap<String, DependencyResolution> =
             rustc_hash::FxHashMap::default();
-        if let Some(cc) = self.derived_raw_cache().get(canonical_id) {
+        if let Some(cc) = self.derived_raw_cache().get(analysis_canonical_id) {
             for (specifier, resolution) in cc.import_routes.iter() {
                 import_routes.insert(specifier.clone(), resolution.clone());
             }
@@ -275,7 +304,7 @@ impl VerterHost {
                 .or_insert_with(|| {
                     self.ws()
                         .resolve_import(
-                            canonical_id,
+                            analysis_canonical_id,
                             specifier,
                             verter_workspace::ResolutionContext {
                                 phase: verter_workspace::ResolvePhase::CodegenBlocker,
@@ -285,7 +314,7 @@ impl VerterHost {
                         .map(|resolution| {
                             if kind == verter_workspace::ResolveRequestKind::TypeImport {
                                 self.normalize_live_type_dependency_target(
-                                    canonical_id,
+                                    analysis_canonical_id,
                                     specifier,
                                     resolution.source_id.as_str(),
                                 )
@@ -295,15 +324,24 @@ impl VerterHost {
                         })
                 })
                 .clone();
+            // `resolve_relative_overlay_candidate` probes the view's
+            // overlay maps (`view.source` / `view.content_hash_for`)
+            // for an overlay-only relative helper, so it takes the RAW
+            // `canonical_id` — the owner the overlay is keyed under.
+            // Workspace resolution above uses the normalised
+            // `analysis_canonical_id` (directory-equivalent for the
+            // `.js`→`.d.ts` rewrite, and the base path's identity).
             let resolved: Option<String> = if kind
                 == verter_workspace::ResolveRequestKind::TypeImport
             {
                 primary
-                    .or_else(|| self.fallback_relative_type_companion(canonical_id, specifier))
+                    .or_else(|| {
+                        self.fallback_relative_type_companion(analysis_canonical_id, specifier)
+                    })
                     .or_else(|| {
                         self.ws()
                             .resolve_import(
-                                canonical_id,
+                                analysis_canonical_id,
                                 specifier,
                                 verter_workspace::ResolutionContext {
                                     phase: verter_workspace::ResolvePhase::CodegenBlocker,
@@ -330,7 +368,7 @@ impl VerterHost {
         }
 
         let external_type_analysis = self.build_external_type_analysis(
-            canonical_id,
+            analysis_canonical_id,
             whole_hash,
             raw_source.as_ref(),
             cached_parse.as_deref(),
@@ -352,7 +390,7 @@ impl VerterHost {
                 &resolver,
             );
         crate::resolver_core::vue_default_synth::inject_vue_default_into_shallow_state(
-            canonical_id,
+            analysis_canonical_id,
             &mut shallow_state_inner,
             &snapshot.macros,
         );
@@ -425,14 +463,18 @@ impl VerterHost {
         // `view.project_identity()`) is not threaded into this call;
         // lift the env hashes into the materialiser's signature when
         // the broader env-hash-migration block lands.
+        // The publish key uses the NORMALISED `analysis_canonical_id` —
+        // the artifact-store identity — so it matches the fast-path
+        // lookup above; a later call short-circuits on the cached
+        // candidate.
         let key = match overlay_discriminator {
             Some(discriminator) => crate::file_artifact_store::FileArtifactKey::overlay_scoped(
-                Arc::from(canonical_id),
+                Arc::from(analysis_canonical_id),
                 overlay_whole_hash,
                 discriminator,
             ),
             None => crate::file_artifact_store::FileArtifactKey::legacy(
-                Arc::from(canonical_id),
+                Arc::from(analysis_canonical_id),
                 overlay_whole_hash,
             ),
         };

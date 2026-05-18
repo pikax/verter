@@ -342,3 +342,131 @@ fn overlay_materialiser_returns_none_when_view_has_no_source() {
          source is a refusal, not a fabricated empty artifact",
     );
 }
+
+// ──────────────────────────────────────────────────────────────────
+// Overlay materialiser — view lookups use the RAW canonical, not the
+// `normalized_analysis_canonical` rewrite.
+// ──────────────────────────────────────────────────────────────────
+
+/// The overlay materialiser reads `view.source` / `view.content_hash_for`
+/// under the RAW requested canonical, even when
+/// `normalized_analysis_canonical` rewrites that canonical to a
+/// companion (a runtime `.js` whose `.d.ts` companion is the analysis
+/// target).
+///
+/// ## The defect this test pins
+///
+/// `materialize_overlay_indexed_ready_with_view` normalises
+/// `canonical_id` for its artifact-store key and build target. A prior
+/// shape normalised FIRST, then called every `view.*` lookup on the
+/// normalised id. The `SessionView` overlay maps are keyed by the RAW
+/// requested canonical, so for a `.js` runtime file with a `.d.ts`
+/// companion the materialiser read `view.source("/pkg/index.d.ts")` —
+/// the BASE `.d.ts` source — instead of the overlaid `/pkg/index.js`
+/// bytes. The session's overlay was silently dropped.
+///
+/// ## Fixture
+///
+/// Base workspace carries `/pkg/index.js` (a runtime stub) AND its
+/// `/pkg/index.d.ts` companion, so `normalized_analysis_canonical`
+/// rewrites `/pkg/index.js` → `/pkg/index.d.ts` (asserted as a fixture
+/// invariant). The base `.d.ts` declares NOTHING relative; the base
+/// `.js` imports nothing. The `OverlaidView` overlays `/pkg/index.js`
+/// with a body that imports `./helper`, and overlays the overlay-only
+/// `/pkg/helper.ts` (no disk / base presence).
+///
+/// ## Discrimination property
+///
+/// Post-fix the materialiser builds from the OVERLAID `.js` bytes:
+/// `IndexedReady.raw_source` is the overlay source and the `./helper`
+/// route resolves to the overlay-only `/pkg/helper.ts`. Pre-fix it
+/// builds from the base `.d.ts` companion: `raw_source` is the `.d.ts`
+/// text and there is NO `./helper` route. Both assertions FAIL against
+/// the pre-fix tree and PASS post-fix.
+#[test]
+fn overlay_materialiser_view_lookups_use_raw_canonical_for_normalised_js() {
+    // Base `.js` runtime stub — imports nothing relative.
+    const BASE_JS: &str = "export const runtime = 1;\n";
+    // Base `.d.ts` companion — declares nothing relative. This is what
+    // `normalized_analysis_canonical` rewrites `/pkg/index.js` to, and
+    // what a pre-fix materialiser would wrongly read through the view.
+    const BASE_DTS: &str = "export declare const runtime: number;\n";
+    // Overlaid `/pkg/index.js` body — imports the overlay-only
+    // `./helper`. This is the content the materialiser MUST build from.
+    const OVERLAY_JS: &str = "import { helper } from './helper';\nexport const runtime = helper;\n";
+    // Overlay-only relative helper — no base / disk presence.
+    const OVERLAY_HELPER: &str = "export const helper = 1;\n";
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    for (path, source) in [("/pkg/index.js", BASE_JS), ("/pkg/index.d.ts", BASE_DTS)] {
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some(path.to_string()),
+                input_id: path.to_string(),
+                source: Arc::from(source),
+                file_kind: crate::FileKind::from_path(path),
+                aliases: Vec::new(),
+            })
+            .expect("base seed upsert succeeds");
+    }
+    let host = Arc::new(host);
+
+    // Fixture invariant: the `.d.ts` companion exists, so the runtime
+    // `.js` canonical normalises to a NON-IDENTITY analysis target.
+    // Without this the bug cannot reproduce (identity normalisation
+    // makes the raw and normalised lookups coincide).
+    let normalized = host.normalized_analysis_canonical("/pkg/index.js");
+    assert_eq!(
+        normalized.as_ref(),
+        "/pkg/index.d.ts",
+        "fixture invariant: `/pkg/index.js` with a `.d.ts` companion must \
+         normalise to `/pkg/index.d.ts` — this non-identity rewrite is the \
+         precondition the bug needs",
+    );
+
+    // Overlay `/pkg/index.js` with the `./helper`-importing body, and
+    // overlay the overlay-only `/pkg/helper.ts`. The overlay map is
+    // keyed by the RAW `.js` canonical.
+    let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+    overlays.insert("/pkg/index.js".to_string(), Arc::from(OVERLAY_JS));
+    overlays.insert("/pkg/helper.ts".to_string(), Arc::from(OVERLAY_HELPER));
+    let view = OverlaidView::new(Arc::clone(&host), overlays);
+
+    let indexed = host
+        .materialize_overlay_indexed_ready_with_view("/pkg/index.js", &view)
+        .expect("the overlay materialiser produces an IndexedReady for the overlaid .js");
+
+    // Discriminator 1 — the materialised artifact's source is the
+    // OVERLAID `.js` bytes, not the base `.d.ts` companion the
+    // normalised id would have selected.
+    assert_eq!(
+        indexed.raw_source.as_ref(),
+        OVERLAY_JS,
+        "the materialiser MUST build from the overlaid `/pkg/index.js` source — \
+         a `raw_source` equal to the base `.d.ts` companion means the view \
+         lookup ran on the NORMALISED id (`/pkg/index.d.ts`) and dropped the \
+         session overlay",
+    );
+    assert_ne!(
+        indexed.raw_source.as_ref(),
+        BASE_DTS,
+        "the materialised `raw_source` must NOT be the base `.d.ts` companion text",
+    );
+
+    // Discriminator 2 — the overlay-only `./helper` import resolved to
+    // the overlay-only `/pkg/helper.ts`. The base `.d.ts` companion has
+    // no `./helper` import at all, so a pre-fix build from it carries
+    // no such route.
+    let helper_route = indexed
+        .import_routes
+        .get("./helper")
+        .and_then(|resolution| resolution.resolved_canonical_id.clone());
+    assert_eq!(
+        helper_route.as_deref(),
+        Some("/pkg/helper.ts"),
+        "the overlaid `.js` imports `./helper`; the materialiser MUST resolve it \
+         to the overlay-only `/pkg/helper.ts`. A missing route means the \
+         materialiser parsed the base `.d.ts` companion (which has no `./helper` \
+         import) instead of the overlaid `.js`",
+    );
+}
