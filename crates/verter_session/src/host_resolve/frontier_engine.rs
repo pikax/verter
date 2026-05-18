@@ -656,12 +656,25 @@ impl VerterHost {
         // Authoritative `IndexedReady` fast path — preserved from the
         // pre-migration body so scheduler-materialised entries take
         // precedence over route-only shadow entries.
-        if let Some(facts) = self
-            .project_type_store
-            .indexed()
-            .get_any(normalized_canonical.as_str())
+        //
+        // Current-content-pinned (no `get_any`): with the own-canonical
+        // drain retired a stale pre-edit `IndexedReady` can linger past a
+        // same-canonical edit, and a `get_any` read here would let that
+        // stale artifact shadow the freshly-published route-owned entry.
+        // `current_content_pinned_indexed` serves only a content-current
+        // artifact for a scheduler-tracked canonical;
+        // `artifact_current_indexed` answers for a genuinely artifact-only
+        // canonical (a workspace dependency materialised into
+        // `FileArtifactStore` with no live scheduler `DerivedRawState`) —
+        // the legitimate artifact-only scope this fast path serves. A
+        // stale older-content artifact for a live scheduler scope misses
+        // both, so the route-owned materialiser (its entry tiered-freshness
+        // gated) rebuilds below.
+        if let Some(indexed) = self
+            .current_content_pinned_indexed(normalized_canonical.as_str())
+            .or_else(|| self.artifact_current_indexed(normalized_canonical.as_str()))
         {
-            return Some(Arc::clone(&facts.shallow_state));
+            return Some(Arc::clone(&indexed.shallow_state));
         }
 
         // Request-scoped memo (frontier engine de-dupe). NOT a host-side
@@ -683,6 +696,25 @@ impl VerterHost {
     ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
         let mut route_shallow_cache = RouteShallowStateCache::default();
         self.route_shallow_state(canonical_id, &mut route_shallow_cache)
+    }
+
+    /// Context-threaded variant of [`Self::route_owned_shallow_state`].
+    ///
+    /// When `ctx` carries an active [`crate::session_view::SessionView`]
+    /// with overlay parse artifacts for `canonical_id`, the overlay-rooted
+    /// shallow surface is returned directly — so a session-bearing cold
+    /// compute observes overlay re-export / tombstone edits. Otherwise the
+    /// base (content-pinned) [`Self::route_owned_shallow_state`] body runs.
+    ///
+    /// This is the route-owned fallback [`Self::shallow_file_state_with_context`]
+    /// uses; its indexed fast path is content-pinned via
+    /// [`Self::route_shallow_state`].
+    pub(crate) fn route_owned_shallow_state_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        canonical_id: &str,
+    ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
+        self.route_owned_shallow_state_with_view(canonical_id, ctx.active_session_view())
     }
 
     /// View-aware variant of [`Self::route_owned_shallow_state`].

@@ -67,10 +67,9 @@ pub(crate) fn ensure_loaded_with_view(
 /// Overlay-priority `ensure_indexed_ready` helper.
 ///
 /// When `view` tombstones the canonical, returns `None`. When `view`
-/// has an overlay whose content hash differs from any cached candidate
-/// in the [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore),
-/// materialises a parallel IndexedReady from the overlay source and
-/// publishes it under the overlay's content hash via
+/// carries an **explicit overlay** for the canonical, materialises a
+/// parallel IndexedReady from the overlay source and publishes it under
+/// the overlay's content hash via
 /// [`VerterHost::materialize_overlay_indexed_ready_with_view`].
 /// Otherwise falls through to [`VerterHost::ensure_indexed_ready`].
 pub(crate) fn ensure_indexed_ready_with_view(
@@ -81,35 +80,38 @@ pub(crate) fn ensure_indexed_ready_with_view(
     if view.is_tombstoned(canonical_id) {
         return None;
     }
-    // Overlay-priority: if the view carries an overlay candidate whose
-    // content hash differs from the base host's recorded hash, prefer
-    // the overlay candidate. The host's
+    // Overlay-priority: if the view carries an **explicit overlay**
+    // candidate for the canonical, prefer it. The host's
     // `materialize_overlay_indexed_ready_with_view` entry point
     // publishes the candidate to the file-artifact store under the
-    // overlay's content hash so future reads of the same overlay
-    // reuse the cached candidate. Base-passthrough views (`HostView`,
-    // `HostViewRef`) report a `view_hash` equal to the base — those
-    // fall through to the host's standard `ensure_indexed_ready`.
-    let base_hash = host
-        .effective_file_state(canonical_id, None)
-        .map(|state| state.whole_hash);
-    let view_hash = view.content_hash_for(canonical_id);
-    let view_has_overlay = match (view_hash, base_hash) {
-        (Some(v), Some(b)) => v != b,
-        (Some(_), None) => view.source(canonical_id).is_some(),
-        _ => false,
-    };
-    if view_has_overlay {
+    // overlay's content hash so future reads of the same overlay reuse
+    // the cached candidate. Base-passthrough views (`HostView`,
+    // `HostViewRef`) carry no overlay and fall through to the host's
+    // standard `ensure_indexed_ready`.
+    //
+    // Overlay detection uses the **strict** `overlay_content_hash_for`,
+    // NOT the permissive `content_hash_for`. `content_hash_for` falls
+    // through to the base host's `FileArtifactStore`-derived content
+    // hash for an unmasked canonical — the same content-agnostic,
+    // canonical-only scan as `get_any`, which can surface a STALE
+    // lingering artifact's hash once the own-canonical drain is
+    // retired. Comparing that stale hash against the scheduler's
+    // current `base_hash` would read `view_hash != base_hash` for a
+    // canonical with NO overlay and re-route materialisation through
+    // the overlay path keyed on the stale hash — resurrecting the
+    // stale `IndexedReady`. `overlay_content_hash_for` reports `Some`
+    // ONLY when the session installed an actual overlay-Upsert (the
+    // overlay source's own hash), so an unmasked canonical correctly
+    // falls through to `ensure_indexed_ready`.
+    if let Some(overlay_hash) = view.overlay_content_hash_for(canonical_id) {
         if let Some(overlay_source) = view.source(canonical_id) {
-            if let Some(overlay_hash) = view.content_hash_for(canonical_id) {
-                if let Some(indexed) = host.materialize_overlay_indexed_ready_with_view(
-                    canonical_id,
-                    &overlay_source,
-                    overlay_hash,
-                    view,
-                ) {
-                    return Some(indexed);
-                }
+            if let Some(indexed) = host.materialize_overlay_indexed_ready_with_view(
+                canonical_id,
+                &overlay_source,
+                overlay_hash,
+                view,
+            ) {
+                return Some(indexed);
             }
         }
     }

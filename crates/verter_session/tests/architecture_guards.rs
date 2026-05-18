@@ -9500,3 +9500,372 @@ mod typed_ir_resolver_guards {
         );
     }
 }
+
+/// Architecture guard — direct content-agnostic `FileArtifactStore`
+/// reads (`indexed().get_any` / `indexed().get_artifacts_any`) are
+/// banned in `verter_session` production source outside a named
+/// intent-specific helper allowlist.
+///
+/// `FileArtifactStore::get_any` and `get_artifacts_any` are
+/// content-agnostic, canonical-only lookups: they return *whichever*
+/// cached artifact matches the canonical, regardless of content
+/// version. With the own-canonical drain retired (Block 2.S /
+/// retry-item-2), a stale pre-edit `IndexedReady` / `FileArtifacts` can
+/// linger past a same-canonical content edit. A producer that reads it
+/// through `get_any` would feed a stale observed-content identity into
+/// a provenance-pure `fact_dep_signature` builder — defeating
+/// query-identity self-version-rooting at its root.
+///
+/// Correctness-sensitive readers MUST instead use a content-pinned
+/// named helper:
+/// - [`crate::VerterHost::current_content_pinned_indexed`] — the
+///   scheduler-pinned `IndexedReady` read.
+/// - [`crate::VerterHost::artifact_current_indexed`] — the artifact-only
+///   `IndexedReady` authority for a canonical the scheduler does not
+///   track.
+/// - [`crate::VerterHost::current_content_pinned_artifacts`] — the
+///   `FileArtifacts` analogue (scheduler-pinned, artifact-only
+///   fallback).
+///
+/// The few legitimate direct `get_any` / `get_artifacts_any` call sites
+/// (those helpers' own bodies, plus pure existence/diagnostics probes
+/// whose stale answers do not affect a value or its validation) are
+/// listed in [`GET_ANY_ALLOWLIST`] with the reason each is exempt. A
+/// new direct call site outside the allowlist fails this guard.
+#[cfg(test)]
+mod content_pinned_artifact_read_guards {
+    use std::fs;
+    use std::path::PathBuf;
+
+    /// Files permitted to call `indexed().get_any(` /
+    /// `indexed().get_artifacts_any(` directly. Each entry pairs the
+    /// repo-relative path with the reason the direct read is legitimate.
+    ///
+    /// Every other production `verter_session/src` file MUST route
+    /// `FileArtifactStore` reads through a content-pinned named helper
+    /// (`current_content_pinned_indexed` / `artifact_current_indexed` /
+    /// `current_content_pinned_artifacts`).
+    const GET_ANY_ALLOWLIST: &[(&str, &str)] = &[
+        (
+            "crates/verter_session/src/host_manage/analysis_io.rs",
+            "Defines the content-pinned named helpers themselves \
+             (`artifact_current_indexed`, `current_content_pinned_artifacts`) \
+             — their bodies are the artifact-only authority. Also the \
+             documented permissive `get_whole_hash` accessor, whose strict \
+             sibling is `authoritative_current_content_hash`.",
+        ),
+        (
+            "crates/verter_session/src/host_analyze_audit.rs",
+            "`analyze_with_audit` probes `get_any().is_some()` BEFORE \
+             constructing the audit registration — a diagnostics 'was \
+             anything cached?' probe. A stale answer changes only an audit \
+             counter, never a resolved value or its fact validation.",
+        ),
+        (
+            "crates/verter_session/src/host_manage/eval_program.rs",
+            "`analysis_source_exists` probes `get_any().is_some()` as a \
+             pure existence check after the scheduler authority \
+             (`effective_file_state`) missed — it returns a `bool`, never \
+             artifact content.",
+        ),
+        (
+            "crates/verter_session/src/host_manage/component_meta_methods.rs",
+            "`get_raw_analysis_snapshot` gates a route-owned-snapshot \
+             fast path on `get_any().is_none()` — a pure existence gate. \
+             The artifact's content is never read here; the \
+             scheduler-first authority (`build_snapshot_from_scheduler`) \
+             produces the snapshot.",
+        ),
+    ];
+
+    /// Strip `//` line comments and `/* */` block comments so a
+    /// `get_any` mention inside a doc-comment is not flagged as a call
+    /// site. Character-level scan; string-literal contents are left
+    /// intact (a `get_any` substring inside a string literal is not a
+    /// production concern this guard cares about, and none exists).
+    fn strip_comments(src: &str) -> String {
+        let bytes = src.as_bytes();
+        let mut out = String::with_capacity(src.len());
+        let mut i = 0;
+        let mut in_string = false;
+        let mut in_line_comment = false;
+        let mut in_block_comment = false;
+        while i < bytes.len() {
+            let c = bytes[i] as char;
+            let next = bytes.get(i + 1).map(|b| *b as char);
+            if in_line_comment {
+                if c == '\n' {
+                    in_line_comment = false;
+                    out.push('\n');
+                }
+                i += 1;
+                continue;
+            }
+            if in_block_comment {
+                if c == '*' && next == Some('/') {
+                    in_block_comment = false;
+                    i += 2;
+                    continue;
+                }
+                if c == '\n' {
+                    out.push('\n');
+                }
+                i += 1;
+                continue;
+            }
+            if in_string {
+                out.push(c);
+                if c == '\\' {
+                    if let Some(n) = next {
+                        out.push(n);
+                    }
+                    i += 2;
+                    continue;
+                }
+                if c == '"' {
+                    in_string = false;
+                }
+                i += 1;
+                continue;
+            }
+            if c == '/' && next == Some('/') {
+                in_line_comment = true;
+                i += 2;
+                continue;
+            }
+            if c == '/' && next == Some('*') {
+                in_block_comment = true;
+                i += 2;
+                continue;
+            }
+            if c == '"' {
+                in_string = true;
+            }
+            out.push(c);
+            i += 1;
+        }
+        out
+    }
+
+    /// True when `src` (already comment-stripped) contains a direct
+    /// `indexed()` → `.get_any(` / `.get_artifacts_any(` call chain.
+    ///
+    /// Whitespace and newlines between `indexed()` and the method call
+    /// are tolerated — the call chain is frequently split across lines
+    /// by `rustfmt`. The `route_owned_shallow().get_any(` chain is a
+    /// DIFFERENT db (`RouteOwnedShallowDb`) and is deliberately NOT
+    /// matched: this guard targets `FileArtifactStore` reads only.
+    fn has_direct_file_artifact_get_any(src: &str) -> bool {
+        let needle = "indexed()";
+        let mut search_from = 0;
+        while let Some(rel) = src[search_from..].find(needle) {
+            let after = search_from + rel + needle.len();
+            let tail = src[after..].trim_start();
+            if tail.starts_with(".get_any(") || tail.starts_with(".get_artifacts_any(") {
+                return true;
+            }
+            search_from = after;
+        }
+        false
+    }
+
+    /// Repo-relative `.rs` files under `crates/verter_session/src`,
+    /// excluding test files (`*_tests.rs`, `tests.rs`).
+    fn verter_session_production_rs_files() -> Vec<(PathBuf, String)> {
+        let root = super::workspace_root();
+        let src_dir = root.join("crates/verter_session/src");
+        let mut files: Vec<PathBuf> = Vec::new();
+        walk_rs(&src_dir, &mut files);
+        let mut out: Vec<(PathBuf, String)> = Vec::new();
+        for f in files {
+            let rel = f
+                .strip_prefix(&root)
+                .unwrap_or(&f)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let basename = rel.rsplit('/').next().unwrap_or("");
+            if basename.ends_with("_tests.rs") || basename == "tests.rs" {
+                continue;
+            }
+            out.push((f, rel));
+        }
+        out
+    }
+
+    fn walk_rs(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        if !dir.is_dir() {
+            return;
+        }
+        for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()))
+        {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                walk_rs(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// The scan algorithm — testable in isolation against synthetic
+    /// input. Returns the sorted set of repo-relative production files
+    /// that hold a direct `FileArtifactStore` `get_any` /
+    /// `get_artifacts_any` call AND are not on `allowlist`.
+    fn unallowlisted_get_any_files(files: &[(String, String)], allowlist: &[&str]) -> Vec<String> {
+        let mut violations: Vec<String> = files
+            .iter()
+            .filter(|(rel, src)| {
+                !allowlist.contains(&rel.as_str())
+                    && has_direct_file_artifact_get_any(&strip_comments(src))
+            })
+            .map(|(rel, _)| rel.clone())
+            .collect();
+        violations.sort();
+        violations.dedup();
+        violations
+    }
+
+    /// Static allowlist guard — no `verter_session` production file
+    /// outside [`GET_ANY_ALLOWLIST`] calls `indexed().get_any(` /
+    /// `indexed().get_artifacts_any(` directly.
+    #[test]
+    fn no_direct_file_artifact_get_any_outside_allowlist() {
+        let allow: Vec<&str> = GET_ANY_ALLOWLIST.iter().map(|(p, _)| *p).collect();
+        let files: Vec<(String, String)> = verter_session_production_rs_files()
+            .into_iter()
+            .map(|(path, rel)| {
+                let src = fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+                (rel, src)
+            })
+            .collect();
+        let violations = unallowlisted_get_any_files(&files, &allow);
+        assert!(
+            violations.is_empty(),
+            "content-agnostic `FileArtifactStore` reads found outside the \
+             named-helper allowlist:\n  {}\n\nA stale pre-edit artifact can \
+             linger past a same-canonical edit (own-canonical drain \
+             retired); a `get_any` / `get_artifacts_any` read feeds a stale \
+             observed-content identity into the fact-signature builders. \
+             Route the read through `current_content_pinned_indexed` / \
+             `artifact_current_indexed` / `current_content_pinned_artifacts` \
+             — or, if the read is a genuine existence/diagnostics probe, \
+             add the file to `GET_ANY_ALLOWLIST` with the reason.",
+            violations.join("\n  "),
+        );
+
+        // Every allowlisted file MUST still actually contain a direct
+        // call — a stale allowlist entry (the call was removed / pinned)
+        // must be deleted so the allowlist cannot silently grow
+        // permission it no longer needs.
+        let by_rel: std::collections::BTreeMap<&str, &str> = files
+            .iter()
+            .map(|(rel, src)| (rel.as_str(), src.as_str()))
+            .collect();
+        for (allowed_path, _reason) in GET_ANY_ALLOWLIST {
+            let src = by_rel.get(allowed_path).unwrap_or_else(|| {
+                panic!(
+                    "GET_ANY_ALLOWLIST entry {allowed_path} is not a \
+                     verter_session production source file"
+                )
+            });
+            assert!(
+                has_direct_file_artifact_get_any(&strip_comments(src)),
+                "GET_ANY_ALLOWLIST entry {allowed_path} no longer contains a \
+                 direct `indexed().get_any(` / `.get_artifacts_any(` call — \
+                 remove the stale allowlist entry.",
+            );
+        }
+    }
+
+    /// Discriminating self-test — proves the scan algorithm
+    /// distinguishes a real direct `get_any` call from a comment, a
+    /// `route_owned_shallow().get_any` (different db), and a
+    /// content-pinned helper call.
+    ///
+    /// Without this, an empty-violations result of the guard above is
+    /// indistinguishable from a detector that always passes.
+    #[test]
+    fn get_any_guard_discriminator_self_test() {
+        // (a) A file with a direct `indexed().get_any(` call, NOT
+        //     allowlisted → must be flagged.
+        let bad = (
+            "crates/verter_session/src/synthetic_offender.rs".to_string(),
+            "fn read(&self) { let _ = self.project_type_store.indexed().get_any(c); }".to_string(),
+        );
+        let flagged = unallowlisted_get_any_files(std::slice::from_ref(&bad), &[]);
+        assert_eq!(
+            flagged,
+            vec!["crates/verter_session/src/synthetic_offender.rs".to_string()],
+            "discriminator: a direct `indexed().get_any(` call in a \
+             non-allowlisted file MUST be flagged"
+        );
+
+        // (a') The SAME file, now allowlisted → must NOT be flagged.
+        let flagged_allowed = unallowlisted_get_any_files(
+            std::slice::from_ref(&bad),
+            &["crates/verter_session/src/synthetic_offender.rs"],
+        );
+        assert!(
+            flagged_allowed.is_empty(),
+            "discriminator: an allowlisted file's direct call MUST NOT be \
+             flagged"
+        );
+
+        // (b) The newline-split call chain (`rustfmt` form) → must be
+        //     flagged.
+        let split = (
+            "crates/verter_session/src/synthetic_split.rs".to_string(),
+            "fn read(&self) {\n    let _ = self\n        .project_type_store\n        \
+             .indexed()\n        .get_artifacts_any(c);\n}"
+                .to_string(),
+        );
+        assert_eq!(
+            unallowlisted_get_any_files(std::slice::from_ref(&split), &[]),
+            vec!["crates/verter_session/src/synthetic_split.rs".to_string()],
+            "discriminator: a newline-split `indexed()\\n.get_artifacts_any(` \
+             chain MUST be flagged"
+        );
+
+        // (c) A `get_any` mention inside a comment → must NOT be
+        //     flagged (comment-stripping works).
+        let comment_only = (
+            "crates/verter_session/src/synthetic_comment.rs".to_string(),
+            "// callers MUST NOT use indexed().get_any(c) here\n/* indexed().get_any(x) */\n\
+             fn ok(&self) { let _ = self.current_content_pinned_indexed(c); }"
+                .to_string(),
+        );
+        assert!(
+            unallowlisted_get_any_files(std::slice::from_ref(&comment_only), &[]).is_empty(),
+            "discriminator: a `get_any` mention inside a `//` or `/* */` \
+             comment MUST NOT be flagged"
+        );
+
+        // (d) `route_owned_shallow().get_any(` is a DIFFERENT db
+        //     (`RouteOwnedShallowDb`) — must NOT be flagged.
+        let route_owned = (
+            "crates/verter_session/src/synthetic_route_owned.rs".to_string(),
+            "fn read(&self) { let _ = self.project_type_store.route_owned_shallow().get_any(c); }"
+                .to_string(),
+        );
+        assert!(
+            unallowlisted_get_any_files(std::slice::from_ref(&route_owned), &[]).is_empty(),
+            "discriminator: `route_owned_shallow().get_any(` targets a \
+             different db and MUST NOT be flagged by the FileArtifactStore guard"
+        );
+
+        // (e) A file that only calls the content-pinned helpers → must
+        //     NOT be flagged.
+        let pinned = (
+            "crates/verter_session/src/synthetic_pinned.rs".to_string(),
+            "fn read(&self) { let _ = self.current_content_pinned_indexed(c)\n        \
+             .or_else(|| self.artifact_current_indexed(c)); }"
+                .to_string(),
+        );
+        assert!(
+            unallowlisted_get_any_files(std::slice::from_ref(&pinned), &[]).is_empty(),
+            "discriminator: a file using only the content-pinned named \
+             helpers MUST NOT be flagged"
+        );
+    }
+}

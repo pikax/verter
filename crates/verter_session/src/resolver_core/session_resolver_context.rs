@@ -149,7 +149,13 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
 
     #[inline]
     fn shallow_file_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>> {
-        ResolverContext::shallow_file_state(self.inner, canonical_id)
+        // Thread `self` (the session context) as the current-content
+        // oracle so the pinned `IndexedReady` read and the route-owned
+        // fallback both observe the active overlay's content identity —
+        // an overlay-covered dependency pins against the overlay hash,
+        // not the base host's.
+        self.inner
+            .shallow_file_state_with_context(self, canonical_id)
     }
 
     #[inline]

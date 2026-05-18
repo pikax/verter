@@ -102,10 +102,19 @@ impl VerterHost {
             return Some(cached_env);
         }
 
+        // Reuse the cached `eval_source` only from a **current-content**
+        // artifact (no `get_any`). With the own-canonical drain retired a
+        // stale pre-edit `IndexedReady` can linger past a same-canonical
+        // edit; its `eval_source` is the pre-edit script body. Reading it
+        // here would build the eval-env — and the type evaluation that
+        // depends on it — from stale source even though `raw_source`
+        // (resolved via the content-pinned `current_eval_state` above) is
+        // current. The pinned read serves only a content-current artifact;
+        // on a miss the `eval_source` is rebuilt from the current
+        // `raw_source`.
         let eval_source = self
-            .project_type_store
-            .indexed()
-            .get_any(resolved_canonical_id.as_str())
+            .current_content_pinned_indexed(resolved_canonical_id.as_str())
+            .or_else(|| self.artifact_current_indexed(resolved_canonical_id.as_str()))
             .map(|facts| Arc::clone(&facts.eval_source))
             .unwrap_or_else(|| {
                 Arc::<str>::from(Self::build_eval_script_source(
@@ -382,15 +391,22 @@ impl VerterHost {
     )> {
         component_meta_trace_custom!("current_eval_state", format!("owner={}", canonical_id),);
 
-        // FileArtifactStore fast path — live-host probe.
-        let cached_facts = self.project_type_store.indexed().get_any(canonical_id);
+        // FileArtifactStore fast path — **current-content-pinned** (no
+        // `get_any`). `current_eval_state` returns the canonical's source
+        // for the cold type-evaluation recompute; a stale artifact would
+        // feed pre-edit source into the evaluation. With the own-canonical
+        // drain retired a stale pre-edit `IndexedReady` can linger past a
+        // same-canonical edit, so the artifact read is pinned to the
+        // canonical's authoritative current content hash:
+        // `current_content_pinned_indexed` serves only a content-current
+        // artifact for a scheduler-tracked canonical, and
+        // `artifact_current_indexed` answers for a genuinely artifact-only
+        // canonical. A stale candidate for a live scope misses both — the
+        // scheduler source path below is the authoritative current content.
+        let cached_facts = self
+            .current_content_pinned_indexed(canonical_id)
+            .or_else(|| self.artifact_current_indexed(canonical_id));
         if let Some(facts) = cached_facts {
-            // Live-host staleness gate: the project-global cache is validated
-            // through `HostFenceValidator` at the top-level publish rather than
-            // per-probe view acceptance.
-            if !self.store_view_allows_current_whole_hash(canonical_id, facts.whole_hash) {
-                return None;
-            }
             return Some((
                 Arc::clone(&facts.raw_source),
                 facts.cached_parse.clone(),

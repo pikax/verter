@@ -118,22 +118,26 @@ impl VerterHost {
             if view.is_tombstoned(canonical_id) {
                 return self.materialize_prepared_decl_bundle_via_ctx(ctx, canonical_id);
             }
-            // Authoritative base-content-hash source: the scheduler's
-            // `effective_file_state` whole_hash. The
-            // `FileArtifactStore::content_hash_for_canonical` helper
-            // walks the multi-candidate map and is non-deterministic
-            // under concurrent overlay materialisation — using it here
-            // would race the overlay candidate it itself materialised.
-            let base_hash = self
-                .effective_file_state(canonical_id, None)
-                .map(|state| state.whole_hash);
-            let view_hash = view.content_hash_for(canonical_id);
-            let overlay_differs = match (view_hash, base_hash) {
-                (Some(v), Some(b)) => v != b,
-                (Some(_), None) => true,
-                _ => false,
-            };
-            if overlay_differs {
+            // An explicit overlay for the canonical means the host's
+            // shared bundle cache (keyed by canonical alone) holds the
+            // BASE bundle — materialise a fresh bundle rooted at the
+            // overlay's IndexedReady instead.
+            //
+            // Overlay detection uses the **strict**
+            // `overlay_content_hash_for`, NOT the permissive
+            // `content_hash_for`. `content_hash_for` falls through to
+            // the base host's `FileArtifactStore`-derived content hash
+            // for an unmasked canonical — the same content-agnostic
+            // scan as `get_any`, which can surface a STALE lingering
+            // artifact's hash once the own-canonical drain is retired.
+            // Comparing that stale hash against the scheduler's current
+            // hash would read "overlay differs" for a canonical with NO
+            // overlay and materialise the bundle from the stale
+            // `IndexedReady` via the overlay path.
+            // `overlay_content_hash_for` reports `Some` ONLY for an
+            // actual overlay-Upsert, so an unmasked canonical keeps its
+            // warm-bundle reuse on the base path.
+            if view.overlay_content_hash_for(canonical_id).is_some() {
                 return self.materialize_prepared_decl_bundle_via_ctx(ctx, canonical_id);
             }
         }
@@ -896,31 +900,93 @@ impl VerterHost {
     }
 
     /// Get or build the canonical shallow type file state for an imported
-    /// dependency.  The state is populated through the shared host ensure-path
-    /// and cached in `FileArtifactStore`.
+    /// dependency.  The state is read from `FileArtifactStore` pinned to the
+    /// dependency's current content, falling back to the content-pinned
+    /// route-owned shallow surface.
     ///
     /// Consumed by the frontier engine (production cache-warming pass in
     /// `resolve_external_type_from_loaded_files`) and integration tests.
+    ///
+    /// The lookup is **current-content-pinned**: it never reads
+    /// `FileArtifactStore` through the content-agnostic `get_any`. With the
+    /// own-canonical drain retired, a same-canonical content edit can leave a
+    /// stale pre-edit `IndexedReady` lingering in `FileArtifactStore`; a
+    /// `get_any` read would surface that stale artifact and feed a stale
+    /// observed-content hash to every provenance-pure signature builder. The
+    /// read is therefore pinned to the canonical's authoritative current
+    /// content hash; a stale older-content artifact yields a miss.
+    ///
+    /// It does NOT materialise (`ensure_indexed_ready` re-enters the full
+    /// materialisation path — load files, build snapshots, resolve imports —
+    /// which itself calls `shallow_file_state`; that is the recursion this
+    /// function must not open).
     pub(crate) fn shallow_file_state(
         &self,
+        canonical_id: &str,
+    ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
+        let ctx: &dyn crate::resolver_core::ResolverContext = self;
+        self.shallow_file_state_with_context(ctx, canonical_id)
+    }
+
+    /// Context-threaded core of [`Self::shallow_file_state`].
+    ///
+    /// `ctx` supplies the current-content oracle: the base host resolves the
+    /// scheduler's `parse.whole_hash`, while
+    /// [`crate::resolver_core::SessionResolverContext`] overrides it to
+    /// consult the active overlay so an overlay-covered dependency pins
+    /// against the overlay content hash.
+    ///
+    /// Resolution order (current-content-pinned read mechanism):
+    /// 1. Resolve the canonical through `resolve_eval_dependency_canonical`.
+    /// 2. Read [`crate::project_type_store::IndexedReady`] pinned to the
+    ///    canonical's authoritative current content hash via
+    ///    [`crate::resolver_core::ResolverContext::indexed_for_current_content`]
+    ///    — overlay-aware, scheduler-pinned, no `get_any`. A stale
+    ///    older-content artifact misses here.
+    /// 3. On miss for a live scheduler-tracked canonical, fall through to the
+    ///    content-pinned route-owned shallow surface
+    ///    ([`Self::route_owned_shallow_state_with_view`] — its own indexed
+    ///    fast path is pinned, and the route-owned entry is freshness-gated).
+    /// 4. On miss with no `DerivedRawState` at all (a genuinely artifact-only
+    ///    canonical — foreign source / test seed), the permissive
+    ///    artifact-store read is allowed exactly once, through the named
+    ///    [`Self::artifact_current_indexed`] helper that documents that
+    ///    contract.
+    pub(crate) fn shallow_file_state_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
         canonical_id: &str,
     ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
         let resolved_canonical_id = self
             .resolve_eval_dependency_canonical(canonical_id)
             .unwrap_or_else(|| canonical_id.to_string());
 
-        // FileArtifactStore fast path (cache read only — no materialization to avoid recursion).
-        let cached_facts = self
-            .project_type_store
-            .indexed()
-            .get_any(resolved_canonical_id.as_str());
-        if let Some(facts) = cached_facts {
-            if facts.shallow_state.has_resolvable_surface() {
-                return Some(facts.shallow_state.clone());
+        // Step 2 — current-content-pinned `IndexedReady` fast path. This is
+        // a cache read only; it never materialises (no `ensure_indexed_ready`
+        // — that would re-enter the recursion this function guards against).
+        if let Some(indexed) = ctx.indexed_for_current_content(resolved_canonical_id.as_str()) {
+            if indexed.shallow_state.has_resolvable_surface() {
+                return Some(indexed.shallow_state.clone());
             }
         }
 
-        self.route_owned_shallow_state(resolved_canonical_id.as_str())
+        // Step 3 — content-pinned route-owned shallow fallback. The
+        // route-owned path's own indexed fast path is content-pinned and the
+        // route-owned entry carries the tiered freshness gate.
+        if let Some(state) =
+            self.route_owned_shallow_state_with_context(ctx, resolved_canonical_id.as_str())
+        {
+            return Some(state);
+        }
+
+        // Step 4 — genuinely artifact-only canonical (no scheduler
+        // `DerivedRawState`): the named artifact-current authority answers
+        // for a foreign-source-loaded / test-seeded artifact. It declines
+        // (returns `None`) for any canonical the scheduler tracks, so a stale
+        // older-content artifact for a live scope is never surfaced here.
+        self.artifact_current_indexed(resolved_canonical_id.as_str())
+            .filter(|indexed| indexed.shallow_state.has_resolvable_surface())
+            .map(|indexed| indexed.shallow_state.clone())
     }
 
     /// Ensure the canonical post-parse artifact is materialized for a file.
@@ -960,20 +1026,22 @@ impl VerterHost {
                 );
                 return Some(indexed);
             }
-        } else if let Some(indexed) = self.project_type_store.indexed().get_any(canonical_id) {
-            // Scheduler doesn't have a current snapshot (e.g. the
-            // canonical was loaded from a foreign source path or test
-            // seed) — fall back to the permissive lookup that gives
-            // the first matching candidate. Staleness in that path is
-            // not driven by content upserts.
-            if self.store_view_allows_current_whole_hash(canonical_id, indexed.whole_hash) {
-                component_meta_trace_custom!(
-                    "ensure_indexed_ready_fast_hit",
-                    format!("owner={} whole_hash={:?}", canonical_id, indexed.whole_hash),
-                );
-                return Some(indexed);
-            }
-            self.project_type_store.indexed().remove(canonical_id);
+        } else if let Some(indexed) = self.artifact_current_indexed(canonical_id) {
+            // Scheduler doesn't have a current snapshot. The
+            // artifact-current authority answers ONLY for a genuinely
+            // artifact-only canonical (no scheduler `DerivedRawState` —
+            // a foreign-source-loaded file or a test seed); for such a
+            // canonical staleness is not driven by content upserts, so
+            // the single retained artifact is the current one. A
+            // canonical the scheduler DOES track (a `DerivedRawState`
+            // entry exists) gets `None` from `artifact_current_indexed`,
+            // so this branch declines and the materialiser below
+            // rebuilds rather than serving a possibly-stale artifact.
+            component_meta_trace_custom!(
+                "ensure_indexed_ready_fast_hit",
+                format!("owner={} whole_hash={:?}", canonical_id, indexed.whole_hash),
+            );
+            return Some(indexed);
         }
 
         if canonical_id.is_empty() || is_raw_import_specifier_id(canonical_id) {
@@ -1312,7 +1380,11 @@ impl VerterHost {
                 {
                     return Ok(indexed);
                 }
-            } else if let Some(indexed) = self.project_type_store.indexed().get_any(canonical_id) {
+            } else if let Some(indexed) = self.artifact_current_indexed(canonical_id) {
+                // Scheduler has no current snapshot — the artifact-current
+                // authority answers only for a genuinely artifact-only
+                // canonical (no `DerivedRawState`), mirroring the outer
+                // fast path.
                 return Ok(indexed);
             }
             materialize().ok_or(())

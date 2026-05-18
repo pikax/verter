@@ -194,8 +194,20 @@ impl VerterHost {
             return Some(source);
         }
 
-        // Check the project-global IndexedReady cache for cached raw_source.
-        if let Some(facts) = self.project_type_store.indexed().get_any(canonical_id) {
+        // Project-global IndexedReady cache for cached raw_source —
+        // **current-content-pinned** (no `get_any`). `read_analysis_source`
+        // feeds the route-owned-shallow materialiser (a route-fact
+        // producer) and the cold analysis path; a stale pre-edit
+        // `IndexedReady` (which can linger past a same-canonical edit with
+        // the own-canonical drain retired) would seed those producers with
+        // pre-edit source. `artifact_current_indexed` answers ONLY for a
+        // genuinely artifact-only canonical (no scheduler `DerivedRawState`)
+        // — exactly the foreign-source / test-seed scope this fallback
+        // exists for. A scheduler-tracked canonical (whose authoritative
+        // source is the scheduler, read above via `get_source`) gets `None`
+        // here, so a live-but-stale scope falls through to `ensure_loaded`
+        // rather than reading the stale artifact.
+        if let Some(facts) = self.artifact_current_indexed(canonical_id) {
             component_meta_trace_custom!(
                 "read_analysis_source_result",
                 read_analysis_source_result_detail(
@@ -243,7 +255,12 @@ impl VerterHost {
                     self.test_audit.record_read(canonical_id);
                     return Some(source);
                 }
-                if let Some(facts) = self.project_type_store.indexed().get_any(canonical_id) {
+                // Post-`ensure_loaded` artifact fallback — content-pinned
+                // via `artifact_current_indexed` for the same reason as the
+                // pre-`ensure_loaded` read above: a stale lingering
+                // artifact must not seed the cold analysis / route-fact
+                // producers with pre-edit source.
+                if let Some(facts) = self.artifact_current_indexed(canonical_id) {
                     component_meta_trace_custom!(
                         "read_analysis_source_result",
                         read_analysis_source_result_detail(
@@ -493,11 +510,25 @@ impl VerterHost {
             }
         }
 
-        // The per-request `external_inputs_memo` was.
-        // The project-global `FileArtifactStore` already returns cached state,
-        // so the old memo was just a redundant lookup memo layered over a
-        // host-owned cache.
-        let cached_facts = self.project_type_store.indexed().get_any(canonical_id);
+        // Project-global `FileArtifactStore` fast path. The read is
+        // **current-content-pinned** — never the content-agnostic
+        // `get_any`. `ExternalTypeResolutionInputs` carries the dep's
+        // `whole_hash` and `external_type_analysis`; that analysis feeds
+        // cross-file macro-type resolution (`defineProps<Foo>` etc.) and
+        // the observed `whole_hash` roots the consumer's
+        // `fact_dep_signature`. With the own-canonical drain retired, a
+        // `get_any` read would surface a stale pre-edit `IndexedReady`
+        // after a same-canonical edit, so the consumer would resolve the
+        // stale `Foo` body and root its signature on the stale hash.
+        // `current_content_pinned_indexed` serves only a content-current
+        // artifact for a scheduler-tracked canonical;
+        // `artifact_current_indexed` answers for a genuinely artifact-only
+        // canonical (foreign source / test seed). A stale older-content
+        // artifact for a live scope misses both — the route-owned
+        // materialiser (freshness-gated) rebuilds below.
+        let cached_facts = self
+            .current_content_pinned_indexed(canonical_id)
+            .or_else(|| self.artifact_current_indexed(canonical_id));
         if let Some(facts) = cached_facts {
             let inputs = ExternalTypeResolutionInputs {
                 raw_source: Arc::clone(&facts.raw_source),

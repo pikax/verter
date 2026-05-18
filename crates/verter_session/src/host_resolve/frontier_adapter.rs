@@ -84,20 +84,30 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
                 &mut self.route_shallow_cache.borrow_mut(),
             );
         }
-        if let Some(facts) = self
+        // `IndexedReady` fast path — **current-content-pinned** (no
+        // `get_any`). The frontier resolves a dependency's symbol surface
+        // from this `ShallowFileState`; with the own-canonical drain
+        // retired a stale pre-edit `IndexedReady` can linger past a
+        // same-canonical edit, and a `get_any` read would resolve the
+        // stale symbol surface (e.g. a pre-rename type body). The pinned
+        // read serves only a content-current artifact for a
+        // scheduler-tracked canonical; on a miss the materialising path
+        // below (`ensure_indexed_ready`, overlay-aware) rebuilds at the
+        // current content. `artifact_current_indexed` covers a genuinely
+        // artifact-only canonical (foreign source / test seed).
+        if let Some(indexed) = self
             .host
-            .project_type_store
-            .indexed()
-            .get_any(canonical.as_str())
+            .current_content_pinned_indexed(canonical.as_str())
+            .or_else(|| self.host.artifact_current_indexed(canonical.as_str()))
         {
-            if facts.shallow_state.has_resolvable_surface() || !self.materialize_symbols {
-                if facts.shallow_state.has_wildcard_reexports() {
+            if indexed.shallow_state.has_resolvable_surface() || !self.materialize_symbols {
+                if indexed.shallow_state.has_wildcard_reexports() {
                     self.host
                         .provenance
                         .resolver_barrel_fact_reuse
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                return Some(facts.shallow_state.clone());
+                return Some(indexed.shallow_state.clone());
             }
         }
 

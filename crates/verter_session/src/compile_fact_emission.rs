@@ -324,11 +324,12 @@ fn observe_member_presences_for_export(
     exporter: &InternedName,
     space: SymbolSpace,
 ) {
-    let Some(artifacts) = host
-        .project_type_store()
-        .indexed()
-        .get_artifacts_any(canonical_id)
-    else {
+    // Current-content-pinned read — NOT the content-agnostic
+    // `get_artifacts_any`. The enumerated `MemberPresence` facts are
+    // observed into the compile-tier `fact_dep_signature`; a stale
+    // lingering `FileArtifacts` (own-canonical drain retired) would seed
+    // the consumer's signature with pre-edit member facts.
+    let Some(artifacts) = host.current_content_pinned_artifacts(canonical_id) else {
         return;
     };
     for (key, _) in artifacts.facts.registry().iter() {
@@ -356,10 +357,13 @@ fn lookup_parse_fact_hash(
     key: &FactKey,
     lane: FactLane,
 ) -> Option<Hash16> {
-    let artifacts = host
-        .project_type_store
-        .indexed()
-        .get_artifacts_any(canonical_id)?;
+    // Current-content-pinned read — NOT the content-agnostic
+    // `get_artifacts_any`. The looked-up fact hash is emitted as a
+    // `ParseFactRef` into a compile-tier `fact_dep_signature`; reading
+    // a stale lingering `FileArtifacts`'s registry (own-canonical drain
+    // retired) would root the consumer's signature on a pre-edit fact
+    // hash and the warm slot would validate against stale content.
+    let artifacts = host.current_content_pinned_artifacts(canonical_id)?;
     let fact = artifacts.facts.lookup(key)?;
     Some(match lane {
         FactLane::Semantic => fact.semantic_hash,

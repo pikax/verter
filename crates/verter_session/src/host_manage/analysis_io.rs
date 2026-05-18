@@ -528,15 +528,20 @@ impl VerterHost {
         // common "same content present in both" case.
         let overlay_source = view.source(canonical.as_str());
         let overlay_hash = view.content_hash_for(canonical.as_str());
+        // Base content hash for the overlay-coverage check — the
+        // scheduler's authoritative hash, with a content-pinned
+        // artifact-only fallback (`artifact_current_indexed`) for a
+        // canonical the scheduler does not track. NOT the
+        // content-agnostic `get_any`: a stale lingering artifact's hash
+        // would misreport `overlay_covers` and parse the overlay source
+        // when none was needed (or vice versa).
         let base_hash = self
             .scheduler
             .try_get_source(canonical.as_str())
             .map(|snap| snap.whole_hash)
             .or_else(|| {
-                self.project_type_store
-                    .indexed()
-                    .get_any(canonical.as_str())
-                    .map(|facts| facts.whole_hash)
+                self.artifact_current_indexed(canonical.as_str())
+                    .map(|indexed| indexed.whole_hash)
             });
         let overlay_covers = match (&overlay_source, overlay_hash) {
             (Some(_), Some(oh)) => Some(oh) != base_hash,
@@ -764,6 +769,56 @@ impl VerterHost {
             return None;
         }
         self.project_type_store.indexed().get_any(canonical)
+    }
+
+    /// Current-content-pinned [`crate::file_artifact_store::FileArtifacts`]
+    /// lookup — the `FileArtifacts` analogue of
+    /// [`Self::current_content_pinned_indexed`] /
+    /// [`Self::artifact_current_indexed`].
+    ///
+    /// A `FileArtifacts` payload carries the file's parse-domain
+    /// `FileFacts` registry. A parse-fact producer that emits a
+    /// `ParseFactRef` into a consumer's `fact_dep_signature` MUST read
+    /// the fact registry of the **content version it actually
+    /// observed** — not whichever artifact a content-agnostic
+    /// `get_artifacts_any` walk happens to return. With the
+    /// own-canonical drain retired a stale pre-edit `FileArtifacts` can
+    /// linger past a same-canonical edit, so a `get_artifacts_any` read
+    /// would let the producer fingerprint the stale registry and the
+    /// consumer would validate against pre-edit facts.
+    ///
+    /// Resolution order mirrors [`Self::observe_materialize_scope`]:
+    /// 1. The scheduler-authoritative current content hash
+    ///    ([`Self::authoritative_current_content_hash`]) pins a strict
+    ///    `get_artifacts` read — a content-current artifact, or `None`.
+    /// 2. For a genuinely artifact-only canonical (no scheduler
+    ///    `DerivedRawState` — foreign source / test seed) the permissive
+    ///    `get_artifacts_any` is the current artifact, exactly as
+    ///    [`Self::artifact_current_indexed`] reasons for `IndexedReady`.
+    ///
+    /// Returns `None` when neither answers — a live scheduler scope
+    /// whose pinned read missed (a stale older-content candidate is the
+    /// only entry), or an evicted scope's stale leftover.
+    #[must_use]
+    pub(crate) fn current_content_pinned_artifacts(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
+        if let Some(current_hash) = self.authoritative_current_content_hash(canonical) {
+            let key = crate::file_artifact_store::FileArtifactKey::legacy(
+                Arc::from(canonical),
+                current_hash,
+            );
+            return self.project_type_store.indexed().get_artifacts(&key);
+        }
+        // Genuinely artifact-only canonical — no scheduler authority, so
+        // the single retained `FileArtifacts` is the current one.
+        if self.derived_raw_cache().get(canonical).is_some() {
+            return None;
+        }
+        self.project_type_store
+            .indexed()
+            .get_artifacts_any(canonical)
     }
 
     /// Establish ONE tear-free
@@ -1031,12 +1086,15 @@ impl VerterHost {
         if let Some(source) = self.get_source(resolved_canonical_id) {
             return Some(source);
         }
-        if let Some(facts) = self
-            .project_type_store
-            .indexed()
-            .get_any(resolved_canonical_id)
-        {
-            return Some(Arc::clone(&facts.raw_source));
+        // Artifact-store `raw_source` fallback — content-pinned via
+        // `artifact_current_indexed` (no content-agnostic `get_any`).
+        // `get_source` above is the scheduler authority for any
+        // scheduler-tracked canonical; this fallback answers only for a
+        // genuinely artifact-only canonical (no `DerivedRawState`), so a
+        // scheduler-tracked-but-stale scope never returns its stale
+        // artifact's source here.
+        if let Some(indexed) = self.artifact_current_indexed(resolved_canonical_id) {
+            return Some(Arc::clone(&indexed.raw_source));
         }
         if let Some(source) = self.ws().read_file(resolved_canonical_id) {
             return Some(source);
@@ -1058,10 +1116,11 @@ impl VerterHost {
 
         self.get_source(&dep_id)
             .or_else(|| {
-                self.project_type_store
-                    .indexed()
-                    .get_any(&dep_id)
-                    .map(|facts| Arc::clone(&facts.raw_source))
+                // Content-pinned artifact fallback — `artifact_current_indexed`
+                // answers only for a genuinely artifact-only canonical,
+                // mirroring the `resolved_canonical_id` read above.
+                self.artifact_current_indexed(&dep_id)
+                    .map(|indexed| Arc::clone(&indexed.raw_source))
             })
             .or_else(|| self.ws().read_file(&dep_id))
     }
