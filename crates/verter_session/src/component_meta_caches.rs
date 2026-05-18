@@ -2012,6 +2012,14 @@ pub struct MaterializeStructureEntry {
 /// materialiser. Reverse-index `canonical_to_keys` enables
 /// `Arc::ptr_eq`-based invalidation cleanup; cooperative-admission's
 /// `post_publish` callback wires the registration.
+///
+/// The cache key carries a content-derived `SemanticNodeId`, so each
+/// distinct content version of an owner produces a fresh entry. The
+/// embedded [`crate::bounded_query_retention::GlobalRetentionBudget`] is
+/// the routine memory-reclamation path: the `post_publish` hook records
+/// each admission and FIFO-evicts the oldest entries past
+/// [`Self::MAX_ENTRIES`], so a long-lived session does not accumulate
+/// stale per-version structural materialisations unbounded.
 pub struct MaterializeStructureDb {
     entries: DashMap<MaterializeStructureCacheKey, Arc<MaterializeStructureEntry>>,
     inflight: InflightTable<MaterializeStructureCacheKey>,
@@ -2024,6 +2032,12 @@ pub struct MaterializeStructureDb {
         Arc<str>,
         parking_lot::Mutex<rustc_hash::FxHashMap<MaterializeStructureCacheKey, DepSignature>>,
     >,
+    /// Global insertion-ordered total-size budget. Bounds the total
+    /// entry count across all keys — the reverse-index drain reclaims
+    /// only on per-canonical invalidation, which an owner-content edit
+    /// no longer triggers, so this budget is the routine reclamation.
+    retention_budget:
+        crate::bounded_query_retention::GlobalRetentionBudget<MaterializeStructureCacheKey>,
     live_counter: Arc<AtomicU64>,
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`crate::cache_schema`] for the contract.
@@ -2031,6 +2045,11 @@ pub struct MaterializeStructureDb {
 }
 
 impl MaterializeStructureDb {
+    /// Total entry-count cap. A long-lived editor session that
+    /// re-materialises many owner versions caps here; the oldest
+    /// entries are FIFO-evicted on the write-side `post_publish` hook.
+    pub const MAX_ENTRIES: usize = 2048;
+
     /// Construct a fresh cache.
     #[must_use]
     pub fn new() -> Self {
@@ -2056,9 +2075,18 @@ impl MaterializeStructureDb {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
             canonical_to_keys: DashMap::new(),
+            retention_budget: crate::bounded_query_retention::GlobalRetentionBudget::new(
+                Self::MAX_ENTRIES,
+            ),
             live_counter,
             schema_version,
         }
+    }
+
+    /// Configured total entry-count cap.
+    #[must_use]
+    pub fn retention_cap(&self) -> usize {
+        self.retention_budget.cap()
     }
 
     /// Read-only test accessor for the shared
@@ -2109,6 +2137,8 @@ impl MaterializeStructureDb {
                     .remove_if(key, |_, e| Arc::ptr_eq(e, &entry_arc));
                 if removed.is_some() {
                     self.live_counter.fetch_sub(1, Ordering::Relaxed);
+                    // Stale entry reaped — drop its retention ledger record.
+                    self.retention_budget.forget(key);
                 }
                 return None;
             }
@@ -2154,6 +2184,8 @@ impl MaterializeStructureDb {
             });
             if removed.is_some() {
                 self.live_counter.fetch_sub(1, Ordering::Relaxed);
+                // Entry gone — drop its retention-budget ledger record.
+                self.retention_budget.forget(key);
                 // Cross-canonical cleanup with ptr_eq — drop the
                 // matching registration in every other canonical's
                 // shard.
@@ -2188,6 +2220,7 @@ impl MaterializeStructureDb {
         let n = self.entries.len() as u64;
         self.entries.clear();
         self.canonical_to_keys.clear();
+        self.retention_budget.clear();
         self.live_counter.fetch_sub(
             n.min(self.live_counter.load(Ordering::Relaxed)),
             Ordering::Relaxed,
@@ -2250,6 +2283,11 @@ impl MaterializeStructureDb {
     /// (`Parse(...)` / `ResolveImports(...)` / `RouteSurface(...)`)
     /// invalidate the entry even when the legacy `DepSignature` does
     /// not name the changed canonical.
+    ///
+    /// Also records the admission against the global retention budget
+    /// and FIFO-evicts the oldest entries once the total exceeds
+    /// [`Self::MAX_ENTRIES`]. Evicting a still-valid entry only causes
+    /// a later recompute; it never produces an incorrect result.
     pub(crate) fn register_post_publish(
         &self,
         key: MaterializeStructureCacheKey,
@@ -2273,6 +2311,35 @@ impl MaterializeStructureDb {
                 .unwrap_or(std::time::Duration::ZERO);
             crate::host_manage::record_family_map_lock_acquisition(lock_wait);
             map.insert(key.clone(), Arc::clone(&registered_legacy));
+        }
+        // Global retention budget: record this admission, FIFO-evict the
+        // oldest entries past the total cap.
+        let seq = crate::bounded_query_retention::next_retention_seq();
+        let victims = self.retention_budget.record_admission(seq, key);
+        for victim in victims {
+            self.evict_budget_victim(&victim);
+        }
+    }
+
+    /// Remove one entry chosen by the retention budget for FIFO
+    /// eviction. Drains the entry's reverse-index registrations under
+    /// every canonical its carrier referenced and decrements the live
+    /// counter, matching the removal-side cleanup the cooperative
+    /// substrate runs for a warm-hit reject.
+    fn evict_budget_victim(&self, victim_key: &MaterializeStructureCacheKey) {
+        let Some((_, entry)) = self.entries.remove(victim_key) else {
+            return;
+        };
+        self.live_counter.fetch_sub(1, Ordering::Relaxed);
+        for canonical in entry.read_set_signature.canonical_ids() {
+            if let Some(shard) = self.canonical_to_keys.get(&canonical) {
+                let mut map = shard.lock();
+                if let Some(existing_sig) = map.get(victim_key) {
+                    if Arc::ptr_eq(existing_sig, &entry.read_set_signature.legacy) {
+                        map.remove(victim_key);
+                    }
+                }
+            }
         }
     }
 
@@ -2329,6 +2396,9 @@ impl MaterializeStructureDb {
                 }
             }
         }
+        // Keep the retention ledger consistent: the entry is gone, so
+        // the budget must not later return its key for eviction.
+        self.retention_budget.forget(key);
     }
 }
 
@@ -2350,6 +2420,7 @@ impl crate::cache_schema::CacheSchemaVersioned for MaterializeStructureDb {
         let count = self.entries.len();
         self.entries.clear();
         self.canonical_to_keys.clear();
+        self.retention_budget.clear();
         if count > 0 {
             self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
         }
@@ -2421,10 +2492,24 @@ pub struct RefCycleResultDb {
     /// of cache keys whose dep_signature references it.
     canonical_to_keys:
         DashMap<Arc<str>, parking_lot::Mutex<rustc_hash::FxHashMap<DeclIdentity, DepSignature>>>,
+    /// Global insertion-ordered total-size budget. The `DeclIdentity`
+    /// key embeds the file whole-hash, so each distinct content version
+    /// produces a fresh entry; the reverse-index drain reclaims only on
+    /// per-canonical invalidation, which an owner-content edit no longer
+    /// triggers. This budget is the routine reclamation path —
+    /// `post_publish` records each admission and FIFO-evicts the oldest
+    /// entries past [`Self::MAX_ENTRIES`].
+    retention_budget: crate::bounded_query_retention::GlobalRetentionBudget<DeclIdentity>,
     live_counter: Arc<AtomicU64>,
 }
 
 impl RefCycleResultDb {
+    /// Total entry-count cap. A long-lived session that re-runs the
+    /// transitive-cycle BFS for many owner versions caps here; the
+    /// oldest entries are FIFO-evicted on the write-side `post_publish`
+    /// hook.
+    pub const MAX_ENTRIES: usize = 2048;
+
     /// Construct with a fresh, unshared `live_counter`. Tests-only.
     #[must_use]
     pub fn new() -> Self {
@@ -2438,8 +2523,17 @@ impl RefCycleResultDb {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
             canonical_to_keys: DashMap::new(),
+            retention_budget: crate::bounded_query_retention::GlobalRetentionBudget::new(
+                Self::MAX_ENTRIES,
+            ),
             live_counter,
         }
+    }
+
+    /// Configured total entry-count cap.
+    #[must_use]
+    pub fn retention_cap(&self) -> usize {
+        self.retention_budget.cap()
     }
 
     /// Internal — get the entries map. Used by the BFS-cache compute
@@ -2485,6 +2579,11 @@ impl RefCycleResultDb {
     /// pattern matches `MaterializeStructureDb`. Bounded by
     /// `read_set_signature.canonical_ids().len() ≤ ~80` (BFS hop cap
     /// + transitive fact set).
+    ///
+    /// Also records the admission against the global retention budget
+    /// and FIFO-evicts the oldest entries once the total exceeds
+    /// [`Self::MAX_ENTRIES`]. Evicting a still-valid entry only causes
+    /// a later recompute; it never produces an incorrect result.
     pub(crate) fn register_post_publish(
         &self,
         key: DeclIdentity,
@@ -2508,6 +2607,35 @@ impl RefCycleResultDb {
                 .unwrap_or(std::time::Duration::ZERO);
             crate::host_manage::record_family_map_lock_acquisition(lock_wait);
             map.insert(key.clone(), Arc::clone(&registered_legacy));
+        }
+        // Global retention budget: record this admission, FIFO-evict the
+        // oldest entries past the total cap.
+        let seq = crate::bounded_query_retention::next_retention_seq();
+        let victims = self.retention_budget.record_admission(seq, key);
+        for victim in victims {
+            self.evict_budget_victim(&victim);
+        }
+    }
+
+    /// Remove one entry chosen by the retention budget for FIFO
+    /// eviction. Drains the entry's reverse-index registrations under
+    /// every canonical its carrier referenced and decrements the live
+    /// counter, matching the removal-side cleanup the cooperative
+    /// substrate runs for a warm-hit reject.
+    fn evict_budget_victim(&self, victim_key: &DeclIdentity) {
+        let Some((_, entry)) = self.entries.remove(victim_key) else {
+            return;
+        };
+        self.live_counter.fetch_sub(1, Ordering::Relaxed);
+        for canonical in entry.read_set_signature.canonical_ids() {
+            if let Some(shard) = self.canonical_to_keys.get(&canonical) {
+                let mut map = shard.lock();
+                if let Some(existing_sig) = map.get(victim_key) {
+                    if Arc::ptr_eq(existing_sig, &entry.read_set_signature.legacy) {
+                        map.remove(victim_key);
+                    }
+                }
+            }
         }
     }
 
@@ -2535,6 +2663,9 @@ impl RefCycleResultDb {
                 }
             }
         }
+        // Keep the retention ledger consistent: the entry is gone, so
+        // the budget must not later return its key for eviction.
+        self.retention_budget.forget(key);
     }
 
     /// Strict-validation peek.
@@ -2569,6 +2700,8 @@ impl RefCycleResultDb {
                     .remove_if(id, |_, e| Arc::ptr_eq(e, &entry_arc));
                 if removed.is_some() {
                     self.live_counter.fetch_sub(1, Ordering::Relaxed);
+                    // Stale entry reaped — drop its retention ledger record.
+                    self.retention_budget.forget(id);
                 }
                 return None;
             }
@@ -2613,6 +2746,8 @@ impl RefCycleResultDb {
             });
             if removed.is_some() {
                 self.live_counter.fetch_sub(1, Ordering::Relaxed);
+                // Entry gone — drop its retention-budget ledger record.
+                self.retention_budget.forget(key);
                 // Cross-canonical cleanup with ptr_eq — drop the
                 // matching registration in every other canonical's
                 // shard so subsequent invalidations do not double-free.
@@ -2641,6 +2776,7 @@ impl RefCycleResultDb {
         let n = self.entries.len() as u64;
         self.entries.clear();
         self.canonical_to_keys.clear();
+        self.retention_budget.clear();
         self.live_counter.fetch_sub(
             n.min(self.live_counter.load(Ordering::Relaxed)),
             Ordering::Relaxed,

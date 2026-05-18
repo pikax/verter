@@ -208,6 +208,25 @@ pub struct SemanticGraphStore {
     /// any `canonical_to_entries` shard mutex. The DashMap shard
     /// boundary is the per-canonical Mutex.
     canonical_to_entries: CanonicalToEntries,
+    /// Global insertion-ordered total-size budget for the family memo.
+    /// Each `FamilyKey` is built from content-derived `SemanticNodeId`s
+    /// / a `DeclIdentity` embedding the file whole-hash, so a content
+    /// edit produces fresh families. The reverse-index drain reclaims
+    /// only on per-canonical invalidation, which an owner-content edit
+    /// no longer triggers — this budget is the routine reclamation:
+    /// publishing a newly-keyed family records an admission and the
+    /// oldest families past the cap are FIFO-evicted write-side.
+    memo_budget: crate::bounded_query_retention::GlobalRetentionBudget<FamilyKey>,
+    /// Global total-size budget for the relation memo. `(source,
+    /// target)` `SemanticNodeId` pairs are content-derived, so the
+    /// relation memo grows with content edits without this cap.
+    relation_budget:
+        crate::bounded_query_retention::GlobalRetentionBudget<(SemanticNodeId, SemanticNodeId)>,
+    /// Global total-size budget for the Vue-macro resolved-named-type
+    /// identity map. `HostResolvedNamedTypeKey` embeds the owner's
+    /// content hash, so each owner content version is a fresh key.
+    named_type_budget:
+        crate::bounded_query_retention::GlobalRetentionBudget<HostResolvedNamedTypeKey>,
 }
 
 /// Γ.B reverse-index type alias. See
@@ -634,7 +653,17 @@ impl SemanticGraphStore {
                     evicted_entries.push(((family.clone(), *slot), entry_carrier));
                 }
             }
-            entries.retain(|_, slots| slots.populated_count() > 0);
+            // A family that loses its last slot is removed outright;
+            // drop its retention-budget ledger record so the budget
+            // does not later return an already-removed family.
+            entries.retain(|family, slots| {
+                if slots.populated_count() > 0 {
+                    true
+                } else {
+                    self.memo_budget.forget(family);
+                    false
+                }
+            });
         }
 
         // For each evicted entry, walk every canonical its carrier
@@ -738,6 +767,19 @@ impl SemanticGraphStore {
         let mut entries = self.entries_lock_diagnosed();
         let removed: usize = entries.values().map(FamilySlots::populated_count).sum();
         entries.clear();
+        drop(entries);
+        // A project-generation reset clears every memo entry — drop the
+        // retention ledgers in lockstep so no budget retains a stale
+        // family / relation / named-type key.
+        self.memo_budget.clear();
+        self.relation_budget.clear();
+        self.named_type_budget.clear();
+        // The node arena's dense storage is append-only across content
+        // edits; a project-generation reset is the safe point to
+        // reclaim it. With every memo entry, relation judgement, and
+        // named-type mapping cleared above, no stored `SemanticNodeId`
+        // survives, so reusing the arena's id space is sound here.
+        self.arena.reset();
         removed
     }
 
@@ -752,7 +794,18 @@ impl SemanticGraphStore {
         elements: Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
     ) -> SemanticNodeId {
         let node_id = self.intern_node(SemanticNodeData::VueMacroElements(elements));
-        self.named_type_index.insert(key, node_id);
+        let is_new = !self.named_type_index.contains_key(&key);
+        self.named_type_index.insert(key.clone(), node_id);
+        // Global retention budget: a newly-keyed resolved-named-type
+        // entry records an admission; the oldest entries past the cap
+        // are FIFO-evicted. The key embeds the owner's content hash, so
+        // each owner content version is a distinct, accumulating key.
+        if is_new {
+            let seq = crate::bounded_query_retention::next_retention_seq();
+            for victim in self.named_type_budget.record_admission(seq, key) {
+                self.named_type_index.remove(&victim);
+            }
+        }
         node_id
     }
 
@@ -795,6 +848,7 @@ impl SemanticGraphStore {
     /// identity map was the only external reachability path to them.
     pub fn clear_resolved_named_types(&self) {
         self.named_type_index.clear();
+        self.named_type_budget.clear();
     }
 
     /// Remove every entry in the Vue macro resolution identity map whose
@@ -804,14 +858,19 @@ impl SemanticGraphStore {
     /// Returns the number of entries evicted.
     pub fn invalidate_resolved_named_types_for_canonical(&self, canonical_id: &str) -> usize {
         let mut removed = 0usize;
+        let mut forgotten: Vec<HostResolvedNamedTypeKey> = Vec::new();
         self.named_type_index.retain(|key, _| {
             if key.canonical_id.as_ref() == canonical_id {
                 removed += 1;
+                forgotten.push(key.clone());
                 false
             } else {
                 true
             }
         });
+        for key in &forgotten {
+            self.named_type_budget.forget(key);
+        }
         removed
     }
 
@@ -884,14 +943,24 @@ impl SemanticGraphStore {
         self_root_canonicals: Arc<[Arc<str>]>,
         result: crate::semantic_query::RelationResult,
     ) {
+        let key = (source, target);
+        let is_new = !self.relation_memo.contains_key(&key);
         self.relation_memo.insert(
-            (source, target),
+            key,
             RelationMemoEntry {
                 carrier,
                 self_root_canonicals,
                 result,
             },
         );
+        // Global retention budget: a newly-keyed relation records an
+        // admission; the oldest relations past the cap are FIFO-evicted.
+        if is_new {
+            let seq = crate::bounded_query_retention::next_retention_seq();
+            for victim in self.relation_budget.record_admission(seq, key) {
+                self.relation_memo.remove(&victim);
+            }
+        }
     }
 
     /// Count of relation memo entries. Useful for tests and counters.
@@ -905,6 +974,7 @@ impl SemanticGraphStore {
     /// across a version boundary.
     pub fn clear_relation_memo(&self) {
         self.relation_memo.clear();
+        self.relation_budget.clear();
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -2351,6 +2421,9 @@ impl SemanticGraphStore {
             record_cold_abort_swept(&self.stats);
             return;
         }
+        // Record whether this family is newly entering the memo so the
+        // retention budget tracks one ledger record per family.
+        let family_was_new = !entries.contains_key(&family);
         let populated_slots = entries
             .entry(family.clone())
             .or_default()
@@ -2386,6 +2459,9 @@ impl SemanticGraphStore {
             &populated_slots,
             &read_set_signature,
         );
+        if family_was_new && !populated_slots.is_empty() {
+            self.note_memo_family_admission(&family);
+        }
     }
 
     /// Variant of [`Self::warm_publish_one`]: publish
@@ -2454,6 +2530,7 @@ impl SemanticGraphStore {
             walker_diagnostics: Arc::from([]),
         };
         let mut entries = self.entries_lock_diagnosed();
+        let family_was_new = !entries.contains_key(&family);
         let populated_slots = entries
             .entry(family.clone())
             .or_default()
@@ -2477,6 +2554,9 @@ impl SemanticGraphStore {
             &populated_slots,
             &read_set_signature,
         );
+        if family_was_new && !populated_slots.is_empty() {
+            self.note_memo_family_admission(&family);
+        }
     }
 
     /// Γ.B reverse-index registration helper. Shared by
@@ -2537,6 +2617,64 @@ impl SemanticGraphStore {
                     .unwrap_or(std::time::Duration::ZERO);
                 crate::host_manage::record_family_map_lock_acquisition(lock_wait);
                 map.insert((family.clone(), *populated), Arc::clone(&registered_legacy));
+            }
+        }
+    }
+
+    /// Record a newly-admitted family against the memo retention
+    /// budget and FIFO-evict the oldest families once the family count
+    /// exceeds the budget cap. Evicting a still-valid family only forces
+    /// a recompute; it never yields an incorrect result.
+    ///
+    /// Called exactly once per family that newly enters the `entries`
+    /// memo (a re-publish into a different slot of an already-present
+    /// family does not re-record).
+    fn note_memo_family_admission(&self, family: &FamilyKey) {
+        let seq = crate::bounded_query_retention::next_retention_seq();
+        let victims = self.memo_budget.record_admission(seq, family.clone());
+        for victim in victims {
+            self.evict_memo_family_for_budget(&victim);
+        }
+    }
+
+    /// Remove one whole family chosen by the retention budget for FIFO
+    /// eviction: drop it from the `entries` memo and drain its
+    /// reverse-index registrations under every canonical its carrier
+    /// referenced. Mirrors the per-canonical drain `invalidate_canonical`
+    /// performs for one entry, but keyed by the budget's victim family.
+    fn evict_memo_family_for_budget(&self, victim: &FamilyKey) {
+        const ALL_SLOTS: [ModeSlot; 6] = [
+            ModeSlot::Single,
+            ModeSlot::Identity,
+            ModeSlot::Navigate,
+            ModeSlot::Shallow,
+            ModeSlot::Expanded,
+            ModeSlot::Skeleton,
+        ];
+        // Drop the family from the memo, capturing each populated
+        // slot's carrier so the reverse-index registrations can be
+        // drained.
+        let evicted_carriers: Vec<(ModeSlot, crate::fact_signature_helpers::ReadSetSignature)> = {
+            let mut entries = self.entries_lock_diagnosed();
+            match entries.remove(victim) {
+                Some(slots) => ALL_SLOTS
+                    .iter()
+                    .filter_map(|&slot| {
+                        slots
+                            .slot(slot)
+                            .map(|entry| (slot, entry.read_set_signature.clone()))
+                    })
+                    .collect(),
+                None => return,
+            }
+        };
+        // Lock order: `entries` released above before any
+        // `canonical_to_entries` shard mutex is acquired.
+        for (slot, carrier) in &evicted_carriers {
+            for canonical in carrier.canonical_ids() {
+                if let Some(shard) = self.canonical_to_entries.get(&canonical) {
+                    shard.value().lock().remove(&(victim.clone(), *slot));
+                }
             }
         }
     }

@@ -102,14 +102,13 @@ fn published_facts(host: &VerterHost, owner: &str) -> Vec<FactVersionRef> {
         .expect("owner must have an IndexedReady entry");
     let key = crate::component_meta_result_db::ComponentMetaResultKey {
         owner_canonical: Arc::from(owner),
-        owner_whole_hash: whole_hash,
         options_fingerprint: crate::host_manage::component_meta_options_fingerprint(
             &crate::host_manage::ComponentMetaOptions::default(),
         ),
     };
     host.project_type_store()
         .component_meta_results()
-        .get(&key)
+        .get(&key, whole_hash)
         .expect("a ComponentMetaResultEntry must be published for the owner")
         .read_set_signature
         .facts

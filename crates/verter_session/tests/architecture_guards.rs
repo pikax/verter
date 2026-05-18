@@ -3747,6 +3747,13 @@ mod foundations_guards {
         // so cross-file edits invalidate the consumer's CompileSlot
         // via warm-hit fact-validation without eager invalidation.
         "pub(crate) mod compile_fact_emission",
+        // Shared bounded query-identity retention substrate — the
+        // `GlobalRetentionBudget` FIFO total-size cap + the
+        // `BoundedCandidateMap` per-slot candidate list. Crate-private:
+        // consumed only by `component_meta_result_db`,
+        // `component_meta_caches`, and `semantic_query_memo` within this
+        // crate; no downstream consumer reaches it directly.
+        "pub(crate) mod bounded_query_retention",
         "pub mod cooperative_admission",
         // R3/R26/R28 — fact-validation helpers shared by the inner
         // component-meta caches (Family A/B). Carries

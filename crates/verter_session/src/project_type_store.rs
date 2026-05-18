@@ -1821,9 +1821,6 @@ impl ProjectTypeStore {
         let owner_import_surfaces =
             OwnerImportSurfaceDb::with_counter(Arc::clone(&counters.owner_import_live));
         let component_meta_results = ComponentMetaResultDb::with_counters(
-            ComponentMetaResultDb::<
-                crate::component_meta_result_db::CachedComponentMetaResult,
-            >::DEFAULT_CAPACITY,
             Arc::clone(&counters.component_meta_live),
             Arc::clone(&counters.component_meta_stale_sweeps),
         );
@@ -2911,9 +2908,9 @@ mod tests {
         store.component_meta_results().insert(
             crate::component_meta_result_db::ComponentMetaResultKey {
                 owner_canonical: Arc::from("/w/o.vue"),
-                owner_whole_hash: hash,
                 options_fingerprint: [0u8; 16],
             },
+            hash,
             crate::component_meta_result_db::ComponentMetaResultEntry {
                 payload: Arc::new(crate::component_meta_result_db::CachedComponentMetaResult {
                     analysis: empty_component_meta_analysis(),

@@ -331,9 +331,9 @@ impl VerterHost {
         canonical: &str,
     ) -> Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis> {
         let shallow = self.shallow_file_state(canonical)?;
+        let owner_whole_hash = shallow.whole_hash;
         let key = crate::component_meta_result_db::ComponentMetaResultKey {
             owner_canonical: Arc::from(canonical),
-            owner_whole_hash: shallow.whole_hash,
             options_fingerprint: component_meta_options_fingerprint(
                 &ComponentMetaOptions::default(),
             ),
@@ -359,7 +359,7 @@ impl VerterHost {
         let entry = self
             .project_type_store
             .component_meta_results()
-            .get_with_view(self, &store_view, &key)?;
+            .get_with_view(self, &store_view, &key, owner_whole_hash)?;
         let validator = HostFenceValidator {
             host: self,
             view: session_view.as_ref(),
@@ -428,7 +428,6 @@ impl VerterHost {
         })?;
         let key = crate::component_meta_result_db::ComponentMetaResultKey {
             owner_canonical: Arc::from(canonical),
-            owner_whole_hash,
             options_fingerprint: component_meta_options_fingerprint(
                 &ComponentMetaOptions::default(),
             ),
@@ -442,7 +441,7 @@ impl VerterHost {
         let entry = self
             .project_type_store
             .component_meta_results()
-            .get_with_view(self, &store_view, &key)?;
+            .get_with_view(self, &store_view, &key, owner_whole_hash)?;
         let validator = HostFenceValidator { host: self, view };
         use crate::completion_fence::FenceValidator;
         let dep_sig_valid = entry
@@ -490,7 +489,6 @@ impl VerterHost {
         };
         let key = crate::component_meta_result_db::ComponentMetaResultKey {
             owner_canonical: Arc::from(canonical),
-            owner_whole_hash: whole_hash,
             options_fingerprint: component_meta_options_fingerprint(
                 &ComponentMetaOptions::default(),
             ),
@@ -515,6 +513,7 @@ impl VerterHost {
         let admitted_signature = strip_owner_route_fact(canonical, &fact_dep_signature);
         self.project_type_store.component_meta_results().insert(
             key,
+            whole_hash,
             crate::component_meta_result_db::ComponentMetaResultEntry {
                 payload: Arc::new(cached),
                 read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
@@ -562,7 +561,6 @@ impl VerterHost {
         let whole_hash = shallow.whole_hash;
         let key = crate::component_meta_result_db::ComponentMetaResultKey {
             owner_canonical: Arc::from(canonical),
-            owner_whole_hash: whole_hash,
             options_fingerprint: component_meta_options_fingerprint(
                 &ComponentMetaOptions::default(),
             ),
@@ -587,6 +585,7 @@ impl VerterHost {
         let admitted_signature = strip_owner_route_fact(canonical, &fact_dep_signature);
         self.project_type_store.component_meta_results().insert(
             key,
+            whole_hash,
             crate::component_meta_result_db::ComponentMetaResultEntry {
                 payload: Arc::new(cached),
                 read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
@@ -898,9 +897,9 @@ impl VerterHost {
         crate::meta_resolve::ResolvedComponentMetaState,
     )> {
         let shallow = self.shallow_file_state(canonical)?;
+        let owner_whole_hash = shallow.whole_hash;
         let key = crate::component_meta_result_db::ComponentMetaResultKey {
             owner_canonical: Arc::from(canonical),
-            owner_whole_hash: shallow.whole_hash,
             options_fingerprint: component_meta_options_fingerprint(
                 &ComponentMetaOptions::default(),
             ),
@@ -914,7 +913,7 @@ impl VerterHost {
         let entry = self
             .project_type_store
             .component_meta_results()
-            .get_with_view(self, &store_view, &key)?;
+            .get_with_view(self, &store_view, &key, owner_whole_hash)?;
         // Bind a host-rooted view; the warm-cache fast path on
         // `VerterHost` has no session context, so the overlay-free
         // `HostViewRef` is the correct read substrate.

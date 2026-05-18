@@ -8,17 +8,19 @@
 //! Why this class needs its own gate. Every mutation here routes
 //! through the production [`harness::upsert`] helper (plain
 //! `VerterHost::upsert`), which performs no own-canonical
-//! query-identity cache drain. The final `ComponentMetaResultDb` is
-//! keyed by `owner_whole_hash`, so an owner edit shifts that key and a
-//! post-edit `get_component_meta` cannot warm-hit the stale *result*
-//! entry. But the cold recompute the key-miss triggers walks the
-//! query-identity-keyed layer — `semantic_graph`, `declaration_lookup_db`,
-//! `materialize_structure_db`, the prepared DBs — whose keys are
-//! `(owner_canonical, type_name, ...)` with NO owner whole-hash. Those
-//! entries physically survive an owner-self edit. The ONLY mechanism
-//! that can reject a stale query-identity entry for the owner canonical
-//! is lazy self-version-root validation on the cold-recompute read
-//! path.
+//! query-identity cache drain. The final `ComponentMetaResultDb` slot
+//! key is content-free `(owner_canonical, options)`; the owner content
+//! version is carried by the per-slot candidate, so an owner edit
+//! produces a new candidate discriminant and a post-edit
+//! `get_component_meta` finds no candidate matching the new version —
+//! it cannot warm-hit the stale *result*. But the cold recompute the
+//! candidate-miss triggers walks the query-identity-keyed layer —
+//! `semantic_graph`, `declaration_lookup_db`, `materialize_structure_db`,
+//! the prepared DBs — whose keys are `(owner_canonical, type_name, ...)`
+//! with NO owner whole-hash. Those entries physically survive an
+//! owner-self edit. The ONLY mechanism that can reject a stale
+//! query-identity entry for the owner canonical is lazy
+//! self-version-root validation on the cold-recompute read path.
 //!
 //! Each test therefore DISCRIMINATES: a substrate lacking the
 //! owner-canonical self-version root would serve a stale

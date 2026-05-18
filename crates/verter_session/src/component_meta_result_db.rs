@@ -7,13 +7,26 @@
 //!
 //! ## Contract
 //!
-//! - Key: [`ComponentMetaResultKey`] =
-//!   `(owner_canonical, owner_whole_hash, options_fingerprint)`.
-//! - Value: immutable `Arc` payloads — the native component-meta result
-//!   and any strictly projected derivatives.
-//! - **Transitive dependency validation on lookup**: every warm entry
-//!   stores the exact [`DepSignature`] it observed at build time; lookups
-//!   revalidate that signature against the live host.
+//! - **Slot key:** [`ComponentMetaResultKey`] =
+//!   `(owner_canonical, options_fingerprint)` — content-free, per the
+//!   query-identity-cache model. The owner's content version
+//!   (`owner_whole_hash`) is NOT part of the slot key; it is carried by
+//!   the candidate and validated strictly on read.
+//! - **Slot value:** a bounded candidate list. Concurrent overlay
+//!   variants of the same owner coexist as candidates in one slot,
+//!   capped at [`ComponentMetaResultDb::PER_SLOT_CANDIDATE_CAP`]; a
+//!   global insertion-ordered budget
+//!   ([`ComponentMetaResultDb::GLOBAL_BUDGET`]) caps the total candidate
+//!   count across all slots. Eviction is FIFO (oldest insertion first);
+//!   evicting a still-valid candidate only forces a recompute. The
+//!   bounded substrate is the routine memory-reclamation path — old
+//!   per-version entries do not accumulate unbounded in a long-lived
+//!   session.
+//! - **Candidate payload:** an immutable `Arc` payload — the native
+//!   component-meta result and any strictly projected derivatives — plus
+//!   the exact [`crate::fact_signature_helpers::ReadSetSignature`] the
+//!   build observed. Lookups revalidate that signature against the live
+//!   host.
 //! - **`options_fingerprint` is a stable `Hash16`** produced from a
 //!   manually-stable serialization of output-affecting fields only —
 //!   never request ids, trace flags, or caller metadata.
@@ -24,9 +37,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use dashmap::DashMap;
 use verter_semantic::analysis::Hash16;
 
+use crate::bounded_query_retention::BoundedCandidateMap;
 use crate::resolver_core::StoreView;
 use crate::types::ProjectionMode;
 
@@ -36,11 +49,14 @@ use crate::types::ProjectionMode;
 /// invent a parallel hash.
 pub type ComponentMetaOptionsFingerprint = Hash16;
 
-/// Cache key for the final component-meta result.
+/// Content-free slot key for the final component-meta result.
+///
+/// The owner's content version is intentionally absent — concurrent
+/// content versions of the same owner coexist as candidates inside the
+/// slot this key addresses (the documented query-identity-cache model).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ComponentMetaResultKey {
     pub owner_canonical: Arc<str>,
-    pub owner_whole_hash: Hash16,
     pub options_fingerprint: ComponentMetaOptionsFingerprint,
 }
 
@@ -197,13 +213,21 @@ impl<P> Clone for ComponentMetaResultEntry<P> {
 /// Host-owned final result cache. Generic over the payload type so native
 /// and compat projections can share the same backing without double-caching
 /// semantic meaning.
+///
+/// Backed by [`BoundedCandidateMap`]: the slot key is the content-free
+/// [`ComponentMetaResultKey`], the per-candidate discriminant is the
+/// owner whole-hash, and the candidate payload is a
+/// [`ComponentMetaResultEntry`]. Per-slot and global caps reclaim old
+/// per-version entries write-side so a long-lived session does not grow
+/// the cache monotonically with the owner edit count.
 pub struct ComponentMetaResultDb<P> {
-    entries: DashMap<ComponentMetaResultKey, ComponentMetaResultEntry<P>>,
-    /// Soft size cap — when exceeded, bounded cleanup slices run on the
-    /// top-level query exit path. Cleanup in is
-    /// `stale-first, LRU next`; precise policy lives with the dispatcher.
-    capacity: usize,
+    inner: BoundedCandidateMap<ComponentMetaResultKey, Hash16, ComponentMetaResultEntry<P>>,
+    /// Tracks the substrate's live candidate count. Synced from
+    /// [`BoundedCandidateMap::live_count`] after every mutation so the
+    /// `ProjectTypeStore` counter snapshot reports true occupancy.
     live_counter: Arc<AtomicU64>,
+    /// Counts every eviction / removal — replaces the historical
+    /// "stale sweep" counter.
     stale_sweeps: Arc<AtomicU64>,
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`crate::cache_schema`] for the contract.
@@ -211,33 +235,30 @@ pub struct ComponentMetaResultDb<P> {
 }
 
 impl<P> ComponentMetaResultDb<P> {
-    /// Default capacity — editor sessions with many owner/options
-    /// combinations cap here before triggering bounded stale cleanup. Tuned
-    /// later against live profiling; 512 matches the order-of-magnitude
-    /// called out in the plan's memory budget.
-    pub const DEFAULT_CAPACITY: usize = 512;
+    /// Per-slot candidate cap. One owner + one options fingerprint is one
+    /// slot; concurrent content versions of that owner are candidates in
+    /// the slot, capped here. A fifth version evicts the oldest. Four
+    /// covers the `{current, previous, two concurrent overlay}` working
+    /// set (architecture rule R20 multi-candidate model) — the shared
+    /// substrate's [`crate::bounded_query_retention::DEFAULT_CANDIDATE_CAP`].
+    pub const PER_SLOT_CANDIDATE_CAP: usize = crate::bounded_query_retention::DEFAULT_CANDIDATE_CAP;
+
+    /// Global total-candidate budget across every slot. A long-lived
+    /// editor session touching many distinct owners caps here before
+    /// FIFO eviction reclaims the oldest candidates. Tuned against the
+    /// plan's memory budget order-of-magnitude.
+    pub const GLOBAL_BUDGET: usize = 512;
 
     #[must_use]
     pub fn new() -> Self {
-        Self::with_capacity(Self::DEFAULT_CAPACITY)
-    }
-
-    #[must_use]
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self::with_counters(
-            capacity,
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-        )
+        Self::with_counters(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)))
     }
 
     pub(crate) fn with_counters(
-        capacity: usize,
         live_counter: Arc<AtomicU64>,
         stale_sweeps: Arc<AtomicU64>,
     ) -> Self {
         Self::with_counters_and_schema_version(
-            capacity,
             live_counter,
             stale_sweeps,
             crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
@@ -249,7 +270,6 @@ impl<P> ComponentMetaResultDb<P> {
     #[cfg(any(test, debug_assertions))]
     pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
         Self::with_counters_and_schema_version(
-            Self::DEFAULT_CAPACITY,
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
             schema_version,
@@ -257,39 +277,63 @@ impl<P> ComponentMetaResultDb<P> {
     }
 
     fn with_counters_and_schema_version(
-        capacity: usize,
         live_counter: Arc<AtomicU64>,
         stale_sweeps: Arc<AtomicU64>,
         schema_version: u32,
     ) -> Self {
         Self {
-            entries: DashMap::new(),
-            capacity,
+            inner: BoundedCandidateMap::with_caps(
+                Self::PER_SLOT_CANDIDATE_CAP,
+                Self::GLOBAL_BUDGET,
+            ),
             live_counter,
             stale_sweeps,
             schema_version,
         }
     }
 
-    /// Cache size target. Exceeding it triggers bounded stale cleanup.
-    #[must_use]
-    pub fn capacity(&self) -> usize {
-        self.capacity
+    /// Sync the external live counter to the substrate's authoritative
+    /// candidate count. Called after every mutation.
+    fn sync_live_counter(&self) {
+        self.live_counter
+            .store(self.inner.live_count() as u64, Ordering::Relaxed);
     }
 
-    /// Strict lookup — returns the cached entry when present. The caller
-    /// is responsible for revalidating the dep signature before publishing
-    /// the result; this split keeps the cache decoupled from the live host.
-    ///
-    /// Lookups against a Db whose `schema_version` does not match the current
-    /// [`crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION`] return `None`
-    /// without consulting the entry map.
+    /// Per-slot candidate cap currently configured on the substrate.
     #[must_use]
-    pub fn get(&self, key: &ComponentMetaResultKey) -> Option<ComponentMetaResultEntry<P>> {
+    pub fn per_slot_candidate_cap(&self) -> usize {
+        self.inner.per_slot_cap()
+    }
+
+    /// Global total-candidate budget currently configured on the
+    /// substrate.
+    #[must_use]
+    pub fn global_budget(&self) -> usize {
+        self.inner.global_cap()
+    }
+
+    /// Strict lookup — returns the cached entry for the given owner
+    /// content version when a matching candidate is present. The caller
+    /// is responsible for revalidating the dep signature before
+    /// publishing the result; this split keeps the cache decoupled from
+    /// the live host.
+    ///
+    /// Lookups against a Db whose `schema_version` does not match the
+    /// current [`crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION`]
+    /// return `None`.
+    #[must_use]
+    pub fn get(
+        &self,
+        key: &ComponentMetaResultKey,
+        owner_whole_hash: Hash16,
+    ) -> Option<ComponentMetaResultEntry<P>> {
         if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
-        let result = self.entries.get(key).map(|v| v.clone());
+        let result = self
+            .inner
+            .get_candidate(key, &owner_whole_hash)
+            .map(|c| c.value.clone());
         if let Some(ctx) = crate::request_context::current_request_context() {
             if result.is_some() {
                 ctx.cache_counters
@@ -306,55 +350,39 @@ impl<P> ComponentMetaResultDb<P> {
         result
     }
 
-    /// View-aware lookup. Returns the cached entry only when the entry's
+    /// View-aware lookup. Returns the cached entry only when a candidate
+    /// matches the owner content version AND that candidate's
     /// `fact_dep_signature` validates under the supplied [`StoreView`];
     /// otherwise returns `None` (caller falls through to cold recompute).
     ///
-    /// Fact-precise validation is the primary cache oracle: a fact version
-    /// shift on any transitively observed cross-file dep invalidates the
-    /// warm hit without consulting the legacy `dep_signature` whole-hash
-    /// validator. The legacy signature continues to be carried on the
-    /// entry for the dual-path window pending follow-up retirement, but
-    /// `get_with_view` does NOT consult it — callers that need the
-    /// legacy oracle revalidate separately.
+    /// Fact-precise validation is the primary cache oracle: a fact
+    /// version shift on any transitively observed cross-file dep
+    /// invalidates the warm hit without consulting the legacy
+    /// `dep_signature` whole-hash validator. The legacy signature
+    /// continues to be carried on the candidate; `get_with_view` does NOT
+    /// consult it — callers that need the legacy oracle revalidate
+    /// separately.
     ///
     /// Increments [`crate::types::MetaProvenance::component_meta_result_cache_hits`]
     /// on a validated warm return and
     /// [`crate::types::MetaProvenance::component_meta_result_cache_misses`]
-    /// on every miss path (absent entry OR fact-validation failure). The
-    /// caller threads its own host into the call so the counters live on
-    /// the host the entries belong to.
-    ///
-    /// TODO(follow-up — Block 1.B reviewer-substrate P1.3): the
-    /// `_cache_hits` increment fires AFTER the fact-precise oracle
-    /// validates but BEFORE the caller's legacy `dep_signature`
-    /// validator runs. If `view.validates_fact_signature` accepts and
-    /// the caller-side `HostFenceValidator` subsequently rejects, the
-    /// caller treats the lookup as a miss but `_cache_hits` was
-    /// already bumped — over-counting by 1 in the (post-fact-pass)
-    /// AND (legacy-reject) intersection. Today's tests do not trigger
-    /// this case (the two oracles agree on tested workloads). The
-    /// substrate-level fix is best deferred until Block 6.B retires
-    /// the legacy `dep_signature` field altogether and the two
-    /// oracles collapse onto one. Until then, treat `_cache_hits` as
-    /// an upper bound on warm returns served by the fact-precise
-    /// oracle (legacy rejections are not deducted).
+    /// on every miss path (absent candidate OR fact-validation failure).
     #[must_use]
     pub fn get_with_view<V: StoreView + ?Sized>(
         &self,
         host: &crate::VerterHost,
         view: &V,
         key: &ComponentMetaResultKey,
+        owner_whole_hash: Hash16,
     ) -> Option<Arc<ComponentMetaResultEntry<P>>> {
         let bump_miss = |host: &crate::VerterHost| {
             host.provenance()
                 .component_meta_result_cache_misses
                 .fetch_add(1, Ordering::Relaxed);
             // Keep the per-request `cache_layers.component_meta` audit
-            // counter in sync with the legacy `.get()` accessor so
-            // joiner-accounting assertions (e.g.,
-            // `sixteen_cold_concurrent_identical_requests_attribute_per_joiner_contract`)
-            // continue to attribute a miss to the cold winner.
+            // counter in sync with the `.get()` accessor so
+            // joiner-accounting assertions continue to attribute a miss
+            // to the cold winner.
             if let Some(ctx) = crate::request_context::current_request_context() {
                 ctx.cache_counters
                     .component_meta
@@ -366,8 +394,10 @@ impl<P> ComponentMetaResultDb<P> {
             bump_miss(host);
             return None;
         }
-        let entry = match self.entries.get(key) {
-            Some(v) => v.clone(),
+        // Clone the candidate `Arc` out of the slot before validating —
+        // a concurrent eviction cannot invalidate this borrow.
+        let candidate = match self.inner.get_candidate(key, &owner_whole_hash) {
+            Some(c) => c,
             None => {
                 bump_miss(host);
                 return None;
@@ -375,19 +405,13 @@ impl<P> ComponentMetaResultDb<P> {
         };
         // Fact-precise validation: every entry in the signature must
         // validate under the live view. An empty signature trivially
-        // passes (entries published outside an installed tracer scope
-        // — typically test fixtures — fall through to the legacy
-        // validator on the caller side).
-        if !view.validates_fact_signature(&entry.read_set_signature.facts) {
+        // passes (entries published outside an installed tracer scope —
+        // typically test fixtures — fall through to the legacy validator
+        // on the caller side).
+        if !view.validates_fact_signature(&candidate.value.read_set_signature.facts) {
             bump_miss(host);
             return None;
         }
-        // The legacy per-request cache_counters (separate from
-        // host-level provenance) tracked raw map hits/misses regardless
-        // of fact validation. The view-aware accessor bumps the
-        // host-level provenance counters used by Block 1.B test
-        // discrimination AND keeps the per-request counters in sync
-        // for audit consumers.
         if let Some(ctx) = crate::request_context::current_request_context() {
             ctx.cache_counters
                 .component_meta
@@ -397,29 +421,49 @@ impl<P> ComponentMetaResultDb<P> {
         host.provenance()
             .component_meta_result_cache_hits
             .fetch_add(1, Ordering::Relaxed);
-        Some(Arc::new(entry))
+        Some(Arc::new(candidate.value.clone()))
     }
 
-    /// Insert a final result entry. Cancelled, budget-exceeded, or partial
-    /// results must **not** be passed here — callers are responsible for
-    /// filtering. The cache does not inspect the payload.
-    pub fn insert(&self, key: ComponentMetaResultKey, entry: ComponentMetaResultEntry<P>) {
-        let prev = self.entries.insert(key, entry);
-        if prev.is_some() {
+    /// Insert a final result entry for the given owner content version.
+    /// Cancelled, budget-exceeded, or partial results must **not** be
+    /// passed here — callers are responsible for filtering. The cache
+    /// does not inspect the payload.
+    ///
+    /// The owner whole-hash is the candidate discriminant: re-inserting
+    /// the same `(key, owner_whole_hash)` refreshes the candidate in
+    /// place; a new owner content version appends a candidate to the
+    /// slot, and the bounded substrate evicts the oldest candidate /
+    /// global-oldest entry to stay within the per-slot and global caps.
+    pub fn insert(
+        &self,
+        key: ComponentMetaResultKey,
+        owner_whole_hash: Hash16,
+        entry: ComponentMetaResultEntry<P>,
+    ) {
+        let evicted = self.inner.admit(key, owner_whole_hash, entry);
+        if evicted > 0 {
+            self.stale_sweeps
+                .fetch_add(evicted as u64, Ordering::Relaxed);
+        }
+        self.sync_live_counter();
+    }
+
+    /// Remove the candidate for one owner content version. Returns the
+    /// removed entry when present.
+    pub fn remove(
+        &self,
+        key: &ComponentMetaResultKey,
+        owner_whole_hash: Hash16,
+    ) -> Option<ComponentMetaResultEntry<P>> {
+        let candidate = self.inner.get_candidate(key, &owner_whole_hash)?;
+        let removed = self.inner.evict_candidate(key, candidate.seq);
+        if removed {
             self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
+            self.sync_live_counter();
+            Some(candidate.value.clone())
         } else {
-            self.live_counter.fetch_add(1, Ordering::Relaxed);
+            None
         }
-    }
-
-    /// Remove a key outright.
-    pub fn remove(&self, key: &ComponentMetaResultKey) -> Option<ComponentMetaResultEntry<P>> {
-        let removed = self.entries.remove(key).map(|(_, v)| v);
-        if removed.is_some() {
-            self.live_counter.fetch_sub(1, Ordering::Relaxed);
-            self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
-        }
-        removed
     }
 
     /// Drop every cached entry. Called on project-generation bumps
@@ -427,55 +471,39 @@ impl<P> ComponentMetaResultDb<P> {
     /// depend on routes and intrinsic resolution, which project-shape
     /// changes may shift.
     pub fn invalidate_all(&self) {
-        let count = self.entries.len();
-        self.entries.clear();
-        if count > 0 {
-            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
-            self.stale_sweeps.fetch_add(count as u64, Ordering::Relaxed);
-        }
-    }
-
-    /// Invalidate every cached entry whose owner canonical matches
-    /// `owner_canonical`, across all owner whole-hashes, query kinds, and
-    /// options fingerprints. Called on owner-file content changes. Returns
-    /// the number of entries evicted.
-    pub fn invalidate_owner(&self, owner_canonical: &str) -> usize {
-        let mut removed = 0usize;
-        self.entries.retain(|key, _| {
-            if key.owner_canonical.as_ref() == owner_canonical {
-                removed += 1;
-                false
-            } else {
-                true
-            }
-        });
+        let removed = self.inner.clear();
         if removed > 0 {
-            self.live_counter
-                .fetch_sub(removed as u64, Ordering::Relaxed);
             self.stale_sweeps
                 .fetch_add(removed as u64, Ordering::Relaxed);
         }
+        self.sync_live_counter();
+    }
+
+    /// Invalidate every cached entry whose owner canonical matches
+    /// `owner_canonical`, across all owner whole-hashes and options
+    /// fingerprints. Called on owner-file content changes. Returns the
+    /// number of candidates evicted.
+    pub fn invalidate_owner(&self, owner_canonical: &str) -> usize {
+        let removed = self
+            .inner
+            .retain_slots(|key| key.owner_canonical.as_ref() != owner_canonical);
+        if removed > 0 {
+            self.stale_sweeps
+                .fetch_add(removed as u64, Ordering::Relaxed);
+        }
+        self.sync_live_counter();
         removed
     }
 
+    /// Total live candidate count across every slot.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.inner.live_count()
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Iterate through keys present in the cache. Primarily used by the
-    /// bounded cleanup helper below.
-    #[must_use]
-    pub fn keys(&self) -> Vec<ComponentMetaResultKey> {
-        self.entries
-            .iter()
-            .map(|entry| entry.key().clone())
-            .collect()
+        self.inner.live_count() == 0
     }
 
     /// Test-only synthetic-entry inserter used exclusively by
@@ -488,14 +516,13 @@ impl<P> ComponentMetaResultDb<P> {
     pub fn insert_synthetic_for_schema_test_with_payload(&self, marker: &str, payload: P) {
         let key = ComponentMetaResultKey {
             owner_canonical: Arc::from(marker),
-            owner_whole_hash: [0u8; 16],
             options_fingerprint: [0u8; 16],
         };
         let entry = ComponentMetaResultEntry {
             payload: Arc::new(payload),
             read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
         };
-        self.insert(key, entry);
+        self.insert(key, [0u8; 16], entry);
     }
 }
 
@@ -525,13 +552,12 @@ impl ComponentMetaResultDb<CachedComponentMetaResult> {
             .unwrap_or_default();
         let key = ComponentMetaResultKey {
             owner_canonical: std::sync::Arc::from(owner_canonical),
-            owner_whole_hash: whole_hash,
             options_fingerprint: crate::host_manage::component_meta_options_fingerprint(
                 &crate::host_manage::ComponentMetaOptions::default(),
             ),
         };
         let backing = store.component_meta_results();
-        match backing.get(&key) {
+        match backing.get(&key, whole_hash) {
             Some(entry) => entry
                 .read_set_signature
                 .legacy
@@ -559,12 +585,14 @@ impl ComponentMetaResultDb<CachedComponentMetaResult> {
             .unwrap_or_default();
         let key = ComponentMetaResultKey {
             owner_canonical: std::sync::Arc::from(owner_canonical),
-            owner_whole_hash: whole_hash,
             options_fingerprint: crate::host_manage::component_meta_options_fingerprint(
                 &crate::host_manage::ComponentMetaOptions::default(),
             ),
         };
-        store.component_meta_results().get(&key).is_some()
+        store
+            .component_meta_results()
+            .get(&key, whole_hash)
+            .is_some()
     }
 }
 
@@ -583,12 +611,11 @@ impl<P> crate::cache_schema::CacheSchemaVersioned for ComponentMetaResultDb<P> {
         if self.schema_version == current {
             return 0;
         }
-        let count = self.entries.len();
-        self.entries.clear();
+        let count = self.inner.clear();
         if count > 0 {
-            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
             self.stale_sweeps.fetch_add(count as u64, Ordering::Relaxed);
         }
+        self.sync_live_counter();
         count
     }
 }
@@ -614,9 +641,8 @@ where
     P: Send + Sync,
 {
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
-        // The result key is (owner_canonical, owner_whole_hash, ...);
-        // a content edit on the owner canonical drops every cached
-        // result for that owner across all whole-hashes.
+        // A content edit on the owner canonical drops every cached
+        // result for that owner across all whole-hashes and options.
         self.invalidate_owner(canonical_id)
     }
 }
@@ -624,8 +650,9 @@ where
 impl<P> std::fmt::Debug for ComponentMetaResultDb<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ComponentMetaResultDb")
-            .field("entries", &self.len())
-            .field("capacity", &self.capacity)
+            .field("live_candidates", &self.len())
+            .field("per_slot_cap", &self.per_slot_candidate_cap())
+            .field("global_budget", &self.global_budget())
             .finish_non_exhaustive()
     }
 }
@@ -635,6 +662,10 @@ mod tests {
     use super::*;
     use crate::semantic_query::DepVersion;
 
+    fn empty_sig() -> crate::fact_signature_helpers::ReadSetSignature {
+        crate::fact_signature_helpers::ReadSetSignature::empty()
+    }
+
     #[test]
     fn insert_and_get_roundtrip() {
         #[derive(Clone, PartialEq, Eq, Debug)]
@@ -642,7 +673,6 @@ mod tests {
         let db: ComponentMetaResultDb<MockPayload> = ComponentMetaResultDb::new();
         let key = ComponentMetaResultKey {
             owner_canonical: Arc::from("/w/Accordion.vue"),
-            owner_whole_hash: [1u8; 16],
             options_fingerprint: [9u8; 16],
         };
         let entry = ComponentMetaResultEntry {
@@ -658,8 +688,8 @@ mod tests {
                 ),
             ),
         };
-        db.insert(key.clone(), entry);
-        let hit = db.get(&key).unwrap();
+        db.insert(key.clone(), [1u8; 16], entry);
+        let hit = db.get(&key, [1u8; 16]).unwrap();
         assert_eq!(*hit.payload, MockPayload(42));
         assert_eq!(hit.read_set_signature.legacy.len(), 1);
     }
@@ -669,47 +699,55 @@ mod tests {
         let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
         let k1 = ComponentMetaResultKey {
             owner_canonical: Arc::from("/w/o.vue"),
-            owner_whole_hash: [1u8; 16],
             options_fingerprint: [1u8; 16],
         };
         let k2 = ComponentMetaResultKey {
             owner_canonical: Arc::from("/w/o.vue"),
-            owner_whole_hash: [1u8; 16],
             options_fingerprint: [2u8; 16],
         };
         db.insert(
             k1.clone(),
+            [1u8; 16],
             ComponentMetaResultEntry {
                 payload: Arc::new(1u32),
-                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+                read_set_signature: empty_sig(),
             },
         );
-        assert!(db.get(&k1).is_some());
-        assert!(db.get(&k2).is_none());
+        assert!(db.get(&k1, [1u8; 16]).is_some());
+        assert!(db.get(&k2, [1u8; 16]).is_none());
     }
 
+    /// Distinct owner content versions are distinct candidates inside
+    /// one slot — a lookup for one version never returns another's
+    /// payload.
     #[test]
-    fn distinct_owner_hashes_do_not_alias() {
+    fn distinct_owner_hashes_are_distinct_candidates() {
         let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
-        let k_v1 = ComponentMetaResultKey {
+        let key = ComponentMetaResultKey {
             owner_canonical: Arc::from("/w/o.vue"),
-            owner_whole_hash: [1u8; 16],
-            options_fingerprint: [9u8; 16],
-        };
-        let k_v2 = ComponentMetaResultKey {
-            owner_canonical: Arc::from("/w/o.vue"),
-            owner_whole_hash: [2u8; 16],
             options_fingerprint: [9u8; 16],
         };
         db.insert(
-            k_v1.clone(),
+            key.clone(),
+            [1u8; 16],
             ComponentMetaResultEntry {
                 payload: Arc::new(1u32),
-                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+                read_set_signature: empty_sig(),
             },
         );
-        assert!(db.get(&k_v1).is_some());
-        assert!(db.get(&k_v2).is_none());
+        db.insert(
+            key.clone(),
+            [2u8; 16],
+            ComponentMetaResultEntry {
+                payload: Arc::new(2u32),
+                read_set_signature: empty_sig(),
+            },
+        );
+        assert_eq!(*db.get(&key, [1u8; 16]).unwrap().payload, 1);
+        assert_eq!(*db.get(&key, [2u8; 16]).unwrap().payload, 2);
+        assert!(db.get(&key, [3u8; 16]).is_none());
+        // Both versions coexist as candidates in the one slot.
+        assert_eq!(db.len(), 2);
     }
 
     #[test]
@@ -717,55 +755,98 @@ mod tests {
         let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
         let key = ComponentMetaResultKey {
             owner_canonical: Arc::from("/w/o.vue"),
-            owner_whole_hash: [1u8; 16],
             options_fingerprint: [0u8; 16],
         };
         db.insert(
             key.clone(),
+            [1u8; 16],
             ComponentMetaResultEntry {
                 payload: Arc::new(5u32),
-                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+                read_set_signature: empty_sig(),
             },
         );
-        assert!(db.remove(&key).is_some());
-        assert!(db.get(&key).is_none());
+        assert!(db.remove(&key, [1u8; 16]).is_some());
+        assert!(db.get(&key, [1u8; 16]).is_none());
+    }
+
+    /// The per-slot candidate cap bounds how many content versions of
+    /// one owner are retained. DISCRIMINATES: an unbounded slot would
+    /// retain every version.
+    #[test]
+    fn per_slot_cap_bounds_owner_versions() {
+        let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
+        let key = ComponentMetaResultKey {
+            owner_canonical: Arc::from("/w/o.vue"),
+            options_fingerprint: [0u8; 16],
+        };
+        // Insert one more version than the per-slot cap.
+        let versions = ComponentMetaResultDb::<u32>::PER_SLOT_CANDIDATE_CAP + 3;
+        for v in 0..versions {
+            let mut hash = [0u8; 16];
+            hash[0] = v as u8;
+            db.insert(
+                key.clone(),
+                hash,
+                ComponentMetaResultEntry {
+                    payload: Arc::new(v as u32),
+                    read_set_signature: empty_sig(),
+                },
+            );
+        }
+        assert_eq!(
+            db.len(),
+            ComponentMetaResultDb::<u32>::PER_SLOT_CANDIDATE_CAP,
+            "the slot must retain at most PER_SLOT_CANDIDATE_CAP versions",
+        );
+        // The oldest versions were evicted; the newest survive.
+        let mut hash_last = [0u8; 16];
+        hash_last[0] = (versions - 1) as u8;
+        assert!(
+            db.get(&key, hash_last).is_some(),
+            "the newest version must still be cached",
+        );
+        let mut hash_first = [0u8; 16];
+        hash_first[0] = 0;
+        assert!(
+            db.get(&key, hash_first).is_none(),
+            "the oldest version must have been evicted by the bounded cap",
+        );
     }
 
     #[test]
-    fn capacity_default_matches_plan() {
+    fn cap_constants_match_plan() {
+        assert_eq!(ComponentMetaResultDb::<u32>::PER_SLOT_CANDIDATE_CAP, 4);
+        assert_eq!(ComponentMetaResultDb::<u32>::GLOBAL_BUDGET, 512);
         let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
-        assert_eq!(
-            db.capacity(),
-            ComponentMetaResultDb::<u32>::DEFAULT_CAPACITY
-        );
-        assert_eq!(ComponentMetaResultDb::<u32>::DEFAULT_CAPACITY, 512);
+        assert_eq!(db.per_slot_candidate_cap(), 4);
+        assert_eq!(db.global_budget(), 512);
     }
 
-    /// `invalidate_owner` drops every entry whose owner canonical matches,
-    /// regardless of owner whole-hash / options. Unrelated owners stay warm.
+    /// `invalidate_owner` drops every candidate whose owner canonical
+    /// matches, regardless of owner whole-hash / options. Unrelated
+    /// owners stay warm.
     #[test]
     fn invalidate_owner_removes_all_keys_for_one_canonical() {
         let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
-        let mk_key = |owner: &str, hash: [u8; 16]| ComponentMetaResultKey {
+        let mk_key = |owner: &str| ComponentMetaResultKey {
             owner_canonical: Arc::from(owner),
-            owner_whole_hash: hash,
             options_fingerprint: [0u8; 16],
         };
         let mk_entry = || ComponentMetaResultEntry {
             payload: Arc::new(1u32),
-            read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+            read_set_signature: empty_sig(),
         };
 
-        // Two entries for /w/a.vue (different hashes), one for /w/b.vue.
-        db.insert(mk_key("/w/a.vue", [1u8; 16]), mk_entry());
-        db.insert(mk_key("/w/a.vue", [2u8; 16]), mk_entry());
-        db.insert(mk_key("/w/b.vue", [1u8; 16]), mk_entry());
+        // Two versions for /w/a.vue, one for /w/b.vue.
+        db.insert(mk_key("/w/a.vue"), [1u8; 16], mk_entry());
+        db.insert(mk_key("/w/a.vue"), [2u8; 16], mk_entry());
+        db.insert(mk_key("/w/b.vue"), [1u8; 16], mk_entry());
 
         let removed = db.invalidate_owner("/w/a.vue");
         assert_eq!(removed, 2);
         // /w/b.vue stays.
-        assert!(db.get(&mk_key("/w/b.vue", [1u8; 16])).is_some());
+        assert!(db.get(&mk_key("/w/b.vue"), [1u8; 16]).is_some());
         // /w/a.vue is fully gone.
-        assert!(db.get(&mk_key("/w/a.vue", [1u8; 16])).is_none());
+        assert!(db.get(&mk_key("/w/a.vue"), [1u8; 16]).is_none());
     }
 }

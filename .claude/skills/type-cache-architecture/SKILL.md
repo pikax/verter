@@ -229,8 +229,12 @@ merge into one `merged_symbol_name`. Per-part fingerprints live in
 surfacing — they are NOT the cache validation oracle.
 
 **R8.** Only final per-owner payloads (`ComponentMetaResultDb`) are
-owner-keyed: `(owner_canonical, project_identity, type_env_hash,
-lib_env_hash, projection_mode, options_hash)`.
+owner-keyed. The slot key is content-free —
+`(owner_canonical, options_fingerprint)` — per the query-identity-cache
+model: the owner's content version (`owner_whole_hash`) is NOT in the
+slot key, it is carried by the per-slot candidate and validated
+strictly on read. Concurrent owner content versions coexist as bounded
+candidates inside one slot (R20).
 
 **R9.** Reuse is the default; recomputation is the exception. A cache
 miss under steady-state load is treated as evidence of a fact-graph
@@ -329,7 +333,45 @@ on read; warm reads are `&self` shared borrows with zero atomic write
 or lock contention. Concurrent sessions never overwrite each other's
 results.
 
-Concrete substrate:
+**Bounded query-identity retention substrate.** Every durable
+query-identity cache whose effective identity carries self-version
+state — `ComponentMetaResultDb` (owner whole-hash), `RefCycleResultDb`
+(`DeclIdentity` embeds the file whole-hash), `MaterializeStructureDb` /
+the `SemanticGraphStore` family memo + relation memo + named-type index
+(content-derived `SemanticNodeId`s) — is bounded by the shared
+`verter_session::bounded_query_retention` substrate. Each distinct
+content edit appends a fresh entry; the substrate is the routine
+memory-reclamation path (the eager own-canonical drain that formerly
+reclaimed these is retired). Two cooperating pieces, tuned per cache:
+
+- `GlobalRetentionBudget<K>` — a FIFO insertion-ordered total-size cap.
+  A cache records each admitted entry's key from its write-side
+  `post_publish` hook; the budget returns the oldest keys to evict once
+  the count exceeds the cap. `MaterializeStructureDb` and
+  `RefCycleResultDb` cap at `MAX_ENTRIES` (2048); the `SemanticGraphStore`
+  family / relation / named-type budgets use `DEFAULT_BUDGET_CAP`
+  (4096). The cache's invalidation paths call `forget` so the ledger
+  stays consistent with the map.
+- `BoundedCandidateMap<K, D, V>` — a content-free-keyed slot map with a
+  bounded per-slot candidate list (`DEFAULT_CANDIDATE_CAP` = 4) AND a
+  global budget. `ComponentMetaResultDb` is built on it: the slot key
+  drops `owner_whole_hash`, which becomes the per-candidate
+  discriminant `D`. A fifth owner version in a slot FIFO-evicts the
+  oldest candidate; the global budget (`GLOBAL_BUDGET` = 512) caps the
+  total across all slots.
+
+Eviction is stale-first when cheaply detectable, then FIFO. Evicting a
+*valid* entry is permitted — it only forces a recompute, never an
+incorrect result. A reader clones the candidate `Arc` before
+validating, so a concurrent removal never invalidates an in-flight
+reader; removal is keyed by an insertion sequence number unique per
+admission. The `SemanticGraphStore` node arena's dense storage is
+append-only across content edits; it is reset (alongside the memo,
+relation memo, and named-type index, so no stored `SemanticNodeId`
+survives) on `invalidate_all` — the project-generation reset safe
+point.
+
+Concrete substrate (the per-domain target form):
 
 - Outer table: `DashMap<K, Arc<CacheEntry<V>>>`.
 - `CacheEntry<V> { candidates: ArcSwap<SmallVec<[Arc<Candidate<V>>; 2]>> }`.

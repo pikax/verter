@@ -65,6 +65,7 @@ mod component_meta_cache_discipline_tests;
 pub mod host_audit_runtime;
 // tests/invalidation_perf.rs — InvalidationByCanonical impl on
 // ImportedRegistryDb is exercised by the §12.A12 perf gate.
+pub(crate) mod bounded_query_retention;
 pub(crate) mod compile_fact_emission;
 pub mod component_meta_caches;
 #[cfg(test)]
@@ -450,14 +451,13 @@ pub mod for_tests {
             .map(|ir| ir.whole_hash)?;
         let key = crate::component_meta_result_db::ComponentMetaResultKey {
             owner_canonical: std::sync::Arc::from(owner_canonical),
-            owner_whole_hash: whole_hash,
             options_fingerprint: crate::host_manage::component_meta_options_fingerprint(
                 &crate::host_manage::ComponentMetaOptions::default(),
             ),
         };
         host.project_type_store()
             .component_meta_results()
-            .get(&key)
+            .get(&key, whole_hash)
             .map(|entry| entry.read_set_signature.clone())
     }
 

@@ -439,10 +439,10 @@ fn route_surface_dep_edit_misses_warm_component_meta() {
 /// `materialize_structure_db` / `semantic_graph` query-identity layer
 /// and folds the carrier dep's parse facts into the published
 /// `ComponentMetaResultEntry` signature. The owner SFC itself is
-/// unchanged, so its `owner_whole_hash` result-cache key is stable and
-/// the warm result is eligible for a hit — only
-/// `validates_fact_signature` against the edited carrier's facts can
-/// reject it. The carrier edit routes through the production `upsert`,
+/// unchanged, so its result-cache candidate (keyed in the content-free
+/// slot, discriminated by the unchanged owner content version) is still
+/// present and eligible for a hit — only `validates_fact_signature`
+/// against the edited carrier's facts can reject it. The carrier edit routes through the production `upsert`,
 /// which performs no eager own-canonical drain, so the carrier's own
 /// query-identity entries physically survive; a substrate that keyed
 /// slot bindings under the owner content hash alone — ignoring the

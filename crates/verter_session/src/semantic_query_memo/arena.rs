@@ -260,6 +260,36 @@ impl NodeArena {
     /// Touches every shard mutex once. Each shard's retain walk is
     /// O(shard size). When `node_arena_lock_acquisitions` is wired
     /// into the audit context, each shard lock acquisition is recorded.
+    /// Drop every interned node and every dedup-shard entry, returning
+    /// the node count cleared. The dense node / scope storage Vecs are
+    /// emptied so the arena's memory footprint is reclaimed.
+    ///
+    /// **Safety contract.** This reuses `SemanticNodeId` index space —
+    /// every `SemanticNodeId` allocated before the reset becomes
+    /// invalid. It is sound ONLY at a point where no query holds a live
+    /// `SemanticNodeId` and no memo entry stores one: the sole caller is
+    /// [`super::SemanticGraphStore::invalidate_all`], which is invoked
+    /// atomically on a project-generation reset (the memo, relation
+    /// memo, and named-type index are cleared in the same call, so no
+    /// stored id survives the reset).
+    pub(super) fn reset(&self) -> usize {
+        let cleared = {
+            let mut inner = self.inner.write();
+            let n = inner.nodes.len();
+            inner.nodes.clear();
+            inner.nodes.shrink_to_fit();
+            inner.scopes.clear();
+            inner.scopes.shrink_to_fit();
+            n
+        };
+        for shard in self.shards.iter() {
+            let mut shard = shard.lock();
+            shard.index.clear();
+            shard.index.shrink_to_fit();
+        }
+        cleared
+    }
+
     pub(super) fn invalidate_for_canonical(&self, canonical_id: &str) {
         let timing_on = verter_scheduler::request_context::current_timing_enabled();
         for shard in self.shards.iter() {
