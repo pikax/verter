@@ -2918,6 +2918,45 @@ impl crate::invalidation_domain::InvalidationByCanonical for RefCycleResultDb {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// When set, `ref_cycle_db_get_or_compute`'s `compute` closure
+    /// takes a `ComputeAdmission::ReturnOnly` exit AFTER the real BFS
+    /// has populated `compute_fence` — deterministically reproducing
+    /// the production refusal contract (tracer overflow, an
+    /// unrootable / torn self-root, or a `RouteGeneration` fence
+    /// dependency) without manufacturing a fake fence. The BFS runs
+    /// for real (real files read, real `compute_fence`); only the
+    /// admission decision is forced. The `ReturnOnly` `CacheRead` must
+    /// still carry the BFS fence so the caller's `local_fence` is
+    /// extended exactly as the `None`-arm fallback would extend it.
+    static FORCE_REF_CYCLE_RETURN_ONLY: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// RAII guard that forces `ref_cycle_db_get_or_compute`'s `compute`
+/// closure down a `ComputeAdmission::ReturnOnly` exit for the current
+/// thread until dropped.
+#[cfg(test)]
+pub(crate) struct ForceRefCycleReturnOnlyGuard;
+
+#[cfg(test)]
+impl Drop for ForceRefCycleReturnOnlyGuard {
+    fn drop(&mut self) {
+        FORCE_REF_CYCLE_RETURN_ONLY.with(|f| f.set(false));
+    }
+}
+
+/// Force `ref_cycle_db_get_or_compute`'s cold `compute` closure to
+/// refuse cache admission and return its computed bool via
+/// `ComputeAdmission::ReturnOnly` for the current thread until the
+/// returned guard drops. The BFS still runs in full.
+#[cfg(test)]
+pub(crate) fn force_ref_cycle_return_only_for_tests() -> ForceRefCycleReturnOnlyGuard {
+    FORCE_REF_CYCLE_RETURN_ONLY.with(|f| f.set(true));
+    ForceRefCycleReturnOnlyGuard
+}
+
 /// The cooperative-admission wrapper invoked by
 /// `meta_resolve::ref_root_reaches_transitive_cycle_node` on the cold
 /// path. The `compute` closure runs synchronously on the caller's
@@ -2992,29 +3031,62 @@ where
             provenance
                 .ref_cycle_fact_tracer_installs
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let return_only_value = || crate::semantic_query::CacheRead {
-                value: result,
-                dep_signature: Arc::from(
-                    Vec::<(Arc<str>, crate::semantic_query::DepVersion)>::new(),
-                ),
-                walker_diagnostics: Arc::from([]),
-                cache_suppress: false,
-            };
+            // The legacy `DepVersion` fence is the set of files the BFS
+            // actually read. It is built up front — before the
+            // `RouteGeneration` refusal scan — so every `ReturnOnly`
+            // exit can carry it. A `ReturnOnly` `CacheRead` MUST report
+            // this fence: the caller (`ref_root_reaches_transitive_cycle_node`)
+            // merges `read.dep_signature` into its own `local_fence`, so
+            // a `ReturnOnly` that dropped the fence would let an outer
+            // computation be cached without the files the BFS read.
+            // Carrying `legacy` makes the `ReturnOnly` path observably
+            // equivalent to the `None`-arm uncached-fallback (which
+            // extends the caller's fence via `local_fence.extend(fence)`)
+            // without running a second uncached BFS.
+            let legacy: DepSignature = Arc::from(compute_fence.into_boxed_slice());
+            // `cache_suppress` stays `false`: the caller does not
+            // consume it. A `ReturnOnly` outcome is non-shareable across
+            // cooperative joiners — the winner alone receives this
+            // `CacheRead`, and a joiner that coalesced onto a
+            // `ReturnOnly` winner forks and cold-recomputes its own BFS
+            // (so it builds its own view-accurate fence). The fence
+            // therefore reaches the winner's caller through
+            // `dep_signature`, never through `cache_suppress`.
+            let return_only_value =
+                |dep_signature: DepSignature| crate::semantic_query::CacheRead {
+                    value: result,
+                    dep_signature,
+                    walker_diagnostics: Arc::from([]),
+                    cache_suppress: false,
+                };
             // Refuse shared admission when the BFS fence carries a
             // `RouteGeneration` dependency — route generation has no
             // authoritative validating source, so an entry rooted on
             // it could not detect a content edit to the route-observed
-            // file. The computed bool is still returned via `ReturnOnly`.
-            if compute_fence
+            // file. The computed bool is still returned via `ReturnOnly`,
+            // carrying the BFS fence.
+            if legacy
                 .iter()
                 .any(|(_, v)| matches!(v, crate::semantic_query::DepVersion::RouteGeneration(_)))
             {
                 provenance
                     .ref_cycle_overflow_refusals
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return ComputeAdmission::ReturnOnly(return_only_value());
+                return ComputeAdmission::ReturnOnly(return_only_value(Arc::clone(&legacy)));
             }
-            let legacy: DepSignature = Arc::from(compute_fence.into_boxed_slice());
+            // Test-only injection: deterministically reproduce the
+            // production refusal contract (tracer overflow / unrootable
+            // self-root / `RouteGeneration` fence dependency) AFTER the
+            // real BFS has populated `compute_fence`. The `ReturnOnly`
+            // `CacheRead` carries the real BFS fence (`legacy`) — exactly
+            // as every production refusal site does.
+            #[cfg(test)]
+            if FORCE_REF_CYCLE_RETURN_ONLY.with(|f| f.get()) {
+                provenance
+                    .ref_cycle_overflow_refusals
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return ComputeAdmission::ReturnOnly(return_only_value(Arc::clone(&legacy)));
+            }
             match finalise {
                 crate::resolver_core::FactReadSetFinalise::Ok(traced) => {
                     // Build the observed-root carrier: visited-identity
@@ -3033,11 +3105,13 @@ where
                         None => {
                             // A torn observation among the visited
                             // self-roots — the value is valid but the
-                            // signature cannot be built strictly.
+                            // signature cannot be built strictly. The
+                            // computed bool is returned via `ReturnOnly`,
+                            // carrying the BFS fence.
                             provenance
                                 .ref_cycle_overflow_refusals
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            ComputeAdmission::ReturnOnly(return_only_value())
+                            ComputeAdmission::ReturnOnly(return_only_value(legacy))
                         }
                     }
                 }
@@ -3046,8 +3120,9 @@ where
                         .ref_cycle_overflow_refusals
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     // Tracer overflowed — return the computed bool via
-                    // `ReturnOnly`; no second uncached BFS.
-                    ComputeAdmission::ReturnOnly(return_only_value())
+                    // `ReturnOnly`, carrying the BFS fence; no second
+                    // uncached BFS.
+                    ComputeAdmission::ReturnOnly(return_only_value(legacy))
                 }
             }
         },

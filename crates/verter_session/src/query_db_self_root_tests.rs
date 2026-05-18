@@ -5660,3 +5660,133 @@ fn ref_cycle_db_untracked_self_root_rejects_warm_entry() {
          rejects it.",
     );
 }
+
+/// The ref-cycle BFS `ComputeAdmission::ReturnOnly` path MUST propagate
+/// the BFS's read fence into the caller's `local_fence`.
+///
+/// Discriminating property. `ref_root_reaches_transitive_cycle_node`'s
+/// cold path runs the BFS inside `ref_cycle_db_get_or_compute`'s
+/// `compute` closure. When that closure refuses cache admission
+/// (tracer overflow, an unrootable / torn self-root, or a
+/// `RouteGeneration` fence dependency) it returns the computed bool via
+/// `ComputeAdmission::ReturnOnly`. The caller's `Some(read)` arm merges
+/// `read.dep_signature` into the caller's `local_fence` — so an outer
+/// computation that called `ref_root_reaches_transitive_cycle_node` can
+/// be cached without the files the BFS read unless the `ReturnOnly`
+/// `CacheRead` carries the BFS fence.
+///
+/// This test forces the `ReturnOnly` exit AFTER the real BFS has run
+/// (real `root` + `helper` files read, real `compute_fence` populated)
+/// and asserts `local_fence` carries a `WholeHash` fact for BOTH the
+/// BFS root and the visited helper, pinned to their CURRENT observed
+/// content hashes.
+///
+/// - Pre-fix (`return_only_value` builds an empty `dep_signature`):
+///   `local_fence` is empty — the BFS reads are dropped, the stale
+///   outer-cache hole.
+/// - Post-fix (`return_only_value` carries the `legacy` fence built
+///   from `compute_fence`): `local_fence` carries the root + helper
+///   `WholeHash` facts — observably equivalent to the proven `None`-arm
+///   fallback that runs `local_fence.extend(fence)`, without a second
+///   uncached BFS.
+///
+/// Reverting the `component_meta_caches.rs` `ReturnOnly` fence
+/// propagation flips this test RED.
+#[test]
+fn ref_cycle_db_return_only_path_propagates_bfs_fence_to_caller() {
+    use crate::meta_resolve::ref_root_reaches_transitive_cycle_node;
+    use crate::semantic_query::DepVersion;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let root = "/struct_carrier_qdb/rc_returnonly_root.ts";
+    let helper = "/struct_carrier_qdb/rc_returnonly_helper.ts";
+    upsert(
+        &host,
+        helper,
+        "export type Helper<T> = { wrapped: T; next: Helper<T> };\n",
+    );
+    upsert(
+        &host,
+        root,
+        "import type { Helper } from './rc_returnonly_helper';\n\
+         export type Probe = Helper<number>;\n",
+    );
+    assert!(
+        host.ensure_indexed_ready(helper).is_some(),
+        "helper IndexedReady materialises",
+    );
+    assert!(
+        host.ensure_indexed_ready(root).is_some(),
+        "root IndexedReady materialises",
+    );
+
+    // The CURRENT observed whole hashes of the two files the BFS reads.
+    // The `ReturnOnly` fence must pin these exact hashes.
+    let root_hash = host
+        .shallow_file_state(root)
+        .map(|s| s.whole_hash)
+        .expect("root shallow state present");
+    let helper_hash = host
+        .shallow_file_state(helper)
+        .map(|s| s.whole_hash)
+        .expect("helper shallow state present");
+
+    let ctx: &dyn ResolverContext = &host;
+    let id = ref_cycle_decl_identity(&host, root, "Probe");
+
+    // Force the cold `compute` closure down a `ComputeAdmission::ReturnOnly`
+    // exit. The BFS still runs in full — `root` then `helper` are read,
+    // `compute_fence` is populated — only the admission decision is
+    // forced, reproducing the production overflow / unrootable-self-root
+    // / RouteGeneration refusal contract.
+    let _refusal = crate::component_meta_caches::force_ref_cycle_return_only_for_tests();
+    let refusals_before = host
+        .provenance
+        .ref_cycle_overflow_refusals
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    let mut local_fence: Vec<(Arc<str>, DepVersion)> = Vec::new();
+    let _ = ref_root_reaches_transitive_cycle_node(&id, ctx, &mut local_fence);
+
+    let refusals_after = host
+        .provenance
+        .ref_cycle_overflow_refusals
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        refusals_after > refusals_before,
+        "fixture invariant: the forced `ComputeAdmission::ReturnOnly` exit must have \
+         fired (ref_cycle_overflow_refusals advanced) — without it the test would not \
+         be exercising the ReturnOnly path at all",
+    );
+    let db = host.project_type_store().ref_cycle_db();
+    assert!(
+        crate::component_meta_caches::ref_cycle_db_peek(db, &id, ctx).is_none(),
+        "fixture invariant: a `ReturnOnly` compute does NOT admit a warm entry — the \
+         RefCycleResultDb slot stays empty",
+    );
+
+    // Discriminating assertion: the caller's `local_fence` carries a
+    // `WholeHash` fact for the BFS root AND the visited helper, each
+    // pinned to that file's CURRENT observed content hash.
+    let fence_has = |canonical: &str, hash: [u8; 16]| {
+        local_fence.iter().any(|(c, v)| {
+            c.as_ref() == canonical && matches!(v, DepVersion::WholeHash(h) if *h == hash)
+        })
+    };
+    assert!(
+        fence_has(root, root_hash),
+        "the `ReturnOnly` ref-cycle path MUST propagate the BFS's read fence into the \
+         caller's `local_fence`: it must carry a `WholeHash` fact for the BFS root \
+         `{root}` pinned to its current observed content hash. Pre-fix the \
+         `ReturnOnly` `CacheRead` carried an empty `dep_signature`, so `local_fence` \
+         was empty and an outer computation could be cached without the BFS's root \
+         file — a stale-cache hole. local_fence = {local_fence:?}",
+    );
+    assert!(
+        fence_has(helper, helper_hash),
+        "the `ReturnOnly` ref-cycle path MUST propagate the BFS's read fence into the \
+         caller's `local_fence`: the BFS walked through `root` into the visited helper \
+         `{helper}`, so `local_fence` must also carry a `WholeHash` fact for the \
+         helper pinned to its current observed content hash. local_fence = {local_fence:?}",
+    );
+}
