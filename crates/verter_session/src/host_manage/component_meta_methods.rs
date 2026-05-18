@@ -437,14 +437,15 @@ impl VerterHost {
     /// [`Self::capture_component_meta_inputs`] used by
     /// [`ViewBoundRequestHost`](crate::host_manage::component_meta_request_impl::ViewBoundRequestHost).
     ///
-    /// When `view` carries an overlay source for the owner canonical,
-    /// the helper materialises the overlay's IndexedReady candidate
-    /// (multi-candidate; an overlay-covered canonical is published
-    /// under the overlay-scoped key — overlay content hash plus the
-    /// overlay-set discriminator) and constructs the captured inputs
-    /// from the overlay's snapshot + eval_source. Otherwise falls
-    /// through to the base-only `capture_component_meta_inputs` path.
-    /// Resolver-tier reads downstream through
+    /// When `view` carries an **explicit overlay** for the owner
+    /// canonical, the helper materialises the overlay's IndexedReady
+    /// candidate (multi-candidate; published under the overlay-scoped
+    /// key — overlay content hash plus the overlay-set discriminator)
+    /// and constructs the captured inputs from the overlay's snapshot +
+    /// eval_source. Otherwise — a base-only view, or an overlay view
+    /// for which THIS canonical is unmasked — falls through to the
+    /// base-only `capture_component_meta_inputs` path. Resolver-tier
+    /// reads downstream through
     /// [`SessionResolverContext`](crate::resolver_core::SessionResolverContext)
     /// observe the overlay candidate via
     /// [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore).
@@ -455,23 +456,23 @@ impl VerterHost {
     ) -> Option<CapturedComponentMetaInputs> {
         let audit_enabled = self.config.audit_enabled;
         let capture_started = audit_enabled.then(Instant::now);
-        // Overlay-priority: when the view carries an overlay for the
-        // owner canonical, materialise its IndexedReady candidate
-        // first so the base-host capture below picks it up via the
-        // multi-candidate file-artifact store. The materialiser keys
-        // the candidate under an `overlay_scoped` key when the view
-        // carries an explicit overlay (and the legacy key for a
-        // base-passthrough view, which is base-equivalent). The base
-        // host's scheduler stays untouched (R17).
-        let overlay_facts = if let Some(overlay_source) = view.source(canonical) {
-            view.content_hash_for(canonical).and_then(|overlay_hash| {
-                self.materialize_overlay_indexed_ready_with_view(
-                    canonical,
-                    &overlay_source,
-                    overlay_hash,
-                    view,
-                )
-            })
+        // Overlay-priority: when the view carries an **explicit
+        // overlay** for the owner canonical, materialise its
+        // IndexedReady candidate first so the base-host capture below
+        // picks it up via the multi-candidate file-artifact store. The
+        // materialiser derives both the source and its content hash
+        // from the view itself — a single authority — so a stale
+        // `FileArtifactStore`-scan hash can never be paired with the
+        // fresh source. Overlay detection uses the **strict**
+        // `overlay_content_hash_for` (mirroring
+        // `overlay_priority::ensure_indexed_ready_with_view`): a
+        // base-only view, or an overlay view for which this canonical
+        // is unmasked, reports `None` here and correctly delegates to
+        // the base capture path — the overlay-materialiser snapshot
+        // path is reserved for genuine overlays. The base host's
+        // scheduler stays untouched (R17).
+        let overlay_facts = if view.overlay_content_hash_for(canonical).is_some() {
+            self.materialize_overlay_indexed_ready_with_view(canonical, view)
         } else {
             None
         };

@@ -125,6 +125,13 @@ mod cache_identity_invariants_tests;
 // Block 1.J.1 item 1 — content-pinned artifact-read discriminators.
 #[cfg(test)]
 mod artifact_reads_pinned_tests;
+// `SessionView::content_hash_for` is a view-authoritative current-
+// content oracle, consistent with `source()` — base + overlay
+// fallthrough route through the scheduler authority, never a
+// content-agnostic `FileArtifactStore` scan; the overlay materialiser
+// derives source + hash from the view itself.
+#[cfg(test)]
+mod session_view_current_content_tests;
 // Byte-identical-overlay artifact-key isolation discriminators —
 // a session-view overlay candidate is keyed off the base artifact.
 #[cfg(test)]

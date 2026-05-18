@@ -186,7 +186,6 @@ impl FileArtifactKey {
     ///
     /// The store's **base canonical-wide scans**
     /// ([`FileArtifactStore::get_any`], [`FileArtifactStore::get_artifacts_any`],
-    /// [`FileArtifactStore::content_hash_for_canonical`],
     /// [`FileArtifactStore::snapshot_all`]) filter their iteration on
     /// this predicate so a base `HostView` / `HostStoreView` reader can
     /// never observe an overlay-scoped artifact and derive base cache
@@ -376,15 +375,44 @@ pub struct AugmentationTargetKey {
     pub target: AugmentationTargetKind,
 }
 
-// ── AugmenterSet ──
+// ── AugmenterEntry / AugmenterSet ──
+
+/// One augmenter file's contribution identity inside an [`AugmenterSet`].
+///
+/// Carries the **exact** [`FileArtifactKey`] of the augmenter artifact
+/// scanned at index-population time — the full content-addressed
+/// identity, not just the canonical id. The augmentation-stitching
+/// consumer ([`crate::resolver_core::route_db::RouteDb::get_or_compute_effective_export_set`])
+/// re-fetches the augmenter's `.augmentations` through
+/// [`FileArtifactStore::get_artifacts`] keyed by this exact key — never
+/// a content-agnostic canonical-only scan, which (with lazy cache
+/// invalidation) could surface a different content version of the
+/// augmenter than the one the fingerprint was computed over.
+#[derive(Debug, Clone)]
+pub struct AugmenterEntry {
+    /// Exact content-addressed key of the augmenter artifact.
+    pub artifact_key: FileArtifactKey,
+    /// `parse_stable_hash` of the augmenter artifact — the structural
+    /// hash that the augmenter-set fingerprint folds in (R29).
+    pub parse_stable_hash: Hash16,
+}
+
+impl AugmenterEntry {
+    /// The augmenter file's canonical id.
+    #[must_use]
+    pub fn canonical(&self) -> &Arc<str> {
+        &self.artifact_key.canonical
+    }
+}
 
 /// The set of augmenter files that contribute to a given
 /// [`AugmentationTargetKey`], sorted by `(augmenter_canonical,
 /// augmenter_parse_stable_hash)`.
 #[derive(Debug, Clone)]
 pub struct AugmenterSet {
-    /// `(augmenter_canonical, augmenter_parse_stable_hash)` pairs, sorted.
-    pub entries: SmallVec<[(Arc<str>, Hash16); 2]>,
+    /// Per-augmenter contribution identities, sorted by
+    /// `(canonical, parse_stable_hash)`.
+    pub entries: SmallVec<[AugmenterEntry; 2]>,
     /// Cached `stable_hash(entries)` — the basis of
     /// `ModuleAugmentationIndexShape`.
     pub fingerprint: Hash16,
@@ -1069,53 +1097,6 @@ impl FileArtifactStore {
         None
     }
 
-    /// Return the content hash of the latest cached **base** artifacts
-    /// entry for `canonical`, or `None` if no base artifact has been
-    /// ingested yet.
-    ///
-    /// Used by [`crate::session_view::SessionView`] impls to surface
-    /// the content hash that backs the cached parse artifacts.
-    ///
-    /// This is a base canonical-wide scan: it filters to
-    /// [`FileArtifactKey::is_legacy`] entries. A session-overlay
-    /// artifact ([`FileArtifactKey::overlay_scoped`]) is never
-    /// surfaced — the `OverlaidView` impls only fall through to this
-    /// method for canonicals their overlay map does NOT cover, so they
-    /// genuinely want the base content hash; an overlay-scoped
-    /// candidate here would be another session's artifact. The
-    /// returned hash is the `content_hash` dimension of whichever
-    /// legacy `FileArtifactKey` matches `canonical`.
-    #[must_use]
-    pub fn content_hash_for_canonical(&self, canonical: &str) -> Option<Hash16> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
-            return None;
-        }
-        for entry in self.artifacts.iter() {
-            if entry.key().canonical.as_ref() == canonical && entry.key().is_legacy() {
-                return Some(entry.key().content_hash);
-            }
-        }
-        None
-    }
-
-    /// Alias of [`Self::get_artifacts_any`] — the latest **base**
-    /// `FileArtifacts` for `canonical`. Exists as a named accessor so
-    /// callers stay explicit about "latest base artifact for this
-    /// canonical" semantics; version-aware variants live alongside this
-    /// helper.
-    ///
-    /// Inherits `get_artifacts_any`'s base canonical-wide scan
-    /// semantics — overlay-scoped artifacts are not surfaced. The
-    /// augmentation-stitching consumer
-    /// (`RouteDb::get_or_compute_effective_export_set`) re-fetches an
-    /// augmenter's `.augmentations` through here; the augmenter set it
-    /// iterates was itself built from a base-only scan, so a base
-    /// artifact for that canonical always exists.
-    #[must_use]
-    pub fn latest_artifacts_for_canonical(&self, canonical: &str) -> Option<Arc<FileArtifacts>> {
-        self.get_artifacts_any(canonical)
-    }
-
     /// Insert (or replace) the payload for `key`.
     pub fn insert_artifacts(
         &self,
@@ -1315,13 +1296,14 @@ impl FileArtifactStore {
         // `EffectiveExportSet`. A session-overlay artifact
         // ([`FileArtifactKey::overlay_scoped`]) carries session-divergent
         // augmentations and must not poison that base index.
-        let mut matched: Vec<(Arc<str>, Hash16)> = Vec::new();
+        let mut matched: Vec<AugmenterEntry> = Vec::new();
         let mut seen_canonicals: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
         for artifact_entry in self.artifacts.iter() {
             if !artifact_entry.key().is_legacy() {
                 continue;
             }
-            let augmenter_canonical = Arc::clone(&artifact_entry.key().canonical);
+            let augmenter_key = artifact_entry.key().clone();
+            let augmenter_canonical = Arc::clone(&augmenter_key.canonical);
             let artifacts: &FileArtifacts = artifact_entry.value();
             for fact in artifacts.augmentations.iter() {
                 if augmenter_matches_target(
@@ -1331,7 +1313,14 @@ impl FileArtifactStore {
                     &resolve_relative_canonical,
                 ) {
                     if seen_canonicals.insert(Arc::clone(&augmenter_canonical)) {
-                        matched.push((augmenter_canonical.clone(), artifacts.parse_stable_hash));
+                        // Capture the EXACT artifact key — the stitch
+                        // consumer re-fetches `.augmentations` via
+                        // `get_artifacts(&key)` so it reads precisely
+                        // the version fingerprinted here.
+                        matched.push(AugmenterEntry {
+                            artifact_key: augmenter_key,
+                            parse_stable_hash: artifacts.parse_stable_hash,
+                        });
                     }
                     break;
                 }
@@ -1339,11 +1328,16 @@ impl FileArtifactStore {
         }
 
         // Sort by (canonical, parse_stable_hash) for determinism.
-        matched.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()).then_with(|| a.1.cmp(&b.1)));
+        matched.sort_by(|a, b| {
+            a.canonical()
+                .as_ref()
+                .cmp(b.canonical().as_ref())
+                .then_with(|| a.parse_stable_hash.cmp(&b.parse_stable_hash))
+        });
 
         let augmenter_count = matched.len() as u32;
         let fingerprint = compute_augmenter_set_fingerprint(&matched);
-        let entries: SmallVec<[(Arc<str>, Hash16); 2]> = matched.into_iter().collect();
+        let entries: SmallVec<[AugmenterEntry; 2]> = matched.into_iter().collect();
         let set = Arc::new(AugmenterSet {
             entries,
             fingerprint,
@@ -1423,14 +1417,15 @@ impl FileArtifactStore {
             // Rebuild the set with the new artifact folded in. Same
             // base-only filter as `ensure_augmentation_index_populated`'s
             // cold scan — overlay-scoped artifacts never contribute.
-            let mut matched: Vec<(Arc<str>, Hash16)> = Vec::new();
+            let mut matched: Vec<AugmenterEntry> = Vec::new();
             let mut seen_canonicals: rustc_hash::FxHashSet<Arc<str>> =
                 rustc_hash::FxHashSet::default();
             for artifact_entry in self.artifacts.iter() {
                 if !artifact_entry.key().is_legacy() {
                     continue;
                 }
-                let augmenter_canon = Arc::clone(&artifact_entry.key().canonical);
+                let augmenter_key = artifact_entry.key().clone();
+                let augmenter_canon = Arc::clone(&augmenter_key.canonical);
                 let artifacts: &FileArtifacts = artifact_entry.value();
                 for fact in artifacts.augmentations.iter() {
                     if augmenter_matches_target(
@@ -1440,13 +1435,21 @@ impl FileArtifactStore {
                         &resolve_relative_canonical,
                     ) {
                         if seen_canonicals.insert(Arc::clone(&augmenter_canon)) {
-                            matched.push((augmenter_canon.clone(), artifacts.parse_stable_hash));
+                            matched.push(AugmenterEntry {
+                                artifact_key: augmenter_key,
+                                parse_stable_hash: artifacts.parse_stable_hash,
+                            });
                         }
                         break;
                     }
                 }
             }
-            matched.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()).then_with(|| a.1.cmp(&b.1)));
+            matched.sort_by(|a, b| {
+                a.canonical()
+                    .as_ref()
+                    .cmp(b.canonical().as_ref())
+                    .then_with(|| a.parse_stable_hash.cmp(&b.parse_stable_hash))
+            });
             let augmenter_count = matched.len() as u32;
             let new_fingerprint = compute_augmenter_set_fingerprint(&matched);
 
@@ -1457,7 +1460,7 @@ impl FileArtifactStore {
                 continue;
             }
 
-            let entries: SmallVec<[(Arc<str>, Hash16); 2]> = matched.into_iter().collect();
+            let entries: SmallVec<[AugmenterEntry; 2]> = matched.into_iter().collect();
             let new_set = Arc::new(AugmenterSet {
                 entries,
                 fingerprint: new_fingerprint,
@@ -1592,7 +1595,7 @@ where
 /// Two FxHasher passes seeded with distinct salts produce a 16-byte
 /// hash with low collision risk. Matches the cheap-hash pattern used
 /// by `resolver_core::compute_signature_fingerprint`.
-pub(crate) fn compute_augmenter_set_fingerprint(entries: &[(Arc<str>, Hash16)]) -> Hash16 {
+pub(crate) fn compute_augmenter_set_fingerprint(entries: &[AugmenterEntry]) -> Hash16 {
     use std::hash::{BuildHasher, Hasher};
     let salt_lo = rustc_hash::FxBuildHasher;
     let salt_hi = rustc_hash::FxBuildHasher;
@@ -1600,7 +1603,14 @@ pub(crate) fn compute_augmenter_set_fingerprint(entries: &[(Arc<str>, Hash16)]) 
     let mut h_hi = salt_hi.build_hasher();
     h_lo.write_u64(0xC4A1_C4A1_4A1C_4A1C);
     h_hi.write_u64(0x9E37_79B9_7F4A_7C15);
-    for (canon, hash) in entries {
+    // R29: the fingerprint folds in `(augmenter_canonical,
+    // augmenter_parse_stable_hash)` — the `FileArtifactKey`'s other
+    // dimensions are deliberately NOT mixed in, so a cosmetic edit
+    // (content_hash changes, parse_stable_hash invariant) does not
+    // perturb the augmenter-set fingerprint.
+    for entry in entries {
+        let canon = entry.canonical();
+        let hash = &entry.parse_stable_hash;
         h_lo.write(canon.as_bytes());
         h_lo.write(hash);
         h_hi.write(canon.as_bytes());

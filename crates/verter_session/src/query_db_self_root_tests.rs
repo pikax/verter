@@ -3631,13 +3631,8 @@ fn overlay_disc_fixture(
          content hash differs — otherwise the base/overlay entries are indistinguishable",
     );
 
-    host.materialize_overlay_indexed_ready_with_view(
-        canonical,
-        &overlay_source,
-        overlay_hash,
-        &view,
-    )
-    .expect("overlay IndexedReady materialises");
+    host.materialize_overlay_indexed_ready_with_view(canonical, &view)
+        .expect("overlay IndexedReady materialises");
 
     (host, view, base_hash, overlay_hash)
 }
@@ -3682,16 +3677,12 @@ fn resolvability_db_producer_overlay_discrimination() {
     let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
     overlays.insert(canonical.to_string(), Arc::clone(&overlay_source));
     let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
-    let overlay_hash = view
-        .overlay_content_hash_for(canonical)
-        .expect("overlay content hash present");
-    host.materialize_overlay_indexed_ready_with_view(
-        canonical,
-        &overlay_source,
-        overlay_hash,
-        &view,
-    )
-    .expect("overlay IndexedReady materialises");
+    assert!(
+        view.overlay_content_hash_for(canonical).is_some(),
+        "fixture invariant: the overlay covers the canonical",
+    );
+    host.materialize_overlay_indexed_ready_with_view(canonical, &view)
+        .expect("overlay IndexedReady materialises");
 
     let overlay_ctx = SessionResolverContext::new(&host, &view);
     let mut overlay_engine = ComponentMetaQueryEngine::new(&overlay_ctx);
@@ -3794,16 +3785,12 @@ fn prepared_member_db_producer_overlay_discrimination() {
     let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
     overlays.insert(canonical.to_string(), Arc::clone(&overlay_source));
     let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
-    let overlay_hash = view
-        .overlay_content_hash_for(canonical)
-        .expect("overlay content hash present");
-    host.materialize_overlay_indexed_ready_with_view(
-        canonical,
-        &overlay_source,
-        overlay_hash,
-        &view,
-    )
-    .expect("overlay IndexedReady materialises");
+    assert!(
+        view.overlay_content_hash_for(canonical).is_some(),
+        "fixture invariant: the overlay covers the canonical",
+    );
+    host.materialize_overlay_indexed_ready_with_view(canonical, &view)
+        .expect("overlay IndexedReady materialises");
 
     let overlay_ctx = SessionResolverContext::new(&host, &view);
     let mut overlay_engine = ComponentMetaQueryEngine::new(&overlay_ctx);
@@ -4646,12 +4633,7 @@ fn imported_registry_cooperative_joiner_validates_against_follower_view() {
             "fixture invariant: the overlay hash must differ from the base hash",
         );
         follower_host
-            .materialize_overlay_indexed_ready_with_view(
-                canonical,
-                &overlay_source,
-                overlay_hash,
-                &view,
-            )
+            .materialize_overlay_indexed_ready_with_view(canonical, &view)
             .expect("overlay IndexedReady materialises");
         let session_ctx = SessionResolverContext::new(&follower_host, &view);
         let db = follower_host.project_type_store().imported_registry_db();
@@ -4864,12 +4846,7 @@ fn imported_registry_joiner_fork_removal_keeps_live_counter_consistent() {
             "fixture invariant: the overlay hash must differ from the base hash",
         );
         follower_host
-            .materialize_overlay_indexed_ready_with_view(
-                canonical,
-                &overlay_source,
-                overlay_hash,
-                &view,
-            )
+            .materialize_overlay_indexed_ready_with_view(canonical, &view)
             .expect("overlay IndexedReady materialises");
         let session_ctx = SessionResolverContext::new(&follower_host, &view);
         let db = follower_host.project_type_store().imported_registry_db();
@@ -5087,13 +5064,8 @@ fn imported_registry_removal_cleanup_preserves_fresh_reverse_index_registration(
         overlay_hash, base_hash,
         "fixture invariant: the overlay hash must differ from the base hash",
     );
-    host.materialize_overlay_indexed_ready_with_view(
-        canonical,
-        &overlay_source,
-        overlay_hash,
-        &view,
-    )
-    .expect("overlay IndexedReady materialises");
+    host.materialize_overlay_indexed_ready_with_view(canonical, &view)
+        .expect("overlay IndexedReady materialises");
 
     // The hook fires INSIDE `remove_published_entry_with_cleanup`,
     // AFTER `map.remove_if` removed entry A but BEFORE `removal_cleanup`

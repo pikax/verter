@@ -187,8 +187,9 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// source [`Self::indexed_for_current_content`] pins against.
     ///
     /// Unlike [`Self::get_whole_hash`] this accessor has **no
-    /// permissive fallback**: it never derives a hash from
-    /// `FileArtifactStore::get_any` / `content_hash_for_canonical`.
+    /// permissive fallback**: it never derives a hash from a
+    /// content-agnostic `FileArtifactStore` scan
+    /// (`FileArtifactStore::get_any`).
     /// When only a stale artifact could answer (the canonical was
     /// evicted/deleted while its `IndexedReady` lingers) it returns
     /// `None` so the pinned read becomes a miss rather than resolving

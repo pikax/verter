@@ -6,14 +6,13 @@
 //! pre-fix tree and PASS against the post-fix tree (the
 //! discriminator property required by the stub-prevention rule).
 //!
-//! ## P2.1 — overlay fallthrough uses the scheduler-or-artifacts
-//! helper
+//! ## P2.1 — overlay fallthrough uses the scheduler-authoritative
+//! content-hash helper
 //!
 //! Before the fix, `OverlaidView::resolved_import_facts` (and
 //! `OverlaidViewRef::resolved_import_facts`) composed
-//! `ResolvedImportFactsKey.content_hash` through bare
-//! `content_hash_for`, which on base fallthrough only consulted
-//! `FileArtifactStore::content_hash_for_canonical`. The producer
+//! `ResolvedImportFactsKey.content_hash` through a `FileArtifactStore`
+//! scan on base fallthrough. The producer
 //! (`admit_resolved_import_facts_for_owner`) admits under
 //! `parse.whole_hash` from the scheduler, which is available
 //! immediately post-`upsert` before `IndexedReady` is materialised.
@@ -23,9 +22,10 @@
 //! though both views should agree on the base host's resolution.
 //!
 //! After the fix, both overlay-view shapes route the base-
-//! fallthrough hash through `content_hash_from_scheduler_or_artifacts`
-//! (matching the helper `resolved_import_facts_via_host` already
-//! used for the base-only views).
+//! fallthrough hash through `current_content_hash_from_scheduler`
+//! (matching the helper `resolved_import_facts_via_host` used for the
+//! base-only views) — the scheduler-authoritative current content
+//! hash, with no permissive `FileArtifactStore` fallback.
 //!
 //! ## P2.2 — later route snapshots replace earlier negative entries
 //!

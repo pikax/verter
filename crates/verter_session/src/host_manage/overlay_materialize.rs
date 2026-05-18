@@ -86,8 +86,8 @@ impl VerterHost {
     /// View-aware overlay materialiser.
     ///
     /// Materialises an [`IndexedReady`](crate::project_type_store::IndexedReady)
-    /// candidate for `canonical_id` from `overlay_source` and publishes
-    /// it into [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore)
+    /// candidate for `canonical_id` from the view's overlay source and
+    /// publishes it into [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore)
     /// as a multi-candidate sibling of the base host's `IndexedReady`.
     /// Import-route resolution prefers overlay candidates surfaced by
     /// the supplied [`SessionView`](crate::session_view::SessionView).
@@ -108,15 +108,38 @@ impl VerterHost {
     /// canonical) yields the legacy key, which is correct: without an
     /// overlay there is no overlay-only route discovery and the
     /// candidate is base-equivalent.
+    ///
+    /// ## Source + content-hash authority
+    ///
+    /// The materialiser derives BOTH the overlay source and its
+    /// content hash from the supplied
+    /// [`SessionView`](crate::session_view::SessionView) — a single
+    /// authority, so the two cannot disagree on freshness. A caller
+    /// cannot pass a source / hash pair: separate parameters are how a
+    /// stale-hash-paired-with-fresh-source bug arises (and can race
+    /// under concurrent mutation). `view.content_hash_for(canonical)`
+    /// is view-authoritative-current (overlay hash when masked,
+    /// scheduler-authoritative base hash otherwise), and
+    /// `view.source(canonical)` returns the exact bytes that hash
+    /// covers. Returns `None` when the view carries no source for the
+    /// canonical or no current content hash for it (unloaded / evicted
+    /// / deleted).
     pub(crate) fn materialize_overlay_indexed_ready_with_view(
         &self,
         canonical_id: &str,
-        overlay_source: &Arc<str>,
-        overlay_whole_hash: crate::types::Hash16,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
         let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
         let canonical_id = normalized_canonical_id.as_ref();
+
+        // Derive the overlay source + its content hash from the view —
+        // ONE authority. `content_hash_for` is the view-authoritative
+        // CURRENT content hash (overlay hash when masked, scheduler
+        // hash otherwise); `source` returns the exact bytes that hash
+        // covers. Resolving both here removes the caller-supplied-hash
+        // failure mode entirely.
+        let overlay_source = view.source(canonical_id)?;
+        let overlay_whole_hash = view.content_hash_for(canonical_id)?;
 
         // Overlay artifact-store discriminator. `Some` when the bound
         // view carries an explicit overlay for this canonical — the
@@ -162,7 +185,7 @@ impl VerterHost {
         // sole content authority for this candidate, and the
         // candidate is published as a multi-candidate sibling of the
         // base via `insert_artifacts`.
-        let raw_source: Arc<str> = Arc::clone(overlay_source);
+        let raw_source: Arc<str> = Arc::clone(&overlay_source);
         let cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>> = None;
         let whole_hash = overlay_whole_hash;
         let snapshot = Arc::new(self.build_snapshot_from_source_state(

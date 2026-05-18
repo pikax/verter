@@ -28,12 +28,27 @@ use verter_semantic::facts::registry::{
 };
 use verter_semantic::facts::{FactKey, FactLane};
 use verter_session::file_artifact_store::{
-    AugmentationTargetKey, AugmentationTargetKind, AugmenterSet, FileArtifactStore, ProjectIdentity,
+    AugmentationTargetKey, AugmentationTargetKind, AugmenterEntry, AugmenterSet, FileArtifactKey,
+    FileArtifactStore, ProjectIdentity,
 };
 use verter_session::resolver_core::{
     BarrelRouteSurface, EffectiveExportEntry, EffectiveExportSetEntry, EffectiveExportSetKey,
     FactVersionRef, RouteDb, RouteResult, RouteSurfaceFactRef, StoreView, StoreViewCompatToken,
 };
+
+/// Build an [`AugmenterEntry`] for `canonical` carrying the given
+/// `parse_stable_hash`. The exact `FileArtifactKey` is a `legacy`-shape
+/// key with a placeholder content hash — these tests never insert the
+/// augmenter artifact into `FileArtifactStore`, so the key's
+/// `content_hash` is irrelevant to what they assert (the
+/// augmenter-set fingerprint + per-contributor `FileWholeHash`
+/// signature, both driven by `parse_stable_hash` / mocked hooks).
+fn augmenter_entry(canonical: &str, parse_stable_hash: [u8; 16]) -> AugmenterEntry {
+    AugmenterEntry {
+        artifact_key: FileArtifactKey::legacy_for_test(std::sync::Arc::from(canonical), [0u8; 16]),
+        parse_stable_hash,
+    }
+}
 
 // ────────────────────────────────────────────────────────────────
 // Test view — accepts all facts, used by the basic plumbing tests.
@@ -424,7 +439,7 @@ fn effective_export_set_carries_fact_dep_signature() {
     artifact_store.populate_augmenter_set(
         target_key.clone(),
         Arc::new(AugmenterSet {
-            entries: smallvec![(Arc::from("/aug.ts"), [42u8; 16])],
+            entries: smallvec![augmenter_entry("/aug.ts", [42u8; 16])],
             fingerprint: [99u8; 16],
         }),
     );
@@ -501,7 +516,7 @@ fn effective_export_set_invalidates_when_augmenter_set_fingerprint_changes() {
     artifact_store.populate_augmenter_set(
         target_key.clone(),
         Arc::new(AugmenterSet {
-            entries: smallvec![(Arc::from("/aug.ts"), [42u8; 16])],
+            entries: smallvec![augmenter_entry("/aug.ts", [42u8; 16])],
             fingerprint: initial_fp,
         }),
     );

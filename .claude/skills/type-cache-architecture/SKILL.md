@@ -293,6 +293,26 @@ Overlay artifacts are stored under the overlay's content hash and
 coexist with base artifacts under different keys. Byte-identical
 overlay collapses to base hash automatically.
 
+`SessionView::content_hash_for` is a **view-authoritative current-
+content oracle**, consistent with `SessionView::source` by contract —
+it returns the hash of the exact bytes `source()` yields. An
+overlay-covered canonical resolves to the overlay source's hash; every
+other canonical resolves through `VerterHost::authoritative_current_content_hash`
+(the scheduler authority, no permissive fallback). It is NOT a
+content-agnostic `FileArtifactStore` scan: a stale pre-edit
+`IndexedReady` lingering past a same-canonical edit (lazy
+invalidation) does not surface — an evicted / deleted canonical
+reports `None`. The overlay materialiser
+(`materialize_overlay_indexed_ready_with_view`) derives BOTH the
+overlay source and its content hash from the `SessionView` itself (one
+authority) — a caller cannot pass a separate source/hash pair, so a
+stale hash can never be paired with a fresh source.
+`FileArtifactStore` exposes NO content-agnostic *currency oracle* — a
+canonical-only `Option`-returning accessor that scans `artifacts` is
+forbidden by the `file_artifact_store_defines_no_unpinned_currency_oracle`
+architecture guard. The only intentional content-agnostic escapes are
+`get_any` / `get_artifacts_any`, each guarded at every call site.
+
 **R18.** `SessionView` is passed explicitly through `ResolverContext`.
 Thread-local "current view" globals remain forbidden.
 
@@ -526,7 +546,14 @@ on first miss — the scan walks every loaded `FileArtifacts.augmentations`,
 sorts matched augmenters by `(canonical, parse_stable_hash)`, computes
 the fingerprint, inserts into `augmentation_index`, and emits a typed
 `ModuleAugmentationIndexShape` audit event recording the install (or
-refresh on re-population). The stitcher then folds each augmenter's
+refresh on re-population). Each `AugmenterSet` entry is an
+`AugmenterEntry` carrying the **exact** `FileArtifactKey` of the
+scanned augmenter artifact (plus its `parse_stable_hash`) — the
+stitcher re-fetches each augmenter's `.augmentations` via
+`FileArtifactStore::get_artifacts(&key)` keyed by that exact key,
+never a content-agnostic canonical-only scan, so the stitch reads
+precisely the augmenter version the fingerprint was computed over.
+The stitcher then folds each augmenter's
 `(augmented_name, space)` contributions into an
 `EffectiveExportSetEntry { entries, augmenter_count,
 augmenter_set_fingerprint, fact_dep_signature }`. The
@@ -690,8 +717,8 @@ The discrimination matrix:
   `Interned{Specifier,Name,GlobPattern}` + `SymbolSpace` from
   `verter_semantic::facts::registry`;
   `AugmentationTargetKey`, `AugmentationTargetKind`,
-  `AugmenterSet`, `ParsedEdges`, `ModuleAugmentationFact`,
-  `ProjectIdentity`.
+  `AugmenterSet`, `AugmenterEntry`, `ParsedEdges`,
+  `ModuleAugmentationFact`, `ProjectIdentity`.
 - `crates/verter_session/src/fact_emission.rs` —
   `emit_parse_facts(&IndexedReady) -> ParseFactsEmission`,
   `GLOBAL_AUGMENTATION_TAG`, single-pass
@@ -768,6 +795,17 @@ The discrimination matrix:
 - `crates/verter_session/tests/storeview_per_domain_dispatch.rs` —
   R26 binding (dispatch table bounded by `FactDomain`, not
   `FactKey`).
+- `crates/verter_session/src/session_view_current_content_tests.rs`
+  — R17 binding (`SessionView::content_hash_for` is a view-
+  authoritative current-content oracle: base + overlay fallthrough
+  return the scheduler-authoritative hash, never a stale lingering
+  artifact's; the overlay materialiser does not serve a stale
+  `IndexedReady`).
+- `crates/verter_session/tests/architecture_guards.rs`
+  (`content_pinned_artifact_read_guards` module) — the
+  named-currency-oracle closure: `file_artifact_store_defines_no_unpinned_currency_oracle`
+  (definition-shape guard) + `no_named_currency_oracle_calls_in_production`
+  (call-site ban) + a discriminating self-test.
 
 ## Related skills
 

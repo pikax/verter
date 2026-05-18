@@ -137,7 +137,7 @@ fn augmentation_index_starts_empty() {
 fn augmentation_index_round_trip() {
     use smallvec::smallvec;
 
-    use super::AugmenterSet;
+    use super::{AugmenterEntry, AugmenterSet, FileArtifactKey};
 
     let store = FileArtifactStore::new();
     let key = AugmentationTargetKey {
@@ -147,7 +147,10 @@ fn augmentation_index_round_trip() {
         target: AugmentationTargetKind::ExternalSpecifier(super::InternedSpecifier::from("vue")),
     };
     let set = Arc::new(AugmenterSet {
-        entries: smallvec![(Arc::from("/aug.ts"), [3u8; 16])],
+        entries: smallvec![AugmenterEntry {
+            artifact_key: FileArtifactKey::legacy(Arc::from("/aug.ts"), [9u8; 16]),
+            parse_stable_hash: [3u8; 16],
+        }],
         fingerprint: [4u8; 16],
     });
     store.populate_augmenter_set(key.clone(), Arc::clone(&set));
@@ -214,8 +217,8 @@ fn legacy_remove_drops_entry() {
 // artifact (the discriminator lives in the `parse_env_hash` dimension).
 // Exact-key lookups (`get` / `get_overlay_scoped` / `get_artifacts`)
 // are isolated by the key. The canonical-wide *scans*
-// (`content_hash_for_canonical`, `get_any`, `get_artifacts_any`,
-// `snapshot_all`) match by `canonical` only, so fix-round-1 alone left
+// (`get_any`, `get_artifacts_any`, `snapshot_all`) match by
+// `canonical` only, so fix-round-1 alone left
 // them able to surface an overlay-scoped artifact to a base reader —
 // which would then derive base cache keys / route facts from
 // session-specific import routes. These tests pin the completed
@@ -243,10 +246,10 @@ fn base_canonical_wide_scans_do_not_surface_overlay_only_artifact() {
     // artifact.
     //
     // Pre-fix (`7c1c0429a`): `get_any` / `get_artifacts_any` /
-    // `content_hash_for_canonical` / `snapshot_all` match `canonical`
-    // only, so the overlay-scoped entry — the sole entry for X — is
-    // surfaced to the base reader. Post-fix: the scans filter to
-    // `legacy` keys and return `None` / omit X.
+    // `snapshot_all` match `canonical` only, so the overlay-scoped
+    // entry — the sole entry for X — is surfaced to the base reader.
+    // Post-fix: the scans filter to `legacy` keys and return `None` /
+    // omit X.
     let store = FileArtifactStore::new();
     let content_hash = [0x5au8; 16];
     let overlay_key = FileArtifactKey::overlay_scoped(
@@ -264,12 +267,6 @@ fn base_canonical_wide_scans_do_not_surface_overlay_only_artifact() {
     assert!(
         store.get_artifacts_any("/overlay-only.ts").is_none(),
         "get_artifacts_any (base scan) MUST NOT surface an overlay-scoped artifact"
-    );
-    assert!(
-        store
-            .content_hash_for_canonical("/overlay-only.ts")
-            .is_none(),
-        "content_hash_for_canonical (base scan) MUST NOT surface an overlay-scoped artifact's hash"
     );
     assert!(
         store

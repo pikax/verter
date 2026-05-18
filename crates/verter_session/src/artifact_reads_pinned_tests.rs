@@ -375,12 +375,7 @@ fn indexed_for_current_content_pins_overlay_artifact_through_session_context() {
     // overlay-scoped key (multi-candidate sibling of the base
     // artifact).
     let overlay_indexed = host
-        .materialize_overlay_indexed_ready_with_view(
-            canonical,
-            &overlay_source,
-            overlay_hash,
-            &view,
-        )
+        .materialize_overlay_indexed_ready_with_view(canonical, &view)
         .expect("overlay IndexedReady must materialise");
     assert_eq!(
         overlay_indexed.whole_hash, overlay_hash,
@@ -838,12 +833,7 @@ fn audit_store_snapshot_entry_and_byte_counts_share_one_population() {
     // overlay-scoped key — a multi-candidate sibling of the base
     // artifact.
     let overlay_indexed = host
-        .materialize_overlay_indexed_ready_with_view(
-            canonical,
-            &overlay_source,
-            overlay_hash,
-            &view,
-        )
+        .materialize_overlay_indexed_ready_with_view(canonical, &view)
         .expect("overlay IndexedReady must materialise");
     assert_eq!(
         overlay_indexed.whole_hash, overlay_hash,

@@ -9891,4 +9891,464 @@ mod content_pinned_artifact_read_guards {
              helpers MUST NOT be flagged"
         );
     }
+
+    // ──────────────────────────────────────────────────────────────
+    // Named-currency-oracle closure.
+    //
+    // The `get_any` allowlist guard above bans only the two literal
+    // fluent call chains `indexed().get_any(` / `.get_artifacts_any(`.
+    // A *named* `FileArtifactStore` method with the identical
+    // content-agnostic first-match scan body — `content_hash_for_canonical`,
+    // `latest_artifacts_for_canonical` — is outside that guard's
+    // textual reach: a content-agnostic "currency oracle" can be
+    // reintroduced under any new method name. The two guards below
+    // close that gap:
+    //
+    // - `no_named_currency_oracle_calls_in_production` — a call-site
+    //   ban on the two named oracles, so even if a future change
+    //   re-adds them, production code cannot call them.
+    // - `file_artifact_store_defines_no_unpinned_currency_oracle` — a
+    //   *definition-shape* guard: any `FileArtifactStore` method with a
+    //   canonical-only parameter (no content-hash pin), a singular
+    //   `Option<...>` return, that scans `self.artifacts`, is a
+    //   currency oracle and is banned at the definition site. Only the
+    //   two intentional low-level escapes (`get_any` /
+    //   `get_artifacts_any`, themselves guarded at every call site) are
+    //   allowlisted.
+    // ──────────────────────────────────────────────────────────────
+
+    /// Method names that ARE the content-agnostic currency-oracle
+    /// shape and are intentionally retained as low-level escapes. Their
+    /// every call site is independently guarded by
+    /// [`no_direct_file_artifact_get_any_outside_allowlist`] +
+    /// `tests/structural_carrier_no_get_any_guard.rs`.
+    const CURRENCY_ORACLE_DEFINITION_ALLOWLIST: &[&str] = &["get_any", "get_artifacts_any"];
+
+    /// Banned named currency oracles — a canonical-only
+    /// `Option`-returning `FileArtifactStore` accessor cannot be
+    /// content-pinned, so it must not exist in production use. The set
+    /// is empty of production callers after Block 2.S-G removed
+    /// `content_hash_for_canonical` / `latest_artifacts_for_canonical`;
+    /// this guard keeps it that way.
+    const BANNED_NAMED_CURRENCY_ORACLES: &[&str] = &[
+        ".content_hash_for_canonical(",
+        ".latest_artifacts_for_canonical(",
+    ];
+
+    /// No `verter_session` production file calls a banned named
+    /// currency oracle. There is no allowlist — a canonical-only
+    /// `Option<Hash16>` / `Option<Arc<FileArtifacts>>` accessor is
+    /// unpinnable by construction; a caller needing current identity
+    /// uses the scheduler authority, a caller needing artifacts uses an
+    /// exact key.
+    #[test]
+    fn no_named_currency_oracle_calls_in_production() {
+        let files = verter_session_production_rs_files();
+        let mut violations: Vec<String> = Vec::new();
+        for (path, rel) in &files {
+            let src =
+                fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            let stripped = strip_comments(&src);
+            for banned in BANNED_NAMED_CURRENCY_ORACLES {
+                if stripped.contains(banned) {
+                    violations.push(format!("{rel}: calls `{banned}`"));
+                }
+            }
+        }
+        violations.sort();
+        assert!(
+            violations.is_empty(),
+            "named content-agnostic currency-oracle calls found in \
+             production:\n  {}\n\nA canonical-only `Option`-returning \
+             `FileArtifactStore` accessor cannot be content-pinned — with \
+             lazy cache invalidation it can surface a stale pre-edit \
+             artifact. Resolve current identity through the scheduler \
+             authority (`authoritative_current_content_hash`); read \
+             artifacts through an exact `FileArtifactKey`.",
+            violations.join("\n  "),
+        );
+    }
+
+    /// Extract the brace-balanced body (including the outer braces) of
+    /// the first `pub fn <name>` / `pub(crate) fn <name>` whose
+    /// signature begins at `decl_start`. Returns
+    /// `(signature, body, end_offset)` where `signature` is the text
+    /// from `fn` to the opening brace and `end_offset` is the index in
+    /// `src` one past the closing brace.
+    fn balanced_fn_after(src: &str, decl_start: usize) -> Option<(String, String, usize)> {
+        let after = &src[decl_start..];
+        let brace_rel = after.find('{')?;
+        let signature = after[..brace_rel].trim().to_string();
+        let bytes = after.as_bytes();
+        let mut depth = 0usize;
+        let mut idx = brace_rel;
+        while idx < bytes.len() {
+            match bytes[idx] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((
+                            signature,
+                            after[brace_rel..=idx].to_string(),
+                            decl_start + idx + 1,
+                        ));
+                    }
+                }
+                _ => {}
+            }
+            idx += 1;
+        }
+        None
+    }
+
+    /// Extract the method parameter list — the text between the first
+    /// `(` after the `fn` keyword and its **brace-matching** `)`. This
+    /// is robust to a `where R: Fn(&str) -> T` clause, whose inner
+    /// parentheses would otherwise confuse a `rfind(')')`-based span.
+    /// Returns `(params, after_params)` where `after_params` is the
+    /// signature tail (return arrow + `where` clause).
+    fn split_signature_params(signature: &str) -> Option<(String, String)> {
+        let open = signature.find('(')?;
+        let bytes = signature.as_bytes();
+        let mut depth = 0usize;
+        let mut idx = open;
+        while idx < bytes.len() {
+            match bytes[idx] {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((
+                            signature[open + 1..idx].to_string(),
+                            signature[idx + 1..].to_string(),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+            idx += 1;
+        }
+        None
+    }
+
+    /// True when `signature` (the `fn name(params) -> Ret` slice) is a
+    /// canonical-only accessor: it takes a `&str` parameter whose name
+    /// contains `canonical` and carries NO content-hash pin parameter
+    /// (`Hash16` or a parameter whose name contains `content_hash` /
+    /// `whole_hash` / `parse_stable_hash`). A `&FileArtifactKey`
+    /// parameter IS a content-pin (the exact key carries the content
+    /// hash) — `FileArtifactKey` is recognised as a pin.
+    fn is_canonical_only_signature(signature: &str) -> bool {
+        let Some((params, _after)) = split_signature_params(signature) else {
+            return false;
+        };
+        let takes_canonical_str = params.contains("canonical") && params.contains("&str");
+        let has_hash_pin = params.contains("Hash16")
+            || params.contains("FileArtifactKey")
+            || params.contains("content_hash")
+            || params.contains("whole_hash")
+            || params.contains("parse_stable_hash")
+            || params.contains("discriminator");
+        takes_canonical_str && !has_hash_pin
+    }
+
+    /// True when `signature`'s return type is a singular `Option<...>`
+    /// (NOT `Vec<...>` — a full enumeration is a legitimate
+    /// canonical-wide scan, not a currency oracle). The return type is
+    /// read from the signature tail AFTER the brace-matched parameter
+    /// list, so an arrow inside a `where R: Fn(..) -> T` clause is not
+    /// mistaken for the method's own return type. A `where`-clause-only
+    /// tail with no top-level `->` (a `()`-returning method) is not an
+    /// `Option` return.
+    fn returns_singular_option(signature: &str) -> bool {
+        let Some((_params, after)) = split_signature_params(signature) else {
+            return false;
+        };
+        // The method return type, if any, is the `-> ...` segment
+        // BEFORE any `where` clause. `where` introduces generic bounds
+        // (which may themselves contain `-> ` inside `Fn(..) -> T`).
+        // Split on the `where` keyword as a whitespace-delimited word
+        // (the clause may be newline-separated from the param list).
+        let where_at = after
+            .match_indices("where")
+            .find(|(i, _)| {
+                let before_ok = after[..*i]
+                    .chars()
+                    .next_back()
+                    .is_none_or(char::is_whitespace);
+                let after_ok = after[i + 5..]
+                    .chars()
+                    .next()
+                    .is_none_or(char::is_whitespace);
+                before_ok && after_ok
+            })
+            .map(|(i, _)| i);
+        let head = match where_at {
+            Some(w) => &after[..w],
+            None => &after,
+        };
+        match head.split_once("->") {
+            Some((_, ret)) => {
+                let ret = ret.trim();
+                ret.starts_with("Option<") && !ret.contains("Vec<")
+            }
+            None => false,
+        }
+    }
+
+    /// Scan a `FileArtifactStore`-method `(signature, body)` pair and
+    /// classify it: a method is an **unpinned currency oracle** when it
+    /// is canonical-only ([`is_canonical_only_signature`]), returns a
+    /// singular `Option` ([`returns_singular_option`]), and its body
+    /// iterates `self.artifacts` directly (`self.artifacts.iter()`) or
+    /// delegates to another `self.<method>(` that does.
+    fn is_unpinned_currency_oracle(signature: &str, body: &str) -> bool {
+        if !is_canonical_only_signature(signature) || !returns_singular_option(signature) {
+            return false;
+        }
+        // The body must touch the artifact collection — either a direct
+        // scan or a delegation to a sibling accessor. A direct
+        // `self.artifacts.iter()` is the scan; a `self.get_artifacts_any(`
+        // / `self.get_any(` delegation inherits the scan.
+        body.contains("self.artifacts.iter()")
+            || body.contains("self.get_artifacts_any(")
+            || body.contains("self.get_any(")
+    }
+
+    /// Every `pub` / `pub(crate)` method defined inside `impl
+    /// FileArtifactStore` in `file_artifact_store.rs`, as
+    /// `(name, signature, body)` triples. Methods on other `impl`
+    /// blocks in the same file (`FileArtifactKey`, `FileArtifacts`,
+    /// `AugmenterEntry`, …) are excluded.
+    fn file_artifact_store_methods() -> Vec<(String, String, String)> {
+        let root = super::workspace_root();
+        let path = root.join("crates/verter_session/src/file_artifact_store.rs");
+        let src =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let stripped = strip_comments(&src);
+        // Bound the scan to the `impl FileArtifactStore {` block.
+        let impl_start = stripped
+            .find("impl FileArtifactStore {")
+            .expect("file_artifact_store.rs must define `impl FileArtifactStore`");
+        // Find the matching close brace of the impl block.
+        let bytes = stripped.as_bytes();
+        let block_open = impl_start + stripped[impl_start..].find('{').unwrap();
+        let mut depth = 0usize;
+        let mut idx = block_open;
+        let mut impl_end = stripped.len();
+        while idx < bytes.len() {
+            match bytes[idx] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        impl_end = idx;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            idx += 1;
+        }
+        let impl_body = &stripped[block_open..=impl_end];
+
+        let mut out: Vec<(String, String, String)> = Vec::new();
+        let mut cursor = 0usize;
+        while let Some(rel) = impl_body[cursor..].find("fn ") {
+            let fn_kw = cursor + rel;
+            // Require the `fn` to be a method declaration: preceded
+            // (modulo whitespace) by `pub`, `pub(crate)`, `const`,
+            // `unsafe`, or be a bare `fn`. We only care about `pub` /
+            // `pub(crate)` methods — private helpers are not API.
+            let prefix = &impl_body[..fn_kw];
+            let is_pub =
+                prefix.trim_end().ends_with("pub") || prefix.trim_end().ends_with("pub(crate)");
+            // Method name: the identifier right after `fn `.
+            let name_start = fn_kw + 3;
+            let name: String = impl_body[name_start..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if let Some((signature, body, end_offset)) = balanced_fn_after(impl_body, fn_kw) {
+                // Advance past this fn body before the (possible) move
+                // of `signature` / `body` into `out`.
+                cursor = end_offset;
+                if is_pub && !name.is_empty() {
+                    out.push((name, signature, body));
+                }
+            } else {
+                cursor = fn_kw + 3;
+            }
+        }
+        out
+    }
+
+    /// Definition-shape guard — `FileArtifactStore` defines NO unpinned
+    /// currency-oracle method outside the intentional-escape allowlist.
+    ///
+    /// This catches the *next* `content_hash_for_canonical` regardless
+    /// of the name it is given: the ban is on the shape (canonical-only
+    /// parameter + singular `Option` return + `self.artifacts` scan),
+    /// not a name list.
+    #[test]
+    fn file_artifact_store_defines_no_unpinned_currency_oracle() {
+        let methods = file_artifact_store_methods();
+        // Sanity: the scan found a non-trivial method surface — guards
+        // against a parser regression silently passing vacuously.
+        assert!(
+            methods.len() > 10,
+            "the `impl FileArtifactStore` scan found only {} methods — \
+             the parser likely failed; the guard would pass vacuously",
+            methods.len(),
+        );
+        let mut violations: Vec<String> = Vec::new();
+        for (name, signature, body) in &methods {
+            if CURRENCY_ORACLE_DEFINITION_ALLOWLIST.contains(&name.as_str()) {
+                continue;
+            }
+            if is_unpinned_currency_oracle(signature, body) {
+                violations.push(format!("`{name}` — signature `{signature}`"));
+            }
+        }
+        violations.sort();
+        assert!(
+            violations.is_empty(),
+            "unpinned content-agnostic currency oracle(s) defined on \
+             `FileArtifactStore`:\n  {}\n\nA canonical-only accessor with a \
+             singular `Option` return that scans `self.artifacts` answers \
+             \"the current X for this canonical\" — but with lazy cache \
+             invalidation a stale pre-edit artifact lingers, so a \
+             first-match scan can return it. Either pin the read to a \
+             content hash (add a `Hash16` parameter, use an exact \
+             `FileArtifactKey`), return a `Vec` (a full enumeration is \
+             not a currency oracle), or — for a genuine low-level escape \
+             — add the method to `CURRENCY_ORACLE_DEFINITION_ALLOWLIST` \
+             AND guard its every call site.",
+            violations.join("\n  "),
+        );
+
+        // Every allowlisted escape MUST still be defined — a stale
+        // allowlist entry (the method was removed / pinned) must be
+        // dropped so the allowlist cannot silently grow permission.
+        let defined: std::collections::BTreeSet<&str> =
+            methods.iter().map(|(n, _, _)| n.as_str()).collect();
+        for allowed in CURRENCY_ORACLE_DEFINITION_ALLOWLIST {
+            assert!(
+                defined.contains(allowed),
+                "CURRENCY_ORACLE_DEFINITION_ALLOWLIST entry `{allowed}` is no \
+                 longer a defined `FileArtifactStore` method — remove the \
+                 stale allowlist entry.",
+            );
+        }
+    }
+
+    /// Discriminating self-test for the definition-shape scanner — it
+    /// must flag the currency-oracle shape and clear the pinned /
+    /// enumeration / non-scanning shapes. Without this, an
+    /// empty-violations result is indistinguishable from a vacuous pass.
+    #[test]
+    fn currency_oracle_definition_scanner_discriminates() {
+        // (a) The exact `content_hash_for_canonical` shape — canonical-
+        //     only param, `Option<Hash16>` return, `self.artifacts`
+        //     scan → MUST be flagged.
+        let oracle_sig = "fn content_hash_for_canonical(&self, canonical: &str) -> Option<Hash16>";
+        let oracle_body = "{ for entry in self.artifacts.iter() { if entry.key().canonical.as_ref() == canonical { return Some(entry.key().content_hash); } } None }";
+        assert!(
+            is_unpinned_currency_oracle(oracle_sig, oracle_body),
+            "self-test: the `content_hash_for_canonical` shape MUST be flagged",
+        );
+
+        // (a') The `latest_artifacts_for_canonical` delegation shape →
+        //      MUST be flagged (delegates to `self.get_artifacts_any(`).
+        let alias_sig =
+            "fn latest_artifacts_for_canonical(&self, canonical: &str) -> Option<Arc<FileArtifacts>>";
+        let alias_body = "{ self.get_artifacts_any(canonical) }";
+        assert!(
+            is_unpinned_currency_oracle(alias_sig, alias_body),
+            "self-test: the `latest_artifacts_for_canonical` delegation MUST be flagged",
+        );
+
+        // (b) A content-pinned read — carries a `Hash16` parameter →
+        //     MUST NOT be flagged.
+        let pinned_sig =
+            "fn get(&self, canonical_id: &str, expected_whole_hash: Hash16) -> Option<Arc<IndexedReady>>";
+        let pinned_body = "{ let key = FileArtifactKey::legacy(Arc::from(canonical_id), expected_whole_hash); self.artifacts.get(&key) }";
+        assert!(
+            !is_unpinned_currency_oracle(pinned_sig, pinned_body),
+            "self-test: a content-pinned read (carries a `Hash16` pin) MUST NOT be flagged",
+        );
+
+        // (c) A full-enumeration scan — returns `Vec<...>` → MUST NOT
+        //     be flagged (a caller wants the whole set, not "current").
+        let enum_sig = "fn keys(&self) -> Vec<(Arc<str>, Hash16)>";
+        let enum_body = "{ self.artifacts.iter().map(|e| e.key().clone()).collect() }";
+        assert!(
+            !is_unpinned_currency_oracle(enum_sig, enum_body),
+            "self-test: a `Vec`-returning full enumeration MUST NOT be flagged",
+        );
+
+        // (d) A canonical-only `Option` accessor that does NOT scan
+        //     `self.artifacts` → MUST NOT be flagged (no scan = no
+        //     currency-oracle hazard).
+        let no_scan_sig = "fn last_access_tick(&self, canonical: &str) -> Option<u64>";
+        let no_scan_body = "{ self.last_access.get(canonical).map(|v| *v) }";
+        assert!(
+            !is_unpinned_currency_oracle(no_scan_sig, no_scan_body),
+            "self-test: a canonical-only `Option` accessor that does not scan \
+             `self.artifacts` MUST NOT be flagged",
+        );
+
+        // (e) An overlay-scoped read — carries a `discriminator`
+        //     content-pin parameter → MUST NOT be flagged.
+        let overlay_sig = "fn get_overlay_scoped(&self, canonical_id: &str, expected_whole_hash: Hash16, discriminator: Hash16) -> Option<Arc<IndexedReady>>";
+        let overlay_body = "{ let key = FileArtifactKey::overlay_scoped(Arc::from(canonical_id), expected_whole_hash, discriminator); self.artifacts.get(&key) }";
+        assert!(
+            !is_unpinned_currency_oracle(overlay_sig, overlay_body),
+            "self-test: an overlay-scoped read (carries a pin) MUST NOT be flagged",
+        );
+
+        // (f) The call-site scanner: a banned named-oracle call MUST be
+        //     detected; a clean scheduler-authority call MUST NOT.
+        let banned_call = "let h = store.content_hash_for_canonical(canonical);";
+        assert!(
+            BANNED_NAMED_CURRENCY_ORACLES
+                .iter()
+                .any(|b| banned_call.contains(b)),
+            "self-test: a `.content_hash_for_canonical(` call MUST be detected",
+        );
+        let clean_call = "let h = base.authoritative_current_content_hash(canonical);";
+        assert!(
+            !BANNED_NAMED_CURRENCY_ORACLES
+                .iter()
+                .any(|b| clean_call.contains(b)),
+            "self-test: a scheduler-authority call MUST NOT be flagged",
+        );
+
+        // (g) A `where`-clause method that returns `()` and whose
+        //     `where R: Fn(&str) -> Option<T>` bound contains both a
+        //     `&str` and an `-> Option<...>` → MUST NOT be flagged. The
+        //     signature parser must not mistake the `Fn` bound's params
+        //     / arrow for the method's own — this is the
+        //     `refresh_augmentation_index_for_canonical` shape.
+        let where_clause_sig = "fn refresh_augmentation_index_for_canonical<R>(&self, new_artifact_key: &FileArtifactKey, resolve_relative_canonical: R) where R: Fn(&str, &str) -> Option<Arc<str>>";
+        assert!(
+            !returns_singular_option(where_clause_sig),
+            "self-test: a `()`-returning method whose `where` clause carries \
+             `Fn(..) -> Option<T>` MUST NOT be read as Option-returning",
+        );
+        assert!(
+            !is_canonical_only_signature(where_clause_sig),
+            "self-test: a `&FileArtifactKey`-taking method is content-pinned \
+             (the exact key carries the content hash) — MUST NOT be flagged \
+             canonical-only, and the `Fn(&str)` bound's `&str` must not be \
+             mistaken for a method parameter",
+        );
+        let where_clause_body = "{ for e in self.artifacts.iter() { } }";
+        assert!(
+            !is_unpinned_currency_oracle(where_clause_sig, where_clause_body),
+            "self-test: the `where`-clause `()`-returning augmentation-index \
+             refresh shape MUST NOT be flagged as a currency oracle",
+        );
+    }
 }

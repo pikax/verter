@@ -723,11 +723,20 @@ impl RouteDb {
                     );
 
                     // Stitch each augmenter's contributions for the
-                    // queried target.
+                    // queried target. The augmenter's `.augmentations`
+                    // are re-fetched by the EXACT `FileArtifactKey`
+                    // captured at index-population time
+                    // (`get_artifacts(&key)`), never a content-agnostic
+                    // canonical-only scan: with lazy cache invalidation
+                    // a stale pre-edit version of the augmenter can
+                    // linger alongside the current one, and a
+                    // canonical-only scan could surface a different
+                    // version than the one the augmenter-set
+                    // fingerprint was computed over.
                     let mut stitched: Vec<EffectiveExportEntry> = Vec::new();
-                    for (augmenter_canonical, _parse_stable_hash) in augmenter_set.entries.iter() {
-                        let Some(art) = artifact_store
-                            .latest_artifacts_for_canonical(augmenter_canonical.as_ref())
+                    for augmenter in augmenter_set.entries.iter() {
+                        let augmenter_canonical = augmenter.canonical();
+                        let Some(art) = artifact_store.get_artifacts(&augmenter.artifact_key)
                         else {
                             continue;
                         };
@@ -769,7 +778,8 @@ impl RouteDb {
                         lane: verter_semantic::facts::FactLane::Semantic,
                         expected_hash: augmenter_set.fingerprint,
                     }));
-                    for (augmenter_canonical, _parse_stable_hash) in augmenter_set.entries.iter() {
+                    for augmenter in augmenter_set.entries.iter() {
+                        let augmenter_canonical = augmenter.canonical();
                         if let Some(hash) = contributor_whole_hash(augmenter_canonical.as_ref()) {
                             facts.push(FactVersionRef::FileWholeHash {
                                 canonical_id: augmenter_canonical.as_ref().to_owned(),

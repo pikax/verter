@@ -96,29 +96,18 @@ pub(crate) fn ensure_indexed_ready_with_view(
     // standard `ensure_indexed_ready`.
     //
     // Overlay detection uses the **strict** `overlay_content_hash_for`,
-    // NOT the permissive `content_hash_for`. `content_hash_for` falls
-    // through to the base host's `FileArtifactStore`-derived content
-    // hash for an unmasked canonical — the same content-agnostic,
-    // canonical-only scan as `get_any`, which can surface a STALE
-    // lingering artifact's hash once the own-canonical drain is
-    // retired. Comparing that stale hash against the scheduler's
-    // current `base_hash` would read `view_hash != base_hash` for a
-    // canonical with NO overlay and re-route materialisation through
-    // the overlay path keyed on the stale hash — resurrecting the
-    // stale `IndexedReady`. `overlay_content_hash_for` reports `Some`
-    // ONLY when the session installed an actual overlay-Upsert (the
-    // overlay source's own hash), so an unmasked canonical correctly
-    // falls through to `ensure_indexed_ready`.
-    if let Some(overlay_hash) = view.overlay_content_hash_for(canonical_id) {
-        if let Some(overlay_source) = view.source(canonical_id) {
-            if let Some(indexed) = host.materialize_overlay_indexed_ready_with_view(
-                canonical_id,
-                &overlay_source,
-                overlay_hash,
-                view,
-            ) {
-                return Some(indexed);
-            }
+    // which reports `Some` ONLY when the session installed an actual
+    // overlay-Upsert. An unmasked canonical reports `None` here and
+    // correctly falls through to the host's own `ensure_indexed_ready`
+    // — the overlay materialiser path is reserved for genuine
+    // overlays. The materialiser then derives both the overlay source
+    // and its content hash from the view itself (a single authority),
+    // so no stale hash can be smuggled into the candidate's key or
+    // `whole_hash`.
+    if view.overlay_content_hash_for(canonical_id).is_some() {
+        if let Some(indexed) = host.materialize_overlay_indexed_ready_with_view(canonical_id, view)
+        {
+            return Some(indexed);
         }
     }
     host.ensure_indexed_ready(canonical_id)

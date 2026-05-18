@@ -86,32 +86,48 @@ pub trait SessionView: Send + Sync {
     /// the host on read.
     fn source(&self, canonical: &str) -> Option<Arc<str>>;
 
-    /// Content hash of `canonical` under this view, if known.
+    /// View-authoritative **current** content hash of `canonical`, if
+    /// known.
     ///
-    /// For [`OverlaidView`] this returns the hash of the overlay
-    /// source when an overlay covers the canonical; otherwise it
-    /// returns the base host's content hash (or `None`).
+    /// This is the hash of the exact bytes [`Self::source`] returns for
+    /// `canonical` — the two methods agree on freshness by contract. An
+    /// overlay-covered canonical resolves to the overlay source's hash;
+    /// every other canonical resolves to the base host's
+    /// scheduler-authoritative current content hash
+    /// ([`crate::VerterHost::authoritative_current_content_hash`]).
+    ///
+    /// The base fallthrough is the **scheduler authority**, never a
+    /// permissive `FileArtifactStore` scan. A stale pre-edit
+    /// `IndexedReady` lingering in
+    /// [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore)
+    /// past a same-canonical edit (lazy invalidation) does NOT surface
+    /// here — an evicted / deleted canonical reports `None`, and a live
+    /// canonical reports the current hash, so a content-pinned lookup
+    /// keyed by this value never resolves a stale artifact via its own
+    /// hash.
     fn content_hash_for(&self, canonical: &str) -> Option<Hash16>;
 
     /// Content hash of the **explicit overlay** covering `canonical`,
     /// or `None` when this view carries no overlay for it.
     ///
-    /// Distinct from [`Self::content_hash_for`]: that method falls
-    /// through to the base host's `FileArtifactStore`-derived content
-    /// hash for unmasked canonicals (a permissive scan that can
-    /// surface a *stale* lingering artifact's hash). This method
-    /// reports `Some` **only** when the session has installed an
-    /// overlay-Upsert for `canonical` — the overlay source's hash,
-    /// which the overlay `IndexedReady` candidate was prewarmed under.
+    /// Distinct from [`Self::content_hash_for`]: that method reports
+    /// the view-authoritative current content hash for every known
+    /// canonical (overlay hash when masked, scheduler-authoritative
+    /// base hash otherwise). This method reports `Some` **only** when
+    /// the session has installed an overlay-Upsert for `canonical` —
+    /// the overlay source's hash, which the overlay `IndexedReady`
+    /// candidate was prewarmed under — and `None` for an unmasked
+    /// canonical even when the base host knows it. Consumers that must
+    /// distinguish "an explicit overlay covers this" from "the base
+    /// host knows this" (overlay-detection in
+    /// [`crate::host_manage::overlay_priority`]) consult this method,
+    /// not `content_hash_for`.
     ///
     /// Overlay-tombstoned canonicals report `None` (the session
     /// deleted the file — there is no overlay content).
     ///
     /// Default returns `None` — base-only views ([`HostView`],
-    /// [`HostViewRef`]) never carry overlays. Content-pinned
-    /// resolver-tier readers consult this to pin overlay artifacts
-    /// against the overlay hash while still treating the base
-    /// fallthrough as authoritative-only (no `get_any`).
+    /// [`HostViewRef`]) never carry overlays.
     fn overlay_content_hash_for(&self, _canonical: &str) -> Option<Hash16> {
         None
     }
@@ -274,25 +290,24 @@ pub trait SessionView: Send + Sync {
 ///
 /// The `content_hash` source mirrors the producer
 /// (`admit_resolved_import_facts_for_owner`): both read the
-/// scheduler-cached `parse.whole_hash` so the producer's admission
-/// key and the view's lookup key reach the same `DashMap` slot
-/// immediately after `upsert`, without waiting for the lazy
-/// `IndexedReady` materialization through `ensure_indexed_ready`.
-/// When the scheduler has no source snapshot for the canonical (the
-/// file was never `upsert`-ed or has been closed), falls back to the
-/// file-artifact store's `content_hash_for_canonical` so legacy
-/// callers that materialize through `ensure_indexed_ready` first
-/// still resolve.
+/// scheduler-authoritative `parse.whole_hash` so the producer's
+/// admission key and the view's lookup key reach the same `DashMap`
+/// slot immediately after `upsert`, without waiting for the lazy
+/// `IndexedReady` materialization through `ensure_indexed_ready`. The
+/// source is strict — [`current_content_hash_from_scheduler`] — with
+/// no permissive `FileArtifactStore` fallback: a scan-derived stale
+/// hash would resolve a stale `ResolvedImportFacts` entry instead of
+/// missing.
 ///
-/// Returns `None` when neither the scheduler nor the artifact store
-/// has a content hash for `canonical`, or when the cache has not been
-/// populated for the resolved quintuple.
+/// Returns `None` when the scheduler has no current content hash for
+/// `canonical` (unloaded / evicted / deleted), or when the cache has
+/// not been populated for the resolved quintuple.
 fn resolved_import_facts_via_host(
     base: &VerterHost,
     canonical: &str,
     env_hashes: &EnvHashes,
 ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
-    let content_hash = content_hash_from_scheduler_or_artifacts(base, canonical)?;
+    let content_hash = current_content_hash_from_scheduler(base, canonical)?;
     let known_miss_generation = known_miss_generation_tag_for_owner(base, canonical);
     let key = crate::resolved_import_facts::ResolvedImportFactsKey {
         canonical: Arc::from(canonical),
@@ -335,33 +350,32 @@ fn known_miss_generation_tag_for_owner(
     }
 }
 
-/// Resolve `canonical`'s content hash from the most authoritative
-/// source available.
+/// Resolve `canonical`'s **current** content hash from the scheduler
+/// authority — the sole parse authority, available immediately
+/// post-`upsert`.
 ///
-/// Prefers the scheduler-cached `HostSourceData.parse.whole_hash`
-/// (the sole parse authority — available immediately post-`upsert`)
-/// and falls back to the file-artifact store's
-/// `content_hash_for_canonical` (the lazy view of the same value
-/// once `IndexedReady` has been materialized via
-/// `ensure_indexed_ready`). Both sources record the same hash for a
-/// given canonical's current bytes; the scheduler is just the
-/// earlier-available view.
+/// Strict by contract: this delegates to
+/// [`VerterHost::authoritative_current_content_hash`] (scheduler
+/// `HostSourceData.parse.whole_hash`, gated on the `DerivedRawState`
+/// entry being non-evicted) and has **no permissive fallback**. It
+/// never derives a hash from a `FileArtifactStore` scan: a scan can
+/// surface a stale pre-edit artifact's own hash, and feeding that into
+/// a content-pinned `ResolvedImportFacts` lookup would resolve the
+/// stale resolution instead of yielding a miss. When only a stale
+/// artifact could answer — the canonical was evicted / deleted while
+/// its `IndexedReady` lingers — this returns `None`, which is correct:
+/// `ResolvedImportFacts` is produced keyed from the same scheduler
+/// `parse.whole_hash`, so a `None` here is a true miss, not a lost
+/// cache hit.
 ///
 /// Used by `resolved_import_facts_via_host` to match the producer
 /// (`admit_resolved_import_facts_for_owner`) on cache-key
 /// `content_hash` composition.
-fn content_hash_from_scheduler_or_artifacts(
+fn current_content_hash_from_scheduler(
     base: &VerterHost,
     canonical: &str,
 ) -> Option<verter_semantic::analysis::Hash16> {
-    if let Some(snap) = base.scheduler().try_get_source(canonical) {
-        if let Some(hd) = snap.downcast_data::<crate::host_executor::HostSourceData>() {
-            return Some(hd.parse.whole_hash);
-        }
-    }
-    base.project_type_store()
-        .indexed()
-        .content_hash_for_canonical(canonical)
+    base.authoritative_current_content_hash(canonical)
 }
 
 // ---------------------------------------------------------------------------
@@ -419,13 +433,13 @@ impl SessionView for HostView {
     }
 
     fn content_hash_for(&self, canonical: &str) -> Option<Hash16> {
-        // Use the file-artifact store as the authoritative
-        // content-hash source; falls back to None for canonicals
-        // not yet ingested.
-        self.base
-            .project_type_store()
-            .indexed()
-            .content_hash_for_canonical(canonical)
+        // View-authoritative current content hash. A base-only view
+        // resolves it from the scheduler authority
+        // (`authoritative_current_content_hash`) — never a permissive
+        // `FileArtifactStore` scan, which could surface a stale
+        // pre-edit artifact's hash and disagree with `source()`.
+        // `None` for an unloaded / evicted / deleted canonical.
+        self.base.authoritative_current_content_hash(canonical)
     }
 
     fn parse_artifacts(
@@ -556,13 +570,16 @@ impl SessionView for OverlaidView {
     }
 
     fn content_hash_for(&self, canonical: &str) -> Option<Hash16> {
+        // View-authoritative current content hash. An overlay-covered
+        // canonical resolves to the overlay source's hash; an unmasked
+        // canonical falls through to the base host's
+        // scheduler-authoritative current hash — never a permissive
+        // `FileArtifactStore` scan (a stale pre-edit artifact's hash
+        // would disagree with `source()`).
         if let Some(hash) = self.overlay_hashes.get(canonical) {
             return Some(*hash);
         }
-        self.base
-            .project_type_store()
-            .indexed()
-            .content_hash_for_canonical(canonical)
+        self.base.authoritative_current_content_hash(canonical)
     }
 
     fn overlay_content_hash_for(&self, canonical: &str) -> Option<Hash16> {
@@ -628,18 +645,16 @@ impl SessionView for OverlaidView {
         // The resolved-import facts cache keys on `content_hash`,
         // which is overlay-aware: an overlay that differs from the
         // base source yields a distinct cache slot. The lookup
-        // therefore reads the overlay's content hash when an
-        // overlay covers the canonical and falls through to the
-        // base host's scheduler-or-artifacts hash otherwise (Codex
-        // P2.1 / Block 1.f-fix). Using the bare
-        // `content_hash_for` would miss the scheduler hash that
-        // `admit_resolved_import_facts_for_owner` admits under for
-        // fresh upserts where the `FileArtifactStore` has not yet
-        // materialised `IndexedReady`.
+        // reads the overlay's content hash when an overlay covers
+        // the canonical and falls through to the base host's
+        // strict scheduler-authoritative current hash otherwise.
+        // `current_content_hash_from_scheduler` matches the producer
+        // (`admit_resolved_import_facts_for_owner`), which admits
+        // keyed from the same scheduler `parse.whole_hash`.
         let content_hash = if let Some(hash) = self.overlay_hashes.get(canonical) {
             *hash
         } else {
-            content_hash_from_scheduler_or_artifacts(self.base.as_ref(), canonical)?
+            current_content_hash_from_scheduler(self.base.as_ref(), canonical)?
         };
         // `known_miss_generation` (Codex P2.2): read the owner's
         // sidecar so the lookup composes the same tag value as the
@@ -722,10 +737,10 @@ impl SessionView for HostViewRef<'_> {
     }
 
     fn content_hash_for(&self, canonical: &str) -> Option<Hash16> {
-        self.base
-            .project_type_store()
-            .indexed()
-            .content_hash_for_canonical(canonical)
+        // View-authoritative current content hash — scheduler
+        // authority, no permissive `FileArtifactStore` scan (see
+        // `HostView::content_hash_for` for the same rationale).
+        self.base.authoritative_current_content_hash(canonical)
     }
 
     fn parse_artifacts(
@@ -847,16 +862,19 @@ impl SessionView for OverlaidViewRef<'_> {
     }
 
     fn content_hash_for(&self, canonical: &str) -> Option<Hash16> {
+        // View-authoritative current content hash. A tombstoned
+        // canonical has no current content (the session deleted it).
+        // An overlay-covered canonical resolves to the overlay
+        // source's hash; an unmasked canonical falls through to the
+        // base host's scheduler-authoritative current hash — never a
+        // permissive `FileArtifactStore` scan.
         if self.overlay_tombstones.contains(canonical) {
             return None;
         }
         if let Some(hash) = self.overlay_hashes.get(canonical) {
             return Some(*hash);
         }
-        self.base
-            .project_type_store()
-            .indexed()
-            .content_hash_for_canonical(canonical)
+        self.base.authoritative_current_content_hash(canonical)
     }
 
     fn overlay_content_hash_for(&self, canonical: &str) -> Option<Hash16> {
@@ -933,16 +951,14 @@ impl SessionView for OverlaidViewRef<'_> {
         }
         // Overlay-bearing read: when an overlay covers the
         // canonical use its precomputed hash; otherwise fall
-        // through to the base host's scheduler-or-artifacts hash
-        // (Codex P2.1 / Block 1.f-fix). Bare `content_hash_for`
-        // would only consult the file-artifact store on
-        // fallthrough and miss the scheduler hash that
-        // `admit_resolved_import_facts_for_owner` admits under
-        // post-upsert.
+        // through to the base host's strict scheduler-authoritative
+        // current hash. `current_content_hash_from_scheduler`
+        // matches the producer (`admit_resolved_import_facts_for_owner`),
+        // which admits keyed from the same scheduler `parse.whole_hash`.
         let content_hash = if let Some(hash) = self.overlay_hashes.get(canonical) {
             *hash
         } else {
-            content_hash_from_scheduler_or_artifacts(self.base, canonical)?
+            current_content_hash_from_scheduler(self.base, canonical)?
         };
         // `known_miss_generation` (Codex P2.2): read the owner's
         // sidecar to match the producer's key.

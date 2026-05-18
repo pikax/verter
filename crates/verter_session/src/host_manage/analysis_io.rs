@@ -649,8 +649,9 @@ impl VerterHost {
     ///
     /// This is the distinguishing contract: unlike
     /// [`Self::get_whole_hash`], this accessor never falls back to
-    /// `FileArtifactStore::get_any` / `content_hash_for_canonical`.
-    /// A `get_any`-derived hash is the stale artifact's *own* hash,
+    /// `FileArtifactStore::get_any` (a content-agnostic
+    /// `FileArtifactStore` scan). A `get_any`-derived hash is the
+    /// stale artifact's *own* hash,
     /// so feeding it into a content-pinned lookup would resolve the
     /// stale artifact instead of yielding a miss — exactly the
     /// failure a content pin exists to prevent. Content-pinned

@@ -141,19 +141,11 @@ fn overlay_materialized_first_does_not_poison_base_artifact_routes() {
     // base `legacy` key, and the base route stays unresolved.
     let (host, _base_hash) = host_with_owner();
     let view = byte_identical_overlay_view(&host);
-    let overlay_hash = view
-        .overlay_content_hash_for("/owner.ts")
-        .expect("overlay hash present");
-    let overlay_source = view.source("/owner.ts").expect("overlay source present");
 
-    // Materialise the overlay candidate first.
+    // Materialise the overlay candidate first. The materialiser
+    // derives the overlay source + content hash from the view itself.
     let overlay_indexed = host
-        .materialize_overlay_indexed_ready_with_view(
-            "/owner.ts",
-            &overlay_source,
-            overlay_hash,
-            &view,
-        )
+        .materialize_overlay_indexed_ready_with_view("/owner.ts", &view)
         .expect("overlay IndexedReady materialises");
     assert_eq!(
         helper_route(&overlay_indexed).as_deref(),
@@ -203,19 +195,11 @@ fn base_materialized_first_does_not_starve_overlay_artifact_routes() {
          `/helper.ts` in the base workspace)",
     );
 
-    // Now materialise the overlay candidate.
+    // Now materialise the overlay candidate. The materialiser derives
+    // the overlay source + content hash from the view itself.
     let view = byte_identical_overlay_view(&host);
-    let overlay_hash = view
-        .overlay_content_hash_for("/owner.ts")
-        .expect("overlay hash present");
-    let overlay_source = view.source("/owner.ts").expect("overlay source present");
     let overlay_indexed = host
-        .materialize_overlay_indexed_ready_with_view(
-            "/owner.ts",
-            &overlay_source,
-            overlay_hash,
-            &view,
-        )
+        .materialize_overlay_indexed_ready_with_view("/owner.ts", &view)
         .expect("overlay IndexedReady materialises");
 
     assert_eq!(
@@ -245,14 +229,10 @@ fn base_and_overlay_artifacts_coexist_under_distinct_keys() {
     let discriminator = view
         .overlay_artifact_discriminator("/owner.ts")
         .expect("overlay discriminator present");
-    let overlay_source = view.source("/owner.ts").expect("overlay source present");
+    // The materialiser derives the overlay source + content hash from
+    // the view itself.
     let _ = host
-        .materialize_overlay_indexed_ready_with_view(
-            "/owner.ts",
-            &overlay_source,
-            overlay_hash,
-            &view,
-        )
+        .materialize_overlay_indexed_ready_with_view("/owner.ts", &view)
         .expect("overlay IndexedReady materialises");
 
     // The base legacy-key read returns the base artifact: `./helper`
