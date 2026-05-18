@@ -796,33 +796,89 @@ impl SemanticGraphStore {
     /// `SemanticNodeId`-keyed structure to this store, it MUST be cleared
     /// here too, or `arena.reset()` will reuse ids that still collide
     /// with that structure's stale keys.
+    ///
+    /// ## Serialization against a concurrent cold winner
+    ///
+    /// The clear, the in-flight abort, every id-keyed structure clear,
+    /// and `arena.reset()` all run under ONE continuously-held pair of
+    /// locks — the `entries` memo mutex AND the `inflight` admission
+    /// mutex, both acquired up front and held to the end. This is
+    /// load-bearing, not incidental.
+    ///
+    /// A cold winner that finishes its build publishes through
+    /// [`Self::warm_publish_one`], which acquires `entries` and re-checks
+    /// `inflight.state.aborted` under that lock, publishing only while it
+    /// sees `aborted == false`. The build closure itself interns
+    /// `SemanticNodeId`s into the arena, and in-flight registration takes
+    /// the `inflight` mutex. `arena.reset()` reuses the id index space
+    /// from 0, so a published memo slot carrying a pre-reset id would,
+    /// post-reset, resolve to an unrelated node.
+    ///
+    /// Holding `entries` alone is not enough: a winner does NOT hold
+    /// `entries` while it registers in-flight or runs its build, so a
+    /// winner could register a fresh in-flight entry and intern pre-reset
+    /// ids in the gap between this method's `inflight` drain and its
+    /// `arena.reset()`, then publish those stranded ids once `entries` is
+    /// released. Holding `inflight` as well closes that gap:
+    ///
+    /// - A winner already in-flight when this method runs is in the
+    ///   table when the abort loop runs (under the held `inflight`
+    ///   lock), so it is marked `aborted = true`; its later
+    ///   `warm_publish_one` re-check sees the abort and skips publishing.
+    /// - A winner that has not yet registered in-flight blocks on the
+    ///   `inflight` mutex until this method releases it — i.e. until
+    ///   AFTER `arena.reset()`. It therefore registers and runs its
+    ///   build entirely in the post-reset id epoch, so every id it
+    ///   interns and publishes is a valid post-reset id.
+    ///
+    /// There is no in-between: a winner is either aborted (publish
+    /// skipped) or registers strictly after the reset (post-reset ids).
+    /// No memo slot — primary or prefix-backfilled — ever holds a
+    /// pre-reset `SemanticNodeId` once `arena.reset()` has run. The
+    /// prefix-backfill loop in [`Self::execute_cooperative_slow`] is
+    /// gated on `warm_publish_one`'s published/aborted return so an
+    /// aborted winner skips its narrower backfills too.
+    ///
+    /// Lock order: `entries → inflight → inflight.state`. No path
+    /// acquires `entries` while holding `inflight`, and no path acquires
+    /// `inflight` while holding `inflight.state` out of order: the
+    /// cold-winner publish takes `entries → state`, in-flight
+    /// registration and the panic guard release `inflight` / `state`
+    /// before acquiring any wider lock, and `warm_publish_one_if_absent`
+    /// releases `inflight` before acquiring `entries`. Nesting
+    /// `inflight`/`state` under `entries` here introduces no AB-BA
+    /// cycle. `arena.reset()` only touches arena-internal locks.
     pub fn invalidate_all(&self) -> usize {
+        // One continuously-held lock PAIR — `entries` then `inflight` —
+        // spans the clear, the in-flight abort, every id-keyed clear,
+        // and `arena.reset()`. See the method docs: a winner holds
+        // neither lock while it registers in-flight or runs its build,
+        // so both must stay held through the arena reset or a winner can
+        // strand a pre-reset id. Acquisition order `entries → inflight`
+        // matches every other multi-lock path; no deadlock.
         let mut entries = self.entries_lock_diagnosed();
+        let mut table = self.inflight.lock();
         let removed: usize = entries.values().map(FamilySlots::populated_count).sum();
         entries.clear();
-        drop(entries);
         // Abort every in-flight admission before draining the table —
         // `SemanticQueryKey` keys embed `SemanticNodeId`s, and a
         // cooperative joiner blocked on the condvar must wake and
         // re-enter dispatch rather than join a stale, soon-to-be-invalid
         // entry. Mirrors the per-canonical abort in `invalidate_canonical`.
-        {
-            let mut table = self.inflight.lock();
-            for inflight in table.values() {
-                {
-                    let mut state = inflight.state.lock();
-                    state.aborted = true;
-                    if state.completed.is_none() {
-                        state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
-                            "aborted by project-generation reset",
-                        ))));
-                        state.dep_signature = Some(empty_signature());
-                    }
+        for inflight in table.values() {
+            {
+                let mut state = inflight.state.lock();
+                state.aborted = true;
+                if state.completed.is_none() {
+                    state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
+                        "aborted by project-generation reset",
+                    ))));
+                    state.dep_signature = Some(empty_signature());
                 }
-                inflight.ready.notify_all();
             }
-            table.clear();
+            inflight.ready.notify_all();
         }
+        table.clear();
         // Drop every other `SemanticNodeId`-keyed structure (see the
         // method docs for the exhaustive list) so no stale id-keyed
         // entry survives the arena reset below.
@@ -839,10 +895,18 @@ impl SemanticGraphStore {
         // edits; a project-generation reset is the safe point to
         // reclaim it. Every memo entry, in-flight admission, relation
         // judgement, named-type mapping, derivation edge, and reverse-
-        // index entry has been cleared above, so no stored
-        // `SemanticNodeId` survives — reusing the arena's id space is
-        // sound here.
+        // index entry has been cleared above. The arena reset runs while
+        // BOTH `entries` and `inflight` are STILL held, so no winner can
+        // have slipped a fresh in-flight registration + build, and none
+        // can publish — no stored `SemanticNodeId` survives, and reusing
+        // the arena's id space is sound.
         self.arena.reset();
+        // Both locks release here, at the close of the method. A winner
+        // that was blocked on `inflight` now registers in the post-reset
+        // id epoch; a winner that was blocked on `entries` re-checks
+        // `aborted` and, if it was aborted above, skips its publish.
+        drop(table);
+        drop(entries);
         removed
     }
 
@@ -2270,7 +2334,7 @@ impl SemanticGraphStore {
                 Some(&broadcast_carrier)
             };
         if let Some(carrier) = publish_carrier {
-            self.warm_publish_one(
+            let published = self.warm_publish_one(
                 &key,
                 &result,
                 &walker_diagnostics,
@@ -2279,14 +2343,23 @@ impl SemanticGraphStore {
                 &inflight,
             );
             // Prefix backfill: publish each accumulated backfill
-            // record AFTER the parent entry is warm.
-            for backfill in pending_prefix_backfills {
-                self.warm_publish_one_if_absent(
-                    backfill.key,
-                    QueryResult::Value(backfill.node),
-                    carrier.clone(),
-                    Arc::clone(&self_root_canonicals),
-                );
+            // record AFTER the parent entry is warm — but ONLY when the
+            // parent publish was not skipped by an abort. A `false`
+            // return means the TOCTOU re-check saw `aborted == true`
+            // (a canonical invalidation or a project-generation reset
+            // raced this cold build): the build's `SemanticNodeId`s were
+            // interned against a now-stale id epoch, so the narrower
+            // backfill nodes are equally stale and must NOT enter the
+            // memo. See `invalidate_all`'s serialization docs.
+            if published {
+                for backfill in pending_prefix_backfills {
+                    self.warm_publish_one_if_absent(
+                        backfill.key,
+                        QueryResult::Value(backfill.node),
+                        carrier.clone(),
+                        Arc::clone(&self_root_canonicals),
+                    );
+                }
             }
         } else {
             tracing::debug!(
@@ -2437,6 +2510,15 @@ impl SemanticGraphStore {
     /// Per-store test trigger [`Self::force_cold_abort_sweep`]
     /// simulates a concurrent sweep without racing a real
     /// invalidation window.
+    ///
+    /// **Return value.** Returns `false` IFF the TOCTOU re-check
+    /// observed `aborted == true` and the publish was skipped; returns
+    /// `true` otherwise (published, or skipped for a non-abort reason —
+    /// a non-`Value` result, or a `ResolvedNamedType` family). The
+    /// caller's prefix-backfill loop is gated on this: an aborted winner
+    /// was raced by a project-generation reset, so its build interned
+    /// against a stale id epoch and its narrower backfills must be
+    /// skipped too — see [`Self::invalidate_all`]'s serialization docs.
     fn warm_publish_one(
         &self,
         key: &SemanticQueryKey,
@@ -2445,16 +2527,19 @@ impl SemanticGraphStore {
         read_set_signature: &crate::fact_signature_helpers::ReadSetSignature,
         self_root_canonicals: &Arc<[Arc<str>]>,
         inflight: &Arc<InflightEntry>,
-    ) {
+    ) -> bool {
         let publishable = matches!(result, QueryResult::Value(_));
         if !publishable {
-            return;
+            // Not an abort — an error / recursion sentinel that never
+            // promotes to a warm entry. The winner's build epoch is
+            // still consistent, so backfills (if any) stay valid.
+            return true;
         }
         let (family, slot) = family_and_slot(key);
         // ResolvedNamedType bypasses the family memo entirely (§7.16) —
-        // its DashMap-backed identity map is the cache.
+        // its DashMap-backed identity map is the cache. Not an abort.
         if matches!(family, FamilyKey::ResolvedNamedType { .. }) {
-            return;
+            return true;
         }
         // The carrier is the COMPLETED self-version-rooted carrier the
         // shared cold-build helper produced via
@@ -2488,10 +2573,13 @@ impl SemanticGraphStore {
         let aborted = inflight.state.lock().aborted;
         if aborted {
             drop(entries);
-            // Canonical invalidation swept this slot during the cold
-            // build; skip warm publish and record the sweep.
+            // Canonical invalidation or a project-generation reset swept
+            // this slot during the cold build; skip warm publish and
+            // record the sweep. Returning `false` makes the caller skip
+            // the prefix-backfill loop too — the build's ids were
+            // interned against a now-stale epoch.
             record_cold_abort_swept(&self.stats);
-            return;
+            return false;
         }
         // Record whether this family is newly entering the memo so the
         // retention budget tracks one ledger record per family.
@@ -2534,6 +2622,10 @@ impl SemanticGraphStore {
         if family_was_new && !populated_slots.is_empty() {
             self.note_memo_family_admission(&family);
         }
+        // Published cleanly under a non-aborted in-flight entry — the
+        // winner's id epoch is consistent, so the caller may proceed to
+        // publish its narrower prefix-backfills.
+        true
     }
 
     /// Variant of [`Self::warm_publish_one`]: publish
