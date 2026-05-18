@@ -489,17 +489,28 @@ impl VerterHost {
         canonical_id: &str,
         view: Option<&dyn crate::session_view::SessionView>,
     ) -> Option<ExternalTypeResolutionInputs> {
-        let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
-        let canonical_id = normalized_canonical_id.as_ref();
+        // Two-identity split. `canonical_id` is the RAW dependency
+        // canonical the caller requested; `identity` carries it
+        // alongside `analysis_canonical` (the `normalized_analysis_canonical`
+        // rewrite). The overlay-artifact read below MUST go through the
+        // raw owner (the `SessionView` overlay maps + the overlay-set
+        // discriminator are raw-keyed) while resolving to the
+        // normalised `FileArtifactStore` identity; the project-global
+        // fast path and the route-owned materialiser below key on the
+        // normalised analysis canonical (the artifact / type-context
+        // cache identity).
+        let identity = self.overlay_artifact_identity(canonical_id);
+        let canonical_id = identity.analysis_canonical();
 
-        // Overlay-priority: when the session view carries parse artifacts
-        // for this canonical, return them so the session path sees the
-        // overlay content. `view.parse_artifacts` reads the strict
-        // content-addressed key (overlay-scoped for an overlaid
-        // canonical, legacy otherwise), so this only triggers when a
-        // matching candidate was published.
+        // Overlay-priority: when the session view carries the published
+        // overlay artifact for this canonical, return it so the session
+        // path sees the overlay content. `lookup_overlay_artifacts`
+        // builds the exact `overlay_scoped` key the overlay materialiser
+        // published under — raw-owner hash + discriminator, normalised
+        // `FileArtifactKey.canonical` — so it reaches the candidate even
+        // when `normalize(raw) != raw`.
         if let Some(view) = view {
-            if let Some(facts) = view.parse_artifacts(canonical_id) {
+            if let Some(facts) = identity.lookup_overlay_artifacts(self, view) {
                 let inputs = ExternalTypeResolutionInputs {
                     raw_source: Arc::clone(&facts.indexed.raw_source),
                     cached_parse: facts.indexed.cached_parse.clone(),

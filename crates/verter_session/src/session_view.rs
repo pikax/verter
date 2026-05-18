@@ -162,18 +162,6 @@ pub trait SessionView: Send + Sync {
         None
     }
 
-    /// Return cached file artifacts (indexed-ready + facts +
-    /// parsed-edges + parse_stable_hash + augmentations) for a
-    /// canonical id, if a content-matching artifact bundle is
-    /// already in the file-artifact store.
-    ///
-    /// Returns `None` if the artifacts have not been parsed yet
-    /// under the relevant `(content_hash, parse_env_hash)` key.
-    fn parse_artifacts(
-        &self,
-        canonical: &str,
-    ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>>;
-
     /// Project identity (16-byte stable key) for this view's
     /// project.
     fn project_identity(&self) -> ProjectIdentity;
@@ -442,22 +430,6 @@ impl SessionView for HostView {
         self.base.authoritative_current_content_hash(canonical)
     }
 
-    fn parse_artifacts(
-        &self,
-        canonical: &str,
-    ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
-        // Strict by `(canonical, content_hash)` — base view only
-        // accepts the artifact bundle that matches the host's
-        // current content hash. Returning `None` here forces
-        // resolver-tier consumers to materialise rather than
-        // observe a sibling overlay candidate published by a
-        // concurrent session under a different content hash.
-        let content_hash = self.content_hash_for(canonical)?;
-        let key =
-            crate::file_artifact_store::FileArtifactKey::legacy(Arc::from(canonical), content_hash);
-        self.base.project_type_store().indexed().get_artifacts(&key)
-    }
-
     fn project_identity(&self) -> ProjectIdentity {
         // View-level (workspace-default) project identity. Per-canonical
         // resolution callers use `VerterHost::host_view_project_identity_for`.
@@ -598,36 +570,6 @@ impl SessionView for OverlaidView {
             .map(|_| overlay_artifact_discriminator_from_fingerprint(self.fingerprint()))
     }
 
-    fn parse_artifacts(
-        &self,
-        canonical: &str,
-    ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
-        // Strict by the full content-addressed key. An overlay
-        // candidate is published by `materialize_overlay_indexed_ready_with_view`
-        // under an `overlay_scoped` key (overlay content hash +
-        // overlay-set discriminator); the base candidate lives under
-        // the `legacy` key (overlay content hash, zeroed
-        // `parse_env_hash`). Reading via the discriminator-matched
-        // key prevents an overlay-bearing view from observing the
-        // base candidate — which would be the wrong artifact bundle
-        // for the overlay's source, and is a real divergence when the
-        // overlay bytes are identical to the base (the overlay can
-        // resolve an overlay-only relative helper the base cannot).
-        let content_hash = self.content_hash_for(canonical)?;
-        let key = match self.overlay_artifact_discriminator(canonical) {
-            Some(discriminator) => crate::file_artifact_store::FileArtifactKey::overlay_scoped(
-                Arc::from(canonical),
-                content_hash,
-                discriminator,
-            ),
-            None => crate::file_artifact_store::FileArtifactKey::legacy(
-                Arc::from(canonical),
-                content_hash,
-            ),
-        };
-        self.base.project_type_store().indexed().get_artifacts(&key)
-    }
-
     fn project_identity(&self) -> ProjectIdentity {
         // View-level (workspace-default) project identity. Per-canonical
         // resolution callers use `VerterHost::host_view_project_identity_for`.
@@ -741,20 +683,6 @@ impl SessionView for HostViewRef<'_> {
         // authority, no permissive `FileArtifactStore` scan (see
         // `HostView::content_hash_for` for the same rationale).
         self.base.authoritative_current_content_hash(canonical)
-    }
-
-    fn parse_artifacts(
-        &self,
-        canonical: &str,
-    ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
-        // Strict by `(canonical, content_hash)` — base view only
-        // accepts the artifact bundle matching the host's current
-        // content hash (see `HostView::parse_artifacts` for the
-        // same rationale).
-        let content_hash = self.content_hash_for(canonical)?;
-        let key =
-            crate::file_artifact_store::FileArtifactKey::legacy(Arc::from(canonical), content_hash);
-        self.base.project_type_store().indexed().get_artifacts(&key)
     }
 
     fn project_identity(&self) -> ProjectIdentity {
@@ -899,35 +827,6 @@ impl SessionView for OverlaidViewRef<'_> {
 
     fn is_tombstoned(&self, canonical: &str) -> bool {
         self.overlay_tombstones.contains(canonical)
-    }
-
-    fn parse_artifacts(
-        &self,
-        canonical: &str,
-    ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
-        // Strict by the full content-addressed key. The overlay
-        // candidate is published by `materialize_overlay_indexed_ready_with_view`
-        // under an `overlay_scoped` key (overlay content hash +
-        // overlay-set discriminator); the discriminator-matched read
-        // keeps the overlay-bearing view off the base candidate.
-        // Tombstoned canonicals return `None` regardless of what the
-        // base says.
-        if self.overlay_tombstones.contains(canonical) {
-            return None;
-        }
-        let content_hash = self.content_hash_for(canonical)?;
-        let key = match self.overlay_artifact_discriminator(canonical) {
-            Some(discriminator) => crate::file_artifact_store::FileArtifactKey::overlay_scoped(
-                Arc::from(canonical),
-                content_hash,
-                discriminator,
-            ),
-            None => crate::file_artifact_store::FileArtifactKey::legacy(
-                Arc::from(canonical),
-                content_hash,
-            ),
-        };
-        self.base.project_type_store().indexed().get_artifacts(&key)
     }
 
     fn project_identity(&self) -> ProjectIdentity {

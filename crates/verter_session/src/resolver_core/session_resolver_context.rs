@@ -231,29 +231,28 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         canonical: &str,
     ) -> Option<crate::resolver_core::MaterializeScopeObservation> {
         if let Some(overlay_hash) = self.view.overlay_content_hash_for(canonical) {
-            // Materialise / fetch the overlay candidate, then pin to the
-            // exact overlay content hash — no base fallback. The
-            // overlay candidate is published under an `overlay_scoped`
-            // key (overlay content hash + overlay-set discriminator),
-            // so the read goes through `get_overlay_scoped` to stay off
-            // the base artifact — which is a real divergence when the
-            // overlay bytes are identical to the base. An overlaid
-            // canonical always has a discriminator; the `legacy`
-            // fallback below is unreachable in this branch and exists
-            // only for exhaustiveness.
+            // Materialise / fetch the overlay candidate, then read it
+            // back — no base fallback. Overlay detection
+            // (`overlay_content_hash_for`) and the materialise step
+            // (`ensure_indexed_ready`) operate on the RAW `canonical`
+            // because the `SessionView` overlay maps are raw-keyed. The
+            // store read then goes through `OverlayArtifactIdentity`,
+            // which builds the exact key the overlay materialiser
+            // published under — the raw-owner overlay hash +
+            // discriminator with the NORMALISED `analysis_canonical` as
+            // `FileArtifactKey.canonical`. Keying the read on the raw
+            // `canonical` directly would miss the publish whenever
+            // `normalize(raw) != raw` (a `.js` with a `.d.ts`
+            // companion). `lookup_overlay_artifacts` stays off the base
+            // artifact — a real divergence when the overlay bytes are
+            // identical to the base.
             let _ = ResolverContext::ensure_indexed_ready(self, canonical);
-            let indexed = match self.view.overlay_artifact_discriminator(canonical) {
-                Some(discriminator) => self
-                    .inner
-                    .project_type_store()
-                    .indexed()
-                    .get_overlay_scoped(canonical, overlay_hash, discriminator)?,
-                None => self
-                    .inner
-                    .project_type_store()
-                    .indexed()
-                    .get_for_current_content(canonical, overlay_hash)?,
-            };
+            let identity = self.inner.overlay_artifact_identity(canonical);
+            let indexed = Arc::clone(
+                &identity
+                    .lookup_overlay_artifacts(self.inner, self.view)?
+                    .indexed,
+            );
             let syntactic_export_set =
                 crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
                     self,
@@ -292,22 +291,24 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
     /// unmasked canonical keeps the base legacy-key read.
     #[inline]
     fn indexed_for_current_content(&self, canonical: &str) -> Option<Arc<IndexedReady>> {
-        if let Some(overlay_hash) = self.view.overlay_content_hash_for(canonical) {
-            if let Some(discriminator) = self.view.overlay_artifact_discriminator(canonical) {
-                return self
-                    .inner
-                    .project_type_store()
-                    .indexed()
-                    .get_overlay_scoped(canonical, overlay_hash, discriminator);
-            }
-            // Overlaid canonical with no discriminator is not
-            // reachable (a present overlay hash implies a present
-            // discriminator); fall through defensively.
-            return self
-                .inner
-                .project_type_store()
-                .indexed()
-                .get_for_current_content(canonical, overlay_hash);
+        if self.view.overlay_content_hash_for(canonical).is_some() {
+            // Overlaid canonical. Overlay detection
+            // (`overlay_content_hash_for`) keys on the RAW `canonical`
+            // — the `SessionView` overlay maps are raw-keyed. The
+            // artifact-store read routes through `OverlayArtifactIdentity`,
+            // which rebuilds the exact key the overlay materialiser
+            // published under: the raw-owner overlay hash + discriminator
+            // with the NORMALISED `analysis_canonical` as
+            // `FileArtifactKey.canonical`. A read keyed directly on the
+            // raw `canonical` would miss the publish whenever
+            // `normalize(raw) != raw` (a `.js` with a `.d.ts`
+            // companion). `lookup_overlay_artifacts` handles both the
+            // `overlay_scoped` (discriminator present) and `legacy`
+            // (base-passthrough) key shapes.
+            let identity = self.inner.overlay_artifact_identity(canonical);
+            return identity
+                .lookup_overlay_artifacts(self.inner, self.view)
+                .map(|facts| Arc::clone(&facts.indexed));
         }
         if self.view.is_tombstoned(canonical) {
             return None;
@@ -339,7 +340,7 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
     /// while an overlay now covers the canonical, still misses.
     #[inline]
     fn resolver_store_view(&self) -> HostStoreView {
-        ResolverContext::resolver_store_view(self.inner).with_session_overlay(self.view)
+        ResolverContext::resolver_store_view(self.inner).with_session_overlay(self.inner, self.view)
     }
 
     #[inline]
@@ -565,13 +566,6 @@ impl<'a> SessionView for BoundSessionViewRef<'a> {
 
     fn overlay_artifact_discriminator(&self, canonical: &str) -> Option<Hash16> {
         self.inner.overlay_artifact_discriminator(canonical)
-    }
-
-    fn parse_artifacts(
-        &self,
-        canonical: &str,
-    ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
-        self.inner.parse_artifacts(canonical)
     }
 
     fn project_identity(&self) -> crate::file_artifact_store::ProjectIdentity {

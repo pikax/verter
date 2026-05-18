@@ -731,7 +731,14 @@ impl VerterHost {
         view: Option<&dyn crate::session_view::SessionView>,
     ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
         if let Some(view) = view {
-            if let Some(facts) = view.parse_artifacts(canonical_id) {
+            // `canonical_id` is the RAW requested canonical. The overlay
+            // artifact read goes through `OverlayArtifactIdentity` so it
+            // reconstructs the exact key the overlay materialiser
+            // published under — raw-owner overlay hash + discriminator,
+            // normalised `FileArtifactKey.canonical` — and reaches the
+            // overlay candidate even when `normalize(raw) != raw`.
+            let identity = self.overlay_artifact_identity(canonical_id);
+            if let Some(facts) = identity.lookup_overlay_artifacts(self, view) {
                 return Some(Arc::clone(&facts.indexed.shallow_state));
             }
         }

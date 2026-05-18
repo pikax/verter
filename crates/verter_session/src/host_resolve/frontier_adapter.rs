@@ -50,21 +50,33 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
         &self,
         canonical_id: &str,
     ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
-        let canonical = self
-            .host
-            .resolve_eval_dependency_canonical(canonical_id)
-            .unwrap_or_else(|| canonical_id.to_string());
+        // Two-identity split. `canonical_id` is the RAW requested
+        // canonical; `identity` pairs it with `analysis_canonical` (the
+        // `normalized_analysis_canonical` rewrite). The overlay branches
+        // below (`lookup_overlay_artifacts`,
+        // `ensure_indexed_ready_with_view`) operate on the RAW owner —
+        // the `SessionView` overlay maps + the overlay-detection gate
+        // are raw-keyed, and normalising first would (a) miss the
+        // overlay-scoped artifact key and (b) make the overlay-detection
+        // gate fail. The base reads (`route_shallow_state`,
+        // `current_content_pinned_indexed`, `artifact_current_indexed`)
+        // key on the normalised analysis canonical.
+        let identity = self.host.overlay_artifact_identity(canonical_id);
+        let canonical = identity.analysis_canonical();
 
-        // FileArtifactStore overlay fast path. When the session view carries
-        // parse artifacts for this canonical (overlay candidate), prefer
-        // them so the frontier reads overlay-rooted shallow state even in
-        // the `route_exports_only` branch. Without this, route-only frontier
-        // closures driven from a session-bearing path would fall through to
-        // the base `route_shallow_state` and materialise the wrong target
-        // when an overlay changes a barrel/re-export surface or tombstones
-        // a dependency.
+        // FileArtifactStore overlay fast path. When the session view has
+        // a published overlay artifact for the raw owner, prefer it so
+        // the frontier reads overlay-rooted shallow state even in the
+        // `route_exports_only` branch. Without this, route-only frontier
+        // closures driven from a session-bearing path would fall through
+        // to the base `route_shallow_state` and materialise the wrong
+        // target when an overlay changes a barrel/re-export surface or
+        // tombstones a dependency. `lookup_overlay_artifacts` rebuilds
+        // the exact `overlay_scoped` key the materialiser published
+        // under, so it reaches the candidate even when
+        // `normalize(raw) != raw`.
         if let Some(view) = self.view {
-            if let Some(facts) = view.parse_artifacts(canonical.as_str()) {
+            if let Some(facts) = identity.lookup_overlay_artifacts(self.host, view) {
                 if facts.indexed.shallow_state.has_resolvable_surface() || !self.materialize_symbols
                 {
                     if facts.indexed.shallow_state.has_wildcard_reexports() {
@@ -79,10 +91,9 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
         }
 
         if self.route_exports_only {
-            return self.host.route_shallow_state(
-                canonical.as_str(),
-                &mut self.route_shallow_cache.borrow_mut(),
-            );
+            return self
+                .host
+                .route_shallow_state(canonical, &mut self.route_shallow_cache.borrow_mut());
         }
         // `IndexedReady` fast path — **current-content-pinned** (no
         // `get_any`). The frontier resolves a dependency's symbol surface
@@ -97,8 +108,8 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
         // artifact-only canonical (foreign source / test seed).
         if let Some(indexed) = self
             .host
-            .current_content_pinned_indexed(canonical.as_str())
-            .or_else(|| self.host.artifact_current_indexed(canonical.as_str()))
+            .current_content_pinned_indexed(canonical)
+            .or_else(|| self.host.artifact_current_indexed(canonical))
         {
             if indexed.shallow_state.has_resolvable_surface() || !self.materialize_symbols {
                 if indexed.shallow_state.has_wildcard_reexports() {
@@ -112,15 +123,21 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
         }
 
         // Materialize through ensure_indexed_ready (view-aware when a
-        // session view is active).
+        // session view is active). The view-aware path is driven on the
+        // RAW `canonical_id` — its overlay-detection gate
+        // (`overlay_content_hash_for`) is raw-keyed, so a normalised id
+        // would fail to detect the overlay; `ensure_indexed_ready`
+        // normalises internally on the base-path fall-through. The base
+        // (no-view) path takes the normalised analysis canonical
+        // directly.
         let facts = if let Some(view) = self.view {
             crate::host_manage::overlay_priority::ensure_indexed_ready_with_view(
                 self.host,
                 view,
-                canonical.as_str(),
+                canonical_id,
             )?
         } else {
-            self.host.ensure_indexed_ready(canonical.as_str())?
+            self.host.ensure_indexed_ready(canonical)?
         };
         if facts.shallow_state.has_resolvable_surface() || !self.materialize_symbols {
             if facts.shallow_state.has_wildcard_reexports() {

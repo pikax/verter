@@ -274,8 +274,11 @@ impl HostStoreView {
     ///   `ResolvedImportFactsKey` from, so re-rooting steers that
     ///   content-addressed `DashMap` lookup at the overlay slot.
     /// - **`file_facts`** — overlay-Upsert: refreshed from the overlay
-    ///   `FileArtifacts` (via [`SessionView::parse_artifacts`], which
-    ///   is overlay-aware and content-pinned); tombstone: removed.
+    ///   `FileArtifacts` (via
+    ///   [`OverlayArtifactIdentity::lookup_overlay_artifacts`](crate::host_manage::overlay_materialize::OverlayArtifactIdentity::lookup_overlay_artifacts),
+    ///   which rebuilds the exact overlay-scoped key — raw-owner hash +
+    ///   discriminator, normalised analysis canonical — and is
+    ///   content-pinned); tombstone: removed.
     ///   `validates_parse_domain` reads this per-canonical
     ///   `Arc<FileFacts>` snapshot — a `Parse` fact pinned to the
     ///   overlay version validates against the overlay's `FileFacts`.
@@ -336,6 +339,7 @@ impl HostStoreView {
     #[must_use]
     pub(crate) fn with_session_overlay(
         mut self,
+        host: &VerterHost,
         view: &dyn crate::session_view::SessionView,
     ) -> Self {
         // Tombstone-only canonicals: deleted by the session and never
@@ -361,12 +365,16 @@ impl HostStoreView {
             self.whole_hashes.insert(canonical.clone(), overlay_hash);
 
             // Refresh the per-domain parse-fact + derived-fact
-            // snapshots from the overlay artifact. `parse_artifacts`
-            // is overlay-aware (strict by the overlay-scoped key —
-            // overlay `content_hash` plus the overlay-set
-            // discriminator) so it returns the overlay `FileArtifacts`
-            // candidate, not the base one.
-            match view.parse_artifacts(&canonical) {
+            // snapshots from the overlay artifact. `canonical` is the
+            // RAW overlay owner (from `overlay_canonicals()`);
+            // `lookup_overlay_artifacts` builds the exact overlay
+            // artifact key — the raw-owner overlay hash + discriminator
+            // with the NORMALISED `analysis_canonical` as
+            // `FileArtifactKey.canonical` — so it returns the overlay
+            // `FileArtifacts` candidate (not the base one) even when
+            // `normalize(raw) != raw`.
+            let overlay_identity = host.overlay_artifact_identity(&canonical);
+            match overlay_identity.lookup_overlay_artifacts(host, view) {
                 Some(overlay_artifacts) => {
                     self.file_facts.insert(
                         canonical.clone(),

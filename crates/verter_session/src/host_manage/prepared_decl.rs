@@ -104,19 +104,31 @@ impl VerterHost {
         ctx: &dyn crate::resolver_core::ResolverContext,
         canonical_id: &str,
     ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
-        let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
-        let canonical_id = normalized_canonical_id.as_ref();
-
-        // If the active view tombstones the canonical, or carries an
-        // overlay whose content hash differs from the base, the host's
-        // shared bundle cache holds the base bundle (keyed by canonical
-        // alone). Materialise a fresh bundle rooted at the overlay's
-        // IndexedReady so the prepared-decl payload reflects overlay
-        // content. Warm-cache reuse stays on the base path when the
-        // view's content hash matches the base host's content hash.
+        // Two-identity split. `canonical_id` is the RAW requested
+        // canonical; the overlay-detection gate + tombstone check below
+        // MUST run on it because the `SessionView` overlay maps +
+        // tombstone set are raw-keyed — normalising first (the inverse
+        // hazard) would fail to detect an overlay that exists only under
+        // the raw id. The `OverlayArtifactIdentity` carries the raw
+        // owner alongside `analysis_canonical` (the
+        // `normalized_analysis_canonical` rewrite); the materialise step
+        // drives `ensure_indexed_ready` on the raw owner (its overlay
+        // gate is raw-keyed) and keys the bundle / route-dep cache
+        // identity on the normalised analysis canonical. The base path
+        // (`prepared_decl_bundle`) normalises internally, so the raw id
+        // is forwarded unchanged.
         if let Some(view) = ctx.active_session_view() {
+            let identity = self.overlay_artifact_identity(canonical_id);
+            // If the active view tombstones the canonical, or carries an
+            // overlay whose content hash differs from the base, the
+            // host's shared bundle cache holds the base bundle (keyed by
+            // canonical alone). Materialise a fresh bundle rooted at the
+            // overlay's IndexedReady so the prepared-decl payload
+            // reflects overlay content. Warm-cache reuse stays on the
+            // base path when the view carries no overlay for the
+            // canonical.
             if view.is_tombstoned(canonical_id) {
-                return self.materialize_prepared_decl_bundle_via_ctx(ctx, canonical_id);
+                return self.materialize_prepared_decl_bundle_via_ctx(ctx, &identity);
             }
             // An explicit overlay for the canonical means the host's
             // shared bundle cache (keyed by canonical alone) holds the
@@ -138,23 +150,35 @@ impl VerterHost {
             // actual overlay-Upsert, so an unmasked canonical keeps its
             // warm-bundle reuse on the base path.
             if view.overlay_content_hash_for(canonical_id).is_some() {
-                return self.materialize_prepared_decl_bundle_via_ctx(ctx, canonical_id);
+                return self.materialize_prepared_decl_bundle_via_ctx(ctx, &identity);
             }
         }
         self.prepared_decl_bundle(canonical_id)
     }
 
-    /// Materialise a fresh prepared-decl bundle rooted at
-    /// `ctx.ensure_indexed_ready(canonical)`. Used by the session-tier
-    /// view-aware path when the view carries an overlay for the
-    /// canonical — the shared bundle cache is bypassed because its
-    /// per-canonical slot already holds the base bundle.
+    /// Materialise a fresh prepared-decl bundle rooted at the overlay's
+    /// `IndexedReady`. Used by the session-tier view-aware path when the
+    /// view carries an overlay for (or tombstones) the canonical — the
+    /// shared bundle cache is bypassed because its per-canonical slot
+    /// already holds the base bundle.
+    ///
+    /// `identity` carries both canonical ids: `ensure_indexed_ready` is
+    /// driven on the RAW overlay owner (its overlay-detection gate is
+    /// raw-keyed, so a normalised id would fail to detect the overlay),
+    /// while the bundle identity + route-dep cache identity key on the
+    /// NORMALISED analysis canonical (the analysis / cache target).
     fn materialize_prepared_decl_bundle_via_ctx(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
-        canonical_id: &str,
+        identity: &crate::host_manage::overlay_materialize::OverlayArtifactIdentity,
     ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
-        let facts = ctx.ensure_indexed_ready(canonical_id)?;
+        // Drive the overlay-aware `ensure_indexed_ready` on the RAW
+        // owner — the overlay-detection gate inside
+        // `ensure_indexed_ready_with_view` keys on the raw canonical.
+        let facts = ctx.ensure_indexed_ready(identity.raw_overlay_owner())?;
+        // The bundle + route-dep cache identity is the NORMALISED
+        // analysis canonical.
+        let canonical_id = identity.analysis_canonical();
         let state = &facts.shallow_state;
         if state.symbols.is_empty()
             && state.value_symbols.is_empty()

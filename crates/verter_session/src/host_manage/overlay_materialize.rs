@@ -25,6 +25,112 @@ use crate::VerterHost;
 
 use super::{dep_edges_from_resolutions, is_raw_import_specifier_id, HostShallowImportResolver};
 
+/// The two canonical identities an overlay artifact is keyed by.
+///
+/// An overlay [`IndexedReady`](crate::project_type_store::IndexedReady)
+/// is published into [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore)
+/// under a [`FileArtifactKey`](crate::file_artifact_store::FileArtifactKey)
+/// whose three components do NOT all come from one canonical id — they
+/// span two distinct identities, and conflating them is a keying defect:
+///
+/// * **`raw_overlay_owner`** — the canonical the session edited /
+///   requested. Every [`SessionView`](crate::session_view::SessionView)
+///   overlay-state lookup keys by exactly this string: `source(raw)`,
+///   `content_hash_for(raw)`, `overlay_content_hash_for(raw)`,
+///   `overlay_artifact_discriminator(raw)`, tombstones, overlay
+///   iteration. So the overlay artifact's `content_hash` and its
+///   `parse_env_hash` discriminator are derived from this id.
+/// * **`analysis_canonical`** — the `normalized_analysis_canonical`
+///   rewrite (e.g. a runtime `.js` whose `.d.ts` companion is the
+///   analysis target). It is the analysis / parse / resolve target and
+///   the [`FileArtifactKey::canonical`](crate::file_artifact_store::FileArtifactKey)
+///   identity.
+///
+/// The two coincide for an ordinary `.ts` / `.tsx` / `.d.ts` file
+/// (identity normalisation); they diverge for a `.js`-with-`.d.ts`-companion
+/// canonical. This type is the single owner of overlay artifact key
+/// construction: every reader builds its `FileArtifactKey` through
+/// [`Self::overlay_artifact_key`] / [`Self::lookup_overlay_artifacts`]
+/// instead of constructing the key ad hoc from one id (which can never
+/// reconstruct a key whose `canonical` is normalised but whose
+/// `content_hash` + discriminator are raw-derived).
+#[derive(Debug, Clone)]
+pub(crate) struct OverlayArtifactIdentity {
+    /// The raw canonical the session edited / requested — keys all
+    /// `SessionView` overlay state.
+    raw_overlay_owner: String,
+    /// The `normalized_analysis_canonical` rewrite — the analysis target
+    /// and the `FileArtifactKey.canonical` identity.
+    analysis_canonical: String,
+}
+
+impl OverlayArtifactIdentity {
+    /// The raw overlay owner canonical — keys `SessionView` overlay
+    /// state (`source`, `content_hash_for`, `overlay_content_hash_for`,
+    /// `overlay_artifact_discriminator`, tombstones).
+    #[inline]
+    pub(crate) fn raw_overlay_owner(&self) -> &str {
+        &self.raw_overlay_owner
+    }
+
+    /// The normalized analysis canonical — the analysis target and the
+    /// `FileArtifactStore` identity.
+    #[inline]
+    pub(crate) fn analysis_canonical(&self) -> &str {
+        &self.analysis_canonical
+    }
+
+    /// Build the exact overlay artifact [`FileArtifactKey`](crate::file_artifact_store::FileArtifactKey)
+    /// for this identity under `view`.
+    ///
+    /// Reads the overlay content hash and the overlay-set discriminator
+    /// under the **raw overlay owner** (the `SessionView` overlay maps
+    /// are keyed there), and sets the key's `canonical` to the
+    /// **normalized analysis canonical** (the `FileArtifactStore`
+    /// identity the materialiser publishes under). When the view carries
+    /// an explicit overlay-set discriminator for the raw owner the key
+    /// is `overlay_scoped`; otherwise (a base-passthrough view) it is
+    /// `legacy`. Returns `None` when the view reports no current content
+    /// hash for the raw owner (unloaded / evicted / tombstoned).
+    fn overlay_artifact_key(
+        &self,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<crate::file_artifact_store::FileArtifactKey> {
+        let content_hash = view.content_hash_for(&self.raw_overlay_owner)?;
+        let key = match view.overlay_artifact_discriminator(&self.raw_overlay_owner) {
+            Some(discriminator) => crate::file_artifact_store::FileArtifactKey::overlay_scoped(
+                Arc::from(self.analysis_canonical.as_str()),
+                content_hash,
+                discriminator,
+            ),
+            None => crate::file_artifact_store::FileArtifactKey::legacy(
+                Arc::from(self.analysis_canonical.as_str()),
+                content_hash,
+            ),
+        };
+        Some(key)
+    }
+
+    /// Read the published overlay [`FileArtifacts`](crate::file_artifact_store::FileArtifacts)
+    /// bundle for this identity through `view`.
+    ///
+    /// This is the host-owned replacement for the architecturally
+    /// unsound single-`canonical` `SessionView::parse_artifacts`: it
+    /// preserves BOTH ids (raw for the overlay hash + discriminator,
+    /// normalized for the artifact-store `canonical`), so it reaches the
+    /// exact key the overlay materialiser published — even when
+    /// `normalize(raw) != raw`. A tombstoned raw owner reports no
+    /// current content hash, so the lookup yields `None`.
+    pub(crate) fn lookup_overlay_artifacts(
+        &self,
+        host: &VerterHost,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
+        let key = self.overlay_artifact_key(view)?;
+        host.project_type_store().indexed().get_artifacts(&key)
+    }
+}
+
 /// Discover an overlay-only candidate for a relative import.
 ///
 /// When the workspace cannot resolve a relative `./foo`-style import
@@ -83,6 +189,25 @@ fn resolve_relative_overlay_candidate(
 }
 
 impl VerterHost {
+    /// Construct the [`OverlayArtifactIdentity`] for a raw requested
+    /// canonical.
+    ///
+    /// Computes `analysis_canonical = normalized_analysis_canonical(raw)`
+    /// once and pairs it with the raw owner. This is the single entry
+    /// point every overlay-artifact reader uses to obtain the
+    /// two-identity carrier — readers then build keys / read artifacts
+    /// through the carrier rather than constructing `FileArtifactKey`s
+    /// ad hoc from one id.
+    pub(crate) fn overlay_artifact_identity(&self, raw_canonical: &str) -> OverlayArtifactIdentity {
+        let analysis_canonical = self
+            .normalized_analysis_canonical(raw_canonical)
+            .into_owned();
+        OverlayArtifactIdentity {
+            raw_overlay_owner: raw_canonical.to_string(),
+            analysis_canonical,
+        }
+    }
+
     /// View-aware overlay materialiser.
     ///
     /// Materialises an [`IndexedReady`](crate::project_type_store::IndexedReady)
@@ -136,19 +261,20 @@ impl VerterHost {
         canonical_id: &str,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
-        // Two canonical ids are in play and MUST NOT be conflated:
+        // Two canonical ids are in play and MUST NOT be conflated —
+        // they are carried together by [`OverlayArtifactIdentity`]:
         //
-        // * `canonical_id` — the RAW, un-normalised canonical the
-        //   caller requested. The `SessionView` overlay maps
-        //   (`source` / `content_hash_for` /
+        // * `canonical_id` (`identity.raw_overlay_owner()`) — the RAW,
+        //   un-normalised canonical the caller requested. The
+        //   `SessionView` overlay maps (`source` / `content_hash_for` /
         //   `overlay_artifact_discriminator`) are keyed by exactly this
         //   string, so every `view.*` lookup below uses it. The
         //   overlay-priority callers gate on
         //   `view.overlay_content_hash_for(canonical)` under the same
         //   raw id, so the overlay content lives under the raw id and
         //   nowhere else.
-        // * `analysis_canonical_id` — the
-        //   `normalized_analysis_canonical` rewrite (e.g. a runtime
+        // * `analysis_canonical_id` (`identity.analysis_canonical()`) —
+        //   the `normalized_analysis_canonical` rewrite (e.g. a runtime
         //   `.js` whose `.d.ts` companion is the analysis target). It
         //   is the artifact-store key identity and the build / parse /
         //   resolve target, so it is what `FileArtifactStore` lookups,
@@ -159,8 +285,14 @@ impl VerterHost {
         // the BASE companion source — or `None` — for any canonical
         // whose normalisation is non-identity, silently dropping the
         // overlay. The split keeps view reads on the raw id.
-        let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
-        let analysis_canonical_id = normalized_canonical_id.as_ref();
+        //
+        // The fast-path lookup and the publish below both route their
+        // `FileArtifactKey` construction through `identity` so the
+        // mixed-identity key (`canonical = normalised`, `content_hash`
+        // + discriminator = raw-derived) is built in ONE place and
+        // every downstream reader reconstructs the exact same key.
+        let identity = self.overlay_artifact_identity(canonical_id);
+        let analysis_canonical_id = identity.analysis_canonical();
 
         // Derive the overlay source + its content hash from the view —
         // ONE authority. `content_hash_for` is the view-authoritative
@@ -169,49 +301,28 @@ impl VerterHost {
         // covers. Resolving both here removes the caller-supplied-hash
         // failure mode entirely.
         //
-        // The view source/hash/discriminator lookups are keyed by the
-        // RAW `canonical_id` — the `SessionView` overlay maps are keyed
-        // by the requested canonical, so a normalised id would miss the
-        // overlay. The artifact-store fast-path key below uses the
-        // NORMALISED `analysis_canonical_id` instead (the artifact
-        // identity / analysis target).
+        // The view source/hash lookups are keyed by the RAW
+        // `canonical_id` — the `SessionView` overlay maps are keyed by
+        // the requested canonical, so a normalised id would miss the
+        // overlay. The overlay-set discriminator (also a raw-keyed view
+        // lookup) and the `FileArtifactKey.canonical` (the normalised
+        // analysis target) are both threaded through `identity` at the
+        // fast-path lookup and the publish below.
         let overlay_source = view.source(canonical_id)?;
         let overlay_whole_hash = view.content_hash_for(canonical_id)?;
-
-        // Overlay artifact-store discriminator. `Some` when the bound
-        // view carries an explicit overlay for this canonical — the
-        // overlay `IndexedReady` is then keyed under an `overlay_scoped`
-        // key so it never collides with the base artifact, even when
-        // the overlay bytes are identical to the base (the overlay can
-        // resolve an overlay-only relative helper the base cannot, so
-        // the import routes genuinely diverge). A base-passthrough view
-        // (no overlay for the canonical) yields `None` → the legacy
-        // key, which is correct: without an overlay the materialiser
-        // has no overlay-only route discovery, so its artifact is
-        // base-equivalent. Keyed by the RAW `canonical_id` to match the
-        // overlay map.
-        let overlay_discriminator = view.overlay_artifact_discriminator(canonical_id);
 
         // Fast path: an overlay materialisation for the same content
         // hash already lives in the file-artifact store under the
         // overlay-scoped key (or the legacy key when the bound view
         // carries no overlay for this canonical). Multi-candidate
         // storage keeps base and overlay candidates separate, so this
-        // lookup serves only the overlay. Keyed by the NORMALISED
-        // `analysis_canonical_id` — the artifact-store identity.
-        let fast_hit = match overlay_discriminator {
-            Some(discriminator) => self.project_type_store.indexed().get_overlay_scoped(
-                analysis_canonical_id,
-                overlay_whole_hash,
-                discriminator,
-            ),
-            None => self
-                .project_type_store
-                .indexed()
-                .get(analysis_canonical_id, overlay_whole_hash),
-        };
-        if let Some(indexed) = fast_hit {
-            return Some(indexed);
+        // lookup serves only the overlay. The key is built through
+        // `identity` — `canonical` is the NORMALISED analysis canonical
+        // (the artifact-store identity), `content_hash` + discriminator
+        // are RAW-owner-derived — so it reconstructs exactly the key
+        // the publish below writes under.
+        if let Some(facts) = identity.lookup_overlay_artifacts(self, view) {
+            return Some(Arc::clone(&facts.indexed));
         }
 
         if analysis_canonical_id.is_empty() || is_raw_import_specifier_id(analysis_canonical_id) {
@@ -438,12 +549,12 @@ impl VerterHost {
         // Publish via the multi-candidate surface — base candidate (if
         // any) under its own legacy key stays untouched.
         //
-        // Key selection: a view-aware overlay materialisation
-        // (`overlay_discriminator` is `Some`) publishes under an
-        // `overlay_scoped` key. The discriminator occupies the
-        // `parse_env_hash` dimension and is derived from the session
-        // view's overlay-set fingerprint, so the overlay candidate is
-        // isolated from the base artifact (always
+        // Key selection: `identity.overlay_artifact_key` builds an
+        // `overlay_scoped` key when the bound view carries an explicit
+        // overlay-set discriminator for the raw owner. The discriminator
+        // occupies the `parse_env_hash` dimension and is derived from
+        // the session view's overlay-set fingerprint, so the overlay
+        // candidate is isolated from the base artifact (always
         // `parse_env_hash = LEGACY_PARSE_ENV_HASH`) and from other
         // sessions' overlay candidates — even when the overlay source
         // bytes are identical to the base file and the content hashes
@@ -452,9 +563,9 @@ impl VerterHost {
         // `overlay_scoped` entry, and a session-view read via
         // `get_overlay_scoped` never reaches the base entry. A
         // base-passthrough view (no overlay for this canonical) yields
-        // `None` → the legacy key, which is correct: with no overlay
-        // there is no overlay-only relative route discovery, so the
-        // candidate is base-equivalent.
+        // the legacy key, which is correct: with no overlay there is no
+        // overlay-only relative route discovery, so the candidate is
+        // base-equivalent.
         //
         // TODO(follow-up — substrate-reviewer P1.2): the legacy-key
         // branch zeroes `parse_env_hash` and the `overlay_scoped`
@@ -463,21 +574,16 @@ impl VerterHost {
         // `view.project_identity()`) is not threaded into this call;
         // lift the env hashes into the materialiser's signature when
         // the broader env-hash-migration block lands.
-        // The publish key uses the NORMALISED `analysis_canonical_id` —
-        // the artifact-store identity — so it matches the fast-path
-        // lookup above; a later call short-circuits on the cached
-        // candidate.
-        let key = match overlay_discriminator {
-            Some(discriminator) => crate::file_artifact_store::FileArtifactKey::overlay_scoped(
-                Arc::from(analysis_canonical_id),
-                overlay_whole_hash,
-                discriminator,
-            ),
-            None => crate::file_artifact_store::FileArtifactKey::legacy(
-                Arc::from(analysis_canonical_id),
-                overlay_whole_hash,
-            ),
-        };
+        // The publish key is built through `identity.overlay_artifact_key`
+        // — `canonical` is the NORMALISED analysis canonical, the
+        // `content_hash` + discriminator are RAW-owner-derived — so it
+        // is byte-identical to the key the fast-path lookup above
+        // reconstructs and the key every downstream reader rebuilds
+        // through the same `OverlayArtifactIdentity` helper. A later
+        // call short-circuits on the cached candidate.
+        let key = identity
+            .overlay_artifact_key(view)
+            .expect("the overlay source resolved above, so the view reports a current content hash for the raw owner");
         let payload = Arc::new(crate::file_artifact_store::FileArtifacts::with_indexed(
             Arc::clone(&indexed),
         ));

@@ -470,3 +470,153 @@ fn overlay_materialiser_view_lookups_use_raw_canonical_for_normalised_js() {
          import) instead of the overlaid `.js`",
     );
 }
+
+// ──────────────────────────────────────────────────────────────────
+// Overlay artifact — downstream reachability when `normalize(raw)` is
+// non-identity (the two-identity overlay-artifact-keying contract).
+// ──────────────────────────────────────────────────────────────────
+
+/// A `SessionResolverContext` content-pinned reader
+/// (`indexed_for_current_content`) reaches the overlay artifact the
+/// materialiser published, even when the requested canonical normalises
+/// to a different analysis canonical (a `.js` runtime file with a
+/// `.d.ts` companion).
+///
+/// ## The defect this test pins
+///
+/// `materialize_overlay_indexed_ready_with_view` publishes the overlay
+/// `IndexedReady` under a `FileArtifactKey` whose `canonical` is the
+/// NORMALISED analysis canonical (`normalized_analysis_canonical(raw)` —
+/// e.g. `/pkg/index.d.ts` for `/pkg/index.js`) but whose `content_hash`
+/// and `parse_env_hash` discriminator are derived from the RAW overlay
+/// owner. The `SessionResolverContext` content-pinned readers
+/// (`observe_materialize_scope`, `indexed_for_current_content`) built
+/// their `overlay_scoped` lookup key under the RAW canonical with no
+/// `normalized_analysis_canonical` call, so for any overlay whose
+/// canonical normalises non-identically they MISSED the published
+/// artifact: the lookup key's `canonical` was `/pkg/index.js` while the
+/// publish key's `canonical` was `/pkg/index.d.ts`.
+///
+/// ## Fixture
+///
+/// Base workspace carries `/pkg/index.js` AND its `/pkg/index.d.ts`
+/// companion, so `normalized_analysis_canonical("/pkg/index.js")`
+/// rewrites to `/pkg/index.d.ts` (asserted as a fixture invariant). The
+/// `OverlaidView` overlays `/pkg/index.js` with bytes that differ from
+/// both the base `.js` and the base `.d.ts`, so the overlay content
+/// hash is distinct and the overlay artifact is unambiguously
+/// distinguishable from either base candidate by `whole_hash` +
+/// `raw_source`.
+///
+/// ## Discrimination property
+///
+/// Post-fix `indexed_for_current_content("/pkg/index.js")` returns the
+/// overlay artifact: `whole_hash == overlay_hash` and `raw_source` is
+/// the overlay bytes. Pre-fix (`6f5425720`) the reader builds the
+/// `overlay_scoped` key under the raw `/pkg/index.js` canonical, misses
+/// the `/pkg/index.d.ts`-keyed publish, and — having no base artifact
+/// under the overlay hash either — returns `None`. The
+/// `expect(...)` on the lookup FAILS against the pre-fix tree and the
+/// `raw_source` / `whole_hash` assertions PASS only post-fix.
+#[test]
+fn overlay_artifact_downstream_reachable_for_normalised_js() {
+    use crate::resolver_core::{ResolverContext, SessionResolverContext};
+
+    // Base `.js` runtime stub.
+    const BASE_JS: &str = "export const runtime = 1;\n";
+    // Base `.d.ts` companion — the non-identity normalisation target.
+    const BASE_DTS: &str = "export declare const runtime: number;\n";
+    // Overlaid `/pkg/index.js` body — distinct bytes from BOTH bases so
+    // the overlay content hash is unambiguous.
+    const OVERLAY_JS: &str =
+        "export const runtime = 42;\nexport interface OverlayOnly { tag: string; }\n";
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    for (path, source) in [("/pkg/index.js", BASE_JS), ("/pkg/index.d.ts", BASE_DTS)] {
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some(path.to_string()),
+                input_id: path.to_string(),
+                source: Arc::from(source),
+                file_kind: crate::FileKind::from_path(path),
+                aliases: Vec::new(),
+            })
+            .expect("base seed upsert succeeds");
+    }
+    let host = Arc::new(host);
+
+    // Fixture invariant: the `.d.ts` companion exists, so the runtime
+    // `.js` canonical normalises to a NON-IDENTITY analysis target.
+    // Without this the bug cannot reproduce (identity normalisation
+    // makes the raw and normalised lookup keys coincide).
+    let normalized = host.normalized_analysis_canonical("/pkg/index.js");
+    assert_eq!(
+        normalized.as_ref(),
+        "/pkg/index.d.ts",
+        "fixture invariant: `/pkg/index.js` with a `.d.ts` companion must \
+         normalise to `/pkg/index.d.ts` — this non-identity rewrite is the \
+         precondition the keying-asymmetry bug needs",
+    );
+
+    // Overlay `/pkg/index.js`. The overlay map is keyed by the RAW
+    // `.js` canonical.
+    let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+    overlays.insert("/pkg/index.js".to_string(), Arc::from(OVERLAY_JS));
+    let view = OverlaidView::new(Arc::clone(&host), overlays);
+
+    let overlay_hash = view
+        .overlay_content_hash_for("/pkg/index.js")
+        .expect("OverlaidView must report an overlay content hash for the masked `.js`");
+
+    // Materialise + publish the overlay `IndexedReady` candidate. The
+    // materialiser publishes under the NORMALISED `/pkg/index.d.ts`
+    // analysis canonical with the RAW-derived overlay hash +
+    // discriminator.
+    let materialised = host
+        .materialize_overlay_indexed_ready_with_view("/pkg/index.js", &view)
+        .expect("the overlay materialiser produces an IndexedReady for the overlaid `.js`");
+    assert_eq!(
+        materialised.raw_source.as_ref(),
+        OVERLAY_JS,
+        "fixture invariant: the materialised artifact is built from the overlay bytes",
+    );
+    assert_eq!(
+        materialised.whole_hash, overlay_hash,
+        "fixture invariant: the overlay artifact is keyed by the overlay content hash",
+    );
+
+    // Drive the content-pinned read through the session context — the
+    // downstream reader that codex named as a genuine miss site.
+    let ctx = SessionResolverContext::new(&host, &view);
+
+    // The discriminating assertion: `indexed_for_current_content` keyed
+    // by the RAW `/pkg/index.js` canonical MUST reach the overlay
+    // artifact the materialiser published under the NORMALISED
+    // `/pkg/index.d.ts` canonical. Pre-fix the reader builds an
+    // `overlay_scoped` key under `/pkg/index.js` and misses the
+    // `/pkg/index.d.ts`-keyed publish entirely → `None`.
+    let pinned = ctx.indexed_for_current_content("/pkg/index.js").expect(
+        "indexed_for_current_content MUST reach the overlay artifact \
+             for a `.js` canonical whose `.d.ts` companion makes \
+             `normalized_analysis_canonical` non-identity — a `None` here \
+             means the content-pinned reader built its `overlay_scoped` \
+             lookup key under the raw `.js` id and missed the \
+             normalised-keyed publish",
+    );
+    assert_eq!(
+        pinned.whole_hash, overlay_hash,
+        "the content-pinned read MUST return the OVERLAY artifact \
+         (whole_hash == overlay_hash)",
+    );
+    assert_eq!(
+        pinned.raw_source.as_ref(),
+        OVERLAY_JS,
+        "the content-pinned read MUST surface the overlaid bytes, not the \
+         base `.d.ts` companion text",
+    );
+    assert_ne!(
+        pinned.raw_source.as_ref(),
+        BASE_DTS,
+        "the content-pinned read must NOT surface the base `.d.ts` companion",
+    );
+}

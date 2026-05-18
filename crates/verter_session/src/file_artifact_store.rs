@@ -192,8 +192,9 @@ impl FileArtifactKey {
     /// keys / route facts from another session's routes. A session-view
     /// reader reaches its overlay artifact through the exact-key /
     /// view-aware accessors ([`FileArtifactStore::get_overlay_scoped`],
-    /// `OverlaidView::parse_artifacts`) instead — they key on the full
-    /// `FileArtifactKey` including the discriminator. Lifecycle / removal
+    /// `OverlayArtifactIdentity::lookup_overlay_artifacts`) instead —
+    /// they key on the full `FileArtifactKey` including the
+    /// discriminator. Lifecycle / removal
     /// scans ([`FileArtifactStore::remove`],
     /// [`FileArtifactStore::remove_canonical`]) do NOT filter on this —
     /// an eviction must drain every key for a canonical, overlay-scoped
@@ -1089,7 +1090,9 @@ impl FileArtifactStore {
     /// [`FileArtifactKey::overlay_scoped`] key is never surfaced to a
     /// base reader (which would otherwise read the overlay's
     /// session-specific `IndexedReady` import routes). A session-view
-    /// reader uses `OverlaidView::parse_artifacts` (exact key) instead.
+    /// reader uses
+    /// [`OverlayArtifactIdentity::lookup_overlay_artifacts`](crate::host_manage::overlay_materialize::OverlayArtifactIdentity::lookup_overlay_artifacts)
+    /// (exact key) instead.
     #[must_use]
     pub fn get_artifacts_any(&self, canonical: &str) -> Option<Arc<FileArtifacts>> {
         if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
