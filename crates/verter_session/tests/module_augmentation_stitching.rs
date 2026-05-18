@@ -786,3 +786,98 @@ fn edit_unrelated_file_does_not_invalidate_consumer() {
          control assertion that our signature is narrow per R14/R28"
     );
 }
+
+// ────────────────────────────────────────────────────────────────
+// Base-only contract tripwire — a session view is rejected.
+//
+// The augmentation index (`ModuleAugmentationIndex` on
+// `FileArtifactStore`) is keyed by a base resolve-domain identity
+// (`project_identity`, `resolve_env_hash`, `lib_env_hash`) with no
+// base/session discriminator: its cold scan and refresh path filter
+// to base (`FileArtifactKey::is_legacy`) artifacts, so a session that
+// overlays a `declare module` block would observe the base augmenter
+// set, not its own. `EffectiveExportSet` is therefore base-only until
+// the augmentation index gains artifact-population identity.
+//
+// `RouteDb::get_or_compute_effective_export_set` fails closed on a
+// session view (`StoreViewCompatToken::session.is_some()`): a session
+// call panics rather than silently returning a base-only result
+// presented as session-correct. This test locks that contract — it
+// must keep failing the same way until the future block that adds the
+// overlay-aware augmentation-index schema and wires the live session
+// `EffectiveExportSet` consumer.
+// ────────────────────────────────────────────────────────────────
+
+/// A `StoreView` carrying a session identity — `compat_token().session`
+/// is `Some`. Accepts every fact (the guard fires before any fact
+/// validation runs, so `validates` is never reached in this test).
+#[derive(Debug)]
+struct SessionScopedView {
+    token: StoreViewCompatToken,
+}
+
+impl SessionScopedView {
+    fn new(epoch: u64, session: u64) -> Self {
+        Self {
+            token: StoreViewCompatToken {
+                epoch,
+                session: Some(session),
+            },
+        }
+    }
+}
+
+impl StoreView for SessionScopedView {
+    fn compat_token(&self) -> StoreViewCompatToken {
+        self.token
+    }
+    fn validates(&self, _fact: &FactVersionRef) -> bool {
+        true
+    }
+}
+
+/// Discriminator: a session view passed to
+/// `get_or_compute_effective_export_set` panics with the base-only
+/// invariant message.
+///
+/// - **Against the guard-less tree** (`362eeb0b5`): the session view
+///   flows straight into the cold compute, which returns an
+///   `Arc<EffectiveExportSetEntry>` — no panic — so this `#[should_panic]`
+///   test FAILS ("test did not panic").
+/// - **Post-fix tree**: the entry guard rejects `session.is_some()`
+///   before any compute, so the call panics with the documented
+///   invariant — this test PASSES.
+#[test]
+#[should_panic(expected = "EffectiveExportSet is base-only")]
+fn effective_export_set_rejects_session_view() {
+    let store = FileArtifactStore::new();
+    let _key = insert_artifact_from_fixture(
+        &store,
+        "/aug-external.ts",
+        "module_augmentation_external.ts",
+        [11u8; 16],
+    );
+    let route_db = RouteDb::new();
+    // A session-scoped view — this is the rejected input.
+    let session_view = SessionScopedView::new(1, 42);
+
+    let target = AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from("vue"));
+    let key = EffectiveExportSetKey {
+        provider_canonical: "vue".to_owned(),
+        project_identity: ProjectIdentity([1u8; 16]),
+        resolve_env_hash: [2u8; 16],
+        lib_env_hash: [3u8; 16],
+    };
+
+    // MUST panic — augmentation stitching / `EffectiveExportSet` is
+    // base-only; a session call is observably an error, never a
+    // silently-wrong base-only result.
+    let _ = route_db.get_or_compute_effective_export_set(
+        key,
+        target,
+        &session_view,
+        &store,
+        |_| Some([11u8; 16]),
+        |_, _| None,
+    );
+}

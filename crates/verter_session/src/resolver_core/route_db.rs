@@ -677,6 +677,29 @@ impl RouteDb {
         FH: Fn(&str) -> Option<Hash16>,
         RR: Fn(&str, &str) -> Option<Arc<str>>,
     {
+        // Fail-closed base-only guard. The augmentation index
+        // (`ModuleAugmentationIndex` on `FileArtifactStore`) is keyed by
+        // a base resolve-domain identity with no base/session
+        // discriminator — its cold scan and refresh path filter to base
+        // (`FileArtifactKey::is_legacy`) artifacts. A session that
+        // overlays a `declare module` block would observe the BASE
+        // augmenter set, not its own, so an `EffectiveExportSet`
+        // computed under a session view is base content presented as
+        // session-correct. Until the augmentation index gains
+        // artifact-population identity (the future block that wires the
+        // live session `EffectiveExportSet` consumer), this surface is
+        // base-only: a session call must be observably an error rather
+        // than silent wrong data.
+        assert!(
+            view.compat_token().session.is_none(),
+            "EffectiveExportSet is base-only: get_or_compute_effective_export_set \
+             rejects a session view (compat_token().session.is_some()). The \
+             augmentation index has no base/session population identity, so a \
+             session call would observe the base augmenter set, not the \
+             session's overlay. Augmentation stitching gains session support in \
+             the block that adds the overlay-aware augmentation-index schema."
+        );
+
         if let Some(existing) = self.effective_export_sets.get_if_valid(&key, view) {
             return existing;
         }

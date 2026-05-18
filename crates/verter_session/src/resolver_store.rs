@@ -298,8 +298,16 @@ impl HostStoreView {
     ///   the project generation, so the base snapshot is correct.
     /// - **`route_surface_index_fingerprints`** — keyed by the
     ///   structural augmentation-target shape, not by canonical /
-    ///   content hash; an overlay content edit does not move a target's
-    ///   structural identity, so the base snapshot is correct.
+    ///   content hash. The augmentation index this snapshot mirrors is
+    ///   base-only: it has no base/session population identity, so an
+    ///   overlay that edits a `declare module` block would still be
+    ///   summarised by the BASE augmenter set. The base snapshot is
+    ///   carried unchanged here only because `EffectiveExportSet`
+    ///   consumption is itself base-only —
+    ///   `RouteDb::get_or_compute_effective_export_set` fails closed on
+    ///   a session view, so no session consumer reads these
+    ///   fingerprints. Session-correct augmentation stitching lands with
+    ///   the overlay-aware augmentation-index schema.
     /// - **`import_routes`** — populated by `build` but read by no
     ///   `HostStoreView` validator; nothing to re-root.
     /// - **`env_hashes`** / **`project_identity`** / **`project_generation`**
@@ -1310,14 +1318,23 @@ impl VerterHost {
         crate::component_meta_audit::RequestStoreAudit,
         ComponentMetaStoreCounters,
     ) {
-        let indexed_entries = self.project_type_store.indexed().len() as u32;
-        let indexed_bytes = self
-            .project_type_store
-            .indexed()
-            .snapshot_all()
+        // Entry count and byte sum MUST be drawn from the SAME
+        // population. `FileArtifactStore::len` counts every keyed
+        // artifact (base + overlay-scoped); the byte sum therefore
+        // routes through `snapshot_artifacts()`, which enumerates that
+        // same full keyed set. `snapshot_all()` is base-only (it
+        // filters to `FileArtifactKey::is_legacy` keys), so summing
+        // bytes over it while counting entries via `len()` would report
+        // two different populations in a session that materialised
+        // overlay artifacts.
+        let artifacts = self.project_type_store.indexed().snapshot_artifacts();
+        let indexed_entries = artifacts.len() as u32;
+        let indexed_bytes = artifacts
             .iter()
-            .map(|(id, indexed)| {
-                id.len() as u64 + indexed.raw_source.len() as u64 + indexed.eval_source.len() as u64
+            .map(|(key, file_artifacts)| {
+                key.canonical.len() as u64
+                    + file_artifacts.indexed.raw_source.len() as u64
+                    + file_artifacts.indexed.eval_source.len() as u64
             })
             .sum::<u64>();
 

@@ -763,3 +763,154 @@ fn upsert_donor_with_distinct_surface(host: &VerterHost, path: &str) {
         .ensure_indexed_ready(path)
         .expect("donor IndexedReady must materialise");
 }
+
+/// `component_meta_audit_store_snapshot`'s `imported_dependency_entries`
+/// and `imported_dependency_bytes` MUST be drawn from the SAME
+/// `FileArtifactStore` population.
+///
+/// Pre-fix the entry count came from `FileArtifactStore::len()` (every
+/// keyed artifact — base + overlay-scoped) while the byte sum was taken
+/// over `snapshot_all()`, which filters to base
+/// (`FileArtifactKey::is_legacy`) keys only. In a session that
+/// materialised an overlay artifact the two figures describe different
+/// populations: the count includes the overlay candidate, the byte sum
+/// excludes it.
+///
+/// Post-fix both numbers route through `snapshot_artifacts()` (the full
+/// keyed set), so the audit's byte sum equals an independent
+/// all-population byte sum and the count equals
+/// `snapshot_artifacts().len()`.
+///
+/// Discriminating fixture: a base `.ts` artifact is materialised, then
+/// an overlay `IndexedReady` with deliberately different (longer) source
+/// is published as a multi-candidate sibling under the overlay-scoped
+/// key. The independent all-population byte sum is then strictly larger
+/// than the base-only sum.
+///
+/// - **Pre-fix tree** (`362eeb0b5`): `imported_dependency_bytes` is the
+///   base-only sum and is strictly LESS than the all-population sum →
+///   the equality assertion FAILS.
+/// - **Post-fix tree**: `imported_dependency_bytes` is the
+///   all-population sum → the assertion PASSES.
+#[test]
+fn audit_store_snapshot_entry_and_byte_counts_share_one_population() {
+    use crate::session_view::{OverlaidView, SessionView};
+    use rustc_hash::FxHashMap;
+
+    let canonical = "/audit/store_snapshot_probe.ts";
+    // Base artifact: materialised on the host under the base content
+    // hash.
+    let (host, base_hash) = host_with_materialized_ts(
+        canonical,
+        "export interface Probe { base: number; }\nexport const probe = 1;\n",
+    );
+    let host = Arc::new(host);
+
+    // Overlay source: deliberately LONGER than the base so the overlay
+    // artifact contributes a strictly positive, distinguishable byte
+    // count — the base-only and all-population sums must genuinely
+    // differ for the assertion to discriminate.
+    let overlay_source: Arc<str> = Arc::from(
+        "export interface Probe { overlay: string; overlayExtra: boolean; }\n\
+         export const probe = 2;\n\
+         export const overlayOnlyConstant = 'a deliberately long overlay-only value';\n",
+    );
+    assert!(
+        overlay_source.len()
+            > "export interface Probe { base: number; }\nexport const probe = 1;\n".len(),
+        "fixture invariant: the overlay source must be longer than the base so the \
+         overlay artifact contributes a distinguishable positive byte count",
+    );
+    let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+    overlays.insert(canonical.to_string(), Arc::clone(&overlay_source));
+    let view = OverlaidView::new(Arc::clone(&host), overlays);
+
+    let overlay_hash = view
+        .overlay_content_hash_for(canonical)
+        .expect("OverlaidView must report an overlay content hash for the masked canonical");
+    assert_ne!(
+        overlay_hash, base_hash,
+        "fixture invariant: the overlay source differs from the base, so the overlay \
+         artifact is keyed by a distinct content hash and coexists with the base",
+    );
+
+    // Publish the overlay `IndexedReady` candidate under the
+    // overlay-scoped key — a multi-candidate sibling of the base
+    // artifact.
+    let overlay_indexed = host
+        .materialize_overlay_indexed_ready_with_view(
+            canonical,
+            &overlay_source,
+            overlay_hash,
+            &view,
+        )
+        .expect("overlay IndexedReady must materialise");
+    assert_eq!(
+        overlay_indexed.whole_hash, overlay_hash,
+        "fixture invariant: the overlay artifact is keyed by the overlay hash",
+    );
+
+    // Independent oracle: the full keyed-population entry count + byte
+    // sum, computed directly from `snapshot_artifacts()` (every keyed
+    // artifact — base + overlay-scoped).
+    let all_artifacts = host.project_type_store().indexed().snapshot_artifacts();
+    let all_population_entries = all_artifacts.len() as u32;
+    let all_population_bytes: u64 = all_artifacts
+        .iter()
+        .map(|(key, file_artifacts)| {
+            key.canonical.len() as u64
+                + file_artifacts.indexed.raw_source.len() as u64
+                + file_artifacts.indexed.eval_source.len() as u64
+        })
+        .sum();
+
+    // The base-only oracle: the byte sum over `snapshot_all()` (legacy
+    // keys only). This is the population the PRE-FIX audit byte sum was
+    // drawn from.
+    let base_only_bytes: u64 = host
+        .project_type_store()
+        .indexed()
+        .snapshot_all()
+        .iter()
+        .map(|(id, indexed)| {
+            id.len() as u64 + indexed.raw_source.len() as u64 + indexed.eval_source.len() as u64
+        })
+        .sum();
+
+    // Fixture invariant: with an overlay artifact present the two
+    // populations genuinely differ — otherwise the equality assertion
+    // below would pass vacuously even on the pre-fix tree.
+    assert!(
+        all_population_bytes > base_only_bytes,
+        "fixture invariant: an overlay artifact is keyed alongside the base, so the \
+         all-population byte sum ({all_population_bytes}) must exceed the base-only \
+         byte sum ({base_only_bytes}) — the two populations must be distinguishable",
+    );
+
+    // The audit snapshot under test.
+    let (store_audit, _counters) = host.component_meta_audit_store_snapshot(None);
+
+    // Discriminating assertion 1: the audit byte sum equals the
+    // all-population sum. Pre-fix it equals the strictly-smaller
+    // base-only sum, so this FAILS.
+    assert_eq!(
+        store_audit.imported_dependency_bytes, all_population_bytes,
+        "component_meta_audit_store_snapshot's imported_dependency_bytes MUST be summed \
+         over the SAME population its entry count is drawn from (all keyed artifacts via \
+         snapshot_artifacts()). A pre-fix tree sums bytes over base-only snapshot_all() \
+         ({base_only_bytes}) while counting entries over the full set — two populations.",
+    );
+    assert_ne!(
+        store_audit.imported_dependency_bytes, base_only_bytes,
+        "with an overlay artifact present, the audit byte sum MUST NOT equal the \
+         base-only snapshot_all() sum — that is the pre-fix population mismatch",
+    );
+
+    // Discriminating assertion 2: the entry count is the full keyed
+    // population — consistent with the byte sum's population.
+    assert_eq!(
+        store_audit.imported_dependency_entries, all_population_entries,
+        "imported_dependency_entries MUST count the full keyed artifact population \
+         (snapshot_artifacts()), consistent with imported_dependency_bytes",
+    );
+}

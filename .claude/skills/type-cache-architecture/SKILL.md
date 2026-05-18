@@ -547,6 +547,25 @@ cold-path compute. Both audit-event variants live on
 forbidden on the augmentation stitching surface (R23 scope-fence
 guarded by `tests/audit_event_shape.rs`).
 
+**Base-only contract.** Augmentation stitching / `EffectiveExportSet`
+is **base-only**. `AugmentationTargetKey` has no base/session
+discriminator, and the augmentation index's cold scan + refresh path
+filter to base (`FileArtifactKey::is_legacy`) artifacts — an
+overlay-scoped artifact never contributes, so the base augmenter set
+is never poisoned by a session overlay. The consequence is that a
+session that overlays a `declare module` block would observe the
+*base* augmenter set, not its own. `EffectiveExportSet` therefore has
+no session-correct result yet:
+`RouteDb::get_or_compute_effective_export_set` **fails closed** on a
+session view (`StoreViewCompatToken::session.is_some()`) — it asserts
+the view is base, so a session call is observably an error rather than
+a silently-wrong base-only result. There is no live production
+`EffectiveExportSet` consumer today; the base-only contract is locked
+by `tests/module_augmentation_stitching.rs::effective_export_set_rejects_session_view`.
+Session-correct augmentation stitching — an overlay-aware
+`AugmentationTargetKey` with artifact-population identity plus the
+wired live session consumer — is deferred to a future block.
+
 ## Cache layer key composition
 
 See `docs/arch/fact-based-cache.md` for the canonical per-cache-layer
