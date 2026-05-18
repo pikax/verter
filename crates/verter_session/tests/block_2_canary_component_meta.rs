@@ -1,18 +1,26 @@
-//! Block 2 canary suite — component-meta cross-file lazy invalidation.
+//! Component-meta cross-file lazy-invalidation canary suite.
 //!
 //! The owner-upsert path has no eager reverse-dependent invalidation
 //! cascade. These canary tests are the coherent named gate that proves
 //! the lazy fact-validation substrate backs every `getComponentMeta`
 //! cross-file invalidation scenario.
 //!
+//! Every mutation routes through the skip-own-drain hook (the
+//! [`harness::upsert`] helper → `upsert_skipping_own_canonical_drain_for_tests`),
+//! which suppresses the post-commit own-canonical query-identity cache
+//! drain. The dependency edits exercised here are cross-file, so the
+//! drain skip does not change the dependency's effect on the owner —
+//! but routing the whole suite through the one hook keeps the wiring
+//! uniform with the owner-self-edit canaries, where the drain skip is
+//! load-bearing.
+//!
 //! Each test:
 //!  1. Sets up an owner SFC + dependency file(s) and primes a warm
 //!     `get_component_meta` result.
-//!  2. Mutates the dependency through the plain [`VerterHost::upsert`]
-//!     — no eager cascade runs, so the owner's warm
-//!     `ComponentMetaResultDb` entry physically survives. The ONLY
-//!     mechanism that can invalidate it is `validates_fact_signature`
-//!     on the warm-hit path.
+//!  2. Mutates the dependency through [`harness::upsert`] — no eager
+//!     cascade runs, so the owner's warm `ComponentMetaResultDb` entry
+//!     physically survives. The ONLY mechanism that can invalidate it
+//!     is `validates_fact_signature` on the warm-hit path.
 //!  3. Asserts the lazy semantics: the warm-hit lookup MISSES
 //!     (`component_meta_result_cache_misses` advances), the resolver
 //!     recomputes, and the recomputed `ComponentMetaAnalysis` props
@@ -31,6 +39,25 @@ use verter_session::FileKind;
 mod harness;
 
 use harness::{meta_hits, meta_misses, upsert, workspace_host};
+
+/// Sorted slot-binding names for the named slot of a
+/// `get_component_meta` result.
+fn slot_binding_names(
+    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    slot: &str,
+) -> Vec<String> {
+    let mut names: Vec<String> = meta
+        .slots
+        .iter()
+        .find(|s| s.name == slot)
+        .unwrap_or_else(|| panic!("missing slot `{slot}`"))
+        .bindings
+        .iter()
+        .map(|b| b.name.clone())
+        .collect();
+    names.sort_unstable();
+    names
+}
 
 /// Assert an unedited second `get_component_meta` is a warm hit, then
 /// return the pre-edit miss counter — establishes the baseline that
@@ -395,5 +422,80 @@ fn route_surface_dep_edit_misses_warm_component_meta() {
         "the recomputed props MUST reflect the new `RProps` route surface \
          (`a` + `b`) — a stale warm hit would report only `a`. Got \
          {after_names:?}"
+    );
+}
+
+/// Canary — cross-file `defineSlots` carrier edit.
+///
+/// `Comp.vue` declares `defineSlots<Slots>()` over a `Slots` interface
+/// imported from a workspace `./types`. Editing the carrier `types.ts`
+/// — replacing the `default` slot payload shape — must surface in the
+/// owner's next `get_component_meta` slot bindings.
+///
+/// This is the cross-file complement of the owner-self-edit
+/// `defineSlots` canary (`block_2_canary_owner_self_edit`): there the
+/// slot type is script-local; here it is imported and the *carrier* is
+/// edited.
+///
+/// Discrimination property: slot-binding synthesis walks the
+/// `materialize_structure_db` / `semantic_graph` query-identity layer
+/// and folds the carrier dep's parse facts into the published
+/// `ComponentMetaResultEntry` signature. The owner SFC itself is
+/// unchanged, so its `owner_whole_hash` result-cache key is stable and
+/// the warm result is eligible for a hit — only
+/// `validates_fact_signature` against the edited carrier's facts can
+/// reject it. The carrier edit routes through the skip-own-drain hook,
+/// so the carrier's own query-identity entries are NOT eagerly drained;
+/// a substrate that keyed slot bindings under the owner content hash
+/// alone — ignoring the carrier dep-signature — would serve the stale
+/// `[row]` binding and the `[column, index]` assertion fails.
+#[test]
+fn cross_file_define_slots_carrier_edit_recomputes_slot_bindings() {
+    let (workspace, host) = workspace_host(&[
+        (
+            "/workspace/src/types.ts",
+            "export interface Slots { default(props: { row: string }): any }\n",
+        ),
+        (
+            "/workspace/src/Comp.vue",
+            "<script setup lang=\"ts\">\n\
+             import type { Slots } from '/workspace/src/types'\n\
+             defineSlots<Slots>()\n\
+             </script>\n\
+             <template><div/></template>\n",
+        ),
+    ]);
+
+    let pre = host
+        .get_component_meta("/workspace/src/Comp.vue")
+        .expect("cold get_component_meta must resolve");
+    assert_eq!(
+        slot_binding_names(&pre, "default"),
+        vec!["row"],
+        "precondition: cold `default` slot must publish exactly `row` from \
+         the imported `Slots` carrier",
+    );
+
+    // Edit the carrier — replace the `default` slot payload shape. No
+    // eager cascade; the owner's warm result survives the carrier edit.
+    let edited = "export interface Slots \
+         { default(props: { column: number; index: number }): any }\n";
+    workspace.inject_file(
+        "/workspace/src/types.ts".into(),
+        std::sync::Arc::from(edited),
+    );
+    upsert(&host, "/workspace/src/types.ts", edited, FileKind::NonSfc);
+
+    let post = host
+        .get_component_meta("/workspace/src/Comp.vue")
+        .expect("post-edit get_component_meta must resolve");
+    assert_eq!(
+        slot_binding_names(&post, "default"),
+        vec!["column", "index"],
+        "the recomputed `default` slot MUST publish the carrier-edited \
+         bindings [column, index] — a slot-binding cache keyed under the \
+         owner content hash alone (ignoring the carrier dep-signature) \
+         would still publish the stale [row]. Got {:?}",
+        slot_binding_names(&post, "default"),
     );
 }

@@ -1,4 +1,4 @@
-//! Block 2 canary suite — negative-result recovery, evicted-owner
+//! Lifecycle canary suite — negative-result recovery, evicted-owner
 //! reload, and the over-invalidation guard.
 //!
 //! The owner-upsert path has no eager reverse-dependent invalidation
@@ -16,10 +16,15 @@
 //!    warm and unchanged (negative: the substrate must NOT
 //!    over-invalidate).
 //!
-//! Every mutation routes through the plain [`VerterHost::upsert`] —
-//! no eager cascade runs, so only fact-validation drives invalidation
-//! (and, for the over-invalidation guard, only fact-validation may
-//! decide to leave a warm result alone).
+//! Every mutation routes through the skip-own-drain hook (the
+//! [`harness::upsert`] helper → `upsert_skipping_own_canonical_drain_for_tests`):
+//! no eager cascade runs and the post-commit own-canonical drain is
+//! suppressed, so only lazy fact-validation drives invalidation (and,
+//! for the over-invalidation guard, only fact-validation may decide to
+//! leave a warm result alone). For the over-invalidation guard the
+//! edited / added file is unrelated to the owner, so suppressing the
+//! drain on that unrelated canonical cannot perturb the owner's warm
+//! entry — the guard still proves path-precision.
 
 #![cfg(test)]
 
@@ -90,7 +95,7 @@ fn negative_result_recovers_when_missing_dependency_appears() {
         evaluated_prop(&initial, "ui")
     );
 
-    // ADD `./theme` through the plain `upsert` — no eager cascade
+    // ADD `./theme` through `harness::upsert` — no eager cascade
     // evicts `/src/Comp.vue`'s artifacts, so the lazy fact-validation
     // substrate is what must detect that `./theme` is now resolvable.
     upsert(
@@ -134,7 +139,7 @@ fn negative_result_recovers_when_missing_dependency_appears() {
 /// dependency edit.
 ///
 /// `Comp.vue` imports `Props` from `types.ts`. After a `types.ts`
-/// edit through the plain `upsert` (no eager cascade evicts the
+/// edit through `harness::upsert` (no eager cascade evicts the
 /// owner's artifacts) the owner is EXPLICITLY evicted with
 /// `host.evict`. The next `get_component_meta` must reload the evicted
 /// owner to authoritative state and reflect the edit.
@@ -178,7 +183,7 @@ fn evicted_owner_reloads_to_authoritative_state_after_dep_edit() {
         a_pre.type_expr
     );
 
-    // Edit `types.ts` through the plain `upsert` (no eager cascade),
+    // Edit `types.ts` through `harness::upsert` (no eager cascade),
     // then explicitly evict the owner.
     let edited = "export interface Props { a: string; }\n";
     workspace.inject_file(
@@ -211,7 +216,7 @@ fn evicted_owner_reloads_to_authoritative_state_after_dep_edit() {
 ///
 /// `Comp.vue` imports a macro type from `types.ts`. Adding AND then
 /// editing a wholly UNRELATED file `unrelated.ts` (which `Comp.vue`
-/// does NOT import) through the plain `upsert` must leave `Comp.vue`'s
+/// does NOT import) through `harness::upsert` must leave `Comp.vue`'s
 /// warm compile slot warm and unchanged.
 ///
 /// Discrimination property: the compile slot's `fact_dep_signature`
@@ -248,7 +253,7 @@ fn unrelated_file_upsert_keeps_compile_slot_warm() {
         "precondition: Comp.vue must have a warm compile slot after prime"
     );
 
-    // ADD a wholly unrelated file through the plain `upsert`.
+    // ADD a wholly unrelated file through `harness::upsert`.
     upsert(
         &host,
         "/src/unrelated.ts",
@@ -261,7 +266,7 @@ fn unrelated_file_upsert_keeps_compile_slot_warm() {
          compile slot warm — fact-validation is path-precise"
     );
 
-    // EDIT that unrelated file through the plain `upsert`.
+    // EDIT that unrelated file through `harness::upsert`.
     upsert(
         &host,
         "/src/unrelated.ts",
@@ -297,7 +302,7 @@ fn unrelated_file_upsert_keeps_compile_slot_warm() {
 ///
 /// `Comp.vue` imports `Foo` from `types.ts` and warm-caches a
 /// `get_component_meta` result. Adding a wholly UNRELATED file
-/// `other.ts` through the plain `upsert` must leave the owner's warm
+/// `other.ts` through `harness::upsert` must leave the owner's warm
 /// `ComponentMetaResultDb` entry warm — the next `get_component_meta`
 /// HITS the warm cache and returns the unchanged props.
 ///
@@ -342,7 +347,7 @@ fn unrelated_file_upsert_keeps_component_meta_warm() {
     );
     let misses_before = meta_misses(&host);
 
-    // ADD a wholly unrelated file through the plain `upsert`.
+    // ADD a wholly unrelated file through `harness::upsert`.
     let unrelated = "export interface Other { z: boolean }\n";
     workspace.inject_file(
         "/workspace/src/other.ts".into(),

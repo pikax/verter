@@ -1,17 +1,26 @@
-//! Block 2 canary suite — compile-tier cross-file lazy invalidation.
+//! Compile-tier cross-file lazy-invalidation canary suite.
 //!
 //! The owner-upsert path has no eager reverse-dependent invalidation
 //! cascade. These canary tests are the coherent named gate that proves
 //! the lazy fact-validation substrate backs every compile-tier
 //! cross-file invalidation scenario.
 //!
+//! Every mutation routes through the skip-own-drain hook (the
+//! [`harness::upsert`] helper → `upsert_skipping_own_canonical_drain_for_tests`),
+//! which suppresses the post-commit own-canonical query-identity cache
+//! drain. The dependency edits exercised here are cross-file, so the
+//! drain skip does not change the dependency's effect on the consumer
+//! — but routing the whole suite through the one hook keeps the wiring
+//! uniform with the owner-self-edit canaries, where the drain skip is
+//! load-bearing.
+//!
 //! Each test:
 //!  1. Sets up an owner SFC + dependency file and primes a warm
 //!     compile slot.
-//!  2. Mutates the dependency through the plain [`VerterHost::upsert`]
-//!     — no eager cascade runs, so the consumer's warm slot physically
-//!     survives the dependency edit. The ONLY mechanism that can
-//!     invalidate it is the warm-hit fact-signature check.
+//!  2. Mutates the dependency through [`harness::upsert`] — no eager
+//!     cascade runs, so the consumer's warm slot physically survives
+//!     the dependency edit. The ONLY mechanism that can invalidate it
+//!     is the warm-hit fact-signature check.
 //!  3. Asserts the lazy semantics: the stale warm slot is REJECTED by
 //!     fact-validation (`!compile_slot_is_warm`), `ensure_compiled`
 //!     RECOMPUTES, and the recompiled assembled `Main` output carries
