@@ -5799,3 +5799,362 @@ fn ref_cycle_db_return_only_path_propagates_bfs_fence_to_caller() {
          helper pinned to its current observed content hash. local_fence = {local_fence:?}",
     );
 }
+
+// ===========================================================================
+// `RouteOwnedShallowDb` — self-version-root (tier-1 content-hash) gate.
+//
+// `RouteOwnedShallowDb` is canonical-keyed with the self `whole_hash`
+// carried INSIDE the entry. Its warm-read freshness gate
+// (`route_owned_entry_is_fresh`) is tiered: tier 3 = `project_generation`,
+// tier 1 = scheduler-authoritative content hash, tier 2 = workspace
+// generation + `file_exists`. Tier 1 is the self-version root: it asserts
+// `authoritative_current_content_hash(canonical) == entry.whole_hash`.
+//
+// The existing tiered-gate coverage in `cache_identity_invariants_tests`
+// deliberately exercises a never-upserted canonical so `get_whole_hash`
+// returns `None` and tier 2 decides — tier 1, the self-root content-hash
+// comparison, is left uncovered there. The two tests below close that
+// gap.
+// ===========================================================================
+
+/// Build a `RouteOwnedShallowEntry` whose generations match `host`'s
+/// live state (so the tier-3 / tier-2 gates pass) but whose
+/// `whole_hash` is whatever the caller plants — letting the tier-1
+/// self-root comparison be the deciding tier.
+fn route_owned_entry_with_whole_hash(
+    host: &VerterHost,
+    whole_hash: [u8; 16],
+) -> crate::project_type_store::RouteOwnedShallowEntry {
+    use rustc_hash::{FxHashMap, FxHashSet};
+    let analysis = Arc::new(
+        verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+    );
+    crate::project_type_store::RouteOwnedShallowEntry {
+        whole_hash,
+        workspace_generation: host.ws().content_generation(),
+        project_generation: host.project_type_store().current_project_generation(),
+        raw_source: Arc::from(""),
+        eval_source: Arc::from(""),
+        cached_parse: None,
+        snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
+        external_type_analysis: Arc::clone(&analysis),
+        shallow_state: Arc::new(crate::resolver_core::shallow_file_state::ShallowFileState {
+            whole_hash,
+            exports: FxHashMap::default(),
+            wildcard_reexports: Vec::new(),
+            symbols: FxHashMap::default(),
+            value_symbols: FxHashMap::default(),
+            import_locals: FxHashSet::default(),
+            import_targets: FxHashMap::default(),
+            analysis,
+        }),
+    }
+}
+
+/// `RouteOwnedShallowDb` — a stale self `whole_hash` is rejected by the
+/// tier-1 self-version-root gate.
+///
+/// A real file is upserted, so the scheduler knows it and
+/// `get_whole_hash` returns the authoritative current hash. A
+/// `RouteOwnedShallowEntry` is then built with live generations (tier 3
+/// and tier 2 both pass) but a *planted, stale* `whole_hash`. The
+/// freshness gate must reject it on tier 1:
+/// `authoritative_current_content_hash != entry.whole_hash`.
+///
+/// Discrimination property: tier 1 is the only tier that inspects the
+/// entry's self `whole_hash`. If `RouteOwnedShallowEntry` did not carry
+/// a self `whole_hash` — or the gate skipped the tier-1 comparison —
+/// the entry would fall through to tier 2, whose `workspace_generation`
+/// and `file_exists` clauses BOTH hold here, so the stale entry would
+/// be wrongly accepted as fresh. The companion assertion plants the
+/// genuine current hash and confirms tier 1 then accepts — proving the
+/// gate is a real content-hash comparison, not an unconditional reject.
+#[test]
+fn route_owned_shallow_db_stale_whole_hash_rejects_warm_entry() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/self_root/route_owned_probe.ts";
+    upsert(&host, canonical, "export const a = 1;\n");
+
+    let authoritative = host
+        .get_whole_hash(canonical)
+        .expect("an upserted canonical must have a scheduler-authoritative hash");
+
+    // A planted hash distinct from the authoritative one — a stale
+    // self-root.
+    let stale_hash = PLANTED_HASH;
+    assert_ne!(
+        stale_hash, authoritative,
+        "fixture invariant: the planted stale hash must differ from the \
+         authoritative current hash",
+    );
+    let stale_entry = route_owned_entry_with_whole_hash(&host, stale_hash);
+    assert!(
+        !host.route_owned_entry_is_fresh_for_test(canonical, &stale_entry),
+        "the route-owned freshness gate MUST reject an entry whose self \
+         `whole_hash` ({stale_hash:?}) mismatches the authoritative current \
+         content hash ({authoritative:?}) — tier 1 is the self-version root. \
+         An entry without a self `whole_hash`, or a gate skipping the tier-1 \
+         comparison, would fall through to tier 2 (workspace_generation + \
+         file_exists both hold here) and wrongly serve the stale entry",
+    );
+
+    // Companion: an entry carrying the genuine current hash passes
+    // tier 1 — the gate is a content-hash comparison, not an
+    // unconditional reject.
+    let fresh_entry = route_owned_entry_with_whole_hash(&host, authoritative);
+    assert!(
+        host.route_owned_entry_is_fresh_for_test(canonical, &fresh_entry),
+        "the route-owned freshness gate MUST accept an entry whose self \
+         `whole_hash` equals the authoritative current content hash \
+         ({authoritative:?}) — tier 1 self-root validation is a genuine \
+         comparison, so a matching self-root passes",
+    );
+}
+
+/// `RouteOwnedShallowDb` — a same-canonical content edit shifts the
+/// authoritative hash, so a previously-fresh self `whole_hash` becomes
+/// stale and the tier-1 gate rejects it.
+///
+/// This drives the self-version root end-to-end: the entry is built
+/// fresh against the canonical's content, then the canonical is
+/// re-upserted (skip-own-drain, so no eager eviction masks the gap)
+/// with edited content. The same entry — unchanged — must now be
+/// rejected, because its self `whole_hash` no longer matches the
+/// authoritative hash of the edited canonical.
+///
+/// Discrimination property: only an entry that carries a self
+/// `whole_hash` validated against the *current* authoritative content
+/// hash flips from fresh to stale across the edit. A gate that ignored
+/// the self `whole_hash` would keep reporting the entry fresh after the
+/// same-canonical edit.
+#[test]
+fn route_owned_shallow_db_self_root_rejects_warm_entry_after_same_canonical_edit() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/self_root/route_owned_edit_probe.ts";
+    upsert(&host, canonical, "export const a = 1;\n");
+
+    let hash_v1 = host
+        .get_whole_hash(canonical)
+        .expect("v1 canonical must have a scheduler-authoritative hash");
+    let entry = route_owned_entry_with_whole_hash(&host, hash_v1);
+    assert!(
+        host.route_owned_entry_is_fresh_for_test(canonical, &entry),
+        "fixture invariant: an entry carrying the v1 authoritative hash \
+         must be fresh before the same-canonical edit",
+    );
+
+    // Same-canonical content edit through the skip-own-drain hook — no
+    // eager own-canonical eviction runs, so the route-owned freshness
+    // gate's tier-1 self-root check is the only mechanism that can
+    // reject the now-stale entry.
+    upsert_skip_drain(&host, canonical, "export const a = 2;\n");
+
+    let hash_v2 = host
+        .get_whole_hash(canonical)
+        .expect("v2 canonical must have a scheduler-authoritative hash");
+    assert_ne!(
+        hash_v1, hash_v2,
+        "fixture invariant: the same-canonical content edit must shift the \
+         authoritative content hash",
+    );
+    assert!(
+        !host.route_owned_entry_is_fresh_for_test(canonical, &entry),
+        "after a same-canonical content edit the route-owned entry's self \
+         `whole_hash` ({hash_v1:?}) no longer matches the authoritative \
+         current hash ({hash_v2:?}) — the tier-1 self-version root MUST \
+         reject it. A gate that ignored the entry's self `whole_hash` would \
+         keep reporting the stale entry fresh",
+    );
+}
+
+// ===========================================================================
+// Closure guard — every in-scope query-identity cache has a
+// self-version-root discriminator.
+// ===========================================================================
+
+/// The complete set of in-scope query-identity caches that publish
+/// canonical-keyed entries, paired with a coverage marker — the name of
+/// a self-version-root discriminator test that proves the cache's
+/// published entry carries (and the warm-read gate validates) a self
+/// `FileWholeHash` for the keyed canonical.
+///
+/// `cache` is the `PROJECT_TYPE_STORE_DB_INVENTORY` identifier;
+/// `marker` is a test-function name that must exist in one of the
+/// self-root discriminator source files scanned below.
+const IN_SCOPE_QUERY_IDENTITY_SELF_ROOT_COVERAGE: &[(&str, &str)] = &[
+    (
+        "semantic_graph",
+        "resolve_decl_same_canonical_edit_rejects_warm_entry",
+    ),
+    (
+        "declaration_lookup_db",
+        "declaration_lookup_db_untracked_self_root_rejects_warm_entry",
+    ),
+    (
+        "imported_registry_db",
+        "imported_registry_db_untracked_self_root_rejects_warm_entry",
+    ),
+    (
+        "resolvability_db",
+        "resolvability_db_untracked_self_root_rejects_warm_entry",
+    ),
+    (
+        "owner_collection_db",
+        "owner_collection_db_untracked_self_root_rejects_warm_entry",
+    ),
+    (
+        "prepared_target_db",
+        "prepared_target_db_untracked_self_root_rejects_warm_entry",
+    ),
+    (
+        "prepared_surface_db",
+        "prepared_surface_db_untracked_self_root_rejects_warm_entry",
+    ),
+    (
+        "prepared_member_db",
+        "prepared_member_db_untracked_self_root_rejects_warm_entry",
+    ),
+    (
+        "routed_expr_surface_db",
+        "routed_expr_surface_db_untracked_self_root_rejects_warm_entry",
+    ),
+    (
+        "materialize_memo_db",
+        "materialize_memo_db_untracked_self_root_rejects_warm_entry",
+    ),
+    (
+        "materialize_structure_db",
+        "materialize_structure_db_planted_untracked_self_root_rejects_warm_entry",
+    ),
+    (
+        "ref_cycle_db",
+        "ref_cycle_db_untracked_self_root_rejects_warm_entry",
+    ),
+    (
+        "route_owned_shallow",
+        "route_owned_shallow_db_stale_whole_hash_rejects_warm_entry",
+    ),
+];
+
+/// Closure guard — no in-scope query-identity cache can publish a
+/// query-identity entry without a self-version root.
+///
+/// This is the deliverable-3 lock: it asserts the
+/// [`IN_SCOPE_QUERY_IDENTITY_SELF_ROOT_COVERAGE`] manifest is both
+/// *complete* (every in-scope cache has a discriminator) and *honest*
+/// (every named discriminator actually exists, and every listed cache
+/// is a real `ProjectTypeStore` DB).
+///
+/// Discrimination — three ways this guard fails on a regression:
+///
+/// 1. A cache name in the manifest is not in
+///    `PROJECT_TYPE_STORE_DB_INVENTORY` — a typo or a renamed DB.
+/// 2. A coverage marker names a test that no longer exists in the
+///    self-root discriminator source files — deleting a cache's
+///    self-version-root test trips the guard.
+/// 3. A new query-identity-shaped DB is added to the inventory but not
+///    to the manifest — the `expected_in_scope` cross-check fails,
+///    forcing the author to either add a discriminator or justify the
+///    DB's exclusion here.
+#[test]
+fn in_scope_query_identity_caches_all_have_self_root_coverage() {
+    use std::fs;
+
+    let inventory = crate::project_type_store::PROJECT_TYPE_STORE_DB_INVENTORY;
+
+    // (1) Every manifest cache name is a real inventory DB.
+    for (cache, _marker) in IN_SCOPE_QUERY_IDENTITY_SELF_ROOT_COVERAGE {
+        assert!(
+            inventory.contains(cache),
+            "self-root coverage manifest names `{cache}`, which is not in \
+             PROJECT_TYPE_STORE_DB_INVENTORY ({inventory:?}) — the cache was \
+             renamed or the manifest entry is a typo",
+        );
+    }
+
+    // (2) Every coverage marker names a test that exists in the
+    //     self-root discriminator source files. The scan over source
+    //     text makes the guard discriminating: deleting a cache's
+    //     self-version-root test removes the marker and fails here.
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let self_root_sources = [
+        "src/query_db_self_root_tests.rs",
+        "src/semantic_graph_self_root_tests.rs",
+        "src/query_identity_self_root_substrate_tests.rs",
+    ];
+    let mut corpus = String::new();
+    for rel in self_root_sources {
+        let path = std::path::Path::new(manifest_dir).join(rel);
+        corpus.push_str(&fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "self-root source `{}` must be readable: {e}",
+                path.display()
+            )
+        }));
+        corpus.push('\n');
+    }
+    for (cache, marker) in IN_SCOPE_QUERY_IDENTITY_SELF_ROOT_COVERAGE {
+        let needle = format!("fn {marker}");
+        assert!(
+            corpus.contains(&needle),
+            "in-scope query-identity cache `{cache}` has no self-version-root \
+             discriminator: the coverage marker test `{marker}` was not found \
+             in any self-root discriminator source file ({self_root_sources:?}). \
+             Every in-scope query-identity cache MUST publish entries carrying \
+             a self `FileWholeHash` for the keyed canonical and have a test \
+             proving the warm-read gate validates it",
+        );
+    }
+
+    // (3) Cross-check: the in-scope set is exactly the query-identity
+    //     subset of the inventory. `expected_in_scope` is the inventory
+    //     minus the content-addressed artifact stores, the pure
+    //     registries, and the tier-1 typed DBs that are not
+    //     query-identity caches. A newly-registered query-identity DB
+    //     that is not added to the manifest fails this assertion.
+    let not_query_identity: &[&str] = &[
+        // Content-addressed artifact stores (keyed by content hash) and
+        // analysis-ready store — covered by content-addressed cache
+        // tests, not the query-identity self-root family.
+        "indexed",
+        "analysis",
+        // Owner import-surface + final component-meta result store —
+        // version-rooted on the value via `fact_dep_signature`, covered
+        // by the component-meta result-cache + canary suites.
+        "owner_import_surfaces",
+        "component_meta_results",
+        "routes",
+        "imported_roots",
+        // Pure registry — no canonical-keyed query-identity entries.
+        "intrinsic_registry",
+        // App-config proof DB — keyed on app-config identity, not a
+        // canonical query-identity cache.
+        "app_config_no_override_proof",
+        // Tier-1 typed DBs — content-domain / dep-closure-domain caches,
+        // not query-identity caches.
+        "type_resolution_context_db",
+        "eval_env_cache_db",
+        "compile_cache_db",
+        "derived_raw_cache_db",
+        "dependency_cache_db",
+        "resolved_type_cache_db",
+    ];
+    let expected_in_scope: BTreeSet<&str> = inventory
+        .iter()
+        .copied()
+        .filter(|name| !not_query_identity.contains(name))
+        .collect();
+    let manifest_caches: BTreeSet<&str> = IN_SCOPE_QUERY_IDENTITY_SELF_ROOT_COVERAGE
+        .iter()
+        .map(|(cache, _)| *cache)
+        .collect();
+    assert_eq!(
+        manifest_caches, expected_in_scope,
+        "the self-root coverage manifest must list EXACTLY the query-identity \
+         subset of PROJECT_TYPE_STORE_DB_INVENTORY. A newly-registered \
+         query-identity DB must be added to \
+         IN_SCOPE_QUERY_IDENTITY_SELF_ROOT_COVERAGE with a discriminator \
+         test; a DB that is genuinely not a query-identity cache must be \
+         added to `not_query_identity` with a justification",
+    );
+}
