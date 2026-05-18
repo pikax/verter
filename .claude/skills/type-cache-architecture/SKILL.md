@@ -378,24 +378,24 @@ guard across its candidate push, so an empty-slot reaper's
 an in-flight admit's push — a published candidate is never stranded in
 a detached slot.
 
-`SemanticGraphStore::invalidate_all` (the project-generation reset)
-clears EVERY `SemanticNodeId`-keyed structure on the store — the family
-memo, the in-flight admission table, the relation memo, the named-type
-index, the `DerivationStore` (edges + signature pool), and the Γ.B
-reverse index — *before* it calls `arena.reset()`. The node arena
-reuses `SemanticNodeId` index space from 0 on reset, so any id-keyed
-structure left populated would alias a stale entry onto a freshly
-interned node; clearing them all first is the soundness precondition.
-Adding a new `SemanticNodeId`-keyed structure to the store obliges
-extending `invalidate_all`'s clear set. The node arena's dense
-`nodes` / `scopes` storage is append-only across content edits and is
-reclaimed at **project-generation granularity** (the `invalidate_all`
-reset). True per-content-edit arena compaction is a tracked follow-up:
-it requires a generational-`SemanticNodeId` redesign (the id is a raw
-`u64` index, so a mid-flight arena shrink under concurrent
-index-holding readers is unsafe) and is deliberately out of scope of
-the bounded-retention substrate. Project-generation-granularity
-reclamation is a real, correct bound — just coarser than per-edit.
+`SemanticGraphStore::invalidate_all` (the project-generation bump)
+clears EVERY `SemanticNodeId`-keyed semantic cache on the store — the
+family memo, the in-flight admission table, the relation memo, the
+named-type index, the `DerivationStore` (edges + signature pool), and
+the Γ.B reverse index — so no stale judgement survives a tsconfig / SDK
+/ workspace-folder change. Each cleared `SemanticNodeId`-keyed cache
+has its retention ledger cleared in lockstep. Adding a new
+`SemanticNodeId`-keyed semantic cache to the store obliges extending
+`invalidate_all`'s clear set. `invalidate_all` does NOT touch the node
+arena: `SemanticNodeId` is a raw `u64` arena index with no generation
+tag, so the arena's dense `nodes` / `scopes` storage is **append-only**
+— every `SemanticNodeId` handed out stays valid for the store's
+lifetime. Reclaiming the arena id space would require a generational
+`SemanticNodeId` redesign (a mid-flight arena shrink under concurrent
+index-holding readers is unsafe) and is out of scope of the
+bounded-retention substrate. The substrate bounds the
+`SemanticNodeId`-keyed *caches* listed above; the node arena itself is
+unbounded by design pending that redesign.
 
 Concrete substrate (the per-domain target form):
 

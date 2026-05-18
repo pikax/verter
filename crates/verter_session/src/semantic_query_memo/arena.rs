@@ -255,56 +255,14 @@ impl NodeArena {
     /// invalidation, a re-intern of the same `(payload, File{c})`
     /// pair allocates a fresh node slot (and thus a fresh id),
     /// guaranteeing freshness against the changed canonical's content
-    /// generation.
+    /// generation. The arena's dense node / scope storage is never
+    /// shrunk: `SemanticNodeId` is a raw `u64` index with no generation
+    /// tag, so reclaiming the id space would require a generational
+    /// `SemanticNodeId` redesign.
     ///
     /// Touches every shard mutex once. Each shard's retain walk is
     /// O(shard size). When `node_arena_lock_acquisitions` is wired
     /// into the audit context, each shard lock acquisition is recorded.
-    /// Drop every interned node and every dedup-shard entry, returning
-    /// the node count cleared. The dense node / scope storage Vecs are
-    /// emptied so the arena's memory footprint is reclaimed.
-    ///
-    /// **Safety contract.** This reuses `SemanticNodeId` index space —
-    /// every `SemanticNodeId` allocated before the reset becomes
-    /// invalid. It is sound ONLY at a point where no query holds a live
-    /// `SemanticNodeId` and no structure stores or is keyed by one. The
-    /// sole caller is [`super::SemanticGraphStore::invalidate_all`],
-    /// which clears EVERY `SemanticNodeId`-holding structure on the
-    /// store — the family memo, the in-flight table, the relation memo,
-    /// the named-type index, the derivation edge store, and the Γ.B
-    /// reverse index — in the same call, immediately before this reset.
-    /// See that method's docs for the exhaustive id-holding-structure
-    /// list and the obligation to extend it when a new such structure is
-    /// added.
-    ///
-    /// **Reclamation granularity — bounded at project generation.** This
-    /// reset is the only path that shrinks the arena `nodes` / `scopes`
-    /// Vecs; they otherwise grow append-only across content edits and
-    /// are reclaimed once per project-generation bump. True
-    /// per-content-edit arena compaction is a tracked follow-up: it
-    /// requires a generational-`SemanticNodeId` redesign (the id is a
-    /// raw `u64` index, so a mid-flight arena shrink under concurrent
-    /// index-holding readers is unsafe) and is deliberately out of scope
-    /// here. Project-generation-granularity reclamation is a real,
-    /// correct bound — just coarser-grained than per-edit.
-    pub(super) fn reset(&self) -> usize {
-        let cleared = {
-            let mut inner = self.inner.write();
-            let n = inner.nodes.len();
-            inner.nodes.clear();
-            inner.nodes.shrink_to_fit();
-            inner.scopes.clear();
-            inner.scopes.shrink_to_fit();
-            n
-        };
-        for shard in self.shards.iter() {
-            let mut shard = shard.lock();
-            shard.index.clear();
-            shard.index.shrink_to_fit();
-        }
-        cleared
-    }
-
     pub(super) fn invalidate_for_canonical(&self, canonical_id: &str) {
         let timing_on = verter_scheduler::request_context::current_timing_enabled();
         for shard in self.shards.iter() {

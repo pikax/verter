@@ -1446,27 +1446,24 @@ fn invalidate_all_clears_every_memo_entry() {
     assert_eq!(store.memo_entry_count(), 0);
 }
 
-/// `invalidate_all` ID-REUSE REGRESSION — after a project-generation
-/// reset, the node arena reuses `SemanticNodeId` index space from 0. A
-/// derivation edge or relation judgement recorded against a pre-reset
-/// node id MUST NOT resolve for a freshly-interned, unrelated node that
-/// happens to receive a reused id.
+/// `invalidate_all` ID-KEYED-CACHE CLEAR — a project-generation bump
+/// MUST drop every `SemanticNodeId`-keyed semantic cache (the relation
+/// memo and the `DerivationStore` edges + signature pool), not just the
+/// family memo.
 ///
-/// DISCRIMINATES: against the pre-fix tree, `invalidate_all` cleared the
-/// family memo + the budgets + the arena but left `relation_memo` and
-/// the `DerivationStore` populated. The arena reset then re-issued id 0,
-/// so `origins_of_kind(reused_id, …)` returned the STALE pre-reset edge
-/// and `get_relation(reused_id, reused_id)` returned the STALE relation
-/// (its empty carrier validates vacuously). After the fix both id-keyed
-/// stores are cleared before the arena reset, so the reused id has no
-/// derivation / relation state.
+/// DISCRIMINATES: this test populates a derivation edge and a relation
+/// judgement, then calls `invalidate_all` and asserts the relation-memo
+/// count, the derivation edge-bucket count, and the derivation edge
+/// count are all zero. Against a tree whose `invalidate_all` cleared the
+/// family memo but skipped `relation_memo.clear()` /
+/// `derivation.clear()`, those counters stay non-zero and the assertion
+/// fails — a stale judgement would survive the project-generation bump.
 #[test]
-fn invalidate_all_clears_id_keyed_stores_before_arena_reuse() {
-    let host = ctx_host();
+fn invalidate_all_clears_id_keyed_semantic_caches() {
     let store = SemanticGraphStore::new();
 
-    // Pre-reset: intern a node, record an origin edge for it, and
-    // publish a relation judgement keyed on its id pair.
+    // Intern two nodes, record an origin edge for one, and publish a
+    // relation judgement keyed on its id pair.
     let result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let src = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     store.record_origin_edge(
@@ -1483,75 +1480,58 @@ fn invalidate_all_clears_id_keyed_stores_before_arena_reuse() {
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
         crate::semantic_query::RelationResult::NotAssignable,
     );
-    // `result` is id 0 (first intern). Sanity-check the pre-reset state
-    // is actually populated, else the test would not discriminate.
-    assert_eq!(result.0, 0, "first interned node must be id 0");
+    // Sanity-check the pre-bump state is actually populated, else the
+    // test would not discriminate.
     assert_eq!(
-        store
-            .origins_of_kind(result, OriginEdgeKind::Normalize)
-            .len(),
+        store.origin_edge_count(),
         1,
-        "pre-reset: the derivation edge is recorded",
+        "pre-bump: the derivation edge is recorded",
     );
-    assert!(
-        store.get_relation(&host, result, result).is_some(),
-        "pre-reset: the relation judgement is cached",
+    assert_eq!(
+        store.relation_memo_count(),
+        1,
+        "pre-bump: the relation judgement is cached",
     );
 
-    // Project-generation reset.
+    // Project-generation bump.
     let _ = store.invalidate_all();
 
-    // The arena id space was reset — re-interning yields id 0 again, now
-    // for a structurally UNRELATED node.
-    let reused = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+    // The id-keyed semantic caches are genuinely empty post-bump.
     assert_eq!(
-        reused.0, 0,
-        "the arena reset must reuse id 0 for the next intern",
+        store.relation_memo_count(),
+        0,
+        "CLEAR BUG: invalidate_all must clear relation_memo on a \
+         project-generation bump",
     );
-
-    // The reused id MUST NOT inherit the pre-reset node's derivation
-    // edges or relation judgement.
-    assert!(
-        store
-            .origins_of_kind(reused, OriginEdgeKind::Normalize)
-            .is_empty(),
-        "ID-REUSE BUG: a freshly-interned node that reused id 0 must NOT \
-         resolve to the pre-reset node's derivation edge — the \
-         DerivationStore must be cleared before the arena reset",
+    assert_eq!(
+        store.origin_edge_count(),
+        0,
+        "CLEAR BUG: invalidate_all must clear the DerivationStore edges \
+         on a project-generation bump",
     );
-    assert!(
-        store.get_relation(&host, reused, reused).is_none(),
-        "ID-REUSE BUG: a freshly-interned node that reused id 0 must NOT \
-         resolve to the pre-reset relation judgement — relation_memo must \
-         be cleared before the arena reset",
-    );
-    // The id-keyed counters are genuinely zero post-reset.
-    assert_eq!(store.relation_memo_count(), 0, "relation memo cleared");
-    assert_eq!(store.origin_edge_count(), 0, "derivation edges cleared");
     assert_eq!(
         store.derivation_bucket_count(),
         0,
-        "derivation edge buckets cleared",
+        "CLEAR BUG: invalidate_all must clear the DerivationStore edge \
+         buckets on a project-generation bump",
     );
 }
 
-/// `invalidate_all` ORDERING INVARIANT — a project-generation reset that
+/// `invalidate_all` ABORT INVARIANT — a project-generation bump that
 /// finds a claimed, mid-build in-flight admission MUST abort that
-/// admission AND reset the arena, and the aborted winner's later publish
-/// attempt MUST be skipped.
+/// admission, and the aborted winner's later publish attempt MUST be
+/// skipped.
 ///
-/// This is the deterministic single-API guard for the
-/// clear/abort/reset ordering. It does not by itself isolate the
-/// few-instruction publish window (see the stress test below for the
-/// discriminating race), but it locks down the post-condition the
-/// ordering guarantees: when `invalidate_all` returns, every in-flight
-/// entry it observed is `aborted = true`, the in-flight table is
-/// drained, the arena id space is reset, and a winner that completes its
-/// build afterwards observes the abort under the entries lock and skips
-/// its warm publish — so no slot re-warms with a pre-reset
-/// `SemanticNodeId`.
+/// This is the deterministic single-API guard for the clear/abort
+/// post-condition: when `invalidate_all` returns, every in-flight entry
+/// it observed is `aborted = true`, the in-flight table is drained, and
+/// a winner that completes its build afterwards observes the abort under
+/// the entries lock and skips its warm publish — so no memo slot
+/// re-warms with a result computed against the stale project
+/// generation. Mirrors the per-canonical abort in
+/// `invalidate_canonical`.
 #[test]
-fn invalidate_all_aborts_pending_inflight_then_resets_arena() {
+fn invalidate_all_aborts_pending_inflight_and_skips_aborted_publish() {
     use std::sync::Barrier;
     use std::thread;
 
@@ -1580,9 +1560,6 @@ fn invalidate_all_aborts_pending_inflight_then_resets_arena() {
             || {
                 in_build_w.wait();
                 release_w.wait();
-                // Intern the result INSIDE the build — a pre-reset id
-                // relative to the `invalidate_all` that ran while this
-                // closure was parked.
                 let id = store_w.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
                 (QueryResult::Value(id), empty_signature())
             },
@@ -1600,24 +1577,14 @@ fn invalidate_all_aborts_pending_inflight_then_resets_arena() {
         "winner's in-flight entry must be registered before invalidate_all",
     );
 
-    // Pre-seed an extra node so the arena is non-empty going in — the
-    // reset must shrink it back to zero.
-    let _seed = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    assert!(store.node_count() > 0, "arena non-empty before reset");
-
-    // Project-generation reset while the winner is mid-build.
+    // Project-generation bump while the winner is mid-build.
     let _ = store.invalidate_all();
 
-    // The in-flight table was drained and the arena id space reset.
+    // The in-flight table was drained.
     assert_eq!(
         store.test_inflight_strong_count(&key),
         0,
         "invalidate_all must drain the in-flight admission table",
-    );
-    assert_eq!(
-        store.node_count(),
-        0,
-        "invalidate_all must reset the node arena id space",
     );
 
     // Release the winner. Its build completes and it enters the
@@ -1628,116 +1595,16 @@ fn invalidate_all_aborts_pending_inflight_then_resets_arena() {
 
     assert!(
         store.get_unvalidated(&key).is_none(),
-        "ORDERING BUG: a winner aborted by invalidate_all must skip its \
+        "ABORT BUG: a winner aborted by invalidate_all must skip its \
          warm publish — the memo slot must stay empty, never re-warm with \
-         a pre-reset SemanticNodeId",
+         a result computed against the stale project generation",
     );
     assert_eq!(
         store.memo_entry_count(),
         0,
-        "no memo entry may survive a project-generation reset that \
+        "no memo entry may survive a project-generation bump that \
          aborted the only in-flight winner",
     );
-}
-
-/// `invalidate_all` STALE-ID RACE — DISCRIMINATING regression for the
-/// publish window between the memo clear and the in-flight abort.
-///
-/// A cold winner that finishes its build interns its result node and
-/// then publishes a `MemoEntry` under the entries lock, re-checking
-/// `aborted` first. If `invalidate_all` released the entries lock
-/// between clearing the memo and marking the in-flight table aborted, a
-/// winner that acquired the entries lock in that gap would see
-/// `aborted == false` and publish a `MemoEntry` whose result carries a
-/// pre-reset `SemanticNodeId`. `arena.reset()` then reuses that id space,
-/// so the published id is stranded — `node_data` resolves it to nothing
-/// (or, worse, a structurally unrelated node).
-///
-/// DISCRIMINATES: this test races a cold winner against `invalidate_all`
-/// over many iterations and asserts that every memo entry surviving the
-/// race resolves to a live arena node. Against a tree where
-/// `invalidate_all` drops the entries lock between the clear and the
-/// abort, the windowed publish strands a pre-reset id and `node_data`
-/// returns `None` — the assertion fails. With the clear, abort, and
-/// arena reset serialised under one continuously-held entries lock, a
-/// concurrent winner either has its publish wiped by the clear, is
-/// aborted and skips publishing, or registers cleanly after the reset
-/// with post-reset ids — so every surviving entry always resolves.
-///
-/// A correct survivor is allowed (a winner that registered entirely
-/// after `invalidate_all` finished is a fresh cold winner and publishes
-/// legitimately) — the invariant is "no STRANDED id", not "empty memo".
-#[test]
-fn invalidate_all_concurrent_publish_never_strands_prereset_id() {
-    use std::sync::Barrier;
-    use std::thread;
-
-    // Each iteration is an independent store. The winner and the
-    // `invalidate_all` caller start from a shared barrier so their
-    // entries-lock acquisitions race freely; the assertion afterwards
-    // is interleaving-independent.
-    for iteration in 0..400 {
-        let store = Arc::new(SemanticGraphStore::new());
-        let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-            scope: scope("/w/race.ts"),
-            name: Arc::from("R"),
-        });
-
-        // Two parties: the cold winner and the invalidate_all caller.
-        let start = Arc::new(Barrier::new(2));
-
-        let store_w = Arc::clone(&store);
-        let start_w = Arc::clone(&start);
-        let key_w = key.clone();
-        let winner = thread::spawn(move || {
-            let host = ctx_host();
-            start_w.wait();
-            store_w.execute_cooperative(
-                &host,
-                key_w,
-                || store_w.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
-                || {
-                    // Intern the result node as part of the build. If
-                    // `invalidate_all` resets the arena between this
-                    // intern and the warm publish, this id is stale.
-                    let id =
-                        store_w.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
-                    (QueryResult::Value(id), empty_signature())
-                },
-            )
-        });
-
-        let store_i = Arc::clone(&store);
-        let start_i = Arc::clone(&start);
-        let invalidator = thread::spawn(move || {
-            start_i.wait();
-            store_i.invalidate_all()
-        });
-
-        let _ = winner.join().expect("winner thread must not panic");
-        let _ = invalidator
-            .join()
-            .expect("invalidator thread must not panic");
-
-        // Whatever the interleaving, any memo entry that survived the
-        // race MUST resolve to a live arena node. A windowed publish
-        // strands a pre-reset id that `node_data` cannot resolve.
-        if let Some(entry) = store.get_unvalidated(&key) {
-            if let QueryResult::Value(id) = entry.value {
-                assert!(
-                    store.node_data(id).is_some(),
-                    "STALE-ID RACE (iteration {iteration}): a memo entry \
-                     published while invalidate_all was mid-reset holds \
-                     SemanticNodeId {id:?}, which the reset arena cannot \
-                     resolve (node_count={}). invalidate_all must hold the \
-                     entries lock across the clear, the in-flight abort, \
-                     and arena.reset() so no winner can publish a \
-                     pre-reset id into a slot the reset then aliases.",
-                    store.node_count(),
-                );
-            }
-        }
-    }
 }
 
 #[test]
