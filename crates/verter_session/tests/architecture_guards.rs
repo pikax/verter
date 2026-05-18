@@ -8322,97 +8322,112 @@ fn reverse_graph_not_wired_to_invalidation() {
     );
 }
 
-/// R22 / R3 — the owner-upsert path performs NO reverse-dependent
-/// eager eviction.
+/// R22 / R3 — the upsert path performs NO eager cache drain, on
+/// either the cross-file or the same-canonical axis.
 ///
 /// `host_upsert.rs` must not, anywhere in its body, call
-/// `reverse_deps_for` or `invalidate_canonical`. Those two were the
-/// signature moves of the retired reverse-dependent invalidation
-/// cascade: an owner upsert iterated `ws().reverse_deps_for(canonical)`
-/// and `resolver.runtime.invalidate_canonical(owner)`'d every
-/// dependent. The cascade is deleted — a downstream consumer's warm
-/// cache is now revalidated lazily on read through its own
-/// `fact_dep_signature` check.
+/// `reverse_deps_for`, `invalidate_canonical`, or `evict_canonical`,
+/// and must not call `resolved_type_cache().clear()`.
 ///
-/// What this guard deliberately does NOT ban: the own-canonical
-/// drain. The upserted canonical's own caches are still drained at
-/// upsert time — `resolver.runtime.evict_canonical(&canonical_id)`,
-/// `project_type_store.evict_canonical(&canonical_id)`,
-/// `resolved_type_cache().clear()`. `evict_canonical` is a distinct
-/// method from `invalidate_canonical`; banning only the latter two
-/// identifiers leaves the own-canonical `evict_canonical(&canonical_id)`
-/// untouched. This own-canonical drain is retained until the
-/// query-identity caches self-version-root a same-canonical content
-/// edit; the guard must not regress that retention.
+/// Two retired drains map onto those identifiers:
+///
+/// - The reverse-dependent cascade. An owner upsert iterated
+///   `ws().reverse_deps_for(canonical)` and
+///   `resolver.runtime.invalidate_canonical(owner)`'d every dependent.
+///   A downstream consumer's warm cache is now revalidated lazily on
+///   read through its own `fact_dep_signature` check.
+/// - The own-canonical drain. An upsert eagerly evicted the upserted
+///   canonical's own query-identity caches —
+///   `resolver.runtime.evict_canonical(&canonical_id)`,
+///   `project_type_store.evict_canonical(&canonical_id)`,
+///   `resolved_type_cache().clear()`. A warm query-identity entry for
+///   the upserted canonical is now rejected on the cold-recompute read
+///   path by its current-content self-version root.
+///
+/// Same-canonical invalidation is lazy via self-version-rooted fact
+/// validation; reintroducing either eager drain into `host_upsert.rs`
+/// is forbidden.
 #[test]
 fn host_upsert_performs_no_reverse_dependent_eviction() {
     use syn::visit::Visit;
-    use syn::ExprMethodCall;
-
-    /// Method-call identifiers that exist in `host_upsert.rs` ONLY as
-    /// the reverse-dependent cascade. `evict_canonical` is NOT listed
-    /// — it is the retained own-canonical drain.
-    const FORBIDDEN_REVERSE_DEP_METHODS: &[&str] = &["reverse_deps_for", "invalidate_canonical"];
-
-    struct Scanner {
-        hits: Vec<String>,
-    }
-    impl<'ast> Visit<'ast> for Scanner {
-        fn visit_expr_method_call(&mut self, mc: &'ast ExprMethodCall) {
-            let method = mc.method.to_string();
-            if FORBIDDEN_REVERSE_DEP_METHODS.contains(&method.as_str()) {
-                self.hits.push(method);
-            }
-            syn::visit::visit_expr_method_call(self, mc);
-        }
-    }
 
     let src = read_workspace_file("crates/verter_session/src/host_upsert.rs");
     let parsed = syn::parse_file(&src).expect("parse host_upsert.rs");
-    let mut scanner = Scanner { hits: Vec::new() };
+    let mut scanner = UpsertEagerDrainScanner::default();
     scanner.visit_file(&parsed);
 
     assert!(
         scanner.hits.is_empty(),
-        "host_upsert.rs calls a reverse-dependent eviction method ({:?}). \
-         The reverse-dependent upsert-time invalidation cascade is \
-         removed: an owner upsert drains only the upserted canonical's \
-         own caches; cross-file consumers revalidate lazily on read via \
-         `fact_dep_signature`. `reverse_deps_for` / `invalidate_canonical` \
-         must not reappear in `host_upsert.rs`. (The own-canonical drain \
-         — `evict_canonical(&canonical_id)` / `resolved_type_cache().clear()` \
-         — is a DIFFERENT method surface and stays allowed.)",
+        "host_upsert.rs calls an eager cache-drain method ({:?}). \
+         The upsert performs NO eager drain on either axis. Cross-file: \
+         the reverse-dependent cascade is removed — `reverse_deps_for` / \
+         `invalidate_canonical` must not reappear; cross-file consumers \
+         revalidate lazily on read via `fact_dep_signature`. \
+         Same-canonical: the own-canonical drain is removed — \
+         `evict_canonical(&canonical_id)` / `resolved_type_cache().clear()` \
+         must not reappear; a warm query-identity entry for the upserted \
+         canonical is rejected on the cold-recompute read path by its \
+         current-content self-version root.",
         scanner.hits
     );
 }
 
+/// AST scanner shared by [`host_upsert_performs_no_reverse_dependent_eviction`]
+/// and its discriminating self-test. Flags any reverse-dependent or
+/// own-canonical eager-drain method call: the bare identifiers
+/// `reverse_deps_for` / `invalidate_canonical` / `evict_canonical`, plus
+/// the `resolved_type_cache().clear()` receiver-qualified chain (a bare
+/// `.clear()` is too generic to ban — the chain over a
+/// `resolved_type_cache()` receiver is the discriminating shape).
+#[derive(Default)]
+struct UpsertEagerDrainScanner {
+    hits: Vec<String>,
+}
+
+impl UpsertEagerDrainScanner {
+    /// Bare method identifiers that name an eager cache drain. None of
+    /// these has a legitimate use inside `host_upsert.rs`.
+    const FORBIDDEN_DRAIN_METHODS: &'static [&'static str] = &[
+        "reverse_deps_for",
+        "invalidate_canonical",
+        "evict_canonical",
+    ];
+}
+
+impl<'ast> syn::visit::Visit<'ast> for UpsertEagerDrainScanner {
+    fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+        let method = mc.method.to_string();
+        if Self::FORBIDDEN_DRAIN_METHODS.contains(&method.as_str()) {
+            self.hits.push(method.clone());
+        }
+        // `resolved_type_cache().clear()` — a `.clear()` whose receiver
+        // is a call to `resolved_type_cache()`. This is the bulk
+        // resolved-type-cache flush that was part of the own-canonical
+        // drain; a bare `.clear()` on some other cache is not flagged.
+        if method == "clear" {
+            if let syn::Expr::MethodCall(recv) = &*mc.receiver {
+                if recv.method == "resolved_type_cache" {
+                    self.hits.push("resolved_type_cache().clear".to_string());
+                }
+            }
+        }
+        syn::visit::visit_expr_method_call(self, mc);
+    }
+}
+
 /// Discriminating self-test for
-/// [`host_upsert_performs_no_reverse_dependent_eviction`]: the same
-/// `ExprMethodCall` scanner must FLAG a reverse-dependent method call
-/// and must ACCEPT the retained own-canonical drain. Without this the
-/// production guard could pass trivially.
+/// [`host_upsert_performs_no_reverse_dependent_eviction`]: the
+/// [`UpsertEagerDrainScanner`] must FLAG both the reverse-dependent
+/// cascade and the own-canonical drain, and must ACCEPT a bare
+/// `.clear()` on an unrelated cache. Without this the production guard
+/// could pass trivially.
 #[test]
 fn host_upsert_reverse_dep_eviction_scanner_discriminates() {
     use syn::visit::Visit;
-    use syn::ExprMethodCall;
 
-    const FORBIDDEN_REVERSE_DEP_METHODS: &[&str] = &["reverse_deps_for", "invalidate_canonical"];
-
-    struct Scanner {
-        hits: Vec<String>,
-    }
-    impl<'ast> Visit<'ast> for Scanner {
-        fn visit_expr_method_call(&mut self, mc: &'ast ExprMethodCall) {
-            let method = mc.method.to_string();
-            if FORBIDDEN_REVERSE_DEP_METHODS.contains(&method.as_str()) {
-                self.hits.push(method);
-            }
-            syn::visit::visit_expr_method_call(self, mc);
-        }
-    }
     fn scan(src: &str) -> Vec<String> {
         let parsed = syn::parse_file(src).expect("parse fixture");
-        let mut s = Scanner { hits: Vec::new() };
+        let mut s = UpsertEagerDrainScanner::default();
         s.visit_file(&parsed);
         s.hits
     }
@@ -8432,9 +8447,10 @@ fn host_upsert_reverse_dep_eviction_scanner_discriminates() {
         "scanner must flag a reverse_deps_for / invalidate_canonical cascade"
     );
 
-    // RETAINED: the own-canonical drain — NOT flagged. `evict_canonical`
-    // and a bulk `resolved_type_cache().clear()` for the upserted
-    // canonical are the retained drain and must pass.
+    // FORBIDDEN: the own-canonical drain shape — flagged. Reintroducing
+    // `evict_canonical(&canonical_id)` or `resolved_type_cache().clear()`
+    // into the upsert path is banned: same-canonical invalidation is
+    // lazy via self-version-rooted fact validation.
     let own_canonical_drain_fixture = r#"
         impl Host {
             fn upsert(&self) {
@@ -8444,10 +8460,36 @@ fn host_upsert_reverse_dep_eviction_scanner_discriminates() {
             }
         }
     "#;
+    let drain_hits = scan(own_canonical_drain_fixture);
     assert!(
-        scan(own_canonical_drain_fixture).is_empty(),
-        "scanner must NOT flag the retained own-canonical drain \
-         (`evict_canonical(&canonical_id)` / `resolved_type_cache().clear()`)"
+        drain_hits
+            .iter()
+            .filter(|h| *h == "evict_canonical")
+            .count()
+            == 2,
+        "scanner must flag both `evict_canonical` calls, got {drain_hits:?}"
+    );
+    assert!(
+        drain_hits
+            .iter()
+            .any(|h| h == "resolved_type_cache().clear"),
+        "scanner must flag the `resolved_type_cache().clear()` chain, got {drain_hits:?}"
+    );
+
+    // ACCEPTED: a bare `.clear()` on an unrelated cache is not an
+    // own-canonical drain — the per-domain compile/derived-cache field
+    // resets the upsert legitimately performs must not be flagged.
+    let unrelated_clear_fixture = r#"
+        impl Host {
+            fn upsert(&self) {
+                profile.compile_slots.clear();
+                derived.cached_resolved_meta.clear();
+            }
+        }
+    "#;
+    assert!(
+        scan(unrelated_clear_fixture).is_empty(),
+        "scanner must NOT flag a bare `.clear()` on an unrelated cache field"
     );
 }
 

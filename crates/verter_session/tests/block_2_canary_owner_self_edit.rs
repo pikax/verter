@@ -6,30 +6,27 @@
 //! class: the SFC under test is itself re-upserted with edited content.
 //!
 //! Why this class needs its own gate. Every mutation here routes
-//! through the skip-own-drain hook (`harness::upsert` →
-//! `VerterHost::upsert_skipping_own_canonical_drain_for_tests`), which
-//! suppresses the post-commit own-canonical drain
-//! (`resolver.runtime.evict_canonical`,
-//! `project_type_store.evict_canonical`, `resolved_type_cache().clear()`
-//! for the upserted canonical). The final `ComponentMetaResultDb` is
+//! through the production [`harness::upsert`] helper (plain
+//! `VerterHost::upsert`), which performs no own-canonical
+//! query-identity cache drain. The final `ComponentMetaResultDb` is
 //! keyed by `owner_whole_hash`, so an owner edit shifts that key and a
 //! post-edit `get_component_meta` cannot warm-hit the stale *result*
 //! entry. But the cold recompute the key-miss triggers walks the
 //! query-identity-keyed layer — `semantic_graph`, `declaration_lookup_db`,
 //! `materialize_structure_db`, the prepared DBs — whose keys are
 //! `(owner_canonical, type_name, ...)` with NO owner whole-hash. Those
-//! entries physically survive an owner-self edit. With the
-//! own-canonical drain skipped, the ONLY mechanism that can reject a
-//! stale query-identity entry for the owner canonical is lazy
-//! self-version-root validation on the cold-recompute read path.
+//! entries physically survive an owner-self edit. The ONLY mechanism
+//! that can reject a stale query-identity entry for the owner canonical
+//! is lazy self-version-root validation on the cold-recompute read
+//! path.
 //!
-//! Each test therefore DISCRIMINATES: it runs with the drain skipped,
-//! so a substrate lacking the owner-canonical self-version root would
-//! serve a stale `declaration_lookup_db` / `semantic_graph` /
-//! materialiser entry and the recomputed user-visible output would NOT
-//! reflect the owner edit. The asserted observable is always the
-//! recomputed component-meta props / slot bindings / compiled output —
-//! never physical cache emptiness.
+//! Each test therefore DISCRIMINATES: a substrate lacking the
+//! owner-canonical self-version root would serve a stale
+//! `declaration_lookup_db` / `semantic_graph` / materialiser entry and
+//! the recomputed user-visible output would NOT reflect the owner edit.
+//! The asserted observable is always the recomputed component-meta
+//! props / slot bindings / compiled output — never physical cache
+//! emptiness.
 
 #![cfg(test)]
 

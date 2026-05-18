@@ -49,15 +49,15 @@
 //! recomputed (not the stale) value surfaced — discriminating against
 //! any tree whose self-root validation is lazy.
 //!
-//! The two `*_skip_own_drain_*` tests at the end cover the producer
+//! The two secondary-canonical tests at the end cover the producer
 //! widening for `PreparedTargetDb` (the declaring canonical is a
 //! second self-root) and `MaterializeMemoDb` (every canonical observed
 //! during materialization is a dependency fact): they prime a warm
-//! entry, edit a *secondary* (non-keyed-scope) canonical through
-//! [`crate::VerterHost::upsert_skipping_own_canonical_drain_for_tests`]
-//! so the own-canonical drain does not mask the staleness, and assert
-//! the warm read misses. Pre-widening the producer recorded no fact
-//! for the secondary canonical so the entry validated stale.
+//! entry, edit a *secondary* (non-keyed-scope) canonical through the
+//! production [`crate::VerterHost::upsert`] — which performs no
+//! own-canonical drain, so the entry physically survives — and assert
+//! the warm read misses. A producer that recorded no fact for the
+//! secondary canonical would validate the entry stale.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -82,7 +82,10 @@ use crate::{HostConfig, UpsertRequest, VerterHost};
 /// entry. Distinct from any real content hash.
 const PLANTED_HASH: [u8; 16] = [0xAB; 16];
 
-/// Upsert through the production path.
+/// Upsert through the production [`VerterHost::upsert`] path. The
+/// upsert performs no own-canonical query-identity cache drain, so a
+/// warm entry for the upserted canonical physically survives and the
+/// test can observe whether its self-root validation detects the edit.
 fn upsert(host: &VerterHost, path: &str, source: &str) {
     let _ = host
         .upsert(UpsertRequest {
@@ -93,21 +96,6 @@ fn upsert(host: &VerterHost, path: &str, source: &str) {
             aliases: Vec::new(),
         })
         .expect("upsert succeeds");
-}
-
-/// Upsert through the test-only skip-own-canonical-drain hook so the
-/// upserted canonical's own query-identity cache entries are NOT
-/// drained.
-fn upsert_skip_drain(host: &VerterHost, path: &str, source: &str) {
-    let _ = host
-        .upsert_skipping_own_canonical_drain_for_tests(UpsertRequest {
-            canonical_id: Some(path.to_string()),
-            input_id: path.to_string(),
-            source: Arc::from(source),
-            file_kind: crate::FileKind::from_path(path),
-            aliases: Vec::new(),
-        })
-        .expect("skip-drain upsert succeeds");
 }
 
 /// A standalone host with one unrelated `.ts` file materialized, so a
@@ -459,9 +447,9 @@ fn prepared_target_db_untracked_self_root_rejects_warm_entry() {
 /// records — [`engine_fact_signature_for_prepared_target`], the named
 /// helper `resolve_prepared_surface_target` calls. That helper roots
 /// the declaring canonical as a second self-root. The declaring file
-/// is then edited through the skip-own-drain hook (so the
-/// own-canonical drain does NOT remove the entry), shifting its whole
-/// hash. A producer helper that rooted only the active scope would
+/// is then edited through the production `upsert` (which performs no
+/// own-canonical drain, so the entry physically survives), shifting its
+/// whole hash. A producer helper that rooted only the active scope would
 /// leave the entry valid (the active-scope self-root still matches)
 /// and the warm read would serve stale; with the declaring canonical
 /// rooted, the warm read misses and recomputes. Reverting the helper
@@ -544,9 +532,9 @@ fn prepared_target_db_declaring_canonical_edit_rejects_warm_entry() {
         "fixture invariant: cold publish stores the primed target",
     );
 
-    // Edit ONLY the declaring file through the skip-own-drain hook so
-    // the own-canonical drain does not remove the cache entry.
-    upsert_skip_drain(
+    // Edit ONLY the declaring file. The upsert performs no
+    // own-canonical drain, so the cache entry physically survives.
+    upsert(
         &host,
         decl_canonical,
         "export interface Probe { a: string; b: number; }\n",
@@ -919,22 +907,18 @@ fn materialize_memo_db_untracked_self_root_rejects_warm_entry() {
 /// [`engine_fact_signature_for_materialize_memo`], the named helper
 /// the materialize write-through calls — which merges every observed
 /// canonical from the dep signature as a dependency `FileWholeHash`.
-/// The dependency file is then edited through the skip-own-drain hook,
+/// The dependency file is then edited through the production `upsert`,
 /// shifting `dep`'s whole hash. A producer helper that recorded only
 /// the scope self-root would leave the entry valid and serve stale;
 /// with the observed-dep fact recorded, the warm read misses and
 /// recomputes. Reverting the helper to drop the observed-dep merge
 /// flips this test.
 ///
-/// On the skip-own-drain hook: `MaterializeMemoDb::invalidate_canonical`
-/// matches only entries whose keyed *scope* equals the upserted
-/// canonical, so a normal `upsert(dep)` would NOT drain this entry —
-/// the entry is keyed on `scope`, not `dep`. The skip-drain hook is
-/// used here for consistency with the sibling skip-drain canaries and
-/// to keep the test isolated from any own-canonical drain side-effect;
-/// the entry's survival across the dependency edit does not depend on
-/// it. (The hook would matter for an edit to the keyed *scope*, whose
-/// own-canonical drain does match the entry.)
+/// The entry is keyed on `scope`, not `dep`: an `upsert(dep)` would
+/// never match this scope-keyed entry, and the production `upsert`
+/// performs no own-canonical drain in any case — so the entry's
+/// survival across the dependency edit is guaranteed and the warm-read
+/// rejection is driven purely by the observed-dep `FileWholeHash` fact.
 #[test]
 fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
     use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
@@ -1001,12 +985,12 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
         "fixture invariant: cold publish stores the primed materialized expression",
     );
 
-    // Edit ONLY the observed dependency through the skip-own-drain
-    // hook. (`MaterializeMemoDb::invalidate_canonical` matches only the
-    // keyed scope, so a normal `upsert(dep)` would not drain this
-    // scope-keyed entry anyway — the hook keeps the test isolated from
-    // any own-canonical drain side-effect; see the docstring.)
-    upsert_skip_drain(
+    // Edit ONLY the observed dependency. The entry is keyed on the
+    // scope, not `dep`, and the production `upsert` performs no
+    // own-canonical drain — so the scope-keyed entry physically
+    // survives and the warm-read rejection is driven purely by the
+    // observed-dep `FileWholeHash` fact (see the docstring).
+    upsert(
         &host,
         dep,
         "export interface Helper { a: string; b: number; }\n",
@@ -1040,7 +1024,7 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
 }
 
 // ---------------------------------------------------------------------------
-// End-to-end self-root skip-drain canaries.
+// End-to-end producer-level self-root canaries.
 //
 // The `*_untracked_self_root_rejects_warm_entry` tests above prime each
 // query-identity entry with a *synthetic* one-fact signature
@@ -1060,12 +1044,12 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
 //     calls (`engine_fact_signature_for_exported_type` /
 //     `_for_canonical_member` / `_for_prepared_target` /
 //     `_for_materialize_memo`).
-//  3. Edits the keyed canonical through
-//     [`crate::VerterHost::upsert_skipping_own_canonical_drain_for_tests`]
-//     — so the upserted canonical's own-canonical drain does NOT remove
-//     the entry — with an **unrelated-sibling-body edit**: a member of
-//     the `Sibling` declaration changes type while `Probe` and the
-//     file's export name set are left untouched.
+//  3. Edits the keyed canonical through the production
+//     [`crate::VerterHost::upsert`] — which performs no own-canonical
+//     drain, so the entry physically survives — with an
+//     **unrelated-sibling-body edit**: a member of the `Sibling`
+//     declaration changes type while `Probe` and the file's export name
+//     set are left untouched.
 //  4. Issues the warm read and asserts it MISSED (the cold closure ran)
 //     and the recomputed value surfaced.
 //
@@ -1090,17 +1074,11 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
 // `self_root_fact` and observing every canary flip RED.
 //
 // Scope note: these canaries drive the production producer + warm
-// validator of each of the nine query-identity caches end-to-end. A
-// canary that instead drove the full `get_component_meta` cold
-// recompute over a skip-drain dependency edit would surface staleness
-// in `FileArtifactStore` (a content-addressed cache, NOT one of the
-// nine query-identity caches) before the nine caches are reached — see
-// the feedback log's `[debt]` entry on `FileArtifactStore`
-// content-pinning under the skip-drain hook. The comprehensive
-// per-failing-class `get_component_meta`-level skip-drain canary
-// closure is owned by the dedicated canary-closure work that follows;
-// these nine producer-level canaries prove the self-version-root
-// wiring end-to-end for its own scope.
+// validator of each of the nine query-identity caches end-to-end.
+// `FileArtifactStore` (a content-addressed cache, NOT one of the nine
+// query-identity caches) is content-pinned independently; these nine
+// producer-level canaries prove the self-version-root wiring of the
+// query-identity layer end-to-end.
 
 /// The keyed canonical's source: the cache's keyed type `Probe` plus an
 /// unrelated `Sibling` declaration whose body the canary edits.
@@ -1131,11 +1109,12 @@ fn load_tracked_keyed(host: &VerterHost, canonical: &str) {
 }
 
 /// Edit `canonical`'s unrelated `Sibling` declaration body through the
-/// skip-drain hook (so the own-canonical drain does NOT remove the
-/// entry) and re-`ensure_indexed_ready` it. `Probe` and the file's
-/// export name set are untouched — only the whole-file hash shifts.
-fn skip_drain_sibling_edit(host: &VerterHost, canonical: &str) {
-    upsert_skip_drain(host, canonical, &keyed_source_with_sibling("string"));
+/// production `upsert` (which performs no own-canonical drain, so the
+/// entry physically survives) and re-`ensure_indexed_ready` it. `Probe`
+/// and the file's export name set are untouched — only the whole-file
+/// hash shifts.
+fn sibling_body_edit(host: &VerterHost, canonical: &str) {
+    upsert(host, canonical, &keyed_source_with_sibling("string"));
     assert!(
         host.ensure_indexed_ready(canonical).is_some(),
         "IndexedReady must re-materialise for {canonical} after the sibling edit",
@@ -1147,8 +1126,8 @@ fn skip_drain_sibling_edit(host: &VerterHost, canonical: &str) {
 /// Discriminating property: the entry is cold-published with the EXACT
 /// production producer signature — [`engine_fact_signature_for_exported_type`],
 /// the helper `resolve_type_declaration` calls. The keyed canonical is
-/// then edited through the skip-drain hook with an unrelated-sibling
-/// body edit. The producer signature's parse facts (`Export(Probe)`,
+/// then edited through the production `upsert` with an
+/// unrelated-sibling body edit. The producer signature's parse facts (`Export(Probe)`,
 /// `LocalDecl(Probe)`, `MemberShape(Probe)`) all fingerprint `Probe`
 /// (R14) and do NOT shift when an unrelated `Sibling` declaration is
 /// edited — only the self-root `FileWholeHash` does. The warm read
@@ -1188,7 +1167,7 @@ fn declaration_lookup_db_self_root_sibling_edit_rejects_warm_entry() {
         "fixture invariant: cold publish stores the primed declaration",
     );
 
-    skip_drain_sibling_edit(&host, c);
+    sibling_body_edit(&host, c);
 
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
@@ -1253,7 +1232,7 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
         })
         .expect("cold publish succeeds");
 
-    skip_drain_sibling_edit(&host, c);
+    sibling_body_edit(&host, c);
 
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
@@ -1316,7 +1295,7 @@ fn resolvability_db_self_root_sibling_edit_rejects_warm_entry() {
         })
         .expect("cold publish succeeds");
 
-    skip_drain_sibling_edit(&host, c);
+    sibling_body_edit(&host, c);
 
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
@@ -1380,7 +1359,7 @@ fn owner_collection_db_self_root_sibling_edit_rejects_warm_entry() {
         })
         .expect("cold publish succeeds");
 
-    skip_drain_sibling_edit(&host, c);
+    sibling_body_edit(&host, c);
 
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
@@ -1444,7 +1423,7 @@ fn prepared_surface_db_self_root_sibling_edit_rejects_warm_entry() {
         })
         .expect("cold publish succeeds");
 
-    skip_drain_sibling_edit(&host, c);
+    sibling_body_edit(&host, c);
 
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
@@ -1505,7 +1484,7 @@ fn routed_expr_surface_db_self_root_sibling_edit_rejects_warm_entry() {
         })
         .expect("cold publish succeeds");
 
-    skip_drain_sibling_edit(&host, c);
+    sibling_body_edit(&host, c);
 
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
@@ -1563,9 +1542,9 @@ fn routed_surface_member_names(expr: &TypeExpr) -> Vec<String> {
 /// content version, the self-root hash from a later one.
 ///
 /// The fixture drives the race deterministically. A projection-seam
-/// hook fires a skip-own-drain `upsert` of the keyed scope file
-/// EXACTLY between the projection and the `cache_routed_expr_surface_expr`
-/// write-through — the precise window the torn read opens. `Probe`'s
+/// hook fires an `upsert` of the keyed scope file EXACTLY between the
+/// projection and the `cache_routed_expr_surface_expr` write-through —
+/// the precise window the torn read opens. `Probe`'s
 /// own member is renamed across the edit (`staleField` → `freshField`)
 /// so the v1 routed surface and the v2 routed surface are
 /// distinguishable, and the v1 value is provably stale once v2 lands.
@@ -1601,16 +1580,16 @@ fn routed_expr_surface_db_observed_hash_captured_before_projection_rejects_torn_
         "fixture invariant: IndexedReady must materialise for {c}",
     );
 
-    // The projection-seam hook: upsert v2 of the keyed scope file
-    // through the skip-own-drain hook so the own-canonical drain does
-    // NOT remove the entry the producer is about to publish — the
-    // staleness must be caught by the producer's self-root hash alone.
-    // The hook fires exactly between the routed-expression projection
-    // and the `cache_routed_expr_surface_expr` write-through.
+    // The projection-seam hook: upsert v2 of the keyed scope file. The
+    // upsert performs no own-canonical drain, so the entry the producer
+    // is about to publish physically survives — the staleness must be
+    // caught by the producer's self-root hash alone. The hook fires
+    // exactly between the routed-expression projection and the
+    // `cache_routed_expr_surface_expr` write-through.
     let seam_host = Arc::clone(&host);
     let seam_path = c.to_string();
     let _seam = inject_routed_expr_projection_seam_edit_for_tests(move || {
-        upsert_skip_drain(&seam_host, &seam_path, probe_v2);
+        upsert(&seam_host, &seam_path, probe_v2);
         // Materialise v2's IndexedReady so the post-edit content-version
         // is a recoverable content-addressed artifact. The torn-read
         // producer roots the entry on this v2 hash and its signature
@@ -1730,7 +1709,7 @@ fn prepared_target_db_self_root_sibling_edit_rejects_warm_entry() {
         })
         .expect("cold publish succeeds");
 
-    skip_drain_sibling_edit(&host, c);
+    sibling_body_edit(&host, c);
 
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
@@ -1873,8 +1852,8 @@ fn prepared_target_db_invalidate_canonical_scans_routed_self_root() {
 /// aggregate). An entry is cold-published with the real producer
 /// signature ([`engine_fact_signature_for_prepared_target`]) so it
 /// validates at publish time and IS admitted. The keyed file is then
-/// edited through the skip-own-drain hook — the own-canonical drain
-/// does NOT proactively remove the entry, so it lingers stale. A second
+/// edited through the production `upsert` — which performs no
+/// own-canonical drain, so the entry lingers stale. A second
 /// `get_or_compute` triggers the warm-read eviction; its compute returns
 /// `None` (no republish). The live counter must then equal
 /// `entries.len()`.
@@ -1941,10 +1920,10 @@ fn prepared_target_db_live_counter_does_not_drift_on_stale_eviction() {
         "fixture invariant: exactly one entry is live after the cold publish",
     );
 
-    // Edit the keyed file through the skip-own-drain hook so the
-    // own-canonical drain does NOT proactively remove the entry — it
-    // lingers stale, to be evicted lazily on the next warm read.
-    upsert_skip_drain(
+    // Edit the keyed file. The upsert performs no own-canonical drain,
+    // so the entry lingers stale, to be evicted lazily on the next warm
+    // read.
+    upsert(
         &host,
         keyed,
         "export interface Probe { a: number; b: string; }\n",
@@ -2040,7 +2019,7 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
         })
         .expect("cold publish succeeds");
 
-    skip_drain_sibling_edit(&host, c);
+    sibling_body_edit(&host, c);
 
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
@@ -2135,7 +2114,7 @@ fn prepared_member_db_self_root_sibling_edit_rejects_warm_entry() {
     // member `Probe.field` is untouched, so `MemberPresence(Probe,
     // field)` and `Member(Probe, field)` are unchanged — only the
     // self-root `FileWholeHash` shifts.
-    upsert_skip_drain(
+    upsert(
         &host,
         c,
         "export interface Probe { field: number; }\n\
@@ -2552,10 +2531,10 @@ fn materialize_memo_db_observed_whole_hash_dependency_preserves_observed_hash() 
 
     // The dependency is edited AFTER materialisation but BEFORE the
     // memo signature is built — the race window. Its current content
-    // hash shifts to H2. The skip-drain hook keeps the test isolated
-    // from any own-canonical drain side-effect (`MaterializeMemoDb`
-    // keys on the scope, not `dep`, so this is purely defensive).
-    upsert_skip_drain(
+    // hash shifts to H2. `MaterializeMemoDb` keys on the scope, not
+    // `dep`, and the production `upsert` performs no own-canonical
+    // drain in any case, so no entry eviction perturbs this test.
+    upsert(
         &host,
         dep,
         "export interface Helper { a: string; b: number; }\n",
@@ -2681,10 +2660,10 @@ fn materialize_memo_db_scope_self_root_carries_observed_hash_not_current() {
 
     // The scope is edited AFTER materialisation but BEFORE the memo
     // signature is built — the race window. Its CURRENT content hash
-    // shifts. The skip-drain hook keeps the scope-keyed entry undrained
-    // (irrelevant here — no entry is published — but keeps the fixture
-    // isolated from the own-canonical drain).
-    upsert_skip_drain(&host, scope, "export type Probe = string;\n");
+    // shifts. The production `upsert` performs no own-canonical drain
+    // (irrelevant here — no entry is published — so no eviction can
+    // perturb the fixture).
+    upsert(&host, scope, "export type Probe = string;\n");
     let current_hash = host
         .ensure_indexed_ready(scope)
         .expect("scope re-indexed at current version")
@@ -2802,7 +2781,7 @@ fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end(
     // The scope is edited AFTER the value's hash observation but BEFORE
     // the write-through builds the fact signature — the exact race
     // window the round-3 P1 describes.
-    upsert_skip_drain(&host, scope, "export type Probe = string;\n");
+    upsert(&host, scope, "export type Probe = string;\n");
     let current_hash_h2 = host
         .ensure_indexed_ready(scope)
         .expect("scope re-indexed at H2")
@@ -3170,17 +3149,17 @@ fn materialize_memo_db_artifact_only_scope_lowers_under_shallow_whole_hash() {
 // signature-build. `revalidate_after_compute` validates fresh-vs-fresh and
 // cannot catch it.
 //
-// Discrimination shape (deterministic, no artifact-survival dependency — the
-// upsert path drains every prior content version of a canonical from
-// `FileArtifactStore`, so a stale observed hash has no content-addressed
-// artifact):
+// Discrimination shape (deterministic, no artifact-survival dependency — a
+// same-canonical upsert replaces the canonical's parse-fact registry with
+// the new content's, so a stale observed hash resolves no parse facts
+// regardless of whether a stale `FileArtifactStore` artifact lingers):
 //
 //  1. Load the keyed canonical at content version `H1`; observe `H1`.
 //  2. Anchor non-vacuity: the producer signature builder called with
 //     `observed_hash = H1` while current == `H1` returns `Some` rooted on
 //     `H1`.
-//  3. Edit the keyed canonical through the skip-own-drain hook so current
-//     becomes a different `H2` (the prior `H1` artifact is drained).
+//  3. Edit the keyed canonical so current becomes a different `H2`
+//     (the prior `H1` parse-fact registry is replaced).
 //  4. The producer signature builder called with the STALE `observed_hash =
 //     H1` MUST return `None` — the observed version's parse-fact registry is
 //     unrecoverable, so shared-cache admission is refused. A pre-fix builder
@@ -3247,7 +3226,7 @@ fn imported_registry_db_signature_builder_is_provenance_pure() {
     );
 
     // Step 3 — edit the keyed canonical so current becomes H2.
-    upsert_skip_drain(&host, c, &keyed_source_with_sibling("string"));
+    upsert(&host, c, &keyed_source_with_sibling("string"));
     let current_h2 = host.ensure_indexed_ready(c).expect("re-indexed").whole_hash;
     assert_ne!(
         observed_h1, current_h2,
@@ -3296,7 +3275,7 @@ fn declaration_lookup_db_signature_builder_is_provenance_pure() {
         "anchor: the signature for the observed-current case must root on H1",
     );
 
-    upsert_skip_drain(&host, c, &keyed_source_with_sibling("string"));
+    upsert(&host, c, &keyed_source_with_sibling("string"));
     let current_h2 = host.ensure_indexed_ready(c).expect("re-indexed").whole_hash;
     assert_ne!(
         observed_h1, current_h2,
@@ -3339,7 +3318,7 @@ fn resolvability_db_signature_builder_is_provenance_pure() {
         "anchor: the signature for the observed-current case must root on H1",
     );
 
-    upsert_skip_drain(&host, c, &keyed_source_with_sibling("string"));
+    upsert(&host, c, &keyed_source_with_sibling("string"));
     let current_h2 = host.ensure_indexed_ready(c).expect("re-indexed").whole_hash;
     assert_ne!(
         observed_h1, current_h2,
@@ -3383,7 +3362,7 @@ fn owner_collection_db_signature_builder_is_provenance_pure() {
         "anchor: the signature for the observed-current case must root on H1",
     );
 
-    upsert_skip_drain(&host, c, &keyed_source_with_sibling("string"));
+    upsert(&host, c, &keyed_source_with_sibling("string"));
     let current_h2 = host.ensure_indexed_ready(c).expect("re-indexed").whole_hash;
     assert_ne!(
         observed_h1, current_h2,
@@ -3431,7 +3410,7 @@ fn prepared_member_db_signature_builder_is_provenance_pure() {
         "anchor: the signature for the observed-current case must root on H1",
     );
 
-    upsert_skip_drain(&host, c, &keyed_source_with_sibling("string"));
+    upsert(&host, c, &keyed_source_with_sibling("string"));
     let current_h2 = host.ensure_indexed_ready(c).expect("re-indexed").whole_hash;
     assert_ne!(
         observed_h1, current_h2,
@@ -3487,7 +3466,7 @@ fn prepared_target_db_signature_builder_is_provenance_pure() {
         "anchor: the signature for the observed-current case must root on H1",
     );
 
-    upsert_skip_drain(&host, c, &keyed_source_with_sibling("string"));
+    upsert(&host, c, &keyed_source_with_sibling("string"));
     let current_h2 = host.ensure_indexed_ready(c).expect("re-indexed").whole_hash;
     assert_ne!(
         observed_h1, current_h2,
@@ -5176,10 +5155,10 @@ fn imported_registry_removal_cleanup_preserves_fresh_reverse_index_registration(
 // self-root canonical — rejects the entry. The tests below discriminate the
 // strict warm-read validator against the lax `validate(ctx)`, and confirm
 // that a content edit to the base origin / root / a visited canonical
-// rejects the warm entry under the skip-own-drain hook — the property that
-// makes deleting the own-canonical drain sound (the carrier rejects the
-// edit on its own). The strict-validator mechanism itself is exercised by a
-// planted-self-root entry below.
+// rejects the warm entry through the production `upsert` — same-canonical
+// invalidation is lazy, the carrier rejects the edit on its own self-root
+// rather than relying on an eager upsert-time drain. The strict-validator
+// mechanism itself is exercised by a planted-self-root entry below.
 // ===========================================================================
 
 /// Intern a stable scope-less `Object` node — a `base` whose identity
@@ -5301,25 +5280,24 @@ fn intern_file_derived_object(
 
 /// `MaterializeStructureDb` rejects a warm entry after a content edit
 /// to the `base` node's declaration-origin file — end-to-end through
-/// the production materialiser, under the skip-own-drain hook.
+/// the production materialiser.
 ///
-/// Retry-item-2 unblock: the own-canonical drain currently drains
-/// `MaterializeStructureDb` on a same-canonical upsert. After the drain
-/// is removed, an edit to a file the materialisation actually depends
-/// on must still reject the warm entry on its own. The load-bearing
-/// dependency a `MaterializeStructureDb` value carries is the `base`
-/// node's `NodeScopeId::File` origin — recorded by the producer as a
-/// strict `base_origin_self_root`. This test interns a `base` whose
-/// origin scope is `NodeScopeId::File { canonical_id: edited_file }`,
-/// materialises + admits, then edits `edited_file` through
-/// `upsert_skipping_own_canonical_drain_for_tests` so the own-canonical
-/// drain does NOT mask the staleness, and asserts the warm `peek`
-/// misses. The `base` node id (hence the cache key) is STABLE across
-/// the edit — the only shifting fact is the `base` origin's
-/// `FileWholeHash`. (The materialise *scope* is NOT a strict self-root:
-/// it is non-load-bearing — see `..._unread_scope_edit_keeps_warm_entry`.)
+/// Same-canonical invalidation is lazy: the upsert performs no eager
+/// own-canonical cache drain, so a `MaterializeStructureDb` entry for
+/// the edited file physically survives the upsert and must reject the
+/// edit on its own self-root. The load-bearing dependency a
+/// `MaterializeStructureDb` value carries is the `base` node's
+/// `NodeScopeId::File` origin — recorded by the producer as a strict
+/// `base_origin_self_root`. This test interns a `base` whose origin
+/// scope is `NodeScopeId::File { canonical_id: edited_file }`,
+/// materialises + admits, then edits `edited_file` through the
+/// production `upsert` and asserts the warm `peek` misses. The `base`
+/// node id (hence the cache key) is STABLE across the edit — the only
+/// shifting fact is the `base` origin's `FileWholeHash`. (The
+/// materialise *scope* is NOT a strict self-root: it is non-load-bearing
+/// — see `..._unread_scope_edit_keeps_warm_entry`.)
 #[test]
-fn materialize_structure_db_base_origin_edit_rejects_warm_entry_under_skip_drain() {
+fn materialize_structure_db_base_origin_edit_rejects_warm_entry() {
     use crate::component_meta_materialize::{MaterializationScope, MaterializeStructureCacheKey};
     use crate::semantic_query::ProjectionMode;
 
@@ -5352,9 +5330,10 @@ fn materialize_structure_db_base_origin_edit_rejects_warm_entry_under_skip_drain
          self-rooted on the `base` node's declaration-origin file",
     );
 
-    // Edit the `base` origin file through the skip-own-drain hook so the
-    // own-canonical drain does NOT remove the entry.
-    upsert_skip_drain(
+    // Edit the `base` origin file through the production `upsert`. The
+    // upsert performs no eager own-canonical drain, so the entry
+    // physically survives and the strict self-root must reject it.
+    upsert(
         &host,
         edited_file,
         "export type Probe = { a: string; b: number };\n",
@@ -5368,10 +5347,9 @@ fn materialize_structure_db_base_origin_edit_rejects_warm_entry_under_skip_drain
         db.peek(&key, &host).is_none(),
         "MaterializeStructureDb::peek MUST reject the warm entry after a content edit to \
          the `base` node's declaration-origin file — the entry's strict \
-         `base_origin_self_root` catches the shifted FileWholeHash even though the \
-         own-canonical drain was skipped. This is the property that makes deleting the \
-         own-canonical drain sound for a file-derived base: the carrier rejects an edit \
-         to a file the materialisation depends on, on its own.",
+         `base_origin_self_root` catches the shifted FileWholeHash. Same-canonical \
+         invalidation is lazy: with no eager upsert-time drain, the carrier rejects an \
+         edit to a file the materialisation depends on, on its own self-root.",
     );
 }
 
@@ -5436,10 +5414,11 @@ fn materialize_structure_db_unread_scope_edit_keeps_warm_entry() {
         "fixture invariant: the cold build admitted a warm MaterializeStructureDb entry",
     );
 
-    // Edit the consumer scope through the skip-own-drain hook so the
-    // own-canonical drain does NOT remove the entry. The materialisation
-    // does not depend on the scope's content.
-    upsert_skip_drain(
+    // Edit the consumer scope through the production `upsert`. The
+    // upsert performs no eager own-canonical drain, so the entry
+    // physically survives — and the materialisation does not depend on
+    // the scope's content, so the warm `peek` must still hit.
+    upsert(
         &host,
         scope,
         "export const anchor = 2;\nexport const extra = 3;\n",
@@ -5479,21 +5458,20 @@ fn ref_cycle_decl_identity(
 }
 
 /// `RefCycleResultDb` rejects a warm entry after a content edit to its
-/// BFS ROOT canonical, under the skip-own-drain hook.
+/// BFS ROOT canonical.
 ///
-/// The own-canonical drain currently drains `RefCycleResultDb` on a
-/// same-canonical upsert. For that drain to be safely removable, a
-/// content edit to the root file must still reject the warm entry on
-/// its own. The BFS records the root identity's `(canonical,
+/// Same-canonical invalidation is lazy: the upsert performs no eager
+/// own-canonical cache drain, so a `RefCycleResultDb` entry for the
+/// edited root physically survives the upsert and must reject the edit
+/// on its own. The BFS records the root identity's `(canonical,
 /// whole_hash)` as a strict self-root; this test edits the root file
-/// through `upsert_skipping_own_canonical_drain_for_tests` and asserts
-/// the warm `peek` misses. The BFS cache key is the `DeclIdentity`,
-/// which embeds `whole_hash` — the test holds the identity at its
-/// ORIGINAL hash (the `DeclIdentity` a stale caller would still hold);
-/// `peek` on that key finds the entry and MUST reject it via the
-/// strict self-root.
+/// through the production `upsert` and asserts the warm `peek` misses.
+/// The BFS cache key is the `DeclIdentity`, which embeds `whole_hash` —
+/// the test holds the identity at its ORIGINAL hash (the `DeclIdentity`
+/// a stale caller would still hold); `peek` on that key finds the entry
+/// and MUST reject it via the strict self-root.
 #[test]
-fn ref_cycle_db_root_edit_rejects_warm_entry_under_skip_drain() {
+fn ref_cycle_db_root_edit_rejects_warm_entry() {
     use crate::meta_resolve::ref_root_reaches_transitive_cycle_node;
 
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -5517,8 +5495,10 @@ fn ref_cycle_db_root_edit_rejects_warm_entry_under_skip_drain() {
          self-rooted on the root canonical",
     );
 
-    // Edit the root file through the skip-own-drain hook.
-    upsert_skip_drain(
+    // Edit the root file through the production `upsert`. The upsert
+    // performs no eager own-canonical drain, so the entry physically
+    // survives and the strict self-root must reject it.
+    upsert(
         &host,
         root,
         "export type Probe = { a: string; b: number };\n",
@@ -5533,23 +5513,24 @@ fn ref_cycle_db_root_edit_rejects_warm_entry_under_skip_drain() {
         crate::component_meta_caches::ref_cycle_db_peek(db, &id, ctx2).is_none(),
         "RefCycleResultDb::peek MUST reject the warm entry after a content edit to its \
          BFS root canonical — the BFS records the root identity as a strict self-root, \
-         so the shifted FileWholeHash rejects the entry even though the own-canonical \
-         drain was skipped. This is the property that makes deleting the drain sound.",
+         so the shifted FileWholeHash rejects the entry. Same-canonical invalidation is \
+         lazy: with no eager upsert-time drain, the carrier rejects the edit on its own.",
     );
 }
 
 /// `RefCycleResultDb` rejects a warm entry after a content edit to a
-/// VISITED (non-root) canonical the BFS walked — under the
-/// skip-own-drain hook. This is a **characterization** test: it
-/// confirms a visited-canonical edit rejects the warm entry so the
-/// own-canonical drain can be safely removed. It is not a
-/// strict-vs-lax discriminator — a visited canonical is also carried in
-/// the legacy `DepSignature` rail (the per-`Instantiate` dispatch
-/// dep-signature), which `validate_dep_signature` already rejects on a
-/// content edit to a tracked file. The strict-self-root discriminator
-/// for `RefCycleResultDb` is the untracked-self-root test below.
+/// VISITED (non-root) canonical the BFS walked. This is a
+/// **characterization** test: it confirms a visited-canonical edit
+/// rejects the warm entry — same-canonical invalidation is lazy, so the
+/// entry physically survives the upsert and the carrier must reject it
+/// on its own. It is not a strict-vs-lax discriminator — a visited
+/// canonical is also carried in the legacy `DepSignature` rail (the
+/// per-`Instantiate` dispatch dep-signature), which
+/// `validate_dep_signature` already rejects on a content edit to a
+/// tracked file. The strict-self-root discriminator for
+/// `RefCycleResultDb` is the untracked-self-root test below.
 #[test]
-fn ref_cycle_db_visited_canonical_edit_rejects_warm_entry_under_skip_drain() {
+fn ref_cycle_db_visited_canonical_edit_rejects_warm_entry() {
     use crate::meta_resolve::ref_root_reaches_transitive_cycle_node;
 
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -5589,10 +5570,10 @@ fn ref_cycle_db_visited_canonical_edit_rejects_warm_entry_under_skip_drain() {
         "fixture invariant: the cold BFS admitted a warm RefCycleResultDb entry",
     );
 
-    // Edit ONLY the visited helper file through the skip-own-drain
-    // hook. The BFS root file is untouched, so a producer that rooted
-    // only the root would keep the entry valid.
-    upsert_skip_drain(
+    // Edit ONLY the visited helper file through the production
+    // `upsert`. The BFS root file is untouched, so a producer that
+    // rooted only the root would keep the entry valid.
+    upsert(
         &host,
         helper,
         "export type Helper<T> = { wrapped: T; sibling: string; next: Helper<T> };\n",
@@ -5608,7 +5589,7 @@ fn ref_cycle_db_visited_canonical_edit_rejects_warm_entry_under_skip_drain() {
         "RefCycleResultDb::peek MUST reject the warm entry after a content edit to a \
          VISITED (non-root) canonical the BFS walked — the visited helper is both a \
          strict self-root (recorded by the BFS) AND a legacy-rail dependency, and a \
-         content edit to it rejects the entry under the skip-own-drain hook.",
+         content edit to it rejects the entry on its own self-root.",
     );
 }
 
@@ -5917,8 +5898,9 @@ fn route_owned_shallow_db_stale_whole_hash_rejects_warm_entry() {
 ///
 /// This drives the self-version root end-to-end: the entry is built
 /// fresh against the canonical's content, then the canonical is
-/// re-upserted (skip-own-drain, so no eager eviction masks the gap)
-/// with edited content. The same entry — unchanged — must now be
+/// re-upserted with edited content through the production `upsert`
+/// (which performs no eager own-canonical eviction, so the entry
+/// physically survives). The same entry — unchanged — must now be
 /// rejected, because its self `whole_hash` no longer matches the
 /// authoritative hash of the edited canonical.
 ///
@@ -5943,11 +5925,11 @@ fn route_owned_shallow_db_self_root_rejects_warm_entry_after_same_canonical_edit
          must be fresh before the same-canonical edit",
     );
 
-    // Same-canonical content edit through the skip-own-drain hook — no
+    // Same-canonical content edit through the production `upsert` — no
     // eager own-canonical eviction runs, so the route-owned freshness
     // gate's tier-1 self-root check is the only mechanism that can
     // reject the now-stale entry.
-    upsert_skip_drain(&host, canonical, "export const a = 2;\n");
+    upsert(&host, canonical, "export const a = 2;\n");
 
     let hash_v2 = host
         .get_whole_hash(canonical)

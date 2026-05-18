@@ -2,32 +2,19 @@
 //!
 //! The canary suite proves that the lazy fact-validation substrate
 //! backs every cross-file invalidation scenario. The owner-upsert path
-//! has no eager reverse-dependent invalidation cascade — a warm
-//! consumer result is invalidated only by fact-validation on read.
+//! has no eager reverse-dependent invalidation cascade and no eager
+//! own-canonical cache drain — a warm consumer result, and a warm
+//! query-identity entry for the edited canonical itself, are both
+//! invalidated only by fact-validation on read.
 //!
-//! Every canary mutation routes through the skip-own-drain upsert
-//! hook ([`VerterHost::upsert_skipping_own_canonical_drain_for_tests`]).
-//! That hook runs the full production pipeline — parse, change
-//! detection, per-domain invalidation, parse-domain fact re-emission —
-//! but suppresses the post-commit own-canonical query-identity cache
-//! drain (`resolver.runtime.evict_canonical`,
-//! `project_type_store.evict_canonical`, `resolved_type_cache().clear()`
-//! for the upserted canonical). With that drain suppressed, the ONLY
+//! Every canary mutation routes through the plain production
+//! [`VerterHost::upsert`]. That path runs parse, change detection,
+//! per-domain invalidation, and parse-domain fact re-emission, and
+//! performs no own-canonical query-identity cache drain. So the ONLY
 //! mechanism that can reject a stale warm entry for the edited
 //! canonical — owner-self OR dependency — is lazy self-version-root
 //! fact-validation on the read path. That is exactly what the canary
-//! suite must prove: routing through the plain production `upsert`
-//! would let the eager own-canonical drain mask a missing self-version
-//! root and the canaries would pass without exercising the lazy path.
-//!
-//! Wiring note: the suite reaches the lazy path through ONE chokepoint
-//! — the [`upsert`] helper below. When the own-canonical drain itself
-//! is deleted (and the `upsert_skipping_own_canonical_drain_for_tests`
-//! hook removed with it), this helper flips back to the plain
-//! `VerterHost::upsert`, which by then has no drain to suppress. That
-//! flip is a one-line edit in this one file — the suite's coverage is
-//! unchanged because a drain-free `upsert` exercises the same lazy
-//! path the hook does today.
+//! suite proves.
 //!
 //! Helpers:
 //! - [`standalone_host`] — a hermetic `new_standalone` host (relative
@@ -35,9 +22,9 @@
 //! - [`workspace_host`] — a workspace-backed host rooted at
 //!   `/workspace`, for scenarios that need barrel / absolute-specifier
 //!   resolution.
-//! - [`upsert`] — owner / dependency upsert through the skip-own-drain
-//!   hook, so a same-canonical edit is rejected only by lazy
-//!   fact-validation, not by the eager own-canonical drain.
+//! - [`upsert`] — owner / dependency upsert through the production
+//!   `upsert` path, so a same-canonical edit is rejected only by lazy
+//!   fact-validation.
 //! - [`prime_compile`] — primes a warm compile slot via
 //!   `get_virtual_file`.
 //! - [`compile_main`] — reads the assembled `Main` virtual node, the
@@ -76,35 +63,26 @@ pub fn workspace_host(files: &[(&str, &str)]) -> (Arc<MemoryWorkspace>, Arc<Vert
     (workspace, host)
 }
 
-/// Upsert a file through the skip-own-drain hook
-/// ([`VerterHost::upsert_skipping_own_canonical_drain_for_tests`]).
+/// Upsert a file through the production [`VerterHost::upsert`] path.
 ///
-/// The hook runs the full production upsert pipeline but suppresses the
-/// post-commit own-canonical query-identity cache drain. Two
-/// invalidation mechanisms therefore stay active and one is removed:
+/// The production upsert runs parse, change detection, per-domain
+/// invalidation, and parse-domain fact re-emission, and performs no
+/// own-canonical query-identity cache drain. Two invalidation
+/// mechanisms therefore drive every canary scenario:
 ///
-/// - Active — the no-eager-cascade contract: an owner edit never
-///   eagerly invalidates reverse dependents. A downstream consumer's
-///   warm slot / result physically survives an upstream dependency
-///   edit and is rejected only by lazy fact-validation on the next
-///   read.
-/// - Active — lazy self-version-root validation: a warm query-identity
-///   entry for the *edited canonical itself* is rejected by its
+/// - The no-eager-cascade contract: an owner edit never eagerly
+///   invalidates reverse dependents. A downstream consumer's warm slot
+///   / result physically survives an upstream dependency edit and is
+///   rejected only by lazy fact-validation on the next read.
+/// - Lazy self-version-root validation: a warm query-identity entry
+///   for the *edited canonical itself* is rejected by its
 ///   current-content self-root on the cold-recompute read path.
-/// - Removed (by the hook) — the eager own-canonical drain. With the
-///   plain `upsert` it would evict the edited canonical's own
-///   query-identity entries up front and so mask a missing
-///   self-version root. The hook suppresses it, so the canaries
-///   genuinely exercise the lazy path.
 ///
 /// This is the single chokepoint the whole canary suite mutates
-/// through (owner / dependency setup AND the edit under test). When the
-/// own-canonical drain is deleted, this body flips back to the plain
-/// `VerterHost::upsert` — a drain-free `upsert` exercises the identical
-/// lazy path.
+/// through (owner / dependency setup AND the edit under test).
 pub fn upsert(host: &VerterHost, canonical: &str, source: &str, kind: FileKind) {
     let _ = host
-        .upsert_skipping_own_canonical_drain_for_tests(UpsertRequest {
+        .upsert(UpsertRequest {
             canonical_id: Some(canonical.to_string()),
             input_id: canonical.to_string(),
             source: source.into(),

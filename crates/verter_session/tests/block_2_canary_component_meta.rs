@@ -5,14 +5,12 @@
 //! the lazy fact-validation substrate backs every `getComponentMeta`
 //! cross-file invalidation scenario.
 //!
-//! Every mutation routes through the skip-own-drain hook (the
-//! [`harness::upsert`] helper → `upsert_skipping_own_canonical_drain_for_tests`),
-//! which suppresses the post-commit own-canonical query-identity cache
-//! drain. The dependency edits exercised here are cross-file, so the
-//! drain skip does not change the dependency's effect on the owner —
-//! but routing the whole suite through the one hook keeps the wiring
-//! uniform with the owner-self-edit canaries, where the drain skip is
-//! load-bearing.
+//! Every mutation routes through the production [`harness::upsert`]
+//! helper (plain `VerterHost::upsert`), which performs no eager
+//! own-canonical query-identity cache drain. The dependency edits
+//! exercised here are cross-file, so the owner's warm
+//! `ComponentMetaResultDb` entry survives the dependency edit and is
+//! rejected only by lazy fact-validation on the next read.
 //!
 //! Each test:
 //!  1. Sets up an owner SFC + dependency file(s) and primes a warm
@@ -444,11 +442,12 @@ fn route_surface_dep_edit_misses_warm_component_meta() {
 /// unchanged, so its `owner_whole_hash` result-cache key is stable and
 /// the warm result is eligible for a hit — only
 /// `validates_fact_signature` against the edited carrier's facts can
-/// reject it. The carrier edit routes through the skip-own-drain hook,
-/// so the carrier's own query-identity entries are NOT eagerly drained;
-/// a substrate that keyed slot bindings under the owner content hash
-/// alone — ignoring the carrier dep-signature — would serve the stale
-/// `[row]` binding and the `[column, index]` assertion fails.
+/// reject it. The carrier edit routes through the production `upsert`,
+/// which performs no eager own-canonical drain, so the carrier's own
+/// query-identity entries physically survive; a substrate that keyed
+/// slot bindings under the owner content hash alone — ignoring the
+/// carrier dep-signature — would serve the stale `[row]` binding and
+/// the `[column, index]` assertion fails.
 #[test]
 fn cross_file_define_slots_carrier_edit_recomputes_slot_bindings() {
     let (workspace, host) = workspace_host(&[

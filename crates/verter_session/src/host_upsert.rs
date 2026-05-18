@@ -51,45 +51,6 @@ impl VerterHost {
         self.upsert_with_priority(req, Priority::Interactive)
     }
 
-    /// Test-only upsert that runs the full pipeline but skips the
-    /// own-canonical query-identity cache drain.
-    ///
-    /// Behaves exactly like [`Self::upsert`] — same parse, change
-    /// detection, per-domain invalidation, and parse-domain fact
-    /// re-emission — except it suppresses the post-commit own-canonical
-    /// drain (`resolver.runtime.evict_canonical`,
-    /// `project_type_store.evict_canonical`, `resolved_type_cache().clear()`
-    /// for the upserted canonical). It does NOT reintroduce any
-    /// reverse-dependent invalidation cascade.
-    ///
-    /// This is a temporary test scaffold for the query-identity
-    /// self-version-rooting work: it lets warm-read tests observe
-    /// whether a query-identity cache entry detects a same-canonical
-    /// content edit on its own, without the production own-canonical
-    /// drain masking a stale hit. It is removed once the own-canonical
-    /// drain itself is deleted; production callers must use
-    /// [`Self::upsert`].
-    #[cfg(any(test, debug_assertions))]
-    pub fn upsert_skipping_own_canonical_drain_for_tests(
-        &self,
-        req: UpsertRequest,
-    ) -> Result<HostUpdateResult, HostError> {
-        self.provenance
-            .host_upsert_calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // Mirror `upsert_with_priority`'s parse-domain pre-invalidation
-        // invariant so the next resolver pass rebuilds the fact
-        // registry from the new content.
-        if let Some(ref id) = req.canonical_id {
-            self.register_facts_for_new_content(id);
-        }
-        #[cfg(test)]
-        {
-            *self.last_upsert_priority.lock() = Some(Priority::Interactive);
-        }
-        self.upsert_via_scheduler_with_priority(req, Priority::Interactive, true)
-    }
-
     /// Insert or update a file with caller-configured scheduler priority.
     ///
     /// Performs the semantic-cache pre-invalidation that `upsert` always
@@ -124,7 +85,7 @@ impl VerterHost {
             *self.last_upsert_priority.lock() = Some(priority);
         }
 
-        self.upsert_via_scheduler_with_priority(req, priority, false)
+        self.upsert_via_scheduler_with_priority(req, priority)
     }
 
     /// Priority-parameterized inner helper for the scheduler-backed
@@ -133,25 +94,20 @@ impl VerterHost {
     /// (which performs the semantic-db pre-invalidation invariant) —
     /// direct callers of this inner helper bypass that invariant.
     ///
-    /// Cross-file invalidation is lazy: a downstream consumer's warm
-    /// cache entry is revalidated on read through its own
-    /// `fact_dep_signature` check, not by an eager cascade fired here.
-    /// This helper drains only the upserted canonical's own caches (the
-    /// producer contract — the next resolver pass rebuilds its fact
-    /// registry from the new content).
-    ///
-    /// `skip_own_canonical_drain` is `false` on every production call.
-    /// It is set `true` only by the test-only
-    /// `upsert_skipping_own_canonical_drain_for_tests` hook, which runs
-    /// the full upsert pipeline but suppresses the own-canonical
-    /// query-identity cache drain so tests can exercise warm-read
-    /// self-version-rooting without the drain masking a stale hit.
+    /// Invalidation is lazy on both axes. Same-canonical: a warm
+    /// query-identity entry for the upserted canonical is rejected by
+    /// its current-content self-version root on the cold-recompute read
+    /// path — the upsert performs no eager own-canonical cache drain.
+    /// Cross-file: a downstream consumer's warm cache entry is
+    /// revalidated on read through its own `fact_dep_signature` check,
+    /// not by an eager cascade fired here. The only cache work this
+    /// helper performs is the parse-domain producer contract — see
+    /// `register_facts_for_new_content` below.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(crate) fn upsert_via_scheduler_with_priority(
         &self,
         req: UpsertRequest,
         priority: Priority,
-        skip_own_canonical_drain: bool,
     ) -> Result<HostUpdateResult, HostError> {
         use crate::host_executor::HostSourceData;
         use verter_scheduler::job::CompletionState;
@@ -465,41 +421,17 @@ impl VerterHost {
             export_signatures: parse.export_signatures.clone(),
         };
 
-        // ── Post-commit housekeeping: own-canonical drain ──
+        // ── Post-commit: parse-domain producer contract ──
         //
-        // Drain the upserted canonical's own query-identity caches.
-        // Cross-file consumers revalidate lazily on read through their
-        // `fact_dep_signature` checks (R3) — there is no eager
-        // reverse-dependent cascade.
-        //
-        // TODO: this own-canonical drain is retained until the
-        // query-identity caches (`semantic_graph`, `declaration_lookup_db`,
-        // `materialize_structure_db`, `ref_cycle_db`,
-        // `routed_expr_surface_db`, `route_owned_shallow`) self-version-root
-        // a same-canonical content edit. They do not yet detect a
-        // same-canonical edit on the cold-recompute path, so dropping
-        // this drain would serve stale user-visible output for the
-        // edited file itself.
-        //
-        // `skip_own_canonical_drain` is `true` only for the test-only
-        // `upsert_skipping_own_canonical_drain_for_tests` hook; every
-        // production caller passes `false` so the drain always runs.
-        // The drain skip suppresses ONLY the upserted canonical's own
-        // cache eviction — it does NOT reintroduce any reverse-dependent
-        // cascade (that was removed for good).
-        if !skip_own_canonical_drain {
-            self.resolver.runtime.evict_canonical(&canonical_id);
-            crate::host_manage::push_cache_drained_at_upsert("resolver_runtime", &canonical_id);
-            self.project_type_store.evict_canonical(&canonical_id);
-            crate::host_manage::push_cache_drained_at_upsert("project_type_store", &canonical_id);
-            self.resolved_type_cache().clear();
-            crate::host_manage::push_cache_drained_at_upsert("resolved_type_cache", &canonical_id);
-        }
-        // Parse-domain producer contract — NOT part of the
-        // own-canonical drain. Re-emits the parse-domain fact registry
-        // for the new content so later resolver passes (and the
-        // fact-signature helpers) observe current-content facts. This
-        // runs unconditionally, including under the skip-drain hook.
+        // Re-emit the parse-domain fact registry for the new content so
+        // later resolver passes (and the fact-signature helpers) observe
+        // current-content facts. This is the ONLY cache work the upsert
+        // performs: it does not drain the upserted canonical's own
+        // query-identity caches, and it fires no reverse-dependent
+        // cascade. A warm entry for the upserted canonical is rejected
+        // by its current-content self-version root on the cold-recompute
+        // read path; a cross-file consumer's warm entry is revalidated
+        // lazily on read through its own `fact_dep_signature` check (R3).
         self.register_facts_for_new_content(&canonical_id);
         crate::host_manage::push_cache_drained_at_upsert("semantic_invalidate", &canonical_id);
 

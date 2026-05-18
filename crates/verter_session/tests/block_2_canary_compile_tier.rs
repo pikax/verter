@@ -5,14 +5,12 @@
 //! the lazy fact-validation substrate backs every compile-tier
 //! cross-file invalidation scenario.
 //!
-//! Every mutation routes through the skip-own-drain hook (the
-//! [`harness::upsert`] helper → `upsert_skipping_own_canonical_drain_for_tests`),
-//! which suppresses the post-commit own-canonical query-identity cache
-//! drain. The dependency edits exercised here are cross-file, so the
-//! drain skip does not change the dependency's effect on the consumer
-//! — but routing the whole suite through the one hook keeps the wiring
-//! uniform with the owner-self-edit canaries, where the drain skip is
-//! load-bearing.
+//! Every mutation routes through the production [`harness::upsert`]
+//! helper (plain `VerterHost::upsert`), which performs no eager
+//! own-canonical query-identity cache drain. The dependency edits
+//! exercised here are cross-file, so a consumer's warm entry survives
+//! the dependency edit and is rejected only by lazy fact-validation on
+//! the next read.
 //!
 //! Each test:
 //!  1. Sets up an owner SFC + dependency file and primes a warm

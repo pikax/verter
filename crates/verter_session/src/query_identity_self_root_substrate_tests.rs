@@ -1,20 +1,21 @@
 //! Shared substrate for query-identity self-version rooting —
 //! discriminator tests.
 //!
-//! Codex diagnosis: the query-identity caches do not detect a
-//! **same-canonical content edit** on the resolver's cold-recompute
-//! read path. A cache entry keyed by `(canonical, ...)` survives an
-//! edit to `canonical` itself because its `read_set_signature` carries
-//! no self-version root for the keyed canonical, and the lazy
-//! "unknown means okay" validation behavior accepts an untracked
-//! whole-hash fact. The own-canonical drain in `host_upsert.rs` masks
-//! this gap in production by eagerly evicting the upserted canonical's
-//! caches.
+//! A query-identity cache entry keyed by `(canonical, ...)` must
+//! detect a **same-canonical content edit** on the resolver's
+//! cold-recompute read path. It does so by carrying a self-version
+//! root for the keyed canonical in its `read_set_signature` and
+//! validating that root strictly — an untracked whole-hash fact fails
+//! validation rather than being permissively accepted. The upsert
+//! performs no eager own-canonical cache drain; a stale entry may
+//! physically linger and is rejected lazily on read by its
+//! self-version root.
 //!
-//! This module locks down the four substrate deliverables that make
-//! the own-canonical drain deletable. Each test DISCRIMINATES — it
-//! fails against the pre-substrate tree and passes against the
-//! post-substrate tree — and asserts a concrete observable.
+//! This module locks down the four substrate deliverables that back
+//! that lazy same-canonical rejection. Each test DISCRIMINATES — it
+//! fails against a tree whose validation is lazy and passes against a
+//! tree whose validation is strictly self-version-rooted — and asserts
+//! a concrete observable.
 //!
 //! 1. [`observed_parse_fact_lookup_is_content_addressed_not_get_any`]
 //!    — `parse_fact_ref_for_observed_current_content` reads a file's
@@ -36,11 +37,6 @@
 //!    `FileWholeHash` strictly: an untracked keyed canonical fails
 //!    validation. The lazy `validate_fact_signature` accepts the same
 //!    untracked fact.
-//! 4. [`skip_own_canonical_drain_hook_leaves_caches_undrained`] — the
-//!    test-only upsert hook runs the upsert pipeline but skips the
-//!    own-canonical drain, so a `project_type_store` entry for the
-//!    upserted canonical survives the hooked upsert where it would not
-//!    survive the production `upsert`.
 
 use std::sync::Arc;
 
@@ -533,125 +529,4 @@ fn strict_self_root_validation_accepts_tracked_matching_whole_hash() {
          FileWholeHash whose hash differs from the keyed canonical's current \
          content — this is the same-canonical edit detection",
     );
-}
-
-// ---------------------------------------------------------------------------
-// Item 4 — the temporary skip-own-drain test hook.
-// ---------------------------------------------------------------------------
-
-/// The skip-own-drain upsert hook runs the upsert pipeline but does NOT
-/// drain the upserted canonical's own query-identity caches.
-///
-/// Discriminating property: a `project_type_store` entry for the
-/// upserted canonical is seeded, then the file is re-upserted through
-/// the hook. The production `upsert` calls
-/// `project_type_store.evict_canonical(&canonical)` (the own-canonical
-/// drain), which removes that entry. The hook skips that call, so the
-/// seeded entry survives the hooked upsert. The companion
-/// production-path assertion confirms the same entry does NOT survive a
-/// normal `upsert` — proving the hook genuinely changes drain behavior
-/// rather than being a no-op.
-#[test]
-fn skip_own_canonical_drain_hook_leaves_caches_undrained() {
-    let canonical = "/self_root/hook_probe.vue";
-    let source_v1 =
-        "<script setup lang=\"ts\">\nconst a = 1;\n</script>\n<template><div/></template>\n";
-    let source_v2 =
-        "<script setup lang=\"ts\">\nconst a = 2;\n</script>\n<template><div/></template>\n";
-
-    // --- Production path: the own-canonical drain removes the entry. ---
-    {
-        let host = VerterHost::new_standalone(HostConfig::default());
-        let _ = host
-            .upsert(UpsertRequest {
-                canonical_id: Some(canonical.to_string()),
-                input_id: canonical.to_string(),
-                source: Arc::from(source_v1),
-                file_kind: crate::FileKind::from_path(canonical),
-                aliases: Vec::new(),
-            })
-            .expect("seed upsert succeeds");
-        // Materialise an IndexedReady so project_type_store holds an
-        // own-canonical entry.
-        host.ensure_indexed_ready(canonical)
-            .expect("IndexedReady materialises");
-        assert!(
-            host.project_type_store()
-                .indexed()
-                .get_artifacts_any(canonical)
-                .is_some(),
-            "fixture invariant: project_type_store must hold an own-canonical \
-             entry before the re-upsert",
-        );
-        // Re-upsert through the PRODUCTION path — the own-canonical
-        // drain runs.
-        let _ = host
-            .upsert(UpsertRequest {
-                canonical_id: Some(canonical.to_string()),
-                input_id: canonical.to_string(),
-                source: Arc::from(source_v2),
-                file_kind: crate::FileKind::from_path(canonical),
-                aliases: Vec::new(),
-            })
-            .expect("re-upsert succeeds");
-        assert!(
-            host.project_type_store()
-                .indexed()
-                .get_artifacts_any(canonical)
-                .is_none(),
-            "production upsert MUST drain the upserted canonical's own \
-             project_type_store entry (the own-canonical drain) — if this entry \
-             survives, the production drain did not run and the hook test below \
-             is not discriminating",
-        );
-    }
-
-    // --- Hooked path: the own-canonical drain is skipped. ---
-    {
-        let host = VerterHost::new_standalone(HostConfig::default());
-        let _ = host
-            .upsert(UpsertRequest {
-                canonical_id: Some(canonical.to_string()),
-                input_id: canonical.to_string(),
-                source: Arc::from(source_v1),
-                file_kind: crate::FileKind::from_path(canonical),
-                aliases: Vec::new(),
-            })
-            .expect("seed upsert succeeds");
-        host.ensure_indexed_ready(canonical)
-            .expect("IndexedReady materialises");
-        assert!(
-            host.project_type_store()
-                .indexed()
-                .get_artifacts_any(canonical)
-                .is_some(),
-            "fixture invariant: project_type_store must hold an own-canonical \
-             entry before the hooked re-upsert",
-        );
-        // Re-upsert through the HOOK — the own-canonical drain is
-        // skipped.
-        let _ = host
-            .upsert_skipping_own_canonical_drain_for_tests(UpsertRequest {
-                canonical_id: Some(canonical.to_string()),
-                input_id: canonical.to_string(),
-                source: Arc::from(source_v2),
-                file_kind: crate::FileKind::from_path(canonical),
-                aliases: Vec::new(),
-            })
-            .expect("hooked re-upsert succeeds");
-
-        // The discriminating assertion: the own-canonical entry SURVIVES
-        // the hooked upsert because the drain was skipped. Through the
-        // production `upsert` (above) the same entry is gone.
-        assert!(
-            host.project_type_store()
-                .indexed()
-                .get_artifacts_any(canonical)
-                .is_some(),
-            "the skip-own-drain hook MUST leave the upserted canonical's own \
-             project_type_store entry intact — a missing entry means the hook \
-             still ran the own-canonical drain and is not the discriminator \
-             scaffold the later query-identity-cache phases need",
-        );
-    }
 }

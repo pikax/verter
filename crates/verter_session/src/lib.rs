@@ -141,8 +141,8 @@ mod overlay_artifact_key_isolation_tests;
 #[cfg(test)]
 mod shallow_file_state_pinned_tests;
 // Shared substrate for query-identity self-version rooting —
-// current-content fact path, self-root signature helpers, strict
-// self-root validation, and the skip-own-drain test hook.
+// current-content fact path, self-root signature helpers, and strict
+// self-root validation.
 #[cfg(test)]
 mod query_identity_self_root_substrate_tests;
 // Per-cache self-version-root discriminators for the nine

@@ -20,23 +20,20 @@
 //!
 //! 1. Loads a `.ts`/`.vue` fixture and primes a warm query-node memo
 //!    entry by dispatching the relevant `SemanticQueryKey`.
-//! 2. Edits the entry's defining canonical through
-//!    [`crate::VerterHost::upsert_skipping_own_canonical_drain_for_tests`]
-//!    — the skip-own-drain hook runs the full upsert pipeline but
-//!    suppresses the own-canonical query-identity cache drain, so the
-//!    warm graph entry is NOT removed by the drain. The test therefore
-//!    observes whether the entry detects the same-canonical edit on
-//!    its own self-root.
+//! 2. Edits the entry's defining canonical through the production
+//!    [`crate::VerterHost::upsert`]. The upsert performs no
+//!    own-canonical query-identity cache drain, so the warm graph entry
+//!    physically survives. The test therefore observes whether the
+//!    entry detects the same-canonical edit on its own self-root.
 //! 3. Asserts the warm read (`get_validated`) MISSES — the strict
 //!    self-root validator rejects the entry because the file's whole
 //!    hash shifted — while `get_unvalidated` still finds the (now
 //!    stale) physical entry.
 //!
-//! Discriminating property: pre-self-version-rooting, the
-//! `SemanticGraphStore` query nodes did NOT validate a self-root
-//! strictly — a warm read after a same-canonical edit (with the
-//! own-canonical drain skipped) would return the stale entry. With
-//! strict self-root validation the warm read misses. Each test's
+//! Discriminating property: without strict self-root validation, the
+//! `SemanticGraphStore` query nodes would return a stale entry on a
+//! warm read after a same-canonical edit. With strict self-root
+//! validation the warm read misses. Each test's
 //! `get_unvalidated`-still-`Some` assertion proves the entry was
 //! physically present (the discrimination is the validator rejecting
 //! it, not the entry being absent).
@@ -62,7 +59,11 @@ fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())
 }
 
-/// Upsert through the production path (own-canonical drain runs).
+/// Upsert through the production [`VerterHost::upsert`] path. The
+/// upsert performs no own-canonical query-identity cache drain, so a
+/// warm graph entry for the upserted canonical physically survives and
+/// the test can observe whether its self-root validation detects the
+/// edit.
 fn upsert(host: &VerterHost, path: &str, source: &str) {
     let _ = host
         .upsert(UpsertRequest {
@@ -73,22 +74,6 @@ fn upsert(host: &VerterHost, path: &str, source: &str) {
             aliases: Vec::new(),
         })
         .expect("upsert succeeds");
-}
-
-/// Upsert through the test-only skip-own-canonical-drain hook so the
-/// upserted canonical's own query-identity cache entries are NOT
-/// drained — the warm graph entry survives the upsert and the test
-/// can observe whether its self-root validation detects the edit.
-fn upsert_skip_drain(host: &VerterHost, path: &str, source: &str) {
-    let _ = host
-        .upsert_skipping_own_canonical_drain_for_tests(UpsertRequest {
-            canonical_id: Some(path.to_string()),
-            input_id: path.to_string(),
-            source: Arc::from(source),
-            file_kind: FileKind::from_path(path),
-            aliases: Vec::new(),
-        })
-        .expect("skip-drain upsert succeeds");
 }
 
 fn resolve_decl_key(canonical: &str, name: &str) -> ResolveDeclKey {
@@ -109,11 +94,11 @@ fn resolve_decl_key(canonical: &str, name: &str) -> ResolveDeclKey {
 /// query-node memo entry.
 ///
 /// Discriminating property: the `ResolveDecl` memo entry self-roots on
-/// `scope.canonical_id`'s `FileWholeHash`. After a skip-own-drain edit
-/// the file's whole hash shifts; the strict self-root validator
-/// rejects the warm entry. Pre-self-version-rooting the entry was not
-/// strictly self-rooted and the warm read (with the own-canonical
-/// drain skipped) returned it stale.
+/// `scope.canonical_id`'s `FileWholeHash`. After the same-canonical
+/// edit the file's whole hash shifts; the strict self-root validator
+/// rejects the warm entry. Without strict self-root validation the
+/// entry would not be strictly self-rooted and the warm read would
+/// return it stale.
 #[test]
 fn resolve_decl_same_canonical_edit_rejects_warm_entry() {
     let host = host();
@@ -134,15 +119,15 @@ fn resolve_decl_same_canonical_edit_rejects_warm_entry() {
         "fixture invariant: the warm memo entry must exist after priming"
     );
 
-    // Edit the keyed canonical through the skip-own-drain hook: the
-    // own-canonical drain does NOT remove the entry, so the warm read
-    // below exercises the entry's self-root validation directly.
-    upsert_skip_drain(&host, c, "export type Foo = { a: string; b: number };\n");
+    // Edit the keyed canonical: the upsert performs no own-canonical
+    // drain, so the entry survives and the warm read below exercises
+    // the entry's self-root validation directly.
+    upsert(&host, c, "export type Foo = { a: string; b: number };\n");
 
     let ctx: &dyn ResolverContext = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
-        "the physical memo entry must still be present after the skip-drain edit \
+        "the physical memo entry must still be present after the same-canonical edit \
          — the discrimination is the validator rejecting it, not its absence"
     );
     assert!(
@@ -190,12 +175,12 @@ fn typeof_same_canonical_edit_rejects_warm_entry() {
         "fixture invariant: the warm TypeOf memo entry must exist after priming"
     );
 
-    upsert_skip_drain(&host, c, "export const val = { a: 1, b: 2 };\n");
+    upsert(&host, c, "export const val = { a: 1, b: 2 };\n");
 
     let ctx: &dyn ResolverContext = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
-        "the physical TypeOf memo entry must still be present after the skip-drain edit"
+        "the physical TypeOf memo entry must still be present after the same-canonical edit"
     );
     assert!(
         graph.get_validated(&key, ctx).is_none(),
@@ -249,8 +234,8 @@ fn instantiate_same_canonical_edit_rejects_warm_entry() {
         "fixture invariant: the warm Instantiate memo entry must exist after priming"
     );
 
-    // Edit the declaring file through the skip-own-drain hook.
-    upsert_skip_drain(
+    // Edit the declaring file.
+    upsert(
         &host,
         c,
         "export type Box<T> = { value: T; tag: string };\n",
@@ -259,7 +244,7 @@ fn instantiate_same_canonical_edit_rejects_warm_entry() {
     let ctx: &dyn ResolverContext = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
-        "the physical Instantiate memo entry must still be present after the skip-drain edit"
+        "the physical Instantiate memo entry must still be present after the same-canonical edit"
     );
     assert!(
         graph.get_validated(&key, ctx).is_none(),
@@ -316,8 +301,8 @@ fn resolve_macro_payload_same_canonical_edit_rejects_warm_entry() {
         "fixture invariant: the warm ResolveMacroPayload memo entry must exist after priming"
     );
 
-    // Edit the owning SFC through the skip-own-drain hook.
-    upsert_skip_drain(
+    // Edit the owning SFC.
+    upsert(
         &host,
         c,
         "<script setup lang=\"ts\">defineProps<{ x: string; y: number }>()</script>\n",
@@ -825,10 +810,10 @@ fn key_of_same_canonical_edit_rejects_warm_entry() {
         "fixture invariant: the warm KeyOf memo entry must exist after priming"
     );
 
-    // Edit the base node's originating file through the skip-own-drain
-    // hook so the own-canonical drain does not remove the `KeyOf`
-    // entry — the warm read exercises the entry's self-root validation.
-    upsert_skip_drain(
+    // Edit the base node's originating file. The upsert performs no
+    // own-canonical drain, so the `KeyOf` entry survives — the warm
+    // read exercises the entry's self-root validation.
+    upsert(
         &host,
         c,
         "export type Foo = { a: number; b: string; c: boolean };\n",
@@ -837,7 +822,7 @@ fn key_of_same_canonical_edit_rejects_warm_entry() {
     let ctx: &dyn ResolverContext = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
-        "the physical KeyOf memo entry must still be present after the skip-drain edit"
+        "the physical KeyOf memo entry must still be present after the same-canonical edit"
     );
     assert!(
         graph.get_validated(&key, ctx).is_none(),
@@ -889,7 +874,7 @@ fn project_path_same_canonical_edit_rejects_warm_entry() {
         "fixture invariant: the warm ProjectPath memo entry must exist after priming"
     );
 
-    upsert_skip_drain(
+    upsert(
         &host,
         c,
         "export type Foo = { a: number; b: string; c: boolean };\n",
@@ -898,7 +883,7 @@ fn project_path_same_canonical_edit_rejects_warm_entry() {
     let ctx: &dyn ResolverContext = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
-        "the physical ProjectPath memo entry must still be present after the skip-drain edit"
+        "the physical ProjectPath memo entry must still be present after the same-canonical edit"
     );
     assert!(
         graph.get_validated(&key, ctx).is_none(),
@@ -1084,10 +1069,10 @@ fn builtin_utility_instantiation_roots_on_argument_file() {
         carrier.facts,
     );
 
-    // Edit the source argument's file through the skip-own-drain hook so
-    // the own-canonical drain does not remove the utility entry — the
-    // warm read exercises the entry's self-root validation directly.
-    upsert_skip_drain(
+    // Edit the source argument's file. The upsert performs no
+    // own-canonical drain, so the utility entry survives — the warm
+    // read exercises the entry's self-root validation directly.
+    upsert(
         &host,
         c,
         "export type Foo = { a: number; b: string; d: boolean };\n",
@@ -1096,7 +1081,7 @@ fn builtin_utility_instantiation_roots_on_argument_file() {
     let ctx: &dyn ResolverContext = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
-        "the physical Pick utility memo entry must still be present after the skip-drain edit"
+        "the physical Pick utility memo entry must still be present after the same-canonical edit"
     );
     assert!(
         graph.get_validated(&key, ctx).is_none(),
@@ -1194,13 +1179,13 @@ fn non_builtin_instantiation_roots_on_type_argument_file() {
         carrier.facts,
     );
 
-    // Edit the type argument's file through the skip-own-drain hook so
-    // the own-canonical drain does not remove the `Instantiate` entry —
-    // the warm read exercises the entry's self-root validation directly.
+    // Edit the type argument's file. The upsert performs no
+    // own-canonical drain, so the `Instantiate` entry survives — the
+    // warm read exercises the entry's self-root validation directly.
     // The declaring file `gen` is UNTOUCHED, so a declaring-file-only
     // carrier would still validate; only the argument-file self-root
     // catches this edit.
-    upsert_skip_drain(
+    upsert(
         &host,
         arg,
         "export type Foo = { a: number; b: string; c: boolean };\n",
@@ -1312,12 +1297,12 @@ fn resolve_macro_payload_roots_on_type_argument_file() {
         carrier.facts,
     );
 
-    // Edit the type argument's file through the skip-own-drain hook so
-    // the own-canonical drain does not remove the `ResolveMacroPayload`
-    // entry — the warm read exercises the entry's self-root validation
+    // Edit the type argument's file. The upsert performs no
+    // own-canonical drain, so the `ResolveMacroPayload` entry survives
+    // — the warm read exercises the entry's self-root validation
     // directly. The owning SFC is UNTOUCHED, so an owner-only carrier
     // would still validate; only the argument-file self-root catches it.
-    upsert_skip_drain(
+    upsert(
         &host,
         arg,
         "export type Foo = { a: number; b: string; c: boolean };\n",

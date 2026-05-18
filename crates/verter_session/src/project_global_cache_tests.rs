@@ -148,31 +148,29 @@ fn edit_replaces_entry_without_in_place_mutation() {
     assert!(live.is_some(), "live entry under new hash must be present");
 }
 
-/// Upsert with content change calls `project_type_store.evict_canonical`
-/// alongside the legacy resolver-runtime eviction. This keeps the new
-/// caches from accumulating stale entries and is the hook Phase 2+ will
-/// rely on to guarantee lookup-time freshness without whole-hash filters.
+/// A content edit publishes a fresh `IndexedReady` under the new
+/// `whole_hash`. `FileArtifactStore` is content-addressed: a lookup
+/// under the new hash hits the fresh entry. The upsert performs no
+/// eager eviction of the prior content-addressed artifact — a stale
+/// entry may physically linger, and current reads miss it by
+/// content-hash identity rather than by an eager drain.
 #[test]
-fn content_change_evicts_project_type_store_entry() {
+fn content_change_publishes_new_indexed_entry_under_new_hash() {
     let host = host();
     upsert_ts(&host, "/w/t.ts", "export type T = { x: number }");
     let hash_v1 = indexed_whole_hash(&host, "/w/t.ts").expect("v1 IndexedReady must exist");
 
-    // After content change, ensure_facts re-materializes a fresh entry.
-    // The old entry should have been actively evicted (not just shadowed
-    // by hash mismatch) before the new materialization ran.
+    // After the content edit, materialize the fresh entry.
     upsert_ts(&host, "/w/t.ts", "export type T = { x: string }");
-
-    // Old hash lookup misses (active eviction + new insert).
-    assert!(host
-        .project_type_store()
-        .indexed()
-        .get("/w/t.ts", hash_v1)
-        .is_none());
-
-    // Re-materialize under v2 and verify the entry is present.
     let hash_v2 = indexed_whole_hash(&host, "/w/t.ts").expect("v2 IndexedReady must exist");
+
+    // The edit advanced the whole_hash.
     assert_ne!(hash_v1, hash_v2);
+
+    // The fresh entry is content-addressed under the new hash. The
+    // prior v1 artifact is neither asserted present nor absent — the
+    // store is content-addressed and may keep it as an inert candidate;
+    // current reads key on the new hash.
     assert!(host
         .project_type_store()
         .indexed()
@@ -398,55 +396,14 @@ fn component_meta_cache_invalidates_on_transitive_dep_edit_phase3() {
     );
 }
 
-/// Phase 3: editing the owner file bumps its whole-hash; a subsequent
-/// `get_component_meta` call misses at the key level, runs a cold build,
-/// and publishes under the new hash.
-#[test]
-fn component_meta_cache_invalidates_on_owner_edit_phase3() {
-    let host = host();
-    upsert_vue(
-        &host,
-        "/w/App.vue",
-        "<script setup lang=\"ts\">defineProps<{ title: string }>()</script>\n<template><div /></template>\n",
-    );
-    let _ = host
-        .get_component_meta("/w/App.vue")
-        .expect("initial cold build");
-    let initial_live = host
-        .project_type_store()
-        .counters
-        .snapshot()
-        .component_meta_live;
-    assert_eq!(initial_live, 1);
-
-    // Edit the owner — upsert evicts the cache entry for the old hash.
-    upsert_vue(
-        &host,
-        "/w/App.vue",
-        "<script setup lang=\"ts\">defineProps<{ title: string; disabled?: boolean }>()</script>\n<template><div /></template>\n",
-    );
-    let after_edit_live = host
-        .project_type_store()
-        .counters
-        .snapshot()
-        .component_meta_live;
-    assert_eq!(
-        after_edit_live, 0,
-        "upsert must evict the owner's cache entries"
-    );
-
-    // Next query repopulates under the new hash.
-    let refreshed = host
-        .get_component_meta("/w/App.vue")
-        .expect("post-edit cold build");
-    assert_eq!(refreshed.props.len(), 2);
-    let final_live = host
-        .project_type_store()
-        .counters
-        .snapshot()
-        .component_meta_live;
-    assert_eq!(final_live, 1, "new hash publishes one entry");
-}
+// The post-owner-edit component-meta recompute contract is owned by
+// the `block_2_canary_owner_self_edit` suite — `owner_self_edit_to_
+// local_prop_type_recomputes_component_meta` asserts the recomputed
+// props reflect the edit, a stronger observable than a physical
+// entry-count check. Same-canonical invalidation is lazy: a warm
+// `ComponentMetaResultDb` entry is rejected on read by its
+// self-version root, not by an eager upsert-time drain, so a
+// physical-entry-count assertion no longer characterizes the contract.
 
 /// Phase 2: direct owner imports are resolved once per owner version and
 /// reused across stages. The first lookup on an owner builds the surface;
@@ -1275,76 +1232,14 @@ fn semantic_query_second_call_hits_warm_memo_slice11() {
     );
 }
 
-/// Editing the owner file of a semantic query key invalidates the warm
-/// memo entry — the next query runs a fresh cold build and publishes
-/// under the new file version. Verified two ways: the memo entry is
-/// gone after the edit (so the lookup misses at the key level), and the
-/// re-executed query records a new dep signature matching the new file
-/// whole-hash.
-#[test]
-fn semantic_query_invalidates_on_owner_edit_slice11() {
-    use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
-    use crate::semantic_query::{DepVersion, SemanticQueryApi, SemanticQueryKey};
-
-    let host = host();
-    upsert_ts(&host, "/w/t.ts", "export type T = { x: number }");
-    // Ensure IndexedReady is materialized before the first query — the
-    // dispatcher consults shallow state as its cache-read-only source.
-    let _ = ensure_facts(&host, "/w/t.ts");
-    let dispatch = ProjectSemanticDispatch::new(&host);
-
-    let key = resolve_decl_key("/w/t.ts", "T");
-    let _ = dispatch.execute(SemanticQueryKey::ResolveDecl(key.clone()));
-    let warm_before_edit = host
-        .project_type_store()
-        .semantic_graph()
-        .get_unvalidated(&SemanticQueryKey::ResolveDecl(key.clone()))
-        .expect("entry must be warm after first ask");
-    let hash_v1 = warm_before_edit
-        .dep_signature
-        .iter()
-        .find_map(|(_, dv)| match dv {
-            DepVersion::WholeHash(h) => Some(*h),
-            _ => None,
-        })
-        .expect("pre-edit dep signature must carry a whole-hash fact");
-
-    // Edit the file — the semantic memo entry for this scope must drop
-    // so the next query reflects the new file version.
-    upsert_ts(&host, "/w/t.ts", "export type T = { x: number; y: string }");
-
-    // Warm entry keyed on the old canonical is gone.
-    assert!(
-        host.project_type_store()
-            .semantic_graph()
-            .get_unvalidated(&SemanticQueryKey::ResolveDecl(key.clone()))
-            .is_none(),
-        "post-edit: warm entry for the edited canonical must be invalidated"
-    );
-
-    // Re-materialize post-edit so the dispatcher sees the new shallow
-    // state — production callers always materialize via a higher-level
-    // request, but tests exercise the semantic memo directly.
-    let _ = ensure_facts(&host, "/w/t.ts");
-    let _ = dispatch.execute(SemanticQueryKey::ResolveDecl(key.clone()));
-    let warm_after_edit = host
-        .project_type_store()
-        .semantic_graph()
-        .get_unvalidated(&SemanticQueryKey::ResolveDecl(key))
-        .expect("post-edit entry must be warm after rebuild");
-    let hash_v2 = warm_after_edit
-        .dep_signature
-        .iter()
-        .find_map(|(_, dv)| match dv {
-            DepVersion::WholeHash(h) => Some(*h),
-            _ => None,
-        })
-        .expect("post-edit dep signature must carry a whole-hash fact");
-    assert_ne!(
-        hash_v1, hash_v2,
-        "file edit must produce a fresh dep signature pointing at the new whole-hash"
-    );
-}
+// The same-canonical-edit invalidation contract for a `ResolveDecl`
+// semantic query is owned by `semantic_graph_self_root_tests` —
+// `resolve_decl_same_canonical_edit_rejects_warm_entry` is the direct
+// canary for that scenario. Same-canonical invalidation is lazy: the
+// stale memo entry may physically linger and is rejected on read by
+// the strict self-version-root validator (`get_validated`), so an
+// unvalidated physical-presence probe (`get_unvalidated(...).is_none()`)
+// no longer characterizes the contract.
 
 /// Editing an unrelated file keeps warm semantic memo entries intact.
 /// The dep-signature on the warm entry doesn't reference the unrelated

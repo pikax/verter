@@ -16,15 +16,12 @@
 //!    warm and unchanged (negative: the substrate must NOT
 //!    over-invalidate).
 //!
-//! Every mutation routes through the skip-own-drain hook (the
-//! [`harness::upsert`] helper → `upsert_skipping_own_canonical_drain_for_tests`):
-//! no eager cascade runs and the post-commit own-canonical drain is
-//! suppressed, so only lazy fact-validation drives invalidation (and,
-//! for the over-invalidation guard, only fact-validation may decide to
-//! leave a warm result alone). For the over-invalidation guard the
-//! edited / added file is unrelated to the owner, so suppressing the
-//! drain on that unrelated canonical cannot perturb the owner's warm
-//! entry — the guard still proves path-precision.
+//! Every mutation routes through the production [`harness::upsert`]
+//! helper (plain `VerterHost::upsert`): no eager cascade runs and the
+//! upsert performs no own-canonical query-identity cache drain, so only
+//! lazy fact-validation drives invalidation (and, for the
+//! over-invalidation guard, only fact-validation may decide to leave a
+//! warm result alone).
 
 #![cfg(test)]
 
