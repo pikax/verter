@@ -72,3 +72,4 @@ Use this file as the neutral entry point. Reuse the shared sources below instead
 - Test design or verification planning: load `/testing`.
 - VS Code extension or LSP E2E verification: load `/e2e-vscode-testing`.
 - Rust hot paths or allocation-sensitive work: load `/rust-performance`.
+- Driving a large multi-block plan, refactor, migration, or cutover autonomously (orchestrator + sub-agents + dual review): load `/multi-agent-orchestration`.

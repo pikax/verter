@@ -340,6 +340,10 @@ Execute plans fully in one pass without intermediate checkpoints unless explicit
 Once execution starts, complete the approved plan end-to-end in the same pass. Do not pause, defer scope, or leave planned work unfinished because of estimated time or effort unless the user explicitly changes the request.
 Do not rewrite the plan into a smaller or safer variant during execution because the correct path is breaking, broad, or labor-intensive. Approved plans are expected to land as written unless the user explicitly re-scopes them.
 
+### Orchestrating Large Plans
+
+For a large multi-block plan, refactor, migration, or staged cutover executed autonomously, drive it via the `/multi-agent-orchestration` skill rather than improvising the coordination. A pure orchestrator delegates each block to implementer/reviewer/fix sub-agents, gates every block on dual review (an independent reviewer plus a `codex` review), runs per-block fix cycles until the re-review is clean, consults `codex` on any architectural doubt or sub-agent escalation, and verifies sub-agent reports against git state (trust but verify). This keeps the orchestrator's context clean enough to coordinate a plan far larger than one context window.
+
 ### Self-Review
 
 After completing a plan, review the full implementation before declaring done:
@@ -465,3 +469,4 @@ Detailed reference material is available as on-demand skills (loaded automatical
 | `/e2e-vscode-testing`    | VS Code E2E test fixtures, helpers API, adding new tests                                         |
 | `/wsl-e2e-testing`       | WSL E2E tests to reproduce Linux/CI failures, fixture matrix                                     |
 | `/rust-performance`      | Rust optimization patterns, allocation hierarchy, CodeTransform API                              |
+| `/multi-agent-orchestration` | Driving a large multi-block plan, refactor, migration, or staged cutover autonomously: pure orchestrator + implementer/reviewer/fix sub-agents, dual review (independent + codex), per-block fix cycles, trust-but-verify |
