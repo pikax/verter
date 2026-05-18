@@ -3938,6 +3938,16 @@ mod foundations_guards {
             "crates/verter_session/src/component_meta_audit/mod.rs",
             "crates/verter_session/src/component_meta_caches.rs",
             "crates/verter_session/src/component_meta_materialize.rs",
+            // Authoritative per-file artifact storage layer —
+            // `FileArtifactKey`, `FileArtifacts`, the content-addressed
+            // + overlay-scoped read/write surface, the per-canonical
+            // retention sweep, and the promotion-aware LRU all live in
+            // one file so the multi-candidate cache invariants stay
+            // co-located. Adding the overlay-scoped key surface pushed
+            // it over the line; a split (key/store/eviction modules)
+            // is the eventual cleanup but is out of scope for the
+            // overlay-detection fix.
+            "crates/verter_session/src/file_artifact_store.rs",
             "crates/verter_session/src/host_manage.rs",
             "crates/verter_session/src/host_manage/analysis_io.rs",
             // Macro-participation classification + cross-file dep
@@ -9555,13 +9565,6 @@ mod content_pinned_artifact_read_guards {
              sibling is `authoritative_current_content_hash`.",
         ),
         (
-            "crates/verter_session/src/host_analyze_audit.rs",
-            "`analyze_with_audit` probes `get_any().is_some()` BEFORE \
-             constructing the audit registration — a diagnostics 'was \
-             anything cached?' probe. A stale answer changes only an audit \
-             counter, never a resolved value or its fact validation.",
-        ),
-        (
             "crates/verter_session/src/host_manage/eval_program.rs",
             "`analysis_source_exists` probes `get_any().is_some()` as a \
              pure existence check after the scheduler authority \
@@ -9655,6 +9658,26 @@ mod content_pinned_artifact_read_guards {
     /// by `rustfmt`. The `route_owned_shallow().get_any(` chain is a
     /// DIFFERENT db (`RouteOwnedShallowDb`) and is deliberately NOT
     /// matched: this guard targets `FileArtifactStore` reads only.
+    ///
+    /// ## Known limitation — fluent chains only
+    ///
+    /// This scanner matches only the **fluent** form where `.get_any(` /
+    /// `.get_artifacts_any(` immediately follows `indexed()` (modulo
+    /// whitespace). A variable-bound read —
+    /// `let s = …indexed(); s.get_any(c)` — splits the `indexed()`
+    /// receiver from the call across a binding and is NOT flagged.
+    /// Detecting that form by text is not reliable: a bare
+    /// `.get_any(`/`.get_artifacts_any(` on a binding cannot be
+    /// attributed to a `FileArtifactStore` without false positives
+    /// against the identically-named methods on other dbs
+    /// (`route_owned_shallow()`, `member_display_facts()`, …) — that
+    /// needs real name resolution, not a scanner. No current
+    /// `verter_session` production file uses the var-bound form, and
+    /// the structural guard in
+    /// `tests/structural_carrier_no_get_any_guard.rs` covers the
+    /// carrier-type angle. If a var-bound `FileArtifactStore` read is
+    /// ever introduced, convert it to the fluent form (so this guard
+    /// catches it) or route it through a content-pinned named helper.
     fn has_direct_file_artifact_get_any(src: &str) -> bool {
         let needle = "indexed()";
         let mut search_from = 0;

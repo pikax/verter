@@ -494,8 +494,10 @@ impl VerterHost {
 
         // Overlay-priority: when the session view carries parse artifacts
         // for this canonical, return them so the session path sees the
-        // overlay content. `view.parse_artifacts` is strict-by-content-hash,
-        // so this only triggers when an overlay candidate was published.
+        // overlay content. `view.parse_artifacts` reads the strict
+        // content-addressed key (overlay-scoped for an overlaid
+        // canonical, legacy otherwise), so this only triggers when a
+        // matching candidate was published.
         if let Some(view) = view {
             if let Some(facts) = view.parse_artifacts(canonical_id) {
                 let inputs = ExternalTypeResolutionInputs {

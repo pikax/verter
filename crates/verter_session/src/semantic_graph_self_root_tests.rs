@@ -1421,11 +1421,17 @@ fn session_overlay_warm_validation_matrix() {
          must differ — otherwise the matrix cases are indistinguishable",
     );
 
-    // Publish the overlay `IndexedReady` candidate under the overlay
-    // hash so the session view tracks an overlay artifact for the
-    // canonical (multi-candidate sibling of the base artifact).
+    // Publish the overlay `IndexedReady` candidate under the
+    // overlay-scoped key so the session view tracks an overlay
+    // artifact for the canonical (multi-candidate sibling of the base
+    // artifact).
     let overlay_indexed = host
-        .materialize_overlay_indexed_ready(canonical, &overlay_source, overlay_hash)
+        .materialize_overlay_indexed_ready_with_view(
+            canonical,
+            &overlay_source,
+            overlay_hash,
+            &view,
+        )
         .expect("overlay IndexedReady must materialise");
     assert_eq!(
         overlay_indexed.whole_hash, overlay_hash,
@@ -1678,9 +1684,15 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
     );
 
     // Publish the overlay `IndexedReady` + `FileArtifacts` candidate
-    // under the overlay hash (multi-candidate sibling of the base).
+    // under the overlay-scoped key (multi-candidate sibling of the
+    // base).
     let _overlay_indexed = host
-        .materialize_overlay_indexed_ready(canonical, &overlay_source, overlay_hash)
+        .materialize_overlay_indexed_ready_with_view(
+            canonical,
+            &overlay_source,
+            overlay_hash,
+            &view,
+        )
         .expect("overlay IndexedReady must materialise");
 
     // Recover the `SyntacticExportSet` parse-fact hash for each content

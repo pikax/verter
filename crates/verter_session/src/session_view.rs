@@ -116,6 +116,36 @@ pub trait SessionView: Send + Sync {
         None
     }
 
+    /// Session-overlay artifact-store discriminator for `canonical`.
+    ///
+    /// Returns `Some(discriminator)` **only** when this view carries an
+    /// explicit overlay for `canonical` — the same condition under
+    /// which [`Self::overlay_content_hash_for`] reports `Some`. The
+    /// discriminator is a non-zero [`Hash16`] derived from the view's
+    /// overlay-set [`Self::fingerprint`]; it is the `parse_env_hash`
+    /// dimension of [`crate::file_artifact_store::FileArtifactKey::overlay_scoped`].
+    ///
+    /// Purpose: an overlay `IndexedReady` whose source bytes are
+    /// identical to the base file has a content hash equal to the
+    /// base hash, so a [`crate::file_artifact_store::FileArtifactKey::legacy`]
+    /// key for it would collide with the base artifact. The overlay
+    /// materialiser can resolve a relative import to an overlay-only
+    /// helper the base workspace cannot see, so the overlay's import
+    /// routes genuinely diverge from the base's — a collision would
+    /// either poison base reads with session routes or silently serve
+    /// the overlay base routes. Keying the overlay artifact under
+    /// `overlay_scoped(canonical, hash, discriminator)` keeps it
+    /// isolated from the base (`parse_env_hash = LEGACY_PARSE_ENV_HASH`)
+    /// and from other sessions (distinct overlay-set fingerprints).
+    ///
+    /// Default returns `None` — base-only views ([`HostView`],
+    /// [`HostViewRef`]) never carry overlays, so their reads stay on
+    /// the legacy key. Overlay-bearing views ([`OverlaidView`],
+    /// [`OverlaidViewRef`]) override this.
+    fn overlay_artifact_discriminator(&self, _canonical: &str) -> Option<Hash16> {
+        None
+    }
+
     /// Return cached file artifacts (indexed-ready + facts +
     /// parsed-edges + parse_stable_hash + augmentations) for a
     /// canonical id, if a content-matching artifact bundle is
@@ -441,11 +471,14 @@ impl SessionView for HostView {
 ///
 /// The overlay map is consulted first for `source` and
 /// `content_hash_for`. Canonicals absent from the overlay fall
-/// through to the base host. Overlay artifacts are produced on
-/// demand under the overlay's content hash when the artifact
-/// store learns to key on the overlay content hash; until that
-/// wiring lands the artifact-side path falls through to the
-/// base host.
+/// through to the base host. An overlay `IndexedReady` candidate is
+/// materialised on demand and published into
+/// [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore)
+/// under an
+/// [`overlay_scoped`](crate::file_artifact_store::FileArtifactKey::overlay_scoped)
+/// key — the overlay content hash plus this view's overlay-set
+/// discriminator — so it stays isolated from the base artifact even
+/// when the overlay bytes are identical to the base file.
 ///
 /// `OverlaidView` is `Send + Sync` because its overlay map is
 /// behind an `Arc<FxHashMap>`; mutation happens by constructing a
@@ -538,21 +571,43 @@ impl SessionView for OverlaidView {
         self.overlay_hashes.get(canonical).copied()
     }
 
+    fn overlay_artifact_discriminator(&self, canonical: &str) -> Option<Hash16> {
+        // `Some` exactly when an explicit overlay covers `canonical`,
+        // matching `overlay_content_hash_for`. The value namespaces
+        // this view's overlay candidates away from the base artifact
+        // (and from other sessions) in the `parse_env_hash` dimension.
+        self.overlay_hashes
+            .get(canonical)
+            .map(|_| overlay_artifact_discriminator_from_fingerprint(self.fingerprint()))
+    }
+
     fn parse_artifacts(
         &self,
         canonical: &str,
     ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
-        // Strict by `(canonical, content_hash_for(canonical))`. An
-        // overlay candidate is published under the overlay's
-        // content hash by `materialize_overlay_indexed_ready`; the
-        // base candidate lives under the base host's content hash.
-        // Reading via the strict `(canonical, hash)` key prevents
-        // an overlay-bearing view from observing the base
-        // candidate (which would be the wrong artifact bundle for
-        // the overlay's source).
+        // Strict by the full content-addressed key. An overlay
+        // candidate is published by `materialize_overlay_indexed_ready_with_view`
+        // under an `overlay_scoped` key (overlay content hash +
+        // overlay-set discriminator); the base candidate lives under
+        // the `legacy` key (overlay content hash, zeroed
+        // `parse_env_hash`). Reading via the discriminator-matched
+        // key prevents an overlay-bearing view from observing the
+        // base candidate — which would be the wrong artifact bundle
+        // for the overlay's source, and is a real divergence when the
+        // overlay bytes are identical to the base (the overlay can
+        // resolve an overlay-only relative helper the base cannot).
         let content_hash = self.content_hash_for(canonical)?;
-        let key =
-            crate::file_artifact_store::FileArtifactKey::legacy(Arc::from(canonical), content_hash);
+        let key = match self.overlay_artifact_discriminator(canonical) {
+            Some(discriminator) => crate::file_artifact_store::FileArtifactKey::overlay_scoped(
+                Arc::from(canonical),
+                content_hash,
+                discriminator,
+            ),
+            None => crate::file_artifact_store::FileArtifactKey::legacy(
+                Arc::from(canonical),
+                content_hash,
+            ),
+        };
         self.base.project_type_store().indexed().get_artifacts(&key)
     }
 
@@ -813,6 +868,17 @@ impl SessionView for OverlaidViewRef<'_> {
         self.overlay_hashes.get(canonical).copied()
     }
 
+    fn overlay_artifact_discriminator(&self, canonical: &str) -> Option<Hash16> {
+        // `Some` exactly when an explicit overlay covers `canonical`
+        // (and it is not tombstoned), matching `overlay_content_hash_for`.
+        if self.overlay_tombstones.contains(canonical) {
+            return None;
+        }
+        self.overlay_hashes
+            .get(canonical)
+            .map(|_| overlay_artifact_discriminator_from_fingerprint(self.fingerprint()))
+    }
+
     fn is_tombstoned(&self, canonical: &str) -> bool {
         self.overlay_tombstones.contains(canonical)
     }
@@ -821,19 +887,28 @@ impl SessionView for OverlaidViewRef<'_> {
         &self,
         canonical: &str,
     ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
-        // Strict by `(canonical, content_hash_for(canonical))`. The
-        // overlay candidate is published into `FileArtifactStore`
-        // by `materialize_overlay_indexed_ready` under the overlay's
-        // content hash; this read goes through the same strict key
-        // so the overlay-bearing view observes the overlay bundle
-        // (never the base candidate). Tombstoned canonicals return
-        // `None` regardless of what the base says.
+        // Strict by the full content-addressed key. The overlay
+        // candidate is published by `materialize_overlay_indexed_ready_with_view`
+        // under an `overlay_scoped` key (overlay content hash +
+        // overlay-set discriminator); the discriminator-matched read
+        // keeps the overlay-bearing view off the base candidate.
+        // Tombstoned canonicals return `None` regardless of what the
+        // base says.
         if self.overlay_tombstones.contains(canonical) {
             return None;
         }
         let content_hash = self.content_hash_for(canonical)?;
-        let key =
-            crate::file_artifact_store::FileArtifactKey::legacy(Arc::from(canonical), content_hash);
+        let key = match self.overlay_artifact_discriminator(canonical) {
+            Some(discriminator) => crate::file_artifact_store::FileArtifactKey::overlay_scoped(
+                Arc::from(canonical),
+                content_hash,
+                discriminator,
+            ),
+            None => crate::file_artifact_store::FileArtifactKey::legacy(
+                Arc::from(canonical),
+                content_hash,
+            ),
+        };
         self.base.project_type_store().indexed().get_artifacts(&key)
     }
 
@@ -897,6 +972,47 @@ impl SessionView for OverlaidViewRef<'_> {
     fn tombstoned_canonicals(&self) -> Vec<String> {
         self.overlay_tombstones.iter().cloned().collect()
     }
+}
+
+/// Derive the [`crate::file_artifact_store::FileArtifactKey::overlay_scoped`]
+/// `parse_env_hash` discriminator from a view's overlay-set
+/// [`SessionView::fingerprint`].
+///
+/// The discriminator namespaces a session's overlay `IndexedReady`
+/// candidates away from the base artifact (always
+/// `parse_env_hash = LEGACY_PARSE_ENV_HASH`, i.e. `[0u8; 16]`) and away
+/// from other sessions (distinct overlay-set fingerprints → distinct
+/// discriminators). It MUST be non-zero so it can never alias the
+/// legacy key.
+///
+/// Layout: a fixed 8-byte namespace tag in the high half guarantees the
+/// result is non-zero even for the (precondition-excluded) `fingerprint
+/// == 0` case, and keeps the value clear of any real env hash; the
+/// fingerprint occupies the low 8 bytes so distinct overlay sets map to
+/// distinct discriminators.
+fn overlay_artifact_discriminator_from_fingerprint(fingerprint: u64) -> Hash16 {
+    // Arbitrary fixed namespace tag — distinguishes an overlay-scoped
+    // key from any zeroed / real `parse_env_hash` value.
+    const OVERLAY_DISCRIMINATOR_TAG: [u8; 8] = *b"vovl-art";
+    let fp = fingerprint.to_le_bytes();
+    [
+        OVERLAY_DISCRIMINATOR_TAG[0],
+        OVERLAY_DISCRIMINATOR_TAG[1],
+        OVERLAY_DISCRIMINATOR_TAG[2],
+        OVERLAY_DISCRIMINATOR_TAG[3],
+        OVERLAY_DISCRIMINATOR_TAG[4],
+        OVERLAY_DISCRIMINATOR_TAG[5],
+        OVERLAY_DISCRIMINATOR_TAG[6],
+        OVERLAY_DISCRIMINATOR_TAG[7],
+        fp[0],
+        fp[1],
+        fp[2],
+        fp[3],
+        fp[4],
+        fp[5],
+        fp[6],
+        fp[7],
+    ]
 }
 
 /// Hash the `(canonical, content_hash)` pairs of an overlay map (plus

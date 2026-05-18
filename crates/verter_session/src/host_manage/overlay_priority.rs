@@ -10,14 +10,18 @@
 //! ## Authority chain
 //!
 //! - `view.is_tombstoned(canonical)` → short-circuit `None` / `false`.
-//! - `view.source(canonical)` → publish an overlay-content
+//! - `view.overlay_content_hash_for(canonical)` is `Some` (an explicit
+//!   overlay covers the canonical) → publish an overlay-content
 //!   [`IndexedReady`](crate::project_type_store::IndexedReady) candidate
-//!   keyed by the overlay's content hash, then return it. Base-host
-//!   reads never see the candidate because the
-//!   [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore)
-//!   slot is content-addressed.
-//! - View has no overlay → fall through to the host's own
-//!   `ensure_indexed_ready` / `ensure_loaded` path.
+//!   under an
+//!   [`overlay_scoped`](crate::file_artifact_store::FileArtifactKey::overlay_scoped)
+//!   key (overlay content hash + overlay-set discriminator), then
+//!   return it. Base-host reads stay on the
+//!   [`legacy`](crate::file_artifact_store::FileArtifactKey::legacy)
+//!   key and never reach the candidate — even when the overlay bytes
+//!   are identical to the base file.
+//! - View has no overlay for the canonical → fall through to the
+//!   host's own `ensure_indexed_ready` / `ensure_loaded` path.
 
 use std::sync::Arc;
 
@@ -41,24 +45,26 @@ pub(crate) fn ensure_loaded_with_view(
     if view.is_tombstoned(canonical_id) {
         return false;
     }
-    // Distinguish overlay sources from base-passthrough sources: the
-    // base-only views (`HostView`, `HostViewRef`) delegate `source`
-    // to the base host, so `source(canonical).is_some()` fires for
-    // every loaded canonical and would otherwise bypass the host's
-    // `ensure_loaded` accounting (and the underlying scheduler-load
-    // path). Only short-circuit when the view's content hash for the
-    // canonical differs from the base host's recorded content hash —
-    // i.e., the view actually carries an overlay candidate.
-    let base_hash = host
-        .effective_file_state(canonical_id, None)
-        .map(|state| state.whole_hash);
-    let view_hash = view.content_hash_for(canonical_id);
-    let view_has_overlay = match (view_hash, base_hash) {
-        (Some(v), Some(b)) => v != b,
-        (Some(_), None) => view.source(canonical_id).is_some(),
-        _ => false,
-    };
-    if view_has_overlay {
+    // Distinguish an explicit overlay-Upsert from a base-passthrough
+    // source: the base-only views (`HostView`, `HostViewRef`) delegate
+    // `source` to the base host, so `source(canonical).is_some()`
+    // fires for every loaded canonical and would otherwise bypass the
+    // host's `ensure_loaded` accounting (and the underlying
+    // scheduler-load path).
+    //
+    // Overlay detection uses the **strict** `overlay_content_hash_for`,
+    // NOT a `content_hash_for`-vs-base hash comparison. `content_hash_for`
+    // falls through to the base host's `FileArtifactStore`-derived
+    // content hash for an unmasked canonical — the same content-agnostic
+    // scan as `get_any`, which can surface a STALE lingering artifact's
+    // hash once the own-canonical drain is retired; a stale hash that
+    // differs from the scheduler's current `base_hash` would misreport
+    // an overlay for a canonical with NONE. `overlay_content_hash_for`
+    // reports `Some` ONLY for an actual overlay-Upsert — for which the
+    // overlay source is the content authority and the scheduler does
+    // not need to load anything; an unmasked canonical correctly falls
+    // through to `host.ensure_loaded`.
+    if view.overlay_content_hash_for(canonical_id).is_some() {
         return true;
     }
     host.ensure_loaded(canonical_id)

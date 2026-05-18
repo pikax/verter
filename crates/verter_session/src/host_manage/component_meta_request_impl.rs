@@ -274,10 +274,11 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
         // inputs MUST reflect overlay content. The shared
         // `capture_component_meta_inputs_with_view` helper publishes
         // the overlay's IndexedReady into FileArtifactStore on first
-        // demand (multi-candidate, keyed by overlay content_hash) so
-        // resolver-tier reads through SessionResolverContext find the
-        // overlay; the helper then constructs CapturedComponentMetaInputs
-        // from the overlay snapshot.
+        // demand (multi-candidate; an overlay-covered canonical is
+        // keyed under the overlay-scoped key) so resolver-tier reads
+        // through SessionResolverContext find the overlay; the helper
+        // then constructs CapturedComponentMetaInputs from the overlay
+        // snapshot.
         self.host
             .capture_component_meta_inputs_with_view(canonical, self.view)
     }

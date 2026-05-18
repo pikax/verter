@@ -439,10 +439,12 @@ impl VerterHost {
     ///
     /// When `view` carries an overlay source for the owner canonical,
     /// the helper materialises the overlay's IndexedReady candidate
-    /// (multi-candidate, keyed by overlay content_hash) and constructs
-    /// the captured inputs from the overlay's snapshot + eval_source.
-    /// Otherwise falls through to the base-only `capture_component_meta_inputs`
-    /// path. Resolver-tier reads downstream through
+    /// (multi-candidate; an overlay-covered canonical is published
+    /// under the overlay-scoped key — overlay content hash plus the
+    /// overlay-set discriminator) and constructs the captured inputs
+    /// from the overlay's snapshot + eval_source. Otherwise falls
+    /// through to the base-only `capture_component_meta_inputs` path.
+    /// Resolver-tier reads downstream through
     /// [`SessionResolverContext`](crate::resolver_core::SessionResolverContext)
     /// observe the overlay candidate via
     /// [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore).
@@ -455,12 +457,20 @@ impl VerterHost {
         let capture_started = audit_enabled.then(Instant::now);
         // Overlay-priority: when the view carries an overlay for the
         // owner canonical, materialise its IndexedReady candidate
-        // first so the base-host capture below picks it up under the
-        // overlay's content_hash via the multi-candidate file-artifact
-        // store. The base host's scheduler stays untouched (R17).
+        // first so the base-host capture below picks it up via the
+        // multi-candidate file-artifact store. The materialiser keys
+        // the candidate under an `overlay_scoped` key when the view
+        // carries an explicit overlay (and the legacy key for a
+        // base-passthrough view, which is base-equivalent). The base
+        // host's scheduler stays untouched (R17).
         let overlay_facts = if let Some(overlay_source) = view.source(canonical) {
             view.content_hash_for(canonical).and_then(|overlay_hash| {
-                self.materialize_overlay_indexed_ready(canonical, &overlay_source, overlay_hash)
+                self.materialize_overlay_indexed_ready_with_view(
+                    canonical,
+                    &overlay_source,
+                    overlay_hash,
+                    view,
+                )
             })
         } else {
             None

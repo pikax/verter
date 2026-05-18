@@ -165,9 +165,11 @@ impl VerterHost {
     /// 1. `derived_raw_cache().get(owner).import_routes` — the
     ///    owner's per-import resolution table; needed to translate
     ///    `dep.import_source` to a canonical id.
-    /// 2. `project_type_store.indexed().get_artifacts_any(dep)` —
-    ///    the dependency's `FileArtifactStore` entry; needed to look
-    ///    up the `Member` / `MemberPresence` fact hashes.
+    /// 2. `VerterHost::current_content_pinned_artifacts(dep)` — the
+    ///    dependency's content-pinned `FileArtifacts` entry; needed to
+    ///    look up the `Member` / `MemberPresence` fact hashes. The
+    ///    content pin (scheduler-authoritative hash, artifact-only
+    ///    fallback) keeps the lookup off a stale lingering artifact.
     ///
     /// On a cold compute of the owner SFC neither of those is
     /// pre-populated, so without this prefetch the tracer silently

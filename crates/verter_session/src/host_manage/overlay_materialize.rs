@@ -4,6 +4,16 @@
 //! into [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore)
 //! as a multi-candidate sibling of the base host's IndexedReady.
 //!
+//! When the bound [`SessionView`](crate::session_view::SessionView)
+//! carries an explicit overlay for the canonical, the candidate is
+//! published under an
+//! [`overlay_scoped`](crate::file_artifact_store::FileArtifactKey::overlay_scoped)
+//! key — the overlay content hash plus the view's overlay-set
+//! discriminator — so it stays isolated from the base artifact (always
+//! the [`legacy`](crate::file_artifact_store::FileArtifactKey::legacy)
+//! key) and from other sessions, even when the overlay source bytes are
+//! identical to the base file.
+//!
 //! The resolver-tier seal scope reaches this body via
 //! [`crate::resolver_core::ResolverContext::materialize_overlay_indexed_ready`];
 //! the impl on [`crate::VerterHost`] delegates here.
@@ -25,15 +35,14 @@ use super::{dep_edges_from_resolutions, is_raw_import_specifier_id, HostShallowI
 /// view-aware overlay materialiser to remove prewarm-order dependence
 /// when an owner overlay imports overlay-only helpers.
 ///
-/// Returns `None` when `view` is absent, when `specifier` is not a
-/// relative import, or when no extension candidate resolves through
-/// `view.content_hash_for` / `view.source`.
+/// Returns `None` when `specifier` is not a relative import, or when
+/// no extension candidate resolves through `view.content_hash_for` /
+/// `view.source`.
 fn resolve_relative_overlay_candidate(
-    view: Option<&dyn crate::session_view::SessionView>,
+    view: &dyn crate::session_view::SessionView,
     owner_canonical: &str,
     specifier: &str,
 ) -> Option<String> {
-    let view = view?;
     if !specifier.starts_with('.') {
         return None;
     }
@@ -74,35 +83,14 @@ fn resolve_relative_overlay_candidate(
 }
 
 impl VerterHost {
-    /// Materialise an [`IndexedReady`](crate::project_type_store::IndexedReady)
-    /// candidate for `canonical_id` from `overlay_source` and publish it
-    /// under the overlay's content hash so two concurrent sessions
-    /// with different overlays coexist as candidates in
-    /// [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore).
+    /// View-aware overlay materialiser.
     ///
-    /// View-less wrapper: delegates to
-    /// [`Self::materialize_overlay_indexed_ready_with_view`] with no
-    /// active view, so the import-route resolution falls back to the
-    /// workspace-and-disk path. Preserved for callers that have not
-    /// yet been migrated to the view-aware variant.
-    pub(crate) fn materialize_overlay_indexed_ready(
-        &self,
-        canonical_id: &str,
-        overlay_source: &Arc<str>,
-        overlay_whole_hash: crate::types::Hash16,
-    ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
-        self.materialize_overlay_indexed_ready_inner(
-            canonical_id,
-            overlay_source,
-            overlay_whole_hash,
-            None,
-        )
-    }
-
-    /// View-aware overlay materialiser. Identical to
-    /// [`Self::materialize_overlay_indexed_ready`] except that the
-    /// import-route resolution prefers overlay candidates surfaced by
-    /// the supplied `SessionView`.
+    /// Materialises an [`IndexedReady`](crate::project_type_store::IndexedReady)
+    /// candidate for `canonical_id` from `overlay_source` and publishes
+    /// it into [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore)
+    /// as a multi-candidate sibling of the base host's `IndexedReady`.
+    /// Import-route resolution prefers overlay candidates surfaced by
+    /// the supplied [`SessionView`](crate::session_view::SessionView).
     ///
     /// Owner overlays that import overlay-only helpers
     /// (`/src/Button.vue` importing `./theme`, `./schema`, `./tv` where
@@ -110,6 +98,16 @@ impl VerterHost {
     /// `view.content_hash_for(candidate)` / `view.source(candidate)`,
     /// removing the prewarm-order dependence that would otherwise force
     /// helpers to be upserted before the owner.
+    ///
+    /// When the view carries an explicit overlay for `canonical_id`
+    /// (`view.overlay_artifact_discriminator(...)` is `Some`) the
+    /// candidate is published under an
+    /// [`overlay_scoped`](crate::file_artifact_store::FileArtifactKey::overlay_scoped)
+    /// key so it never collides with the base artifact — see the
+    /// publish site below. A base-passthrough view (no overlay for the
+    /// canonical) yields the legacy key, which is correct: without an
+    /// overlay there is no overlay-only route discovery and the
+    /// candidate is base-equivalent.
     pub(crate) fn materialize_overlay_indexed_ready_with_view(
         &self,
         canonical_id: &str,
@@ -117,33 +115,40 @@ impl VerterHost {
         overlay_whole_hash: crate::types::Hash16,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
-        self.materialize_overlay_indexed_ready_inner(
-            canonical_id,
-            overlay_source,
-            overlay_whole_hash,
-            Some(view),
-        )
-    }
-
-    fn materialize_overlay_indexed_ready_inner(
-        &self,
-        canonical_id: &str,
-        overlay_source: &Arc<str>,
-        overlay_whole_hash: crate::types::Hash16,
-        view: Option<&dyn crate::session_view::SessionView>,
-    ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
         let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
         let canonical_id = normalized_canonical_id.as_ref();
 
+        // Overlay artifact-store discriminator. `Some` when the bound
+        // view carries an explicit overlay for this canonical — the
+        // overlay `IndexedReady` is then keyed under an `overlay_scoped`
+        // key so it never collides with the base artifact, even when
+        // the overlay bytes are identical to the base (the overlay can
+        // resolve an overlay-only relative helper the base cannot, so
+        // the import routes genuinely diverge). A base-passthrough view
+        // (no overlay for the canonical) yields `None` → the legacy
+        // key, which is correct: without an overlay the materialiser
+        // has no overlay-only route discovery, so its artifact is
+        // base-equivalent.
+        let overlay_discriminator = view.overlay_artifact_discriminator(canonical_id);
+
         // Fast path: an overlay materialisation for the same content
-        // hash already lives in the file-artifact store. Multi-
-        // candidate storage keeps base and overlay candidates separate
-        // by content_hash, so this lookup serves only the overlay.
-        if let Some(indexed) = self
-            .project_type_store
-            .indexed()
-            .get(canonical_id, overlay_whole_hash)
-        {
+        // hash already lives in the file-artifact store under the
+        // overlay-scoped key (or the legacy key when the bound view
+        // carries no overlay for this canonical). Multi-candidate
+        // storage keeps base and overlay candidates separate, so this
+        // lookup serves only the overlay.
+        let fast_hit = match overlay_discriminator {
+            Some(discriminator) => self.project_type_store.indexed().get_overlay_scoped(
+                canonical_id,
+                overlay_whole_hash,
+                discriminator,
+            ),
+            None => self
+                .project_type_store
+                .indexed()
+                .get(canonical_id, overlay_whole_hash),
+        };
+        if let Some(indexed) = fast_hit {
             return Some(indexed);
         }
 
@@ -360,33 +365,44 @@ impl VerterHost {
         });
 
         // Publish via the multi-candidate surface — base candidate (if
-        // any) under its own content hash stays untouched.
+        // any) under its own legacy key stays untouched.
         //
-        // TODO(follow-up — Codex P1.2 / fix-agent P1.2): the overlay
-        // candidate is published into the shared `FileArtifactStore`
-        // under the overlay's content hash. Base-host paths that read
-        // via content-agnostic lookups (`get_any` /
-        // `content_hash_for_canonical`, used by `read_analysis_source`
-        // and `HostView`) can therefore observe overlay-published
-        // candidates from a concurrent session. Closure requires
-        // either (a) splitting overlay artifacts into a view-scoped
-        // storage namespace, or (b) tagging overlay-published keys so
-        // base lookups skip them. Owned by the follow-up substrate
-        // block that lands the cold-compute call-graph view-threading
-        // refactor (substrate-reviewer's P0.2).
+        // Key selection: a view-aware overlay materialisation
+        // (`overlay_discriminator` is `Some`) publishes under an
+        // `overlay_scoped` key. The discriminator occupies the
+        // `parse_env_hash` dimension and is derived from the session
+        // view's overlay-set fingerprint, so the overlay candidate is
+        // isolated from the base artifact (always
+        // `parse_env_hash = LEGACY_PARSE_ENV_HASH`) and from other
+        // sessions' overlay candidates — even when the overlay source
+        // bytes are identical to the base file and the content hashes
+        // therefore coincide. A base-host read via `get` /
+        // `get_for_current_content` (the legacy key) never reaches an
+        // `overlay_scoped` entry, and a session-view read via
+        // `get_overlay_scoped` never reaches the base entry. A
+        // base-passthrough view (no overlay for this canonical) yields
+        // `None` → the legacy key, which is correct: with no overlay
+        // there is no overlay-only relative route discovery, so the
+        // candidate is base-equivalent.
         //
-        // TODO(follow-up — substrate-reviewer P1.2): the key uses
-        // `FileArtifactKey::legacy` which zeroes `parse_env_hash` and
-        // sets `parser_version = LEGACY_PARSER_VERSION`. The full R21
-        // env-hash quintuple is available on the bound view
-        // (`view.env_hashes()` + `view.project_identity()`) but is
-        // not threaded into this call. Lift the env hashes into
-        // `materialize_overlay_indexed_ready`'s call signature when
+        // TODO(follow-up — substrate-reviewer P1.2): the legacy-key
+        // branch zeroes `parse_env_hash` and the `overlay_scoped`
+        // branch carries only the overlay discriminator there. The
+        // full R21 env-hash quintuple (`view.env_hashes()` +
+        // `view.project_identity()`) is not threaded into this call;
+        // lift the env hashes into the materialiser's signature when
         // the broader env-hash-migration block lands.
-        let key = crate::file_artifact_store::FileArtifactKey::legacy(
-            Arc::from(canonical_id),
-            overlay_whole_hash,
-        );
+        let key = match overlay_discriminator {
+            Some(discriminator) => crate::file_artifact_store::FileArtifactKey::overlay_scoped(
+                Arc::from(canonical_id),
+                overlay_whole_hash,
+                discriminator,
+            ),
+            None => crate::file_artifact_store::FileArtifactKey::legacy(
+                Arc::from(canonical_id),
+                overlay_whole_hash,
+            ),
+        };
         let payload = Arc::new(crate::file_artifact_store::FileArtifacts::with_indexed(
             Arc::clone(&indexed),
         ));

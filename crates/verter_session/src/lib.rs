@@ -125,6 +125,10 @@ mod cache_identity_invariants_tests;
 // Block 1.J.1 item 1 — content-pinned artifact-read discriminators.
 #[cfg(test)]
 mod artifact_reads_pinned_tests;
+// Byte-identical-overlay artifact-key isolation discriminators —
+// a session-view overlay candidate is keyed off the base artifact.
+#[cfg(test)]
+mod overlay_artifact_key_isolation_tests;
 // Current-content-pinned `shallow_file_state` observed-read
 // discriminators.
 #[cfg(test)]

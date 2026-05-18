@@ -280,9 +280,13 @@ fn observe_file_whole_hash(host: &VerterHost, canonical_id: &str) {
 }
 
 /// Emit a `ParseFactRef` observation against the producer's current
-/// fact registry. The `expected_hash` is recovered from
-/// `FileArtifactStore::get_artifacts_any(canonical_id).facts.lookup(&key)`
-/// at the moment of cold-compute.
+/// fact registry. The `expected_hash` is recovered via
+/// `VerterHost::current_content_pinned_artifacts(canonical_id)` —
+/// the content-pinned `FileArtifacts` read (scheduler-authoritative
+/// content hash, artifact-only fallback) — then `facts.lookup(&key)`,
+/// at the moment of cold-compute. The content pin is load-bearing: a
+/// permissive `get_artifacts_any` read could fingerprint a stale
+/// lingering registry once the own-canonical drain is retired.
 ///
 /// Two outcomes:
 ///

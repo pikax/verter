@@ -315,14 +315,20 @@ pub(crate) fn parse_fact_ref_for_observed_current_content(
     key: FactKey,
     lane: FactLane,
 ) -> Option<ParseFactRef> {
-    let artifact_key = crate::file_artifact_store::FileArtifactKey::legacy(
-        Arc::from(canonical_id),
-        observed_content_hash,
-    );
+    // Content-addressed by `(canonical, observed_content_hash)` —
+    // explicitly NOT view-dependent. The looked-up `FileFacts`
+    // registry is parse-domain and content-derived: a base artifact
+    // (legacy key) and a session-overlay artifact (overlay-scoped key)
+    // for the SAME content version carry an identical parse-fact
+    // registry, so the `parse_env_hash` key dimension is irrelevant
+    // here. `get_artifacts_for_content` scans for a `FileArtifacts`
+    // matching the `(canonical, content_hash)` pair regardless of
+    // `parse_env_hash`, so a producer recovers the same observed parse
+    // fact whether or not it ran under a session view.
     let artifacts = ctx
         .project_type_store()
         .indexed()
-        .get_artifacts(&artifact_key)?;
+        .get_artifacts_for_content(canonical_id, observed_content_hash)?;
     let expected_hash = match artifacts.facts.lookup(&key) {
         Some(fact) => match lane {
             FactLane::Semantic => fact.semantic_hash,

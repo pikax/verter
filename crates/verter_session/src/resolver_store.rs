@@ -354,9 +354,10 @@ impl HostStoreView {
 
             // Refresh the per-domain parse-fact + derived-fact
             // snapshots from the overlay artifact. `parse_artifacts`
-            // is overlay-aware (strict by the overlay `content_hash`)
-            // so it returns the overlay `FileArtifacts` candidate, not
-            // the base one.
+            // is overlay-aware (strict by the overlay-scoped key —
+            // overlay `content_hash` plus the overlay-set
+            // discriminator) so it returns the overlay `FileArtifacts`
+            // candidate, not the base one.
             match view.parse_artifacts(&canonical) {
                 Some(overlay_artifacts) => {
                     self.file_facts.insert(

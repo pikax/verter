@@ -233,14 +233,27 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         if let Some(overlay_hash) = self.view.overlay_content_hash_for(canonical) {
             // Materialise / fetch the overlay candidate, then pin to the
             // exact overlay content hash — no base fallback. The
-            // content-addressed `FileArtifactStore` slot keeps the
-            // overlay candidate isolated from the base artifact.
+            // overlay candidate is published under an `overlay_scoped`
+            // key (overlay content hash + overlay-set discriminator),
+            // so the read goes through `get_overlay_scoped` to stay off
+            // the base artifact — which is a real divergence when the
+            // overlay bytes are identical to the base. An overlaid
+            // canonical always has a discriminator; the `legacy`
+            // fallback below is unreachable in this branch and exists
+            // only for exhaustiveness.
             let _ = ResolverContext::ensure_indexed_ready(self, canonical);
-            let indexed = self
-                .inner
-                .project_type_store()
-                .indexed()
-                .get_for_current_content(canonical, overlay_hash)?;
+            let indexed = match self.view.overlay_artifact_discriminator(canonical) {
+                Some(discriminator) => self
+                    .inner
+                    .project_type_store()
+                    .indexed()
+                    .get_overlay_scoped(canonical, overlay_hash, discriminator)?,
+                None => self
+                    .inner
+                    .project_type_store()
+                    .indexed()
+                    .get_for_current_content(canonical, overlay_hash)?,
+            };
             let syntactic_export_set =
                 crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
                     self,
@@ -259,6 +272,49 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
             return None;
         }
         self.inner.observe_materialize_scope(canonical)
+    }
+
+    /// Overlay-aware content-pinned [`IndexedReady`] lookup.
+    ///
+    /// The default [`ResolverContext::indexed_for_current_content`]
+    /// resolves the pin hash via [`Self::authoritative_current_content_hash`]
+    /// (overlay-aware here) but reads the artifact store via
+    /// `get_for_current_content` — the **legacy** key. When this
+    /// context's view carries an explicit overlay for `canonical`, the
+    /// overlay `IndexedReady` was published under an `overlay_scoped`
+    /// key (overlay content hash + overlay-set discriminator); a
+    /// legacy-key read would miss it, or — when the overlay bytes are
+    /// identical to the base — return the BASE artifact, whose import
+    /// routes diverge from the overlay's (the overlay can resolve an
+    /// overlay-only relative helper the base cannot). This override
+    /// reads the overlay candidate through `get_overlay_scoped` so the
+    /// content-pinned read stays on the session's own artifact; an
+    /// unmasked canonical keeps the base legacy-key read.
+    #[inline]
+    fn indexed_for_current_content(&self, canonical: &str) -> Option<Arc<IndexedReady>> {
+        if let Some(overlay_hash) = self.view.overlay_content_hash_for(canonical) {
+            if let Some(discriminator) = self.view.overlay_artifact_discriminator(canonical) {
+                return self
+                    .inner
+                    .project_type_store()
+                    .indexed()
+                    .get_overlay_scoped(canonical, overlay_hash, discriminator);
+            }
+            // Overlaid canonical with no discriminator is not
+            // reachable (a present overlay hash implies a present
+            // discriminator); fall through defensively.
+            return self
+                .inner
+                .project_type_store()
+                .indexed()
+                .get_for_current_content(canonical, overlay_hash);
+        }
+        if self.view.is_tombstoned(canonical) {
+            return None;
+        }
+        // Unmasked canonical: the base host's content-pinned read
+        // (scheduler authoritative hash → legacy-key artifact).
+        self.inner.current_content_pinned_indexed(canonical)
     }
 
     /// Overlay-aware resolver store view.
@@ -505,6 +561,10 @@ impl<'a> SessionView for BoundSessionViewRef<'a> {
 
     fn overlay_content_hash_for(&self, canonical: &str) -> Option<Hash16> {
         self.inner.overlay_content_hash_for(canonical)
+    }
+
+    fn overlay_artifact_discriminator(&self, canonical: &str) -> Option<Hash16> {
+        self.inner.overlay_artifact_discriminator(canonical)
     }
 
     fn parse_artifacts(

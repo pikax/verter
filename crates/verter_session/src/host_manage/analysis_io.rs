@@ -349,11 +349,10 @@ impl VerterHost {
     pub fn get_analysis(&self, canonical_or_alias: &str) -> Option<FileAnalysisSnapshot> {
         // Route through the view-aware entry point with a `HostViewRef`
         // so the single resolver-tier surface stays view-shaped (R17 / R18).
-        // A base-only view never tombstones and reports the host's
-        // source for every canonical; the overlay-source fast path
-        // inside `get_analysis_via_view` is therefore a no-op for this
-        // case, and the call routes through the existing internal
-        // pipeline.
+        // A base-only `HostViewRef` never tombstones and reports `None`
+        // from `overlay_content_hash_for`, so the overlay path inside
+        // `get_analysis_via_view` is a genuine no-op for this case and
+        // the call routes through the existing internal pipeline.
         let view = crate::session_view::HostViewRef::new(self);
         self.get_analysis_via_view(canonical_or_alias, &view)
     }
@@ -481,14 +480,14 @@ impl VerterHost {
 
     /// View-aware variant of [`Self::get_analysis`].
     ///
-    /// R17 / R18 — Consults the supplied [`SessionView`] for overlay
-    /// source before falling back to the base-host analysis path:
+    /// R17 / R18 — Consults the supplied [`SessionView`] for an overlay
+    /// before falling back to the base-host analysis path:
     ///
     /// 1. If `view.is_tombstoned(canonical)` → returns `None`
     ///    (overlay-Deleted canonical is hidden from the consumer).
-    /// 2. If `view.source(canonical)` differs from the base host's
-    ///    source (overlay covers this canonical) → builds the
-    ///    snapshot directly from the overlay source via
+    /// 2. If `view.overlay_content_hash_for(canonical)` is `Some` (the
+    ///    view carries an explicit overlay-Upsert for this canonical)
+    ///    → builds the snapshot directly from the overlay source via
     ///    `build_snapshot_from_source`, then runs the same
     ///    `finalize_analysis_snapshot` enrichment (import resolution,
     ///    destructured binding metadata, template analysis on
@@ -500,9 +499,9 @@ impl VerterHost {
     ///
     /// Used by `MetaSession::get_analysis` so an overlayed canonical
     /// reports the overlay's analysis content (R17 / R18). Base-only
-    /// views (`HostView`, `HostViewRef`) fall through to the existing
-    /// flow because `view.source(canonical)` returns the same Arc the
-    /// host already has.
+    /// views (`HostView`, `HostViewRef`) report `None` from
+    /// `overlay_content_hash_for`, so they fall through to the existing
+    /// flow — the overlay path is a genuine no-op for the base case.
     pub fn get_analysis_via_view(
         &self,
         canonical_or_alias: &str,
@@ -521,32 +520,29 @@ impl VerterHost {
             return None;
         }
 
-        // Overlay-source path: when the view publishes a source for
-        // this canonical that differs from the base host's source,
-        // the canonical is overlayed and the analysis must reflect
-        // the overlay content. Compare by content hash to avoid the
-        // common "same content present in both" case.
+        // Overlay-source path: when the view carries an **explicit
+        // overlay** for this canonical, the analysis must reflect the
+        // overlay content.
+        //
+        // Overlay detection uses the **strict** `overlay_content_hash_for`,
+        // NOT a `content_hash_for`-vs-base hash comparison.
+        // `content_hash_for` falls through to the base host's
+        // `FileArtifactStore`-derived content hash for an unmasked
+        // canonical — the same content-agnostic, canonical-only scan
+        // as `get_any`, which can surface a STALE lingering artifact's
+        // hash once the own-canonical drain is retired. Comparing that
+        // stale hash against the scheduler's current `base_hash` would
+        // read `overlay_hash != base_hash` for a canonical with NO
+        // overlay and re-parse the overlay source when none was needed.
+        // `overlay_content_hash_for` reports `Some` ONLY when the
+        // session installed an actual overlay-Upsert, so an unmasked
+        // canonical correctly falls through to the base path — and a
+        // base-passthrough `HostViewRef` (used by the no-overlay
+        // `get_analysis` entry point) reports `overlay_covers = false`,
+        // restoring the documented "no-op for the base case" invariant.
         let overlay_source = view.source(canonical.as_str());
-        let overlay_hash = view.content_hash_for(canonical.as_str());
-        // Base content hash for the overlay-coverage check — the
-        // scheduler's authoritative hash, with a content-pinned
-        // artifact-only fallback (`artifact_current_indexed`) for a
-        // canonical the scheduler does not track. NOT the
-        // content-agnostic `get_any`: a stale lingering artifact's hash
-        // would misreport `overlay_covers` and parse the overlay source
-        // when none was needed (or vice versa).
-        let base_hash = self
-            .scheduler
-            .try_get_source(canonical.as_str())
-            .map(|snap| snap.whole_hash)
-            .or_else(|| {
-                self.artifact_current_indexed(canonical.as_str())
-                    .map(|indexed| indexed.whole_hash)
-            });
-        let overlay_covers = match (&overlay_source, overlay_hash) {
-            (Some(_), Some(oh)) => Some(oh) != base_hash,
-            _ => false,
-        };
+        let overlay_covers =
+            view.overlay_content_hash_for(canonical.as_str()).is_some() && overlay_source.is_some();
 
         if overlay_covers {
             // Overlay path — parse + analyse the overlay source on

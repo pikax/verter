@@ -121,6 +121,45 @@ impl FileArtifactKey {
         }
     }
 
+    /// Overlay-scoped constructor: builds a key whose `parse_env_hash`
+    /// carries a session-overlay **discriminator** instead of the
+    /// zeroed [`LEGACY_PARSE_ENV_HASH`].
+    ///
+    /// A session-view overlay materialiser
+    /// ([`crate::VerterHost::materialize_overlay_indexed_ready_with_view`])
+    /// can resolve a relative import to an overlay-only helper that the
+    /// base workspace cannot see — so the overlay's `IndexedReady`
+    /// carries session-specific import routes. When the overlay source
+    /// bytes are identical to the base file, the overlay's content hash
+    /// equals the base hash, and a [`Self::legacy`] key for the overlay
+    /// would collide with the base artifact's key: a base read would
+    /// observe the overlay's session routes, or the overlay read would
+    /// silently get the base routes. Byte-identical overlays are the
+    /// common case (every opened-but-unmodified file in an LSP session).
+    ///
+    /// `discriminator` distinguishes the overlay artifact from the base
+    /// in the otherwise-free `parse_env_hash` dimension. It is derived
+    /// from the session view's overlay-set fingerprint
+    /// ([`crate::session_view::SessionView::overlay_artifact_discriminator`]),
+    /// so two sessions with different overlay sets occupy distinct
+    /// slots (R20 multi-candidate isolation) and the base artifact
+    /// (always `parse_env_hash = LEGACY_PARSE_ENV_HASH`) is never
+    /// touched. The discriminator is non-zero by construction (see
+    /// `overlay_artifact_discriminator`), so it can never alias the
+    /// legacy key.
+    pub(crate) fn overlay_scoped(
+        canonical: Arc<str>,
+        content_hash: Hash16,
+        discriminator: Hash16,
+    ) -> Self {
+        Self {
+            canonical,
+            content_hash,
+            parse_env_hash: discriminator,
+            parser_version: LEGACY_PARSER_VERSION,
+        }
+    }
+
     /// Test-only public shim over [`Self::legacy`].
     ///
     /// Used by `tests/eviction_policy.rs` and similar integration
@@ -520,6 +559,59 @@ impl FileArtifactStore {
         result
     }
 
+    /// Overlay-scoped indexed lookup: returns the cached artifact for
+    /// `canonical_id` keyed under [`FileArtifactKey::overlay_scoped`]
+    /// (the overlay's content hash plus the session-overlay
+    /// `discriminator`).
+    ///
+    /// This is the read counterpart of the overlay materialiser's
+    /// publish. A session-view-routed reader resolves an overlay
+    /// candidate through here so it never collides with the base
+    /// artifact (always keyed under [`FileArtifactKey::legacy`]) — even
+    /// when the overlay source is byte-identical to the base and the
+    /// content hashes therefore coincide. A base read using
+    /// [`Self::get`] never reaches an overlay-scoped entry; an
+    /// overlay-scoped read never reaches the base entry. Stale
+    /// candidates for an older content hash yield `None`.
+    #[must_use]
+    pub fn get_overlay_scoped(
+        &self,
+        canonical_id: &str,
+        expected_whole_hash: Hash16,
+        discriminator: Hash16,
+    ) -> Option<Arc<IndexedReady>> {
+        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+            return None;
+        }
+        let key = FileArtifactKey::overlay_scoped(
+            Arc::from(canonical_id),
+            expected_whole_hash,
+            discriminator,
+        );
+        let result = self
+            .artifacts
+            .get(&key)
+            .map(|entry| Arc::clone(&entry.value().indexed));
+        if result.is_some() {
+            self.bump_access_tick(canonical_id);
+            self.bump_hit_counter(&key);
+        }
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            if result.is_some() {
+                ctx.cache_counters
+                    .indexed
+                    .hits
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                ctx.cache_counters
+                    .indexed
+                    .misses
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        result
+    }
+
     /// Look up the cached artifact for `canonical_id` without hash check.
     #[must_use]
     pub fn get_any(&self, canonical_id: &str) -> Option<Arc<IndexedReady>> {
@@ -859,6 +951,48 @@ impl FileArtifactStore {
             self.bump_hit_counter(key);
         }
         v
+    }
+
+    /// Look up a `FileArtifacts` payload for `canonical` whose key's
+    /// `content_hash` equals `content_hash`, **regardless of the
+    /// `parse_env_hash` / `parser_version` dimensions**.
+    ///
+    /// This is content-addressed by the `(canonical, content_hash)`
+    /// pair — strictly narrower than the permissive
+    /// [`Self::get_artifacts_any`] (which ignores `content_hash` too).
+    /// It is the read for consumers that need the **parse-domain
+    /// `FileFacts` registry** for a specific observed content version:
+    /// a base artifact (keyed [`FileArtifactKey::legacy`]) and a
+    /// session-overlay artifact (keyed [`FileArtifactKey::overlay_scoped`])
+    /// for the SAME content version carry an identical parse-fact
+    /// registry, so the `parse_env_hash` discriminator is irrelevant to
+    /// a parse-fact lookup. Returns the first matching candidate; for
+    /// `.facts` recovery any candidate at the content hash is
+    /// equivalent. A reader that needs the import-route-bearing
+    /// `IndexedReady` (which DOES diverge between base and overlay)
+    /// must NOT use this — it must use [`Self::get`] /
+    /// [`Self::get_overlay_scoped`] with the right key.
+    #[must_use]
+    pub fn get_artifacts_for_content(
+        &self,
+        canonical: &str,
+        content_hash: Hash16,
+    ) -> Option<Arc<FileArtifacts>> {
+        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+            return None;
+        }
+        for entry in self.artifacts.iter() {
+            if entry.key().canonical.as_ref() == canonical
+                && entry.key().content_hash == content_hash
+            {
+                let matched_key = entry.key().clone();
+                let value = entry.value().clone();
+                drop(entry);
+                self.bump_hit_counter(&matched_key);
+                return Some(value);
+            }
+        }
+        None
     }
 
     /// Look up the latest `FileArtifacts` payload for `canonical`

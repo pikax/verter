@@ -18,13 +18,15 @@
 //!    the matching observer:
 //!    - `Active` → real [`RequestContextGuard`].
 //!    - `Noop` → [`verter_audit::install_noop_observer`].
-//! 3. Detect "fresh build vs warm-cache reuse" by probing
-//!    [`crate::file_artifact_store::FileArtifactStore::get_any`] BEFORE
+//! 3. Detect "fresh build vs warm-cache reuse" with a content-pinned
+//!    probe ([`VerterHost::current_content_pinned_indexed`]) BEFORE
 //!    invoking [`VerterHost::ensure_indexed_ready`]. The probe is
-//!    cheap (a single DashMap lookup) and provides a discriminating
-//!    signal independent of the producer's internal state machine —
-//!    a regression that always rebuilt would still surface a real
-//!    `indexed_ready_built = true` here.
+//!    cheap and provides a discriminating signal independent of the
+//!    producer's internal state machine — a regression that always
+//!    rebuilt would still surface a real `indexed_ready_built = true`
+//!    here. The pin matters: a permissive `get_any` probe would match
+//!    a stale lingering artifact and misreport the request as
+//!    cache-served.
 //! 4. Materialise the [`AnalysisReady`] from the canonical's cached
 //!    `IndexedReady` artifact + `FileAnalysisSnapshot`. The numeric
 //!    payload counters are sourced from this snapshot so the audit
@@ -73,15 +75,18 @@ impl VerterHost {
     ) -> (Option<AnalysisReady>, Option<RequestAuditRecord>) {
         // Probe the IndexedReady cache BEFORE constructing the
         // registration so the cache state we observe is unaffected by
-        // any work we are about to perform. The probe uses
-        // `get_any`, which is the same surface
-        // `ensure_indexed_ready` checks internally; a `Some` here
-        // means a warm entry will satisfy the request.
-        let pre_call_cache_hit = self
-            .project_type_store()
-            .indexed()
-            .get_any(canonical_id)
-            .is_some();
+        // any work we are about to perform. The probe is
+        // content-pinned (`current_content_pinned_indexed`): a `Some`
+        // here means a *current-content* warm artifact exists and the
+        // request will be served by warm state. A permissive `get_any`
+        // probe would also match a STALE lingering artifact for an
+        // older content hash once the own-canonical drain is retired —
+        // reporting `from_cache: true` (and `indexed_ready_built: false`)
+        // even though `materialize_analysis_ready` below rematerialises
+        // the current content. The content pin keeps the audit
+        // `from_cache` / `indexed_ready_built` flags faithful to what
+        // the request actually did.
+        let pre_call_cache_hit = self.current_content_pinned_indexed(canonical_id).is_some();
 
         // Audit-disabled fast path: drive the analysis with NO
         // `RequestContextGuard` installed. Producer-side
