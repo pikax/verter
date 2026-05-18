@@ -388,6 +388,16 @@ pub struct AugmentationTargetKey {
 /// a content-agnostic canonical-only scan, which (with lazy cache
 /// invalidation) could surface a different content version of the
 /// augmenter than the one the fingerprint was computed over.
+///
+/// The captured key can itself go stale: the augmenter-set fingerprint
+/// folds over `parse_stable_hash` (the decl skeleton), so a member-body
+/// edit that leaves the skeleton intact reparses the augmenter under a
+/// new `FileArtifactKey` (new `content_hash`) WITHOUT moving the
+/// fingerprint — the cached `AugmenterSet` is not invalidated and this
+/// `artifact_key` keeps pointing at the drained pre-edit version. The
+/// stitch consumer self-heals that exact-key miss by re-deriving the
+/// augmenter's current key from the scheduler-authoritative content
+/// hash and writing the refreshed key back here.
 #[derive(Debug, Clone)]
 pub struct AugmenterEntry {
     /// Exact content-addressed key of the augmenter artifact.

@@ -138,6 +138,16 @@ impl VerterHost {
         // hash otherwise); `source` returns the exact bytes that hash
         // covers. Resolving both here removes the caller-supplied-hash
         // failure mode entirely.
+        //
+        // Both the view source/hash lookups and the artifact-store
+        // fast-path key below are keyed by the NORMALISED canonical.
+        // For `.ts`/`.tsx`/`.vue` ids `normalized_analysis_canonical`
+        // is identity, so today this matches what the scheduler keyed
+        // the source under. A future virtual / synthetic overlay ID
+        // whose normalisation is non-identity must ensure the view is
+        // populated under the normalised id (or the source/hash must
+        // be looked up under the raw id), or the fast-path key and the
+        // view lookup would diverge silently.
         let overlay_source = view.source(canonical_id)?;
         let overlay_whole_hash = view.content_hash_for(canonical_id)?;
 

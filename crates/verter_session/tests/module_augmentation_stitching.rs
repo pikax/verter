@@ -788,6 +788,209 @@ fn edit_unrelated_file_does_not_invalidate_consumer() {
 }
 
 // ────────────────────────────────────────────────────────────────
+// Test 15 — re-keyed augmenter with an unchanged decl skeleton is
+// NOT silently dropped from the stitched surface.
+//
+// The augmentation index captures each augmenter's EXACT
+// `FileArtifactKey` (content-addressed) at index-population time. The
+// augmenter-set fingerprint folds over `parse_stable_hash` (the decl
+// skeleton), NOT `content_hash`. So a member-body edit to an augmenter
+// — content hash changes, decl skeleton (hence `parse_stable_hash`,
+// hence the fingerprint) unchanged — does NOT invalidate the cached
+// `AugmenterSet`: its `AugmenterEntry.artifact_key` keeps pointing at
+// the PRE-edit content hash. A same-canonical edit drains that
+// pre-edit `FileArtifactKey`, so the stitch's exact-key
+// `get_artifacts` lookup misses.
+//
+// - **Against `d7b3ddd0f`**: the stitch sees the exact-key miss and
+//   `continue`s — the augmenter's declarations are silently dropped,
+//   so the recomputed effective set has an EMPTY `entries` list while
+//   `augmenter_count` still reports 1. This test FAILS (the
+//   `!entries.is_empty()` assertion trips).
+// - **Post-fix**: the stitch self-heals on the miss — it re-derives
+//   the augmenter's CURRENT exact key from the scheduler-authoritative
+//   `contributor_whole_hash` oracle and reads pinned to it, so the
+//   augmenter's `foo` contribution is still stitched. This test
+//   PASSES.
+//
+// The contract: a stale captured key must NOT silently drop an
+// augmenter whose content version is still materialised.
+// ────────────────────────────────────────────────────────────────
+
+#[test]
+fn rekeyed_augmenter_with_unchanged_skeleton_is_not_dropped() {
+    let store = FileArtifactStore::new();
+    let augmenter_canonical = "/aug-rekey.ts";
+
+    // Step 1 — augmenter present at the PRE-edit content hash.
+    let pre_edit_hash = [61u8; 16];
+    let pre_edit_key = insert_artifact_from_fixture(
+        &store,
+        augmenter_canonical,
+        "module_augmentation_external.ts",
+        pre_edit_hash,
+    );
+
+    let target = AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from("vue"));
+    let key = EffectiveExportSetKey {
+        provider_canonical: "vue".to_owned(),
+        project_identity: ProjectIdentity([1u8; 16]),
+        resolve_env_hash: [2u8; 16],
+        lib_env_hash: [3u8; 16],
+    };
+
+    // Cold compute on the first RouteDb — this populates the
+    // augmentation index on `store`, capturing the augmenter's EXACT
+    // pre-edit `FileArtifactKey`.
+    let route_db_initial = RouteDb::new();
+    let effective_initial = route_db_initial.get_or_compute_effective_export_set(
+        key.clone(),
+        target.clone(),
+        &AcceptAllView::new(1),
+        &store,
+        |c| {
+            if c == augmenter_canonical {
+                Some(pre_edit_hash)
+            } else {
+                None
+            }
+        },
+        |_, _| None,
+    );
+    assert_eq!(
+        effective_initial.augmenter_count, 1,
+        "pre-edit cold compute MUST see exactly one augmenter"
+    );
+    assert!(
+        !effective_initial.entries.is_empty(),
+        "pre-edit cold compute MUST stitch the augmenter's `foo` contribution"
+    );
+    let pre_edit_fingerprint = effective_initial.augmenter_set_fingerprint;
+
+    // Step 2 — a same-canonical member-body edit. The fixture source
+    // is byte-identical, so the rebuilt `IndexedReady` has the SAME
+    // decl skeleton and therefore the SAME `parse_stable_hash` — only
+    // the content hash advances. `remove` drains every prior
+    // `FileArtifactKey` for the canonical (the same drain a
+    // same-canonical `FileArtifactStore::insert` performs), then the
+    // augmenter is reparsed under the NEW content-hash key.
+    let post_edit_hash = [62u8; 16];
+    store.remove(augmenter_canonical);
+    let post_edit_key = insert_artifact_from_fixture(
+        &store,
+        augmenter_canonical,
+        "module_augmentation_external.ts",
+        post_edit_hash,
+    );
+
+    // The pre-edit key is genuinely drained; the post-edit key is the
+    // only live artifact. (Confirms the test reproduces codex's
+    // exact failure mode rather than a coexisting-versions one.)
+    assert!(
+        store.get_artifacts(&pre_edit_key).is_none(),
+        "pre-edit FileArtifactKey MUST be drained after the re-key"
+    );
+    assert!(
+        store.get_artifacts(&post_edit_key).is_some(),
+        "post-edit FileArtifactKey MUST be the live artifact"
+    );
+    // The decl skeleton is unchanged, so `parse_stable_hash` — and
+    // hence the augmenter-set fingerprint — does NOT move. The cached
+    // `AugmenterSet` is therefore NOT invalidated and still carries
+    // the stale pre-edit `artifact_key`.
+    assert_eq!(
+        pre_edit_key.content_hash, pre_edit_hash,
+        "pre-edit key carries the pre-edit content hash"
+    );
+    assert_ne!(
+        post_edit_key.content_hash, pre_edit_key.content_hash,
+        "the re-key MUST advance the content-hash dimension"
+    );
+
+    // Step 3 — recompute the effective export set on a FRESH RouteDb
+    // so the `effective_export_sets` cache is empty and the cold
+    // stitch runs. The augmentation index lives on the shared `store`
+    // and warm-hits, handing the stitch the cached `AugmenterSet`
+    // whose `AugmenterEntry.artifact_key` is the now-stale pre-edit
+    // key. `contributor_whole_hash` reports the augmenter's CURRENT
+    // (post-edit) content hash — the scheduler authority.
+    let route_db_recompute = RouteDb::new();
+    let effective_recomputed = route_db_recompute.get_or_compute_effective_export_set(
+        key.clone(),
+        target.clone(),
+        &AcceptAllView::new(2),
+        &store,
+        |c| {
+            if c == augmenter_canonical {
+                Some(post_edit_hash)
+            } else {
+                None
+            }
+        },
+        |_, _| None,
+    );
+
+    // The discriminating assertion. Pre-fix the stale exact-key miss
+    // is a silent `continue`, so `entries` is EMPTY; post-fix the
+    // stitch self-heals via the scheduler-authoritative current key,
+    // so the augmenter's `foo` contribution is still present.
+    assert!(
+        !effective_recomputed.entries.is_empty(),
+        "a re-keyed augmenter whose decl skeleton is unchanged MUST NOT \
+         be silently dropped from the stitched surface — the stitch \
+         MUST self-heal the stale captured key via the \
+         scheduler-authoritative current content hash"
+    );
+    assert!(
+        effective_recomputed
+            .entries
+            .iter()
+            .any(|e| e.contributor_canonical.as_ref() == augmenter_canonical),
+        "the recomputed effective set MUST attribute the stitched \
+         contribution to the re-keyed augmenter"
+    );
+    assert_eq!(
+        effective_recomputed.augmenter_count, 1,
+        "augmenter count is unchanged across the re-key (one augmenter)"
+    );
+    // The fingerprint is invariant under the decl-skeleton-preserving
+    // edit — the self-heal advances only the `artifact_key`.
+    assert_eq!(
+        effective_recomputed.augmenter_set_fingerprint, pre_edit_fingerprint,
+        "the augmenter-set fingerprint MUST be invariant under a \
+         decl-skeleton-preserving re-key"
+    );
+
+    // The self-heal also writes the refreshed exact key back into the
+    // cached `AugmenterSet`, so a subsequent stitch hits the fast
+    // exact-key path with no further refresh.
+    let target_key = AugmentationTargetKey {
+        project_identity: ProjectIdentity([1u8; 16]),
+        resolve_env_hash: [2u8; 16],
+        lib_env_hash: [3u8; 16],
+        target: target.clone(),
+    };
+    let healed_set = store
+        .get_augmenter_set(&target_key)
+        .expect("augmentation index MUST still hold an entry");
+    assert_eq!(
+        healed_set.entries.len(),
+        1,
+        "the healed augmenter set MUST still hold exactly one entry"
+    );
+    assert_eq!(
+        healed_set.entries[0].artifact_key.content_hash, post_edit_hash,
+        "the self-heal MUST write the refreshed (post-edit) exact key \
+         back into the cached AugmenterSet"
+    );
+    assert_eq!(
+        healed_set.fingerprint, pre_edit_fingerprint,
+        "writing back the refreshed key MUST preserve the augmenter-set \
+         fingerprint"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────
 // Base-only contract tripwire — a session view is rejected.
 //
 // The augmentation index (`ModuleAugmentationIndex` on

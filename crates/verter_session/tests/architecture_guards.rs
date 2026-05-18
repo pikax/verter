@@ -9927,9 +9927,10 @@ mod content_pinned_artifact_read_guards {
     /// Banned named currency oracles — a canonical-only
     /// `Option`-returning `FileArtifactStore` accessor cannot be
     /// content-pinned, so it must not exist in production use. The set
-    /// is empty of production callers after Block 2.S-G removed
-    /// `content_hash_for_canonical` / `latest_artifacts_for_canonical`;
-    /// this guard keeps it that way.
+    /// is empty of production callers after the named content-agnostic
+    /// currency oracles (`content_hash_for_canonical` /
+    /// `latest_artifacts_for_canonical`) were removed; this guard keeps
+    /// it that way.
     const BANNED_NAMED_CURRENCY_ORACLES: &[&str] = &[
         ".content_hash_for_canonical(",
         ".latest_artifacts_for_canonical(",

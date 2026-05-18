@@ -23,7 +23,8 @@ use rustc_hash::FxHashMap;
 use verter_semantic::facts::registry::{InternedName, SymbolSpace};
 
 use crate::file_artifact_store::{
-    AugmentationTargetKey, AugmentationTargetKind, FileArtifactStore, ProjectIdentity,
+    AugmentationTargetKey, AugmentationTargetKind, AugmenterEntry, AugmenterSet, FileArtifactKey,
+    FileArtifactStore, ProjectIdentity,
 };
 use crate::resolver_core::{
     FactVersionRef, PermissiveStoreView, RouteSurfaceFactRef, SingleflightGroup, SingleflightRole,
@@ -733,11 +734,63 @@ impl RouteDb {
                     // canonical-only scan could surface a different
                     // version than the one the augmenter-set
                     // fingerprint was computed over.
+                    //
+                    // Stale-key self-heal. The captured exact key can
+                    // still go stale: when an augmenter is reparsed
+                    // under a NEW `FileArtifactKey` but its
+                    // `parse_stable_hash` is unchanged (a member-body
+                    // edit that leaves the decl skeleton intact), the
+                    // augmenter-set fingerprint does not move, so the
+                    // cached `AugmenterSet` is not invalidated and its
+                    // `AugmenterEntry.artifact_key` keeps pointing at
+                    // the PRE-edit content hash. A same-canonical edit
+                    // routed through `FileArtifactStore::insert` drains
+                    // that pre-edit key, so `get_artifacts` on the
+                    // captured key misses. Silently dropping the
+                    // augmenter there would shrink the stitched surface
+                    // while keeping the (now wrong) fingerprint/count.
+                    // On a miss we therefore re-derive the augmenter's
+                    // CURRENT exact key from the scheduler-authoritative
+                    // content hash (`contributor_whole_hash`, the same
+                    // scheduler oracle the per-contributor `FileWholeHash`
+                    // anchors below are built from — never a
+                    // content-agnostic `get_artifacts_any` /
+                    // `content_hash_for_canonical` scan) and read with
+                    // that. Refreshed keys are written back into the
+                    // cached `AugmenterSet` after the loop so subsequent
+                    // reads hit the fast exact-key path.
                     let mut stitched: Vec<EffectiveExportEntry> = Vec::new();
-                    for augmenter in augmenter_set.entries.iter() {
+                    let mut refreshed_keys: Vec<(usize, FileArtifactKey)> = Vec::new();
+                    for (idx, augmenter) in augmenter_set.entries.iter().enumerate() {
                         let augmenter_canonical = augmenter.canonical();
-                        let Some(art) = artifact_store.get_artifacts(&augmenter.artifact_key)
-                        else {
+                        let art = match artifact_store.get_artifacts(&augmenter.artifact_key) {
+                            Some(art) => Some(art),
+                            None => {
+                                // Refresh: re-derive the current exact
+                                // key from scheduler authority and read
+                                // pinned to it.
+                                contributor_whole_hash(augmenter_canonical.as_ref())
+                                    .map(|current_hash| {
+                                        FileArtifactKey::legacy(
+                                            Arc::clone(augmenter_canonical),
+                                            current_hash,
+                                        )
+                                    })
+                                    .and_then(|current_key| {
+                                        let refreshed = artifact_store.get_artifacts(&current_key);
+                                        if refreshed.is_some() {
+                                            refreshed_keys.push((idx, current_key));
+                                        }
+                                        refreshed
+                                    })
+                            }
+                        };
+                        // A genuine miss after the current-key re-fetch
+                        // (the augmenter's `IndexedReady` is not
+                        // materialised under its current content hash)
+                        // is a principled skip — never a content-agnostic
+                        // fallback scan.
+                        let Some(art) = art else {
                             continue;
                         };
                         for fact in art.augmentations.iter() {
@@ -756,6 +809,40 @@ impl RouteDb {
                             });
                         }
                     }
+
+                    // Write any refreshed exact keys back into the
+                    // cached `AugmenterSet`. The augmenter-set
+                    // fingerprint is folded over `parse_stable_hash`
+                    // values (never `content_hash`), and a stale key is
+                    // only refreshed when the augmenter's
+                    // `parse_stable_hash` is unchanged — so the rebuilt
+                    // set carries the SAME fingerprint and the same
+                    // per-entry `parse_stable_hash` values; only the
+                    // `artifact_key` content-hash dimension advances.
+                    // Re-publishing under the identical fingerprint
+                    // keeps every recorded `ModuleAugmentationIndexShape`
+                    // signature valid while making the next stitch hit
+                    // the fast exact-key path.
+                    let augmenter_set = if refreshed_keys.is_empty() {
+                        augmenter_set
+                    } else {
+                        let mut entries = augmenter_set.entries.clone();
+                        for (idx, current_key) in refreshed_keys {
+                            entries[idx] = AugmenterEntry {
+                                artifact_key: current_key,
+                                parse_stable_hash: entries[idx].parse_stable_hash,
+                            };
+                        }
+                        let refreshed_set = Arc::new(AugmenterSet {
+                            entries,
+                            fingerprint: augmenter_set.fingerprint,
+                        });
+                        artifact_store.populate_augmenter_set(
+                            augmentation_target_key.clone(),
+                            Arc::clone(&refreshed_set),
+                        );
+                        refreshed_set
+                    };
                     stitched.sort_by(|a, b| {
                         a.augmented_name
                             .as_ref()
