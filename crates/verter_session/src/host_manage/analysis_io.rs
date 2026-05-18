@@ -698,15 +698,33 @@ impl VerterHost {
     /// pin from a `get_any`-backed hash would let the same stale
     /// artifact answer its own pin, so the hash source is restricted
     /// to the authoritative scheduler value.
+    ///
+    /// The lookup is keyed by the **normalised analysis canonical**
+    /// ([`Self::normalized_analysis_canonical`] — e.g. a runtime `.js`
+    /// whose `.d.ts` companion is the analysis target): every base
+    /// `IndexedReady` artifact is published under the normalised id as
+    /// `FileArtifactKey::canonical`, and the scheduler tracks the
+    /// normalised analysis target's `parse.whole_hash`. Normalising here
+    /// lets a caller pass the RAW requested canonical — the
+    /// architectural id before an overlay-detection point — without the
+    /// base read mis-keying for a non-identity `.js`. Normalisation is
+    /// idempotent, so a caller that already holds a normalised id is
+    /// unaffected. Overlay detection is NOT this method's concern — it
+    /// reads the base candidate only; the overlay-aware
+    /// [`crate::resolver_core::SessionResolverContext::indexed_for_current_content`]
+    /// gates on the raw id and routes the overlay branch through
+    /// [`crate::host_manage::overlay_materialize::OverlayArtifactIdentity`].
     #[must_use]
     pub(crate) fn current_content_pinned_indexed(
         &self,
         canonical: &str,
     ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
-        let current_hash = self.authoritative_current_content_hash(canonical)?;
+        let analysis_canonical = self.normalized_analysis_canonical(canonical);
+        let analysis_canonical = analysis_canonical.as_ref();
+        let current_hash = self.authoritative_current_content_hash(analysis_canonical)?;
         self.project_type_store
             .indexed()
-            .get_for_current_content(canonical, current_hash)
+            .get_for_current_content(analysis_canonical, current_hash)
     }
 
     /// Artifact-current [`crate::project_type_store::IndexedReady`]
@@ -749,11 +767,22 @@ impl VerterHost {
     ///   leftover → `None`.
     ///
     /// Returns `None` when no artifact is cached at all.
+    ///
+    /// Both the `DerivedRawState` gate and the `get_any` artifact lookup
+    /// are keyed by the **normalised analysis canonical**
+    /// ([`Self::normalized_analysis_canonical`]) — the identity every
+    /// base `IndexedReady` artifact is published under and the same
+    /// identity [`Self::current_content_pinned_indexed`] reasons about,
+    /// so the two artifact-current authorities stay in lockstep. A
+    /// caller may therefore pass the RAW requested canonical; the
+    /// rewrite is idempotent for an already-normalised id.
     #[must_use]
     pub(crate) fn artifact_current_indexed(
         &self,
         canonical: &str,
     ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
+        let analysis_canonical = self.normalized_analysis_canonical(canonical);
+        let analysis_canonical = analysis_canonical.as_ref();
         // The artifact-current authority answers ONLY for a canonical
         // with no `DerivedRawState` entry — a genuinely artifact-only
         // scope the scheduler never tracked. Any `DerivedRawState` entry
@@ -762,10 +791,12 @@ impl VerterHost {
         // `current_content_pinned_indexed` and a `get_any` artifact
         // would risk self-rooting under a stale older hash; an evicted
         // scope's surviving artifact is a stale leftover.
-        if self.derived_raw_cache().get(canonical).is_some() {
+        if self.derived_raw_cache().get(analysis_canonical).is_some() {
             return None;
         }
-        self.project_type_store.indexed().get_any(canonical)
+        self.project_type_store
+            .indexed()
+            .get_any(analysis_canonical)
     }
 
     /// Current-content-pinned [`crate::file_artifact_store::FileArtifacts`]
@@ -796,26 +827,36 @@ impl VerterHost {
     /// Returns `None` when neither answers — a live scheduler scope
     /// whose pinned read missed (a stale older-content candidate is the
     /// only entry), or an evicted scope's stale leftover.
+    ///
+    /// Keyed by the **normalised analysis canonical**
+    /// ([`Self::normalized_analysis_canonical`]) — the `FileArtifacts`
+    /// payload is published under the normalised id, matching
+    /// [`Self::current_content_pinned_indexed`] /
+    /// [`Self::artifact_current_indexed`]. A caller may pass the RAW
+    /// requested canonical; the rewrite is idempotent for an
+    /// already-normalised id.
     #[must_use]
     pub(crate) fn current_content_pinned_artifacts(
         &self,
         canonical: &str,
     ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
-        if let Some(current_hash) = self.authoritative_current_content_hash(canonical) {
+        let analysis_canonical = self.normalized_analysis_canonical(canonical);
+        let analysis_canonical = analysis_canonical.as_ref();
+        if let Some(current_hash) = self.authoritative_current_content_hash(analysis_canonical) {
             let key = crate::file_artifact_store::FileArtifactKey::legacy(
-                Arc::from(canonical),
+                Arc::from(analysis_canonical),
                 current_hash,
             );
             return self.project_type_store.indexed().get_artifacts(&key);
         }
         // Genuinely artifact-only canonical — no scheduler authority, so
         // the single retained `FileArtifacts` is the current one.
-        if self.derived_raw_cache().get(canonical).is_some() {
+        if self.derived_raw_cache().get(analysis_canonical).is_some() {
             return None;
         }
         self.project_type_store
             .indexed()
-            .get_artifacts_any(canonical)
+            .get_artifacts_any(analysis_canonical)
     }
 
     /// Establish ONE tear-free

@@ -796,3 +796,172 @@ fn observe_materialize_scope_recovers_parse_facts_for_normalised_js_overlay() {
          materialize-memo self-root and the ParseFactRef must agree on it",
     );
 }
+
+/// A `SessionResolverContext::shallow_file_state` read keyed by the RAW
+/// `.js` canonical observes the OVERLAID shallow surface — not the base
+/// `.d.ts` companion — when the requested canonical normalises to a
+/// different analysis canonical (a runtime `.js` with a `.d.ts`
+/// companion).
+///
+/// ## The defect this test pins
+///
+/// `shallow_file_state` delegates to `shallow_file_state_with_context`,
+/// which resolved the canonical through `resolve_eval_dependency_canonical`
+/// (the `normalized_analysis_canonical` rewrite) BEFORE handing it to the
+/// overlay-aware reads `ctx.indexed_for_current_content(..)` and
+/// `route_owned_shallow_state_with_context(..)`. For an overlay on
+/// `/pkg/index.js` whose `/pkg/index.d.ts` companion exists, that
+/// pre-normalisation turned the raw `/pkg/index.js` id into
+/// `/pkg/index.d.ts` — and the `SessionView` overlay maps are keyed by
+/// the RAW overlay owner. `overlay_content_hash_for("/pkg/index.d.ts")`
+/// reports `None`, so the overlay gate never fires and the reader falls
+/// back to the BASE `.d.ts` companion's shallow state. The overlay the
+/// materialiser published is silently dropped.
+///
+/// Normalisation is one-way: the raw overlay owner cannot be recovered
+/// from the normalised companion, so the raw id MUST be carried forward
+/// to the overlay-detection point. The fix removes the pre-normalisation
+/// from `shallow_file_state_with_context`; the overlay-aware accessors
+/// own the raw→normalised split internally.
+///
+/// ## Fixture
+///
+/// Base workspace carries `/pkg/index.js` AND its `/pkg/index.d.ts`
+/// companion, so `normalized_analysis_canonical("/pkg/index.js")`
+/// rewrites to `/pkg/index.d.ts` (asserted as a fixture invariant). The
+/// `OverlaidView` overlays `/pkg/index.js` with bytes that declare an
+/// `export interface OverlayOnly` — a type symbol NEITHER the base `.js`
+/// nor the base `.d.ts` carries — so the overlaid shallow surface is
+/// unambiguously distinguishable from either base candidate.
+///
+/// ## Discrimination property
+///
+/// Post-fix `ctx.shallow_file_state("/pkg/index.js")` returns the
+/// overlay's shallow state: `whole_hash == overlay_hash` and the
+/// `symbols` map carries `OverlayOnly`. Pre-fix (`d840d3ecd`)
+/// `shallow_file_state_with_context` normalises `/pkg/index.js` →
+/// `/pkg/index.d.ts` first, the overlay-aware reads receive the
+/// normalised id, `overlay_content_hash_for` misses, and the base
+/// `.d.ts` companion's shallow state is returned — `whole_hash` is the
+/// base `.d.ts` hash and `OverlayOnly` is absent. The `whole_hash` and
+/// `symbols` assertions FAIL against the pre-fix tree and PASS only
+/// post-fix.
+#[test]
+fn shallow_file_state_observes_overlay_for_normalised_js() {
+    use crate::resolver_core::{ResolverContext, SessionResolverContext};
+
+    // Base `.js` runtime stub — no `OverlayOnly` symbol.
+    const BASE_JS: &str = "export const runtime = 1;\n";
+    // Base `.d.ts` companion — the non-identity normalisation target;
+    // declares no `OverlayOnly` interface.
+    const BASE_DTS: &str = "export declare const runtime: number;\n";
+    // Overlaid `/pkg/index.js` body — declares an `OverlayOnly`
+    // interface neither base candidate carries.
+    const OVERLAY_JS: &str =
+        "export const runtime = 42;\nexport interface OverlayOnly { tag: string; }\n";
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    for (path, source) in [("/pkg/index.js", BASE_JS), ("/pkg/index.d.ts", BASE_DTS)] {
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some(path.to_string()),
+                input_id: path.to_string(),
+                source: Arc::from(source),
+                file_kind: crate::FileKind::from_path(path),
+                aliases: Vec::new(),
+            })
+            .expect("base seed upsert succeeds");
+    }
+    let host = Arc::new(host);
+
+    // Fixture invariant: the `.d.ts` companion exists, so the runtime
+    // `.js` canonical normalises to a NON-IDENTITY analysis target.
+    // Without this the bug cannot reproduce (identity normalisation
+    // makes the raw and normalised lookup keys coincide).
+    let normalized = host.normalized_analysis_canonical("/pkg/index.js");
+    assert_eq!(
+        normalized.as_ref(),
+        "/pkg/index.d.ts",
+        "fixture invariant: `/pkg/index.js` with a `.d.ts` companion must \
+         normalise to `/pkg/index.d.ts` — this non-identity rewrite is the \
+         precondition the shallow-state keying bug needs",
+    );
+
+    // Overlay `/pkg/index.js`. The overlay map is keyed by the RAW
+    // `.js` canonical.
+    let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+    overlays.insert("/pkg/index.js".to_string(), Arc::from(OVERLAY_JS));
+    let view = OverlaidView::new(Arc::clone(&host), overlays);
+
+    let overlay_hash = view
+        .overlay_content_hash_for("/pkg/index.js")
+        .expect("OverlaidView must report an overlay content hash for the masked `.js`");
+
+    // The base `.d.ts` companion's shallow state — the stale fallback
+    // the pre-fix path returns. Recovered here so the post-fix
+    // assertions can prove the overlay surface is distinct from it.
+    let base_dts_shallow = host
+        .shallow_file_state("/pkg/index.d.ts")
+        .expect("the base `.d.ts` companion has a shallow state");
+    assert!(
+        !base_dts_shallow.symbols.contains_key("OverlayOnly"),
+        "fixture invariant: the base `.d.ts` companion declares no \
+         `OverlayOnly` interface — a pre-fix `shallow_file_state` of the \
+         `.js` overlay falls back to THIS surface",
+    );
+
+    // Materialise + publish the overlay `IndexedReady` candidate so the
+    // overlay-aware reader has an artifact to reach (prewarm parity with
+    // the session-bearing query entry points).
+    let materialised = host
+        .materialize_overlay_indexed_ready_with_view("/pkg/index.js", &view)
+        .expect("the overlay materialiser produces an IndexedReady for the overlaid `.js`");
+    assert_eq!(
+        materialised.whole_hash, overlay_hash,
+        "fixture invariant: the overlay artifact is keyed by the overlay content hash",
+    );
+    assert!(
+        materialised
+            .shallow_state
+            .symbols
+            .contains_key("OverlayOnly"),
+        "fixture invariant: the overlay artifact's shallow surface carries \
+         the `OverlayOnly` interface",
+    );
+
+    // Drive the shallow-state read through the session context — the
+    // codex-named miss site (`shallow_file_state_with_context`
+    // normalises before the overlay-aware reads).
+    let ctx = SessionResolverContext::new(&host, &view);
+    let observed = ctx.shallow_file_state("/pkg/index.js").expect(
+        "shallow_file_state MUST resolve a shallow state for the overlaid \
+         `.js` canonical",
+    );
+
+    // Discriminating assertion 1 — the observed `whole_hash` is the
+    // OVERLAY content hash, not the base `.d.ts` companion's hash.
+    assert_eq!(
+        observed.whole_hash, overlay_hash,
+        "shallow_file_state keyed by the RAW `/pkg/index.js` MUST observe \
+         the OVERLAY content (whole_hash == overlay_hash) — a pre-fix \
+         `shallow_file_state_with_context` normalises the raw id to \
+         `/pkg/index.d.ts` before the overlay-aware reads, the overlay gate \
+         misses, and the base `.d.ts` companion's shallow state is returned",
+    );
+    assert_ne!(
+        observed.whole_hash, base_dts_shallow.whole_hash,
+        "shallow_file_state MUST NOT return the base `.d.ts` companion's \
+         shallow state for the `.js` overlay",
+    );
+
+    // Discriminating assertion 2 — the observed shallow surface carries
+    // the overlay-only `OverlayOnly` type symbol.
+    assert!(
+        observed.symbols.contains_key("OverlayOnly"),
+        "shallow_file_state MUST observe the overlaid shallow surface — the \
+         `OverlayOnly` interface declared only by the overlay bytes must be \
+         present. A pre-fix read falls back to the base `.d.ts` companion \
+         (no `OverlayOnly`). Got {:?}",
+        observed.symbols.keys().collect::<Vec<_>>(),
+    );
+}

@@ -992,18 +992,35 @@ impl VerterHost {
     /// consult the active overlay so an overlay-covered dependency pins
     /// against the overlay content hash.
     ///
+    /// `canonical_id` is the **raw** requested canonical and is carried
+    /// forward unchanged to every read below. Each read is an
+    /// overlay-aware accessor — `indexed_for_current_content`,
+    /// `route_owned_shallow_state_with_context`, `artifact_current_indexed`
+    /// — and the `SessionView` overlay maps are keyed by the RAW overlay
+    /// owner. Normalising the canonical here (the
+    /// `normalized_analysis_canonical` rewrite — e.g. a runtime `.js`
+    /// whose `.d.ts` companion is the analysis target) BEFORE those reads
+    /// would hand the overlay-detection gate the normalised companion id,
+    /// the gate would miss the overlay (keyed by the raw owner), and the
+    /// reader would silently fall back to the base companion state.
+    /// Normalisation is one-way — the raw owner cannot be recovered from
+    /// the normalised companion — so the raw id MUST reach the
+    /// overlay-detection point. Each accessor owns the raw→normalised
+    /// split internally: the overlay branch resolves it through
+    /// [`crate::host_manage::overlay_materialize::OverlayArtifactIdentity`]
+    /// and the base branch normalises for its `FileArtifactStore` key.
+    ///
     /// Resolution order (current-content-pinned read mechanism):
-    /// 1. Resolve the canonical through `resolve_eval_dependency_canonical`.
-    /// 2. Read [`crate::project_type_store::IndexedReady`] pinned to the
+    /// 1. Read [`crate::project_type_store::IndexedReady`] pinned to the
     ///    canonical's authoritative current content hash via
     ///    [`crate::resolver_core::ResolverContext::indexed_for_current_content`]
     ///    — overlay-aware, scheduler-pinned, no `get_any`. A stale
     ///    older-content artifact misses here.
-    /// 3. On miss for a live scheduler-tracked canonical, fall through to the
+    /// 2. On miss for a live scheduler-tracked canonical, fall through to the
     ///    content-pinned route-owned shallow surface
     ///    ([`Self::route_owned_shallow_state_with_view`] — its own indexed
     ///    fast path is pinned, and the route-owned entry is freshness-gated).
-    /// 4. On miss with no `DerivedRawState` at all (a genuinely artifact-only
+    /// 3. On miss with no `DerivedRawState` at all (a genuinely artifact-only
     ///    canonical — foreign source / test seed), the permissive
     ///    artifact-store read is allowed exactly once, through the named
     ///    [`Self::artifact_current_indexed`] helper that documents that
@@ -1013,34 +1030,28 @@ impl VerterHost {
         ctx: &dyn crate::resolver_core::ResolverContext,
         canonical_id: &str,
     ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
-        let resolved_canonical_id = self
-            .resolve_eval_dependency_canonical(canonical_id)
-            .unwrap_or_else(|| canonical_id.to_string());
-
-        // Step 2 — current-content-pinned `IndexedReady` fast path. This is
+        // Step 1 — current-content-pinned `IndexedReady` fast path. This is
         // a cache read only; it never materialises (no `ensure_indexed_ready`
         // — that would re-enter the recursion this function guards against).
-        if let Some(indexed) = ctx.indexed_for_current_content(resolved_canonical_id.as_str()) {
+        if let Some(indexed) = ctx.indexed_for_current_content(canonical_id) {
             if indexed.shallow_state.has_resolvable_surface() {
                 return Some(indexed.shallow_state.clone());
             }
         }
 
-        // Step 3 — content-pinned route-owned shallow fallback. The
+        // Step 2 — content-pinned route-owned shallow fallback. The
         // route-owned path's own indexed fast path is content-pinned and the
         // route-owned entry carries the tiered freshness gate.
-        if let Some(state) =
-            self.route_owned_shallow_state_with_context(ctx, resolved_canonical_id.as_str())
-        {
+        if let Some(state) = self.route_owned_shallow_state_with_context(ctx, canonical_id) {
             return Some(state);
         }
 
-        // Step 4 — genuinely artifact-only canonical (no scheduler
+        // Step 3 — genuinely artifact-only canonical (no scheduler
         // `DerivedRawState`): the named artifact-current authority answers
         // for a foreign-source-loaded / test-seeded artifact. It declines
         // (returns `None`) for any canonical the scheduler tracks, so a stale
         // older-content artifact for a live scope is never surfaced here.
-        self.artifact_current_indexed(resolved_canonical_id.as_str())
+        self.artifact_current_indexed(canonical_id)
             .filter(|indexed| indexed.shallow_state.has_resolvable_surface())
             .map(|indexed| indexed.shallow_state.clone())
     }

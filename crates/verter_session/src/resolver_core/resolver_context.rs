@@ -233,16 +233,22 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// reintroduces exactly that staleness — so the pin is derived
     /// strictly from the authoritative accessor above.
     ///
-    /// Defaulted so the base implementer ([`crate::VerterHost`]) and
-    /// the overlay-aware `SessionResolverContext` both inherit the
-    /// identical pinned-read body; only the hash source differs, and
-    /// that difference lives in
-    /// [`Self::authoritative_current_content_hash`].
+    /// Defaulted so the base implementer ([`crate::VerterHost`])
+    /// inherits the host's pinned-read body
+    /// ([`crate::VerterHost::current_content_pinned_indexed`]) — which
+    /// resolves the authoritative current content hash and reads the
+    /// artifact store pinned to it, keyed by the **normalised analysis
+    /// canonical** so a RAW requested canonical (the architectural id
+    /// before an overlay-detection point) does not mis-key for a
+    /// non-identity `.js`. The overlay-aware
+    /// [`crate::resolver_core::SessionResolverContext`] overrides this
+    /// method: it gates the overlay branch on the raw id via
+    /// [`crate::host_manage::overlay_materialize::OverlayArtifactIdentity`]
+    /// and only falls through to the base host (this body) for an
+    /// unmasked canonical.
     fn indexed_for_current_content(&self, canonical: &str) -> Option<Arc<IndexedReady>> {
-        let current_hash = self.authoritative_current_content_hash(canonical)?;
-        self.project_type_store()
-            .indexed()
-            .get_for_current_content(canonical, current_hash)
+        self.host_for_fact_tracer_install()
+            .current_content_pinned_indexed(canonical)
     }
 
     /// Establish ONE tear-free [`MaterializeScopeObservation`] for a
