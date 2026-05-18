@@ -8,27 +8,40 @@
 //!
 //! ## Bounded retention
 //!
-//! Both maps are keyed on content-derived state — `edges` on
-//! [`SemanticNodeId`]s (a fresh content version produces fresh ids and
-//! thus fresh `(result, kind)` keys), `signature_pool` on the distinct
-//! [`DepSignature`] fences builders emit. Without a routine reclamation
-//! path each map would grow append-only with the content-edit count in a
-//! long-lived session — the same unbounded-growth class the bounded
-//! query-identity retention substrate exists to cap.
+//! `edges` is keyed on content-derived state — `(result, kind)` pairs of
+//! [`SemanticNodeId`]s, where a fresh content version produces fresh ids
+//! and thus fresh keys. Without a routine reclamation path it would grow
+//! append-only with the content-edit count in a long-lived session — the
+//! same unbounded-growth class the bounded query-identity retention
+//! substrate exists to cap. It is bounded by a [`GlobalRetentionBudget`]:
+//! a newly-keyed `(result, kind)` bucket records an admission, and the
+//! oldest buckets past the cap are FIFO-evicted write-side (from
+//! [`DerivationStore::record`]). Evicting an `edges` bucket only drops
+//! cached derivation provenance — a future origin walk simply finds no
+//! edge for that node, never a wrong edge.
 //!
-//! Each map is bounded by a [`GlobalRetentionBudget`]: a newly-keyed
-//! `(result, kind)` bucket / a newly-interned signature records an
-//! admission, and the oldest keys past the cap are FIFO-evicted
-//! write-side (from [`DerivationStore::record`] /
-//! [`DerivationStore::intern_signature`]). Evicting an `edges` bucket
-//! only drops cached derivation provenance — a future origin walk simply
-//! finds no edge for that node, never a wrong edge. Evicting a
-//! `signature_pool` entry only forgoes a dedup opportunity: any edge that
-//! already holds the `Arc<DepSignature>` keeps it alive, and a later
-//! identical fence re-allocates instead of dedup-hitting. Both are
-//! correctness-neutral.
+//! `signature_pool` is the dep-signature interner. It is NOT bounded by an
+//! independent FIFO cap: `record_origin_edge`'s duplicate-edge dedup probe
+//! compares the interned `Arc<DepSignature>` by pointer
+//! ([`std::sync::Arc::ptr_eq`]), so the interner MUST guarantee that an
+//! identical signature value always shares ONE `Arc` for as long as a live
+//! edge references it. An independent cap that evicted a pooled signature
+//! a live edge still held would break that guarantee: the next intern of
+//! the same value would allocate a fresh `Arc`, the pointer probe would
+//! miss, and the edge would be recorded a second time. The pool's
+//! reclamation is therefore tied to edge lifetime — it holds
+//! [`std::sync::Weak`] values. `intern_signature` upgrades the stored
+//! `Weak`: a successful upgrade means a live edge still holds the `Arc`,
+//! so it is reused; a failed upgrade means every edge that referenced it
+//! has been evicted from `edges`, so a fresh `Arc` is allocated. A pooled
+//! signature can never hand back a stale `Arc`, and a signature still
+//! reachable from a live edge can never be missed. The `edges` map is
+//! already bounded by `edge_budget`, so the count of distinct live-edge
+//! signatures is already bounded; the pool's map of `Weak`s is compacted
+//! of dead entries write-side once it grows past the live count, so it
+//! does not accumulate dead `Weak`s.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use rustc_hash::FxHashMap;
 
@@ -39,10 +52,6 @@ use crate::semantic_query::{DepSignature, OriginEdge, OriginEdgeKind, SemanticNo
 /// derivation store retains. A long-lived session that edits many owners
 /// caps here before FIFO eviction reclaims the oldest buckets.
 pub(super) const DERIVATION_EDGE_BUCKET_CAP: usize = 4096;
-
-/// Total cap on the number of distinct interned [`DepSignature`] fences
-/// the derivation store's interning pool retains.
-pub(super) const DERIVATION_SIGNATURE_POOL_CAP: usize = 4096;
 
 /// Sibling edge store for the derivation/origin layer. Co-owned by
 /// [`super::SemanticGraphStore`] but conceptually a separate graph: edges
@@ -60,16 +69,23 @@ pub(super) const DERIVATION_SIGNATURE_POOL_CAP: usize = 4096;
 /// dedup is the walker's responsibility (it usually is not — different
 /// derivations carry different dep-sigs).
 ///
-/// Both maps are bounded — see the module docs. The two budgets are
-/// reclaimed wholesale by [`DerivationStore::clear`] on a
-/// project-generation reset.
+/// `edges` is bounded by `edge_budget`; `signature_pool` holds [`Weak`]
+/// values so its reclamation is tied to edge lifetime — see the module
+/// docs. Both maps are dropped wholesale by [`DerivationStore::clear`] on
+/// a project-generation reset.
 pub(super) struct DerivationStore {
     edges: FxHashMap<(SemanticNodeId, OriginEdgeKind), Vec<OriginEdge>>,
-    pub(super) signature_pool: FxHashMap<DepSignature, Arc<DepSignature>>,
+    /// Dep-signature interner. Maps a signature value to a [`Weak`]
+    /// reference to the canonical `Arc<DepSignature>` handed to edges.
+    /// `intern_signature` upgrades the `Weak`: a live upgrade reuses the
+    /// `Arc` (an edge still holds it); a dead upgrade means every edge
+    /// referencing it was evicted, so a fresh `Arc` is allocated. This
+    /// ties pool reclamation to edge lifetime — an entry can never hand
+    /// back an `Arc` no live edge holds, so `record_origin_edge`'s
+    /// `Arc::ptr_eq` dedup probe stays sound (see module docs).
+    pub(super) signature_pool: FxHashMap<DepSignature, Weak<DepSignature>>,
     /// FIFO total-size budget bounding the `edges` bucket count.
     edge_budget: GlobalRetentionBudget<(SemanticNodeId, OriginEdgeKind)>,
-    /// FIFO total-size budget bounding the `signature_pool` entry count.
-    signature_budget: GlobalRetentionBudget<DepSignature>,
 }
 
 impl Default for DerivationStore {
@@ -79,14 +95,13 @@ impl Default for DerivationStore {
 }
 
 impl DerivationStore {
-    /// Construct a derivation store with both retention budgets set to
-    /// their default caps.
+    /// Construct a derivation store with the edge-bucket retention budget
+    /// set to its default cap.
     pub(super) fn new() -> Self {
         Self {
             edges: FxHashMap::default(),
             signature_pool: FxHashMap::default(),
             edge_budget: GlobalRetentionBudget::new(DERIVATION_EDGE_BUCKET_CAP),
-            signature_budget: GlobalRetentionBudget::new(DERIVATION_SIGNATURE_POOL_CAP),
         }
     }
 
@@ -97,20 +112,33 @@ impl DerivationStore {
         // token is bound (zero-overhead production path). The
         // `with_active_capture` body never panics so it is safe to
         // run inside the `&mut self` borrow.
+        //
+        // The pool stores `Weak`s: an upgrade succeeds only while a
+        // live edge still holds the canonical `Arc`. A successful
+        // upgrade reuses that `Arc` so identical signatures keep
+        // sharing one allocation — which is what makes the
+        // `Arc::ptr_eq` dedup probe in `record_origin_edge` sound. A
+        // failed upgrade means every edge that referenced this
+        // signature has been evicted from `edges`, so there is no
+        // live `Arc` to dedup against and a fresh one is allocated.
         if let Some(existing) = self.signature_pool.get(&sig) {
-            crate::capture_token::with_active_capture(|t| t.record_signature_intern(true));
-            return Arc::clone(existing);
+            if let Some(arc) = existing.upgrade() {
+                crate::capture_token::with_active_capture(|t| t.record_signature_intern(true));
+                return arc;
+            }
         }
         let arc = Arc::new(sig.clone());
-        self.signature_pool.insert(sig.clone(), Arc::clone(&arc));
+        self.signature_pool.insert(sig, Arc::downgrade(&arc));
         crate::capture_token::with_active_capture(|t| t.record_signature_intern(false));
-        // Bounded retention: a newly-interned fence records an
-        // admission; the oldest pooled signatures past the cap are
-        // FIFO-evicted. Eviction only forgoes future dedup — any edge
-        // already holding the evicted `Arc` keeps the data alive.
-        let seq = next_retention_seq();
-        for victim in self.signature_budget.record_admission(seq, sig) {
-            self.signature_pool.remove(&victim);
+        // Compact dead `Weak`s write-side. The pool's reclamation is
+        // tied to edge lifetime, so an evicted edge bucket leaves dead
+        // `Weak`s behind. `edges` is bounded by `edge_budget`, so the
+        // count of distinct live-edge signatures is bounded; compacting
+        // once the pool grows past that live count keeps the pool's map
+        // bounded too without an independent FIFO cap.
+        if self.signature_pool.len() > 2 * self.edges.len() + DERIVATION_EDGE_BUCKET_CAP {
+            self.signature_pool
+                .retain(|_, weak| weak.strong_count() > 0);
         }
         arc
     }
@@ -138,17 +166,18 @@ impl DerivationStore {
         }
     }
 
-    /// Drop every edge bucket and every pooled signature, and clear both
-    /// retention ledgers. Called from
+    /// Drop every edge bucket and every pooled signature, and clear the
+    /// edge-bucket retention ledger. Called from
     /// [`super::SemanticGraphStore::invalidate_all`] on a
-    /// project-generation reset — every stored [`SemanticNodeId`] becomes
-    /// invalid at that boundary, so this id-keyed store MUST be cleared
-    /// before the node arena reuses its id space.
+    /// project-generation reset: the stale [`SemanticNodeId`]-keyed edge
+    /// buckets are dropped so a future origin walk does not return a
+    /// judgement carried over from the superseded project generation. The
+    /// node arena itself is append-only and is not reset — `clear` only
+    /// drops this store's own cached provenance.
     pub(super) fn clear(&mut self) {
         self.edges.clear();
         self.signature_pool.clear();
         self.edge_budget.clear();
-        self.signature_budget.clear();
     }
 
     /// Number of distinct `(result, kind)` edge buckets currently

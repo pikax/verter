@@ -1607,6 +1607,136 @@ fn invalidate_all_aborts_pending_inflight_and_skips_aborted_publish() {
     );
 }
 
+/// `invalidate_all` TORN-PUBLISH WINDOW — a cold winner that finishes its
+/// build and reaches `warm_publish_one` in the tail of a concurrent
+/// `invalidate_all` MUST NOT strand a memo entry computed against the
+/// superseded project generation.
+///
+/// The window: when `invalidate_all` clears `entries` and releases that
+/// lock BEFORE a separate block sets `aborted` on the in-flight table, a
+/// winner can acquire `entries` in the gap, see `aborted == false` in
+/// `warm_publish_one`'s TOCTOU re-check, publish a memo slot — and the
+/// abort block then drains `inflight` WITHOUT removing that stranded
+/// slot. `invalidate_all` is meant to leave the memo empty on a
+/// project-generation bump.
+///
+/// This test pins the window deterministically. The winner is parked
+/// mid-build (its in-flight entry registered + claimed). `invalidate_all`
+/// runs on a second thread and parks at the per-store post-`entries`-
+/// clear injection point — that point fires AFTER the `entries` lock that
+/// performs the abort + clear has been released. While `invalidate_all`
+/// is parked there, the winner is released: it finishes its build and
+/// runs `warm_publish_one`, which acquires the (now free) `entries` lock
+/// and re-checks `aborted`.
+///
+/// DISCRIMINATES: against a tree where `invalidate_all` clears `entries`
+/// and releases the lock before setting `aborted`, the winner re-check
+/// sees `aborted == false` and publishes — `memo_entry_count()` is `1`
+/// after `invalidate_all` returns. After the fix the abort runs under the
+/// SAME `entries`-lock hold as the clear, so by the time the injection
+/// point (post-lock-release) fires `aborted` is already `true`; the
+/// winner's re-check skips the publish and the memo stays empty.
+#[test]
+fn invalidate_all_closes_torn_publish_window_against_cold_winner() {
+    use std::sync::Barrier;
+    use std::thread;
+
+    let store = Arc::new(SemanticGraphStore::new());
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope("/w/torn.ts"),
+        name: Arc::from("W"),
+    });
+
+    // winner_in_build: winner signals it is inside the cold-build closure
+    //   (its in-flight entry is registered + claimed).
+    // release_winner: main releases the winner to finish its build —
+    //   driven only AFTER `invalidate_all` is parked at its injection
+    //   point, so the winner's `warm_publish_one` runs in the post-clear
+    //   tail of `invalidate_all`.
+    let winner_in_build = Arc::new(Barrier::new(2));
+    let release_winner = Arc::new(Barrier::new(2));
+    // inval_gate: the barrier armed on the store's `invalidate_all`
+    //   post-`entries`-clear injection point. `invalidate_all` calls
+    //   `wait()` on it (party 1); main supplies party 2 only after the
+    //   winner has fully finished, so `invalidate_all` stays parked
+    //   across the winner's publish attempt.
+    let inval_gate = Arc::new(Barrier::new(2));
+
+    let store_w = Arc::clone(&store);
+    let in_build_w = Arc::clone(&winner_in_build);
+    let release_w = Arc::clone(&release_winner);
+    let key_w = key.clone();
+    let winner = thread::spawn(move || {
+        let host = ctx_host();
+        store_w.execute_cooperative(
+            &host,
+            key_w,
+            || store_w.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                // Parked mid-build: the in-flight entry is claimed but
+                // `inflight.state` is unlocked, so `invalidate_all`'s
+                // abort can mark it. Released only once `invalidate_all`
+                // is parked at its post-clear injection point.
+                in_build_w.wait();
+                release_w.wait();
+                let id = store_w.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+                (QueryResult::Value(id), empty_signature())
+            },
+        )
+    });
+
+    // Winner is parked mid-build with a claimed in-flight entry.
+    winner_in_build.wait();
+    assert_eq!(
+        store.test_inflight_strong_count(&key),
+        WINNER_ONLY_INFLIGHT_REFS,
+        "winner's in-flight entry must be registered before invalidate_all",
+    );
+
+    // Arm the post-`entries`-clear injection point and run
+    // `invalidate_all` on a second thread.
+    let _gate_guard = store.test_invalidate_all_post_entries_clear_gate(Arc::clone(&inval_gate));
+    let store_i = Arc::clone(&store);
+    let invalidator = thread::spawn(move || store_i.invalidate_all());
+
+    // The winner is still parked, so `invalidate_all` runs its abort +
+    // `entries` clear, releases the `entries` lock, and parks at the
+    // injection point (waiting for party 2 of `inval_gate`). Release the
+    // winner NOW: it finishes its build and enters `warm_publish_one`,
+    // acquiring the freed `entries` lock and re-checking `aborted`.
+    release_winner.wait();
+
+    // Wait for the winner's `execute_cooperative` to fully return — its
+    // publish (or abort-skip) is complete by this point.
+    let _ = winner.join().expect("winner thread must not panic");
+
+    // Release `invalidate_all` from the injection point so it runs its
+    // remaining tail and returns.
+    inval_gate.wait();
+    let _ = invalidator
+        .join()
+        .expect("invalidator thread must not panic");
+
+    // The memo MUST be empty. A torn publish that slipped through the
+    // pre-fix window would leave exactly one stranded entry that the
+    // abort/clear failed to remove.
+    assert_eq!(
+        store.memo_entry_count(),
+        0,
+        "TORN-PUBLISH BUG: a cold winner that reached `warm_publish_one` \
+         in `invalidate_all`'s post-`entries`-clear tail published a memo \
+         entry that survived the project-generation reset. `invalidate_all` \
+         must hold `entries` across BOTH the abort and the clear so the \
+         winner's `aborted` re-check skips the publish.",
+    );
+    assert!(
+        store.get_unvalidated(&key).is_none(),
+        "TORN-PUBLISH BUG: the winner's `(family, slot)` must not be warm \
+         after `invalidate_all` — the build interned its ids against the \
+         superseded project generation.",
+    );
+}
+
 #[test]
 fn recursive_sentinel_does_not_promote_to_warm_memo() {
     let host = ctx_host();
@@ -2673,46 +2803,172 @@ fn derivation_store_bounds_edge_bucket_growth() {
 }
 
 /// BOUND PROOF — the derivation store's `signature_pool` interning map
-/// MUST NOT grow monotonically with the count of distinct fences.
+/// MUST NOT grow monotonically with the count of distinct fences. The
+/// pool stores `Weak` values whose lifetime is tied to the edges that
+/// reference them; the `edges` map is itself bounded by `edge_budget`, so
+/// the count of LIVE pooled signatures is bounded by the live-edge count.
 ///
-/// DISCRIMINATES: pre-fix the pool was an unbounded `FxHashMap` — every
-/// distinct `DepSignature` fence stayed resident forever. After the fix
-/// the FIFO `signature_budget` caps the pool. Evicting a pool entry only
-/// forgoes future dedup (callers already holding the `Arc` keep the data
-/// alive), so the bound is correctness-neutral.
+/// DISCRIMINATES: an unbounded `FxHashMap` of strong `Arc`s would keep
+/// every distinct `DepSignature` fence resident forever — recording
+/// `DERIVATION_EDGE_BUCKET_CAP + 600` distinct fences would leave all of
+/// them live. With the `Weak`-valued pool, evicting an edge bucket (FIFO
+/// past `edge_budget`) drops the strong `Arc`s its edges held, so the
+/// corresponding pooled `Weak`s go dead and stop counting toward the live
+/// pool size.
 #[test]
 fn derivation_store_bounds_signature_pool_growth() {
-    use super::derivation::DERIVATION_SIGNATURE_POOL_CAP;
+    use super::derivation::DERIVATION_EDGE_BUCKET_CAP;
 
     let store = SemanticGraphStore::new();
-    let src = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    // Emit more distinct fences than the pool cap. Each fence is a
-    // distinct `(canonical, whole-hash)` rail, so each interns a fresh
-    // pool entry. Each edge targets a fresh `result` node (a distinct
-    // `Alias`-chain link) so every emission lands in its own bucket —
-    // keeping the per-call identity-tuple scan O(1) and isolating this
-    // test to the signature pool's growth, not the bucket count.
-    let fence_count = DERIVATION_SIGNATURE_POOL_CAP + 600;
-    let mut prev = src;
+    // Emit more distinct fences than the edge-bucket cap. Each edge gets
+    // a distinct fence AND a fresh `result` node (a distinct `Alias`-chain
+    // link), so every emission opens its own `(result, kind)` bucket. Once
+    // the bucket count exceeds `edge_budget`, the oldest buckets are
+    // FIFO-evicted — dropping the only strong `Arc`s to their fences, so
+    // those pooled `Weak`s go dead.
+    let fence_count = DERIVATION_EDGE_BUCKET_CAP + 600;
+    let mut prev = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     for i in 0..fence_count {
         let result = store.intern_node(SemanticNodeData::Alias(prev));
         let canonical = format!("/w/f{i}.ts");
         store.record_origin_edge(
             result,
             OriginEdgeKind::Normalize,
-            Arc::from(vec![src].into_boxed_slice()),
+            Arc::from(vec![prev].into_boxed_slice()),
             crate::semantic_query::OriginMeta::None,
             dep_sig_for(&canonical, (i % 251) as u8),
         );
         prev = result;
     }
-    let pool_size = store.derivation_signature_pool_size();
+    // Live pooled signatures = signatures still reachable from a surviving
+    // edge bucket. `edges` is capped at `DERIVATION_EDGE_BUCKET_CAP`, and
+    // each surviving bucket holds exactly one edge → one live fence — so
+    // the live pool size cannot exceed the bucket cap.
+    let live_pool_size = store.derivation_signature_pool_size();
     assert!(
-        pool_size <= DERIVATION_SIGNATURE_POOL_CAP,
+        live_pool_size <= DERIVATION_EDGE_BUCKET_CAP,
         "bounded retention proof: after interning {fence_count} distinct \
-         fences the DerivationStore signature pool must stay bounded by \
-         its cap ({DERIVATION_SIGNATURE_POOL_CAP}), not grow with the \
-         fence count. Observed pool size={pool_size}.",
+         fences the DerivationStore's LIVE signature pool must stay \
+         bounded by the edge-bucket cap ({DERIVATION_EDGE_BUCKET_CAP}) — \
+         a `Weak` goes dead when its edge bucket is FIFO-evicted. Observed \
+         live pool size={live_pool_size}.",
+    );
+    // Discrimination floor — the pool still retains its newest live
+    // signatures (it is not a wipe).
+    assert!(
+        live_pool_size >= 1,
+        "the signature pool must still retain the fences of its surviving \
+         edge buckets — observed live pool size={live_pool_size}",
+    );
+}
+
+/// ORIGIN-EDGE DEDUP DURABILITY — re-emitting an origin edge whose fence
+/// was driven out of the interning pool's reclamation reach by a flood of
+/// other distinct fences MUST still deduplicate. `record_origin_edge`
+/// probes for an existing edge with `Arc::ptr_eq` on the interned
+/// `edge_dep_signature`; the interner therefore has to keep handing back
+/// the SAME `Arc<DepSignature>` for an identical fence value for as long
+/// as a live edge references it.
+///
+/// DISCRIMINATES: an interner that bounded `signature_pool` with an
+/// independent FIFO cap would, when flooded with `cap + N` other distinct
+/// fences, evict the original fence's pool entry even though the first
+/// edge still held its `Arc`. The re-emit's `intern_signature` would then
+/// allocate a FRESH `Arc`, `Arc::ptr_eq` would miss, and the edge would
+/// be recorded a SECOND time — the bucket would grow to two `OriginEdge`s
+/// and `origin_edges_emitted` would double-count. With the `Weak`-valued
+/// pool the original fence's entry upgrades successfully (the first edge
+/// keeps it alive), the same `Arc` is reused, and the re-emit
+/// deduplicates.
+#[test]
+fn origin_edge_dedup_survives_signature_pool_flood() {
+    let store = SemanticGraphStore::new();
+
+    // Distinct, stable nodes for the edge under test.
+    let result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let original_fence = dep_sig_for("/w/original.ts", 7);
+
+    // Step 1 — emit the original edge. Its interned dep-signature `Arc`
+    // is now held by the stored `OriginEdge`.
+    store.record_origin_edge(
+        result,
+        OriginEdgeKind::Normalize,
+        Arc::from(vec![source].into_boxed_slice()),
+        crate::semantic_query::OriginMeta::None,
+        original_fence.clone(),
+    );
+    assert_eq!(
+        store
+            .origins_of_kind(result, OriginEdgeKind::Normalize)
+            .len(),
+        1,
+        "pre-flood: the original edge is recorded exactly once",
+    );
+    assert_eq!(
+        store.stats_snapshot().origin_edges_emitted,
+        1,
+        "pre-flood: exactly one origin-edge emission counted",
+    );
+
+    // Step 2 — drive a flood of distinct fences through the SAME store so
+    // any independent FIFO cap on the pool would evict the original
+    // fence's pool entry. Each flood edge targets ONE shared `result`
+    // node so the flood adds a single extra `(result, kind)` bucket
+    // (never enough to evict the bucket under test) — this isolates the
+    // test to signature-pool reclamation, not edge-bucket eviction. A
+    // count well past any plausible pool cap guarantees the original
+    // fence would be FIFO-evicted under the pre-fix mechanism.
+    let flood_target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+    let flood_count = 4096 + 1024;
+    for i in 0..flood_count {
+        let canonical = format!("/w/flood-{i}.ts");
+        store.record_origin_edge(
+            flood_target,
+            OriginEdgeKind::Normalize,
+            Arc::from(vec![source].into_boxed_slice()),
+            crate::semantic_query::OriginMeta::None,
+            dep_sig_for(&canonical, (i % 211) as u8),
+        );
+    }
+
+    // Step 3 — re-emit the ORIGINAL edge with a fresh-but-equal fence
+    // value. The interner must upgrade the original fence's still-live
+    // `Weak` and hand back the SAME `Arc` the first edge holds, so the
+    // `Arc::ptr_eq` dedup probe matches and the re-emit is suppressed.
+    store.record_origin_edge(
+        result,
+        OriginEdgeKind::Normalize,
+        Arc::from(vec![source].into_boxed_slice()),
+        crate::semantic_query::OriginMeta::None,
+        dep_sig_for("/w/original.ts", 7),
+    );
+
+    // The `(result, Normalize)` bucket must still hold exactly ONE edge.
+    let bucket = store.origins_of_kind(result, OriginEdgeKind::Normalize);
+    assert_eq!(
+        bucket.len(),
+        1,
+        "DEDUP BUG: re-emitting an identical origin edge after a \
+         signature-pool flood must deduplicate — the `(result, Normalize)` \
+         bucket grew to {} edges. A FIFO-capped pool evicted the original \
+         fence's interned `Arc`, so the re-emit allocated a fresh `Arc`, \
+         `Arc::ptr_eq` missed, and the duplicate was recorded.",
+        bucket.len(),
+    );
+    // …and the cumulative `origin_edges_emitted` counter must reflect
+    // exactly `1 (original) + flood_count` ledger writes — the re-emit
+    // was deduplicated, so it must NOT have bumped the counter. Every
+    // flood fence is distinct, so all `flood_count` flood edges are
+    // genuine (non-duplicate) emissions.
+    let emitted = store.stats_snapshot().origin_edges_emitted;
+    assert_eq!(
+        emitted,
+        1 + flood_count as u64,
+        "DEDUP BUG: `origin_edges_emitted` must be 1 + {flood_count} \
+         after the dedup'd re-emit — observed {emitted}. A higher count \
+         means the re-emitted original edge double-counted because its \
+         pooled signature `Arc` was evicted and re-allocated.",
     );
 }
 

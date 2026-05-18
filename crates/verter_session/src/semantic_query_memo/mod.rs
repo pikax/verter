@@ -187,6 +187,25 @@ pub struct SemanticGraphStore {
     /// already takes the entries lock, so the cost is in the noise and
     /// production cold-abort-sweep behaviour is unchanged.
     force_cold_abort_sweep: std::sync::atomic::AtomicBool,
+    /// Per-store test-only injection point for the
+    /// [`Self::invalidate_all`] post-`entries`-clear tail. When a test
+    /// arms it (via [`Self::test_invalidate_all_post_entries_clear_gate`])
+    /// `invalidate_all` calls [`std::sync::Barrier::wait`] on the stored
+    /// barrier right after releasing the `entries` lock that performed
+    /// the in-flight abort + memo clear — letting a test deterministically
+    /// race a cold winner's `warm_publish_one` against that tail and
+    /// assert no stale memo entry survives.
+    ///
+    /// **Per-store scope (test hermeticity).** Like `force_cold_abort_sweep`,
+    /// the gate lives on the store the test drives, never in a
+    /// process-global, so a test arming it cannot park an unrelated
+    /// concurrent test's `invalidate_all`.
+    ///
+    /// `cfg`-gated to `test` / `debug_assertions`: the field and the
+    /// `invalidate_all` probe are both absent from release builds, so the
+    /// production reset path is unchanged.
+    #[cfg(any(test, debug_assertions))]
+    invalidate_all_post_entries_clear_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Γ.B reverse index. For each canonical id,
     /// holds the set of `(family, slot)` pairs whose published
     /// dep_signature references it, paired with the dep_signature
@@ -274,14 +293,23 @@ impl SemanticGraphStore {
         Self::default()
     }
 
-    /// Diagnosis accessor: number of distinct interned
-    /// `DepSignature` payloads in the derivation-signature pool. Used
-    /// by the diagnosis benchmark to record the pool's growth across
-    /// scenarios — `record_signature_pool_size` on the active capture
-    /// token reads this value at end-of-capture.
+    /// Diagnosis accessor: number of distinct interned `DepSignature`
+    /// payloads still reachable from a live origin edge in the
+    /// derivation-signature pool. The pool stores `Weak` values whose
+    /// lifetime is tied to the edges that reference them, so this counts
+    /// only the entries that still upgrade — a dead `Weak` left behind by
+    /// an evicted edge bucket is not counted. Used by the diagnosis
+    /// benchmark to record the pool's growth across scenarios —
+    /// `record_signature_pool_size` on the active capture token reads
+    /// this value at end-of-capture.
     #[must_use]
     pub fn derivation_signature_pool_size(&self) -> usize {
-        self.derivation.lock().signature_pool.len()
+        self.derivation
+            .lock()
+            .signature_pool
+            .values()
+            .filter(|weak| weak.strong_count() > 0)
+            .count()
     }
 
     /// Diagnosis-instrumented entries-mutex acquisition.
@@ -795,43 +823,80 @@ impl SemanticGraphStore {
     /// same payload afterwards. Reclaiming the id space would require a
     /// generational `SemanticNodeId` redesign.
     ///
-    /// ## Locking
+    /// ## Locking — no winner may publish into a cleared `entries`
     ///
-    /// The `entries` memo lock guards only the count + clear of the
-    /// memo; the `inflight` lock guards only the abort + drain of the
-    /// admission table. They are taken in turn, each scoped to exactly
-    /// the structure it protects (acquisition order `entries → inflight`
-    /// matches every other multi-lock path, so there is no AB-BA
-    /// cycle). The `SemanticNodeId`-keyed caches and the retention
-    /// ledgers are individually synchronised and need no outer lock.
+    /// The in-flight abort and the `entries` clear are performed under a
+    /// SINGLE `entries`-lock hold: the `entries` lock is acquired, then
+    /// the `inflight` lock is acquired nested inside it, every in-flight
+    /// entry is marked `aborted`, the in-flight table is drained, and
+    /// `entries` is cleared — all before the `entries` lock is released.
+    ///
+    /// This ordering is load-bearing. A cold winner publishes through
+    /// [`Self::warm_publish_one`], which acquires the `entries` lock and
+    /// then re-checks `inflight.state.aborted` under it before writing a
+    /// memo slot. Because this method holds `entries` across BOTH the
+    /// abort and the clear, any winner is strictly one of two cases: it
+    /// acquired `entries` and published BEFORE this method's clear (its
+    /// entry is dropped by the clear), or it acquires `entries` AFTER
+    /// this method releases it — by which point `aborted` is already set
+    /// on its in-flight entry, so its `warm_publish_one` re-check skips
+    /// the publish (and its prefix backfills). There is no window in
+    /// which a winner sees `aborted == false` and publishes a slot the
+    /// abort/clear then fails to remove.
+    ///
+    /// The acquisition order `entries → inflight` matches
+    /// [`Self::invalidate_canonical`] and every other multi-lock path —
+    /// no path acquires `inflight` then `entries`, so there is no AB-BA
+    /// cycle. The `SemanticNodeId`-keyed caches and the retention ledgers
+    /// are individually synchronised and need no outer lock.
     pub fn invalidate_all(&self) -> usize {
         let removed: usize = {
             let mut entries = self.entries_lock_diagnosed();
             let count = entries.values().map(FamilySlots::populated_count).sum();
+            // Abort every in-flight admission, then drain the table and
+            // clear `entries` — all under the SAME `entries`-lock hold.
+            // `SemanticQueryKey` keys embed `SemanticNodeId`s, and a
+            // cooperative joiner blocked on the condvar must wake and
+            // re-enter dispatch rather than join a stale, soon-to-be-
+            // invalid entry. Setting `aborted` before the `entries` lock
+            // that performs the clear is released closes the torn-publish
+            // window: a cold winner that acquires `entries` afterwards
+            // re-checks `aborted` in `warm_publish_one` and skips. Mirrors
+            // the per-canonical abort in `invalidate_canonical`.
+            {
+                let mut table = self.inflight.lock();
+                for inflight in table.values() {
+                    {
+                        let mut state = inflight.state.lock();
+                        state.aborted = true;
+                        if state.completed.is_none() {
+                            state.completed = Some(QueryResult::Error(QueryError::Other(
+                                Arc::from("aborted by project-generation reset"),
+                            )));
+                            state.dep_signature = Some(empty_signature());
+                        }
+                    }
+                    inflight.ready.notify_all();
+                }
+                table.clear();
+            }
             entries.clear();
             count
         };
-        // Abort every in-flight admission before draining the table —
-        // `SemanticQueryKey` keys embed `SemanticNodeId`s, and a
-        // cooperative joiner blocked on the condvar must wake and
-        // re-enter dispatch rather than join a stale, soon-to-be-invalid
-        // entry. Mirrors the per-canonical abort in `invalidate_canonical`.
+        // Test-only injection point: a barrier armed by
+        // `test_invalidate_all_post_entries_clear_gate` parks here, after
+        // the `entries` lock that performed the abort + clear has been
+        // released. It lets a test deterministically race a cold winner's
+        // `warm_publish_one` against this method's post-clear tail — the
+        // winner re-checks `aborted` (already set above) and must skip.
+        // A single relaxed lock probe; `None` (the production default) is
+        // a no-op.
+        #[cfg(any(test, debug_assertions))]
         {
-            let mut table = self.inflight.lock();
-            for inflight in table.values() {
-                {
-                    let mut state = inflight.state.lock();
-                    state.aborted = true;
-                    if state.completed.is_none() {
-                        state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
-                            "aborted by project-generation reset",
-                        ))));
-                        state.dep_signature = Some(empty_signature());
-                    }
-                }
-                inflight.ready.notify_all();
+            let gate = self.invalidate_all_post_entries_clear_gate.lock().clone();
+            if let Some(barrier) = gate {
+                barrier.wait();
             }
-            table.clear();
         }
         // Drop every `SemanticNodeId`-keyed semantic cache so no stale
         // id-keyed judgement survives the project-generation bump.
@@ -3111,6 +3176,46 @@ impl SemanticGraphStore {
             flag: &self.force_cold_abort_sweep,
         }
     }
+
+    /// Test-only driver: arm the [`Self::invalidate_all`] post-`entries`-
+    /// clear injection point with `barrier`. The next `invalidate_all` on
+    /// **this store** calls `barrier.wait()` right after releasing the
+    /// `entries` lock that performed the in-flight abort + memo clear, so
+    /// a test holding the other `barrier` party can deterministically
+    /// drive a cold winner's `warm_publish_one` against that tail.
+    ///
+    /// The returned guard disarms the gate on drop. Per-store scoped, so
+    /// it cannot park a concurrent unrelated test's `invalidate_all`.
+    /// `cfg`-gated to `test` / `debug_assertions`, mirroring the field.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_invalidate_all_post_entries_clear_gate(
+        &self,
+        barrier: Arc<std::sync::Barrier>,
+    ) -> TestInvalidateAllGateGuard<'_> {
+        *self.invalidate_all_post_entries_clear_gate.lock() = Some(barrier);
+        TestInvalidateAllGateGuard {
+            gate: &self.invalidate_all_post_entries_clear_gate,
+        }
+    }
+}
+
+/// RAII guard returned by
+/// [`SemanticGraphStore::test_invalidate_all_post_entries_clear_gate`].
+/// Clears the per-store gate on drop so a later `invalidate_all` on the
+/// same store does not park on a stale barrier.
+#[cfg(any(test, debug_assertions))]
+#[doc(hidden)]
+pub struct TestInvalidateAllGateGuard<'a> {
+    gate: &'a parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+}
+
+#[cfg(any(test, debug_assertions))]
+impl Drop for TestInvalidateAllGateGuard<'_> {
+    fn drop(&mut self) {
+        *self.gate.lock() = None;
+    }
 }
 
 impl SemanticGraphRead for SemanticGraphStore {
@@ -3135,7 +3240,9 @@ impl crate::invalidation_domain::ParticipatesInInvalidation for SemanticGraphSto
         if matches!(domain, ProjectGeneration) {
             // `invalidate_all` itself clears the resolved-named-type
             // identity map (and every other `SemanticNodeId`-keyed
-            // structure) before resetting the arena id space.
+            // structure) so no stale `SemanticNodeId`-keyed judgement
+            // survives the project-generation bump. The node arena is
+            // append-only and is not reset.
             let _ = self.invalidate_all();
         }
     }
