@@ -113,10 +113,13 @@ impl VerterHost {
         // owner alongside `analysis_canonical` (the
         // `normalized_analysis_canonical` rewrite); the materialise step
         // drives `ensure_indexed_ready` on the raw owner (its overlay
-        // gate is raw-keyed) and keys the bundle / route-dep cache
-        // identity on the normalised analysis canonical. The base path
-        // (`prepared_decl_bundle`) normalises internally, so the raw id
-        // is forwarded unchanged.
+        // gate is raw-keyed), keys the BUNDLE identity on the raw owner
+        // (so a `root_identity.canonical_id` resolves to the overlay
+        // content hash under the session view's raw-keyed maps — see
+        // `materialize_prepared_decl_bundle_via_ctx`), and keys
+        // import-route resolution on the normalised analysis canonical.
+        // The base path (`prepared_decl_bundle`) normalises internally,
+        // so the raw id is forwarded unchanged.
         if let Some(view) = ctx.active_session_view() {
             let identity = self.overlay_artifact_identity(canonical_id);
             // If the active view tombstones the canonical, or carries an
@@ -162,11 +165,31 @@ impl VerterHost {
     /// shared bundle cache is bypassed because its per-canonical slot
     /// already holds the base bundle.
     ///
-    /// `identity` carries both canonical ids: `ensure_indexed_ready` is
-    /// driven on the RAW overlay owner (its overlay-detection gate is
-    /// raw-keyed, so a normalised id would fail to detect the overlay),
-    /// while the bundle identity + route-dep cache identity key on the
-    /// NORMALISED analysis canonical (the analysis / cache target).
+    /// `identity` carries both canonical ids, and the two are NOT
+    /// interchangeable here:
+    ///
+    /// * **Bundle identity** — the bundle, and therefore every
+    ///   `PreparedTypeDecl::root_identity.canonical_id` it produces, is
+    ///   keyed on the **RAW overlay owner**. The bundle's
+    ///   `IndexedReady` and `owner_whole_hash` came from the raw
+    ///   overlay (`ensure_indexed_ready` is driven on the raw owner);
+    ///   the bundle identity must stay tied to that raw owner. A
+    ///   downstream prepared-member / prepared-target write-through
+    ///   roots its shared-cache entry on `authoritative_current_content_hash`
+    ///   of this canonical — and the session view's overlay maps are
+    ///   raw-keyed, so only the raw owner resolves to the OVERLAY
+    ///   content hash. Keying the bundle on the normalised companion
+    ///   instead would root an overlay-derived member on the BASE
+    ///   companion hash (the view carries no overlay for the
+    ///   companion), admitting session-overlay data into the shared
+    ///   cache under a base-valid signature where the base host — or an
+    ///   unrelated session — would reuse it.
+    /// * **Route-resolution identity** — import-route resolution keys
+    ///   on the NORMALISED analysis canonical, matching how the overlay
+    ///   `IndexedReady` itself resolved its routes
+    ///   (`materialize_overlay_indexed_ready_with_view` resolves
+    ///   imports against the analysis canonical) and the base bundle
+    ///   path's route-dep cache identity.
     fn materialize_prepared_decl_bundle_via_ctx(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
@@ -176,9 +199,18 @@ impl VerterHost {
         // owner — the overlay-detection gate inside
         // `ensure_indexed_ready_with_view` keys on the raw canonical.
         let facts = ctx.ensure_indexed_ready(identity.raw_overlay_owner())?;
-        // The bundle + route-dep cache identity is the NORMALISED
-        // analysis canonical.
-        let canonical_id = identity.analysis_canonical();
+        // The bundle identity is the RAW overlay owner — see the
+        // doc-comment above. Every `root_identity.canonical_id` on a
+        // decl built from this bundle is therefore the raw owner, so a
+        // downstream write-through roots on the overlay content hash
+        // (the raw owner is the only id the session view's raw-keyed
+        // overlay maps mask) and never pollutes the base shared cache.
+        let bundle_canonical_id = identity.raw_overlay_owner();
+        // Import-route resolution keys on the NORMALISED analysis
+        // canonical — directory-equivalent for the `.js`→`.d.ts`
+        // rewrite and consistent with the overlay `IndexedReady`'s own
+        // route resolution.
+        let route_canonical_id = identity.analysis_canonical();
         let state = &facts.shallow_state;
         if state.symbols.is_empty()
             && state.value_symbols.is_empty()
@@ -188,17 +220,17 @@ impl VerterHost {
             return None;
         }
         let (dep_edges, _import_route_hash) =
-            self.prepared_decl_bundle_route_dep_edges(canonical_id, state.as_ref());
+            self.prepared_decl_bundle_route_dep_edges(route_canonical_id, state.as_ref());
 
-        let script_setup_type_bindings = if canonical_id.ends_with(".vue") {
-            self.build_script_setup_type_bindings(canonical_id, state.as_ref(), &dep_edges)
+        let script_setup_type_bindings = if bundle_canonical_id.ends_with(".vue") {
+            self.build_script_setup_type_bindings(bundle_canonical_id, state.as_ref(), &dep_edges)
         } else {
             rustc_hash::FxHashMap::default()
         };
 
         let bundle = std::sync::Arc::new(
             crate::resolver_core::prepared_decl::build_prepared_decl_bundle(
-                canonical_id,
+                bundle_canonical_id,
                 std::sync::Arc::clone(state),
                 dep_edges,
                 script_setup_type_bindings,
@@ -213,7 +245,7 @@ impl VerterHost {
             "materialize_prepared_decl_bundle_via_ctx",
             format!(
                 "owner={} type_decls={} value_decls={} dep_edges={} source=session_overlay",
-                canonical_id,
+                bundle_canonical_id,
                 bundle.prepared_type_decls.len(),
                 bundle.prepared_value_decls.len(),
                 bundle.dep_edges.len(),

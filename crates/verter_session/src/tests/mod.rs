@@ -10,3 +10,4 @@
 
 pub mod audit_tls_harness;
 pub mod dispatch_bridges;
+pub mod overlay_pollution_probe;
