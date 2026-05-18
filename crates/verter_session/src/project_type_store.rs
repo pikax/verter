@@ -2392,8 +2392,10 @@ impl ProjectTypeStore {
         //     a different target file)
         self.owner_import_surfaces
             .entries_drain_for_generation_bump();
+        // `invalidate_all` clears every `SemanticNodeId`-keyed structure
+        // on the graph store — including the Vue macro resolved-named-type
+        // identity map — before resetting the node arena's id space.
         let _ = self.semantic_graph.invalidate_all();
-        self.semantic_graph.clear_resolved_named_types();
         self.component_meta_results.invalidate_all();
         // Step 3 closure: project-shape change invalidates every engine
         // cache (entries depend on the same routes / intrinsics that

@@ -763,22 +763,85 @@ impl SemanticGraphStore {
     /// (`tsconfig` changes, active-TS-SDK swaps, workspace-folder
     /// changes). Returns the number of slots cleared (summed across
     /// every family).
+    ///
+    /// ## `SemanticNodeId` reuse contract
+    ///
+    /// The final step reuses the node arena's id space ([`NodeArena::reset`]
+    /// allocates fresh ids from 0). That is sound ONLY because every
+    /// structure that stores or is keyed by a [`SemanticNodeId`] is
+    /// cleared first, in this method, before the arena reset. The
+    /// complete set of id-holding structures, all cleared below:
+    ///
+    /// - `entries` — the family memo. `FamilyKey` embeds `SemanticNodeId`s
+    ///   (`ProjectMember.base`, `Conditional.*`, `Instantiate.args`, …)
+    ///   and `MemoEntry.result` is a `QueryResult<SemanticNodeId>`.
+    /// - `inflight` — in-flight admission table. `SemanticQueryKey` keys
+    ///   embed `SemanticNodeId`s for node-keyed variants. Entries are
+    ///   aborted (so any cooperative joiner wakes and re-enters dispatch)
+    ///   then the table is drained.
+    /// - `named_type_index` — `DashMap<HostResolvedNamedTypeKey,
+    ///   SemanticNodeId>`; the value is an arena id.
+    /// - `relation_memo` — `DashMap<(SemanticNodeId, SemanticNodeId),
+    ///   RelationMemoEntry>`; the key is a node-id pair.
+    /// - `derivation` — the [`DerivationStore`]: `edges` is keyed by
+    ///   `(SemanticNodeId, OriginEdgeKind)`, and its `signature_pool` is
+    ///   cleared in the same `clear` call.
+    /// - `canonical_to_entries` — the Γ.B reverse index; its inner-map
+    ///   key is `(FamilyKey, ModeSlot)` and `FamilyKey` embeds
+    ///   `SemanticNodeId`s.
+    ///
+    /// Their retention budgets (`memo_budget`, `relation_budget`,
+    /// `named_type_budget`) are dropped in lockstep so no ledger retains
+    /// a key whose entry is gone. If a future change adds another
+    /// `SemanticNodeId`-keyed structure to this store, it MUST be cleared
+    /// here too, or `arena.reset()` will reuse ids that still collide
+    /// with that structure's stale keys.
     pub fn invalidate_all(&self) -> usize {
         let mut entries = self.entries_lock_diagnosed();
         let removed: usize = entries.values().map(FamilySlots::populated_count).sum();
         entries.clear();
         drop(entries);
-        // A project-generation reset clears every memo entry — drop the
-        // retention ledgers in lockstep so no budget retains a stale
-        // family / relation / named-type key.
+        // Abort every in-flight admission before draining the table —
+        // `SemanticQueryKey` keys embed `SemanticNodeId`s, and a
+        // cooperative joiner blocked on the condvar must wake and
+        // re-enter dispatch rather than join a stale, soon-to-be-invalid
+        // entry. Mirrors the per-canonical abort in `invalidate_canonical`.
+        {
+            let mut table = self.inflight.lock();
+            for inflight in table.values() {
+                {
+                    let mut state = inflight.state.lock();
+                    state.aborted = true;
+                    if state.completed.is_none() {
+                        state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
+                            "aborted by project-generation reset",
+                        ))));
+                        state.dep_signature = Some(empty_signature());
+                    }
+                }
+                inflight.ready.notify_all();
+            }
+            table.clear();
+        }
+        // Drop every other `SemanticNodeId`-keyed structure (see the
+        // method docs for the exhaustive list) so no stale id-keyed
+        // entry survives the arena reset below.
+        self.named_type_index.clear();
+        self.relation_memo.clear();
+        self.derivation.lock().clear();
+        self.canonical_to_entries.clear();
+        // Drop the retention ledgers in lockstep so no budget retains a
+        // stale family / relation / named-type key.
         self.memo_budget.clear();
         self.relation_budget.clear();
         self.named_type_budget.clear();
         // The node arena's dense storage is append-only across content
         // edits; a project-generation reset is the safe point to
-        // reclaim it. With every memo entry, relation judgement, and
-        // named-type mapping cleared above, no stored `SemanticNodeId`
-        // survives, so reusing the arena's id space is sound here.
+        // reclaim it. Every memo entry, in-flight admission, relation
+        // judgement, named-type mapping, derivation edge, and reverse-
+        // index entry has been cleared above, so no stored
+        // `SemanticNodeId` survives — reusing the arena's id space is
+        // sound here.
         self.arena.reset();
         removed
     }
@@ -1171,6 +1234,15 @@ impl SemanticGraphStore {
     #[must_use]
     pub fn origin_edge_count(&self) -> usize {
         self.derivation.lock().edge_count()
+    }
+
+    /// Number of distinct `(result, kind)` derivation edge buckets
+    /// currently retained. The derivation store bounds this with a FIFO
+    /// retention budget; the bounded-retention proof asserts the count
+    /// stays capped across many content edits.
+    #[must_use]
+    pub fn derivation_bucket_count(&self) -> usize {
+        self.derivation.lock().bucket_count()
     }
 
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
@@ -3032,8 +3104,10 @@ impl crate::invalidation_domain::ParticipatesInInvalidation for SemanticGraphSto
     fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
         use crate::invalidation_domain::InvalidationDomain::*;
         if matches!(domain, ProjectGeneration) {
+            // `invalidate_all` itself clears the resolved-named-type
+            // identity map (and every other `SemanticNodeId`-keyed
+            // structure) before resetting the arena id space.
             let _ = self.invalidate_all();
-            self.clear_resolved_named_types();
         }
     }
 }

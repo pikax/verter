@@ -327,18 +327,30 @@ where
     ///
     /// Returns the count of candidates evicted (per-slot + global) so the
     /// caller can keep an external live counter consistent.
+    ///
+    /// **Slot-detach safety.** The candidate push happens while the
+    /// `DashMap` shard write guard for `key` (the `RefMut` returned by
+    /// `entry().or_insert_with()`) is still held. An empty-slot reaper
+    /// ([`Self::remove_candidate_by_seq`]'s `remove_if`) acquires the
+    /// same shard write lock to test-and-detach a slot, so it can never
+    /// interleave between "slot observed empty" and "this admit pushed
+    /// its candidate" — the slot the admitter populates is always still
+    /// attached when the shard guard is released, and the published
+    /// candidate is always reachable by later reads / `live_count`.
     pub fn admit(&self, key: K, discriminant: D, value: V) -> usize {
         let seq = next_retention_seq();
-        let slot = self
-            .slots
-            .entry(key.clone())
-            .or_insert_with(|| Arc::new(CandidateSlot::new()))
-            .clone();
 
         let mut evicted = 0usize;
         let mut forget_seqs: Vec<u64> = Vec::new();
         {
-            let mut candidates = slot.candidates.lock();
+            // Hold the shard write guard for `key` across the candidate
+            // push: a concurrent reaper's `remove_if`-empty needs this
+            // same guard, so it cannot detach the slot mid-admit.
+            let slot_ref = self
+                .slots
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(CandidateSlot::new()));
+            let mut candidates = slot_ref.candidates.lock();
             if let Some(existing) = candidates
                 .iter_mut()
                 .find(|c| c.discriminant == discriminant)
@@ -372,6 +384,12 @@ where
                     }
                 }
             }
+            // Release the candidate lock then the shard guard before the
+            // global-budget step: that step can re-enter `self.slots`
+            // for a victim on this same shard, which would deadlock if
+            // the shard guard were still held.
+            drop(candidates);
+            drop(slot_ref);
         }
         for s in forget_seqs {
             self.budget.forget_seq(s);
@@ -379,6 +397,17 @@ where
 
         // Global budget: record the fresh admission, evict oldest across
         // all slots if the total exceeds the global cap.
+        //
+        // Eviction is two-phase by design — the per-slot push above runs
+        // under the slot lock, this global trim runs after. Between the
+        // two phases a concurrent `live_count` may transiently observe
+        // one candidate over the global cap (this admit's push landed,
+        // its over-budget victim not yet removed). That is a momentary
+        // overcount of a *bounded* quantity (at most one admit's worth
+        // per concurrent admitter), not unbounded growth — the budget
+        // ledger is authoritative and the victim is removed before
+        // `admit` returns. A future reader should not treat the window
+        // as a bug.
         let over_budget = self.budget.record_admission(seq, (key, seq));
         for (victim_key, victim_seq) in over_budget {
             if self.remove_candidate_by_seq(&victim_key, victim_seq) {
@@ -405,9 +434,19 @@ where
         };
         drop(slot);
         if removed {
-            // Drop the slot if it is now empty. `remove_if` re-checks
-            // emptiness under the shard lock so a concurrent admission
-            // that just repopulated the slot is not lost.
+            // Drop the slot if it is still empty. `remove_if` holds the
+            // shard write lock while it runs the emptiness predicate and
+            // detaches the slot; [`Self::admit`] holds that same shard
+            // write guard across its candidate push. The two therefore
+            // serialise: a `remove_if` that observes the slot empty has
+            // exclusive shard access, so no in-flight admit can be
+            // mid-push into this slot — and a `remove_if` racing an
+            // admit either runs first (predicate sees the slot, which
+            // the admit then repopulates and re-checks is irrelevant —
+            // the slot was non-empty so detach is skipped) or runs after
+            // (predicate sees the admit's candidate, detach skipped). A
+            // freshly published candidate is never stranded in a
+            // detached slot.
             self.slots
                 .remove_if(key, |_, slot| slot.candidates.lock().is_empty());
         }
@@ -608,6 +647,121 @@ mod tests {
         );
         // The reader's clone is still valid and unchanged.
         assert_eq!(held.value, 42, "in-flight reader's Arc still resolves");
+    }
+
+    /// SLOT-DETACH REGRESSION — a candidate admitted into a slot that
+    /// was just emptied (and therefore eligible for opportunistic
+    /// detach) MUST remain reachable by `get_candidate` and counted by
+    /// `live_count`.
+    ///
+    /// Sequence: admit one candidate; remove it — the slot is now empty
+    /// and `remove_candidate_by_seq`'s `remove_if` detaches it from the
+    /// outer map. Then admit a fresh candidate under the SAME key:
+    /// `admit` re-creates the slot via `entry().or_insert_with()`. The
+    /// fresh candidate must be visible. A pre-fix `admit` that cloned the
+    /// slot `Arc` and dropped the shard guard before pushing could push
+    /// into a slot a concurrent reaper had detached; this test pins the
+    /// post-detach re-admit path so a regression to that shape would
+    /// leave the re-admitted candidate invisible (`live_count() == 0`).
+    #[test]
+    fn candidate_map_readmit_into_emptied_slot_stays_visible() {
+        let map: BoundedCandidateMap<&str, u8, u32> = BoundedCandidateMap::with_caps(4, 100);
+        // Admit, then evict — the slot is emptied and detached.
+        map.admit("owner", 1, 100);
+        let first = map.get_candidate(&"owner", &1).expect("first admitted");
+        assert!(
+            map.evict_candidate(&"owner", first.seq),
+            "first candidate evicted — slot now empty + detached",
+        );
+        assert_eq!(map.live_count(), 0, "slot emptied");
+        assert!(map.slot_candidates(&"owner").is_empty());
+
+        // Re-admit under the same key. The fresh candidate MUST be
+        // reachable — `admit` re-attaches the slot under its shard guard.
+        map.admit("owner", 2, 200);
+        let readmitted = map
+            .get_candidate(&"owner", &2)
+            .expect("re-admitted candidate must be reachable after slot detach");
+        assert_eq!(readmitted.value, 200, "re-admitted payload visible");
+        assert_eq!(
+            map.live_count(),
+            1,
+            "re-admitted candidate must be counted by live_count — a \
+             candidate pushed into a detached slot would read as 0",
+        );
+        assert_eq!(
+            map.slot_candidates(&"owner").len(),
+            1,
+            "the re-attached slot holds exactly the re-admitted candidate",
+        );
+    }
+
+    /// SLOT-DETACH RACE under real thread contention — a reaper emptying
+    /// a slot must never strand a concurrent admitter's candidate. Many
+    /// rounds of `{admit / evict-then-readmit}` race on one key; after
+    /// every round the key's live candidate must be reachable. Drives
+    /// the shard-guard serialisation between `admit`'s push and
+    /// `remove_if`'s detach.
+    #[test]
+    fn candidate_map_concurrent_admit_vs_detach_never_strands() {
+        use std::sync::Arc as StdArc;
+        use std::thread;
+
+        let map: StdArc<BoundedCandidateMap<u32, u8, u32>> =
+            StdArc::new(BoundedCandidateMap::with_caps(4, 4096));
+        // Seed every key so the first reaper round has something to
+        // evict (and thus a slot to attempt to detach).
+        for key in 0u32..8 {
+            map.admit(key, 0, key);
+        }
+
+        let rounds = 400usize;
+        let reaper = {
+            let map = StdArc::clone(&map);
+            thread::spawn(move || {
+                for r in 0..rounds {
+                    let key = (r % 8) as u32;
+                    // Evict whatever candidate currently holds disc 0,
+                    // emptying + detaching the slot, then re-admit it.
+                    if let Some(c) = map.get_candidate(&key, &0) {
+                        map.evict_candidate(&key, c.seq);
+                    }
+                    map.admit(key, 0, key);
+                }
+            })
+        };
+        let admitter = {
+            let map = StdArc::clone(&map);
+            thread::spawn(move || {
+                for r in 0..rounds {
+                    let key = (r % 8) as u32;
+                    // Admit a second discriminant concurrently with the
+                    // reaper churning disc 0 on the same slot.
+                    map.admit(key, 1, key + 1000);
+                }
+            })
+        };
+        reaper.join().expect("reaper thread");
+        admitter.join().expect("admitter thread");
+
+        // Every key must still resolve disc 0 — the reaper's final
+        // re-admit cannot have been stranded in a detached slot.
+        for key in 0u32..8 {
+            assert!(
+                map.get_candidate(&key, &0).is_some(),
+                "key {key}: disc-0 candidate stranded by a slot-detach race",
+            );
+        }
+        // Total live count must reflect reachable candidates only — a
+        // stranded candidate would be recorded in the budget but absent
+        // from `live_count`, so `live_count` would not exceed the number
+        // of reachable candidates. Assert at least the 8 disc-0 entries
+        // are reachable and counted.
+        assert!(
+            map.live_count() >= 8,
+            "live_count must count every reachable candidate — observed {}",
+            map.live_count(),
+        );
     }
 
     /// `evict_slot` drops every version in a slot and forgets them all

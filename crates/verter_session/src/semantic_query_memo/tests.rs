@@ -1446,6 +1446,95 @@ fn invalidate_all_clears_every_memo_entry() {
     assert_eq!(store.memo_entry_count(), 0);
 }
 
+/// `invalidate_all` ID-REUSE REGRESSION — after a project-generation
+/// reset, the node arena reuses `SemanticNodeId` index space from 0. A
+/// derivation edge or relation judgement recorded against a pre-reset
+/// node id MUST NOT resolve for a freshly-interned, unrelated node that
+/// happens to receive a reused id.
+///
+/// DISCRIMINATES: against the pre-fix tree, `invalidate_all` cleared the
+/// family memo + the budgets + the arena but left `relation_memo` and
+/// the `DerivationStore` populated. The arena reset then re-issued id 0,
+/// so `origins_of_kind(reused_id, …)` returned the STALE pre-reset edge
+/// and `get_relation(reused_id, reused_id)` returned the STALE relation
+/// (its empty carrier validates vacuously). After the fix both id-keyed
+/// stores are cleared before the arena reset, so the reused id has no
+/// derivation / relation state.
+#[test]
+fn invalidate_all_clears_id_keyed_stores_before_arena_reuse() {
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+
+    // Pre-reset: intern a node, record an origin edge for it, and
+    // publish a relation judgement keyed on its id pair.
+    let result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let src = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    store.record_origin_edge(
+        result,
+        OriginEdgeKind::Normalize,
+        Arc::from(vec![src].into_boxed_slice()),
+        crate::semantic_query::OriginMeta::None,
+        dep_sig_for("/w/a.ts", 1),
+    );
+    store.insert_relation(
+        result,
+        result,
+        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+        crate::semantic_query::RelationResult::NotAssignable,
+    );
+    // `result` is id 0 (first intern). Sanity-check the pre-reset state
+    // is actually populated, else the test would not discriminate.
+    assert_eq!(result.0, 0, "first interned node must be id 0");
+    assert_eq!(
+        store
+            .origins_of_kind(result, OriginEdgeKind::Normalize)
+            .len(),
+        1,
+        "pre-reset: the derivation edge is recorded",
+    );
+    assert!(
+        store.get_relation(&host, result, result).is_some(),
+        "pre-reset: the relation judgement is cached",
+    );
+
+    // Project-generation reset.
+    let _ = store.invalidate_all();
+
+    // The arena id space was reset — re-interning yields id 0 again, now
+    // for a structurally UNRELATED node.
+    let reused = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+    assert_eq!(
+        reused.0, 0,
+        "the arena reset must reuse id 0 for the next intern",
+    );
+
+    // The reused id MUST NOT inherit the pre-reset node's derivation
+    // edges or relation judgement.
+    assert!(
+        store
+            .origins_of_kind(reused, OriginEdgeKind::Normalize)
+            .is_empty(),
+        "ID-REUSE BUG: a freshly-interned node that reused id 0 must NOT \
+         resolve to the pre-reset node's derivation edge — the \
+         DerivationStore must be cleared before the arena reset",
+    );
+    assert!(
+        store.get_relation(&host, reused, reused).is_none(),
+        "ID-REUSE BUG: a freshly-interned node that reused id 0 must NOT \
+         resolve to the pre-reset relation judgement — relation_memo must \
+         be cleared before the arena reset",
+    );
+    // The id-keyed counters are genuinely zero post-reset.
+    assert_eq!(store.relation_memo_count(), 0, "relation memo cleared");
+    assert_eq!(store.origin_edge_count(), 0, "derivation edges cleared");
+    assert_eq!(
+        store.derivation_bucket_count(),
+        0,
+        "derivation edge buckets cleared",
+    );
+}
+
 #[test]
 fn recursive_sentinel_does_not_promote_to_warm_memo() {
     let host = ctx_host();
@@ -2449,6 +2538,110 @@ fn walk_origin_chain_releases_derivation_lock_before_visitor() {
         visited_count += 1;
     });
     assert_eq!(visited_count, 1, "the single recorded edge was visited");
+}
+
+/// BOUND PROOF — the derivation store's `edges` map MUST NOT grow
+/// monotonically with the content-edit count.
+///
+/// Each content edit interns fresh `SemanticNodeId`s, so each edit's
+/// origin edges land in fresh `(result, kind)` buckets. Without a
+/// retention bound the bucket count grew +N per edit forever (the
+/// identity-tuple dedup only suppresses a re-publish of the SAME node
+/// id, never a new content version's fresh ids).
+///
+/// DISCRIMINATES: against the pre-fix tree the `DerivationStore` had no
+/// bound — recording 4096 + 600 distinct buckets left all of them
+/// resident. After the fix the FIFO `edge_budget` caps the bucket count
+/// at `DERIVATION_EDGE_BUCKET_CAP`. The assertion bound is the store's
+/// own published cap, so the test stays correct if the cap is tuned.
+#[test]
+fn derivation_store_bounds_edge_bucket_growth() {
+    use super::derivation::DERIVATION_EDGE_BUCKET_CAP;
+
+    let store = SemanticGraphStore::new();
+    // Record more distinct `(result, kind)` buckets than the cap. Each
+    // `result` is a fresh node id (a distinct `Alias`-chain link), so
+    // every `record_origin_edge` opens a brand-new bucket — exactly the
+    // "fresh ids per content version" growth the bound must contain.
+    let bucket_count = DERIVATION_EDGE_BUCKET_CAP + 600;
+    let mut prev = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    for _ in 0..bucket_count {
+        let result = store.intern_node(SemanticNodeData::Alias(prev));
+        store.record_origin_edge(
+            result,
+            OriginEdgeKind::Normalize,
+            Arc::from(vec![prev].into_boxed_slice()),
+            crate::semantic_query::OriginMeta::None,
+            dep_sig_for("/w/a.ts", 1),
+        );
+        prev = result;
+    }
+
+    let live_buckets = store.derivation_bucket_count();
+    assert!(
+        live_buckets <= DERIVATION_EDGE_BUCKET_CAP,
+        "bounded retention proof: after recording {bucket_count} distinct \
+         derivation buckets the DerivationStore must stay bounded by its \
+         edge-bucket cap ({DERIVATION_EDGE_BUCKET_CAP}), not grow with the \
+         edit count. Observed live buckets={live_buckets}.",
+    );
+    // Discrimination floor — the store is still retaining its newest
+    // buckets (it is not empty), so the bound is a cap, not a wipe.
+    assert!(
+        live_buckets >= 1,
+        "the derivation store must still retain its most recent buckets — \
+         observed live buckets={live_buckets}",
+    );
+    // The most-recently recorded bucket survived (FIFO evicts oldest).
+    assert_eq!(
+        store.origins_of_kind(prev, OriginEdgeKind::Normalize).len(),
+        1,
+        "the newest derivation bucket must be retained under FIFO eviction",
+    );
+}
+
+/// BOUND PROOF — the derivation store's `signature_pool` interning map
+/// MUST NOT grow monotonically with the count of distinct fences.
+///
+/// DISCRIMINATES: pre-fix the pool was an unbounded `FxHashMap` — every
+/// distinct `DepSignature` fence stayed resident forever. After the fix
+/// the FIFO `signature_budget` caps the pool. Evicting a pool entry only
+/// forgoes future dedup (callers already holding the `Arc` keep the data
+/// alive), so the bound is correctness-neutral.
+#[test]
+fn derivation_store_bounds_signature_pool_growth() {
+    use super::derivation::DERIVATION_SIGNATURE_POOL_CAP;
+
+    let store = SemanticGraphStore::new();
+    let src = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    // Emit more distinct fences than the pool cap. Each fence is a
+    // distinct `(canonical, whole-hash)` rail, so each interns a fresh
+    // pool entry. Each edge targets a fresh `result` node (a distinct
+    // `Alias`-chain link) so every emission lands in its own bucket —
+    // keeping the per-call identity-tuple scan O(1) and isolating this
+    // test to the signature pool's growth, not the bucket count.
+    let fence_count = DERIVATION_SIGNATURE_POOL_CAP + 600;
+    let mut prev = src;
+    for i in 0..fence_count {
+        let result = store.intern_node(SemanticNodeData::Alias(prev));
+        let canonical = format!("/w/f{i}.ts");
+        store.record_origin_edge(
+            result,
+            OriginEdgeKind::Normalize,
+            Arc::from(vec![src].into_boxed_slice()),
+            crate::semantic_query::OriginMeta::None,
+            dep_sig_for(&canonical, (i % 251) as u8),
+        );
+        prev = result;
+    }
+    let pool_size = store.derivation_signature_pool_size();
+    assert!(
+        pool_size <= DERIVATION_SIGNATURE_POOL_CAP,
+        "bounded retention proof: after interning {fence_count} distinct \
+         fences the DerivationStore signature pool must stay bounded by \
+         its cap ({DERIVATION_SIGNATURE_POOL_CAP}), not grow with the \
+         fence count. Observed pool size={pool_size}.",
+    );
 }
 
 /// A panic inside the cold-build closure must NOT leak the

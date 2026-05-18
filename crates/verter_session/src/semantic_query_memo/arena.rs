@@ -267,11 +267,26 @@ impl NodeArena {
     /// **Safety contract.** This reuses `SemanticNodeId` index space —
     /// every `SemanticNodeId` allocated before the reset becomes
     /// invalid. It is sound ONLY at a point where no query holds a live
-    /// `SemanticNodeId` and no memo entry stores one: the sole caller is
-    /// [`super::SemanticGraphStore::invalidate_all`], which is invoked
-    /// atomically on a project-generation reset (the memo, relation
-    /// memo, and named-type index are cleared in the same call, so no
-    /// stored id survives the reset).
+    /// `SemanticNodeId` and no structure stores or is keyed by one. The
+    /// sole caller is [`super::SemanticGraphStore::invalidate_all`],
+    /// which clears EVERY `SemanticNodeId`-holding structure on the
+    /// store — the family memo, the in-flight table, the relation memo,
+    /// the named-type index, the derivation edge store, and the Γ.B
+    /// reverse index — in the same call, immediately before this reset.
+    /// See that method's docs for the exhaustive id-holding-structure
+    /// list and the obligation to extend it when a new such structure is
+    /// added.
+    ///
+    /// **Reclamation granularity — bounded at project generation.** This
+    /// reset is the only path that shrinks the arena `nodes` / `scopes`
+    /// Vecs; they otherwise grow append-only across content edits and
+    /// are reclaimed once per project-generation bump. True
+    /// per-content-edit arena compaction is a tracked follow-up: it
+    /// requires a generational-`SemanticNodeId` redesign (the id is a
+    /// raw `u64` index, so a mid-flight arena shrink under concurrent
+    /// index-holding readers is unsafe) and is deliberately out of scope
+    /// here. Project-generation-granularity reclamation is a real,
+    /// correct bound — just coarser-grained than per-edit.
     pub(super) fn reset(&self) -> usize {
         let cleared = {
             let mut inner = self.inner.write();

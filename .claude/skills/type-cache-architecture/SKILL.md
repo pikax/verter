@@ -338,7 +338,10 @@ query-identity cache whose effective identity carries self-version
 state — `ComponentMetaResultDb` (owner whole-hash), `RefCycleResultDb`
 (`DeclIdentity` embeds the file whole-hash), `MaterializeStructureDb` /
 the `SemanticGraphStore` family memo + relation memo + named-type index
-(content-derived `SemanticNodeId`s) — is bounded by the shared
+(content-derived `SemanticNodeId`s) + the `SemanticGraphStore`
+derivation/origin store (`DerivationStore` — `edges` keyed by
+`(SemanticNodeId, OriginEdgeKind)`, plus its `signature_pool` fence
+interner) — is bounded by the shared
 `verter_session::bounded_query_retention` substrate. Each distinct
 content edit appends a fresh entry; the substrate is the routine
 memory-reclamation path (the eager own-canonical drain that formerly
@@ -350,8 +353,12 @@ reclaimed these is retired). Two cooperating pieces, tuned per cache:
   the count exceeds the cap. `MaterializeStructureDb` and
   `RefCycleResultDb` cap at `MAX_ENTRIES` (2048); the `SemanticGraphStore`
   family / relation / named-type budgets use `DEFAULT_BUDGET_CAP`
-  (4096). The cache's invalidation paths call `forget` so the ledger
-  stays consistent with the map.
+  (4096); the `DerivationStore` bounds its edge-bucket count
+  (`DERIVATION_EDGE_BUCKET_CAP` = 4096) and its signature-interning pool
+  (`DERIVATION_SIGNATURE_POOL_CAP` = 4096) with two such budgets, evicted
+  write-side from `record` / `intern_signature`. The cache's
+  invalidation paths call `forget` so the ledger stays consistent with
+  the map.
 - `BoundedCandidateMap<K, D, V>` — a content-free-keyed slot map with a
   bounded per-slot candidate list (`DEFAULT_CANDIDATE_CAP` = 4) AND a
   global budget. `ComponentMetaResultDb` is built on it: the slot key
@@ -365,11 +372,30 @@ Eviction is stale-first when cheaply detectable, then FIFO. Evicting a
 incorrect result. A reader clones the candidate `Arc` before
 validating, so a concurrent removal never invalidates an in-flight
 reader; removal is keyed by an insertion sequence number unique per
-admission. The `SemanticGraphStore` node arena's dense storage is
-append-only across content edits; it is reset (alongside the memo,
-relation memo, and named-type index, so no stored `SemanticNodeId`
-survives) on `invalidate_all` — the project-generation reset safe
-point.
+admission. `BoundedCandidateMap::admit` holds the `DashMap` shard write
+guard across its candidate push, so an empty-slot reaper's
+`remove_if`-detach cannot interleave between "slot observed empty" and
+an in-flight admit's push — a published candidate is never stranded in
+a detached slot.
+
+`SemanticGraphStore::invalidate_all` (the project-generation reset)
+clears EVERY `SemanticNodeId`-keyed structure on the store — the family
+memo, the in-flight admission table, the relation memo, the named-type
+index, the `DerivationStore` (edges + signature pool), and the Γ.B
+reverse index — *before* it calls `arena.reset()`. The node arena
+reuses `SemanticNodeId` index space from 0 on reset, so any id-keyed
+structure left populated would alias a stale entry onto a freshly
+interned node; clearing them all first is the soundness precondition.
+Adding a new `SemanticNodeId`-keyed structure to the store obliges
+extending `invalidate_all`'s clear set. The node arena's dense
+`nodes` / `scopes` storage is append-only across content edits and is
+reclaimed at **project-generation granularity** (the `invalidate_all`
+reset). True per-content-edit arena compaction is a tracked follow-up:
+it requires a generational-`SemanticNodeId` redesign (the id is a raw
+`u64` index, so a mid-flight arena shrink under concurrent
+index-holding readers is unsafe) and is deliberately out of scope of
+the bounded-retention substrate. Project-generation-granularity
+reclamation is a real, correct bound — just coarser than per-edit.
 
 Concrete substrate (the per-domain target form):
 
