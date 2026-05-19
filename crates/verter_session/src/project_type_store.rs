@@ -2394,10 +2394,24 @@ impl ProjectTypeStore {
             .entries_drain_for_generation_bump();
         // `invalidate_all` drops every `SemanticNodeId`-keyed structure
         // on the graph store — including the Vue macro resolved-named-type
-        // identity map — so no judgement keyed on the superseded project
-        // generation survives. The node arena itself is append-only and
-        // is not reset.
+        // identity map — and aborts every in-flight macro-resolution
+        // build. The node arena itself is append-only and is not reset.
         let _ = self.semantic_graph.invalidate_all();
+        // Final resolved-named-type sweep. `invalidate_all` aborts the
+        // in-flight macro-resolution builds, but an aborted build keeps
+        // running until its next abort check — and in that drain window
+        // it can still call `insert_resolved_named_type`, landing a stale
+        // artifact AFTER `invalidate_all`'s own `named_type_index` clear.
+        // `HostResolvedNamedTypeKey` is `(canonical, whole_hash, inner)`
+        // with no project generation, so such a straggler — built against
+        // the superseded tsconfig / TypeScript-SDK route configuration —
+        // would otherwise be matched and reused in the new generation.
+        // Clearing the identity map again here, after `invalidate_all`
+        // has returned, sweeps any straggler the draining aborted builds
+        // landed before the new generation admits queries. The clear runs
+        // through `BudgetedNamedTypeIndex::clear` under its `retention_gate`
+        // write guard, so the map and its retention budget drop together.
+        self.semantic_graph.clear_resolved_named_types();
         self.component_meta_results.invalidate_all();
         // Step 3 closure: project-shape change invalidates every engine
         // cache (entries depend on the same routes / intrinsics that
@@ -2947,6 +2961,107 @@ mod tests {
         // AnalysisReady survive (they key on whole_hash, not project gen).
         assert_eq!(store.owner_import_surfaces().len(), 0);
         assert_eq!(store.component_meta_results().len(), 0);
+    }
+
+    /// A macro-resolution build aborted by `invalidate_all` keeps running
+    /// until its next abort check; in that drain window it can still call
+    /// `insert_resolved_named_type`, landing a stale artifact AFTER
+    /// `invalidate_all`'s own `named_type_index` clear.
+    /// `HostResolvedNamedTypeKey` carries no project generation, so such a
+    /// straggler — built against the superseded tsconfig / SDK route
+    /// configuration — would be matched and reused in the new generation
+    /// unless `bump_project_generation_and_evict` sweeps the
+    /// resolved-named-type map AGAIN after `invalidate_all` returns.
+    ///
+    /// This test deterministically places the stale insert in that exact
+    /// post-internal-clear window (via the
+    /// `invalidate_all_post_named_type_clear_gate` injection point) and
+    /// asserts the straggler does NOT survive
+    /// `bump_project_generation_and_evict`. It FAILS without the
+    /// post-`invalidate_all` sweep (the straggler survives, count == 1)
+    /// and PASSES with it (count == 0).
+    #[test]
+    fn bump_generation_post_sweep_evicts_resolved_named_type_straggler() {
+        use std::sync::Barrier;
+        use std::thread;
+        use verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey;
+        use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+
+        let store = Arc::new(ProjectTypeStore::new());
+
+        // The stale insert an aborted macro-resolution build performs as
+        // it drains. Built against the OLD project shape; if it survives
+        // the generation bump it is a wrong result in the NEW generation.
+        let stale_key = HostResolvedNamedTypeKey {
+            canonical_id: Arc::from("/w/aborted.ts"),
+            whole_hash: [7u8; 16],
+            inner: ResolvedNamedTypeCacheKey {
+                name: b"Stale".to_vec().into_boxed_slice(),
+                surface: None,
+                base_offset: 0,
+                companion_cache_key: Arc::from(Vec::<Box<[u8]>>::new().into_boxed_slice()),
+                type_param_bindings: Arc::from(Vec::new().into_boxed_slice()),
+            },
+        };
+
+        // Arm the post-`named_type_index`-clear injection point inside
+        // `invalidate_all` on this store's graph. When the generation
+        // bump's `invalidate_all` reaches the gate, the in-flight
+        // `named_type_index` clear has already run.
+        let gate = Arc::new(Barrier::new(2));
+        let _gate_guard = store
+            .semantic_graph()
+            .test_invalidate_all_post_named_type_clear_gate(Arc::clone(&gate));
+
+        // The "draining aborted build": it lands its stale
+        // `insert_resolved_named_type` in the window AFTER `invalidate_all`
+        // cleared `named_type_index` and BEFORE `bump`'s post-sweep.
+        let store_b = Arc::clone(&store);
+        let stale_key_b = stale_key.clone();
+        let gate_b = Arc::clone(&gate);
+        let aborted_build = thread::spawn(move || {
+            // Park until the generation bump's `invalidate_all` has run
+            // its internal `named_type_index` clear.
+            gate_b.wait();
+            store_b
+                .semantic_graph()
+                .insert_resolved_named_type(stale_key_b, Arc::new(ResolvedElements::default()));
+            // Release the generation bump so it can run its post-sweep.
+            gate_b.wait();
+        });
+
+        // Drives the project-generation reset. `invalidate_all` clears
+        // `named_type_index`, parks at the gate (letting the aborted build
+        // land its stale insert), then the restored post-`invalidate_all`
+        // sweep must clear that straggler.
+        let g_after = store.bump_project_generation_and_evict();
+        aborted_build.join().expect("aborted-build thread");
+
+        assert!(
+            g_after >= 1,
+            "generation bump advanced the project generation counter",
+        );
+        assert_eq!(
+            store.semantic_graph().resolved_named_type_count(),
+            0,
+            "STALE-ARTIFACT SURVIVAL: a macro-resolution build aborted by \
+             `invalidate_all` landed `insert_resolved_named_type` AFTER \
+             `invalidate_all`'s internal `named_type_index` clear, and the \
+             straggler survived `bump_project_generation_and_evict`. \
+             Because `HostResolvedNamedTypeKey` carries no project \
+             generation, it would be matched and reused in the NEW \
+             generation — a wrong result after a tsconfig / SDK route \
+             change. `bump_project_generation_and_evict` must clear the \
+             resolved-named-type map AGAIN, as a post-`invalidate_all` \
+             sweep.",
+        );
+        assert!(
+            store
+                .semantic_graph()
+                .get_resolved_named_type(&stale_key)
+                .is_none(),
+            "the stale artifact must not be retrievable in the new generation",
+        );
     }
 
     #[test]

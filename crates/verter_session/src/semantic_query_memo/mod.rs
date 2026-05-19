@@ -305,6 +305,24 @@ pub struct SemanticGraphStore {
     /// process-global. `cfg`-gated to `test` / `debug_assertions`.
     #[cfg(any(test, debug_assertions))]
     publish_post_reverse_index_prune_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+    /// Per-store test-only injection point inside [`Self::invalidate_all`],
+    /// fired right AFTER the `named_type_index` (Vue macro resolved-named-
+    /// type identity map) clear and BEFORE this method returns. A race
+    /// test arms it (via
+    /// [`Self::test_invalidate_all_post_named_type_clear_gate`]) and, with
+    /// `invalidate_all` parked here, has a second thread call
+    /// [`Self::insert_resolved_named_type`] — landing a stale insert in
+    /// the exact window the in-flight-abort drain occupies (an aborted
+    /// macro-resolution build keeps running until its next abort check
+    /// and can insert after this internal clear). The test then asserts
+    /// [`ProjectTypeStore::bump_project_generation_and_evict`](crate::project_type_store::ProjectTypeStore::bump_project_generation_and_evict)'s
+    /// post-`invalidate_all` resolved-named-type sweep removes that
+    /// straggler before the new generation admits queries.
+    ///
+    /// **Per-store scope (test hermeticity).** Per-store, never a
+    /// process-global. `cfg`-gated to `test` / `debug_assertions`.
+    #[cfg(any(test, debug_assertions))]
+    invalidate_all_post_named_type_clear_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Γ.B reverse index. For each canonical id,
     /// holds the set of `(family, slot)` pairs whose published
     /// dep_signature references it, paired with the dep_signature
@@ -1143,6 +1161,27 @@ impl SemanticGraphStore {
         // `canonical_to_entries`) was cleared above under the `entries`
         // lock.
         self.named_type_index.clear();
+        // Test-only injection point: a barrier armed by
+        // `test_invalidate_all_post_named_type_clear_gate` parks here,
+        // right after the `named_type_index` clear, so a race test can
+        // have a second thread land a `insert_resolved_named_type` in
+        // exactly the post-internal-clear window an aborted macro-
+        // resolution build occupies while it drains to its next abort
+        // check. The test then asserts the post-`invalidate_all`
+        // resolved-named-type sweep in `bump_project_generation_and_evict`
+        // removes that straggler. `None` (the production default) is a
+        // no-op.
+        #[cfg(any(test, debug_assertions))]
+        {
+            let gate = self
+                .invalidate_all_post_named_type_clear_gate
+                .lock()
+                .clone();
+            if let Some(barrier) = gate {
+                barrier.wait();
+                barrier.wait();
+            }
+        }
         self.relation_memo.clear();
         self.derivation.lock().clear();
         removed
@@ -3718,6 +3757,34 @@ impl SemanticGraphStore {
             gate: &self.publish_post_reverse_index_prune_gate,
         }
     }
+
+    /// Test-only driver: arm the [`Self::invalidate_all`]
+    /// post-`named_type_index`-clear injection point with `barrier`. The
+    /// next `invalidate_all` on **this store** calls `barrier.wait()`
+    /// TWICE right after the `named_type_index` (Vue macro resolved-
+    /// named-type identity map) clear, so a test can have a second thread
+    /// land a `insert_resolved_named_type` in that window — modelling an
+    /// aborted macro-resolution build that drains past its abort check —
+    /// and then assert
+    /// [`ProjectTypeStore::bump_project_generation_and_evict`](crate::project_type_store::ProjectTypeStore::bump_project_generation_and_evict)'s
+    /// post-`invalidate_all` resolved-named-type sweep removes that
+    /// straggler.
+    ///
+    /// The returned guard disarms the gate on drop. Per-store scoped, so
+    /// it cannot park a concurrent unrelated test's `invalidate_all`.
+    /// `cfg`-gated to `test` / `debug_assertions`, mirroring the field.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_invalidate_all_post_named_type_clear_gate(
+        &self,
+        barrier: Arc<std::sync::Barrier>,
+    ) -> TestInvalidateAllGateGuard<'_> {
+        *self.invalidate_all_post_named_type_clear_gate.lock() = Some(barrier);
+        TestInvalidateAllGateGuard {
+            gate: &self.invalidate_all_post_named_type_clear_gate,
+        }
+    }
 }
 
 /// RAII guard returned by the per-store test injection-point arming
@@ -3727,7 +3794,8 @@ impl SemanticGraphStore {
 /// [`SemanticGraphStore::test_publish_post_memo_budget_record_gate`],
 /// [`SemanticGraphStore::test_cold_winner_pre_backfill_gate`],
 /// [`SemanticGraphStore::test_invalidate_all_pre_reverse_index_clear_gate`],
-/// and [`SemanticGraphStore::test_publish_post_reverse_index_prune_gate`].
+/// [`SemanticGraphStore::test_publish_post_reverse_index_prune_gate`],
+/// and [`SemanticGraphStore::test_invalidate_all_post_named_type_clear_gate`].
 /// Clears the per-store gate it borrows on drop so a later operation on
 /// the same store does not park on a stale barrier.
 #[cfg(any(test, debug_assertions))]
