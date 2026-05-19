@@ -2771,71 +2771,6 @@ fn stats_counters_increment_on_hit_and_miss() {
     assert_eq!(stats2.hits, 1);
 }
 
-/// `origins_with_fence` merges each edge's `edge_dep_signature` into
-/// the supplied fence at hop-time.
-#[test]
-fn origins_with_fence_merges_edge_dep_signature_at_each_hop() {
-    use crate::completion_fence::CompletionFence;
-    let store = SemanticGraphStore::new();
-    let result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-    let src = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-
-    store.record_origin_edge(
-        result,
-        OriginEdgeKind::Instantiate,
-        Arc::from(vec![src].into_boxed_slice()),
-        crate::semantic_query::OriginMeta::None,
-        dep_sig_for("/w/inst.ts", 1),
-    );
-    store.record_origin_edge(
-        result,
-        OriginEdgeKind::Normalize,
-        Arc::from(vec![src].into_boxed_slice()),
-        crate::semantic_query::OriginMeta::None,
-        dep_sig_for("/w/norm.ts", 2),
-    );
-
-    let fence = CompletionFence::new();
-    let visited = store.origins_with_fence(result, &fence);
-    assert_eq!(visited.len(), 2, "both edges visited");
-    // Fence should now carry both canonicals' dep facts.
-    let snapshot = fence.observed_signature();
-    let canonicals: Vec<&str> = snapshot.iter().map(|(c, _v)| c.as_ref()).collect();
-    assert!(
-        canonicals.contains(&"/w/inst.ts"),
-        "fence missing /w/inst.ts"
-    );
-    assert!(
-        canonicals.contains(&"/w/norm.ts"),
-        "fence missing /w/norm.ts"
-    );
-}
-
-/// `origins(node)` (the read-only walk) does NOT touch any fence.
-/// Outside-execute consumers (LSP hover, debug dumps) use this form.
-#[test]
-fn plain_origins_walk_does_not_touch_active_fence() {
-    use crate::completion_fence::CompletionFence;
-    let store = SemanticGraphStore::new();
-    let result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-    let src = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    store.record_origin_edge(
-        result,
-        OriginEdgeKind::Instantiate,
-        Arc::from(vec![src].into_boxed_slice()),
-        crate::semantic_query::OriginMeta::None,
-        dep_sig_for("/w/x.ts", 1),
-    );
-
-    let fence = CompletionFence::new();
-    let _ = store.origins(result);
-    let snapshot = fence.observed_signature();
-    assert!(
-        snapshot.is_empty(),
-        "plain origins() must NOT merge into active fence"
-    );
-}
-
 /// Multiple derivations of the SAME structural result store as
 /// distinct edges with distinct dep-signatures. Walkers see all of
 /// them — there is no "canonical publisher" shortcut.
@@ -2873,26 +2808,19 @@ fn multiple_derivations_of_same_node_all_contribute_their_edges() {
 }
 
 /// A purely structural node that no builder ever recorded an edge for
-/// has zero origins — the walk yields nothing and the caller's fence
-/// stays untouched. Structural / primitive / shared-literal nodes have
-/// no version identity, so this is correct.
+/// has zero origins — the walk yields nothing. Structural / primitive /
+/// shared-literal nodes have no version identity, so this is correct.
 #[test]
-fn structural_node_has_zero_origin_edges_and_contributes_no_dep_sig() {
-    use crate::completion_fence::CompletionFence;
+fn structural_node_has_zero_origin_edges() {
     let store = SemanticGraphStore::new();
     let primitive = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let fence = CompletionFence::new();
 
-    let visited = store.origins_with_fence(primitive, &fence);
+    let visited = store.origins(primitive);
     assert!(
         visited.is_empty(),
         "structural primitive node must have zero origin edges"
     );
     assert_eq!(store.origin_edge_count(), 0);
-    assert!(
-        fence.observed_signature().is_empty(),
-        "fence must carry no facts when node has no origin edges"
-    );
 }
 
 /// Edge dep-signature interning: two edges committed with identical

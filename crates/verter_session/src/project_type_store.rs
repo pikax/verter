@@ -2172,8 +2172,8 @@ impl ProjectTypeStore {
     }
 
     /// Build a `(project_generation, whole_hash)` dep-signature pair that
-    /// downstream callers merge into their active
-    /// [`CompletionFence`](crate::completion_fence::CompletionFence).
+    /// downstream callers fold into their dependency-fact set for the
+    /// publish-side completion-fence revalidation.
     #[must_use]
     pub fn dep_version_for(&self, whole_hash: Hash16) -> DepVersion {
         // Callers merge file-version facts as `DepVersion::WholeHash` and add

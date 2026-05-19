@@ -5039,6 +5039,163 @@ mod foundations_guards {
             entries_without_walker_hits.join("\n  "),
         );
     }
+
+    // ── Guard — origin-edge dep signatures are not an invalidation source ──
+    //
+    // Invariant:
+    //
+    //   Origin-edge dep signatures are not an invalidation source.
+    //   No production code may reconstruct a CompletionFence from
+    //   DerivationStore origin edges.
+    //
+    // The `DerivationStore` origin layer keeps an `edge_dep_signature`
+    // snapshot of the publishing builder's fence purely for the audit
+    // origin-graph trace. It is bounded best-effort provenance — the
+    // FIFO `edge_budget` evicts the oldest buckets, so the snapshots are
+    // NOT load-bearing for invalidation. The load-bearing invalidation
+    // record is the memo entry's own `fact_dep_signature` /
+    // `ReadSetSignature` carrier, rooted by `HostFenceValidator`.
+    //
+    // Reconstructing a `CompletionFence` from origin-edge dep signatures
+    // would couple correctness to a best-effort, FIFO-evicted structure
+    // — a latent footgun. The retired `SemanticGraphStore::origins_with_fence`
+    // did exactly that (`fence.merge_signature(&edge.edge_dep_signature)`)
+    // and had zero production callers; this guard fails if it — or any
+    // equivalent origin-edge-into-fence merge — is reintroduced into
+    // non-test production source.
+
+    /// Predicate: does this single production source line reintroduce an
+    /// origin-edge-into-`CompletionFence` merge? Returns `true` for a
+    /// match. Two shapes are forbidden — (a) any mention of the retired
+    /// `origins_with_fence` API, and (b) a `merge_signature(...)` call
+    /// whose argument is an `edge_dep_signature` (folding a
+    /// `DerivationStore` origin edge's dep-signature snapshot into a
+    /// fence). Comment lines are NOT exempt: a doc comment that
+    /// re-documents an `origins_with_fence`-style API is itself the
+    /// reintroduction this guard forbids.
+    pub fn line_reconstructs_fence_from_origin_edge(line: &str) -> bool {
+        if line.contains("origins_with_fence") {
+            return true;
+        }
+        // The forbidden merge shape: a `merge_signature` call on the
+        // same line as an `edge_dep_signature` operand — the exact
+        // `fence.merge_signature(&edge.edge_dep_signature)` pattern the
+        // retired API used. Requiring both needles on one line keeps the
+        // guard focused: a legitimate `merge_signature` of a memo
+        // entry's own carrier never names `edge_dep_signature`.
+        line.contains("merge_signature") && line.contains("edge_dep_signature")
+    }
+
+    /// Walk the production tree and return `(rel_path, line_no, line)`
+    /// triples for every origin-edge-into-fence reconstruction.
+    pub fn origin_fence_reconstruction_violations() -> Vec<(String, usize, String)> {
+        let crates_root = workspace_root().join("crates");
+        let mut violations = Vec::new();
+        let entries = match fs::read_dir(&crates_root) {
+            Ok(it) => it,
+            Err(_) => return violations,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let src_dir = path.join("src");
+            if !src_dir.exists() {
+                continue;
+            }
+            for file in walk_production_rs(&src_dir) {
+                let src = match fs::read_to_string(&file) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let rel = relative_to_root(&file);
+                // This guard test file is exempt — it names the
+                // forbidden patterns in its own predicate + self-test.
+                if rel.contains("architecture_guards") {
+                    continue;
+                }
+                for (idx, line) in src.lines().enumerate() {
+                    if line_reconstructs_fence_from_origin_edge(line) {
+                        violations.push((rel.clone(), idx + 1, line.to_string()));
+                    }
+                }
+            }
+        }
+        violations.sort();
+        violations
+    }
+
+    #[test]
+    fn origin_edge_dep_signatures_are_not_an_invalidation_source() {
+        let violations = origin_fence_reconstruction_violations();
+        assert!(
+            violations.is_empty(),
+            "Architecture guard `origin_edge_dep_signatures_are_not_an_invalidation_source`\n\
+             violations: production source reconstructs a CompletionFence from DerivationStore\n\
+             origin edges.\n\n\
+             INVARIANT:\n  \
+             Origin-edge dep signatures are not an invalidation source.\n  \
+             No production code may reconstruct a CompletionFence from DerivationStore\n  \
+             origin edges.\n\n\
+             Origin edges are bounded best-effort provenance for the audit origin-graph\n\
+             trace; the FIFO `edge_budget` evicts the oldest buckets, so an `edge_dep_signature`\n\
+             is NOT load-bearing for invalidation. The load-bearing record is the memo entry's\n\
+             own `fact_dep_signature` / `ReadSetSignature` carrier (`HostFenceValidator`).\n\
+             Do not reintroduce `origins_with_fence` or fold an `edge_dep_signature` into a\n\
+             `CompletionFence`.\n\n\
+             Violations:\n  {}",
+            violations
+                .iter()
+                .map(|(rel, lineno, line)| format!("{rel}:{lineno}: {}", line.trim()))
+                .collect::<Vec<_>>()
+                .join("\n  "),
+        );
+    }
+
+    #[test]
+    fn origin_fence_guard_predicate_rejects_deliberate_violations() {
+        // Each fabricated line models a real reintroduction of the
+        // retired origin-edge-into-fence merge.
+        let forbidden = [
+            // The retired API by name — a re-declaration or a call.
+            "    pub fn origins_with_fence(&self, node: SemanticNodeId) -> Vec<OriginEdge> {",
+            "        let visited = store.origins_with_fence(result, &fence);",
+            "/// merges each edge's dep-signature via `origins_with_fence`.",
+            // The forbidden merge shape — `merge_signature` folding an
+            // origin edge's `edge_dep_signature` snapshot into a fence.
+            "            fence.merge_signature(&edge.edge_dep_signature);",
+            "    active_fence.merge_signature(&origin.edge_dep_signature);",
+        ];
+        for line in forbidden {
+            assert!(
+                line_reconstructs_fence_from_origin_edge(line),
+                "origin-fence guard predicate must reject deliberate-violation line: {line:?}",
+            );
+        }
+        // Lines that look superficially similar but are NOT violations:
+        // a `merge_signature` of a memo entry's OWN carrier (never names
+        // `edge_dep_signature`), and an `edge_dep_signature` touched for
+        // a purpose other than a fence merge (interning, dedup probe).
+        let allowed = [
+            // Legitimate fence merge of a cached read's own carrier.
+            "    crate::component_meta_audit::merge_dep_signature_into_local_fence(local_fence, &read.dep_signature);",
+            "        fence.merge_signature(&read.dep_signature);",
+            // `edge_dep_signature` touched for interning / dedup — no
+            // fence merge on the line.
+            "        let interned = self.intern_signature(edge.edge_dep_signature.clone());",
+            "            && Arc::ptr_eq(&existing.edge_dep_signature, &candidate.edge_dep_signature)",
+            // Plain prose about origin edges that does not name the
+            // retired API.
+            "// Origin edges are bounded best-effort provenance, not an invalidation source.",
+        ];
+        for line in allowed {
+            assert!(
+                !line_reconstructs_fence_from_origin_edge(line),
+                "origin-fence guard predicate must NOT flag legitimate line: {line:?}",
+            );
+        }
+    }
 }
 
 // ===========================================================================

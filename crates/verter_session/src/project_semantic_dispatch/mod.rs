@@ -39,8 +39,8 @@
 //! Every variant observes a dep-signature fragment (at minimum the project
 //! generation; additional file hashes flow in from the base nodes' origin
 //! scopes where the dispatcher can observe them). Dep-signature propagation
-//! is the substrate [`CompletionFence`](crate::completion_fence::CompletionFence)
-//! relies on for transitive final-result validation.
+//! is what the publish-side completion-fence revalidation relies on for
+//! transitive final-result validation.
 //!
 //! ## Design rules
 //!
@@ -50,9 +50,9 @@
 //! - Errors, partial results, and recursion sentinels never promote to warm
 //!   memo entries — the underlying [`SemanticGraphStore`] enforces this
 //!   invariant at publish time.
-//! - Dep-signatures returned from warm hits must merge into the caller's
-//!   active [`CompletionFence`](crate::completion_fence::CompletionFence)
-//!   so final-result validation stays transitive.
+//! - Dep-signatures returned from warm hits must fold into the caller's
+//!   dependency-fact set so the publish-side completion-fence
+//!   revalidation stays transitive.
 
 use std::sync::Arc;
 

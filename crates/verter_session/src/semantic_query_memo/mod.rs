@@ -59,7 +59,7 @@ use interner::SWEEP_INTERVAL;
 use arena::NodeArena;
 #[cfg(test)]
 use arena::{shard_index_for, NUM_SHARDS};
-use budgeted_caches::{BudgetedNamedTypeIndex, BudgetedRelationMemo, RelationMemoEntry};
+use budgeted_caches::{BudgetedNamedTypeIndex, BudgetedRelationMemo};
 use derivation::{sorted_percentile, DerivationStore};
 pub use family::AuditEagerKeyRow;
 use family::{
@@ -164,15 +164,16 @@ pub struct SemanticGraphStore {
     /// wrapper's `retention_gate` read guard, `clear` under its write
     /// guard.
     relation_memo: BudgetedRelationMemo,
-    /// Sibling derivation/origin layer (plan B2 + Derivation/Origin Layer
-    /// Contract). Edges are keyed by `(result_node, kind)`; multiple
-    /// derivations of the same structural result store multiple edges per
-    /// key. Edge dep-signatures are interned in the store's signature pool
-    /// so per-builder fence snapshots share allocations.
+    /// Sibling derivation/origin layer. Edges are keyed by
+    /// `(result_node, kind)`; multiple derivations of the same structural
+    /// result store multiple edges per key. Edge dep-signatures are
+    /// interned in the store's signature pool so per-builder fence
+    /// snapshots share allocations. Origin edges are bounded best-effort
+    /// provenance for the audit origin-graph trace, NOT an invalidation
+    /// source — see the `derivation` module docs.
     derivation: Mutex<DerivationStore>,
-    /// Lock-free telemetry counters (plan B2 + §7.4). Read via
-    /// [`Self::stats_snapshot`] into the public [`SemanticGraphStats`]
-    /// surface.
+    /// Lock-free telemetry counters. Read via [`Self::stats_snapshot`]
+    /// into the public [`SemanticGraphStats`] surface.
     stats: AtomicSemanticGraphStats,
     /// Path C C1 contention instrumentation. Mirrors the arena's
     /// `provenance` field: `Some` for stores wired up by the host, `None`
@@ -1210,19 +1211,14 @@ impl SemanticGraphStore {
     ) {
         // The map insert + retention-budget admission run under the
         // `BudgetedRelationMemo`'s `retention_gate` read guard, and
-        // new-key detection is atomic (via the `DashMap::insert` return
-        // value) — a `contains_key`-then-`insert` pair would let two
-        // writers racing the same key both observe "absent" and
-        // double-record the admission.
-        self.relation_memo.insert(
-            source,
-            target,
-            RelationMemoEntry {
-                carrier,
-                self_root_canonicals,
-                result,
-            },
-        );
+        // new-key detection is atomic (via the `DashMap::entry` API) —
+        // a `contains_key`-then-`insert` pair would let two writers
+        // racing the same key both observe "absent" and double-record
+        // the admission. `insert` stamps the entry's retention-ledger
+        // `admission_seq` so it stays paired with its FIFO ledger
+        // record.
+        self.relation_memo
+            .insert(source, target, carrier, self_root_canonicals, result);
     }
 
     /// Count of relation memo entries. Useful for tests and counters.
@@ -1242,7 +1238,7 @@ impl SemanticGraphStore {
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Derivation / origin layer (plan B2)
+    // Derivation / origin layer
     // ──────────────────────────────────────────────────────────────────
 
     /// Record a derivation/origin edge for `result`. Builders call this
@@ -1252,27 +1248,24 @@ impl SemanticGraphStore {
     /// interned in the store's signature pool so identical fences share
     /// one allocation.
     ///
+    /// Origin edges are bounded best-effort provenance for the audit
+    /// origin-graph trace, NOT an invalidation source — the stored fence
+    /// snapshot is never reconstructed into a `CompletionFence`. See the
+    /// `derivation` module docs.
+    ///
     /// Multiple derivations of the same structural `result` produce
     /// multiple edges with the same `(result, kind)` — the layer supports
     /// this; the walker walks all edges.
     ///
-    /// **Issue #11** (B-B7d's diagnosis report identified
-    /// duplicate edges as 12.8%–18.7% of every origin-edge emission on
-    /// the `repo_first_pass` corpus). The cooperative-admission cold-
-    /// winner path in `build_project_path`'s prefix-backfill loop emits
-    /// origin edges even when the prefix-backfill target is already
-    /// warm in `SemanticGraphStore::entries`. Different `build_project_path`
-    /// invocations that walk through the same intermediate hop emit the
-    /// same `(result, kind, sources, meta, fence)` identity tuple
-    /// repeatedly, inflating the ledger and the per-request audit cost.
-    ///
-    /// The fix dedups by edge identity at the call site: before
-    /// recording into [`DerivationStore::edges`], we check whether an
-    /// edge with the exact same identity tuple is already present and
-    /// skip the ledger write if so. The audit-mining contract is
-    /// preserved: the [`request_context::current_accumulator`] push
-    /// remains unconditional so the footprint miner observes every
-    /// derivation hop the production hot path would have emitted.
+    /// Edges are deduplicated by identity at the call site: before
+    /// recording into [`DerivationStore::edges`], an edge with the exact
+    /// same `(result, kind, sources, meta, fence)` identity tuple already
+    /// present is skipped, so repeated walks through the same
+    /// intermediate hop do not inflate the bucket or the per-request
+    /// audit cost. The audit-mining contract is preserved: the
+    /// [`request_context::current_accumulator`] push remains
+    /// unconditional so the footprint miner observes every derivation hop
+    /// the production hot path would have emitted.
     pub fn record_origin_edge(
         &self,
         result: SemanticNodeId,
@@ -1393,9 +1386,14 @@ impl SemanticGraphStore {
     }
 
     /// Read-only origin walk for a result node — yields every edge
-    /// reachable from `node`, regardless of kind. Outside-execute
-    /// consumers (LSP hover, debug dumps, compat rendering) use this
-    /// form; it never touches any active completion fence.
+    /// reachable from `node`, regardless of kind.
+    ///
+    /// Test-only enumeration accessor. Production origin consumption
+    /// goes through [`Self::walk_origin_chain`] (the audit origin-graph
+    /// builder); this whole-vector form exists for the derivation-layer
+    /// tests. Origin edges are bounded best-effort provenance — see the
+    /// `derivation` module docs.
+    #[cfg(test)]
     #[must_use]
     pub fn origins(&self, node: SemanticNodeId) -> Vec<(OriginEdgeKind, OriginEdge)> {
         let store = self.derivation.lock();
@@ -1403,6 +1401,9 @@ impl SemanticGraphStore {
     }
 
     /// Filtered read-only origin walk: only edges of the given kind.
+    ///
+    /// Test-only enumeration accessor — see [`Self::origins`].
+    #[cfg(test)]
     #[must_use]
     pub fn origins_of_kind(&self, node: SemanticNodeId, kind: OriginEdgeKind) -> Vec<OriginEdge> {
         let store = self.derivation.lock();
@@ -1451,35 +1452,8 @@ impl SemanticGraphStore {
         self.derivation.lock().all_edges()
     }
 
-    /// Dispatch-side origin walk: visits every edge on `node` and merges
-    /// each edge's `edge_dep_signature` into the supplied
-    /// [`CompletionFence`](crate::completion_fence::CompletionFence) at
-    /// hop-time. Returns the visited edges so the caller can recurse over
-    /// `edge.sources` itself (the transitive walk is the caller's
-    /// responsibility, per).
-    ///
-    /// Per, **edges are the only dep-sig propagation route for
-    /// builders** — there is intentionally no `publisher_of(node)` /
-    /// `dep_signature_of(node)` API. Structurally interned nodes can be
-    /// reached by multiple derivations with different dep-signatures;
-    /// selecting a "canonical" publisher would pick an arbitrary owner
-    /// and merge an incomplete fence, which is unsound.
-    pub fn origins_with_fence(
-        &self,
-        node: SemanticNodeId,
-        fence: &crate::completion_fence::CompletionFence,
-    ) -> Vec<(OriginEdgeKind, OriginEdge)> {
-        let store = self.derivation.lock();
-        let mut visited: Vec<(OriginEdgeKind, OriginEdge)> = Vec::new();
-        for (kind, edge) in store.origins(node) {
-            fence.merge_signature(&edge.edge_dep_signature);
-            visited.push((kind, edge.clone()));
-        }
-        visited
-    }
-
     // ──────────────────────────────────────────────────────────────────
-    // Telemetry — public stats snapshot (plan B2 + §7.4)
+    // Telemetry — public stats snapshot
     // ──────────────────────────────────────────────────────────────────
 
     /// Read an immutable snapshot of every counter the store maintains.
@@ -1837,10 +1811,11 @@ impl SemanticGraphStore {
     /// ## Soundness
     ///
     /// The fast path returns a clone of the cached `MemoEntry`'s
-    /// `(result, dep_signature)`. The dep signature flows back to the
-    /// caller's `CompletionFence` exactly as the slow path's warm-hit
+    /// `(result, dep_signature)`. The dep signature flows back into the
+    /// caller's dependency-fact set exactly as the slow path's warm-hit
     /// branch does, so warm-cache reuse stays bounded by dep-signature
-    /// validation at the outer caller's fence-revalidation point.
+    /// validation at the outer caller's publish-side
+    /// completion-fence revalidation.
     /// Same-path recursion detection is unaffected: the cold winner
     /// publishes the warm slot AFTER the build closure returns, so a
     /// populated slot cannot represent a cycle currently being built
@@ -1848,7 +1823,7 @@ impl SemanticGraphStore {
     /// the slow path's loop, which still runs on cache miss. Joiner
     /// waits and abort-driven retries are unaffected: a populated
     /// warm slot means no joiner participation is needed.
-    #[must_use = "the CacheRead carries both the resolved node id and the dep signature callers must merge into their active CompletionFence"]
+    #[must_use = "the CacheRead carries both the resolved node id and the dep signature callers must fold into their dependency-fact set for the publish-side completion-fence revalidation"]
     pub(crate) fn execute_cooperative<F, R, O>(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
@@ -3050,7 +3025,20 @@ impl SemanticGraphStore {
             ModeSlot,
             crate::fact_signature_helpers::ReadSetSignature,
         )> = Vec::new();
-        for victim in victims {
+        // `record_admission` hands back `(seq, FamilyKey)` victims. The
+        // removal here is by `FamilyKey` alone, NOT by admission seq —
+        // sound because this whole method runs under the caller's
+        // exclusive `entries` lock (`&mut FxHashMap<FamilyKey,
+        // FamilySlots>`), the same lock domain every
+        // `record_family_admission_locked` records under and that
+        // `invalidate_all` clears `entries` + `memo_budget` under. With
+        // the exclusive lock held no concurrent writer can re-admit a
+        // FIFO victim's `FamilyKey` between `record_admission` and this
+        // drain, so a key-based removal cannot evict a fresh same-key
+        // re-admission. The `GlobalRetentionBudget` victim-identity
+        // contract permits a key-based removal for exactly this
+        // exclusive-lock-serialised case.
+        for (_victim_seq, victim) in victims {
             // Remove the victim family from the held `entries` map (so
             // map and budget stay in lockstep) and capture each
             // populated slot's carrier for the deferred reverse-index

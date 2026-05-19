@@ -98,9 +98,10 @@ impl VerterHost {
     /// the method consults the project-global result cache first, revalidates
     /// the cached entry's dep-signature against the live host, and only falls
     /// back to the cold resolver path on miss or stale signature. The cold
-    /// build runs inside a [`CompletionFence`](crate::completion_fence::CompletionFence)
-    /// bounded to 3 attempts; repeated revalidation failures surface as a
-    /// top-level `None` result rather than a publish of torn state.
+    /// build publishes through the cooperative-admission completion-fence
+    /// path: the published entry's dep-signature is revalidated against the
+    /// live host before it warms the shared cache, so a result torn by a
+    /// mid-flight change is discarded rather than published as torn state.
     ///
     /// Returns `None` if the file doesn't exist.
     pub fn get_component_meta(

@@ -20,8 +20,8 @@
 //! - Stale owner versions are rejected at lookup time; callers materialize
 //!   through the shared route layer to repopulate.
 //! - Warm hits return the surface + an exact dep-signature fragment the
-//!   caller merges into the active
-//!   [`CompletionFence`](crate::completion_fence::CompletionFence).
+//!   caller folds into its dependency-fact set for the publish-side
+//!   completion-fence revalidation.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

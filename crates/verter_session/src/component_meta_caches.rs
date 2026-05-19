@@ -2129,6 +2129,16 @@ pub struct MaterializeStructureDb {
     /// absent from release builds.
     #[cfg(any(test, debug_assertions))]
     invalidate_all_midpoint_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+    /// Test-only injection point inside [`Self::register_post_publish`],
+    /// parked AFTER `retention_budget.record_admission` has returned its
+    /// FIFO victims but BEFORE `evict_budget_victim` removes them. A race
+    /// test arms it with a barrier and calls `wait()` twice to drive a
+    /// concurrent same-key re-publish into that gap, then asserts the
+    /// identity-scoped `evict_budget_victim` removes the OLD victim and
+    /// leaves the fresh re-publish intact. Per-instance; absent from
+    /// release builds.
+    #[cfg(any(test, debug_assertions))]
+    register_post_publish_pre_evict_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`crate::cache_schema`] for the contract.
     schema_version: u32,
@@ -2198,6 +2208,8 @@ impl MaterializeStructureDb {
             retention_gate: parking_lot::RwLock::new(()),
             #[cfg(any(test, debug_assertions))]
             invalidate_all_midpoint_gate: parking_lot::Mutex::new(None),
+            #[cfg(any(test, debug_assertions))]
+            register_post_publish_pre_evict_gate: parking_lot::Mutex::new(None),
             schema_version,
         }
     }
@@ -2422,6 +2434,28 @@ impl MaterializeStructureDb {
         }
     }
 
+    /// Test-only driver: arm the [`Self::register_post_publish`]
+    /// pre-eviction injection point with `barrier`. The next
+    /// `register_post_publish` on this Db calls `barrier.wait()` twice
+    /// AFTER `retention_budget.record_admission` returned its FIFO
+    /// victims but BEFORE `evict_budget_victim` removes them. A race
+    /// test uses this to interleave a concurrent same-key re-publish and
+    /// prove the identity-scoped `evict_budget_victim` removes the OLD
+    /// victim, not the fresh re-publish. The returned guard disarms the
+    /// injection point on drop.
+    #[cfg(test)]
+    #[doc(hidden)]
+    #[must_use]
+    pub(crate) fn test_arm_register_post_publish_pre_evict_gate(
+        &self,
+        barrier: Arc<std::sync::Barrier>,
+    ) -> MaterializeRegisterPreEvictGateGuard<'_> {
+        *self.register_post_publish_pre_evict_gate.lock() = Some(barrier);
+        MaterializeRegisterPreEvictGateGuard {
+            gate: &self.register_post_publish_pre_evict_gate,
+        }
+    }
+
     /// Number of warm entries.
     #[must_use]
     pub fn live_count(&self) -> usize {
@@ -2518,10 +2552,27 @@ impl MaterializeStructureDb {
         }
         // Global retention budget: record this admission under the
         // entry's own seq, FIFO-evict the oldest entries past the total
-        // cap.
+        // cap. Each victim carries its admission `seq`, so
+        // `evict_budget_victim` removes precisely that admission's entry
+        // even if a concurrent same-key re-publish has overwritten the
+        // map slot under `victim_key` with a fresh, distinctly-seq'd
+        // entry.
         let victims = self.retention_budget.record_admission(admission_seq, key);
-        for victim in victims {
-            self.evict_budget_victim(&victim);
+        // Test-only injection point — parked AFTER `record_admission`
+        // returned its FIFO victims but BEFORE `evict_budget_victim`
+        // removes them. A race test arms it to drive a concurrent
+        // same-key re-publish into this gap. `None` (production default)
+        // is a no-op.
+        #[cfg(any(test, debug_assertions))]
+        {
+            let gate = self.register_post_publish_pre_evict_gate.lock().clone();
+            if let Some(barrier) = gate {
+                barrier.wait();
+                barrier.wait();
+            }
+        }
+        for (victim_seq, victim_key) in victims {
+            self.evict_budget_victim(victim_seq, &victim_key);
         }
     }
 
@@ -2530,8 +2581,21 @@ impl MaterializeStructureDb {
     /// every canonical its carrier referenced and decrements the live
     /// counter, matching the removal-side cleanup the cooperative
     /// substrate runs for a warm-hit reject.
-    fn evict_budget_victim(&self, victim_key: &MaterializeStructureCacheKey) {
-        let Some((_, entry)) = self.entries.remove(victim_key) else {
+    ///
+    /// **Identity-scoped removal.** The map entry under `victim_key` is
+    /// removed ONLY when its stored `admission_seq` still equals
+    /// `victim_seq`. A same-key re-publish racing this eviction
+    /// overwrites the `victim_key` slot with a fresh entry carrying a
+    /// distinct seq; a bare-key removal would evict that fresh entry and
+    /// strand its live ledger record (cache grows past the cap). The
+    /// `remove_if` predicate runs under the `DashMap` shard write lock,
+    /// so the seq check and the removal are atomic against a concurrent
+    /// re-publish.
+    fn evict_budget_victim(&self, victim_seq: u64, victim_key: &MaterializeStructureCacheKey) {
+        let Some((_, entry)) = self
+            .entries
+            .remove_if(victim_key, |_, e| e.admission_seq == victim_seq)
+        else {
             return;
         };
         self.live_counter.fetch_sub(1, Ordering::Relaxed);
@@ -2644,6 +2708,23 @@ pub(crate) struct MaterializeInvalidateGateGuard<'a> {
 
 #[cfg(test)]
 impl Drop for MaterializeInvalidateGateGuard<'_> {
+    fn drop(&mut self) {
+        *self.gate.lock() = None;
+    }
+}
+
+/// RAII guard returned by
+/// [`MaterializeStructureDb::test_arm_register_post_publish_pre_evict_gate`].
+/// Disarms the per-instance pre-eviction injection point on drop so a
+/// later `register_post_publish` does not park on a stale barrier.
+#[cfg(test)]
+#[doc(hidden)]
+pub(crate) struct MaterializeRegisterPreEvictGateGuard<'a> {
+    gate: &'a parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+}
+
+#[cfg(test)]
+impl Drop for MaterializeRegisterPreEvictGateGuard<'_> {
     fn drop(&mut self) {
         *self.gate.lock() = None;
     }
@@ -2962,10 +3043,14 @@ impl RefCycleResultDb {
         }
         // Global retention budget: record this admission under the
         // entry's own seq, FIFO-evict the oldest entries past the total
-        // cap.
+        // cap. Each victim carries its admission `seq`, so
+        // `evict_budget_victim` removes precisely that admission's entry
+        // even if a concurrent same-key re-publish has overwritten the
+        // map slot under `victim_key` with a fresh, distinctly-seq'd
+        // entry.
         let victims = self.retention_budget.record_admission(admission_seq, key);
-        for victim in victims {
-            self.evict_budget_victim(&victim);
+        for (victim_seq, victim_key) in victims {
+            self.evict_budget_victim(victim_seq, &victim_key);
         }
     }
 
@@ -2974,8 +3059,21 @@ impl RefCycleResultDb {
     /// every canonical its carrier referenced and decrements the live
     /// counter, matching the removal-side cleanup the cooperative
     /// substrate runs for a warm-hit reject.
-    fn evict_budget_victim(&self, victim_key: &DeclIdentity) {
-        let Some((_, entry)) = self.entries.remove(victim_key) else {
+    ///
+    /// **Identity-scoped removal.** The map entry under `victim_key` is
+    /// removed ONLY when its stored `admission_seq` still equals
+    /// `victim_seq`. A same-key re-publish racing this eviction
+    /// overwrites the `victim_key` slot with a fresh entry carrying a
+    /// distinct seq; a bare-key removal would evict that fresh entry and
+    /// strand its live ledger record (cache grows past the cap). The
+    /// `remove_if` predicate runs under the `DashMap` shard write lock,
+    /// so the seq check and the removal are atomic against a concurrent
+    /// re-publish.
+    fn evict_budget_victim(&self, victim_seq: u64, victim_key: &DeclIdentity) {
+        let Some((_, entry)) = self
+            .entries
+            .remove_if(victim_key, |_, e| e.admission_seq == victim_seq)
+        else {
             return;
         };
         self.live_counter.fetch_sub(1, Ordering::Relaxed);

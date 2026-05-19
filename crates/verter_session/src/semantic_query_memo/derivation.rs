@@ -6,7 +6,7 @@
 //! builders that emit dozens of edges with identical fences share one
 //! `Arc` allocation.
 //!
-//! ## Bounded retention
+//! ## Bounded retention — origin edges are best-effort provenance
 //!
 //! `edges` is keyed on content-derived state — `(result, kind)` pairs of
 //! [`SemanticNodeId`]s, where a fresh content version produces fresh ids
@@ -16,9 +16,21 @@
 //! substrate exists to cap. It is bounded by a [`GlobalRetentionBudget`]:
 //! a newly-keyed `(result, kind)` bucket records an admission, and the
 //! oldest buckets past the cap are FIFO-evicted write-side (from
-//! [`DerivationStore::record`]). Evicting an `edges` bucket only drops
-//! cached derivation provenance — a future origin walk simply finds no
-//! edge for that node, never a wrong edge.
+//! [`DerivationStore::record`]).
+//!
+//! **Origin edges are bounded best-effort provenance, NOT an
+//! invalidation source.** A FIFO-evicted bucket loses cached *provenance*
+//! only — a later origin walk simply finds no edge for that node, never
+//! a wrong edge. An origin edge's `edge_dep_signature` is a snapshot of
+//! the publishing builder's fence kept purely for the audit origin-graph
+//! trace ([`crate::meta_resolve::build_origin_graph`]); it is **not** a
+//! dependency-propagation route and nothing reconstructs a completion
+//! fence (`CompletionFence`) from it. The load-bearing invalidation
+//! record for a cached result is that result's own memo entry — its
+//! `fact_dep_signature` / `ReadSetSignature` carrier, revalidated by
+//! `HostFenceValidator`.
+//! Because origin edges carry no invalidation weight, FIFO-evicting a
+//! bucket is sound: it degrades only the audit trace, never correctness.
 //!
 //! `signature_pool` is the dep-signature interner. It is NOT bounded by an
 //! independent FIFO cap: `record_origin_edge`'s duplicate-edge dedup probe
@@ -158,9 +170,21 @@ impl DerivationStore {
         // `SemanticNodeId`s, so each content version contributes new
         // bucket keys — this budget is what stops the `edges` map
         // growing append-only with the edit count.
+        //
+        // `record_admission` hands back `(seq, bucket_key)` victims. The
+        // removal here is by `bucket_key` alone, NOT by admission seq —
+        // sound because `DerivationStore::record` takes `&mut self`:
+        // `edges` and `edge_budget` are mutated under that exclusive
+        // borrow (the `SemanticGraphStore` holds the store behind a
+        // `Mutex<DerivationStore>`), so no concurrent writer can
+        // re-admit a FIFO victim's `bucket_key` between `record_admission`
+        // and this drain. A key-based removal therefore cannot evict a
+        // fresh same-key re-admission. The `GlobalRetentionBudget`
+        // victim-identity contract permits a key-based removal for
+        // exactly this exclusive-`&mut self`-serialised case.
         if is_new_bucket {
             let seq = next_retention_seq();
-            for victim in self.edge_budget.record_admission(seq, bucket_key) {
+            for (_victim_seq, victim) in self.edge_budget.record_admission(seq, bucket_key) {
                 self.edges.remove(&victim);
             }
         }
@@ -198,6 +222,12 @@ impl DerivationStore {
         self.edges.get(&(result, kind))
     }
 
+    /// Test-only filtered origin walk — yields only `kind` edges for
+    /// `result`. The sole caller is the test-only
+    /// `SemanticGraphStore::origins_of_kind` enumeration accessor;
+    /// production origin consumption walks every kind via
+    /// [`Self::origins`] (driven by `walk_origin_chain`).
+    #[cfg(test)]
     pub(super) fn origins_of_kind(
         &self,
         result: SemanticNodeId,

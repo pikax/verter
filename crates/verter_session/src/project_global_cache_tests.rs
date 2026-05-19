@@ -1000,23 +1000,9 @@ fn project_type_store_public_accessor_returns_stable_arc() {
     assert!(Arc::ptr_eq(&a, &b));
 }
 
-/// The completion-fence shape is available for Phase 3 wiring — this is a
-/// static import/type shape check, not a behavioural test.
-#[test]
-fn completion_fence_is_in_the_public_surface() {
-    use crate::completion_fence::{CompletionFence, FenceOutcome};
-    // Construct a fence so we bind the import; drop immediately.
-    let _fence = CompletionFence::new();
-    // Verify the MAX_ATTEMPTS constant matches the plan's `3`.
-    assert_eq!(CompletionFence::MAX_ATTEMPTS, 3);
-    // Ensure FenceOutcome is constructible — this is a shape-only test.
-    let _stable = FenceOutcome::Stable(()) as FenceOutcome<()>;
-    let _unstable: FenceOutcome<()> = FenceOutcome::Unstable { attempts: 3 };
-}
-
 /// Utility: the `dep_version_for` helper returns a `WholeHash` variant so
-/// callers that feed the `CompletionFence` do not need to know the internal
-/// `DepVersion` shape.
+/// callers building a dependency signature do not need to know the
+/// internal `DepVersion` shape.
 #[test]
 fn dep_version_for_whole_hash_returns_whole_hash_variant() {
     let store = crate::project_type_store::ProjectTypeStore::new();
@@ -1079,8 +1065,8 @@ fn empty_host_has_empty_project_type_store() {
     assert!(store.analysis().is_empty());
 }
 
-/// Direct dep-signature construction: callers that produce a signature for
-/// the `CompletionFence` can build one with plain `DepVersion` variants.
+/// Direct dep-signature construction: callers that produce a dependency
+/// signature can build one with plain `DepVersion` variants.
 #[test]
 fn dep_signature_construction_is_caller_local() {
     use crate::semantic_query::{DepSignature, DepVersion};
@@ -1108,24 +1094,6 @@ fn project_type_store_counters_start_at_zero() {
     assert_eq!(snap.component_meta_live, 0);
     assert_eq!(snap.component_meta_stale_sweeps, 0);
     assert_eq!(snap.inflight_waiters, 0);
-}
-
-/// DepSignature merging in CompletionFence is commutative-ish: observing
-/// two different facts for the same canonical+kind keeps only the latest.
-#[test]
-fn completion_fence_observed_signature_reflects_latest_fact() {
-    use crate::completion_fence::CompletionFence;
-    use crate::semantic_query::DepVersion;
-
-    let fence = CompletionFence::new();
-    fence.observe(Arc::from("/w/a.ts"), DepVersion::WholeHash([1u8; 16]));
-    fence.observe(Arc::from("/w/a.ts"), DepVersion::WholeHash([2u8; 16]));
-    let observed = fence.observed_signature();
-    assert_eq!(observed.len(), 1);
-    match &observed[0].1 {
-        DepVersion::WholeHash(h) => assert_eq!(*h, [2u8; 16]),
-        other => panic!("expected WholeHash, got {other:?}"),
-    }
 }
 
 /// The ProjectTypeStore route/imported-roots accessors return stable Arcs

@@ -856,3 +856,171 @@ fn ref_cycle_budget_eviction_prunes_empty_reverse_index_shards() {
         "the primary entry map is itself capped at the budget",
     );
 }
+
+// ===========================================================================
+// FIFO victim identity — `evict_budget_victim` removes by admission seq,
+// not by bare key (codex P2-A).
+//
+// `GlobalRetentionBudget::record_admission` returns the oldest FIFO
+// victims as `(seq, key)` pairs. When a same-key re-publish races the
+// old entry's budget eviction, the map slot under `victim_key` can hold
+// a FRESH entry (a distinct `admission_seq`) by the time
+// `evict_budget_victim` runs. A bare-key `entries.remove(victim_key)`
+// would evict that fresh entry and strand its live ledger record — the
+// cache then grows past its cap. `evict_budget_victim` must scope the
+// removal to `victim_seq`: remove the slot ONLY when its stored
+// `admission_seq` still equals the victim's seq.
+//
+// The test below makes the race deterministic via the
+// `register_post_publish` pre-eviction injection point: a publisher
+// thread is parked AFTER `record_admission` returned the old victim but
+// BEFORE `evict_budget_victim` removes it; while it is parked the main
+// thread re-publishes the victim key with a fresh entry; the publisher
+// is then released to run its (identity-scoped) eviction.
+//
+// DISCRIMINATION:
+//   - With the identity-scoped `remove_if(victim_key, |_, e|
+//     e.admission_seq == victim_seq)` the predicate sees the fresh
+//     entry's distinct seq, skips the removal, and the fresh entry
+//     SURVIVES. Assertion PASSES.
+//   - With a bare-key `entries.remove(victim_key)` the fresh entry is
+//     unconditionally evicted. Assertion FAILS.
+// ===========================================================================
+
+/// `MaterializeStructureDb::evict_budget_victim` removes the FIFO victim
+/// by its admission seq — a same-key re-publish racing the eviction
+/// keeps its fresh entry.
+#[test]
+fn materialize_structure_budget_victim_eviction_is_admission_seq_scoped() {
+    use crate::component_meta_caches::{MaterializeStructureDb, MaterializeStructureEntry};
+    use crate::component_meta_materialize::{
+        MaterializationScope, MaterializeOutcome, MaterializeStructureCacheKey,
+    };
+    use crate::fact_signature_helpers::ReadSetSignature;
+    use crate::semantic_query::{DepVersion, ProjectionMode, SemanticNodeId};
+    use std::sync::Barrier;
+    use std::thread;
+
+    // A distinct cache key per `base` id; `key_for(0)` is the FIFO
+    // victim, `key_for(1)` is the new admission that overflows the cap.
+    let key_for = |base: u64| MaterializeStructureCacheKey {
+        scope_canonical_id: Arc::from("/owner.ts"),
+        base: SemanticNodeId(base),
+        scope_axis: MaterializationScope::TopLevel,
+        mode: ProjectionMode::Shallow,
+    };
+    // Each entry carries a DISTINCT canonical on its legacy rail and a
+    // freshly-allocated `admission_seq`, so the two entries that share
+    // `key_for(0)` (the old victim and the fresh re-publish) are told
+    // apart by seq.
+    let make_entry = |canonical: &str, version: u8| {
+        let legacy: crate::semantic_query::DepSignature = Arc::from(
+            vec![(
+                Arc::<str>::from(canonical),
+                DepVersion::WholeHash([version; 16]),
+            )]
+            .into_boxed_slice(),
+        );
+        MaterializeStructureEntry {
+            outcome: MaterializeOutcome::Miss(SemanticNodeId(0)),
+            read_set_signature: ReadSetSignature::new(
+                crate::fact_signature_helpers::empty_fact_signature(),
+                legacy,
+            ),
+            self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
+            admission_seq: crate::bounded_query_retention::next_retention_seq(),
+        }
+    };
+
+    // Budget cap 1 — the SECOND admission overflows and evicts the
+    // first.
+    let db = Arc::new(MaterializeStructureDb::new_with_budget_for_test(1));
+
+    // Seed the FIFO victim under `key_for(0)`. Gate not yet armed, so
+    // this `register_post_publish` runs straight through.
+    let victim_key = key_for(0);
+    let old_entry = Arc::new(make_entry("/dep-old.ts", 1));
+    db.entries()
+        .insert(victim_key.clone(), Arc::clone(&old_entry));
+    db.register_post_publish(
+        victim_key.clone(),
+        &old_entry.read_set_signature,
+        old_entry.admission_seq,
+    );
+    assert_eq!(db.retention_tracked_len(), 1, "victim admission seeded");
+
+    // Arm the pre-eviction injection point. The next
+    // `register_post_publish` parks AFTER `record_admission` returned
+    // the `(seq, key)` victim but BEFORE `evict_budget_victim` removes
+    // it.
+    let pre_evict = Arc::new(Barrier::new(2));
+    let _gate_guard = db.test_arm_register_post_publish_pre_evict_gate(Arc::clone(&pre_evict));
+
+    // Publisher thread: a NEW admission under `key_for(1)` overflows the
+    // cap-1 budget — `record_admission` returns the `(seq, key_for(0))`
+    // victim and the thread parks at the pre-eviction injection point.
+    let new_key = key_for(1);
+    let new_entry = Arc::new(make_entry("/dep-new.ts", 2));
+    let publisher = {
+        let db = Arc::clone(&db);
+        let new_key = new_key.clone();
+        let new_entry = Arc::clone(&new_entry);
+        thread::spawn(move || {
+            db.entries().insert(new_key.clone(), Arc::clone(&new_entry));
+            db.register_post_publish(
+                new_key,
+                &new_entry.read_set_signature,
+                new_entry.admission_seq,
+            );
+        })
+    };
+
+    // Wait until the publisher has recorded its admission and parked —
+    // still inside `register_post_publish`, victim returned, eviction
+    // not yet run.
+    pre_evict.wait();
+
+    // RACE WINDOW: a concurrent re-publish overwrites the victim key's
+    // map slot with a FRESH entry (a distinct `admission_seq`). This is
+    // exactly the slot overwrite a concurrent `register_post_publish`'s
+    // `entries.insert` performs.
+    let fresh_entry = Arc::new(make_entry("/dep-fresh.ts", 3));
+    db.entries()
+        .insert(victim_key.clone(), Arc::clone(&fresh_entry));
+    assert_ne!(
+        old_entry.admission_seq, fresh_entry.admission_seq,
+        "the old victim and the fresh re-publish must carry distinct \
+         admission identities",
+    );
+
+    // Release the publisher — it now runs `evict_budget_victim` for the
+    // OLD victim's `(seq, key)`.
+    pre_evict.wait();
+    publisher.join().expect("publisher thread");
+
+    // The fresh re-published entry MUST survive: `evict_budget_victim`
+    // is scoped to the OLD victim's `admission_seq`, which no longer
+    // matches the slot's occupant.
+    let surviving = db
+        .entries()
+        .get(&victim_key)
+        .map(|e| e.value().admission_seq);
+    assert_eq!(
+        surviving,
+        Some(fresh_entry.admission_seq),
+        "FIFO VICTIM IDENTITY BUG: evict_budget_victim must remove the \
+         FIFO victim by its admission seq. A same-key re-publish racing \
+         the eviction overwrote the slot with a fresh entry; a bare-key \
+         `entries.remove(victim_key)` evicts that fresh entry instead of \
+         the old victim and strands its live ledger record, so the cache \
+         grows past its cap. The fresh entry's distinct seq must spare it \
+         from the old victim's eviction.",
+    );
+    // The new admission under `key_for(1)` is untouched — it was never a
+    // victim.
+    assert!(
+        db.entries().get(&new_key).is_some(),
+        "the overflowing new admission is not a FIFO victim and must \
+         remain resident",
+    );
+}

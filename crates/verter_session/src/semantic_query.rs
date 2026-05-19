@@ -632,9 +632,10 @@ impl std::hash::Hash for SurfaceView {
 
 /// Dependency-version variant recorded alongside each cache read.
 ///
-/// Warm hits return a recorded `DepSignature` that merges into the active
-/// [`CompletionFence`](crate::completion_fence::CompletionFence), so
-/// final-result validation is transitive, not root-key-only.
+/// Warm hits return a recorded `DepSignature` that folds into the
+/// caller's dependency-fact set for the publish-side completion-fence
+/// revalidation, so final-result validation is transitive, not
+/// root-key-only.
 ///
 /// `Ord` is derived for `DepSignatureInterner`
 /// canonicalises bucket contents by sorting `(canonical, version)` pairs
@@ -650,8 +651,9 @@ pub enum DepVersion {
 /// Dependency signature returned alongside every reusable cache read.
 pub type DepSignature = Arc<[(Arc<str>, DepVersion)]>;
 
-/// Returned by cache reads so callers can merge transitive dep facts into the
-/// active [`CompletionFence`](crate::completion_fence::CompletionFence).
+/// Returned by cache reads so callers can fold transitive dep facts into
+/// their dependency-fact set for the publish-side completion-fence
+/// revalidation.
 ///
 /// Carries `walker_diagnostics` produced during the query's computation
 /// (empty for queries that do not run the shallow-mode terminal-surface

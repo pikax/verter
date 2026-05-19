@@ -12,8 +12,13 @@
 //!
 //! - [`GlobalRetentionBudget`] — a process-cheap, insertion-ordered
 //!   (FIFO) total-size budget. A cache records each admitted entry's key
-//!   and the budget returns the keys to evict once the recorded count
-//!   exceeds the cache's configured cap. Caches whose backing map is
+//!   together with its unique admission sequence number; once the
+//!   recorded count exceeds the cache's configured cap the budget hands
+//!   back the oldest `(seq, key)` victims so the caller can evict them.
+//!   The victim carries its admission `seq` so the caller can scope the
+//!   map removal to that exact admission — a same-key re-publish racing
+//!   the eviction carries a different `seq` and must survive. Caches
+//!   whose backing map is
 //!   owned by the cooperative-admission primitive
 //!   ([`crate::component_meta_caches::MaterializeStructureDb`],
 //!   [`crate::component_meta_caches::RefCycleResultDb`], the
@@ -76,9 +81,23 @@ pub fn next_retention_seq() -> u64 {
 /// A cache calls [`Self::record_admission`] for each entry it admits,
 /// passing the entry's map key and its insertion sequence number. The
 /// budget keeps a FIFO ledger of admitted `(seq, key)` pairs; when the
-/// ledger exceeds `cap` it returns the keys of the oldest entries so the
+/// ledger exceeds `cap` it returns the oldest `(seq, key)` victims so the
 /// caller can evict them from its own map (running whatever reverse-index
 /// / counter cleanup the cache needs).
+///
+/// **Victims carry their admission identity.** A FIFO victim is a
+/// `(seq, key)` pair, not a bare key. A concurrent same-key re-publish
+/// can overwrite the map slot under `key` with a *fresh* entry (a
+/// distinct `seq`) before the caller acts on the victim. A bare-key
+/// removal would then evict that fresh entry and strand its still-live
+/// ledger record, so the cache grows past `cap`. A correct victim
+/// consumer scopes the removal to `victim_seq` — it removes the map
+/// entry under `victim_key` ONLY IF that entry's stored `admission_seq`
+/// equals `victim_seq`. The single exception is a consumer whose map and
+/// budget are mutated under an exclusive lock that also serialises every
+/// `record_admission` of the same key (e.g. a `&mut self` store): with
+/// no concurrent re-admission possible a bare-key removal is sound, and
+/// that consumer must name the serialising lock.
 ///
 /// The ledger holds `(seq, key)` pairs only — never payloads — so it is
 /// cheap. A cache that removes an entry through its own invalidation path
@@ -123,19 +142,26 @@ where
         self.cap
     }
 
-    /// Record one freshly-admitted entry. Returns the keys of the oldest
-    /// entries that must now be evicted to bring the ledger back within
+    /// Record one freshly-admitted entry. Returns the oldest `(seq, key)`
+    /// victims that must now be evicted to bring the ledger back within
     /// `cap` (empty when the cache is still within budget).
     ///
-    /// The returned keys are removed from the ledger immediately, so a
+    /// Each victim carries its own admission `seq` — the caller scopes
+    /// the map removal to that `seq` (remove only when the entry under
+    /// `victim_key` still carries `admission_seq == victim_seq`) so a
+    /// concurrent same-key re-publish, which carries a distinct `seq`,
+    /// survives. See the struct-level "Victims carry their admission
+    /// identity" contract.
+    ///
+    /// The returned victims are removed from the ledger immediately, so a
     /// caller that evicts them keeps the ledger consistent with its map.
     #[must_use]
-    pub fn record_admission(&self, seq: u64, key: K) -> Vec<K> {
+    pub fn record_admission(&self, seq: u64, key: K) -> Vec<(u64, K)> {
         let mut ledger = self.ledger.lock();
         ledger.push_back((seq, key));
         let mut evict = Vec::new();
         while ledger.len() > self.cap {
-            if let Some((_, victim)) = ledger.pop_front() {
+            if let Some(victim) = ledger.pop_front() {
                 evict.push(victim);
             }
         }
@@ -577,7 +603,12 @@ where
         // `admit` returns. A future reader should not treat the window
         // as a bug.
         let over_budget = self.budget.record_admission(seq, (key, seq));
-        for (victim_key, victim_seq) in over_budget {
+        // The budget ledger seq and the candidate seq embedded in the
+        // budget key are the same value (`record_admission(seq, (key,
+        // seq))`); `remove_candidate_by_seq` is already identity-scoped
+        // — it removes the slot candidate ONLY when its `seq` matches, so
+        // a concurrent same-key re-admission (a distinct seq) survives.
+        for (_ledger_seq, (victim_key, victim_seq)) in over_budget {
             if self.remove_candidate_by_seq(&victim_key, victim_seq) {
                 evicted += 1;
             }
@@ -770,26 +801,29 @@ impl Drop for AdmitPostRecordGateGuard<'_> {
 mod tests {
     use super::*;
 
-    /// `GlobalRetentionBudget` returns the oldest keys once the ledger
-    /// exceeds the cap, in FIFO order. DISCRIMINATES: an unbounded
-    /// ledger would return an empty eviction list forever.
+    /// `GlobalRetentionBudget` returns the oldest `(seq, key)` victims
+    /// once the ledger exceeds the cap, in FIFO order. DISCRIMINATES: an
+    /// unbounded ledger would return an empty eviction list forever. The
+    /// victim's `seq` is the admission identity the caller scopes its
+    /// removal to — proven here by asserting the exact `(seq, key)` pair.
     #[test]
     fn budget_evicts_oldest_first_past_cap() {
         let budget: GlobalRetentionBudget<u32> = GlobalRetentionBudget::new(3);
         assert!(budget.record_admission(1, 10).is_empty(), "1st within cap");
         assert!(budget.record_admission(2, 11).is_empty(), "2nd within cap");
         assert!(budget.record_admission(3, 12).is_empty(), "3rd within cap");
-        // 4th admission overflows — the oldest (key 10) is evicted.
+        // 4th admission overflows — the oldest (seq 1, key 10) is
+        // evicted; the victim carries its admission seq.
         assert_eq!(
             budget.record_admission(4, 13),
-            vec![10],
-            "4th admission must evict the oldest key (FIFO)",
+            vec![(1, 10)],
+            "4th admission must evict the oldest (seq, key) victim (FIFO)",
         );
-        // 5th — key 11 is now oldest.
+        // 5th — (seq 2, key 11) is now oldest.
         assert_eq!(
             budget.record_admission(5, 14),
-            vec![11],
-            "5th admission must evict the next-oldest key",
+            vec![(2, 11)],
+            "5th admission must evict the next-oldest (seq, key) victim",
         );
         assert_eq!(budget.tracked_len(), 3, "ledger stays bounded at cap");
     }
@@ -849,8 +883,8 @@ mod tests {
         assert!(budget.record_admission(1, 1).is_empty());
         assert_eq!(
             budget.record_admission(2, 2),
-            vec![1],
-            "second admission evicts the first under a cap of 1",
+            vec![(1, 1)],
+            "second admission evicts the first (seq, key) victim under a cap of 1",
         );
     }
 

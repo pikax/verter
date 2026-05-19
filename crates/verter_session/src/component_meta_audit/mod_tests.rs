@@ -364,10 +364,11 @@ fn audit_counter_smallest_reproducer() {
     assert!(
         cm.dep_signature_merges > 0,
         "smallest reproducer: dep_signature merges must increment when \
-         the cold resolver walks origins under the completion fence. \
-         Production `CompletionFence::merge_signature` is called by \
-         `origins_with_fence` — observing 0 means the audit hook is no \
-         longer wired into the production merge site. Counter: {}",
+         the cold resolver folds a cached read's dep-signature into the \
+         materialiser's per-frame local fence. Production \
+         `merge_dep_signature_into_local_fence` bumps the counter at \
+         every such fold — observing 0 means the audit hook is no longer \
+         wired into the production merge site. Counter: {}",
         cm.dep_signature_merges,
     );
     assert!(

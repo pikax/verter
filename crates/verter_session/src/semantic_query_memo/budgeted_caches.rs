@@ -51,6 +51,15 @@ pub(crate) struct RelationMemoEntry {
     pub(crate) self_root_canonicals: Arc<[Arc<str>]>,
     /// The cached tri-state relation result.
     pub(crate) result: crate::semantic_query::RelationResult,
+    /// FIFO retention-ledger admission identity — the unique sequence
+    /// number this entry's key was first recorded under. A budget FIFO
+    /// victim carries its admission seq; the victim removal is scoped to
+    /// it (`remove_if` on `admission_seq`) so a concurrent same-key
+    /// re-`insert`, which carries a distinct seq, survives. Allocated on
+    /// the vacant-slot path and carried forward unchanged across a
+    /// same-key replace (the ledger record is never removed on a
+    /// replace, so the stored seq must stay paired with it).
+    admission_seq: u64,
 }
 
 /// Relation-engine memo: `(source, target)` semantic-node pairs → a
@@ -113,24 +122,69 @@ impl BudgetedRelationMemo {
     /// guard, so it cannot interleave its map clear and budget clear
     /// with this insert's two-phase update.
     ///
-    /// New-key detection is atomic: `DashMap::insert` returns the prior
-    /// value (`Some` on a same-key replace), so the budget admission is
-    /// recorded exactly once per distinct key even when two writers
-    /// race the same key — a `contains_key`-then-`insert` pair would
-    /// let both racing writers observe "absent" and double-record.
+    /// New-key detection is atomic: the slot is taken through the
+    /// `DashMap::entry` API, so the "vacant vs occupied" decision AND
+    /// the slot write happen under one held shard write guard. The
+    /// budget admission is therefore recorded exactly once per distinct
+    /// key even when two writers race the same key — a
+    /// `contains_key`-then-`insert` pair would let both racing writers
+    /// observe "absent" and double-record.
+    ///
+    /// On a same-key replace the entry keeps the PRIOR admission's
+    /// `admission_seq` — the FIFO ledger still tracks the original
+    /// admission, so the stored seq must stay paired with the ledger
+    /// record it identifies. A fresh seq on a replace would desync the
+    /// entry from its ledger record and leak it past a budget removal.
     pub(crate) fn insert(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
-        entry: RelationMemoEntry,
+        carrier: crate::fact_signature_helpers::ReadSetSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
+        result: crate::semantic_query::RelationResult,
     ) {
+        use dashmap::mapref::entry::Entry;
+
         let _retention = self.retention_gate.read();
         let key = (source, target);
-        let is_new = self.memo.insert(key, entry).is_none();
-        if is_new {
-            let seq = crate::bounded_query_retention::next_retention_seq();
-            for victim in self.budget.record_admission(seq, key) {
-                self.memo.remove(&victim);
+        // Decide new-vs-replace and write the slot atomically under the
+        // shard write guard the `entry` API holds. `admitted_seq` is
+        // `Some(seq)` only when this call freshly admitted the key — on
+        // a same-key replace the prior seq is carried forward (the
+        // ledger record was never removed) and no admission is recorded.
+        let admitted_seq = match self.memo.entry(key) {
+            Entry::Occupied(mut occ) => {
+                let admission_seq = occ.get().admission_seq;
+                occ.insert(RelationMemoEntry {
+                    carrier,
+                    self_root_canonicals,
+                    result,
+                    admission_seq,
+                });
+                None
+            }
+            Entry::Vacant(vac) => {
+                let admission_seq = crate::bounded_query_retention::next_retention_seq();
+                vac.insert(RelationMemoEntry {
+                    carrier,
+                    self_root_canonicals,
+                    result,
+                    admission_seq,
+                });
+                Some(admission_seq)
+            }
+        };
+        if let Some(seq) = admitted_seq {
+            // New key: record the admission and FIFO-evict the oldest
+            // entries past the cap. The victim removal is identity-scoped
+            // — `remove_if` drops the `victim_key` entry ONLY when its
+            // stored `admission_seq` still equals `victim_seq`. A
+            // concurrent `insert` re-admitting the same key carries a
+            // fresh seq, so a bare-key removal would evict that fresh
+            // entry and strand its ledger record.
+            for (victim_seq, victim_key) in self.budget.record_admission(seq, key) {
+                self.memo
+                    .remove_if(&victim_key, |_, entry| entry.admission_seq == victim_seq);
             }
         }
         #[cfg(any(test, debug_assertions))]
@@ -337,9 +391,16 @@ impl BudgetedNamedTypeIndex {
         };
         if let Some(seq) = admitted_seq {
             // New key: record the admission and FIFO-evict the oldest
-            // entries past the cap.
-            for victim in self.budget.record_admission(seq, key) {
-                self.index.remove(&victim);
+            // entries past the cap. The victim removal is identity-scoped
+            // — `remove_if` drops the `victim_key` entry ONLY when its
+            // stored `admission_seq` still equals `victim_seq`. A
+            // concurrent `insert` re-admitting the same key carries a
+            // fresh seq, so a bare-key removal would evict that fresh
+            // entry and strand its ledger record; scoping to the seq
+            // leaves the fresh re-admission intact.
+            for (victim_seq, victim_key) in self.budget.record_admission(seq, key) {
+                self.index
+                    .remove_if(&victim_key, |_, entry| entry.admission_seq == victim_seq);
             }
         }
         #[cfg(any(test, debug_assertions))]
@@ -531,12 +592,21 @@ mod tests {
     use std::sync::{Arc as StdArc, Barrier};
     use std::thread;
 
-    fn relation_entry() -> RelationMemoEntry {
-        RelationMemoEntry {
-            carrier: crate::fact_signature_helpers::ReadSetSignature::empty(),
-            self_root_canonicals: StdArc::from(Vec::<StdArc<str>>::new()),
-            result: RelationResult::Unknown,
-        }
+    /// Publish one relation judgement for `(source, target)` with empty
+    /// carrier / self-roots and an `Unknown` result — the minimal entry
+    /// the budget/desync tests admit.
+    fn insert_relation(
+        memo: &BudgetedRelationMemo,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) {
+        memo.insert(
+            source,
+            target,
+            crate::fact_signature_helpers::ReadSetSignature::empty(),
+            StdArc::from(Vec::<StdArc<str>>::new()),
+            RelationResult::Unknown,
+        );
     }
 
     /// `insert` records a budget admission exactly once per distinct
@@ -549,11 +619,11 @@ mod tests {
         let memo = BudgetedRelationMemo::default();
         let a = SemanticNodeId(1);
         let b = SemanticNodeId(2);
-        memo.insert(a, b, relation_entry());
+        insert_relation(&memo, a, b);
         assert_eq!(memo.len(), 1);
         assert_eq!(memo.budget_tracked_len(), 1, "first insert recorded once");
         // Re-insert the SAME key — replace in place, no new admission.
-        memo.insert(a, b, relation_entry());
+        insert_relation(&memo, a, b);
         assert_eq!(memo.len(), 1, "same key does not grow the map");
         assert_eq!(
             memo.budget_tracked_len(),
@@ -561,7 +631,7 @@ mod tests {
             "re-insert of the same key must NOT record a second admission",
         );
         // A distinct key records a fresh admission.
-        memo.insert(a, SemanticNodeId(3), relation_entry());
+        insert_relation(&memo, a, SemanticNodeId(3));
         assert_eq!(memo.budget_tracked_len(), 2, "distinct key recorded");
     }
 
@@ -586,7 +656,7 @@ mod tests {
     #[test]
     fn relation_memo_inflight_clear_engages_gate_against_insert() {
         let memo = StdArc::new(BudgetedRelationMemo::default());
-        memo.insert(SemanticNodeId(1), SemanticNodeId(2), relation_entry());
+        insert_relation(&memo, SemanticNodeId(1), SemanticNodeId(2));
 
         let clear_parked = StdArc::new(Barrier::new(2));
         let _guard = memo.test_arm_clear_midpoint_gate(StdArc::clone(&clear_parked));
@@ -634,7 +704,7 @@ mod tests {
 
         let memo_insert = StdArc::clone(&memo);
         let inserter = thread::spawn(move || {
-            memo_insert.insert(SemanticNodeId(5), SemanticNodeId(6), relation_entry());
+            insert_relation(&memo_insert, SemanticNodeId(5), SemanticNodeId(6));
         });
 
         // `insert` has landed its map insert + budget admission and
