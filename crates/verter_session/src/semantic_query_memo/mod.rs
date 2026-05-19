@@ -272,6 +272,33 @@ impl SemanticGraphStore {
         Self::default()
     }
 
+    /// Test-only constructor pinning a small `memo_budget` cap. Lets a
+    /// reverse-index test drive FIFO family eviction without admitting
+    /// the production [`crate::bounded_query_retention::DEFAULT_BUDGET_CAP`]
+    /// (4096) families. Every other field is the `Default` value.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn new_with_memo_budget_for_test(memo_budget_cap: usize) -> Self {
+        Self {
+            memo_budget: crate::bounded_query_retention::GlobalRetentionBudget::new(
+                memo_budget_cap,
+            ),
+            ..Self::default()
+        }
+    }
+
+    /// Test-only — number of distinct outer shards currently resident
+    /// in the Γ.B `canonical_to_entries` reverse index (one shard per
+    /// canonical that has, or has had, a registration). A budget
+    /// eviction that empties a shard's inner map must drop the outer
+    /// shard, so this count tracks the surviving canonicals — not the
+    /// lifetime canonical count.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn canonical_to_entries_shard_count_for_test(&self) -> usize {
+        self.canonical_to_entries.len()
+    }
+
     /// Diagnosis accessor: number of distinct interned `DepSignature`
     /// payloads still reachable from a live origin edge in the
     /// derivation-signature pool. The pool stores `Weak` values whose
@@ -708,6 +735,17 @@ impl SemanticGraphStore {
                     // sharing the same legacy `Arc<DepSignature>` keep
                     // their reverse-index registrations intact.
                     map.remove(evicted_key);
+                    // Release the per-canonical mutex before the outer
+                    // drop so `remove_if`'s predicate can re-lock it
+                    // under the `DashMap` shard write lock.
+                    drop(map);
+                    drop(shard);
+                    // Drop the outer shard when this removal emptied its
+                    // inner map — otherwise the cross-canonical cleanup
+                    // would strand an empty `Mutex<map>` under every
+                    // OTHER canonical the evicted entry referenced.
+                    self.canonical_to_entries
+                        .remove_if(&other_canonical, |_, mutex| mutex.lock().is_empty());
                 } else {
                     // Shard absent: account for the canonical-shard
                     // probe as one observed acquisition with zero wait.
@@ -2775,6 +2813,45 @@ impl SemanticGraphStore {
         }
     }
 
+    /// Remove one `(family, slot)` registration from `canonical`'s
+    /// reverse-index shard, then drop the outer shard entirely when that
+    /// removal empties its inner map.
+    ///
+    /// Leaving an emptied shard resident strands an empty `Mutex<map>`
+    /// plus the canonical `Arc<str>` under `canonical_to_entries` for
+    /// the lifetime of the project generation; under churn across many
+    /// distinct canonicals the reverse index would then grow unbounded,
+    /// defeating the bound the `memo_budget` exists to enforce.
+    ///
+    /// **Concurrency.** The outer `canonical_to_entries` is a `DashMap`.
+    /// The inner-map removal releases the per-canonical `Mutex` before
+    /// the outer drop is attempted; the outer drop is then a single
+    /// [`DashMap::remove_if`] whose emptiness predicate runs while the
+    /// `DashMap` shard write lock is held. A concurrent
+    /// [`Self::register_reverse_index`] inserter takes that same shard
+    /// write lock for the whole `entry(canonical).or_insert_with(...)` +
+    /// inner `insert`, so the two serialise: either the inserter runs
+    /// first and `remove_if`'s predicate observes the inner map
+    /// non-empty (drop skipped), or `remove_if` runs first, drops the
+    /// empty outer entry, and the inserter's later `or_insert_with`
+    /// re-creates a fresh shard cleanly. A registration can never be
+    /// stranded in a just-removed outer entry. This mirrors the
+    /// `BoundedCandidateMap::remove_candidate_by_seq` slot-detach
+    /// pattern.
+    fn prune_reverse_index_registration(
+        canonical_to_entries: &CanonicalToEntries,
+        canonical: &Arc<str>,
+        registration: &(FamilyKey, ModeSlot),
+    ) {
+        if let Some(shard) = canonical_to_entries.get(canonical) {
+            shard.value().lock().remove(registration);
+        }
+        // Drop the outer shard iff its inner map is now empty. The
+        // predicate holds the `DashMap` shard write lock, so it cannot
+        // race a concurrent inserter on this shard.
+        canonical_to_entries.remove_if(canonical, |_, mutex| mutex.lock().is_empty());
+    }
+
     /// Remove one whole family chosen by the retention budget for FIFO
     /// eviction: drop it from the `entries` memo and drain its
     /// reverse-index registrations under every canonical its carrier
@@ -2807,12 +2884,17 @@ impl SemanticGraphStore {
             }
         };
         // Lock order: `entries` released above before any
-        // `canonical_to_entries` shard mutex is acquired.
+        // `canonical_to_entries` shard mutex is acquired. Each removal
+        // also drops the outer shard when its inner map becomes empty,
+        // so a budget-driven eviction wave does not leave empty shards
+        // resident.
         for (slot, carrier) in &evicted_carriers {
             for canonical in carrier.canonical_ids() {
-                if let Some(shard) = self.canonical_to_entries.get(&canonical) {
-                    shard.value().lock().remove(&(victim.clone(), *slot));
-                }
+                Self::prune_reverse_index_registration(
+                    &self.canonical_to_entries,
+                    &canonical,
+                    &(victim.clone(), *slot),
+                );
             }
         }
     }
@@ -2852,6 +2934,12 @@ impl SemanticGraphStore {
     /// `facts` rail names (the fact-only invalidation discriminator) and
     /// drive the strict self-root warm-read validator.
     ///
+    /// A newly-keyed family records an admission against the
+    /// `memo_budget` (matching `warm_publish_one`'s
+    /// `note_memo_family_admission` call) so a test publishing many
+    /// distinct families drives the same FIFO budget eviction the
+    /// production path does.
+    ///
     /// Returns the number of populated slots after publish (always
     /// ≥1 for a `Value` result on a previously-empty slot).
     #[doc(hidden)]
@@ -2876,6 +2964,7 @@ impl SemanticGraphStore {
             walker_diagnostics: Arc::from([]),
         };
         let mut entries = self.entries_lock_diagnosed();
+        let family_was_new = !entries.contains_key(&family);
         let populated_slots = entries
             .entry(family.clone())
             .or_default()
@@ -2887,6 +2976,9 @@ impl SemanticGraphStore {
             &populated_slots,
             &read_set_signature,
         );
+        if family_was_new && !populated_slots.is_empty() {
+            self.note_memo_family_admission(&family);
+        }
         populated_slots.len()
     }
 }

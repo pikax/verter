@@ -716,3 +716,143 @@ fn ref_cycle_invalidate_all_engages_gate_against_publish() {
         "map and budget cleared consistently",
     );
 }
+
+// ===========================================================================
+// Reverse-index shard pruning after budget eviction (codex P2).
+//
+// The retention budget caps `entries`, but the reverse index keys
+// `canonical -> Mutex<map of cache-key registrations>`. `evict_budget_victim`
+// removes the evicted entry's registration from each inner map; if it
+// leaves the now-empty outer shard (an empty `Mutex<map>` + a canonical
+// `Arc<str>`) resident, the reverse index grows unbounded with churn
+// across distinct canonicals until a project-generation clear — defeating
+// the bound the budget exists to enforce.
+//
+// The two tests below admit entries under many DISTINCT canonicals (one
+// shard each) with a small budget, drive FIFO eviction so all but the
+// cap are evicted, and assert the outer reverse-index shard count
+// collapses to ~the surviving entries. DISCRIMINATES — pre-fix the inner
+// registration is stripped but the outer shard lingers, so the shard
+// count stays at the total admitted; post-fix the empty shards are
+// dropped and the count collapses to the budget cap.
+// ===========================================================================
+
+/// `MaterializeStructureDb` budget eviction drops the emptied outer
+/// `canonical_to_keys` shard along with the inner registration.
+#[test]
+fn materialize_structure_budget_eviction_prunes_empty_reverse_index_shards() {
+    use crate::component_meta_caches::{MaterializeStructureDb, MaterializeStructureEntry};
+    use crate::component_meta_materialize::{
+        MaterializationScope, MaterializeOutcome, MaterializeStructureCacheKey,
+    };
+    use crate::fact_signature_helpers::ReadSetSignature;
+    use crate::semantic_query::{DepVersion, ProjectionMode, SemanticNodeId};
+
+    // Budget cap 2 — past 2 admissions the oldest is FIFO-evicted.
+    let db = MaterializeStructureDb::new_with_budget_for_test(2);
+    let total = 12usize;
+    for i in 0..total {
+        // Each entry is keyed by a distinct base id AND its carrier
+        // legacy rail names a distinct canonical — so every admission
+        // creates its own outer reverse-index shard.
+        let key = MaterializeStructureCacheKey {
+            scope_canonical_id: Arc::from("/owner.ts"),
+            base: SemanticNodeId(i as u64),
+            scope_axis: MaterializationScope::TopLevel,
+            mode: ProjectionMode::Shallow,
+        };
+        let legacy: crate::semantic_query::DepSignature = Arc::from(
+            vec![(
+                Arc::<str>::from(format!("/w/dist{i}.ts").as_str()),
+                DepVersion::WholeHash([1u8; 16]),
+            )]
+            .into_boxed_slice(),
+        );
+        let entry = Arc::new(MaterializeStructureEntry {
+            outcome: MaterializeOutcome::Miss(SemanticNodeId(0)),
+            read_set_signature: ReadSetSignature::new(
+                crate::fact_signature_helpers::empty_fact_signature(),
+                legacy,
+            ),
+            self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
+            admission_seq: crate::bounded_query_retention::next_retention_seq(),
+        });
+        db.entries().insert(key.clone(), Arc::clone(&entry));
+        db.register_post_publish(key, &entry.read_set_signature, entry.admission_seq);
+    }
+
+    // The budget cap is 2: ten of the twelve entries have been
+    // FIFO-evicted, each via `evict_budget_victim`. Every evicted
+    // entry's registration was its shard's only one, so the shard's
+    // inner map is now empty — the outer reverse index must not retain
+    // those empty shards.
+    let outer_shards = db.canonical_to_keys_shard_count_for_test();
+    assert!(
+        outer_shards <= 2,
+        "budget eviction left {outer_shards} outer canonical_to_keys \
+         shards resident — an empty `Mutex<map>` + canonical `Arc<str>` \
+         lingers for every evicted canonical. `evict_budget_victim` must \
+         drop the outer shard when its inner map becomes empty (codex \
+         P2); the count must collapse to the surviving entries (≤ budget \
+         cap 2), not stay at {total}.",
+    );
+    assert_eq!(
+        db.entry_count(),
+        2,
+        "the primary entry map is itself capped at the budget",
+    );
+}
+
+/// `RefCycleResultDb` budget eviction drops the emptied outer
+/// `canonical_to_keys` shard along with the inner registration.
+/// Mirror of the `MaterializeStructureDb` test.
+#[test]
+fn ref_cycle_budget_eviction_prunes_empty_reverse_index_shards() {
+    use crate::component_meta_caches::{RefCycleEntry, RefCycleResultDb};
+    use crate::fact_signature_helpers::ReadSetSignature;
+    use crate::semantic_query::{DeclIdentity, DepVersion, HashValue};
+
+    let db = RefCycleResultDb::new_with_budget_for_test(2);
+    let total = 12usize;
+    for i in 0..total {
+        let key = DeclIdentity {
+            canonical_id: Arc::from("/owner.ts"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from(format!("Helper{i}").as_str()),
+        };
+        let legacy: crate::semantic_query::DepSignature = Arc::from(
+            vec![(
+                Arc::<str>::from(format!("/w/dist{i}.ts").as_str()),
+                DepVersion::WholeHash([1u8; 16]),
+            )]
+            .into_boxed_slice(),
+        );
+        let entry = Arc::new(RefCycleEntry {
+            result: false,
+            read_set_signature: ReadSetSignature::new(
+                crate::fact_signature_helpers::empty_fact_signature(),
+                legacy,
+            ),
+            self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
+            admission_seq: crate::bounded_query_retention::next_retention_seq(),
+        });
+        db.entries().insert(key.clone(), Arc::clone(&entry));
+        db.register_post_publish(key, &entry.read_set_signature, entry.admission_seq);
+    }
+
+    let outer_shards = db.canonical_to_keys_shard_count_for_test();
+    assert!(
+        outer_shards <= 2,
+        "budget eviction left {outer_shards} outer canonical_to_keys \
+         shards resident — an empty `Mutex<map>` + canonical `Arc<str>` \
+         lingers for every evicted canonical. `evict_budget_victim` must \
+         drop the outer shard when its inner map becomes empty (codex \
+         P2); the count must collapse to the surviving entries (≤ budget \
+         cap 2), not stay at {total}.",
+    );
+    assert_eq!(
+        db.entries().len(),
+        2,
+        "the primary entry map is itself capped at the budget",
+    );
+}

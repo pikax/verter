@@ -2022,6 +2022,60 @@ pub struct MaterializeStructureEntry {
     pub admission_seq: u64,
 }
 
+/// Remove the `Arc::ptr_eq`-matching `key` registration from
+/// `canonical`'s `canonical_to_keys` shard, then drop the outer shard
+/// when that removal empties its inner map.
+///
+/// Shared by every `canonical_to_keys` removal path in
+/// [`MaterializeStructureDb`] and [`RefCycleResultDb`] — budget
+/// eviction, per-canonical-invalidation cross-canonical cleanup, and
+/// cooperative-removal `unregister_post_publish`. Leaving an emptied
+/// shard resident strands an empty `Mutex<map>` plus the canonical
+/// `Arc<str>` for the lifetime of the project generation; under churn
+/// across many distinct canonicals the reverse index would then grow
+/// unbounded, defeating the bound the `GlobalRetentionBudget` exists to
+/// enforce.
+///
+/// **Concurrency.** The outer `canonical_to_keys` is a `DashMap`. The
+/// inner-map removal releases the per-canonical `Mutex` before the
+/// outer drop is attempted; the outer drop is a single
+/// [`DashMap::remove_if`] whose emptiness predicate runs while the
+/// `DashMap` shard write lock is held. `register_post_publish`'s
+/// inserter holds that same shard write lock for the whole
+/// `entry(canonical).or_insert_with(...)` + inner `insert`, so the two
+/// serialise: either the inserter runs first and the predicate observes
+/// the inner map non-empty (drop skipped), or `remove_if` runs first,
+/// drops the empty outer entry, and the inserter's later
+/// `or_insert_with` re-creates a fresh shard cleanly. A registration is
+/// never stranded in a just-removed outer entry. Mirrors the
+/// `BoundedCandidateMap::remove_candidate_by_seq` slot-detach pattern.
+fn prune_canonical_to_keys_registration<K>(
+    canonical_to_keys: &DashMap<
+        Arc<str>,
+        parking_lot::Mutex<rustc_hash::FxHashMap<K, DepSignature>>,
+    >,
+    canonical: &Arc<str>,
+    key: &K,
+    expected_legacy: &DepSignature,
+) where
+    K: Eq + std::hash::Hash,
+{
+    if let Some(shard) = canonical_to_keys.get(canonical) {
+        let mut map = shard.lock();
+        if let Some(existing_sig) = map.get(key) {
+            // `Arc::ptr_eq` guard — drop only OUR registration, never a
+            // concurrent fresh winner's that republished the same key.
+            if Arc::ptr_eq(existing_sig, expected_legacy) {
+                map.remove(key);
+            }
+        }
+    }
+    // Drop the outer shard iff its inner map is now empty. The predicate
+    // holds the `DashMap` shard write lock, so it cannot race a
+    // concurrent `register_post_publish` inserter on this shard.
+    canonical_to_keys.remove_if(canonical, |_, mutex| mutex.lock().is_empty());
+}
+
 /// Final-result cache for the structural
 /// materialiser. Reverse-index `canonical_to_keys` enables
 /// `Arc::ptr_eq`-based invalidation cleanup; cooperative-admission's
@@ -2104,6 +2158,32 @@ impl MaterializeStructureDb {
     #[cfg(any(test, debug_assertions))]
     pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
         Self::with_counter_and_schema_version(Arc::new(AtomicU64::new(0)), schema_version)
+    }
+
+    /// Test-only constructor pinning a small `retention_budget` cap so a
+    /// reverse-index test drives FIFO eviction without admitting
+    /// [`Self::MAX_ENTRIES`] (2048) entries.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn new_with_budget_for_test(budget_cap: usize) -> Self {
+        let mut db = Self::with_counter_and_schema_version(
+            Arc::new(AtomicU64::new(0)),
+            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+        );
+        db.retention_budget =
+            crate::bounded_query_retention::GlobalRetentionBudget::new(budget_cap);
+        db
+    }
+
+    /// Test-only — number of distinct outer shards currently resident
+    /// in the `canonical_to_keys` reverse index. A budget eviction that
+    /// empties a shard's inner map must drop the outer shard, so this
+    /// count tracks the surviving canonicals — not the lifetime
+    /// canonical count.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn canonical_to_keys_shard_count_for_test(&self) -> usize {
+        self.canonical_to_keys.len()
     }
 
     fn with_counter_and_schema_version(live_counter: Arc<AtomicU64>, schema_version: u32) -> Self {
@@ -2265,19 +2345,18 @@ impl MaterializeStructureDb {
                     .forget_seq(removed_entry.admission_seq);
                 // Cross-canonical cleanup with ptr_eq — drop the
                 // matching registration in every other canonical's
-                // shard.
+                // shard, and drop that outer shard too when the removal
+                // empties its inner map.
                 for (other_canonical, _) in registered_sig.iter() {
                     if other_canonical.as_ref() == canonical_id {
                         continue;
                     }
-                    if let Some(shard) = self.canonical_to_keys.get(other_canonical) {
-                        let mut map = shard.lock();
-                        if let Some(existing_sig) = map.get(key) {
-                            if Arc::ptr_eq(existing_sig, registered_sig) {
-                                map.remove(key);
-                            }
-                        }
-                    }
+                    prune_canonical_to_keys_registration(
+                        &self.canonical_to_keys,
+                        other_canonical,
+                        key,
+                        registered_sig,
+                    );
                 }
             }
         }
@@ -2456,15 +2535,17 @@ impl MaterializeStructureDb {
             return;
         };
         self.live_counter.fetch_sub(1, Ordering::Relaxed);
+        // Drop each reverse-index registration; the helper also drops
+        // the outer shard when the removal empties its inner map, so a
+        // budget-driven eviction wave does not leave empty shards
+        // resident.
         for canonical in entry.read_set_signature.canonical_ids() {
-            if let Some(shard) = self.canonical_to_keys.get(&canonical) {
-                let mut map = shard.lock();
-                if let Some(existing_sig) = map.get(victim_key) {
-                    if Arc::ptr_eq(existing_sig, &entry.read_set_signature.legacy) {
-                        map.remove(victim_key);
-                    }
-                }
-            }
+            prune_canonical_to_keys_registration(
+                &self.canonical_to_keys,
+                &canonical,
+                victim_key,
+                &entry.read_set_signature.legacy,
+            );
         }
     }
 
@@ -2532,14 +2613,12 @@ impl MaterializeStructureDb {
         admission_seq: u64,
     ) {
         for canonical in read_set_signature.canonical_ids() {
-            if let Some(shard) = self.canonical_to_keys.get(&canonical) {
-                let mut map = shard.lock();
-                if let Some(existing_sig) = map.get(key) {
-                    if Arc::ptr_eq(existing_sig, &read_set_signature.legacy) {
-                        map.remove(key);
-                    }
-                }
-            }
+            prune_canonical_to_keys_registration(
+                &self.canonical_to_keys,
+                &canonical,
+                key,
+                &read_set_signature.legacy,
+            );
         }
         // Keep the retention ledger consistent: drop exactly this
         // entry's ledger record, leaving a fresh re-admission of the
@@ -2712,18 +2791,42 @@ impl RefCycleResultDb {
     /// Construct with a shared `live_counter` borrowed from
     /// `ProjectTypeStoreCounters::component_meta_cache_live`.
     pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+        Self::with_counter_and_budget(live_counter, Self::MAX_ENTRIES)
+    }
+
+    fn with_counter_and_budget(live_counter: Arc<AtomicU64>, budget_cap: usize) -> Self {
         Self {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
             canonical_to_keys: DashMap::new(),
             retention_budget: crate::bounded_query_retention::GlobalRetentionBudget::new(
-                Self::MAX_ENTRIES,
+                budget_cap,
             ),
             live_counter,
             retention_gate: parking_lot::RwLock::new(()),
             #[cfg(any(test, debug_assertions))]
             invalidate_all_midpoint_gate: parking_lot::Mutex::new(None),
         }
+    }
+
+    /// Test-only constructor pinning a small `retention_budget` cap so a
+    /// reverse-index test drives FIFO eviction without admitting
+    /// [`Self::MAX_ENTRIES`] (2048) entries.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn new_with_budget_for_test(budget_cap: usize) -> Self {
+        Self::with_counter_and_budget(Arc::new(AtomicU64::new(0)), budget_cap)
+    }
+
+    /// Test-only — number of distinct outer shards currently resident
+    /// in the `canonical_to_keys` reverse index. A budget eviction that
+    /// empties a shard's inner map must drop the outer shard, so this
+    /// count tracks the surviving canonicals — not the lifetime
+    /// canonical count.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn canonical_to_keys_shard_count_for_test(&self) -> usize {
+        self.canonical_to_keys.len()
     }
 
     /// Configured total entry-count cap.
@@ -2876,15 +2979,17 @@ impl RefCycleResultDb {
             return;
         };
         self.live_counter.fetch_sub(1, Ordering::Relaxed);
+        // Drop each reverse-index registration; the helper also drops
+        // the outer shard when the removal empties its inner map, so a
+        // budget-driven eviction wave does not leave empty shards
+        // resident.
         for canonical in entry.read_set_signature.canonical_ids() {
-            if let Some(shard) = self.canonical_to_keys.get(&canonical) {
-                let mut map = shard.lock();
-                if let Some(existing_sig) = map.get(victim_key) {
-                    if Arc::ptr_eq(existing_sig, &entry.read_set_signature.legacy) {
-                        map.remove(victim_key);
-                    }
-                }
-            }
+            prune_canonical_to_keys_registration(
+                &self.canonical_to_keys,
+                &canonical,
+                victim_key,
+                &entry.read_set_signature.legacy,
+            );
         }
     }
 
@@ -2914,14 +3019,12 @@ impl RefCycleResultDb {
         admission_seq: u64,
     ) {
         for canonical in read_set_signature.canonical_ids() {
-            if let Some(shard) = self.canonical_to_keys.get(&canonical) {
-                let mut map = shard.lock();
-                if let Some(existing_sig) = map.get(key) {
-                    if Arc::ptr_eq(existing_sig, &read_set_signature.legacy) {
-                        map.remove(key);
-                    }
-                }
-            }
+            prune_canonical_to_keys_registration(
+                &self.canonical_to_keys,
+                &canonical,
+                key,
+                &read_set_signature.legacy,
+            );
         }
         // Keep the retention ledger consistent: drop exactly this
         // entry's ledger record, leaving a fresh re-admission of the
@@ -3027,19 +3130,19 @@ impl RefCycleResultDb {
                     .forget_seq(removed_entry.admission_seq);
                 // Cross-canonical cleanup with ptr_eq — drop the
                 // matching registration in every other canonical's
-                // shard so subsequent invalidations do not double-free.
+                // shard so subsequent invalidations do not double-free,
+                // and drop that outer shard too when the removal empties
+                // its inner map.
                 for (other_canonical, _) in registered_sig.iter() {
                     if other_canonical.as_ref() == canonical_id {
                         continue;
                     }
-                    if let Some(shard) = self.canonical_to_keys.get(other_canonical) {
-                        let mut map = shard.lock();
-                        if let Some(existing_sig) = map.get(key) {
-                            if Arc::ptr_eq(existing_sig, registered_sig) {
-                                map.remove(key);
-                            }
-                        }
-                    }
+                    prune_canonical_to_keys_registration(
+                        &self.canonical_to_keys,
+                        other_canonical,
+                        key,
+                        registered_sig,
+                    );
                 }
             }
         }

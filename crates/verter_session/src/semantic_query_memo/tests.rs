@@ -5739,3 +5739,138 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
         );
     }
 }
+
+/// Budget eviction must drop the now-EMPTY outer `canonical_to_entries`
+/// shard when it removes an entry's last reverse-index registration —
+/// not merely the inner `(family, slot)` registration.
+///
+/// The retention budget caps the primary `entries` memo, but the
+/// reverse index keys `canonical -> Mutex<map of (family, slot)>`. If
+/// budget eviction strips only the inner registration it leaves an
+/// empty `Mutex<map>` plus the canonical `Arc<str>` resident under the
+/// outer `DashMap` for every distinct evicted canonical. Under churn
+/// across many distinct canonicals that secondary structure grows
+/// unbounded until a project-generation clear, defeating the bound the
+/// budget exists to enforce (codex P2).
+///
+/// DISCRIMINATES: each entry is published under a DISTINCT canonical,
+/// so every entry owns its own outer shard. A small `memo_budget`
+/// (cap 2) FIFO-evicts all but the two newest families. Pre-fix
+/// `evict_memo_family_for_budget` removes only the inner registration,
+/// so the outer-shard count stays at `families` (= 12) and the
+/// assertion FAILS. Post-fix the empty outer shards are dropped, so
+/// the count collapses to the number of surviving families' canonicals
+/// (≤ the budget cap) and the assertion PASSES.
+#[test]
+fn budget_eviction_prunes_empty_canonical_to_entries_shards() {
+    let store = SemanticGraphStore::new_with_memo_budget_for_test(2);
+    let families = 12usize;
+    for i in 0..families {
+        // Each family is keyed by a distinct decl name; each entry's
+        // carrier legacy rail names a distinct canonical, so every
+        // publish creates its own outer reverse-index shard.
+        let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: scope(&format!("/w/scope{i}.ts")),
+            name: Arc::from(format!("Decl{i}")),
+        });
+        let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let carrier = crate::fact_signature_helpers::ReadSetSignature::new(
+            crate::fact_signature_helpers::empty_fact_signature(),
+            dep_sig_for(&format!("/w/dist{i}.ts"), 1),
+        );
+        store.publish_with_carrier_for_tests(key, QueryResult::Value(id), carrier, Arc::from([]));
+    }
+
+    // The budget cap is 2 — every family past the two newest has been
+    // FIFO-evicted. Each evicted entry's reverse-index registration was
+    // its shard's only registration, so the shard's inner map is now
+    // empty. The outer reverse index must NOT retain those empty shards.
+    let outer_shards = store.canonical_to_entries_shard_count_for_test();
+    assert!(
+        outer_shards <= 2,
+        "budget eviction left {outer_shards} outer canonical_to_entries \
+         shards resident — an empty `Mutex<map>` + canonical `Arc<str>` \
+         lingers for every evicted canonical. Eviction must drop the \
+         outer shard when its inner map becomes empty (codex P2); the \
+         count must collapse to the surviving families' canonicals \
+         (≤ budget cap 2), not stay at {families}.",
+    );
+    // The surviving families' shards must still be intact (not
+    // over-pruned): the two newest families each keep one registration.
+    assert_eq!(
+        store.canonical_to_entries_count("/w/dist11.ts"),
+        1,
+        "the newest surviving family's reverse-index registration must \
+         remain — pruning must drop only EMPTIED shards",
+    );
+    assert_eq!(
+        store.canonical_to_entries_count("/w/dist10.ts"),
+        1,
+        "the second-newest surviving family's registration must remain",
+    );
+    // An evicted family's shard is gone entirely.
+    assert_eq!(
+        store.canonical_to_entries_count("/w/dist0.ts"),
+        0,
+        "an evicted family's reverse-index shard must be fully removed",
+    );
+}
+
+/// `invalidate_canonical`'s cross-canonical drain must also drop a
+/// reverse-index shard it empties — an entry registered under multiple
+/// canonicals, invalidated through one of them, must not leave empty
+/// `Mutex<map>` shards behind under the OTHER canonicals.
+///
+/// DISCRIMINATES: one entry is published whose carrier legacy rail
+/// names two canonicals (`/w/a.ts`, `/w/b.ts`) — so it registers a
+/// shard under each. `invalidate_canonical("/w/a.ts")` drains the
+/// `/w/a.ts` shard outright AND must drop the entry's registration from
+/// the `/w/b.ts` shard; since that was `/w/b.ts`'s only registration,
+/// the `/w/b.ts` outer shard must be removed too. Pre-fix the
+/// cross-canonical cleanup leaves an empty `/w/b.ts` shard resident, so
+/// `canonical_to_entries_count("/w/b.ts")` reads 0 (inner map empty)
+/// but the outer shard count stays at 1; post-fix the outer shard is
+/// dropped and the count is 0.
+#[test]
+fn invalidate_canonical_prunes_emptied_cross_canonical_shard() {
+    let store = SemanticGraphStore::new();
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope("/w/scope.ts"),
+        name: Arc::from("Multi"),
+    });
+    let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    // Carrier legacy rail names two canonicals — the entry registers a
+    // reverse-index shard under each.
+    let two_canonical_sig: crate::semantic_query::DepSignature = Arc::from(
+        vec![
+            (
+                Arc::<str>::from("/w/a.ts"),
+                crate::semantic_query::DepVersion::WholeHash([1u8; 16]),
+            ),
+            (
+                Arc::<str>::from("/w/b.ts"),
+                crate::semantic_query::DepVersion::WholeHash([1u8; 16]),
+            ),
+        ]
+        .into_boxed_slice(),
+    );
+    let carrier = crate::fact_signature_helpers::ReadSetSignature::new(
+        crate::fact_signature_helpers::empty_fact_signature(),
+        two_canonical_sig,
+    );
+    store.publish_with_carrier_for_tests(key, QueryResult::Value(id), carrier, Arc::from([]));
+    assert_eq!(store.canonical_to_entries_shard_count_for_test(), 2);
+
+    // Invalidate via `/w/a.ts`. Its shard is drained whole; the entry's
+    // registration in `/w/b.ts` is removed by the cross-canonical
+    // cleanup — and since it was the only registration there, that
+    // outer shard must be dropped too.
+    store.invalidate_canonical("/w/a.ts");
+    assert_eq!(
+        store.canonical_to_entries_shard_count_for_test(),
+        0,
+        "`invalidate_canonical` must drop the cross-canonical shard it \
+         empties — an empty `Mutex<map>` for `/w/b.ts` must not linger \
+         after its last registration is stripped (codex P2)",
+    );
+}
