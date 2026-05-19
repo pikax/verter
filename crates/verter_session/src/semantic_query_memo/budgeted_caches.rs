@@ -800,6 +800,7 @@ mod tests {
     ///     re-admission's, so `budget_tracked_len() == 0` while
     ///     `len() == 1` — the fresh entry is stranded, invisible to FIFO
     ///     eviction. Assertion FAILS.
+    ///
     /// `budget_tracked_len()` is exactly the count
     /// `GlobalRetentionBudget::record_admission` compares against the
     /// cap, so a surviving record is a FIFO-counted record.
