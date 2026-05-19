@@ -370,13 +370,11 @@ impl<P> ComponentMetaResultDb<P> {
     /// `fact_dep_signature` validates under the supplied [`StoreView`];
     /// otherwise returns `None` (caller falls through to cold recompute).
     ///
-    /// Fact-precise validation is the primary cache oracle: a fact
+    /// Fact-precise validation is the sole cache oracle: a fact
     /// version shift on any transitively observed cross-file dep
-    /// invalidates the warm hit without consulting the legacy
-    /// `dep_signature` whole-hash validator. The legacy signature
-    /// continues to be carried on the candidate; `get_with_view` does NOT
-    /// consult it — callers that need the legacy oracle revalidate
-    /// separately.
+    /// invalidates the warm hit. Validation reads only
+    /// `candidate.read_set_signature.facts` against the supplied
+    /// `StoreView`; there is no separate bundled-signature rail.
     ///
     /// Increments [`crate::types::MetaProvenance::component_meta_result_cache_hits`]
     /// on a validated warm return and

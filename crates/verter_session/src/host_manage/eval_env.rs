@@ -59,9 +59,10 @@ impl VerterHost {
         } else {
             vec![canonical_id.to_string(), resolved_canonical_id.clone()]
         };
-        // Post-cut: no ambient view gates hash acceptance. The
-        // project-global cache validates entries through `HostFenceValidator`
-        // at publish time, so reads here are live-host permissive.
+        // No ambient view gates hash acceptance. The project-global
+        // cache fact-validates entries on warm read (each candidate's
+        // `read_set_signature.facts` re-walked against the live
+        // `StoreView`), so reads here are live-host permissive.
         let cached_whole_hash = self
             .current_or_read_whole_hash(resolved_canonical_id.as_str())
             .or_else(|| self.cached_route_owned_shallow_whole_hash(resolved_canonical_id.as_str()));

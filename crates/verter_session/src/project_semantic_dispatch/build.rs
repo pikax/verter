@@ -2260,11 +2260,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// Returns a warm node id when the identity map has an entry, or
     /// [`QueryError::Miss`] when the entry has not been written yet.
-    /// Carries a dep-signature fragment capturing
-    /// `(canonical_id, whole_hash, project_generation)` so
-    /// [`HostFenceValidator`](crate::host_manage::HostFenceValidator)
-    /// catches stale warm hits if any downstream layer memoizes this
-    /// dispatch path.
+    /// Carries a dispatch fence fragment capturing
+    /// `(canonical_id, whole_hash, project_generation)` so warm-read
+    /// validation against the live `StoreView` catches stale hits if
+    /// any downstream layer memoizes this dispatch path.
     pub(super) fn build_resolved_named_type(
         &self,
         key: &HostResolvedNamedTypeKey,
@@ -2313,9 +2312,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   else `type_args[0]` unchanged.
     ///
     /// All arms record `(owner.canonical_id, WholeHash(owner.whole_hash))`
-    /// in the local fence so warm-hit revalidation through
-    /// [`HostFenceValidator`](crate::host_manage::HostFenceValidator)
-    /// observes the macro's owning file generation.
+    /// in the local fence so warm-hit revalidation against the live
+    /// `StoreView` observes the macro's owning file generation.
     ///
     /// **Recursion safety:** A self-reference like
     /// `type R = { next: R }; defineEmits<{ recurse: [R] }>()` reaches

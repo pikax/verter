@@ -25,9 +25,10 @@ impl VerterHost {
         _canonical_id: &str,
         _whole_hash: Hash16,
     ) -> bool {
-        // Post-cut: no ambient request view gates hash acceptance. Live-host
-        // probes operate directly on the project-global caches, which are
-        // validated by `HostFenceValidator` at publish time.
+        // No ambient request view gates hash acceptance. Live-host
+        // probes operate directly on the project-global caches, whose
+        // candidates fact-validate on warm read against the live
+        // `StoreView`.
         true
     }
 

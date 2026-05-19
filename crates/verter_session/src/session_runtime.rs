@@ -63,11 +63,12 @@ impl SessionRuntime {
     /// Try to get a cached resolved-meta from the host's shared cache.
     ///
     /// There is no session-scoped `resolved_meta_cache` (R20). The
-    /// host's shared cache is fact-validated (view-aware
-    /// `HostFenceValidator`) so overlay-derived state cannot leak
-    /// across concurrent sessions when the multi-candidate substrate
-    /// is consulted. Where the multi-candidate substrate is not yet
-    /// in the read path, overlay sessions transparently read
+    /// host's shared cache is fact-validated against the session's
+    /// overlay-aware `StoreView` (re-rooted via
+    /// `HostStoreView::with_session_overlay`) so overlay-derived state
+    /// cannot leak across concurrent sessions when the multi-candidate
+    /// substrate is consulted. Where the multi-candidate substrate is
+    /// not yet in the read path, overlay sessions transparently read
     /// base-state results.
     pub fn try_get_cached_resolved_meta(
         &self,
@@ -79,9 +80,10 @@ impl SessionRuntime {
 
     /// Store resolved-meta in the host's shared cache.
     ///
-    /// Writes go directly to the host cache (which validates via
-    /// `HostFenceValidator`). Multi-candidate admission isolates
-    /// concurrent overlay variants in the same query-identity slot.
+    /// Writes go directly to the host cache, which validates each
+    /// candidate's `read_set_signature.facts` on warm read.
+    /// Multi-candidate admission isolates concurrent overlay variants
+    /// in the same query-identity slot.
     pub fn store_resolved_meta(
         &self,
         canonical: &str,

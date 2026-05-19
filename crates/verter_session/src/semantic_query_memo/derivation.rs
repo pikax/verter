@@ -40,8 +40,8 @@
 //! dependency-propagation route and nothing reconstructs a completion
 //! fence (`CompletionFence`) from it. The load-bearing invalidation
 //! record for a cached result is that result's own memo entry — its
-//! `fact_dep_signature` / `ReadSetSignature` carrier, revalidated by
-//! `HostFenceValidator`.
+//! `ReadSetSignature` carrier, revalidated against the live `StoreView`
+//! on every warm read.
 //! Because origin edges carry no invalidation weight, FIFO-evicting a
 //! bucket is sound: it degrades only the audit trace, never correctness.
 //!

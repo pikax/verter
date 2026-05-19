@@ -2191,12 +2191,13 @@ impl SemanticGraphStore {
     /// **Lock discipline.** Acquires `self.entries` directly (no
     /// `entries_lock_diagnosed` Instant::now/capture-token wrapping).
     /// Holds the lock ONLY for the slot read + `MemoEntry` clone, then
-    /// releases it. Carrier validation (`entry.validate` — builds a
-    /// resolver store view, walks the legacy dep-signature rail), the
-    /// TLS fact-rail bubble, and instrumentation all run AFTER the
-    /// lock is dropped, so an unrelated warm read or cold publish does
-    /// not serialise on the single global memo mutex for the duration
-    /// of validation. Mirrors the relation memo's `get_relation`.
+    /// releases it. Carrier validation (`entry.validate` — fact-rail
+    /// validation against the resolver store view with strict
+    /// self-root checks), the TLS fact-rail bubble, and instrumentation
+    /// all run AFTER the lock is dropped, so an unrelated warm read or
+    /// cold publish does not serialise on the single global memo mutex
+    /// for the duration of validation. Mirrors the relation memo's
+    /// `get_relation`.
     #[inline]
     fn try_warm_hit_fast_path(
         &self,
@@ -2206,17 +2207,17 @@ impl SemanticGraphStore {
         let (family, slot) = family_and_slot(key);
 
         // Clone the `MemoEntry` OUT of the `entries` lock before
-        // validating. `entry.validate(ctx)` builds a resolver store
-        // view and walks the legacy dep-signature rail; holding the
-        // single global `entries` mutex across that work would
-        // serialise every unrelated warm read and cold publish on the
-        // memo mutex for the duration of validation. The clone is a
-        // handful of `Arc::clone`s (`ReadSetSignature` rails,
-        // `self_root_canonicals`, `walker_diagnostics`) — far cheaper
-        // than holding the lock through validation. This mirrors the
-        // relation memo's `get_relation`, which clones the
-        // `RelationMemoEntry` out of its `DashMap` shard guard before
-        // validating + bubbling.
+        // validating. `entry.validate(ctx)` validates the path-precise
+        // fact rail against the resolver store view with strict
+        // self-root checks; holding the single global `entries` mutex
+        // across that work would serialise every unrelated warm read
+        // and cold publish on the memo mutex for the duration of
+        // validation. The clone is a handful of `Arc::clone`s
+        // (`ReadSetSignature` facts, `self_root_canonicals`,
+        // `walker_diagnostics`) — far cheaper than holding the lock
+        // through validation. This mirrors the relation memo's
+        // `get_relation`, which clones the `RelationMemoEntry` out of
+        // its `DashMap` shard guard before validating + bubbling.
         let entry: MemoEntry = {
             // Single non-diagnosed lock acquisition. The
             // `entries_lock_diagnosed` wrapper that adds Instant::now
@@ -2687,8 +2688,9 @@ impl SemanticGraphStore {
         //    result from a thread that checked `aborted=false` before
         //    acquiring `entries` could land AFTER invalidation's step 1
         //  completed but BEFORE set `aborted=true` — a stale
-        //    slot whose dep-sig does NOT reference the invalidated
-        //    canonical (so even HostFenceValidator does not catch it).
+        //    slot whose carrier does NOT reference the invalidated
+        //    canonical (so even fact-rail self-root validation does
+        //    not catch it).
         // Refactor: cold-winner publish path is encapsulated in
         // `warm_publish_one` so that `publish_warm_if_absent` (used by
         // the §1.B prefix-backfill in `build_project_path`) can reuse the
@@ -3105,12 +3107,12 @@ impl SemanticGraphStore {
     ///
     /// **Carrier contract.** The published `MemoEntry` stores the
     /// caller-supplied [`ReadSetSignature`] verbatim. Prefix-backfill
-    /// callers must pass the parent's authoritative carrier (legacy
-    /// rail + path-precise traced facts captured under
-    /// `install_fact_tracer`) so the backfilled entry's facts rail
-    /// contains the parent's `Parse(...)` / `ResolveImports(...)` /
-    /// `RouteSurface(...)` observations — never a fence-only
-    /// reconstruction, which drops path-precise facts.
+    /// callers must pass the parent's authoritative carrier — the
+    /// path-precise traced facts captured under `install_fact_tracer`
+    /// — so the backfilled entry's facts rail contains the parent's
+    /// `Parse(...)` / `ResolveImports(...)` / `RouteSurface(...)`
+    /// observations — never a fence-only reconstruction, which drops
+    /// path-precise facts.
     fn warm_publish_one_if_absent(
         &self,
         key: SemanticQueryKey,

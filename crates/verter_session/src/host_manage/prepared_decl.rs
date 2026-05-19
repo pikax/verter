@@ -1622,9 +1622,10 @@ impl VerterHost {
         canonical_id: &str,
         import_source: &str,
     ) -> Option<DependencyResolution> {
-        // The project-global cache already validates entries through
-        // `HostFenceValidator` at publish time, so readers consume the
-        // cache permissively here.
+        // The project-global cache already fact-validates entries on
+        // warm read (each candidate's `read_set_signature.facts`
+        // re-walked against the live `StoreView`), so readers consume
+        // the cache permissively here.
         // import_routes lives on DerivedRawState (D48 split).
         if self.is_canonical_evicted(canonical_id) {
             return None;

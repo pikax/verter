@@ -27,9 +27,8 @@ use crate::resolver_core::ResolverContext;
 ///   subsequent re-registration of the lib invalidates this consumer
 ///   through the standard dep-fact validators.
 /// - returns a `ResolvedRootIdentity` whose `canonical_id` is the ambient
-///   virtual id, ensuring the resolver fence reaches
-///   [`HostFenceValidator`](crate::host_manage::HostFenceValidator)'s
-///   ambient `WholeHash` arm.
+///   virtual id, so the recorded fact reaches the ambient `WholeHash`
+///   arm on warm-read validation through the live `StoreView`.
 ///
 /// First production caller is the bare-name resolver fallback.
 #[allow(dead_code)]

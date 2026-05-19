@@ -5,23 +5,30 @@
 //! signature `ReadSetSignature.facts: Arc<[FactVersionRef]>`. The
 //! bundled whole-hash / project-generation `DepSignature`
 //! cache-validity rail — once carried as `ReadSetSignature.legacy` —
-//! is retired. No cache-carrier struct may carry a public
-//! `DepSignature` field.
+//! is retired. No cache-carrier struct may carry a `DepSignature`
+//! field under any visibility class except for the single sanctioned
+//! sibling `dispatch_dep_signature` field on `MemoEntry` /
+//! `MaterializeStructureEntry` / `RefCycleEntry`.
 //!
 //! This guard scans `crates/verter_session/src/**/*.rs` (production
-//! source) for any `pub <name>: DepSignature` field declaration
+//! source) for any `<vis> <name>: DepSignature` field declaration
 //! inside a struct whose role is "cache carrier" — concretely, any
 //! struct named `ReadSetSignature` (the carrier type) or any
 //! per-cache entry struct with the suffix `*Entry` / `*CacheEntry` /
-//! `*Signature` / `*Snapshot`. Re-introduction of a public legacy
-//! `DepSignature` rail is a regression.
+//! `*Signature` / `*Snapshot`. The visibility classes the guard
+//! treats as cache-rail-shaped are:
 //!
-//! The dispatch-return signature relocated onto `MemoEntry` as a
-//! `pub(super)` field is intentionally NOT in scope: it is not a
-//! cache-validity rail, it is the dispatch accumulator's transitive
-//! input, and the guard targets the *public* validity rail only (a
-//! crate-private field is a separate, far smaller concern — see
-//! fixture C).
+//! - `pub` — public cache-validity rail. Always rejected.
+//! - `pub(crate)` and `pub(super)` — restricted-visibility
+//!   cache-carrier fields. Rejected UNLESS the field name is exactly
+//!   `dispatch_dep_signature` (the dispatch-return accumulator
+//!   sibling field — not a cache-validity rail). Without this
+//!   restricted-visibility coverage a future contributor could
+//!   re-introduce a re-named legacy-rail field under `pub(super)` /
+//!   `pub(crate)` and slip past the guard.
+//! - module-private (no visibility marker) — out of scope. A truly
+//!   private field is not part of the cache rail surface a sibling
+//!   crate or module could read through.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -39,19 +46,62 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// Visibility classes the guard considers cache-rail-shaped.
+#[derive(Debug, Clone, Copy)]
+enum CacheRailVisibility {
+    /// `pub` — public cache-validity rail.
+    Public,
+    /// `pub(crate)` — crate-visible cache-carrier field.
+    PubCrate,
+    /// `pub(super)` — parent-module-visible cache-carrier field.
+    PubSuper,
+}
+
+impl CacheRailVisibility {
+    fn as_label(self) -> &'static str {
+        match self {
+            CacheRailVisibility::Public => "pub",
+            CacheRailVisibility::PubCrate => "pub(crate)",
+            CacheRailVisibility::PubSuper => "pub(super)",
+        }
+    }
+}
+
+/// Classify a `syn::Visibility` as one of the cache-rail-shaped
+/// visibility classes the guard targets. Module-private (no marker)
+/// and other restricted shapes (`pub(in path)`, `pub(self)`) are out
+/// of scope.
+fn classify_cache_rail_visibility(vis: &Visibility) -> Option<CacheRailVisibility> {
+    match vis {
+        Visibility::Public(_) => Some(CacheRailVisibility::Public),
+        Visibility::Restricted(r) => {
+            if r.path.is_ident("crate") {
+                Some(CacheRailVisibility::PubCrate)
+            } else if r.path.is_ident("super") {
+                Some(CacheRailVisibility::PubSuper)
+            } else {
+                None
+            }
+        }
+        Visibility::Inherited => None,
+    }
+}
+
 #[derive(Debug)]
 struct Violation {
     file: PathBuf,
     struct_name: String,
     field_name: String,
+    visibility: CacheRailVisibility,
 }
 
 impl std::fmt::Display for Violation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}: `{}.{}: DepSignature` -- legacy field must be deleted",
+            "{}: `{} {}.{}: DepSignature` -- legacy-rail-shaped field must be deleted or renamed to `dispatch_dep_signature`",
             self.file.display(),
+            self.visibility.as_label(),
             self.struct_name,
             self.field_name
         )
@@ -83,6 +133,14 @@ fn struct_is_cache_carrier(name: &str) -> bool {
         || name.ends_with("Snapshot")
 }
 
+/// The single sanctioned cache-carrier `DepSignature` field name. The
+/// dispatch-return accumulator on `MemoEntry` /
+/// `MaterializeStructureEntry` / `RefCycleEntry` is an internal
+/// sibling rail (not a cache-validity rail), so it is allowed to live
+/// on a cache-carrier struct under `pub(crate)` / `pub(super)`. Any
+/// other name under restricted visibility is a regression.
+const SANCTIONED_DISPATCH_FIELD: &str = "dispatch_dep_signature";
+
 struct Scanner<'a> {
     file: &'a Path,
     violations: &'a mut Vec<Violation>,
@@ -96,9 +154,9 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         }
         if let Fields::Named(named) = &s.fields {
             for field in &named.named {
-                if !matches!(field.vis, Visibility::Public(_)) {
+                let Some(visibility) = classify_cache_rail_visibility(&field.vis) else {
                     continue;
-                }
+                };
                 let Field {
                     ident: Some(field_name),
                     ty,
@@ -110,10 +168,23 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                 if !type_is_dep_signature(ty) {
                     continue;
                 }
+                // `pub` is always rejected — no sanctioned public
+                // cache-carrier `DepSignature` field exists.
+                // `pub(crate)` and `pub(super)` are rejected UNLESS
+                // the field name is exactly `dispatch_dep_signature`
+                // (the dispatch-return accumulator sibling field).
+                let allowed = matches!(
+                    visibility,
+                    CacheRailVisibility::PubCrate | CacheRailVisibility::PubSuper
+                ) && field_name == SANCTIONED_DISPATCH_FIELD;
+                if allowed {
+                    continue;
+                }
                 self.violations.push(Violation {
                     file: self.file.to_path_buf(),
                     struct_name: struct_name.clone(),
                     field_name: field_name.to_string(),
+                    visibility,
                 });
             }
         }
@@ -166,8 +237,10 @@ fn format_violations(violations: &[Violation]) -> String {
         lines.push(format!("  {}", file.display()));
         for v in vs {
             lines.push(format!(
-                "    struct `{}` field `{}: DepSignature`",
-                v.struct_name, v.field_name
+                "    struct `{}` field `{} {}: DepSignature`",
+                v.struct_name,
+                v.visibility.as_label(),
+                v.field_name,
             ));
         }
     }
@@ -363,8 +436,12 @@ fn scan_file_rails(path: &Path, hits: &mut Vec<RailHit>) {
 /// Cache validity collapsed to one oracle — the path-precise
 /// fact-tracer signature `ReadSetSignature.facts`. No cache-carrier
 /// struct (`ReadSetSignature` or any `*Entry` / `*CacheEntry` /
-/// `*Signature` / `*Snapshot`) may carry a public `DepSignature`
-/// field. Re-introducing one resurrects the retired bundled rail.
+/// `*Signature` / `*Snapshot`) may carry a `DepSignature` field under
+/// `pub`, `pub(crate)`, or `pub(super)` visibility, except for the
+/// single sanctioned `dispatch_dep_signature` sibling field on
+/// `MemoEntry` / `MaterializeStructureEntry` / `RefCycleEntry`
+/// (allowed under restricted visibility only — never `pub`).
+/// Re-introducing one resurrects the retired bundled rail.
 #[test]
 fn no_legacy_dep_signature_field_in_cache_carriers() {
     let crate_root = workspace_root().join("crates/verter_session/src");
@@ -376,8 +453,10 @@ fn no_legacy_dep_signature_field_in_cache_carriers() {
         violations.is_empty(),
         "`legacy_dep_signature_field_gone` violation:\n{}\n\n\
          The bundled `DepSignature` cache-validity rail is retired. \n\
-         No cache-carrier struct may carry a public `DepSignature` \n\
-         field — the path-precise fact-tracer \n\
+         No cache-carrier struct may carry a `DepSignature` field \n\
+         under `pub`, `pub(crate)`, or `pub(super)` visibility \n\
+         (except the sanctioned `dispatch_dep_signature` sibling \n\
+         under restricted visibility). The path-precise fact-tracer \n\
          (`facts: Arc<[FactVersionRef]>`) is the sole cache-validity \n\
          authority.",
         format_violations(&violations)
@@ -459,9 +538,10 @@ fn scanner_discriminating_property_fixtures() {
         scan_fixture_violations(fixture_b)
     );
 
-    // Fixture C: private `legacy: DepSignature` on a carrier — ACCEPTED.
-    // The guard targets the *public* migration rail. A private field
-    // with that type would be a separate (and far smaller) concern.
+    // Fixture C: module-private `legacy: DepSignature` on a carrier
+    // — ACCEPTED. The guard targets the cache-rail-shaped visibility
+    // classes (`pub`, `pub(crate)`, `pub(super)`); a truly private
+    // field is not reachable through the cache rail surface.
     let fixture_c = r#"
         pub struct ReadSetSignature {
             legacy: DepSignature,
@@ -469,7 +549,7 @@ fn scanner_discriminating_property_fixtures() {
     "#;
     assert!(
         scan_fixture_violations(fixture_c).is_empty(),
-        "scanner incorrectly flagged a non-pub field: {:?}",
+        "scanner incorrectly flagged a module-private field: {:?}",
         scan_fixture_violations(fixture_c)
     );
 
@@ -508,6 +588,112 @@ fn scanner_discriminating_property_fixtures() {
         scan_fixture_violations(fixture_f).is_empty(),
         "scanner unexpectedly flagged a wrapped DepSignature container: {:?}",
         scan_fixture_violations(fixture_f)
+    );
+
+    // Fixture G: `pub(super) <renamed>: DepSignature` on a cache
+    // carrier — REJECTED. A re-named legacy-rail field under
+    // restricted visibility must NOT slip past the guard. This is the
+    // "guard escape hatch" the strengthened scanner closes: a
+    // contributor introducing a `pub(super) cache_validity_rail:
+    // DepSignature` (or any name other than `dispatch_dep_signature`)
+    // gets caught.
+    let fixture_g = r#"
+        pub struct MemoEntry {
+            pub(super) cache_validity_rail: DepSignature,
+        }
+    "#;
+    let violations_g = scan_fixture_violations(fixture_g);
+    assert!(
+        !violations_g.is_empty(),
+        "scanner failed to flag `pub(super)` cache-carrier `DepSignature` \
+         field whose name is NOT `dispatch_dep_signature`. The new \
+         restricted-visibility rail must be caught: {:?}",
+        violations_g
+    );
+    assert!(
+        violations_g
+            .iter()
+            .any(|v| v.field_name == "cache_validity_rail"),
+        "scanner flagged something, but not the offending field: {:?}",
+        violations_g
+    );
+
+    // Fixture H: `pub(crate) <renamed>: DepSignature` on a cache
+    // carrier — REJECTED. Same coverage as fixture G for the
+    // `pub(crate)` visibility class.
+    let fixture_h = r#"
+        pub struct MaterializeStructureEntry {
+            pub(crate) bundled_dep_rail: DepSignature,
+        }
+    "#;
+    assert!(
+        !scan_fixture_violations(fixture_h).is_empty(),
+        "scanner failed to flag `pub(crate)` cache-carrier `DepSignature` \
+         field whose name is NOT `dispatch_dep_signature`"
+    );
+
+    // Fixture I: `pub(super) dispatch_dep_signature: DepSignature` on
+    // a cache carrier — ACCEPTED. The single sanctioned restricted-
+    // visibility cache-carrier `DepSignature` field. This is the
+    // exact production shape on `MemoEntry`.
+    let fixture_i = r#"
+        pub(super) struct MemoEntry {
+            pub(super) dispatch_dep_signature: DepSignature,
+        }
+    "#;
+    assert!(
+        scan_fixture_violations(fixture_i).is_empty(),
+        "scanner incorrectly flagged the sanctioned \
+         `pub(super) dispatch_dep_signature: DepSignature` sibling field: {:?}",
+        scan_fixture_violations(fixture_i)
+    );
+
+    // Fixture J: `pub(crate) dispatch_dep_signature: DepSignature`
+    // on a cache carrier — ACCEPTED. The same sanctioned name under
+    // the `pub(crate)` visibility class. This is the exact production
+    // shape on `MaterializeStructureEntry` / `RefCycleEntry`.
+    let fixture_j = r#"
+        pub struct MaterializeStructureEntry {
+            pub(crate) dispatch_dep_signature: DepSignature,
+        }
+    "#;
+    assert!(
+        scan_fixture_violations(fixture_j).is_empty(),
+        "scanner incorrectly flagged the sanctioned \
+         `pub(crate) dispatch_dep_signature: DepSignature` sibling field: {:?}",
+        scan_fixture_violations(fixture_j)
+    );
+
+    // Fixture K: `pub dispatch_dep_signature: DepSignature` — REJECTED.
+    // The sanctioned name is allowed ONLY under restricted visibility;
+    // promoting it to `pub` would expose the dispatch-return rail as
+    // a public cache-validity field, which is exactly the public rail
+    // the retirement deletes.
+    let fixture_k = r#"
+        pub struct MemoEntry {
+            pub dispatch_dep_signature: DepSignature,
+        }
+    "#;
+    assert!(
+        !scan_fixture_violations(fixture_k).is_empty(),
+        "scanner failed to flag `pub dispatch_dep_signature: DepSignature` \
+         — the sanctioned name is restricted-visibility-only, never `pub`"
+    );
+
+    // Fixture L: `pub(in some::path) <name>: DepSignature` — NOT
+    // matched. The guard only classifies `pub(crate)` and `pub(super)`
+    // as cache-rail-shaped restricted visibility. A `pub(in ...)`
+    // field is a separate scope shape that the guard does not target
+    // (and that production code does not currently use).
+    let fixture_l = r#"
+        pub struct ReadSetSignature {
+            pub(in crate::resolver_core) leaked_rail: DepSignature,
+        }
+    "#;
+    assert!(
+        scan_fixture_violations(fixture_l).is_empty(),
+        "scanner unexpectedly flagged `pub(in path)` (out of scope): {:?}",
+        scan_fixture_violations(fixture_l)
     );
 }
 

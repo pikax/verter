@@ -36,8 +36,8 @@
 //!   materialiser; sole authoritative materialiser cache.
 //!
 //! All five participate in `ProjectTypeStore`'s invalidation cascade
-//! and are dep-signature-validated on warm hit via
-//! [`HostFenceValidator`](crate::host_manage::HostFenceValidator).
+//! and are fact-validated on warm hit by re-walking each candidate's
+//! `read_set_signature.facts` against the live `StoreView`.
 //!
 //! ### Per-request scratch (NOT promoted, dies with the engine)
 //!
@@ -397,11 +397,11 @@ pub(crate) struct ObservedPreparedTypeDecl {
 ///   not bump the generation, so this fact does not over-invalidate.
 /// - `DepVersion::RouteGeneration(_)` — route generation is not a
 ///   real validating fact: there is no authoritative route-generation
-///   counter and no production emitter. `HostFenceValidator` rejects
-///   it fail-safe (the `RouteGeneration` arm returns `false`) so a
-///   stale entry rooted on it cannot survive. Rooting it would be
-///   unsound (it cannot detect a content edit to the observed file).
-///   The function therefore returns `None` so the entry is NOT
+///   counter and no production emitter. The fact-rail validator
+///   rejects it fail-safe (the `RouteGeneration` arm returns `false`)
+///   so a stale entry rooted on it cannot survive. Rooting it would
+///   be unsound (it cannot detect a content edit to the observed
+///   file). The function therefore returns `None` so the entry is NOT
 ///   admitted to the shared `MaterializeMemoDb`; no production path
 ///   constructs the variant.
 pub(crate) fn engine_fact_signature_for_materialize_memo(

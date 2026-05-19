@@ -42,9 +42,9 @@
 //! `post_publish` is structurally unreachable on the revalidation-fail
 //! path, so the bump is correct-by-construction: an entry contributes
 //! `+1` exactly while it is live in the map.
-//! - `validate(&Entry)` and `revalidate_after_compute(&Entry)` consult
-//!   [`HostFenceValidator`](crate::host_manage::HostFenceValidator) to
-//!   reject entries whose `dep_signature` no longer matches host state.
+//! - `validate(&Entry)` and `revalidate_after_compute(&Entry)` reject
+//!   entries whose `read_set_signature.facts` no longer validate
+//!   against the live `StoreView`.
 //! - Per-canonical and project-generation invalidation hooks wired into
 //!   [`ProjectTypeStore::evict_canonical`] and
 //!   [`ProjectTypeStore::bump_project_generation_and_evict`].
@@ -2711,11 +2711,12 @@ impl MaterializeStructureDb {
     /// Each removed entry's reverse-index registrations and
     /// retention-ledger record are dropped by [`Self::unregister_post_publish`],
     /// the single removal-side cleanup helper. It iterates the entry's
-    /// `read_set_signature.canonical_ids()` — the exact legacy + fact
-    /// union [`Self::register_post_publish`] registered under — so a
-    /// fact-only dependency's shard is pruned just like a legacy-rail
-    /// dependency's. The `canonical_id` shard itself is already drained
-    /// by the `canonical_to_keys.remove` above; the helper's
+    /// `read_set_signature.canonical_ids()` — the union of fact-rail
+    /// canonicals (from `read_set_signature.facts`) and dispatch-fence
+    /// canonicals (from `dispatch_dep_signature`) — the same set
+    /// [`Self::register_post_publish`] registered under. The
+    /// `canonical_id` shard itself is already drained by the
+    /// `canonical_to_keys.remove` above; the helper's
     /// `prune_canonical_to_keys_registration` for that canonical is then
     /// a no-op (the shard is gone). The `live_counter` decrement stays
     /// here — `unregister_post_publish` does not touch the counter — so

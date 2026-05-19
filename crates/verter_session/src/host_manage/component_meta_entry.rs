@@ -411,7 +411,17 @@ impl VerterHost {
         // `read_set_signature.facts` against the resolver-tier
         // `HostStoreView` and counts a warm hit only when validation
         // passes and the value is returned.
-        let store_view = self.resolver_store_view();
+        //
+        // Thread the session view into the store view via
+        // `HostStoreView::with_session_overlay` so a candidate whose
+        // cross-file dep facts are pinned to BASE content is rejected
+        // when the session overlays or tombstones a dep — the
+        // overlay-aware per-canonical snapshots re-root parse /
+        // derived-fact validators at the session's CURRENT content
+        // identity. Without this threading, a session that mutates a
+        // dependency of an owner whose own whole-hash is unchanged
+        // would return the stale base candidate.
+        let store_view = self.resolver_store_view().with_session_overlay(self, view);
         let entry = self
             .project_type_store
             .component_meta_results()

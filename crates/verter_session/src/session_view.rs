@@ -18,11 +18,14 @@
 //! ## Architectural role
 //!
 //! The fact-based cache refactor consolidates session-side reads
-//! onto this trait: `ResolverContext` exposes a `view()` accessor,
-//! [`HostFenceValidator`](crate::host_manage::HostFenceValidator) is
-//! view-aware, and the host's overlay-mutation machinery is gone
-//! (R17). See `/type-cache-architecture` and `/host-session`
-//! skills for the architectural rules (R17–R20).
+//! onto this trait. The session view threads into the resolver-tier
+//! `StoreView` via
+//! [`HostStoreView::with_session_overlay`](crate::resolver_store::HostStoreView::with_session_overlay),
+//! re-rooting overlay-bearing per-canonical snapshots so fact
+//! validation observes the session's CURRENT content identity; the
+//! host's overlay-mutation machinery is gone (R17). See
+//! `/type-cache-architecture` and `/host-session` skills for the
+//! architectural rules (R17–R20).
 //!
 //! ## What `SessionView` is NOT
 //!
@@ -637,18 +640,14 @@ impl SessionView for OverlaidView {
 /// instead of `Arc<VerterHost>`.
 ///
 /// `HostView` carries `Arc<VerterHost>` so it can be cloned across
-/// threads. That ownership shape is wrong for the
-/// [`ResolverContext::view`](crate::resolver_core::resolver_context::ResolverContext::view)
-/// call path, which has a `&self: &VerterHost` already in scope and
-/// would otherwise need a self-referential `Arc<VerterHost>` cycle.
-/// `HostViewRef<'a>` borrows the host instead and is the value
-/// `VerterHost`'s `view()` impl returns. The trait method exposes it
-/// as `Box<dyn SessionView + '_>` so the dyn-compatibility of
-/// `ResolverContext` is preserved.
-///
-/// The impl mirrors `HostView`; once real env-hash + project-identity
-/// plumbing lands, both shapes consume the workspace config the same
-/// way.
+/// threads. That ownership shape is wrong for short-lived call paths
+/// that already have a `&VerterHost` in scope (and would otherwise
+/// need a self-referential `Arc<VerterHost>` cycle). `HostViewRef<'a>`
+/// borrows the host instead and is constructed inline at every base-
+/// host call site that needs a base-view `&dyn SessionView` without
+/// owning an `Arc<VerterHost>`. The impl mirrors `HostView`; once
+/// real env-hash + project-identity plumbing lands, both shapes
+/// consume the workspace config the same way.
 #[derive(Clone, Copy)]
 pub struct HostViewRef<'a> {
     base: &'a VerterHost,

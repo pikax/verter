@@ -54,12 +54,13 @@ pub struct OwnerImportSurface {
     pub owner_whole_hash: Hash16,
     /// Local binding name → resolved root identity.
     pub bindings: Arc<FxHashMap<Arc<str>, ResolvedOwnerImport>>,
-    /// Carrier holding both the legacy whole-hash `DepSignature` rail
-    /// (used by `validate_dep_signature` / fence merging) and the
-    /// path-precise R28 fact signature. Warm reads call
-    /// `read_set_signature.validate(ctx)` BEFORE bubbling. The
-    /// owner's own whole-hash is always seeded into the legacy rail;
-    /// transitive target hashes append as they are observed.
+    /// Path-precise fact-tracer carrier — the sole cache-validity
+    /// oracle (R28). Carries the materialisation's
+    /// `facts: Arc<[FactVersionRef]>` observed under the active
+    /// fact tracer (parse / resolve-imports / route-surface facts on
+    /// every transitively read canonical, including the owner's own
+    /// `FileWholeHash`). Warm reads validate this carrier against the
+    /// live `StoreView` BEFORE bubbling.
     pub read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
 }
 

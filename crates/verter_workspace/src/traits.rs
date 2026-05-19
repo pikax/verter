@@ -319,7 +319,9 @@ pub trait WorkspaceRead: Send + Sync {
     }
 
     /// Lock-free read of the engine's ambient lib registry, used by host-side
-    /// validators (e.g., `HostFenceValidator`'s ambient `WholeHash` arm).
+    /// fact validators that resolve an ambient virtual id's current
+    /// `FileWholeHash` (e.g., the `WholeHash` arm of the
+    /// `validates_fact_signature` walk on the `StoreView`).
     /// Backends that don't support ambient libs return an empty registry.
     fn ambient_libs_view(&self) -> Arc<AmbientLibsByProject> {
         Arc::new(AmbientLibsByProject::default())
@@ -551,8 +553,9 @@ pub trait WorkspaceAccess: WorkspaceRead {
     /// Record a session-side reverse-dep edge from a consumer file to the
     /// ambient virtual id. Routes to the dedicated `ambient_resolved`
     /// dep class (F1.5: ambient deps survive parse re-records).
-    /// Re-registration of the lib bumps the content generation so
-    /// `HostFenceValidator` invalidates downstream caches.
+    /// Re-registration of the lib bumps the content generation so the
+    /// fact-rail self-root validators reject downstream caches that
+    /// pinned the prior content.
     /// **R6: no default; every workspace impl must override.**
     fn record_ambient_dependency(&self, consumer: &str, virtual_id: &str);
 

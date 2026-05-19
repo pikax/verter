@@ -3,13 +3,15 @@
 //! consumers without forking the trait.
 //!
 //! The base `impl ResolverContext for VerterHost` returns
-//! `active_session_view() = None` and a `view()` that hands back a
-//! `HostViewRef`. Session-bearing query paths construct
-//! [`SessionResolverContext`] over `(inner, view)` so the same trait
-//! methods become overlay-aware: the wrapper overrides
-//! `active_session_view()` to return `Some(view)` and overrides
-//! `view()` to hand back the bound session view, while every other
-//! method delegates to the inner [`ResolverContext`].
+//! `active_session_view() = None` and the base per-canonical /
+//! per-domain `StoreView` snapshots. Session-bearing query paths
+//! construct [`SessionResolverContext`] over `(inner, view)` so the
+//! same trait methods become overlay-aware: the wrapper overrides
+//! `active_session_view()` to return `Some(view)` and overrides the
+//! `resolver_store_view` / `shallow_file_state` / `ensure_indexed_ready`
+//! family so an overlay-bearing canonical pins against the overlay
+//! content hash, while every other method delegates to the inner
+//! [`ResolverContext`].
 //!
 //! ## Lifetime story
 //!
@@ -54,11 +56,14 @@ use crate::HostConfig;
 ///
 /// Delegates every `ResolverContext` method to the inner
 /// [`crate::VerterHost`] except [`ResolverContext::active_session_view`]
-/// (returns `Some(view)`) and [`ResolverContext::view`] (returns the
-/// bound view). Resolver-tier helpers that consult
-/// `active_session_view()` for overlay-aware reads observe the session
-/// view via this wrapper without changing the trait surface or the
-/// call-site signature in [`ProjectSemanticDispatch::new`].
+/// (returns `Some(view)`) and the overlay-aware overrides on
+/// [`ResolverContext::resolver_store_view`],
+/// [`ResolverContext::shallow_file_state`],
+/// [`ResolverContext::ensure_indexed_ready`], etc. Resolver-tier
+/// helpers that consult `active_session_view()` (or the per-method
+/// overrides above) for overlay-aware reads observe the session view
+/// via this wrapper without changing the trait surface or the call-
+/// site signature in [`ProjectSemanticDispatch::new`].
 ///
 /// `inner` is the concrete host so the wrapper can reach
 /// view-aware internals (e.g.,
