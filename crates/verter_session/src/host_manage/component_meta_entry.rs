@@ -13,12 +13,11 @@ use std::sync::Arc;
 
 use crate::instant::Instant;
 
-use crate::types::*;
 use crate::VerterHost;
 
 use super::{
     component_meta_debug, component_meta_debug_enabled, component_meta_options_fingerprint,
-    extract_component_meta_from_resolved, ComponentMetaOptions, HostFenceValidator,
+    extract_component_meta_from_resolved, ComponentMetaOptions,
 };
 
 /// Strip the OWNER's own `DerivedFactHash { kind: Route }` fact from a
@@ -324,9 +323,9 @@ impl VerterHost {
     }
 
     /// Look up the project-global final-result cache for the
-    /// owner and return the warm payload only when its recorded
-    /// dep-signature revalidates against the live host. Returns `None` on
-    /// any miss, stale entry, or missing shallow state.
+    /// owner and return the warm payload only when its recorded fact
+    /// signature revalidates against the live store view. Returns
+    /// `None` on any miss, stale entry, or missing shallow state.
     fn try_component_meta_cache_hit(
         &self,
         canonical: &str,
@@ -339,46 +338,20 @@ impl VerterHost {
                 &ComponentMetaOptions::default(),
             ),
         };
-        // Bind a host-rooted view via the `ResolverContext::view()`
-        // trait accessor. The session-less call path has no overlay,
-        // so the host's default `view()` impl returns a `HostViewRef`
-        // — the overlay-free read substrate. Routing through the trait
-        // accessor (via a `&dyn ResolverContext` cast) makes the view
-        // extension point uniformly observable: dyn-dispatched calls
-        // through `view()` exercise the trait method so static
-        // dead-code analysis sees the production caller (R18 — view is
-        // passed by explicit argument, no thread-local).
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = self;
-        let session_view = ctx.view();
-        // Block 1.B: fact-precise validation runs first via
-        // `ComponentMetaResultDb::get_with_view`. The view threaded
-        // in here is the resolver-tier `HostStoreView` because
-        // [`StoreView::validates_fact_signature`] is defined on
-        // `StoreView`, not on `SessionView`. The session view
-        // remains in scope below for the legacy whole-hash oracle.
+        // Fact-precise validation is the sole cache oracle:
+        // `ComponentMetaResultDb::get_with_view` validates the entry's
+        // `read_set_signature.facts` against the live `HostStoreView`
+        // and counts a warm hit only when validation passes and the
+        // value is returned. The DB stores
+        // `CachedComponentMetaResult { analysis, resolution_template, ... }`
+        // so the with_resolution path can rehydrate without re-running
+        // the cold resolver; the plain `get_component_meta` warm path
+        // returns only the analysis projection.
         let store_view = self.resolver_store_view();
         let entry = self
             .project_type_store
             .component_meta_results()
             .get_with_view(self, &store_view, &key, owner_whole_hash)?;
-        let validator = HostFenceValidator {
-            host: self,
-            view: session_view.as_ref(),
-        };
-        use crate::completion_fence::FenceValidator;
-        let dep_sig_valid = entry
-            .read_set_signature
-            .legacy
-            .iter()
-            .all(|(canonical_id, version)| validator.validate(canonical_id, version));
-        if !dep_sig_valid {
-            return None;
-        }
-        // The DB stores
-        // `CachedComponentMetaResult { analysis, resolution_template, ... }`
-        // so the with_resolution path can rehydrate without re-running the
-        // cold resolver. The plain `get_component_meta` warm path returns
-        // only the analysis projection.
         Some(entry.payload.analysis.clone())
     }
 
@@ -433,26 +406,16 @@ impl VerterHost {
                 &ComponentMetaOptions::default(),
             ),
         };
-        // Block 1.B: fact-precise validation runs first via
-        // `ComponentMetaResultDb::get_with_view`. The view threaded
-        // in here is the resolver-tier `HostStoreView` (matching the
-        // base path); the session-aware view in scope continues to
-        // gate the legacy whole-hash oracle below.
+        // Fact-precise validation is the sole cache oracle:
+        // `ComponentMetaResultDb::get_with_view` validates the entry's
+        // `read_set_signature.facts` against the resolver-tier
+        // `HostStoreView` and counts a warm hit only when validation
+        // passes and the value is returned.
         let store_view = self.resolver_store_view();
         let entry = self
             .project_type_store
             .component_meta_results()
             .get_with_view(self, &store_view, &key, owner_whole_hash)?;
-        let validator = HostFenceValidator { host: self, view };
-        use crate::completion_fence::FenceValidator;
-        let dep_sig_valid = entry
-            .read_set_signature
-            .legacy
-            .iter()
-            .all(|(canonical_id, version)| validator.validate(canonical_id, version));
-        if !dep_sig_valid {
-            return None;
-        }
         Some(entry.payload.analysis.clone())
     }
 
@@ -494,12 +457,6 @@ impl VerterHost {
                 &ComponentMetaOptions::default(),
             ),
         };
-        let dep_signature = Self::build_component_meta_dep_signature(
-            canonical,
-            whole_hash,
-            self.project_type_store.project_generation(),
-            &resolved.fact_versions,
-        );
         let resolution_template =
             crate::component_meta_result_db::ResolutionTemplate::from_resolved_state(resolved);
         let cached = crate::component_meta_result_db::CachedComponentMetaResult {
@@ -519,19 +476,18 @@ impl VerterHost {
                 payload: Arc::new(cached),
                 read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
                     admitted_signature,
-                    dep_signature,
                 ),
             },
         );
     }
 
     /// Publish the cold-build result into the project-global
-    /// final-result cache. The dep-signature carries the owner's whole-hash,
-    /// the current project generation, and every transitive file fact the
-    /// resolver observed while producing the result. A later lookup
-    /// revalidates the full signature against the live host so an edit to
-    /// *any* file the resolver touched invalidates the cached payload — not
-    /// just edits to the owner itself.
+    /// final-result cache. The recorded fact signature carries every
+    /// transitive file fact the resolver observed while producing the
+    /// result. A later lookup revalidates the full fact signature
+    /// against the live store view so an edit to *any* file the
+    /// resolver touched invalidates the cached payload — not just edits
+    /// to the owner itself.
     ///
     /// **Suppression gate.** When graph-native slot-binding synthesis
     /// observed a fatal `QueryError` (`BudgetExceeded`,
@@ -566,12 +522,6 @@ impl VerterHost {
                 &ComponentMetaOptions::default(),
             ),
         };
-        let dep_signature = Self::build_component_meta_dep_signature(
-            canonical,
-            whole_hash,
-            self.project_type_store.project_generation(),
-            &resolved.fact_versions,
-        );
         let resolution_template =
             crate::component_meta_result_db::ResolutionTemplate::from_resolved_state(resolved);
         let cached = crate::component_meta_result_db::CachedComponentMetaResult {
@@ -591,49 +541,9 @@ impl VerterHost {
                 payload: Arc::new(cached),
                 read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
                     admitted_signature,
-                    dep_signature,
                 ),
             },
         );
-    }
-
-    /// Lower the resolver's observed fact-version list into a transitive
-    /// `DepSignature`. Owner + project-generation facts always participate;
-    /// file whole-hashes discovered during resolution are deduped per
-    /// canonical so a single entry per touched file ends up in the signature.
-    /// Derived-fact hashes (route / import-route) are intentionally skipped
-    /// for now — they are validated via their underlying file hashes plus
-    /// the project-generation bump on shape changes. Including them in the
-    /// signature would require extending `HostFenceValidator` with a
-    /// derived-fact-aware path, which lands with the cut.
-    fn build_component_meta_dep_signature(
-        owner_canonical: &str,
-        owner_whole_hash: Hash16,
-        project_gen: u64,
-        fact_versions: &[crate::resolver_core::FactVersionRef],
-    ) -> crate::semantic_query::DepSignature {
-        use crate::semantic_query::DepVersion;
-        let mut entries: Vec<(Arc<str>, DepVersion)> = Vec::with_capacity(fact_versions.len() + 2);
-        entries.push((
-            Arc::<str>::from(owner_canonical),
-            DepVersion::WholeHash(owner_whole_hash),
-        ));
-        entries.push((
-            Arc::<str>::from(owner_canonical),
-            DepVersion::ProjectGeneration(project_gen),
-        ));
-        let mut seen: rustc_hash::FxHashSet<(Arc<str>, Hash16)> = rustc_hash::FxHashSet::default();
-        seen.insert((Arc::<str>::from(owner_canonical), owner_whole_hash));
-        for fact in fact_versions {
-            if let crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, hash } = fact
-            {
-                let canonical: Arc<str> = Arc::from(canonical_id.as_str());
-                if seen.insert((canonical.clone(), *hash)) {
-                    entries.push((canonical, DepVersion::WholeHash(*hash)));
-                }
-            }
-        }
-        Arc::from(entries.into_boxed_slice())
     }
 
     /// Combined query: resolves component-meta once and returns both the
@@ -905,37 +815,20 @@ impl VerterHost {
                 &ComponentMetaOptions::default(),
             ),
         };
-        // Block 1.B: fact-precise validation runs first via
-        // `ComponentMetaResultDb::get_with_view`. The view threaded
-        // in here is the resolver-tier `HostStoreView`; the session
-        // view in scope below continues to gate the legacy whole-hash
-        // oracle.
+        // Fact-precise validation is the sole cache oracle:
+        // `ComponentMetaResultDb::get_with_view` validates the entry's
+        // `read_set_signature.facts` against the resolver-tier
+        // `HostStoreView` and counts a warm hit only when validation
+        // passes and the value is returned.
         let store_view = self.resolver_store_view();
         let entry = self
             .project_type_store
             .component_meta_results()
             .get_with_view(self, &store_view, &key, owner_whole_hash)?;
-        // Bind a host-rooted view; the warm-cache fast path on
-        // `VerterHost` has no session context, so the overlay-free
-        // `HostViewRef` is the correct read substrate.
-        let view = crate::session_view::HostViewRef::new(self);
-        let validator = HostFenceValidator {
-            host: self,
-            view: &view,
-        };
-        use crate::completion_fence::FenceValidator;
-        let dep_sig_valid = entry
-            .read_set_signature
-            .legacy
-            .iter()
-            .all(|(canonical_id, version)| validator.validate(canonical_id, version));
-        if !dep_sig_valid {
-            return None;
-        }
 
         // Rehydrate the resolution template into a fresh per-request state.
         // Returns None on the bounded eviction race where the snapshot
-        // was evicted between dep_signature validation and reload.
+        // was evicted between the warm-cache validation and reload.
         let cached = entry.payload.clone();
         let resolution = cached.resolution_template.rehydrate(
             self,

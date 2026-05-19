@@ -79,8 +79,8 @@ Flow on each call:
 
 1. Look up `shallow_file_state(owner)` for the current whole-hash.
 2. Build `ComponentMetaResultKey` with `component_meta_options_fingerprint(&ComponentMetaOptions::default())` — xxh3-128 over a manually-versioned encoding (schema + `compat` + `include_fallthrough`).
-3. Try `component_meta_results().get(&key)`. On hit, revalidate the entry's `DepSignature` via `HostFenceValidator::validate` (walks every `(canonical, DepVersion)` pair against the live host). Stable signatures return `Arc<ComponentMetaAnalysis>` with zero resolver work.
-4. On miss or stale signature, run the existing resolver and publish the result with the owner's whole-hash + transitive dep facts + current project generation as the dep-signature.
+3. Try `component_meta_results().get_with_view(&key, &store_view)`. On hit, the entry's `ReadSetSignature.facts` (the path-precise fact-tracer observation set) revalidates against the live `StoreView` — `get_with_view` counts a warm hit only when validation passes and the value is returned. Stable signatures return `Arc<ComponentMetaAnalysis>` with zero resolver work.
+4. On miss or stale signature, run the existing resolver and publish the result with the transitive fact signature (`ReadSetSignature.facts`).
 
 Cache eviction is automatic: `host.upsert(...)` calls `project_type_store.evict_canonical(owner)` which `invalidate_owner`s every key for the changed canonical. Workspace-shape shifts (tsconfig / SDK / project-graph) call `bump_project_generation_and_evict`, clearing all result entries.
 

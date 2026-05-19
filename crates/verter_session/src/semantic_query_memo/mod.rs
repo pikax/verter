@@ -65,8 +65,7 @@ use budgeted_caches::{BudgetedNamedTypeIndex, BudgetedRelationMemo};
 use derivation::{sorted_percentile, DerivationStore};
 pub use family::AuditEagerKeyRow;
 use family::{
-    carrier_facts_reference_canonical, dep_signature_references_canonical, family_and_slot,
-    FamilyKey, FamilySlots, MemoEntry, ModeSlot,
+    carrier_facts_reference_canonical, family_and_slot, FamilyKey, FamilySlots, MemoEntry, ModeSlot,
 };
 use inflight::{
     InflightEntry, InflightPanicGuard, RecursionStackGuard, IN_FLIGHT_ON_THIS_THREAD,
@@ -396,7 +395,19 @@ pub struct SemanticGraphStore {
 
 /// Γ.B reverse-index type alias. See
 /// [`SemanticGraphStore::canonical_to_entries`] for the contract.
-type CanonicalToEntries = DashMap<Arc<str>, Mutex<FxHashMap<(FamilyKey, ModeSlot), DepSignature>>>;
+///
+/// The per-canonical shard maps each `(family, slot)` entry identity to
+/// the entry's `ReadSetSignature.facts` rail — the path-precise fact
+/// signature, kept as a diagnostic stamp of what was registered.
+/// `invalidate_canonical`'s drain identifies registrations by
+/// `(family, slot)` entry identity, not by `Arc::ptr_eq` on this stamp.
+type CanonicalToEntries =
+    DashMap<Arc<str>, Mutex<FxHashMap<(FamilyKey, ModeSlot), RegisteredFacts>>>;
+
+/// The `ReadSetSignature.facts` rail an entry registered under a
+/// canonical in [`CanonicalToEntries`] — the diagnostic stamp + the
+/// `Arc::ptr_eq` fast-path discriminant for the invalidation drain.
+type RegisteredFacts = Arc<[crate::resolver_core::FactVersionRef]>;
 
 impl std::fmt::Debug for SemanticGraphStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -697,7 +708,7 @@ impl SemanticGraphStore {
                 let result_repr = format!("{:?}", slot.result);
                 result_repr.hash(&mut hasher);
                 let result_hash = format!("{:016x}", hasher.finish());
-                let dep_signature = format!("{:?}", slot.read_set_signature.legacy);
+                let dep_signature = format!("{:?}", slot.read_set_signature.facts);
                 rows.push(AuditEagerKeyRow {
                     key_repr: format!("{key_repr}/{slot_label}"),
                     result_hash,
@@ -777,17 +788,17 @@ impl SemanticGraphStore {
         // `affected_pairs` is collected from the drained set so the
         // post-lock in-flight abort can drop matching in-flight entries
         // even when the `Arc::ptr_eq` check rejects an entry (e.g., a
-        // fresh post-publish write replaced the registered dep_signature).
+        // fresh post-publish write replaced the registered fact rail).
         let mut affected_pairs: FxHashSet<(FamilyKey, ModeSlot)> = FxHashSet::default();
         let mut evicted = 0usize;
         {
             let timing_on = verter_scheduler::request_context::current_timing_enabled();
             let mut entries = self.entries_lock_diagnosed();
 
-            // Drain the per-canonical `(family, slot) →
-            // registered_dep_signature` map for `canonical_id`, UNDER the
-            // held `entries` lock.
-            let drained: Vec<((FamilyKey, ModeSlot), DepSignature)> =
+            // Drain the per-canonical `(family, slot) → registered fact
+            // rail` map for `canonical_id`, UNDER the held `entries`
+            // lock.
+            let drained: Vec<((FamilyKey, ModeSlot), RegisteredFacts)> =
                 match self.canonical_to_entries.remove(canonical_id) {
                     Some((_, mutex)) => {
                         let lock_start = if timing_on {
@@ -818,56 +829,61 @@ impl SemanticGraphStore {
                 affected_pairs.insert((family.clone(), *slot));
             }
 
-            // Walk the drained set. Drop each slot whose current
-            // dep_signature `Arc::ptr_eq`-matches the registered
-            // dep_signature. ptr_eq distinguishes "our entry" from "a
-            // fresh post-publish write that beat us". A fallback dep-sig
-            // / fact-rail walk catches any slot that did not ptr_eq (the
-            // registered dep_sig was replaced by a fresh build whose
-            // dep_sig also references the canonical).
+            // Walk the drained set. Drop each slot whose current fact
+            // rail `Arc::ptr_eq`-matches the registered fact rail.
+            // ptr_eq distinguishes "our entry" from "a fresh
+            // post-publish write that beat us". A fallback fact-rail
+            // walk catches any slot that did not ptr_eq (the registered
+            // fact rail was replaced by a fresh build whose fact rail
+            // also references the canonical).
             //
             // Track each evicted entry's `(family, slot)` key together
             // with its full carrier so the cross-canonical drain can
             // remove that exact entry's registrations from every
-            // canonical it referenced — both the legacy `DepSignature`
-            // rail AND the path-precise `facts` rail (the union returned
-            // by `ReadSetSignature::canonical_ids()`).
+            // canonical its fact rail referenced (the set returned by
+            // `ReadSetSignature::canonical_ids()`).
             //
             // Keying the drain by entry identity `(FamilyKey, ModeSlot)`
-            // rather than by `Arc::ptr_eq` on the stored legacy
-            // `DepSignature` prevents the "shared legacy Arc" hazard:
-            // when two memo entries share the same legacy fence Arc and
-            // only one is evicted, a `map.retain` over the other
-            // canonical shards with `Arc::ptr_eq(registered, sig)` would
-            // remove BOTH entries' registrations because they point to
-            // the same Arc. The surviving entry would then have no
-            // reverse-index registration for its legacy canonicals and a
-            // later `invalidate_canonical` of those canonicals would miss
-            // it, leaving stale warm data. Keying the drain by entry
+            // rather than by `Arc::ptr_eq` on the stored fact rail
+            // prevents the "shared Arc" hazard: when two memo entries
+            // share the same `Arc<[FactVersionRef]>` and only one is
+            // evicted, a `map.retain` over the other canonical shards
+            // with `Arc::ptr_eq(registered, facts)` would remove BOTH
+            // entries' registrations because they point to the same
+            // Arc. The surviving entry would then have no reverse-index
+            // registration for its canonicals and a later
+            // `invalidate_canonical` of those canonicals would miss it,
+            // leaving stale warm data. Keying the drain by entry
             // identity is what makes that drain precise.
             let mut evicted_entries: Vec<(
                 (FamilyKey, ModeSlot),
                 crate::fact_signature_helpers::ReadSetSignature,
+                DepSignature,
             )> = Vec::new();
-            for ((family, slot), registered_sig) in &drained {
+            for ((family, slot), registered_facts) in &drained {
                 let Some(slots) = entries.get_mut(family) else {
                     continue;
                 };
                 let Some(current_entry) = slots.slot(*slot) else {
                     continue;
                 };
-                let entry_legacy = &current_entry.read_set_signature.legacy;
-                let drop = Arc::ptr_eq(entry_legacy, registered_sig)
-                    || dep_signature_references_canonical(entry_legacy, canonical_id)
-                    || carrier_facts_reference_canonical(
-                        &current_entry.read_set_signature.facts,
-                        canonical_id,
-                    );
+                let entry_facts = &current_entry.read_set_signature.facts;
+                let drop = Arc::ptr_eq(entry_facts, registered_facts)
+                    || carrier_facts_reference_canonical(entry_facts, canonical_id)
+                    || current_entry
+                        .dispatch_dep_signature
+                        .iter()
+                        .any(|(c, _)| c.as_ref() == canonical_id);
                 if drop {
                     let entry_carrier = current_entry.read_set_signature.clone();
+                    let entry_dispatch_sig = Arc::clone(&current_entry.dispatch_dep_signature);
                     *slots.slot_mut(*slot) = None;
                     evicted += 1;
-                    evicted_entries.push(((family.clone(), *slot), entry_carrier));
+                    evicted_entries.push((
+                        (family.clone(), *slot),
+                        entry_carrier,
+                        entry_dispatch_sig,
+                    ));
                 }
             }
             // A family that loses its last slot is removed outright;
@@ -891,27 +907,47 @@ impl SemanticGraphStore {
                 }
             });
 
-            // For each evicted entry, walk every canonical its carrier
-            // referenced (union of `legacy` + path-precise `facts` via
-            // `canonical_ids()`) and remove THAT entry's `(family, slot)`
-            // registration from the canonical's shard. Removal is by
-            // entry identity, not by `Arc::ptr_eq` on the stored legacy
-            // signature — see the comment on `evicted_entries` above for
-            // the shared-Arc hazard this avoids. Walking the full
-            // `canonical_ids()` set (not only `legacy.iter()`) also
-            // drains the path-precise fact rail's registrations, matching
-            // what `register_reverse_index` populated. Runs UNDER the
-            // held `entries` lock (the `entries → canonical_to_entries`
-            // order permits it), so the cross-canonical cleanup is atomic
-            // with the `entries` eviction above.
-            for (evicted_key, evicted_carrier) in &evicted_entries {
+            // For each evicted entry, walk every canonical the entry
+            // depended on — the carrier's fact rail
+            // (`canonical_ids()`) PLUS the dispatch fence — and remove
+            // THAT entry's `(family, slot)` registration from the
+            // canonical's shard. Removal is by entry identity, not by
+            // `Arc::ptr_eq` on the stored fact rail — see the comment
+            // on `evicted_entries` above for the shared-Arc hazard this
+            // avoids. The dispatch-fence union mirrors the publish-side
+            // `register_reverse_index` iteration so every shard
+            // `register_reverse_index` populated is drained here. Runs
+            // UNDER the held `entries` lock (the `entries →
+            // canonical_to_entries` order permits it), so the
+            // cross-canonical cleanup is atomic with the `entries`
+            // eviction above.
+            let mut seen_cleanup: rustc_hash::FxHashSet<Arc<str>> =
+                rustc_hash::FxHashSet::default();
+            for (evicted_key, evicted_carrier, evicted_dispatch_sig) in &evicted_entries {
+                seen_cleanup.clear();
                 for other_canonical in evicted_carrier.canonical_ids() {
                     if other_canonical.as_ref() == canonical_id {
+                        continue;
+                    }
+                    if !seen_cleanup.insert(Arc::clone(&other_canonical)) {
                         continue;
                     }
                     Self::prune_reverse_index_registration(
                         &self.canonical_to_entries,
                         &other_canonical,
+                        evicted_key,
+                    );
+                }
+                for (other_canonical, _) in evicted_dispatch_sig.iter() {
+                    if other_canonical.as_ref() == canonical_id {
+                        continue;
+                    }
+                    if !seen_cleanup.insert(Arc::clone(other_canonical)) {
+                        continue;
+                    }
+                    Self::prune_reverse_index_registration(
+                        &self.canonical_to_entries,
+                        other_canonical,
                         evicted_key,
                     );
                 }
@@ -1440,7 +1476,12 @@ impl SemanticGraphStore {
             return None;
         }
         entry.carrier.bubble(ctx);
-        Some((Arc::clone(&entry.carrier.legacy), entry.result))
+        // The returned `DepSignature` is dispatch-plumbing only — every
+        // `relate_nodes` caller discards it. The relation carrier is
+        // fact-only; a warm relation hit carries no separate dispatch
+        // signature, so an empty signature is the truthful answer. The
+        // carrier's facts already bubbled above.
+        Some((empty_signature(), entry.result))
     }
 
     /// Publish a relation judgement for `(source, target)`. Writes to the
@@ -1881,7 +1922,7 @@ impl SemanticGraphStore {
                 // fact identities. AND-gate validation happens at
                 // the outer fence revalidation point.
                 entry.read_set_signature.bubble_via_tls();
-                let dep_signature = Arc::clone(&entry.read_set_signature.legacy);
+                let dep_signature = Arc::clone(&entry.dispatch_dep_signature);
                 CacheRead {
                     value: entry.result,
                     dep_signature,
@@ -1946,7 +1987,7 @@ impl SemanticGraphStore {
                     return None;
                 }
                 entry.read_set_signature.bubble(ctx);
-                let dep_signature = Arc::clone(&entry.read_set_signature.legacy);
+                let dep_signature = Arc::clone(&entry.dispatch_dep_signature);
                 Some(CacheRead {
                     value: entry.result,
                     dep_signature,
@@ -2210,7 +2251,7 @@ impl SemanticGraphStore {
         entry.read_set_signature.bubble_via_tls();
         let hit = CacheRead {
             value: entry.result,
-            dep_signature: Arc::clone(&entry.read_set_signature.legacy),
+            dep_signature: Arc::clone(&entry.dispatch_dep_signature),
             walker_diagnostics: entry.walker_diagnostics,
             cache_suppress: false,
         };
@@ -2675,11 +2716,8 @@ impl SemanticGraphStore {
         //   joiners inherit the suppressed child's transitive deps). A
         //   direct `execute_cooperative` caller that bypasses the
         //   dispatch's `traced_build` wrapper (test / debug drivers)
-        //   leaves `graph_carrier` unset; such a build broadcasts a
-        //   synthetic carrier — the legacy `dep_signature` rail and an
-        //   empty fact rail. This is NOT a fence-fact reconstruction:
-        //   the fact rail is left empty rather than reverse-engineered
-        //   from the legacy `WholeHash` entries.
+        //   leaves `graph_carrier` unset; such a build broadcasts an
+        //   empty carrier — its build observed no traced facts.
         //
         // - `publish_carrier` — `Some` only when the build is
         //   cacheable (`!cache_suppress`). A `cache_suppress` build
@@ -2693,7 +2731,6 @@ impl SemanticGraphStore {
             Some(boxed) => *boxed,
             None => crate::fact_signature_helpers::ReadSetSignature::new(
                 crate::fact_signature_helpers::empty_fact_signature(),
-                dep_signature.clone(),
             ),
         };
         let publish_carrier: Option<&crate::fact_signature_helpers::ReadSetSignature> =
@@ -2708,6 +2745,7 @@ impl SemanticGraphStore {
                 &result,
                 &walker_diagnostics,
                 carrier,
+                &dep_signature,
                 &self_root_canonicals,
                 &inflight,
             );
@@ -2747,6 +2785,7 @@ impl SemanticGraphStore {
                         backfill.key,
                         QueryResult::Value(backfill.node),
                         carrier.clone(),
+                        dep_signature.clone(),
                         Arc::clone(&self_root_canonicals),
                         &inflight,
                     );
@@ -2916,6 +2955,7 @@ impl SemanticGraphStore {
         result: &QueryResult<SemanticNodeId>,
         walker_diagnostics: &Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
         read_set_signature: &crate::fact_signature_helpers::ReadSetSignature,
+        dispatch_dep_signature: &DepSignature,
         self_root_canonicals: &Arc<[Arc<str>]>,
         inflight: &Arc<InflightEntry>,
     ) -> bool {
@@ -2942,6 +2982,7 @@ impl SemanticGraphStore {
         let entry = MemoEntry {
             result: result.clone(),
             read_set_signature: read_set_signature.clone(),
+            dispatch_dep_signature: Arc::clone(dispatch_dep_signature),
             self_root_canonicals: Arc::clone(self_root_canonicals),
             walker_diagnostics: Arc::clone(walker_diagnostics),
         };
@@ -3021,6 +3062,7 @@ impl SemanticGraphStore {
             &family,
             &populated_slots,
             &read_set_signature,
+            dispatch_dep_signature,
         );
         drop(entries);
         // Published cleanly under a non-aborted in-flight entry — the
@@ -3074,6 +3116,7 @@ impl SemanticGraphStore {
         key: SemanticQueryKey,
         result: QueryResult<SemanticNodeId>,
         read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+        dispatch_dep_signature: DepSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
         parent_inflight: &Arc<InflightEntry>,
     ) {
@@ -3099,9 +3142,11 @@ impl SemanticGraphStore {
         if self.inflight.lock().contains_key(&key) {
             return;
         }
+        let dispatch_dep_signature_clone = Arc::clone(&dispatch_dep_signature);
         let entry = MemoEntry {
             result,
             read_set_signature: read_set_signature.clone(),
+            dispatch_dep_signature,
             self_root_canonicals,
             walker_diagnostics: Arc::from([]),
         };
@@ -3150,6 +3195,7 @@ impl SemanticGraphStore {
             &family,
             &populated_slots,
             &read_set_signature,
+            &dispatch_dep_signature_clone,
         );
         drop(entries);
     }
@@ -3166,25 +3212,21 @@ impl SemanticGraphStore {
     ///
     /// **Carrier-aware registration.** The reverse index keys each
     /// populated slot under EVERY canonical the entry's
-    /// [`ReadSetSignature`] references — the union of the legacy
-    /// `dep_signature` rail AND the path-precise `facts` rail
-    /// (`Parse(...)`, `ResolveImports(...)`, `RouteSurface(...)`,
-    /// `FileWholeHash`, `DerivedFactHash`). The stored value in the
-    /// per-canonical shard is the legacy `DepSignature` (kept as a
-    /// diagnostic stamp of what was registered) but
-    /// `invalidate_canonical`'s cross-canonical drain identifies
-    /// registrations by `(family, slot)` entry identity rather than
-    /// by `Arc::ptr_eq` on the stored signature. This prevents the
-    /// "shared legacy Arc" hazard where two entries sharing a
-    /// canonicalised legacy `Arc<DepSignature>` would have BOTH
+    /// [`ReadSetSignature`] references — every canonical named by a
+    /// fact in the path-precise `facts` rail (`Parse(...)`,
+    /// `ResolveImports(...)`, `RouteSurface(...)`, `FileWholeHash`,
+    /// `DerivedFactHash`). The stored value in the per-canonical shard
+    /// is the entry's `facts` rail (kept as a diagnostic stamp of what
+    /// was registered) but `invalidate_canonical`'s cross-canonical
+    /// drain identifies registrations by `(family, slot)` entry
+    /// identity rather than by `Arc::ptr_eq` on the stored signature.
+    /// This prevents the "shared Arc" hazard where two entries sharing
+    /// a canonicalised `Arc<[FactVersionRef]>` would have BOTH
     /// registrations stripped when only one is evicted — see the
     /// drain implementation in `invalidate_canonical` for the
     /// rationale. Iterating `read_set_signature.canonical_ids()`
-    /// ensures fact-only canonicals (whose canonical does not appear
-    /// in the legacy rail) still surface in `invalidate_canonical`'s
-    /// shard-drain — without this, a `Parse(MemberPresence(Foo, a))`
-    /// fact for a canonical that the legacy signature does not name
-    /// would leave the memo entry orphaned across invalidation.
+    /// covers every canonical the fact rail names so
+    /// `invalidate_canonical`'s shard-drain reaches the entry.
     ///
     /// **Consistency with `MaterializeStructureDb::register_post_publish`.**
     /// `MaterializeStructureDb` and `RefCycleResultDb` register their
@@ -3197,27 +3239,75 @@ impl SemanticGraphStore {
         family: &FamilyKey,
         populated_slots: &[ModeSlot],
         read_set_signature: &crate::fact_signature_helpers::ReadSetSignature,
+        dispatch_dep_signature: &DepSignature,
     ) {
         let timing_on = verter_scheduler::request_context::current_timing_enabled();
-        let registered_legacy = Arc::clone(&read_set_signature.legacy);
+        let registered_facts = Arc::clone(&read_set_signature.facts);
+        // Iteration set: every canonical the entry depends on — the
+        // carrier's fact rail (`canonical_ids()`) PLUS the dispatch
+        // fence (the build's `QueryBuildOutput.dep_signature`). The
+        // dispatch-fence iteration covers entries whose cold build
+        // emitted a dep signature without populating the fact tracer
+        // (synthetic / test publishes); production cold builds wrap
+        // with `install_fact_tracer`, so the carrier's `facts`
+        // canonical set covers the same files the dispatch fence
+        // names.
+        let mut seen: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
         for populated in populated_slots {
+            seen.clear();
             for canonical in read_set_signature.canonical_ids() {
-                let shard = canonical_to_entries
-                    .entry(canonical)
-                    .or_insert_with(|| Mutex::new(FxHashMap::default()));
-                let lock_start = if timing_on {
-                    Some(Instant::now())
-                } else {
-                    None
-                };
-                let mut map = shard.value().lock();
-                let lock_wait = lock_start
-                    .map(|t| t.elapsed())
-                    .unwrap_or(std::time::Duration::ZERO);
-                crate::host_manage::record_family_map_lock_acquisition(lock_wait);
-                map.insert((family.clone(), *populated), Arc::clone(&registered_legacy));
+                if !seen.insert(Arc::clone(&canonical)) {
+                    continue;
+                }
+                Self::register_single_canonical(
+                    canonical_to_entries,
+                    &canonical,
+                    family,
+                    *populated,
+                    &registered_facts,
+                    timing_on,
+                );
+            }
+            for (canonical, _) in dispatch_dep_signature.iter() {
+                if !seen.insert(Arc::clone(canonical)) {
+                    continue;
+                }
+                Self::register_single_canonical(
+                    canonical_to_entries,
+                    canonical,
+                    family,
+                    *populated,
+                    &registered_facts,
+                    timing_on,
+                );
             }
         }
+    }
+
+    /// Single-shard registration step used by [`Self::register_reverse_index`].
+    #[inline]
+    fn register_single_canonical(
+        canonical_to_entries: &CanonicalToEntries,
+        canonical: &Arc<str>,
+        family: &FamilyKey,
+        populated: ModeSlot,
+        registered_facts: &RegisteredFacts,
+        timing_on: bool,
+    ) {
+        let shard = canonical_to_entries
+            .entry(Arc::clone(canonical))
+            .or_insert_with(|| Mutex::new(FxHashMap::default()));
+        let lock_start = if timing_on {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        let mut map = shard.value().lock();
+        let lock_wait = lock_start
+            .map(|t| t.elapsed())
+            .unwrap_or(std::time::Duration::ZERO);
+        crate::host_manage::record_family_map_lock_acquisition(lock_wait);
+        map.insert((family.clone(), populated), Arc::clone(registered_facts));
     }
 
     /// Record a newly-admitted family against the memo retention
@@ -3461,6 +3551,7 @@ impl SemanticGraphStore {
         let entry = MemoEntry {
             result,
             read_set_signature: read_set_signature.clone(),
+            dispatch_dep_signature: empty_signature(),
             self_root_canonicals,
             walker_diagnostics: Arc::from([]),
         };
@@ -3482,6 +3573,7 @@ impl SemanticGraphStore {
             &family,
             &populated_slots,
             &read_set_signature,
+            &empty_signature(),
         );
         drop(entries);
         populated_slots.len()
@@ -3554,12 +3646,9 @@ pub(crate) type ObservedGraphSelfRoot = (Arc<str>, crate::types::Hash16);
 /// The builder NEVER re-reads current content. `observed_self_roots`
 /// carries each `(canonical, observed_hash)` pair the cold build
 /// captured at the value source; `traced_facts` is the path-precise
-/// fact set the `install_fact_tracer` scope collected; `legacy` is the
-/// whole-hash / project-generation `DepSignature` rail retained so
-/// `ProjectGeneration` stays validated by `validate_dep_signature`
-/// until the generation rail is unified. Re-reading a canonical's
-/// current hash here would reopen the publish race the central
-/// fact-signature helpers close.
+/// fact set the `install_fact_tracer` scope collected. Re-reading a
+/// canonical's current hash here would reopen the publish race the
+/// central fact-signature helpers close.
 ///
 /// Returns `None` — refusing shared-cache admission — when the entry
 /// cannot be soundly rooted. The cooperative-admission caller still
@@ -3571,14 +3660,7 @@ pub(crate) type ObservedGraphSelfRoot = (Arc<str>, crate::types::Hash16);
 /// - a `traced` `FileWholeHash` fact names a self-root canonical with a
 ///   hash that disagrees with the observed self-root (the traced
 ///   dependency rail and the observed self-root disagree on the keyed
-///   file's version), or
-/// - the legacy rail carries a `RouteGeneration` dependency: route
-///   generation has no authoritative validating source — there is no
-///   production emitter, and `HostFenceValidator` rejects it fail-safe
-///   (the `RouteGeneration` arm returns `false`) — so an entry rooted
-///   on it could not detect a content edit to the route-observed file.
-///   No production path constructs the variant; producers refuse
-///   admission so no entry's legacy rail carries it.
+///   file's version).
 ///
 /// The traced fact set is merged after the self-roots: a self-root
 /// `FileWholeHash` already emitted is not duplicated, but every other
@@ -3596,21 +3678,8 @@ pub(crate) type ObservedGraphSelfRoot = (Arc<str>, crate::types::Hash16);
 pub(crate) fn semantic_graph_read_set_signature(
     observed_self_roots: &[ObservedGraphSelfRoot],
     traced_facts: &[crate::resolver_core::FactVersionRef],
-    legacy: &DepSignature,
 ) -> Option<crate::fact_signature_helpers::ReadSetSignature> {
     use crate::resolver_core::FactVersionRef;
-    use crate::semantic_query::DepVersion;
-
-    // A `RouteGeneration` legacy dependency cannot be soundly rooted —
-    // it has no authoritative validator and no production emitter.
-    // Refuse shared admission rather than caching an entry that cannot
-    // detect a content edit to the route-observed file.
-    if legacy
-        .iter()
-        .any(|(_, v)| matches!(v, DepVersion::RouteGeneration(_)))
-    {
-        return None;
-    }
 
     // Collapse the observed self-roots into a per-canonical hash map;
     // a conflicting hash for the same canonical is a torn observation.
@@ -3659,7 +3728,6 @@ pub(crate) fn semantic_graph_read_set_signature(
 
     Some(crate::fact_signature_helpers::ReadSetSignature::new(
         Arc::from(facts),
-        Arc::clone(legacy),
     ))
 }
 

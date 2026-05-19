@@ -44,7 +44,7 @@ use crate::resolver_core::prepared_decl::PreparedDeclBundle;
 use crate::resolver_core::resolver_context::ResolverContext;
 use crate::resolver_core::{FactReadSetCell, FactVersionRef, ShallowFileState};
 use crate::resolver_store::HostStoreView;
-use crate::semantic_query::{DepSignature, SemanticNodeData, SemanticNodeId};
+use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
 use crate::session_view::SessionView;
 use crate::types::Hash16;
 use crate::FileAnalysisSnapshot;
@@ -481,26 +481,6 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         ResolverContext::dispatch_node_data(self.inner, node)
     }
 
-    // -------- Cache validation -------------------------------------
-
-    /// Overlay-aware legacy dep-signature validation.
-    ///
-    /// The base-host `validate_dep_signature` binds a base-only
-    /// `HostViewRef`, so its `WholeHash` arm validates against base
-    /// content. A value computed under this session roots its legacy
-    /// whole-hash rail on the overlay content hash for overlay-bearing
-    /// canonicals; validating that rail through the base view would
-    /// reject every session-warm hit. Routing through
-    /// [`crate::host_manage::dep_signature_valid_for_view`] binds the
-    /// session view, so the legacy rail validates against the
-    /// session's overlay identity in lockstep with the fact rail
-    /// ([`Self::resolver_store_view`]). Non-overlay canonicals fall
-    /// through to base content unchanged.
-    #[inline]
-    fn validate_dep_signature(&self, signature: &DepSignature) -> bool {
-        crate::host_manage::dep_signature_valid_for_view(signature, self.view, self.inner)
-    }
-
     // -------- Component-meta-tier bridges --------------------------
 
     #[inline]
@@ -515,13 +495,6 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
     #[inline]
     fn get_raw_analysis_snapshot(&self, canonical: &str) -> Option<FileAnalysisSnapshot> {
         ResolverContext::get_raw_analysis_snapshot(self.inner, canonical)
-    }
-
-    // -------- Session view (overlay-aware) -------------------------
-
-    #[inline]
-    fn view(&self) -> Box<dyn SessionView + '_> {
-        Box::new(BoundSessionViewRef { inner: self.view })
     }
 
     // -------- Fact tracer ------------------------------------------
@@ -541,61 +514,5 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
     #[inline]
     fn host_for_fact_tracer_install(&self) -> &crate::VerterHost {
         self.inner
-    }
-}
-
-/// Borrow adapter that lets [`SessionResolverContext::view`] return a
-/// `Box<dyn SessionView + '_>` over a `&dyn SessionView` without
-/// requiring the caller to own a clonable view.
-struct BoundSessionViewRef<'a> {
-    inner: &'a dyn SessionView,
-}
-
-impl<'a> SessionView for BoundSessionViewRef<'a> {
-    fn source(&self, canonical: &str) -> Option<Arc<str>> {
-        self.inner.source(canonical)
-    }
-
-    fn content_hash_for(&self, canonical: &str) -> Option<Hash16> {
-        self.inner.content_hash_for(canonical)
-    }
-
-    fn overlay_content_hash_for(&self, canonical: &str) -> Option<Hash16> {
-        self.inner.overlay_content_hash_for(canonical)
-    }
-
-    fn overlay_artifact_discriminator(&self, canonical: &str) -> Option<Hash16> {
-        self.inner.overlay_artifact_discriminator(canonical)
-    }
-
-    fn project_identity(&self) -> crate::file_artifact_store::ProjectIdentity {
-        self.inner.project_identity()
-    }
-
-    fn env_hashes(&self) -> &crate::session_view::EnvHashes {
-        self.inner.env_hashes()
-    }
-
-    fn is_tombstoned(&self, canonical: &str) -> bool {
-        self.inner.is_tombstoned(canonical)
-    }
-
-    fn resolved_import_facts(
-        &self,
-        canonical: &str,
-    ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
-        self.inner.resolved_import_facts(canonical)
-    }
-
-    fn fingerprint(&self) -> u64 {
-        self.inner.fingerprint()
-    }
-
-    fn overlay_canonicals(&self) -> Vec<String> {
-        self.inner.overlay_canonicals()
-    }
-
-    fn tombstoned_canonicals(&self) -> Vec<String> {
-        self.inner.tombstoned_canonicals()
     }
 }

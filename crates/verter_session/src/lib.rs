@@ -58,7 +58,6 @@ mod audited_request_tests;
 mod cache;
 pub mod cache_schema;
 mod compile;
-pub(crate) mod completion_fence;
 pub mod component_meta_audit;
 #[cfg(test)]
 mod component_meta_cache_discipline_tests;

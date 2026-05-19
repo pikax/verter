@@ -60,18 +60,14 @@ pub struct ComponentMetaResultKey {
     pub options_fingerprint: ComponentMetaOptionsFingerprint,
 }
 
-/// Cache entry — the payload plus the carrier holding both
-/// dependency-signature rails.
+/// Cache entry — the payload plus the carrier holding the
+/// path-precise fact signature.
 ///
-/// The carrier's legacy rail is the whole-hash / project-generation
-/// signature validated through
-/// [`crate::host_manage::HostFenceValidator`]; the fact rail is the
-/// path-precise signature produced by the `with_fact_tracer` scope
-/// wrapping the cold compute. Warm-hit reads gate on
-/// [`StoreView::validates_fact_signature`] BEFORE falling through to
-/// the legacy validator so a fact-version bump on any cross-file dep
-/// invalidates the warm hit without consulting the legacy whole-hash
-/// oracle.
+/// `read_set_signature.facts` is the path-precise signature produced
+/// by the `with_fact_tracer` scope wrapping the cold compute — the
+/// sole cache-validity rail. Warm-hit reads gate on
+/// [`StoreView::validates_fact_signature`]: a fact-version bump on any
+/// cross-file dep invalidates the warm hit.
 pub struct ComponentMetaResultEntry<P> {
     pub payload: Arc<P>,
     pub read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
@@ -588,12 +584,7 @@ impl ComponentMetaResultDb<CachedComponentMetaResult> {
         };
         let backing = store.component_meta_results();
         match backing.get(&key, whole_hash) {
-            Some(entry) => entry
-                .read_set_signature
-                .legacy
-                .iter()
-                .map(|(canonical, _)| std::sync::Arc::clone(canonical))
-                .collect(),
+            Some(entry) => entry.read_set_signature.canonical_ids(),
             None => Vec::new(),
         }
     }
@@ -692,7 +683,6 @@ impl<P> std::fmt::Debug for ComponentMetaResultDb<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::semantic_query::DepVersion;
 
     fn empty_sig() -> crate::fact_signature_helpers::ReadSetSignature {
         crate::fact_signature_helpers::ReadSetSignature::empty()
@@ -709,21 +699,17 @@ mod tests {
         };
         let entry = ComponentMetaResultEntry {
             payload: Arc::new(MockPayload(42)),
-            read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
-                Arc::from(Vec::<crate::resolver_core::FactVersionRef>::new()),
-                Arc::from(
-                    vec![(
-                        Arc::<str>::from("/w/Accordion.vue"),
-                        DepVersion::WholeHash([1u8; 16]),
-                    )]
-                    .into_boxed_slice(),
-                ),
-            ),
+            read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(
+                vec![crate::resolver_core::FactVersionRef::FileWholeHash {
+                    canonical_id: "/w/Accordion.vue".to_string(),
+                    hash: [1u8; 16],
+                }],
+            )),
         };
         db.insert(key.clone(), [1u8; 16], entry);
         let hit = db.get(&key, [1u8; 16]).unwrap();
         assert_eq!(*hit.payload, MockPayload(42));
-        assert_eq!(hit.read_set_signature.legacy.len(), 1);
+        assert_eq!(hit.read_set_signature.facts.len(), 1);
     }
 
     #[test]

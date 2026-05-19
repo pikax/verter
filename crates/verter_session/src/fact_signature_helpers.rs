@@ -1,18 +1,17 @@
 //! Shared helpers for the R3/R26/R28 fact-based validation substrate
 //! used by the inner component-meta caches.
 //!
-//! Every cache entry that previously carried
-//! [`crate::semantic_query::DepSignature`] migrates to
-//! `Arc<[FactVersionRef]>` (the cold-compute observation set the
-//! producer recorded). Warm-hit reads call
-//! [`validate_fact_signature`] which walks every fact through the
-//! current [`crate::resolver_core::StoreView`] snapshot; a single
-//! mismatch returns `false` and the warm hit misses, falling through
-//! to cold recompute.
+//! Every cache entry carries a [`ReadSetSignature`] whose `facts`
+//! rail is `Arc<[FactVersionRef]>` — the cold-compute observation set
+//! the producer recorded. It is the sole cache-validity rail. Warm-hit
+//! reads call [`validate_fact_signature`] which walks every fact
+//! through the current [`crate::resolver_core::StoreView`] snapshot; a
+//! single mismatch returns `false` and the warm hit misses, falling
+//! through to cold recompute.
 //!
 //! Bubble-up is the dual rule: when a cache cold-compute or warm-hit
-//! returns a value to its caller, the entry's `fact_dep_signature`
-//! merges into any active outer tracer via
+//! returns a value to its caller, the entry's fact signature merges
+//! into any active outer tracer via
 //! [`crate::resolver_core::FactReadSetCell::observe_borrowed_signature`].
 //! That keeps the outer compute's observation set complete even when
 //! inner reads come from cache.
@@ -125,9 +124,9 @@ pub(crate) fn observe_fact_signature(sig: &[FactVersionRef]) {
     crate::resolver_core::resolver_context::observe_fan_out_borrowed(sig);
 }
 
-/// Convert a legacy [`DepSignature`] into a [`Vec<FactVersionRef>`] —
-/// the dual-emit bridge that fans a sub-query's recorded dependency
-/// set into the active fact tracer.
+/// Convert a [`DepSignature`] into a [`Vec<FactVersionRef>`] — the
+/// bridge that fans a dispatch sub-query's recorded dependency set
+/// into the active fact tracer.
 ///
 /// Per-version mapping (no generation dep is silently dropped):
 ///
@@ -138,15 +137,9 @@ pub(crate) fn observe_fact_signature(sig: &[FactVersionRef]) {
 ///   tracer validate against a superseded project shape.
 /// - `RouteGeneration` is **not expressible** as a `FactVersionRef` —
 ///   there is no `FactVersionRef::RouteGeneration` variant (route
-///   generation has no authoritative validating source). It is not
-///   emitted into the tracer here; non-cacheability of an entry whose
-///   sub-result carried a `RouteGeneration` is enforced at the entry
-///   producer, which inspects the legacy `DepSignature` rail directly
-///   (`semantic_graph_read_set_signature`,
-///   `engine_fact_signature_for_materialize_memo`,
-///   [`crate::component_meta_materialize::fact_signature_from_fence`])
-///   and refuses shared admission. No production path constructs
-///   `DepVersion::RouteGeneration`; this arm is the defensive floor.
+///   generation has no authoritative validating source) — so it is
+///   skipped. No production path constructs `DepVersion::RouteGeneration`;
+///   this arm is the defensive floor.
 pub(crate) fn dep_signature_to_fact_signature(sig: &DepSignature) -> Vec<FactVersionRef> {
     sig.iter()
         .filter_map(|(canon, ver)| match ver {
@@ -599,37 +592,30 @@ pub(crate) fn empty_fact_signature() -> Arc<[FactVersionRef]> {
 /// a `None` result refuses shared-cache admission.
 pub(crate) type StructuralCarrierReadSet = (Arc<[FactVersionRef]>, Arc<[Arc<str>]>);
 
-/// Transition carrier for a cache entry's dependency signature.
+/// A cache entry's dependency signature — the path-precise fact
+/// signature captured by an `install_fact_tracer` scope.
 ///
-/// `facts` is the path-precise fact signature captured by an
-/// `install_fact_tracer` scope. `legacy` is the whole-hash /
-/// project-generation signature retained for cache entries whose
-/// producers still gate on `validate_dep_signature` (the legacy
-/// validator). The follow-up hygiene block deletes `legacy`; the
-/// carrier's surface (`validate`, `bubble`, `canonical_ids`,
-/// `is_overflow`) is invariant under that deletion.
+/// `facts` is the sole cache-validity rail: the fact-tracer
+/// observation set the producer recorded. Warm-hit reads validate
+/// `facts` against the live store view (self-roots strict, cross-file
+/// dependency facts lazy) and bubble it into any active outer tracer.
 ///
 /// The carrier is `pub(crate)`. Cache entries store a single
-/// `read_set_signature: ReadSetSignature` field instead of two
-/// separate `dep_signature`/`fact_dep_signature` rails. The shared
-/// cold-build helper builds the carrier when the tracer finalises;
-/// warm-hit paths call `validate_with_self_roots(ctx, &self_roots)`
-/// BEFORE `bubble(ctx)`.
+/// `read_set_signature: ReadSetSignature` field. The shared cold-build
+/// helper builds the carrier when the tracer finalises; warm-hit paths
+/// call `validate_with_self_roots(ctx, &self_roots)` BEFORE
+/// `bubble(ctx)`.
 ///
 /// Invariants:
 /// - `validate_with_self_roots(ctx, &self_roots)` returns true only
-///   when BOTH rails validate, with every `FileWholeHash` fact for a
-///   listed self-root canonical validated **strictly**. If `legacy`
-///   is empty (the post-cleanup state of cache producers wired
-///   entirely through `install_fact_tracer`), the legacy gate is a
-///   no-op and the carrier behaves as if `facts` is the sole oracle.
+///   when `facts` validates, with every `FileWholeHash` fact for a
+///   listed self-root canonical validated **strictly**. An empty
+///   carrier with no self-roots validates vacuously.
 /// - `bubble(ctx)` fans `facts` into every active outer tracer on the
-///   current TLS stack. `legacy` does NOT bubble: it is the validator
-///   rail only; the bubble channel is the fact signature.
-/// - `canonical_ids()` returns the union of the canonical IDs
-///   referenced by `legacy` and `facts`, deduplicated by string
-///   identity. The unified reverse index registers a (canonical →
-///   entry) mapping for each yielded ID.
+///   current TLS stack.
+/// - `canonical_ids()` returns the canonical IDs referenced by
+///   `facts`, deduplicated by string identity. The reverse index
+///   registers a (canonical → entry) mapping for each yielded ID.
 /// - `is_overflow()` returns true when the producer's tracer finalised
 ///   with `FactReadSetFinalise::Overflow` — the materialised result
 ///   is valid but the path-precise signature is too large to admit
@@ -638,7 +624,6 @@ pub(crate) type StructuralCarrierReadSet = (Arc<[FactVersionRef]>, Arc<[Arc<str>
 #[derive(Clone, Debug)]
 pub struct ReadSetSignature {
     pub facts: Arc<[FactVersionRef]>,
-    pub legacy: DepSignature,
     /// Marks the carrier as constructed from a tracer that returned
     /// `FactReadSetFinalise::Overflow`. The materialised value is
     /// valid; the signature is too large to admit. The cooperative
@@ -649,36 +634,16 @@ pub struct ReadSetSignature {
 }
 
 impl ReadSetSignature {
-    /// Construct a carrier from explicit components. The legacy rail
-    /// may be empty.
+    /// Construct a carrier from the traced path-precise fact set.
     #[inline]
-    pub fn new(facts: Arc<[FactVersionRef]>, legacy: DepSignature) -> Self {
+    pub fn new(facts: Arc<[FactVersionRef]>) -> Self {
         Self {
             facts,
-            legacy,
             overflowed: false,
         }
     }
 
-    /// Construct a fact-only carrier — the legacy rail is empty.
-    ///
-    /// Test-support only: no production producer composes a carrier
-    /// this way (production producers build the carrier via
-    /// `ReadSetSignature::new` with the traced legacy rail, or via
-    /// `overflow` / `empty`). The self-root substrate test suites
-    /// (`fact_signature_helpers` unit tests, `query_db_self_root_tests`)
-    /// use it to plant synthetic fact-only entries.
-    #[cfg(test)]
-    #[inline]
-    pub(crate) fn facts_only(facts: Arc<[FactVersionRef]>) -> Self {
-        Self {
-            facts,
-            legacy: Arc::from(Vec::<(Arc<str>, DepVersion)>::new()),
-            overflowed: false,
-        }
-    }
-
-    /// Construct an overflow carrier. Both rails are empty; the
+    /// Construct an overflow carrier. The fact rail is empty; the
     /// `overflowed` flag is set. Cooperative admission consumers
     /// route values bearing this carrier through
     /// `ComputeAdmission::ReturnOnly`.
@@ -686,30 +651,27 @@ impl ReadSetSignature {
     pub fn overflow() -> Self {
         Self {
             facts: empty_fact_signature(),
-            legacy: Arc::from(Vec::<(Arc<str>, DepVersion)>::new()),
             overflowed: true,
         }
     }
 
-    /// Empty carrier. Both rails are empty; the `overflowed` flag is
+    /// Empty carrier. The fact rail is empty; the `overflowed` flag is
     /// false. Used for synthetic publishes that pre-date the
     /// fact-tracer substrate.
     #[inline]
     pub fn empty() -> Self {
         Self {
             facts: empty_fact_signature(),
-            legacy: Arc::from(Vec::<(Arc<str>, DepVersion)>::new()),
             overflowed: false,
         }
     }
 
-    /// Validate both rails against the host's live state, validating
+    /// Validate the fact rail against the host's live state, validating
     /// every `FileWholeHash` fact whose canonical is listed in
     /// `self_root_canonicals` **strictly**.
     ///
-    /// Returns `true` only when BOTH rails validate (R3 AND-gate). The
-    /// fact rail routes any `FileWholeHash` for a listed self-root
-    /// canonical through the strict
+    /// Returns `true` only when `facts` validates. Any `FileWholeHash`
+    /// for a listed self-root canonical routes through the strict
     /// [`crate::resolver_core::StoreView::validates_self_root_whole_hash`]
     /// (an untracked or hash-mismatched self-root fails); every other
     /// fact — including a `FileWholeHash` for a non-listed cross-file
@@ -734,7 +696,6 @@ impl ReadSetSignature {
         }
         let self_root_refs: Vec<&str> = self_root_canonicals.iter().map(Arc::as_ref).collect();
         validate_fact_signature_with_self_roots(ctx, &self.facts, &self_root_refs)
-            && ctx.validate_dep_signature(&self.legacy)
     }
 
     /// Whether [`Self::validate_with_self_roots`] would actually
@@ -789,8 +750,7 @@ impl ReadSetSignature {
 
     /// Bubble the path-precise fact set into every active outer
     /// tracer on the current TLS stack. No-op when the tracer stack
-    /// is empty or `facts` is empty. The legacy rail is the
-    /// validator-side channel and is NOT bubbled.
+    /// is empty or `facts` is empty.
     #[inline]
     pub(crate) fn bubble(&self, ctx: &dyn ResolverContext) {
         bubble_fact_signature(ctx, &self.facts);
@@ -804,20 +764,19 @@ impl ReadSetSignature {
         bubble_fact_signature_via_tls(&self.facts);
     }
 
-    /// Canonical IDs referenced by this carrier. Yields the union of
-    /// canonicals from `legacy` and `facts`, deduplicated by string
-    /// equality. The reverse index drains via this iterator.
+    /// Canonical IDs referenced by this carrier's fact rail,
+    /// deduplicated by string equality. The reverse index drains via
+    /// this iterator.
+    ///
+    /// A `ProjectGeneration` fact references no canonical and
+    /// contributes nothing — it is a project-wide fact validated
+    /// on-read, not indexed per-canonical.
     pub fn canonical_ids(&self) -> Vec<Arc<str>> {
         // Small dedup set; cache entries' canonical sets typically
         // hold fewer than 16 entries each. `FxHashSet` over Arc<str>
         // keeps comparison O(1) per insertion when arcs are shared.
         let mut seen: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
         let mut out: Vec<Arc<str>> = Vec::new();
-        for (canon, _) in self.legacy.iter() {
-            if seen.insert(Arc::clone(canon)) {
-                out.push(Arc::clone(canon));
-            }
-        }
         for fact in self.facts.iter() {
             // `ProjectGeneration` references no canonical — it
             // contributes nothing to the reverse index.
@@ -872,12 +831,11 @@ mod read_set_signature_unit_tests {
 
     #[test]
     fn read_set_signature_empty_validates_vacuously_via_facts_path() {
-        // Empty carrier: facts empty + legacy empty.
-        // `validate_fact_signature` returns true on empty input.
-        // ctx.validate_dep_signature on empty signature: depends on
-        // the trait impl; the production impls treat empty as valid.
+        // Empty carrier: facts empty. `validate_fact_signature`
+        // returns true on empty input.
         let sig = ReadSetSignature::empty();
         assert!(!sig.is_overflow(), "empty carrier must NOT be overflow");
+        assert_eq!(sig.facts.len(), 0, "empty carrier carries no facts");
         // Don't assert validate without ctx — empty carrier's
         // `validate` short-circuits via empty fact list. Tested
         // separately in integration with a `ResolverContext` stub.
@@ -894,33 +852,31 @@ mod read_set_signature_unit_tests {
     }
 
     #[test]
-    fn read_set_signature_canonical_ids_deduplicates_across_rails() {
-        // legacy mentions /a.ts; facts mention /a.ts + /b.ts. Union
-        // should be [/a.ts, /b.ts] in legacy-first order.
-        let legacy: DepSignature = Arc::from(
-            vec![(Arc::from("/a.ts"), DepVersion::WholeHash([0u8; 16]))].into_boxed_slice(),
-        );
-        let facts: Arc<[FactVersionRef]> =
-            Arc::from(vec![fact_filewhole("/a.ts", 1), fact_filewhole("/b.ts", 2)]);
-        let sig = ReadSetSignature {
-            facts,
-            legacy,
-            overflowed: false,
-        };
-        let canons = sig.canonical_ids();
+    fn read_set_signature_canonical_ids_deduplicates_facts() {
+        // facts mention /a.ts twice + /b.ts once. The canonical set
+        // must collapse the duplicate /a.ts to one entry.
+        let facts: Arc<[FactVersionRef]> = Arc::from(vec![
+            fact_filewhole("/a.ts", 1),
+            fact_parse("/a.ts", 9),
+            fact_filewhole("/b.ts", 2),
+        ]);
+        let sig = ReadSetSignature::new(facts);
+        let canons: Vec<String> = sig
+            .canonical_ids()
+            .iter()
+            .map(|a| a.as_ref().to_string())
+            .collect();
         assert_eq!(
             canons.len(),
             2,
-            "duplicate /a.ts across rails must collapse to one entry"
+            "duplicate /a.ts across facts must collapse to one entry"
         );
-        assert_eq!(canons[0].as_ref(), "/a.ts");
-        assert_eq!(canons[1].as_ref(), "/b.ts");
+        assert!(canons.contains(&"/a.ts".to_string()));
+        assert!(canons.contains(&"/b.ts".to_string()));
     }
 
     #[test]
     fn read_set_signature_canonical_ids_covers_all_fact_variants() {
-        let legacy: DepSignature =
-            Arc::from(Vec::<(Arc<str>, DepVersion)>::new().into_boxed_slice());
         let facts: Arc<[FactVersionRef]> = Arc::from(vec![
             fact_filewhole("/wholehash.ts", 1),
             fact_derived("/derived.ts", 2),
@@ -938,11 +894,7 @@ mod read_set_signature_unit_tests {
                 expected_hash: [0u8; 16],
             }),
         ]);
-        let sig = ReadSetSignature {
-            facts,
-            legacy,
-            overflowed: false,
-        };
+        let sig = ReadSetSignature::new(facts);
         let canons: Vec<String> = sig
             .canonical_ids()
             .iter()
@@ -972,34 +924,37 @@ mod read_set_signature_unit_tests {
     }
 
     #[test]
-    fn read_set_signature_canonical_ids_legacy_only_carrier() {
-        let legacy: DepSignature = Arc::from(
-            vec![
-                (Arc::from("/x.ts"), DepVersion::WholeHash([0u8; 16])),
-                (Arc::from("/y.ts"), DepVersion::WholeHash([0u8; 16])),
-            ]
-            .into_boxed_slice(),
-        );
-        let sig = ReadSetSignature {
-            facts: empty_fact_signature(),
-            legacy,
-            overflowed: false,
-        };
+    fn read_set_signature_canonical_ids_skips_project_generation_fact() {
+        // A `ProjectGeneration` fact references no canonical — it must
+        // contribute nothing to the reverse-index canonical set, while
+        // the sibling `FileWholeHash` fact still surfaces.
+        let facts: Arc<[FactVersionRef]> = Arc::from(vec![
+            FactVersionRef::ProjectGeneration { generation: 7 },
+            fact_filewhole("/only.ts", 1),
+        ]);
+        let sig = ReadSetSignature::new(facts);
         let canons: Vec<String> = sig
             .canonical_ids()
             .iter()
             .map(|a| a.as_ref().to_string())
             .collect();
-        assert_eq!(canons, vec!["/x.ts".to_string(), "/y.ts".to_string()]);
+        assert_eq!(
+            canons,
+            vec!["/only.ts".to_string()],
+            "ProjectGeneration contributes no canonical; only /only.ts surfaces"
+        );
     }
 
     #[test]
-    fn read_set_signature_facts_only_constructor() {
+    fn read_set_signature_new_is_fact_only() {
         let facts: Arc<[FactVersionRef]> = Arc::from(vec![fact_filewhole("/a.ts", 1)]);
-        let sig = ReadSetSignature::facts_only(Arc::clone(&facts));
+        let sig = ReadSetSignature::new(Arc::clone(&facts));
         assert_eq!(sig.facts.len(), 1);
-        assert_eq!(sig.legacy.len(), 0);
         assert!(!sig.overflowed);
+        assert!(
+            Arc::ptr_eq(&sig.facts, &facts),
+            "new() stores facts verbatim"
+        );
         let canons = sig.canonical_ids();
         assert_eq!(canons.len(), 1);
         assert_eq!(canons[0].as_ref(), "/a.ts");

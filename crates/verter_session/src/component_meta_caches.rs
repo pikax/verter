@@ -2308,16 +2308,16 @@ use crate::component_meta_materialize::{MaterializeOutcome, MaterializeStructure
 /// observed-root carrier, and the explicit self-root canonical set.
 ///
 /// The carrier holds the path-precise fact signature observed during
-/// the cold build (the materialiser's traced read set) plus the
-/// legacy whole-hash rail kept for `validate_dep_signature` bubbling.
-/// `self_root_canonicals` lists the canonicals whose `FileWholeHash`
-/// fact the warm-read validator must check **strictly** — ONLY the
-/// `base` node's declaration-origin file. The consumer materialise
-/// scope is NOT a self-root: a value's identity does not depend on
-/// which consumer reached it (R7 cross-owner reuse). A `Global`-origin
-/// base yields an empty `self_root_canonicals`. A same-canonical
-/// content edit, or a self-root canonical the live store view no
-/// longer tracks, rejects the entry through
+/// the cold build (the materialiser's traced read set) — the sole
+/// cache-validity rail. `self_root_canonicals` lists the canonicals
+/// whose `FileWholeHash` fact the warm-read validator must check
+/// **strictly** — ONLY the `base` node's declaration-origin file. The
+/// consumer materialise scope is NOT a self-root: a value's identity
+/// does not depend on which consumer reached it (R7 cross-owner
+/// reuse). A `Global`-origin base yields an empty
+/// `self_root_canonicals`. A same-canonical content edit, or a
+/// self-root canonical the live store view no longer tracks, rejects
+/// the entry through
 /// [`crate::fact_signature_helpers::ReadSetSignature::validate_with_self_roots`].
 #[derive(Clone)]
 pub struct MaterializeStructureEntry {
@@ -2325,12 +2325,21 @@ pub struct MaterializeStructureEntry {
     /// The materialiser's publish path enforces this with
     /// `debug_assert!`.
     pub outcome: MaterializeOutcome,
-    /// Carrier holding the path-precise fact signature (used by
-    /// warm-hit bubble) AND the legacy `DepSignature` rail. Warm reads
-    /// call `read_set_signature.validate_with_self_roots(ctx,
+    /// Carrier holding the path-precise fact signature — the sole
+    /// cache-validity rail. Warm reads call
+    /// `read_set_signature.validate_with_self_roots(ctx,
     /// &self_root_canonicals)` BEFORE bubbling. `canonical_ids()`
-    /// drives the unified reverse-index registration.
+    /// drives the reverse-index registration.
     pub read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+    /// The cold build's dispatch-return signature — the materialiser's
+    /// traced `local_fence` as a `DepSignature`. NOT a cache-validity
+    /// rail (the carrier above is the sole validity oracle); it is the
+    /// transitive-dependency payload a warm `peek` returns on
+    /// `CacheRead.dep_signature` so the component-meta dispatch
+    /// accumulator folds the warm sub-query's deps into the owner's
+    /// `fact_versions`. Crate-private: the dispatch-return signature is
+    /// an internal sibling rail, not a public cache-carrier field.
+    pub(crate) dispatch_dep_signature: DepSignature,
     /// Canonicals validated **strictly** as self-roots on every warm
     /// read and post-compute revalidation: ONLY the `base` node's
     /// declaration-origin file (empty for a `Global`-origin base). The
@@ -2365,6 +2374,14 @@ pub struct MaterializeStructureEntry {
     pub validated_at_generation: u64,
 }
 
+/// Per-canonical reverse index shared by [`MaterializeStructureDb`]
+/// and [`RefCycleResultDb`]: maps each canonical id to the set of
+/// cache keys whose carrier fact rail references it, paired with the
+/// registered `ReadSetSignature.facts` `Arc` (the `Arc::ptr_eq`
+/// discriminant for the per-canonical invalidation drain).
+type CanonicalToKeysIndex<K> =
+    DashMap<Arc<str>, parking_lot::Mutex<rustc_hash::FxHashMap<K, Arc<[FactVersionRef]>>>>;
+
 /// Remove the `Arc::ptr_eq`-matching `key` registration from
 /// `canonical`'s `canonical_to_keys` shard, then drop the outer shard
 /// when that removal empties its inner map.
@@ -2393,13 +2410,10 @@ pub struct MaterializeStructureEntry {
 /// never stranded in a just-removed outer entry. Mirrors the
 /// `BoundedCandidateMap::remove_candidate_by_seq` slot-detach pattern.
 fn prune_canonical_to_keys_registration<K>(
-    canonical_to_keys: &DashMap<
-        Arc<str>,
-        parking_lot::Mutex<rustc_hash::FxHashMap<K, DepSignature>>,
-    >,
+    canonical_to_keys: &CanonicalToKeysIndex<K>,
     canonical: &Arc<str>,
     key: &K,
-    expected_legacy: &DepSignature,
+    expected_facts: &Arc<[FactVersionRef]>,
 ) where
     K: Eq + std::hash::Hash,
 {
@@ -2408,7 +2422,7 @@ fn prune_canonical_to_keys_registration<K>(
         if let Some(existing_sig) = map.get(key) {
             // `Arc::ptr_eq` guard — drop only OUR registration, never a
             // concurrent fresh winner's that republished the same key.
-            if Arc::ptr_eq(existing_sig, expected_legacy) {
+            if Arc::ptr_eq(existing_sig, expected_facts) {
                 map.remove(key);
             }
         }
@@ -2434,15 +2448,11 @@ fn prune_canonical_to_keys_registration<K>(
 pub struct MaterializeStructureDb {
     entries: DashMap<MaterializeStructureCacheKey, Arc<MaterializeStructureEntry>>,
     inflight: InflightTable<MaterializeStructureCacheKey>,
-    /// Per-canonical reverse index: maps each canonical id to the set
-    /// of cache keys whose `dep_signature` references it, paired with
-    /// the registered `dep_signature` `Arc`. `invalidate_for_canonical`
-    /// drains this map and uses `Arc::ptr_eq` to discriminate stale
-    /// entries from fresh post-publish writes.
-    canonical_to_keys: DashMap<
-        Arc<str>,
-        parking_lot::Mutex<rustc_hash::FxHashMap<MaterializeStructureCacheKey, DepSignature>>,
-    >,
+    /// Per-canonical reverse index — see [`CanonicalToKeysIndex`].
+    /// `invalidate_for_canonical` drains this map and uses
+    /// `Arc::ptr_eq` to discriminate stale entries from fresh
+    /// post-publish writes.
+    canonical_to_keys: CanonicalToKeysIndex<MaterializeStructureCacheKey>,
     /// Global insertion-ordered total-size budget. Bounds the total
     /// entry count across all keys — the reverse-index drain reclaims
     /// only on per-canonical invalidation, which an owner-content edit
@@ -2666,7 +2676,7 @@ impl MaterializeStructureDb {
             crate::host_manage::record_materialize_structure_cache_hit();
             Some(crate::semantic_query::CacheRead {
                 value: entry_arc.outcome.clone(),
-                dep_signature: Arc::clone(&entry_arc.read_set_signature.legacy),
+                dep_signature: Arc::clone(&entry_arc.dispatch_dep_signature),
                 walker_diagnostics: std::sync::Arc::from([]),
                 cache_suppress: false,
             })
@@ -2712,7 +2722,7 @@ impl MaterializeStructureDb {
     /// each removed entry nets exactly one decrement.
     pub fn invalidate_for_canonical(&self, canonical_id: &str) {
         let _retention = self.retention_gate.read();
-        let drained: Vec<(MaterializeStructureCacheKey, DepSignature)> =
+        let drained: Vec<(MaterializeStructureCacheKey, Arc<[FactVersionRef]>)> =
             match self.canonical_to_keys.remove(canonical_id) {
                 Some((_, mutex)) => mutex.lock().drain().collect(),
                 None => return,
@@ -2720,7 +2730,7 @@ impl MaterializeStructureDb {
         for (key, registered_sig) in &drained {
             let registered = Arc::clone(registered_sig);
             let removed = self.entries.remove_if(key, move |_, entry_arc| {
-                Arc::ptr_eq(&entry_arc.read_set_signature.legacy, &registered)
+                Arc::ptr_eq(&entry_arc.read_set_signature.facts, &registered)
             });
             if let Some((_, removed_entry)) = removed {
                 self.live_counter.fetch_sub(1, Ordering::Relaxed);
@@ -2864,6 +2874,7 @@ impl MaterializeStructureDb {
         let entry = Arc::new(MaterializeStructureEntry {
             outcome: MaterializeOutcome::Miss(SemanticNodeId(0)),
             read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+            dispatch_dep_signature: Arc::from(Vec::new()),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
             admission_seq: crate::bounded_query_retention::next_retention_seq(),
             validated_at_generation: 0,
@@ -2872,14 +2883,13 @@ impl MaterializeStructureDb {
         self.live_counter.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Internal — register a `(key, dep_signature_legacy)` pair under
-    /// every canonical referenced by the entry's carrier (union of
-    /// legacy + facts canonicals). Called from the materialiser's
-    /// `post_publish` callback. The unified reverse index drains
-    /// under any canonical the carrier references, so fact-only deps
-    /// (`Parse(...)` / `ResolveImports(...)` / `RouteSurface(...)`)
-    /// invalidate the entry even when the legacy `DepSignature` does
-    /// not name the changed canonical.
+    /// Internal — register a `(key, fact_rail)` pair under every
+    /// canonical the entry's carrier fact rail references. Called from
+    /// the materialiser's `post_publish` callback. The reverse index
+    /// drains under any canonical a fact names, so every fact-rail dep
+    /// (`Parse(...)` / `ResolveImports(...)` / `RouteSurface(...)` /
+    /// `FileWholeHash` / `DerivedFactHash`) invalidates the entry when
+    /// its canonical changes.
     ///
     /// Also records the admission against the global retention budget
     /// and FIFO-evicts the oldest entries once the total exceeds
@@ -2899,7 +2909,7 @@ impl MaterializeStructureDb {
         admission_seq: u64,
     ) {
         let timing_on = verter_scheduler::request_context::current_timing_enabled();
-        let registered_legacy = Arc::clone(&read_set_signature.legacy);
+        let registered_facts = Arc::clone(&read_set_signature.facts);
         for canonical in read_set_signature.canonical_ids() {
             let shard = self
                 .canonical_to_keys
@@ -2915,7 +2925,7 @@ impl MaterializeStructureDb {
                 .map(|t| t.elapsed())
                 .unwrap_or(std::time::Duration::ZERO);
             crate::host_manage::record_family_map_lock_acquisition(lock_wait);
-            map.insert(key.clone(), Arc::clone(&registered_legacy));
+            map.insert(key.clone(), Arc::clone(&registered_facts));
         }
         // Global retention budget: record this admission under the
         // entry's own seq, FIFO-evict the oldest entries past the total
@@ -2975,7 +2985,7 @@ impl MaterializeStructureDb {
                 &self.canonical_to_keys,
                 &canonical,
                 victim_key,
-                &entry.read_set_signature.legacy,
+                &entry.read_set_signature.facts,
             );
         }
     }
@@ -3050,7 +3060,7 @@ impl MaterializeStructureDb {
                 &self.canonical_to_keys,
                 &canonical,
                 key,
-                &read_set_signature.legacy,
+                &read_set_signature.facts,
             );
         }
         // Keep the retention ledger consistent: drop exactly this
@@ -3135,8 +3145,8 @@ use crate::semantic_query::DeclIdentity;
 /// self-root canonical set.
 ///
 /// The carrier holds the path-precise fact signature observed during
-/// the cold BFS plus the legacy `DepSignature` rail. The BFS records
-/// one observed self-root per visited declaration identity (the
+/// the cold BFS — the sole cache-validity rail. The BFS records one
+/// observed self-root per visited declaration identity (the
 /// `DeclIdentity`'s embedded `(canonical_id, whole_hash)`); those
 /// canonicals are the entry's `self_root_canonicals`. Every `peek`
 /// validates them **strictly** via
@@ -3148,12 +3158,20 @@ pub struct RefCycleEntry {
     /// `true` when the BFS root reaches a transitive cycle through a
     /// complex helper surface.
     pub result: bool,
-    /// Carrier holding the R28 path-precise fact signature (used by
-    /// warm-hit bubble) AND the legacy `DepSignature` rail.
-    /// `read_set_signature.validate_with_self_roots(ctx,
+    /// Carrier holding the R28 path-precise fact signature — the sole
+    /// cache-validity rail. `read_set_signature.validate_with_self_roots(ctx,
     /// &self_root_canonicals)` is the warm-read gate; `canonical_ids()`
     /// drives reverse-index registration.
     pub read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+    /// The cold BFS's dispatch-return signature — the BFS's traced
+    /// `local_fence` as a `DepSignature`. NOT a cache-validity rail
+    /// (the carrier above is the sole validity oracle); it is the
+    /// transitive-dependency payload a warm `peek` returns on
+    /// `CacheRead.dep_signature` so the component-meta dispatch
+    /// accumulator folds the warm sub-query's deps into the owner's
+    /// `fact_versions`. Crate-private: the dispatch-return signature is
+    /// an internal sibling rail, not a public cache-carrier field.
+    pub(crate) dispatch_dep_signature: DepSignature,
     /// Canonicals validated **strictly** as self-roots on every warm
     /// read: the BFS root file plus every visited declaration's file.
     /// An untracked or hash-mismatched self-root rejects the entry.
@@ -3210,8 +3228,7 @@ pub struct RefCycleResultDb {
     inflight: InflightTable<DeclIdentity>,
     /// Per-canonical reverse index — maps each canonical id to the set
     /// of cache keys whose dep_signature references it.
-    canonical_to_keys:
-        DashMap<Arc<str>, parking_lot::Mutex<rustc_hash::FxHashMap<DeclIdentity, DepSignature>>>,
+    canonical_to_keys: CanonicalToKeysIndex<DeclIdentity>,
     /// Global insertion-ordered total-size budget. The `DeclIdentity`
     /// key embeds the file whole-hash, so each distinct content version
     /// produces a fresh entry; the reverse-index drain reclaims only on
@@ -3384,9 +3401,9 @@ impl RefCycleResultDb {
     }
 
     /// Register the reverse-index after a successful publish under
-    /// every canonical referenced by the entry's carrier (union of
-    /// legacy + facts canonicals). Per-canonical mutex acquisition
-    /// pattern matches `MaterializeStructureDb`. Bounded by
+    /// every canonical the entry's carrier fact rail references.
+    /// Per-canonical mutex acquisition pattern matches
+    /// `MaterializeStructureDb`. Bounded by
     /// `read_set_signature.canonical_ids().len() ≤ ~80` (BFS hop cap
     /// + transitive fact set).
     ///
@@ -3407,7 +3424,7 @@ impl RefCycleResultDb {
         admission_seq: u64,
     ) {
         let timing_on = verter_scheduler::request_context::current_timing_enabled();
-        let registered_legacy = Arc::clone(&read_set_signature.legacy);
+        let registered_facts = Arc::clone(&read_set_signature.facts);
         for canonical in read_set_signature.canonical_ids() {
             let shard = self
                 .canonical_to_keys
@@ -3423,7 +3440,7 @@ impl RefCycleResultDb {
                 .map(|t| t.elapsed())
                 .unwrap_or(std::time::Duration::ZERO);
             crate::host_manage::record_family_map_lock_acquisition(lock_wait);
-            map.insert(key.clone(), Arc::clone(&registered_legacy));
+            map.insert(key.clone(), Arc::clone(&registered_facts));
         }
         // Global retention budget: record this admission under the
         // entry's own seq, FIFO-evict the oldest entries past the total
@@ -3470,7 +3487,7 @@ impl RefCycleResultDb {
                 &self.canonical_to_keys,
                 &canonical,
                 victim_key,
-                &entry.read_set_signature.legacy,
+                &entry.read_set_signature.facts,
             );
         }
     }
@@ -3507,7 +3524,7 @@ impl RefCycleResultDb {
                 &self.canonical_to_keys,
                 &canonical,
                 key,
-                &read_set_signature.legacy,
+                &read_set_signature.facts,
             );
         }
         // Keep the retention ledger consistent: drop exactly this
@@ -3580,7 +3597,7 @@ impl RefCycleResultDb {
             entry_arc.read_set_signature.bubble(ctx);
             Some(crate::semantic_query::CacheRead {
                 value: entry_arc.result,
-                dep_signature: Arc::clone(&entry_arc.read_set_signature.legacy),
+                dep_signature: Arc::clone(&entry_arc.dispatch_dep_signature),
                 walker_diagnostics: Arc::from([]),
                 cache_suppress: false,
             })
@@ -3614,18 +3631,17 @@ impl RefCycleResultDb {
     /// Each removed entry's reverse-index registrations and
     /// retention-ledger record are dropped by [`Self::unregister_post_publish`],
     /// the single removal-side cleanup helper. It iterates the entry's
-    /// `read_set_signature.canonical_ids()` — the exact legacy + fact
-    /// union [`Self::register_post_publish`] registered under — so a
-    /// fact-only dependency's shard is pruned just like a legacy-rail
-    /// dependency's. The `canonical_id` shard itself is already drained
-    /// by the `canonical_to_keys.remove` above; the helper's
+    /// `read_set_signature.canonical_ids()` — the exact fact-rail
+    /// canonical set [`Self::register_post_publish`] registered under.
+    /// The `canonical_id` shard itself is already drained by the
+    /// `canonical_to_keys.remove` above; the helper's
     /// `prune_canonical_to_keys_registration` for that canonical is then
     /// a no-op. The `live_counter` decrement stays here —
     /// `unregister_post_publish` does not touch the counter — so each
     /// removed entry nets exactly one decrement.
     pub fn invalidate_for_canonical(&self, canonical_id: &str) {
         let _retention = self.retention_gate.read();
-        let drained: Vec<(DeclIdentity, DepSignature)> =
+        let drained: Vec<(DeclIdentity, Arc<[FactVersionRef]>)> =
             match self.canonical_to_keys.remove(canonical_id) {
                 Some((_, mutex)) => mutex.lock().drain().collect(),
                 None => return,
@@ -3633,7 +3649,7 @@ impl RefCycleResultDb {
         for (key, registered_sig) in &drained {
             let registered = Arc::clone(registered_sig);
             let removed = self.entries.remove_if(key, move |_, entry_arc| {
-                Arc::ptr_eq(&entry_arc.read_set_signature.legacy, &registered)
+                Arc::ptr_eq(&entry_arc.read_set_signature.facts, &registered)
             });
             if let Some((_, removed_entry)) = removed {
                 self.live_counter.fetch_sub(1, Ordering::Relaxed);
@@ -4085,7 +4101,7 @@ where
                 entry.read_set_signature.bubble(ctx);
                 Some(crate::semantic_query::CacheRead {
                     value: entry.result,
-                    dep_signature: Arc::clone(&entry.read_set_signature.legacy),
+                    dep_signature: Arc::clone(&entry.dispatch_dep_signature),
                     walker_diagnostics: Arc::from([]),
                     cache_suppress: false,
                 })
@@ -4111,7 +4127,7 @@ where
             provenance
                 .ref_cycle_fact_tracer_installs
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // The legacy `DepVersion` fence is the set of files the BFS
+            // The dispatch-return fence is the set of files the BFS
             // actually read. It is built up front — before the
             // `RouteGeneration` refusal scan — so every `ReturnOnly`
             // exit can carry it. A `ReturnOnly` `CacheRead` MUST report
@@ -4119,11 +4135,14 @@ where
             // merges `read.dep_signature` into its own `local_fence`, so
             // a `ReturnOnly` that dropped the fence would let an outer
             // computation be cached without the files the BFS read.
-            // Carrying `legacy` makes the `ReturnOnly` path observably
+            // Carrying it makes the `ReturnOnly` path observably
             // equivalent to the `None`-arm uncached-fallback (which
             // extends the caller's fence via `local_fence.extend(fence)`)
-            // without running a second uncached BFS.
-            let legacy: DepSignature = Arc::from(compute_fence.into_boxed_slice());
+            // without running a second uncached BFS. It is the entry's
+            // dispatch-return signature, NOT a cache-validity rail — the
+            // fact carrier built by `ref_cycle_read_set` is the validity
+            // oracle.
+            let dispatch_dep_signature: DepSignature = Arc::from(compute_fence.into_boxed_slice());
             // `cache_suppress` stays `false`: the caller does not
             // consume it. A `ReturnOnly` outcome is non-shareable across
             // cooperative joiners — the winner alone receives this
@@ -4145,27 +4164,31 @@ where
             // it could not detect a content edit to the route-observed
             // file. The computed bool is still returned via `ReturnOnly`,
             // carrying the BFS fence.
-            if legacy
+            if dispatch_dep_signature
                 .iter()
                 .any(|(_, v)| matches!(v, crate::semantic_query::DepVersion::RouteGeneration(_)))
             {
                 provenance
                     .ref_cycle_overflow_refusals
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return ComputeAdmission::ReturnOnly(return_only_value(Arc::clone(&legacy)));
+                return ComputeAdmission::ReturnOnly(return_only_value(Arc::clone(
+                    &dispatch_dep_signature,
+                )));
             }
             // Test-only injection: deterministically reproduce the
             // production refusal contract (tracer overflow / unrootable
             // self-root / `RouteGeneration` fence dependency) AFTER the
             // real BFS has populated `compute_fence`. The `ReturnOnly`
-            // `CacheRead` carries the real BFS fence (`legacy`) — exactly
-            // as every production refusal site does.
+            // `CacheRead` carries the real BFS fence — exactly as every
+            // production refusal site does.
             #[cfg(test)]
             if FORCE_REF_CYCLE_RETURN_ONLY.with(|f| f.get()) {
                 provenance
                     .ref_cycle_overflow_refusals
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return ComputeAdmission::ReturnOnly(return_only_value(Arc::clone(&legacy)));
+                return ComputeAdmission::ReturnOnly(return_only_value(Arc::clone(
+                    &dispatch_dep_signature,
+                )));
             }
             match finalise {
                 crate::resolver_core::FactReadSetFinalise::Ok(traced) => {
@@ -4176,9 +4199,8 @@ where
                             ComputeAdmission::Cacheable(RefCycleEntry {
                                 result,
                                 read_set_signature:
-                                    crate::fact_signature_helpers::ReadSetSignature::new(
-                                        facts, legacy,
-                                    ),
+                                    crate::fact_signature_helpers::ReadSetSignature::new(facts),
+                                dispatch_dep_signature,
                                 self_root_canonicals,
                                 admission_seq: crate::bounded_query_retention::next_retention_seq(),
                                 validated_at_generation,
@@ -4193,7 +4215,7 @@ where
                             provenance
                                 .ref_cycle_overflow_refusals
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            ComputeAdmission::ReturnOnly(return_only_value(legacy))
+                            ComputeAdmission::ReturnOnly(return_only_value(dispatch_dep_signature))
                         }
                     }
                 }
@@ -4204,7 +4226,7 @@ where
                     // Tracer overflowed — return the computed bool via
                     // `ReturnOnly`, carrying the BFS fence; no second
                     // uncached BFS.
-                    ComputeAdmission::ReturnOnly(return_only_value(legacy))
+                    ComputeAdmission::ReturnOnly(return_only_value(dispatch_dep_signature))
                 }
             }
         },
@@ -4214,7 +4236,7 @@ where
             entry.read_set_signature.bubble(ctx);
             crate::semantic_query::CacheRead {
                 value: entry.result,
-                dep_signature: Arc::clone(&entry.read_set_signature.legacy),
+                dep_signature: Arc::clone(&entry.dispatch_dep_signature),
                 walker_diagnostics: Arc::from([]),
                 cache_suppress: false,
             }

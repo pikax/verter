@@ -637,15 +637,21 @@ fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
     let walker_diagnostics: std::sync::Arc<
         [crate::project_semantic_dispatch::walk::ShallowDiagnostic],
     > = std::sync::Arc::from([]);
-    let carrier = crate::fact_signature_helpers::ReadSetSignature::new(
-        crate::fact_signature_helpers::empty_fact_signature(),
-        Arc::clone(&dep_sig),
-    );
+    // The carrier's fact rail names the test canonical via a
+    // `FileWholeHash` fact — `register_reverse_index` registers under
+    // every canonical `read_set_signature.canonical_ids()` yields.
+    let carrier = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
+        crate::resolver_core::FactVersionRef::FileWholeHash {
+            canonical_id: "/w/helper_test.ts".to_string(),
+            hash: [7u8; 16],
+        },
+    ]));
     store.warm_publish_one(
         &key,
         &QueryResult::Value(value),
         &walker_diagnostics,
         &carrier,
+        &dep_sig,
         &Arc::from([]),
         &inflight,
     );
@@ -2052,6 +2058,7 @@ fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
         aborted_key.clone(),
         QueryResult::Value(node),
         crate::fact_signature_helpers::ReadSetSignature::empty(),
+        Arc::from(Vec::new()),
         Arc::from([]),
         &aborted_parent,
     );
@@ -2076,6 +2083,7 @@ fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
         healthy_key.clone(),
         QueryResult::Value(node),
         crate::fact_signature_helpers::ReadSetSignature::empty(),
+        Arc::from(Vec::new()),
         Arc::from([]),
         &healthy_parent,
     );
@@ -2355,15 +2363,18 @@ fn warm_publish_records_memo_budget_under_entries_lock() {
     );
 }
 
-/// Build a `ReadSetSignature` whose legacy rail names exactly
-/// `canonical` — so a publish through `publish_with_carrier_for_tests`
-/// registers a `canonical_to_entries` reverse-index entry under that
-/// canonical. `hash` keeps each carrier's `WholeHash` distinct.
+/// Build a `ReadSetSignature` whose fact rail names exactly
+/// `canonical` via a `FileWholeHash` fact — so a publish through
+/// `publish_with_carrier_for_tests` registers a `canonical_to_entries`
+/// reverse-index entry under that canonical. `hash` keeps each
+/// carrier's `FileWholeHash` distinct.
 fn carrier_naming(canonical: &str, hash: u8) -> crate::fact_signature_helpers::ReadSetSignature {
-    crate::fact_signature_helpers::ReadSetSignature::new(
-        crate::fact_signature_helpers::empty_fact_signature(),
-        dep_sig_for(canonical, hash),
-    )
+    crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
+        crate::resolver_core::FactVersionRef::FileWholeHash {
+            canonical_id: canonical.to_string(),
+            hash: [hash; 16],
+        },
+    ]))
 }
 
 /// FINDING A — codex P2-A: FENCE THE REVERSE-INDEX CLEAR AGAINST NEW
@@ -4895,10 +4906,8 @@ fn prefix_backfill_carries_traced_facts() {
     // `dep_signature`. A test calling `execute_cooperative` directly
     // does not go through the dispatch's `traced_build` wrapper, so it
     // builds `graph_carrier` itself here.
-    let parent_carrier = crate::fact_signature_helpers::ReadSetSignature::new(
-        Arc::clone(&parent_traced_facts),
-        Arc::clone(&parent_dep_signature),
-    );
+    let parent_carrier =
+        crate::fact_signature_helpers::ReadSetSignature::new(Arc::clone(&parent_traced_facts));
     let _ = store.execute_cooperative(
         &host,
         parent_key.clone(),
@@ -4942,19 +4951,6 @@ fn prefix_backfill_carries_traced_facts() {
          `dep_signature` to `warm_publish_one_if_absent`, dropping \
          the parent's path-precise facts. Codex P2.C.",
         facts = prefix_carrier.facts.as_ref()
-    );
-
-    // Cross-check: the legacy rail still carries the parent's
-    // legacy signature for backwards-compat with consumers that read
-    // `dep_signature`.
-    let has_legacy_canonical = prefix_carrier
-        .legacy
-        .iter()
-        .any(|(c, _)| c.as_ref() == "/test/legacy-dep.ts");
-    assert!(
-        has_legacy_canonical,
-        "backfilled prefix entry's legacy rail must include the \
-         parent's legacy canonical (`/test/legacy-dep.ts`)"
     );
 }
 
@@ -5218,10 +5214,10 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
                 // `execute_cooperative` caller builds `graph_carrier`
                 // itself (the dispatch's `traced_build` wrapper is not
                 // in scope here).
-                let carrier = crate::fact_signature_helpers::ReadSetSignature::new(
-                    Arc::from(vec![winner_fact_for_build.clone()]),
-                    Arc::from(Vec::new().into_boxed_slice()),
-                );
+                let carrier =
+                    crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
+                        winner_fact_for_build.clone(),
+                    ]));
                 crate::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(id),
                     dep_signature: Arc::from(Vec::new().into_boxed_slice()),
@@ -5410,10 +5406,10 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
                 // build is suppressed for a non-self-root reason (an
                 // unvalidatable legacy dep) yet the self-root
                 // observation is intact.
-                let carrier = crate::fact_signature_helpers::ReadSetSignature::new(
-                    Arc::from(vec![winner_fact_for_build.clone()]),
-                    Arc::from(Vec::new().into_boxed_slice()),
-                );
+                let carrier =
+                    crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
+                        winner_fact_for_build.clone(),
+                    ]));
                 crate::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(id),
                     dep_signature: Arc::from(Vec::new().into_boxed_slice()),
@@ -5645,10 +5641,7 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
                 // Self-version-rooted carrier: one `FileWholeHash`
                 // self-root for the keyed canonical, plus the matching
                 // `self_root_canonicals` entry.
-                let carrier = ReadSetSignature::new(
-                    Arc::from(vec![winner_fact_for_build.clone()]),
-                    Arc::from(Vec::new().into_boxed_slice()),
-                );
+                let carrier = ReadSetSignature::new(Arc::from(vec![winner_fact_for_build.clone()]));
                 crate::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(id),
                     dep_signature: Arc::from(Vec::new().into_boxed_slice()),
@@ -5841,10 +5834,7 @@ fn same_view_joiner_still_coalesces_onto_winner() {
                 rx_release_winner
                     .recv()
                     .expect("winner: released by driver");
-                let carrier = ReadSetSignature::new(
-                    Arc::from(vec![winner_fact_for_build.clone()]),
-                    Arc::from(Vec::new().into_boxed_slice()),
-                );
+                let carrier = ReadSetSignature::new(Arc::from(vec![winner_fact_for_build.clone()]));
                 crate::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(winner_node),
                     dep_signature: Arc::from(Vec::new().into_boxed_slice()),
@@ -6265,10 +6255,8 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
                 // carrier carrying only cross-file *dependency* facts,
                 // with an EMPTY `self_root_canonicals` — the build could
                 // not be soundly self-rooted.
-                let carrier = ReadSetSignature::new(
-                    Arc::from(vec![winner_dep_fact_for_build.clone()]),
-                    Arc::from(Vec::new().into_boxed_slice()),
-                );
+                let carrier =
+                    ReadSetSignature::new(Arc::from(vec![winner_dep_fact_for_build.clone()]));
                 crate::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(winner_node),
                     dep_signature: Arc::from(Vec::new().into_boxed_slice()),
@@ -6535,10 +6523,8 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
                 // *dependency* fact and an EMPTY `self_root_canonicals`
                 // — `cache_suppress` is `false` (a plain miss is a
                 // cacheable result, not a non-cacheable build).
-                let carrier = ReadSetSignature::new(
-                    Arc::from(vec![winner_dep_fact_for_build.clone()]),
-                    Arc::from(Vec::new().into_boxed_slice()),
-                );
+                let carrier =
+                    ReadSetSignature::new(Arc::from(vec![winner_dep_fact_for_build.clone()]));
                 crate::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Error(QueryError::Miss),
                     dep_signature: Arc::from(Vec::new().into_boxed_slice()),
@@ -6722,10 +6708,12 @@ fn budget_eviction_prunes_empty_canonical_to_entries_shards() {
             name: Arc::from(format!("Decl{i}")),
         });
         let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-        let carrier = crate::fact_signature_helpers::ReadSetSignature::new(
-            crate::fact_signature_helpers::empty_fact_signature(),
-            dep_sig_for(&format!("/w/dist{i}.ts"), 1),
-        );
+        let carrier = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
+            crate::resolver_core::FactVersionRef::FileWholeHash {
+                canonical_id: format!("/w/dist{i}.ts"),
+                hash: [1u8; 16],
+            },
+        ]));
         store.publish_with_carrier_for_tests(key, QueryResult::Value(id), carrier, Arc::from([]));
     }
 
@@ -6787,25 +6775,19 @@ fn invalidate_canonical_prunes_emptied_cross_canonical_shard() {
         name: Arc::from("Multi"),
     });
     let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    // Carrier legacy rail names two canonicals — the entry registers a
+    // Carrier fact rail names two canonicals — the entry registers a
     // reverse-index shard under each.
-    let two_canonical_sig: crate::semantic_query::DepSignature = Arc::from(
-        vec![
-            (
-                Arc::<str>::from("/w/a.ts"),
-                crate::semantic_query::DepVersion::WholeHash([1u8; 16]),
-            ),
-            (
-                Arc::<str>::from("/w/b.ts"),
-                crate::semantic_query::DepVersion::WholeHash([1u8; 16]),
-            ),
-        ]
-        .into_boxed_slice(),
-    );
-    let carrier = crate::fact_signature_helpers::ReadSetSignature::new(
-        crate::fact_signature_helpers::empty_fact_signature(),
-        two_canonical_sig,
-    );
+    let two_canonical_facts: Arc<[crate::resolver_core::FactVersionRef]> = Arc::from(vec![
+        crate::resolver_core::FactVersionRef::FileWholeHash {
+            canonical_id: "/w/a.ts".to_string(),
+            hash: [1u8; 16],
+        },
+        crate::resolver_core::FactVersionRef::FileWholeHash {
+            canonical_id: "/w/b.ts".to_string(),
+            hash: [1u8; 16],
+        },
+    ]);
+    let carrier = crate::fact_signature_helpers::ReadSetSignature::new(two_canonical_facts);
     store.publish_with_carrier_for_tests(key, QueryResult::Value(id), carrier, Arc::from([]));
     assert_eq!(store.canonical_to_entries_shard_count_for_test(), 2);
 

@@ -57,10 +57,9 @@ fn component_meta_result_signature_carries_module_aug_index_shape() {
 
     let entry: ComponentMetaResultEntry<u32> = ComponentMetaResultEntry {
         payload: Arc::new(0u32),
-        read_set_signature: verter_session::for_tests::ReadSetSignature::new(
-            Arc::clone(&signature),
-            Arc::from(Vec::new().into_boxed_slice()),
-        ),
+        read_set_signature: verter_session::for_tests::ReadSetSignature::new(Arc::clone(
+            &signature,
+        )),
     };
     assert!(
         !entry.read_set_signature.facts.is_empty(),

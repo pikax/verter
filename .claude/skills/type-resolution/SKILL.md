@@ -14,7 +14,7 @@ description: "Cross-file type resolution: type solver, ShallowFileState, Externa
 - `RouteDb` — rehomed barrel/route surface cache, validated against live host facts.
 - `OwnerImportSurfaceDb` — direct-owner-imports cache keyed by `(owner_canonical, owner_whole_hash)`. `VerterHost::owner_import_surface(...)` builds-or-fetches the surface; `resolve_owner_direct_import(owner, local_name)` is the single-call lookup that every direct-owner-import caller now uses.
 - `SemanticGraphStore` — host-owned memo table + node arena for the `SemanticQueryKey` / `ProjectSemanticDispatch` layer. Every `SemanticQueryKey` variant dispatches through `ProjectSemanticDispatch::execute`. Same-path recursion returns a sentinel instead of self-awaiting; cross-thread joiners block cooperatively on a per-entry `Condvar`. Also owns Vue macro resolution artifacts (`SemanticNodeData::VueMacroElements`, keyed by `HostResolvedNamedTypeKey` through an internal identity map) — the former `ResolvedNamedTypesDb` has been folded in; the parser's `NamedTypeCache` adapter hits the graph directly on the refcount-only hot path via `get_resolved_named_type` / `insert_resolved_named_type`.
-- `ComponentMetaResultDb<ComponentMetaAnalysis>` — final payload cache for `get_component_meta`. Warm hits revalidate the recorded `DepSignature` via `HostFenceValidator` before returning.
+- `ComponentMetaResultDb<ComponentMetaAnalysis>` — final payload cache for `get_component_meta`. Warm hits revalidate the recorded `ReadSetSignature.facts` fact signature against the live `StoreView` before returning.
 - `IntrinsicRegistry` — authoritative table for `= intrinsic` declarations. `SessionSolverHost::utility_source` consults it before the `BuiltinUtility` fallback.
 
 Dep-signature semantics: every reusable cache read returns a `CacheRead<T>` carrying the touched fact fragment. Callers merge those fragments into the active `CompletionFence`, which bounds retries at 3 and publishes `UnstableState` when mid-flight invalidation persists.
@@ -238,7 +238,7 @@ The type graph structurally interns nodes — two distinct derivations that prod
 - Origin edges are stored outside the interned node table, in a sibling edge set keyed by `(result_node, edge_kind, source_node)` with optional per-edge metadata.
 - A single result node may have multiple origin edges of the same kind from different derivations; the layer MUST support this. Walking from a result returns the full edge set, not one canonical chain.
 - Walking is a first-class API on `SemanticGraphStore`, not a private solver internal. External consumers (component-meta compat, LSP hover, error-message rendering) walk origin to present provenance.
-- Origin edges are immutable once published; they participate in the same `DepSignature` / `HostFenceValidator` fencing as the interned nodes they point at. Cancelled / budget-exceeded / superseded derivations do not publish origin edges.
+- Origin edges are immutable once published; they participate in the same `ReadSetSignature.facts` fact-signature validation as the interned nodes they point at. Cancelled / budget-exceeded / superseded derivations do not publish origin edges.
 
 **Required edge kinds** (names are normative; semantics must not drift):
 

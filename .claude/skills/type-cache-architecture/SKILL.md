@@ -104,8 +104,9 @@ that self-root is checked:
   `NormalizeIntersection`). The carrier is built by the provenance-pure
   producer `semantic_graph_read_set_signature` (prepends a self-root
   `FileWholeHash` per observed self-root, merges the traced fact set,
-  returns `None` — non-cacheable — on a conflicting self-root hash or an
-  unvalidated `RouteGeneration` dependency). The warm-read validator —
+  returns `None` — non-cacheable — on a conflicting self-root hash or a
+  traced `FileWholeHash` that disagrees with an observed self-root).
+  The warm-read validator —
   `execute_cooperative`'s fast path, `get_validated`, the slow-path
   step-1 recheck, and the relation memo's `get_relation` — validates
   every self-root strictly via `validate_fact_signature_with_self_roots`

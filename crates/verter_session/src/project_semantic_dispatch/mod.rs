@@ -507,9 +507,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// is bounded by the cold-build cost it observes.
     ///
     /// **Build-output threading.** On `FactReadSetFinalise::Ok`, the
-    /// traced fact signature is stored on `QueryBuildOutput.fact_dep_signature`
-    /// so `warm_publish_one` records it verbatim onto the `MemoEntry`
-    /// via `ReadSetSignature::new(facts, legacy)`. On
+    /// self-version-rooted carrier is stored on
+    /// `QueryBuildOutput.graph_carrier` so `warm_publish_one` records
+    /// it verbatim onto the `MemoEntry`. On
     /// `FactReadSetFinalise::Overflow`, the build output is marked
     /// `cache_suppress = true` so the memo refuses to publish the
     /// entry — the caller cold-recomputes on the next request.
@@ -661,18 +661,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         //
         // On `Ok(traced_facts)` the carrier is assembled by
         // `semantic_graph_read_set_signature` from the build's
-        // `observed_self_roots`, the traced fact set, and the legacy
-        // `dep_signature`: it prepends a self-root `FileWholeHash` per
-        // observed self-root and merges the traced cross-file facts.
-        // The producer is provenance-pure — it roots the entry on the
-        // content version the build OBSERVED, never a current-content
-        // re-read, so a same-canonical content edit misses the warm
-        // read. A `None` producer result (a torn / conflicting
-        // self-root observation, a `FileWholeHash` traced fact that
-        // disagrees with the observed self-root, or a `RouteGeneration`
-        // dependency that has no authoritative validator) marks the
-        // build `cache_suppress = true`: the value still flows to the
-        // caller, the memo refuses admission.
+        // `observed_self_roots` and the traced fact set: it prepends a
+        // self-root `FileWholeHash` per observed self-root and merges
+        // the traced cross-file facts. The producer is provenance-pure
+        // — it roots the entry on the content version the build
+        // OBSERVED, never a current-content re-read, so a
+        // same-canonical content edit misses the warm read. A `None`
+        // producer result (a torn / conflicting self-root observation,
+        // or a `FileWholeHash` traced fact that disagrees with the
+        // observed self-root) marks the build `cache_suppress = true`:
+        // the value still flows to the caller, the memo refuses
+        // admission.
         //
         // On `Overflow` the build is marked `cache_suppress = true` so
         // the memo refuses to admit the entry — caller cold-recomputes
@@ -710,13 +709,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
 ///
 /// On `FactReadSetFinalise::Ok` it builds the published memo entry's
 /// completed [`crate::fact_signature_helpers::ReadSetSignature`] carrier
-/// from the build's `observed_self_roots`, the traced fact set, and the
-/// legacy `dep_signature` via
+/// from the build's `observed_self_roots` and the traced fact set via
 /// [`crate::semantic_query_memo::semantic_graph_read_set_signature`],
 /// and records the deduplicated self-root canonical set. A `None`
-/// producer result (a torn / conflicting self-root observation, or an
-/// unvalidated `RouteGeneration` dependency) marks the build
-/// `cache_suppress = true`. On `Overflow` it marks `cache_suppress`.
+/// producer result (a torn / conflicting self-root observation) marks
+/// the build `cache_suppress = true`. On `Overflow` it marks
+/// `cache_suppress`.
 ///
 /// `#[inline(never)]`: this is invoked once per cold build from the
 /// dispatch's `traced_build` closure. Keeping it out-of-line gives its
@@ -746,7 +744,6 @@ fn finalise_traced_build_output(
             match crate::semantic_query_memo::semantic_graph_read_set_signature(
                 &output.observed_self_roots,
                 &traced_facts,
-                &output.dep_signature,
             ) {
                 Some(carrier) => {
                     output.graph_carrier = Some(Box::new(carrier));
@@ -759,23 +756,19 @@ fn finalise_traced_build_output(
                     // valid — `semantic_graph_read_set_signature`
                     // refused only because the entry could not be
                     // soundly SELF-rooted (a torn self-root
-                    // observation, or an unvalidatable
-                    // `RouteGeneration` legacy dep). Carry those
-                    // traced facts on a NON-ADMITTED carrier: the
-                    // cooperative-admission winner bubbles this
-                    // carrier into its own outer tracer AND broadcasts
-                    // it to cross-thread joiners, so a joiner inside
-                    // an outer cold query inherits the suppressed
-                    // child's transitive dependency facts exactly as
-                    // a joiner of a cacheable child would. Memo
-                    // admission stays gated by `cache_suppress` — this
-                    // carrier is broadcast, never published.
+                    // observation). Carry those traced facts on a
+                    // NON-ADMITTED carrier: the cooperative-admission
+                    // winner bubbles this carrier into its own outer
+                    // tracer AND broadcasts it to cross-thread
+                    // joiners, so a joiner inside an outer cold query
+                    // inherits the suppressed child's transitive
+                    // dependency facts exactly as a joiner of a
+                    // cacheable child would. Memo admission stays
+                    // gated by `cache_suppress` — this carrier is
+                    // broadcast, never published.
                     output.cache_suppress = true;
                     output.graph_carrier = Some(Box::new(
-                        crate::fact_signature_helpers::ReadSetSignature::new(
-                            traced_facts,
-                            output.dep_signature.clone(),
-                        ),
+                        crate::fact_signature_helpers::ReadSetSignature::new(traced_facts),
                     ));
                 }
             }

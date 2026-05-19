@@ -73,7 +73,7 @@ use crate::project_type_store::{IndexedReady, ProjectTypeStore};
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
 use crate::resolver_core::{FactVersionRef, ShallowFileState};
 use crate::resolver_store::HostStoreView;
-use crate::semantic_query::{DepSignature, SemanticNodeData, SemanticNodeId};
+use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
 use crate::types::Hash16;
 use crate::FileAnalysisSnapshot;
 use crate::HostConfig;
@@ -392,10 +392,6 @@ pub(crate) trait ResolverContext: sealed::Sealed {
 
     fn dispatch_node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>>;
 
-    // -------- Cache validation -------------------------------------
-
-    fn validate_dep_signature(&self, signature: &DepSignature) -> bool;
-
     // -------- Component-meta-tier bridges --------------------------
     //
     // clippy cleanup — these two trait methods are part of
@@ -417,30 +413,6 @@ pub(crate) trait ResolverContext: sealed::Sealed {
 
     #[allow(dead_code)]
     fn get_raw_analysis_snapshot(&self, canonical: &str) -> Option<FileAnalysisSnapshot>;
-
-    // -------- Session view (explicit view threading) ----
-    //
-    // Returns a [`SessionView`](crate::session_view::SessionView) trait
-    // object over `&self`. Resolver-tier code that needs to observe
-    // host source / artifact state under a session context calls this
-    // method instead of poking at host accessors directly. The default
-    // impl (`VerterHost`) returns a `HostViewRef<'_>` boxed in a
-    // `Box<dyn SessionView + '_>` so the trait stays dyn-compatible.
-    //
-    // Overlay-aware sessions thread `OverlaidView`-shaped variants
-    // into the same surface so callers always read the view rather
-    // than the bare host.
-    //
-    // Binds R17 (sessions are views) and R18 (no thread-local view
-    // globals — the view is on the trait, passed explicitly).
-    //
-    // Consumed by
-    // [`VerterHost::try_component_meta_cache_hit`](crate::VerterHost)
-    // for the session-less warm fast path; session-bearing calls
-    // construct an `OverlaidViewRef` directly and call
-    // `get_component_meta_via_view`.
-    //
-    fn view(&self) -> Box<dyn crate::session_view::SessionView + '_>;
 
     // -------- Push-style fact-read tracer (cold-path only) ---------
     //
@@ -792,13 +764,6 @@ impl ResolverContext for crate::VerterHost {
         self.project_type_store().semantic_graph().node_data(node)
     }
 
-    // Cache validation -----------------------------------------------
-
-    #[inline]
-    fn validate_dep_signature(&self, signature: &DepSignature) -> bool {
-        crate::host_manage::dep_signature_valid_for_host(signature, self)
-    }
-
     // Component-meta-tier bridges ------------------------------------
 
     #[inline]
@@ -813,13 +778,6 @@ impl ResolverContext for crate::VerterHost {
     #[inline]
     fn get_raw_analysis_snapshot(&self, canonical: &str) -> Option<FileAnalysisSnapshot> {
         crate::VerterHost::get_raw_analysis_snapshot(self, canonical)
-    }
-
-    // Session view ----------------------------------------------------
-
-    #[inline]
-    fn view(&self) -> Box<dyn crate::session_view::SessionView + '_> {
-        Box::new(crate::session_view::HostViewRef::new(self))
     }
 
     // Fact tracer ----------------------------------------------------

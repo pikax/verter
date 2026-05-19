@@ -408,7 +408,7 @@ fn materialize_structure_unregister_preserves_fresh_admission() {
         MaterializationScope, MaterializeOutcome, MaterializeStructureCacheKey,
     };
     use crate::fact_signature_helpers::ReadSetSignature;
-    use crate::semantic_query::{DepVersion, ProjectionMode, SemanticNodeId};
+    use crate::semantic_query::{ProjectionMode, SemanticNodeId};
 
     // One shared content-free cache key — both the old entry and the
     // fresh winner key here.
@@ -424,19 +424,15 @@ fn materialize_structure_unregister_preserves_fresh_admission() {
     // (distinct content version) so the reverse-index `Arc::ptr_eq`
     // guard correctly tells the two apart.
     let make_entry = |canonical: &str, version: u8| {
-        let legacy: crate::semantic_query::DepSignature = Arc::from(
-            vec![(
-                Arc::<str>::from(canonical),
-                DepVersion::WholeHash([version; 16]),
-            )]
-            .into_boxed_slice(),
-        );
+        let facts: Arc<[crate::resolver_core::FactVersionRef]> =
+            Arc::from(vec![crate::resolver_core::FactVersionRef::FileWholeHash {
+                canonical_id: canonical.to_string(),
+                hash: [version; 16],
+            }]);
         MaterializeStructureEntry {
             outcome: MaterializeOutcome::Miss(SemanticNodeId(0)),
-            read_set_signature: ReadSetSignature::new(
-                crate::fact_signature_helpers::empty_fact_signature(),
-                legacy,
-            ),
+            read_set_signature: ReadSetSignature::new(facts),
+            dispatch_dep_signature: Arc::from(Vec::new()),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
             admission_seq: crate::bounded_query_retention::next_retention_seq(),
             validated_at_generation: 0,
@@ -500,7 +496,7 @@ fn materialize_structure_unregister_preserves_fresh_admission() {
 fn ref_cycle_unregister_preserves_fresh_admission() {
     use crate::component_meta_caches::{RefCycleEntry, RefCycleResultDb};
     use crate::fact_signature_helpers::ReadSetSignature;
-    use crate::semantic_query::{DeclIdentity, DepVersion, HashValue};
+    use crate::semantic_query::{DeclIdentity, HashValue};
 
     // One shared content-free cache key — both the old entry and the
     // fresh winner key here.
@@ -511,19 +507,15 @@ fn ref_cycle_unregister_preserves_fresh_admission() {
     };
 
     let make_entry = |canonical: &str, version: u8| {
-        let legacy: crate::semantic_query::DepSignature = Arc::from(
-            vec![(
-                Arc::<str>::from(canonical),
-                DepVersion::WholeHash([version; 16]),
-            )]
-            .into_boxed_slice(),
-        );
+        let facts: Arc<[crate::resolver_core::FactVersionRef]> =
+            Arc::from(vec![crate::resolver_core::FactVersionRef::FileWholeHash {
+                canonical_id: canonical.to_string(),
+                hash: [version; 16],
+            }]);
         RefCycleEntry {
             result: false,
-            read_set_signature: ReadSetSignature::new(
-                crate::fact_signature_helpers::empty_fact_signature(),
-                legacy,
-            ),
+            read_set_signature: ReadSetSignature::new(facts),
+            dispatch_dep_signature: Arc::from(Vec::new()),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
             admission_seq: crate::bounded_query_retention::next_retention_seq(),
             validated_at_generation: 0,
@@ -624,6 +616,7 @@ fn materialize_structure_invalidate_all_engages_gate_against_publish() {
         Arc::new(MaterializeStructureEntry {
             outcome: MaterializeOutcome::Miss(SemanticNodeId(0)),
             read_set_signature: ReadSetSignature::empty(),
+            dispatch_dep_signature: Arc::from(Vec::new()),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
             admission_seq: crate::bounded_query_retention::next_retention_seq(),
             validated_at_generation: 0,
@@ -687,6 +680,7 @@ fn ref_cycle_invalidate_all_engages_gate_against_publish() {
         Arc::new(RefCycleEntry {
             result: false,
             read_set_signature: ReadSetSignature::empty(),
+            dispatch_dep_signature: Arc::from(Vec::new()),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
             admission_seq: crate::bounded_query_retention::next_retention_seq(),
             validated_at_generation: 0,
@@ -750,7 +744,7 @@ fn materialize_structure_budget_eviction_prunes_empty_reverse_index_shards() {
         MaterializationScope, MaterializeOutcome, MaterializeStructureCacheKey,
     };
     use crate::fact_signature_helpers::ReadSetSignature;
-    use crate::semantic_query::{DepVersion, ProjectionMode, SemanticNodeId};
+    use crate::semantic_query::{ProjectionMode, SemanticNodeId};
 
     // Budget cap 2 — past 2 admissions the oldest is FIFO-evicted.
     let db = MaterializeStructureDb::new_with_budget_for_test(2);
@@ -765,19 +759,15 @@ fn materialize_structure_budget_eviction_prunes_empty_reverse_index_shards() {
             scope_axis: MaterializationScope::TopLevel,
             mode: ProjectionMode::Shallow,
         };
-        let legacy: crate::semantic_query::DepSignature = Arc::from(
-            vec![(
-                Arc::<str>::from(format!("/w/dist{i}.ts").as_str()),
-                DepVersion::WholeHash([1u8; 16]),
-            )]
-            .into_boxed_slice(),
-        );
+        let facts: Arc<[crate::resolver_core::FactVersionRef]> =
+            Arc::from(vec![crate::resolver_core::FactVersionRef::FileWholeHash {
+                canonical_id: format!("/w/dist{i}.ts"),
+                hash: [1u8; 16],
+            }]);
         let entry = Arc::new(MaterializeStructureEntry {
             outcome: MaterializeOutcome::Miss(SemanticNodeId(0)),
-            read_set_signature: ReadSetSignature::new(
-                crate::fact_signature_helpers::empty_fact_signature(),
-                legacy,
-            ),
+            read_set_signature: ReadSetSignature::new(facts),
+            dispatch_dep_signature: Arc::from(Vec::new()),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
             admission_seq: crate::bounded_query_retention::next_retention_seq(),
             validated_at_generation: 0,
@@ -815,7 +805,7 @@ fn materialize_structure_budget_eviction_prunes_empty_reverse_index_shards() {
 fn ref_cycle_budget_eviction_prunes_empty_reverse_index_shards() {
     use crate::component_meta_caches::{RefCycleEntry, RefCycleResultDb};
     use crate::fact_signature_helpers::ReadSetSignature;
-    use crate::semantic_query::{DeclIdentity, DepVersion, HashValue};
+    use crate::semantic_query::{DeclIdentity, HashValue};
 
     let db = RefCycleResultDb::new_with_budget_for_test(2);
     let total = 12usize;
@@ -825,19 +815,15 @@ fn ref_cycle_budget_eviction_prunes_empty_reverse_index_shards() {
             whole_hash: HashValue::default(),
             decl_name: Arc::from(format!("Helper{i}").as_str()),
         };
-        let legacy: crate::semantic_query::DepSignature = Arc::from(
-            vec![(
-                Arc::<str>::from(format!("/w/dist{i}.ts").as_str()),
-                DepVersion::WholeHash([1u8; 16]),
-            )]
-            .into_boxed_slice(),
-        );
+        let facts: Arc<[crate::resolver_core::FactVersionRef]> =
+            Arc::from(vec![crate::resolver_core::FactVersionRef::FileWholeHash {
+                canonical_id: format!("/w/dist{i}.ts"),
+                hash: [1u8; 16],
+            }]);
         let entry = Arc::new(RefCycleEntry {
             result: false,
-            read_set_signature: ReadSetSignature::new(
-                crate::fact_signature_helpers::empty_fact_signature(),
-                legacy,
-            ),
+            read_set_signature: ReadSetSignature::new(facts),
+            dispatch_dep_signature: Arc::from(Vec::new()),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
             admission_seq: crate::bounded_query_retention::next_retention_seq(),
             validated_at_generation: 0,
@@ -903,7 +889,7 @@ fn materialize_structure_budget_victim_eviction_is_admission_seq_scoped() {
         MaterializationScope, MaterializeOutcome, MaterializeStructureCacheKey,
     };
     use crate::fact_signature_helpers::ReadSetSignature;
-    use crate::semantic_query::{DepVersion, ProjectionMode, SemanticNodeId};
+    use crate::semantic_query::{ProjectionMode, SemanticNodeId};
     use std::sync::Barrier;
     use std::thread;
 
@@ -915,24 +901,20 @@ fn materialize_structure_budget_victim_eviction_is_admission_seq_scoped() {
         scope_axis: MaterializationScope::TopLevel,
         mode: ProjectionMode::Shallow,
     };
-    // Each entry carries a DISTINCT canonical on its legacy rail and a
+    // Each entry carries a DISTINCT canonical on its fact rail and a
     // freshly-allocated `admission_seq`, so the two entries that share
     // `key_for(0)` (the old victim and the fresh re-publish) are told
     // apart by seq.
     let make_entry = |canonical: &str, version: u8| {
-        let legacy: crate::semantic_query::DepSignature = Arc::from(
-            vec![(
-                Arc::<str>::from(canonical),
-                DepVersion::WholeHash([version; 16]),
-            )]
-            .into_boxed_slice(),
-        );
+        let facts: Arc<[crate::resolver_core::FactVersionRef]> =
+            Arc::from(vec![crate::resolver_core::FactVersionRef::FileWholeHash {
+                canonical_id: canonical.to_string(),
+                hash: [version; 16],
+            }]);
         MaterializeStructureEntry {
             outcome: MaterializeOutcome::Miss(SemanticNodeId(0)),
-            read_set_signature: ReadSetSignature::new(
-                crate::fact_signature_helpers::empty_fact_signature(),
-                legacy,
-            ),
+            read_set_signature: ReadSetSignature::new(facts),
+            dispatch_dep_signature: Arc::from(Vec::new()),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
             admission_seq: crate::bounded_query_retention::next_retention_seq(),
             validated_at_generation: 0,
@@ -1071,7 +1053,7 @@ fn materialize_structure_invalidate_for_canonical_prunes_fact_only_reverse_index
     };
     use crate::fact_signature_helpers::ReadSetSignature;
     use crate::resolver_core::FactVersionRef;
-    use crate::semantic_query::{DepVersion, ProjectionMode, SemanticNodeId};
+    use crate::semantic_query::{ProjectionMode, SemanticNodeId};
 
     let key = MaterializeStructureCacheKey {
         scope_canonical_id: Arc::from("/owner.ts"),
@@ -1080,26 +1062,24 @@ fn materialize_structure_invalidate_for_canonical_prunes_fact_only_reverse_index
         mode: ProjectionMode::Shallow,
     };
 
-    // The carrier carries TWO rails naming TWO distinct canonicals:
-    //  - legacy `DepSignature` rail names canonical A (`/dep-a.ts`)
-    //  - fact rail names canonical B (`/dep-b.ts`) — a fact-ONLY
-    //    dependency, absent from the legacy rail.
-    // `register_post_publish` loops `canonical_ids()` (the union of both
-    // rails) and registers one reverse-index shard per canonical.
-    let legacy: crate::semantic_query::DepSignature = Arc::from(
-        vec![(
-            Arc::<str>::from("/dep-a.ts"),
-            DepVersion::WholeHash([1u8; 16]),
-        )]
-        .into_boxed_slice(),
-    );
-    let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: "/dep-b.ts".to_string(),
-        hash: [2; 16],
-    }]);
+    // The carrier's fact rail names TWO distinct canonicals — A
+    // (`/dep-a.ts`) and B (`/dep-b.ts`). `register_post_publish` loops
+    // `canonical_ids()` (every canonical the fact rail names) and
+    // registers one reverse-index shard per canonical.
+    let facts: Arc<[FactVersionRef]> = Arc::from(vec![
+        FactVersionRef::FileWholeHash {
+            canonical_id: "/dep-a.ts".to_string(),
+            hash: [1u8; 16],
+        },
+        FactVersionRef::FileWholeHash {
+            canonical_id: "/dep-b.ts".to_string(),
+            hash: [2; 16],
+        },
+    ]);
     let entry = Arc::new(MaterializeStructureEntry {
         outcome: MaterializeOutcome::Miss(SemanticNodeId(0)),
-        read_set_signature: ReadSetSignature::new(facts, legacy),
+        read_set_signature: ReadSetSignature::new(facts),
+        dispatch_dep_signature: Arc::from(Vec::new()),
         self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
         admission_seq: crate::bounded_query_retention::next_retention_seq(),
         validated_at_generation: 0,
@@ -1113,9 +1093,9 @@ fn materialize_structure_invalidate_for_canonical_prunes_fact_only_reverse_index
     assert_eq!(
         db.canonical_to_keys_shard_count_for_test(),
         2,
-        "fixture invariant: the entry's carrier names canonical A (legacy \
-         rail) and canonical B (fact rail), so `register_post_publish` \
-         registers two reverse-index shards",
+        "fixture invariant: the entry's fact rail names canonical A and \
+         canonical B, so `register_post_publish` registers two \
+         reverse-index shards",
     );
     assert_eq!(
         db.live_counter_for_test(),
@@ -1128,8 +1108,8 @@ fn materialize_structure_invalidate_for_canonical_prunes_fact_only_reverse_index
         "fixture invariant: one admission is in the retention ledger",
     );
 
-    // Invalidate via canonical A — the legacy-rail dependency. The entry
-    // is removed (its legacy rail names A).
+    // Invalidate via canonical A. The entry is removed (its fact rail
+    // names A).
     db.invalidate_for_canonical("/dep-a.ts");
 
     assert!(
@@ -1141,15 +1121,10 @@ fn materialize_structure_invalidate_for_canonical_prunes_fact_only_reverse_index
         0,
         "LEAKED REVERSE-INDEX SHARD: `invalidate_for_canonical` removed \
          the entry via canonical A but left canonical B's reverse-index \
-         shard resident. B is a FACT-ONLY dependency — it appears in the \
-         carrier's fact rail but not its legacy `DepSignature` rail. A \
-         cross-canonical cleanup loop that iterates the legacy rail \
-         (`registered_sig.iter()`) never sees B, so its dead registration \
-         survives until B itself or the whole project is invalidated and \
-         the bounded reverse index grows with churn. The cleanup must \
-         iterate `read_set_signature.canonical_ids()` (the legacy + fact \
-         union) — exactly the set `register_post_publish` registered \
-         under — so every shard is pruned.",
+         shard resident. The cross-canonical cleanup must iterate \
+         `read_set_signature.canonical_ids()` — exactly the set \
+         `register_post_publish` registered under — so every shard the \
+         entry's fact rail named is pruned.",
     );
     // The other accounting dimensions stay net-exactly-one-decrement.
     assert_eq!(
@@ -1175,7 +1150,7 @@ fn ref_cycle_invalidate_for_canonical_prunes_fact_only_reverse_index_shard() {
     use crate::component_meta_caches::{RefCycleEntry, RefCycleResultDb};
     use crate::fact_signature_helpers::ReadSetSignature;
     use crate::resolver_core::FactVersionRef;
-    use crate::semantic_query::{DeclIdentity, DepVersion, HashValue};
+    use crate::semantic_query::{DeclIdentity, HashValue};
 
     let key = DeclIdentity {
         canonical_id: Arc::from("/owner.ts"),
@@ -1183,23 +1158,23 @@ fn ref_cycle_invalidate_for_canonical_prunes_fact_only_reverse_index_shard() {
         decl_name: Arc::from("RootHelper"),
     };
 
-    // Legacy rail names canonical A; fact rail names a distinct
-    // fact-ONLY canonical B. `register_post_publish` registers two
-    // reverse-index shards via the `canonical_ids()` union.
-    let legacy: crate::semantic_query::DepSignature = Arc::from(
-        vec![(
-            Arc::<str>::from("/dep-a.ts"),
-            DepVersion::WholeHash([1u8; 16]),
-        )]
-        .into_boxed_slice(),
-    );
-    let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: "/dep-b.ts".to_string(),
-        hash: [2; 16],
-    }]);
+    // The fact rail names TWO distinct canonicals — A and B.
+    // `register_post_publish` registers two reverse-index shards via
+    // the `canonical_ids()` set.
+    let facts: Arc<[FactVersionRef]> = Arc::from(vec![
+        FactVersionRef::FileWholeHash {
+            canonical_id: "/dep-a.ts".to_string(),
+            hash: [1u8; 16],
+        },
+        FactVersionRef::FileWholeHash {
+            canonical_id: "/dep-b.ts".to_string(),
+            hash: [2; 16],
+        },
+    ]);
     let entry = Arc::new(RefCycleEntry {
         result: false,
-        read_set_signature: ReadSetSignature::new(facts, legacy),
+        read_set_signature: ReadSetSignature::new(facts),
+        dispatch_dep_signature: Arc::from(Vec::new()),
         self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
         admission_seq: crate::bounded_query_retention::next_retention_seq(),
         validated_at_generation: 0,
@@ -1213,9 +1188,9 @@ fn ref_cycle_invalidate_for_canonical_prunes_fact_only_reverse_index_shard() {
     assert_eq!(
         db.canonical_to_keys_shard_count_for_test(),
         2,
-        "fixture invariant: the entry's carrier names canonical A (legacy \
-         rail) and canonical B (fact rail), so `register_post_publish` \
-         registers two reverse-index shards",
+        "fixture invariant: the entry's fact rail names canonical A and \
+         canonical B, so `register_post_publish` registers two \
+         reverse-index shards",
     );
     assert_eq!(
         db.live_counter_for_test(),
@@ -1228,7 +1203,7 @@ fn ref_cycle_invalidate_for_canonical_prunes_fact_only_reverse_index_shard() {
         "fixture invariant: one admission is in the retention ledger",
     );
 
-    // Invalidate via canonical A — the legacy-rail dependency.
+    // Invalidate via canonical A.
     db.invalidate_for_canonical("/dep-a.ts");
 
     assert!(

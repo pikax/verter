@@ -56,10 +56,7 @@ fn component_meta_signature_carries_import_ref() {
 
     let entry: ComponentMetaResultEntry<u32> = ComponentMetaResultEntry {
         payload: Arc::new(0u32),
-        read_set_signature: ReadSetSignature::new(
-            Arc::clone(&signature),
-            Arc::from(Vec::new().into_boxed_slice()),
-        ),
+        read_set_signature: ReadSetSignature::new(Arc::clone(&signature)),
     };
     assert!(
         !entry.read_set_signature.facts.is_empty(),

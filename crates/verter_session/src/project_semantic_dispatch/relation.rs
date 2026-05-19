@@ -138,11 +138,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self_root_canonicals.push(std::sync::Arc::clone(canonical));
             }
         }
-        if let Some(carrier) = crate::semantic_query_memo::semantic_graph_read_set_signature(
-            &observed_self_roots,
-            &[],
-            &fence,
-        ) {
+        if let Some(carrier) =
+            crate::semantic_query_memo::semantic_graph_read_set_signature(&observed_self_roots, &[])
+        {
             graph.insert_relation(
                 source,
                 target,

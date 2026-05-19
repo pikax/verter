@@ -496,14 +496,13 @@ fn finish_materialize_admission(
             },
         );
     }
-    let legacy = dep_signature_from_fence(local_fence.clone());
+    let dispatch_dep_signature = dep_signature_from_fence(local_fence.clone());
     match materialize_structure_read_set(&local_fence, base_origin_self_root) {
         Some((facts, self_root_canonicals)) => {
             crate::cooperative_admission::ComputeAdmission::Cacheable(MaterializeStructureEntry {
                 outcome,
-                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
-                    facts, legacy,
-                ),
+                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(facts),
+                dispatch_dep_signature,
                 self_root_canonicals,
                 admission_seq: crate::bounded_query_retention::next_retention_seq(),
                 validated_at_generation,
@@ -1272,11 +1271,13 @@ pub(crate) fn materialize_component_meta_structure(
                                 &fact_dep_signature,
                             ) {
                                 Some(merged) => {
-                                    let legacy =
-                                        Arc::clone(&entry.read_set_signature.legacy);
+                                    // Re-build the fact carrier with the
+                                    // merged traced facts. The entry's
+                                    // `dispatch_dep_signature` is the
+                                    // dispatch-return rail — untouched.
                                     entry.read_set_signature =
                                         crate::fact_signature_helpers::ReadSetSignature::new(
-                                            merged, legacy,
+                                            merged,
                                         );
                                     crate::cooperative_admission::ComputeAdmission::Cacheable(
                                         entry,
@@ -1347,7 +1348,7 @@ pub(crate) fn materialize_component_meta_structure(
                 entry.read_set_signature.bubble(ctx);
                 Some(crate::semantic_query::CacheRead {
                     value: entry.outcome.clone(),
-                    dep_signature: Arc::clone(&entry.read_set_signature.legacy),
+                    dep_signature: Arc::clone(&entry.dispatch_dep_signature),
                     walker_diagnostics: Arc::from([]),
                     cache_suppress: false,
                 })
@@ -1360,7 +1361,7 @@ pub(crate) fn materialize_component_meta_structure(
             entry.read_set_signature.bubble(ctx);
             crate::semantic_query::CacheRead {
                 value: entry.outcome.clone(),
-                dep_signature: Arc::clone(&entry.read_set_signature.legacy),
+                dep_signature: Arc::clone(&entry.dispatch_dep_signature),
                 walker_diagnostics: Arc::from([]),
                 cache_suppress: false,
             }
@@ -2565,23 +2566,30 @@ export type C<T> = A<T>
         };
         // First materialisation populates the cache.
         let _ = materialize_component_meta_structure(host, key.clone());
-        // Mutate /types.ts so the prior dep_signature becomes stale.
+        // Mutate /types.ts so the prior entry's fact carrier becomes
+        // stale.
         project
             .upsert_base("/types.ts", "export type Foo = { x: number; y: string }")
             .unwrap();
         // Peek again — the stale entry must be reaped, not returned.
-        let after_peek = host
-            .project_type_store()
-            .materialize_structure_db()
-            .peek(&key, host);
-        // Either None (stale entry was reaped) or Some(entry) where the
-        // entry's dep_signature is still valid (legitimate cache hit).
-        // We assert the cache invariant: peek never returns a stale entry.
-        if let Some(read) = after_peek {
-            // If we got Some, the dep_signature must be currently valid.
+        // We assert the cache invariant: peek never returns a stale
+        // entry. If `peek` still returns `Some`, the surviving entry's
+        // fact carrier MUST validate against the live store view (it
+        // would only survive if its `base`-origin self-root happened to
+        // be content-invariant under the edit).
+        let db = host.project_type_store().materialize_structure_db();
+        if db.peek(&key, host).is_some() {
+            let entry = db
+                .entries()
+                .get(&key)
+                .map(|e| e.clone())
+                .expect("entry present after a Some peek");
             assert!(
-                crate::host_manage::dep_signature_valid_for_host(&read.dep_signature, host,),
-                "peek returned a stale dep_signature — invariant violation"
+                entry
+                    .read_set_signature
+                    .validate_with_self_roots(host, &entry.self_root_canonicals),
+                "peek returned an entry whose fact carrier no longer validates — \
+                 invariant violation"
             );
         }
     }
@@ -2591,7 +2599,8 @@ export type C<T> = A<T>
     /// the other angle).
     #[test]
     fn materialize_orphan_entry_caught_on_next_peek() {
-        use crate::semantic_query::{DepVersion, ProjectionMode};
+        use crate::resolver_core::FactVersionRef;
+        use crate::semantic_query::ProjectionMode;
 
         let project = a0_make_project();
         project
@@ -2616,28 +2625,28 @@ export type C<T> = A<T>
             scope_axis: MaterializationScope::TopLevel,
             mode: ProjectionMode::Expanded,
         };
-        // Insert a stale orphan with a clearly-invalid dep_signature
-        // (an all-zero whole_hash for /types.ts that doesn't match the
-        // live whole_hash).
-        let stale_signature = StdArc::from(
-            vec![(
-                StdArc::<str>::from("/types.ts"),
-                DepVersion::WholeHash([0u8; 16]),
-            )]
+        // Insert a stale orphan whose fact carrier carries a self-root
+        // `FileWholeHash` for `/types.ts` with an all-zero hash that
+        // never matches the live whole-hash. `peek`'s strict
+        // `validate_with_self_roots` rejects the listed self-root.
+        let stale_carrier = crate::fact_signature_helpers::ReadSetSignature::new(StdArc::from(
+            vec![FactVersionRef::FileWholeHash {
+                canonical_id: "/types.ts".to_string(),
+                hash: [0u8; 16],
+            }]
             .into_boxed_slice(),
-        );
+        ));
         let stale_entry = StdArc::new(MaterializeStructureEntry {
             outcome: MaterializeOutcome::Value(decl_ref_node),
-            read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
-                crate::fact_signature_helpers::empty_fact_signature(),
-                stale_signature,
-            ),
-            // No self-roots on this synthetic stale entry — its
-            // staleness is carried by the legacy `DepSignature` rail
-            // (an all-zero whole hash for `/types.ts` that the live
-            // store view's real hash rejects via
-            // `validate_dep_signature`).
-            self_root_canonicals: StdArc::from(Vec::<StdArc<str>>::new()),
+            read_set_signature: stale_carrier,
+            // The dispatch-return signature is not a validity rail —
+            // staleness is carried by the fact carrier above.
+            dispatch_dep_signature: StdArc::from(Vec::new()),
+            // `/types.ts` listed as a self-root so the strict validator
+            // routes its `FileWholeHash` through
+            // `validates_self_root_whole_hash` and rejects the all-zero
+            // hash.
+            self_root_canonicals: StdArc::from(vec![StdArc::<str>::from("/types.ts")]),
             admission_seq: crate::bounded_query_retention::next_retention_seq(),
             // Current project generation — this entry's staleness is
             // exercised through the carrier rail, not the generation
@@ -2966,27 +2975,32 @@ export type C<T> = A<T>
         let host = project.host();
         let id = a0_make_decl_identity(host, "/types.ts", "Foo");
 
-        // Insert a synthetic entry whose dep_signature is stale (refs
-        // a canonical that does not exist in the host's
-        // FileArtifactStore). peek's slow-path will reject and remove.
-        let stale_signature: crate::semantic_query::DepSignature = std::sync::Arc::from(
-            vec![(
-                std::sync::Arc::<str>::from("/nonexistent.ts"),
-                crate::semantic_query::DepVersion::WholeHash([7u8; 16]),
-            )]
-            .into_boxed_slice(),
-        );
+        // Insert a synthetic entry whose fact carrier is stale: it
+        // carries a self-root `FileWholeHash` for `/nonexistent.ts`, a
+        // canonical the host's `FileArtifactStore` does not track. The
+        // strict `validate_with_self_roots` rejects an untracked
+        // self-root; peek's slow-path removes the entry.
+        let stale_carrier =
+            crate::fact_signature_helpers::ReadSetSignature::new(std::sync::Arc::from(
+                vec![crate::resolver_core::FactVersionRef::FileWholeHash {
+                    canonical_id: "/nonexistent.ts".to_string(),
+                    hash: [7u8; 16],
+                }]
+                .into_boxed_slice(),
+            ));
         let stale_entry = std::sync::Arc::new(crate::component_meta_caches::RefCycleEntry {
             result: false,
-            read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
-                crate::fact_signature_helpers::empty_fact_signature(),
-                stale_signature,
-            ),
-            // No self-roots on this synthetic stale entry — its
-            // staleness is carried by the legacy `DepSignature` rail
-            // (a whole-hash for `/nonexistent.ts`, a canonical the
-            // host's `FileArtifactStore` does not track).
-            self_root_canonicals: std::sync::Arc::from(Vec::<std::sync::Arc<str>>::new()),
+            read_set_signature: stale_carrier,
+            // The dispatch-return signature is not a validity rail —
+            // staleness is carried by the fact carrier above.
+            dispatch_dep_signature: std::sync::Arc::from(Vec::new()),
+            // `/nonexistent.ts` listed as a self-root so the strict
+            // validator routes its `FileWholeHash` through
+            // `validates_self_root_whole_hash`, which rejects an
+            // untracked self-root canonical.
+            self_root_canonicals: std::sync::Arc::from(vec![std::sync::Arc::<str>::from(
+                "/nonexistent.ts",
+            )]),
             admission_seq: crate::bounded_query_retention::next_retention_seq(),
             // Current project generation — this entry's staleness is
             // exercised through the carrier rail, not the generation
@@ -3003,13 +3017,13 @@ export type C<T> = A<T>
         );
 
         // Peek must return None (entry is stale). Every peek validates
-        // the carrier strictly — `validate_dep_signature` rejects the
-        // legacy rail's whole-hash on a nonexistent canonical; peek
-        // removes the entry.
+        // the carrier strictly — the self-root `FileWholeHash` for the
+        // untracked `/nonexistent.ts` fails `validates_self_root_whole_hash`;
+        // peek removes the entry.
         let peek_result = db.peek(&id, host);
         assert!(
             peek_result.is_none(),
-            "stale entry (dep_signature references nonexistent canonical) must be reaped"
+            "stale entry (fact carrier references nonexistent canonical) must be reaped"
         );
 
         let live_after = db.live_counter_for_test();
@@ -3239,7 +3253,7 @@ export type C<T> = A<T>
                     {
                         Some(CacheRead {
                             value: entry.outcome.clone(),
-                            dep_signature: StdArc::clone(&entry.read_set_signature.legacy),
+                            dep_signature: StdArc::clone(&entry.dispatch_dep_signature),
                             walker_diagnostics: StdArc::from([]),
                             cache_suppress: false,
                         })
@@ -3255,6 +3269,7 @@ export type C<T> = A<T>
                             outcome: entry_outcome.clone(),
                             read_set_signature:
                                 crate::fact_signature_helpers::ReadSetSignature::empty(),
+                            dispatch_dep_signature: StdArc::from(Vec::new()),
                             self_root_canonicals: StdArc::from(Vec::<StdArc<str>>::new()),
                             admission_seq: crate::bounded_query_retention::next_retention_seq(),
                             validated_at_generation,
@@ -3264,7 +3279,7 @@ export type C<T> = A<T>
                 // project.
                 |entry: &MaterializeStructureEntry| CacheRead {
                     value: entry.outcome.clone(),
-                    dep_signature: StdArc::clone(&entry.read_set_signature.legacy),
+                    dep_signature: StdArc::clone(&entry.dispatch_dep_signature),
                     walker_diagnostics: StdArc::from([]),
                     cache_suppress: false,
                 },
@@ -3410,7 +3425,7 @@ export type C<T> = A<T>
                     {
                         Some(CacheRead {
                             value: entry.result,
-                            dep_signature: StdArc::clone(&entry.read_set_signature.legacy),
+                            dep_signature: StdArc::clone(&entry.dispatch_dep_signature),
                             walker_diagnostics: StdArc::from([]),
                             cache_suppress: false,
                         })
@@ -3423,6 +3438,7 @@ export type C<T> = A<T>
                         result: false,
                         read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(
                         ),
+                        dispatch_dep_signature: StdArc::from(Vec::new()),
                         self_root_canonicals: StdArc::from(Vec::<StdArc<str>>::new()),
                         admission_seq: crate::bounded_query_retention::next_retention_seq(),
                         validated_at_generation,
@@ -3430,7 +3446,7 @@ export type C<T> = A<T>
                 },
                 |entry: &RefCycleEntry| CacheRead {
                     value: entry.result,
-                    dep_signature: StdArc::clone(&entry.read_set_signature.legacy),
+                    dep_signature: StdArc::clone(&entry.dispatch_dep_signature),
                     walker_diagnostics: StdArc::from([]),
                     cache_suppress: false,
                 },
@@ -3526,6 +3542,7 @@ export type C<T> = A<T>
         let entry = StdArc::new(MaterializeStructureEntry {
             outcome: MaterializeOutcome::Miss(SemanticNodeId(0)),
             read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+            dispatch_dep_signature: StdArc::from(Vec::new()),
             self_root_canonicals: StdArc::from(Vec::<StdArc<str>>::new()),
             admission_seq: crate::bounded_query_retention::next_retention_seq(),
             validated_at_generation: gen0,
@@ -3585,6 +3602,7 @@ export type C<T> = A<T>
         let entry = StdArc::new(RefCycleEntry {
             result: true,
             read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+            dispatch_dep_signature: StdArc::from(Vec::new()),
             self_root_canonicals: StdArc::from(Vec::<StdArc<str>>::new()),
             admission_seq: crate::bounded_query_retention::next_retention_seq(),
             validated_at_generation: gen0,

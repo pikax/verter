@@ -17,16 +17,24 @@ use crate::semantic_query::{
 #[derive(Clone)]
 pub(super) struct MemoEntry {
     pub(super) result: QueryResult<SemanticNodeId>,
-    /// Carrier holding both the legacy whole-hash `DepSignature` and
-    /// the path-precise R28 fact signature for this entry. Warm-hit
-    /// reads validate the carrier against the live store view —
-    /// validating every [`Self::self_root_canonicals`] entry's
-    /// `FileWholeHash` *strictly* — BEFORE bubbling the carrier's
-    /// observations (see [`MemoEntry::validate`]). The unified reverse
-    /// index registers under every canonical yielded by
-    /// `read_set_signature.canonical_ids()` so `invalidate_canonical`
-    /// drains both legacy- and fact-only deps.
+    /// Carrier holding the path-precise R28 fact signature for this
+    /// entry — the sole cache-validity rail. Warm-hit reads validate
+    /// the carrier against the live store view — validating every
+    /// [`Self::self_root_canonicals`] entry's `FileWholeHash`
+    /// *strictly* — BEFORE bubbling the carrier's observations (see
+    /// [`MemoEntry::validate`]). The reverse index registers under
+    /// every canonical yielded by `read_set_signature.canonical_ids()`
+    /// so `invalidate_canonical` drains every fact dependency.
     pub(super) read_set_signature: ReadSetSignature,
+    /// The cold build's dispatch-return signature — the
+    /// `QueryBuildOutput.dep_signature` the build produced. NOT a
+    /// cache-validity rail (the carrier above is the sole validity
+    /// oracle); it is the transitive-dependency payload a warm hit
+    /// returns on `CacheRead.dep_signature` so the component-meta
+    /// dispatch accumulator folds the warm sub-query's deps into the
+    /// owner's `fact_versions`. Validity is decided exclusively by
+    /// `read_set_signature` / `self_root_canonicals`.
+    pub(super) dispatch_dep_signature: DepSignature,
     /// The entry's **self-root canonicals** — the keyed canonical(s) the
     /// cold build's value depends on for its own identity (its keyed
     /// canonical for `ResolveDecl` / `TypeOf` / `Instantiate` /
@@ -429,23 +437,12 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
     }
 }
 
-/// Returns `true` iff `sig` contains a dep-record that names `canonical_id`.
-/// The single invalidation authority in B3: `invalidate_canonical` walks
-/// every populated slot's stored dep-signature and evicts those whose
-/// signature references the changed canonical. No structural short-cut on
-/// family-key shape — the dep-sig is the only truth.
-pub(super) fn dep_signature_references_canonical(sig: &DepSignature, canonical_id: &str) -> bool {
-    sig.iter()
-        .any(|(canonical, _)| canonical.as_ref() == canonical_id)
-}
-
 /// Returns true iff any [`crate::resolver_core::FactVersionRef`] in
 /// `facts` carries `canonical_id` as its referenced canonical. Used by
 /// `invalidate_canonical` to discriminate entries whose path-precise
-/// fact signature references `canonical_id` even when the legacy
-/// `DepSignature` does not. The unified reverse index (carrier-aware)
-/// registers under both rails' canonicals, so this predicate is the
-/// fact-side complement of [`dep_signature_references_canonical`].
+/// fact signature references `canonical_id`. The reverse index
+/// registers under every canonical the fact rail names, so this
+/// predicate is the fact-rail membership check the drain falls back to.
 pub(super) fn carrier_facts_reference_canonical(
     facts: &[crate::resolver_core::FactVersionRef],
     canonical_id: &str,

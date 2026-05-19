@@ -5249,7 +5249,8 @@ fn materialize_structure_db_planted_untracked_self_root_rejects_warm_entry() {
     }]);
     let planted = Arc::new(MaterializeStructureEntry {
         outcome: MaterializeOutcome::Value(base),
-        read_set_signature: crate::fact_signature_helpers::ReadSetSignature::facts_only(facts),
+        read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(facts),
+        dispatch_dep_signature: std::sync::Arc::from(Vec::new()),
         self_root_canonicals: planted_self_root_canonicals(scope),
         admission_seq: crate::bounded_query_retention::next_retention_seq(),
         // Live project generation — this test exercises the carrier's
@@ -5662,7 +5663,8 @@ fn ref_cycle_db_untracked_self_root_rejects_warm_entry() {
     }]);
     let planted = Arc::new(RefCycleEntry {
         result: true,
-        read_set_signature: crate::fact_signature_helpers::ReadSetSignature::facts_only(facts),
+        read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(facts),
+        dispatch_dep_signature: std::sync::Arc::from(Vec::new()),
         self_root_canonicals: planted_self_root_canonicals(root),
         admission_seq: crate::bounded_query_retention::next_retention_seq(),
         // Live project generation — this test exercises the carrier's
@@ -6251,10 +6253,8 @@ fn materialize_structure_peek_stale_reap_cleans_every_reverse_index_shard() {
     let generation_at_compute = host.project_type_store().current_project_generation();
     let entry = Arc::new(MaterializeStructureEntry {
         outcome: MaterializeOutcome::Miss(SemanticNodeId(0)),
-        read_set_signature: ReadSetSignature::new(
-            facts,
-            Arc::from(Vec::<(Arc<str>, crate::semantic_query::DepVersion)>::new()),
-        ),
+        read_set_signature: ReadSetSignature::new(facts),
+        dispatch_dep_signature: Arc::from(Vec::new()),
         self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
         admission_seq: crate::bounded_query_retention::next_retention_seq(),
         validated_at_generation: generation_at_compute,
@@ -6345,10 +6345,8 @@ fn ref_cycle_peek_stale_reap_cleans_every_reverse_index_shard() {
     let generation_at_compute = host.project_type_store().current_project_generation();
     let entry = Arc::new(RefCycleEntry {
         result: false,
-        read_set_signature: ReadSetSignature::new(
-            facts,
-            Arc::from(Vec::<(Arc<str>, crate::semantic_query::DepVersion)>::new()),
-        ),
+        read_set_signature: ReadSetSignature::new(facts),
+        dispatch_dep_signature: Arc::from(Vec::new()),
         self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
         admission_seq: crate::bounded_query_retention::next_retention_seq(),
         validated_at_generation: generation_at_compute,

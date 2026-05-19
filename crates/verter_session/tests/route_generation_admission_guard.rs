@@ -138,7 +138,7 @@ struct Producer {
 }
 
 /// The full producer roster — explicit per-producer classification.
-fn producers() -> [Producer; 6] {
+fn producers() -> [Producer; 5] {
     [
         // The 5 ENTRY PRODUCERS — each builds a shared-cache admission
         // carrier and MUST abort the whole entry on `RouteGeneration`.
@@ -155,11 +155,6 @@ fn producers() -> [Producer; 6] {
         Producer {
             file: "component_meta_caches.rs",
             signature: "pub(crate) fn ref_cycle_db_get_or_compute<C>(",
-            kind: ProducerKind::EntryProducer,
-        },
-        Producer {
-            file: "semantic_query_memo/mod.rs",
-            signature: "pub(crate) fn semantic_graph_read_set_signature(",
             kind: ProducerKind::EntryProducer,
         },
         Producer {

@@ -317,20 +317,21 @@ where
         bindings.insert(local_name, binding);
     }
 
-    // Stable order so the dep signature is deterministic for downstream
-    // validation.
+    // Stable order so the fact signature is deterministic for
+    // downstream validation.
     sig_entries.sort_by(|a, b| a.0.cmp(&b.0));
     sig_entries.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
 
-    let dep_signature: DepSignature = Arc::from(sig_entries.into_boxed_slice());
+    let owner_target_fence: DepSignature = Arc::from(sig_entries.into_boxed_slice());
 
-    // Path-precise fact_dep_signature: start from the legacy-shape
-    // dep_signature conversion (owner + final-target whole hashes)
-    // and append every chain fact observed by the producer.
-    // De-duplicate so the same `FactVersionRef` does not appear
-    // twice when fast-path + route-walk both emit it.
+    // Path-precise fact signature: start from the owner + final-target
+    // whole-hash facts (`fact_signature_from_fence` lowers the
+    // `owner_target_fence` whole-hash entries into `FileWholeHash`
+    // facts) and append every chain fact observed by the producer.
+    // De-duplicate so the same `FactVersionRef` does not appear twice
+    // when fast-path + route-walk both emit it.
     //
-    // `dep_signature` here is built entirely from `DepVersion::WholeHash`
+    // `owner_target_fence` is built entirely from `DepVersion::WholeHash`
     // entries (the loop above pushes only `WholeHash`, and the owner
     // seed is a `WholeHash`), so `fact_signature_from_fence` — which
     // refuses ONLY on a `RouteGeneration` entry — always yields `Some`.
@@ -340,9 +341,9 @@ where
     // an unrooted `OwnerImportSurface` cache entry that warm validation
     // could never invalidate.
     let base_facts =
-        crate::component_meta_materialize::fact_signature_from_fence(dep_signature.as_ref())
+        crate::component_meta_materialize::fact_signature_from_fence(owner_target_fence.as_ref())
             .expect(
-                "OwnerImportSurface dep_signature is built exclusively from \
+                "OwnerImportSurface owner_target_fence is built exclusively from \
                  DepVersion::WholeHash entries, so fact_signature_from_fence — which \
                  refuses only on RouteGeneration — must yield Some",
             );
@@ -363,7 +364,6 @@ where
         bindings: Arc::new(bindings),
         read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
             fact_dep_signature,
-            dep_signature,
         ),
     })
 }
@@ -420,32 +420,46 @@ mod tests {
     }
 
     #[test]
-    fn dep_signature_includes_owner_and_known_targets() {
+    fn fact_signature_includes_owner_and_known_targets() {
+        use crate::resolver_core::FactVersionRef;
         let surface = mk_surface([7u8; 16]);
-        // Owner + Foo (known hash); Bar has no hash and is not included.
-        let signed: Vec<_> = surface
+        // Owner + Foo (known hash) become `FileWholeHash` facts; Bar has
+        // no hash and is not included.
+        let owner_target_facts: Vec<&FactVersionRef> = surface
             .read_set_signature
-            .legacy
+            .facts
             .iter()
-            .map(|(c, v)| (c.as_ref().to_string(), v.clone()))
+            .filter(|f| matches!(f, FactVersionRef::FileWholeHash { .. }))
             .collect();
-        assert_eq!(signed.len(), 2);
-        assert!(signed
-            .iter()
-            .any(|(c, v)| c == "/w/owner.ts"
-                && matches!(v, DepVersion::WholeHash(h) if *h == [7u8; 16])));
-        assert!(signed
-            .iter()
-            .any(|(c, v)| c == "/w/foo.ts"
-                && matches!(v, DepVersion::WholeHash(h) if *h == [1u8; 16])));
+        assert_eq!(owner_target_facts.len(), 2);
+        assert!(owner_target_facts.iter().any(|f| matches!(
+            f,
+            FactVersionRef::FileWholeHash { canonical_id, hash }
+                if canonical_id == "/w/owner.ts" && *hash == [7u8; 16]
+        )));
+        assert!(owner_target_facts.iter().any(|f| matches!(
+            f,
+            FactVersionRef::FileWholeHash { canonical_id, hash }
+                if canonical_id == "/w/foo.ts" && *hash == [1u8; 16]
+        )));
     }
 
     #[test]
     fn empty_imports_produces_owner_only_signature() {
+        use crate::resolver_core::FactVersionRef;
         let surface =
             build_owner_import_surface(Arc::from("/w/o.ts"), [1u8; 16], vec![], Vec::new());
         assert_eq!(surface.bindings.len(), 0);
-        assert_eq!(surface.read_set_signature.legacy.len(), 1);
-        assert_eq!(surface.read_set_signature.legacy[0].0.as_ref(), "/w/o.ts");
+        let owner_target_facts: Vec<&FactVersionRef> = surface
+            .read_set_signature
+            .facts
+            .iter()
+            .filter(|f| matches!(f, FactVersionRef::FileWholeHash { .. }))
+            .collect();
+        assert_eq!(owner_target_facts.len(), 1);
+        assert!(matches!(
+            owner_target_facts[0],
+            FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == "/w/o.ts"
+        ));
     }
 }

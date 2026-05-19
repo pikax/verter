@@ -3733,7 +3733,6 @@ mod foundations_guards {
         // ─── B-C5 territory (separate ownership), kept `pub` ────────
         "pub mod component_meta_resolution_policy",
         // ─── crate-private modules (already non-public) ─────────────
-        "pub(crate) mod completion_fence",
         // `tests/cross_owner_materialise_reuse.rs` needs the key types
         // (R7 cross-owner reuse).
         "pub mod component_meta_materialize",

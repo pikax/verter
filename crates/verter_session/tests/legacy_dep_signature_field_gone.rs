@@ -1,26 +1,27 @@
 //! Architecture guard — legacy `DepSignature` field on
 //! `ReadSetSignature` (and any other cache-carrier struct) is gone.
 //!
-//! The Block 6.B / 7 / 8 retirement removes the legacy
-//! `ReadSetSignature.legacy: DepSignature` field. The path-precise
-//! fact-tracer (`facts: Arc<[FactVersionRef]>`) is the sole
-//! cache-validity authority after the retirement; the bundled
-//! `DepSignature` cache-validity rail is dead.
+//! Cache validity is a single oracle: the path-precise fact-tracer
+//! signature `ReadSetSignature.facts: Arc<[FactVersionRef]>`. The
+//! bundled whole-hash / project-generation `DepSignature`
+//! cache-validity rail — once carried as `ReadSetSignature.legacy` —
+//! is retired. No cache-carrier struct may carry a public
+//! `DepSignature` field.
 //!
-//! `#[ignore]` reason: the field still exists at HEAD (commit
-//! `e79dbdb54`) and is actively consumed during the dual-emit
-//! migration window. Un-ignoring this test before Block 6.B+7+8
-//! land would fail — so the guard sits dormant until the retirement
-//! commit deletes the field, at which point the `#[ignore]` line
-//! is removed alongside the producer.
+//! This guard scans `crates/verter_session/src/**/*.rs` (production
+//! source) for any `pub <name>: DepSignature` field declaration
+//! inside a struct whose role is "cache carrier" — concretely, any
+//! struct named `ReadSetSignature` (the carrier type) or any
+//! per-cache entry struct with the suffix `*Entry` / `*CacheEntry` /
+//! `*Signature` / `*Snapshot`. Re-introduction of a public legacy
+//! `DepSignature` rail is a regression.
 //!
-//! When activated, this guard scans
-//! `crates/verter_session/src/**/*.rs` (production source) for any
-//! `pub <name>: DepSignature` field declaration inside a struct
-//! whose role is "cache carrier" — concretely, any struct named
-//! `ReadSetSignature` (the carrier type) or any per-cache entry
-//! struct with the suffix `*Entry` / `*CacheEntry` / `*Signature` /
-//! `*Snapshot`. Re-introduction of the legacy field is a regression.
+//! The dispatch-return signature relocated onto `MemoEntry` as a
+//! `pub(super)` field is intentionally NOT in scope: it is not a
+//! cache-validity rail, it is the dispatch accumulator's transitive
+//! input, and the guard targets the *public* validity rail only (a
+//! crate-private field is a separate, far smaller concern — see
+//! fixture C).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -174,20 +175,197 @@ fn format_violations(violations: &[Violation]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Production-tree guard (block-gated).
+// Legacy cache-validity-rail scanner — `validate_dep_signature` symbol
+// + `.legacy` field access.
+// ---------------------------------------------------------------------------
+
+/// One legacy cache-validity-rail reference in production source.
+#[derive(Debug)]
+struct RailHit {
+    file: PathBuf,
+    kind: &'static str,
+    detail: String,
+}
+
+impl std::fmt::Display for RailHit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: [{}] {}",
+            self.file.display(),
+            self.kind,
+            self.detail
+        )
+    }
+}
+
+/// Scans a production source file for two legacy-rail shapes that the
+/// `DepSignature` cache-validity retirement removes:
+///
+/// 1. The `validate_dep_signature` symbol — the legacy AND-gate
+///    validator — as a function/method definition OR a call site.
+/// 2. A `.legacy` field access — `<expr>.legacy` — the read of the
+///    retired `ReadSetSignature.legacy` cache-validity rail.
+///
+/// `#[cfg(test)]` regions are skipped so test scaffolding is exempt.
+struct RailScanner<'a> {
+    file: &'a Path,
+    cfg_test_depth: u32,
+    hits: &'a mut Vec<RailHit>,
+}
+
+impl<'ast> Visit<'ast> for RailScanner<'_> {
+    fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+        let entered = has_cfg_test_attr(&m.attrs) || m.ident == "tests";
+        if entered {
+            self.cfg_test_depth += 1;
+        }
+        syn::visit::visit_item_mod(self, m);
+        if entered {
+            self.cfg_test_depth -= 1;
+        }
+    }
+
+    fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+        let entered = has_cfg_test_attr(&f.attrs);
+        if entered {
+            self.cfg_test_depth += 1;
+        }
+        if self.cfg_test_depth == 0 && f.sig.ident == "validate_dep_signature" {
+            self.hits.push(RailHit {
+                file: self.file.to_path_buf(),
+                kind: "validate_dep_signature-def",
+                detail: "`fn validate_dep_signature(...)` -- legacy AND-gate validator".into(),
+            });
+        }
+        syn::visit::visit_item_fn(self, f);
+        if entered {
+            self.cfg_test_depth -= 1;
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+        let entered = has_cfg_test_attr(&f.attrs);
+        if entered {
+            self.cfg_test_depth += 1;
+        }
+        if self.cfg_test_depth == 0 && f.sig.ident == "validate_dep_signature" {
+            self.hits.push(RailHit {
+                file: self.file.to_path_buf(),
+                kind: "validate_dep_signature-def",
+                detail: "`fn validate_dep_signature(...)` -- legacy AND-gate validator (impl)"
+                    .into(),
+            });
+        }
+        syn::visit::visit_impl_item_fn(self, f);
+        if entered {
+            self.cfg_test_depth -= 1;
+        }
+    }
+
+    fn visit_trait_item_fn(&mut self, f: &'ast syn::TraitItemFn) {
+        if self.cfg_test_depth == 0 && f.sig.ident == "validate_dep_signature" {
+            self.hits.push(RailHit {
+                file: self.file.to_path_buf(),
+                kind: "validate_dep_signature-def",
+                detail: "`fn validate_dep_signature(...)` -- legacy AND-gate validator (trait)"
+                    .into(),
+            });
+        }
+        syn::visit::visit_trait_item_fn(self, f);
+    }
+
+    fn visit_expr_method_call(&mut self, c: &'ast syn::ExprMethodCall) {
+        if self.cfg_test_depth == 0 && c.method == "validate_dep_signature" {
+            self.hits.push(RailHit {
+                file: self.file.to_path_buf(),
+                kind: "validate_dep_signature-call",
+                detail: "`.validate_dep_signature(...)` -- legacy AND-gate validator call".into(),
+            });
+        }
+        syn::visit::visit_expr_method_call(self, c);
+    }
+
+    fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+        if self.cfg_test_depth == 0 {
+            if let syn::Expr::Path(p) = &*c.func {
+                if p.path
+                    .segments
+                    .last()
+                    .map(|s| s.ident == "validate_dep_signature")
+                    .unwrap_or(false)
+                {
+                    self.hits.push(RailHit {
+                        file: self.file.to_path_buf(),
+                        kind: "validate_dep_signature-call",
+                        detail: "`validate_dep_signature(...)` -- legacy AND-gate validator call"
+                            .into(),
+                    });
+                }
+            }
+        }
+        syn::visit::visit_expr_call(self, c);
+    }
+
+    fn visit_expr_field(&mut self, e: &'ast syn::ExprField) {
+        if self.cfg_test_depth == 0 {
+            if let syn::Member::Named(name) = &e.member {
+                if name == "legacy" {
+                    self.hits.push(RailHit {
+                        file: self.file.to_path_buf(),
+                        kind: "legacy-field-access",
+                        detail: "`<expr>.legacy` -- read of the retired cache-validity rail".into(),
+                    });
+                }
+            }
+        }
+        syn::visit::visit_expr_field(self, e);
+    }
+}
+
+/// `#[cfg(test)]` detection — token-scan the `cfg(...)` payload for the
+/// bare `test` identifier (mirrors the sibling guards).
+fn has_cfg_test_attr(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        if !a.path().is_ident("cfg") {
+            return false;
+        }
+        let rendered = match &a.meta {
+            syn::Meta::List(list) => list.tokens.to_string(),
+            _ => return false,
+        };
+        rendered
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .any(|t| t == "test")
+    })
+}
+
+fn scan_file_rails(path: &Path, hits: &mut Vec<RailHit>) {
+    let src =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    let parsed =
+        syn::parse_file(&src).unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e));
+    let mut scanner = RailScanner {
+        file: path,
+        cfg_test_depth: 0,
+        hits,
+    };
+    scanner.visit_file(&parsed);
+}
+
+// ---------------------------------------------------------------------------
+// Production-tree guards.
 // ---------------------------------------------------------------------------
 
 /// Legacy `DepSignature` field on `ReadSetSignature` (and any other
-/// cache-carrier struct) must be deleted.
+/// cache-carrier struct) is gone.
 ///
-/// Today the field still exists at HEAD; the producer wires
-/// `state.fact_versions` into the legacy rail during the dual-emit
-/// migration window. Block 6.B + 7 + 8 retire the legacy rail; this
-/// test stays `#[ignore]`'d until that lands. Once the field is
-/// deleted, the `#[ignore]` line above this test is removed and the
-/// guard activates.
+/// Cache validity collapsed to one oracle — the path-precise
+/// fact-tracer signature `ReadSetSignature.facts`. No cache-carrier
+/// struct (`ReadSetSignature` or any `*Entry` / `*CacheEntry` /
+/// `*Signature` / `*Snapshot`) may carry a public `DepSignature`
+/// field. Re-introducing one resurrects the retired bundled rail.
 #[test]
-#[ignore = "block-6.B+7+8 RED — closed by ReadSetSignature.legacy field deletion"]
 fn no_legacy_dep_signature_field_in_cache_carriers() {
     let crate_root = workspace_root().join("crates/verter_session/src");
     let mut violations = Vec::new();
@@ -196,14 +374,54 @@ fn no_legacy_dep_signature_field_in_cache_carriers() {
     }
     assert!(
         violations.is_empty(),
-        "Block 5 `legacy_dep_signature_field_gone` violation (gated):\n{}\n\n\
-         The legacy `DepSignature` field on cache-carrier structs is \n\
-         being retired in Block 6.B / 7 / 8. Once the dual-emit window \n\
-         closes, the `ReadSetSignature.legacy: DepSignature` field \n\
-         (and any equivalent) must be deleted. The path-precise \n\
-         fact-tracer (`facts: Arc<[FactVersionRef]>`) is the sole \n\
-         cache-validity authority.",
+        "`legacy_dep_signature_field_gone` violation:\n{}\n\n\
+         The bundled `DepSignature` cache-validity rail is retired. \n\
+         No cache-carrier struct may carry a public `DepSignature` \n\
+         field — the path-precise fact-tracer \n\
+         (`facts: Arc<[FactVersionRef]>`) is the sole cache-validity \n\
+         authority.",
         format_violations(&violations)
+    );
+}
+
+/// The legacy cache-validity rail — the `validate_dep_signature`
+/// AND-gate validator and every `.legacy` field read — is gone from
+/// production source.
+///
+/// `validate_dep_signature` was the bundled whole-hash /
+/// project-generation validator AND-gated alongside fact validation;
+/// `.legacy` was the `ReadSetSignature` field carrying that rail. Both
+/// are retired: fact validation (`validates_fact_signature` /
+/// `validate_with_self_roots` over `ReadSetSignature.facts`) is the
+/// sole cache-validity oracle. A re-introduced `validate_dep_signature`
+/// definition / call, or a `.legacy` read, is a regression.
+#[test]
+fn no_legacy_dep_signature_validation_rail_in_production() {
+    let crate_root = workspace_root().join("crates/verter_session/src");
+    let mut hits = Vec::new();
+    for file in walk_production_rs_files(&crate_root) {
+        scan_file_rails(&file, &mut hits);
+    }
+    let mut by_file: BTreeMap<&Path, Vec<&RailHit>> = BTreeMap::new();
+    for h in &hits {
+        by_file.entry(h.file.as_path()).or_default().push(h);
+    }
+    let mut rendered = Vec::new();
+    for (file, hs) in by_file {
+        rendered.push(format!("  {}", file.display()));
+        for h in hs {
+            rendered.push(format!("    [{}] {}", h.kind, h.detail));
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "`legacy_dep_signature_field_gone` validation-rail violation:\n{}\n\n\
+         The legacy `DepSignature` cache-validity rail is retired. \n\
+         Production cache code must not define or call \n\
+         `validate_dep_signature`, nor read a `.legacy` rail. Fact \n\
+         validation over `ReadSetSignature.facts` is the sole \n\
+         cache-validity oracle.",
+        rendered.join("\n")
     );
 }
 
@@ -303,4 +521,101 @@ fn scan_fixture_violations(src: &str) -> Vec<Violation> {
     };
     scanner.visit_file(&parsed);
     violations
+}
+
+/// Drive the validation-rail scanner against synthetic fixtures so
+/// `no_legacy_dep_signature_validation_rail_in_production` cannot pass
+/// trivially.
+#[test]
+fn rail_scanner_discriminating_property_fixtures() {
+    // Fixture A: free-function `validate_dep_signature` definition — REJECTED.
+    let a = r#"
+        fn validate_dep_signature(sig: &DepSignature) -> bool { sig.is_empty() }
+    "#;
+    assert!(
+        !scan_fixture_rails(a).is_empty(),
+        "rail scanner failed to flag a `validate_dep_signature` definition"
+    );
+
+    // Fixture B: trait-method `validate_dep_signature` — REJECTED.
+    let b = r#"
+        trait T {
+            fn validate_dep_signature(&self, sig: &DepSignature) -> bool;
+        }
+    "#;
+    assert!(
+        !scan_fixture_rails(b).is_empty(),
+        "rail scanner failed to flag a `validate_dep_signature` trait method"
+    );
+
+    // Fixture C: `.validate_dep_signature(...)` method call — REJECTED.
+    let c = r#"
+        fn caller(ctx: &dyn R) -> bool { ctx.validate_dep_signature(&sig) }
+    "#;
+    assert!(
+        !scan_fixture_rails(c).is_empty(),
+        "rail scanner failed to flag a `.validate_dep_signature(...)` call"
+    );
+
+    // Fixture D: `<expr>.legacy` field read — REJECTED.
+    let d = r#"
+        fn caller(entry: &E) -> usize { entry.read_set_signature.legacy.len() }
+    "#;
+    assert!(
+        !scan_fixture_rails(d).is_empty(),
+        "rail scanner failed to flag a `.legacy` field read"
+    );
+
+    // Fixture E: clean fact-only code — ACCEPTED.
+    let e = r#"
+        fn caller(entry: &E, ctx: &dyn R) -> bool {
+            entry.read_set_signature.validate_with_self_roots(ctx, &roots)
+        }
+    "#;
+    assert!(
+        scan_fixture_rails(e).is_empty(),
+        "rail scanner incorrectly flagged clean fact-only code: {:?}",
+        scan_fixture_rails(e)
+    );
+
+    // Fixture F: `#[cfg(test)] mod` containing both shapes — ACCEPTED
+    // (test scaffolding is exempt, mirroring the sibling guards).
+    let f = r#"
+        #[cfg(test)]
+        mod tests {
+            fn t(ctx: &dyn R, entry: &E) -> bool {
+                let _ = entry.read_set_signature.legacy.len();
+                ctx.validate_dep_signature(&sig)
+            }
+        }
+    "#;
+    assert!(
+        scan_fixture_rails(f).is_empty(),
+        "rail scanner incorrectly flagged a #[cfg(test)] mod body: {:?}",
+        scan_fixture_rails(f)
+    );
+
+    // Fixture G: an unrelated `.legacy_set` field — NOT matched (the
+    // guard keys on the exact member name `legacy`).
+    let g = r#"
+        fn caller(x: &X) -> usize { x.legacy_set.len() }
+    "#;
+    assert!(
+        scan_fixture_rails(g).is_empty(),
+        "rail scanner incorrectly flagged an unrelated `.legacy_set` field: {:?}",
+        scan_fixture_rails(g)
+    );
+}
+
+fn scan_fixture_rails(src: &str) -> Vec<RailHit> {
+    let parsed = syn::parse_file(src).expect("parse fixture");
+    let mut hits = Vec::new();
+    let fake_path = Path::new("<fixture>");
+    let mut scanner = RailScanner {
+        file: fake_path,
+        cfg_test_depth: 0,
+        hits: &mut hits,
+    };
+    scanner.visit_file(&parsed);
+    hits
 }

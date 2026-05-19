@@ -145,8 +145,7 @@ pub struct QueryBuildOutput {
     pub observed_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
     /// The completed self-version-rooted carrier for the published
     /// memo entry — built by the shared cold-build helper from
-    /// [`Self::observed_self_roots`], the traced fact set, and
-    /// [`Self::dep_signature`] via
+    /// [`Self::observed_self_roots`] and the traced fact set via
     /// [`crate::semantic_query_memo::semantic_graph_read_set_signature`].
     ///
     /// `None` BEFORE the shared cold-build helper post-processes the
