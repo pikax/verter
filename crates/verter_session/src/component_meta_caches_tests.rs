@@ -1031,3 +1031,233 @@ fn materialize_structure_budget_victim_eviction_is_admission_seq_scoped() {
          remain resident",
     );
 }
+
+// ===========================================================================
+// `invalidate_for_canonical` unregisters under the SAME canonical set
+// `register_post_publish` registered under (codex re-review #19).
+//
+// `register_post_publish` registers an entry under every canonical its
+// carrier references — `read_set_signature.canonical_ids()`, the UNION of
+// the legacy `DepSignature` rail and the fact rail. A cross-canonical
+// removal must therefore prune every one of those shards. When
+// `invalidate_for_canonical` removes an entry because ONE of its
+// canonicals was invalidated, its reverse-index cleanup must reach the
+// OTHER shards too — including any fact-only-dependency shard the legacy
+// rail does not name.
+//
+// The two tests below plant an entry whose carrier carries BOTH a legacy
+// rail naming canonical A AND a fact rail naming a distinct canonical B.
+// `register_post_publish` creates two reverse-index shards. Invalidating
+// via canonical A removes the entry; the test then asserts the fact-only
+// shard B is ALSO pruned — no dead registration survives.
+//
+// DISCRIMINATION: a cross-canonical cleanup loop that iterates the legacy
+// `DepSignature` rail (`registered_sig.iter()`) only ever sees canonical
+// A — it skips A itself and prunes nothing, so shard B lingers and
+// `canonical_to_keys_shard_count_for_test()` reads 1 (assertion FAILS). A
+// cleanup that iterates `canonical_ids()` (or delegates to
+// `unregister_post_publish`, which does) reaches B, empties its inner
+// map, and drops the outer shard — the count reads 0 (assertion PASSES).
+// ===========================================================================
+
+/// `MaterializeStructureDb::invalidate_for_canonical` prunes a fact-only
+/// dependency's reverse-index shard when it removes an entry via a
+/// different (legacy-rail) canonical.
+#[test]
+fn materialize_structure_invalidate_for_canonical_prunes_fact_only_reverse_index_shard() {
+    use crate::component_meta_caches::{MaterializeStructureDb, MaterializeStructureEntry};
+    use crate::component_meta_materialize::{
+        MaterializationScope, MaterializeOutcome, MaterializeStructureCacheKey,
+    };
+    use crate::fact_signature_helpers::ReadSetSignature;
+    use crate::resolver_core::FactVersionRef;
+    use crate::semantic_query::{DepVersion, ProjectionMode, SemanticNodeId};
+
+    let key = MaterializeStructureCacheKey {
+        scope_canonical_id: Arc::from("/owner.ts"),
+        base: SemanticNodeId(0),
+        scope_axis: MaterializationScope::TopLevel,
+        mode: ProjectionMode::Shallow,
+    };
+
+    // The carrier carries TWO rails naming TWO distinct canonicals:
+    //  - legacy `DepSignature` rail names canonical A (`/dep-a.ts`)
+    //  - fact rail names canonical B (`/dep-b.ts`) — a fact-ONLY
+    //    dependency, absent from the legacy rail.
+    // `register_post_publish` loops `canonical_ids()` (the union of both
+    // rails) and registers one reverse-index shard per canonical.
+    let legacy: crate::semantic_query::DepSignature = Arc::from(
+        vec![(
+            Arc::<str>::from("/dep-a.ts"),
+            DepVersion::WholeHash([1u8; 16]),
+        )]
+        .into_boxed_slice(),
+    );
+    let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
+        canonical_id: "/dep-b.ts".to_string(),
+        hash: [2; 16],
+    }]);
+    let entry = Arc::new(MaterializeStructureEntry {
+        outcome: MaterializeOutcome::Miss(SemanticNodeId(0)),
+        read_set_signature: ReadSetSignature::new(facts, legacy),
+        self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
+        admission_seq: crate::bounded_query_retention::next_retention_seq(),
+        validated_at_generation: 0,
+    });
+
+    let db = MaterializeStructureDb::new();
+    db.entries().insert(key.clone(), Arc::clone(&entry));
+    db.bump_live_counter();
+    db.register_post_publish(key.clone(), &entry.read_set_signature, entry.admission_seq);
+
+    assert_eq!(
+        db.canonical_to_keys_shard_count_for_test(),
+        2,
+        "fixture invariant: the entry's carrier names canonical A (legacy \
+         rail) and canonical B (fact rail), so `register_post_publish` \
+         registers two reverse-index shards",
+    );
+    assert_eq!(
+        db.live_counter_for_test(),
+        1,
+        "fixture invariant: one entry is live",
+    );
+    assert_eq!(
+        db.retention_tracked_len(),
+        1,
+        "fixture invariant: one admission is in the retention ledger",
+    );
+
+    // Invalidate via canonical A — the legacy-rail dependency. The entry
+    // is removed (its legacy rail names A).
+    db.invalidate_for_canonical("/dep-a.ts");
+
+    assert!(
+        db.entries().get(&key).is_none(),
+        "the entry depends on canonical A, so invalidating A removes it",
+    );
+    assert_eq!(
+        db.canonical_to_keys_shard_count_for_test(),
+        0,
+        "LEAKED REVERSE-INDEX SHARD: `invalidate_for_canonical` removed \
+         the entry via canonical A but left canonical B's reverse-index \
+         shard resident. B is a FACT-ONLY dependency — it appears in the \
+         carrier's fact rail but not its legacy `DepSignature` rail. A \
+         cross-canonical cleanup loop that iterates the legacy rail \
+         (`registered_sig.iter()`) never sees B, so its dead registration \
+         survives until B itself or the whole project is invalidated and \
+         the bounded reverse index grows with churn. The cleanup must \
+         iterate `read_set_signature.canonical_ids()` (the legacy + fact \
+         union) — exactly the set `register_post_publish` registered \
+         under — so every shard is pruned.",
+    );
+    // The other accounting dimensions stay net-exactly-one-decrement.
+    assert_eq!(
+        db.live_counter_for_test(),
+        0,
+        "`invalidate_for_canonical` must decrement `live_counter` exactly \
+         once for the one removed entry — not zero, not twice",
+    );
+    assert_eq!(
+        db.retention_tracked_len(),
+        0,
+        "`invalidate_for_canonical` must drop the removed entry's \
+         retention-ledger record exactly once (`forget_seq`)",
+    );
+}
+
+/// `RefCycleResultDb::invalidate_for_canonical` prunes a fact-only
+/// dependency's reverse-index shard when it removes an entry via a
+/// different (legacy-rail) canonical. Mirror of the
+/// `MaterializeStructureDb` test.
+#[test]
+fn ref_cycle_invalidate_for_canonical_prunes_fact_only_reverse_index_shard() {
+    use crate::component_meta_caches::{RefCycleEntry, RefCycleResultDb};
+    use crate::fact_signature_helpers::ReadSetSignature;
+    use crate::resolver_core::FactVersionRef;
+    use crate::semantic_query::{DeclIdentity, DepVersion, HashValue};
+
+    let key = DeclIdentity {
+        canonical_id: Arc::from("/owner.ts"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("RootHelper"),
+    };
+
+    // Legacy rail names canonical A; fact rail names a distinct
+    // fact-ONLY canonical B. `register_post_publish` registers two
+    // reverse-index shards via the `canonical_ids()` union.
+    let legacy: crate::semantic_query::DepSignature = Arc::from(
+        vec![(
+            Arc::<str>::from("/dep-a.ts"),
+            DepVersion::WholeHash([1u8; 16]),
+        )]
+        .into_boxed_slice(),
+    );
+    let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
+        canonical_id: "/dep-b.ts".to_string(),
+        hash: [2; 16],
+    }]);
+    let entry = Arc::new(RefCycleEntry {
+        result: false,
+        read_set_signature: ReadSetSignature::new(facts, legacy),
+        self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
+        admission_seq: crate::bounded_query_retention::next_retention_seq(),
+        validated_at_generation: 0,
+    });
+
+    let db = RefCycleResultDb::new();
+    db.entries().insert(key.clone(), Arc::clone(&entry));
+    db.bump_live_counter();
+    db.register_post_publish(key.clone(), &entry.read_set_signature, entry.admission_seq);
+
+    assert_eq!(
+        db.canonical_to_keys_shard_count_for_test(),
+        2,
+        "fixture invariant: the entry's carrier names canonical A (legacy \
+         rail) and canonical B (fact rail), so `register_post_publish` \
+         registers two reverse-index shards",
+    );
+    assert_eq!(
+        db.live_counter_for_test(),
+        1,
+        "fixture invariant: one entry is live",
+    );
+    assert_eq!(
+        db.retention_tracked_len(),
+        1,
+        "fixture invariant: one admission is in the retention ledger",
+    );
+
+    // Invalidate via canonical A — the legacy-rail dependency.
+    db.invalidate_for_canonical("/dep-a.ts");
+
+    assert!(
+        db.entries().get(&key).is_none(),
+        "the entry depends on canonical A, so invalidating A removes it",
+    );
+    assert_eq!(
+        db.canonical_to_keys_shard_count_for_test(),
+        0,
+        "LEAKED REVERSE-INDEX SHARD: `invalidate_for_canonical` removed \
+         the entry via canonical A but left canonical B's reverse-index \
+         shard resident. B is a FACT-ONLY dependency — present in the \
+         carrier's fact rail but not its legacy `DepSignature` rail. A \
+         cross-canonical cleanup loop iterating the legacy rail never \
+         reaches B, so its dead registration survives and the bounded \
+         reverse index grows with churn. The cleanup must iterate \
+         `read_set_signature.canonical_ids()` — the same legacy + fact \
+         union `register_post_publish` registered under.",
+    );
+    assert_eq!(
+        db.live_counter_for_test(),
+        0,
+        "`invalidate_for_canonical` must decrement `live_counter` exactly \
+         once for the one removed entry — not zero, not twice",
+    );
+    assert_eq!(
+        db.retention_tracked_len(),
+        0,
+        "`invalidate_for_canonical` must drop the removed entry's \
+         retention-ledger record exactly once (`forget_seq`)",
+    );
+}

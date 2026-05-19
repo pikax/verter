@@ -31,7 +31,10 @@
 //! `map.insert` and a successful `revalidate_after_compute` — and
 //! decrements it in the `removal_cleanup` callback (and on every direct
 //! map removal: per-canonical / project-generation invalidation, budget
-//! eviction, stale-`peek` reap, schema-mismatch evict). The increment is
+//! eviction, schema-mismatch evict — plus, for the two retention-bounded
+//! caches whose `peek` reaps stale entries, that stale-`peek` reap; the
+//! `cooperative_get_or_insert` engine wrappers below have non-reaping
+//! `peek`s). The increment is
 //! never placed in the `compute` closure: a cold compute that fails
 //! `revalidate_after_compute` (a project-generation reset landed during
 //! the cold window) publishes no map entry and the substrate runs no
@@ -2684,16 +2687,29 @@ impl MaterializeStructureDb {
         result
     }
 
-    /// Drop every cache entry whose `dep_signature` references
-    /// `canonical_id`. — uses the `canonical_to_keys`
-    /// reverse index to find affected keys; uses `Arc::ptr_eq` to
-    /// discriminate "our entry" from concurrent fresh writes.
+    /// Drop every cache entry whose carrier references `canonical_id`.
+    /// Uses the `canonical_to_keys` reverse index to find affected
+    /// keys; uses `Arc::ptr_eq` to discriminate "our entry" from
+    /// concurrent fresh writes.
     ///
     /// Holds the `retention_gate` read guard across the whole
     /// reverse-index drain + `entries` removal + budget `forget_seq` +
     /// counter decrement, so this per-canonical invalidation does not
     /// desync the map and the budget against a concurrent
     /// project-generation `clear` (which takes the write guard).
+    ///
+    /// Each removed entry's reverse-index registrations and
+    /// retention-ledger record are dropped by [`Self::unregister_post_publish`],
+    /// the single removal-side cleanup helper. It iterates the entry's
+    /// `read_set_signature.canonical_ids()` — the exact legacy + fact
+    /// union [`Self::register_post_publish`] registered under — so a
+    /// fact-only dependency's shard is pruned just like a legacy-rail
+    /// dependency's. The `canonical_id` shard itself is already drained
+    /// by the `canonical_to_keys.remove` above; the helper's
+    /// `prune_canonical_to_keys_registration` for that canonical is then
+    /// a no-op (the shard is gone). The `live_counter` decrement stays
+    /// here — `unregister_post_publish` does not touch the counter — so
+    /// each removed entry nets exactly one decrement.
     pub fn invalidate_for_canonical(&self, canonical_id: &str) {
         let _retention = self.retention_gate.read();
         let drained: Vec<(MaterializeStructureCacheKey, DepSignature)> =
@@ -2708,26 +2724,18 @@ impl MaterializeStructureDb {
             });
             if let Some((_, removed_entry)) = removed {
                 self.live_counter.fetch_sub(1, Ordering::Relaxed);
-                // Entry gone — drop exactly its ledger record
-                // (`forget_seq`), leaving a fresh re-admission of the
-                // same key counted.
-                self.retention_budget
-                    .forget_seq(removed_entry.admission_seq);
-                // Cross-canonical cleanup with ptr_eq — drop the
-                // matching registration in every other canonical's
-                // shard, and drop that outer shard too when the removal
-                // empties its inner map.
-                for (other_canonical, _) in registered_sig.iter() {
-                    if other_canonical.as_ref() == canonical_id {
-                        continue;
-                    }
-                    prune_canonical_to_keys_registration(
-                        &self.canonical_to_keys,
-                        other_canonical,
-                        key,
-                        registered_sig,
-                    );
-                }
+                // Route reverse-index + retention-ledger cleanup through
+                // the shared removal helper. It prunes the registration
+                // under every canonical the carrier referenced
+                // (`canonical_ids()` — legacy ∪ facts) and forgets
+                // exactly this entry's ledger record (`forget_seq`),
+                // identical to the cooperative-removal and stale-`peek`
+                // reap paths — no second canonical-set derivation.
+                self.unregister_post_publish(
+                    key,
+                    &removed_entry.read_set_signature,
+                    removed_entry.admission_seq,
+                );
             }
         }
     }
@@ -3593,15 +3601,28 @@ impl RefCycleResultDb {
         result
     }
 
-    /// Drop every cache entry whose `dep_signature`
-    /// references `canonical_id`. Uses the `canonical_to_keys` reverse
-    /// index to find affected keys; `Arc::ptr_eq` discriminates "our
-    /// entry" from concurrent fresh writes.
+    /// Drop every cache entry whose carrier references `canonical_id`.
+    /// Uses the `canonical_to_keys` reverse index to find affected
+    /// keys; `Arc::ptr_eq` discriminates "our entry" from concurrent
+    /// fresh writes.
     ///
     /// Holds the `retention_gate` read guard across the whole
     /// reverse-index drain + `entries` removal + budget `forget_seq` +
     /// counter decrement, so this per-canonical invalidation does not
     /// desync the map and the budget against a concurrent `clear`.
+    ///
+    /// Each removed entry's reverse-index registrations and
+    /// retention-ledger record are dropped by [`Self::unregister_post_publish`],
+    /// the single removal-side cleanup helper. It iterates the entry's
+    /// `read_set_signature.canonical_ids()` — the exact legacy + fact
+    /// union [`Self::register_post_publish`] registered under — so a
+    /// fact-only dependency's shard is pruned just like a legacy-rail
+    /// dependency's. The `canonical_id` shard itself is already drained
+    /// by the `canonical_to_keys.remove` above; the helper's
+    /// `prune_canonical_to_keys_registration` for that canonical is then
+    /// a no-op. The `live_counter` decrement stays here —
+    /// `unregister_post_publish` does not touch the counter — so each
+    /// removed entry nets exactly one decrement.
     pub fn invalidate_for_canonical(&self, canonical_id: &str) {
         let _retention = self.retention_gate.read();
         let drained: Vec<(DeclIdentity, DepSignature)> =
@@ -3616,27 +3637,18 @@ impl RefCycleResultDb {
             });
             if let Some((_, removed_entry)) = removed {
                 self.live_counter.fetch_sub(1, Ordering::Relaxed);
-                // Entry gone — drop exactly its ledger record
-                // (`forget_seq`), leaving a fresh re-admission of the
-                // same key counted.
-                self.retention_budget
-                    .forget_seq(removed_entry.admission_seq);
-                // Cross-canonical cleanup with ptr_eq — drop the
-                // matching registration in every other canonical's
-                // shard so subsequent invalidations do not double-free,
-                // and drop that outer shard too when the removal empties
-                // its inner map.
-                for (other_canonical, _) in registered_sig.iter() {
-                    if other_canonical.as_ref() == canonical_id {
-                        continue;
-                    }
-                    prune_canonical_to_keys_registration(
-                        &self.canonical_to_keys,
-                        other_canonical,
-                        key,
-                        registered_sig,
-                    );
-                }
+                // Route reverse-index + retention-ledger cleanup through
+                // the shared removal helper. It prunes the registration
+                // under every canonical the carrier referenced
+                // (`canonical_ids()` — legacy ∪ facts) and forgets
+                // exactly this entry's ledger record (`forget_seq`),
+                // identical to the cooperative-removal and stale-`peek`
+                // reap paths — no second canonical-set derivation.
+                self.unregister_post_publish(
+                    key,
+                    &removed_entry.read_set_signature,
+                    removed_entry.admission_seq,
+                );
             }
         }
     }
