@@ -2084,6 +2084,265 @@ fn warm_publish_records_memo_budget_under_entries_lock() {
     );
 }
 
+/// Build a `ReadSetSignature` whose legacy rail names exactly
+/// `canonical` — so a publish through `publish_with_carrier_for_tests`
+/// registers a `canonical_to_entries` reverse-index entry under that
+/// canonical. `hash` keeps each carrier's `WholeHash` distinct.
+fn carrier_naming(canonical: &str, hash: u8) -> crate::fact_signature_helpers::ReadSetSignature {
+    crate::fact_signature_helpers::ReadSetSignature::new(
+        crate::fact_signature_helpers::empty_fact_signature(),
+        dep_sig_for(canonical, hash),
+    )
+}
+
+/// FINDING A — codex P2-A: FENCE THE REVERSE-INDEX CLEAR AGAINST NEW
+/// PUBLISHES. `invalidate_all` MUST clear the `canonical_to_entries`
+/// reverse index UNDER the `entries` lock that performed
+/// `entries.clear()` + `memo_budget.clear()`, so all three members of
+/// the family-memo consistency cluster are cleared atomically against a
+/// concurrent publisher.
+///
+/// Without the fence `invalidate_all` clears `entries` + `memo_budget`
+/// under the lock, RELEASES it, then clears `canonical_to_entries` in a
+/// tail. A query admitted in that window publishes a fresh memo entry
+/// and registers it in `canonical_to_entries`; the trailing
+/// `canonical_to_entries.clear()` then deletes only the reverse-index
+/// registration while the memo entry + budget record stay live — or,
+/// depending on timing, leaves the live memo entry with no registration.
+/// Either way a later `invalidate_canonical` cannot find or abort that
+/// entry.
+///
+/// Deterministic. `invalidate_all` is parked, via the
+/// pre-`canonical_to_entries`-clear injection point, right before the
+/// reverse-index clear. With it pinned there the test asserts
+/// `entries.try_lock()` is `None`: a publisher reaching
+/// `entries_lock_diagnosed()` right now WOULD block, so it cannot
+/// register into `canonical_to_entries` between the `entries` clear and
+/// the reverse-index clear.
+///
+/// DISCRIMINATES: against an un-fenced `invalidate_all` (the
+/// `canonical_to_entries` clear runs after the `entries` lock is
+/// released) `try_lock()` succeeds (`Some`) and the assertion FAILS.
+/// With the fence the reverse-index clear runs while the `entries` lock
+/// is held, `try_lock()` is `None`, and the assertion PASSES. The
+/// post-join end-state assertions confirm all three cluster members end
+/// empty and consistent.
+#[test]
+fn invalidate_all_clears_reverse_index_under_entries_lock() {
+    use std::sync::Barrier;
+    use std::thread;
+
+    let store = Arc::new(SemanticGraphStore::new());
+    // Seed one family whose carrier names `/w/seed.ts` — so `entries`,
+    // `memo_budget`, AND the `canonical_to_entries` reverse index are
+    // all non-empty.
+    let node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    store.publish_with_carrier_for_tests(
+        SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: scope("/w/seed.ts"),
+            name: Arc::from("Seed"),
+        }),
+        QueryResult::Value(node),
+        carrier_naming("/w/seed.ts", 1),
+        Arc::from([]),
+    );
+    assert_eq!(store.memo_family_count_for_test(), 1, "seeded one family");
+    assert_eq!(
+        store.memo_budget_tracked_len_for_test(),
+        1,
+        "seed recorded one budget admission",
+    );
+    assert_eq!(
+        store.canonical_to_entries_count("/w/seed.ts"),
+        1,
+        "seed registered one reverse-index entry",
+    );
+
+    let clear_parked = Arc::new(Barrier::new(2));
+    let _gate_guard =
+        store.test_invalidate_all_pre_reverse_index_clear_gate(Arc::clone(&clear_parked));
+
+    let store_i = Arc::clone(&store);
+    let invalidator = thread::spawn(move || store_i.invalidate_all());
+
+    // `invalidate_all` has cleared `entries` + `memo_budget` and parked
+    // right before the `canonical_to_entries` clear. With the fence in
+    // place the `entries` lock is STILL held — a concurrent publisher
+    // would block.
+    clear_parked.wait();
+    assert!(
+        store.entries.try_lock().is_none(),
+        "REVERSE-INDEX DESYNC: `invalidate_all` does NOT hold the \
+         `entries` lock while clearing `canonical_to_entries` — a \
+         concurrent publish could register a fresh reverse-index entry \
+         between the `entries` clear and the reverse-index clear, \
+         leaving a live memo entry with no `canonical_to_entries` \
+         registration (or a stranded registration with no entry), \
+         invisible to a later `invalidate_canonical`. The \
+         `canonical_to_entries` clear must run under the `entries` lock.",
+    );
+    clear_parked.wait();
+    let _ = invalidator.join().expect("invalidator thread");
+
+    // End-state: all three cluster members are empty and consistent.
+    assert_eq!(
+        store.memo_family_count_for_test(),
+        0,
+        "invalidate_all cleared every family",
+    );
+    assert_eq!(
+        store.memo_budget_tracked_len_for_test(),
+        0,
+        "invalidate_all cleared the budget ledger",
+    );
+    assert_eq!(
+        store.canonical_to_entries_count("/w/seed.ts"),
+        0,
+        "invalidate_all cleared the reverse index — no stranded \
+         registration survives the project-generation reset",
+    );
+    assert_eq!(
+        store.canonical_to_entries_shard_count_for_test(),
+        0,
+        "no reverse-index shard survives the clear",
+    );
+}
+
+/// FINDING B — codex P2-B: SCOPE BUDGET REVERSE-INDEX CLEANUP TO EVICTED
+/// ENTRIES. The FIFO budget-eviction MUST prune the evicted victim's
+/// `canonical_to_entries` reverse-index registration UNDER the `entries`
+/// lock that performed the victim's `entries` removal, so a concurrent
+/// fresh same-`(family, slot)` re-publish cannot interleave its
+/// reverse-index registration between the victim's `entries` removal and
+/// the victim's reverse-index pruning.
+///
+/// Without the fence the FIFO eviction removes the victim from `entries`
+/// under the lock, RELEASES it, then prunes the victim's
+/// `canonical_to_entries` registration in a deferred key-only cleanup.
+/// An already-in-flight build for the same `(family, slot)` that
+/// publishes and registers before that loop runs has its FRESH
+/// registration removed by the key-only cleanup, leaving the live
+/// re-published memo slot invisible to future `invalidate_canonical`
+/// drains.
+///
+/// Deterministic. The store is pinned to a `memo_budget` cap of 2.
+/// Publishing the THIRD distinct family FIFO-evicts the first; that
+/// publish is parked, via the post-reverse-index-prune injection point,
+/// right after the evicted victim's reverse-index registration is
+/// pruned. With it pinned there the test asserts `entries.try_lock()` is
+/// `None`: a fresh re-publisher reaching `entries_lock_diagnosed()`
+/// right now WOULD block, so it cannot register a fresh
+/// `canonical_to_entries` entry between the victim's `entries` removal
+/// and the victim's reverse-index prune.
+///
+/// DISCRIMINATES: against an un-fenced eviction (the victim's
+/// reverse-index pruning runs after the `entries` lock is released)
+/// `try_lock()` succeeds (`Some`) and the assertion FAILS. With the
+/// fence the prune runs while the `entries` lock is held, `try_lock()`
+/// is `None`, and the assertion PASSES. The post-join end-state
+/// assertions confirm the evicted victim's registration is gone and the
+/// two surviving families' registrations are intact.
+#[test]
+fn budget_eviction_prunes_reverse_index_under_entries_lock() {
+    use std::sync::Barrier;
+    use std::thread;
+
+    // Cap of 2: the third distinct family evicts the first (FIFO).
+    let store = Arc::new(SemanticGraphStore::new_with_memo_budget_for_test(2));
+
+    // Publish family A (carrier names /w/a.ts) and family B (/w/b.ts).
+    // Ledger after both: [A, B] — at the cap, no eviction yet.
+    for (name, canonical, hash) in [("A", "/w/a.ts", 1u8), ("B", "/w/b.ts", 2u8)] {
+        let node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        store.publish_with_carrier_for_tests(
+            SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                scope: scope(canonical),
+                name: Arc::from(name),
+            }),
+            QueryResult::Value(node),
+            carrier_naming(canonical, hash),
+            Arc::from([]),
+        );
+    }
+    assert_eq!(store.memo_family_count_for_test(), 2, "A and B both warm");
+    assert_eq!(
+        store.canonical_to_entries_count("/w/a.ts"),
+        1,
+        "A registered a reverse-index entry",
+    );
+    assert_eq!(
+        store.canonical_to_entries_count("/w/b.ts"),
+        1,
+        "B registered a reverse-index entry",
+    );
+
+    // Arm the post-reverse-index-prune gate; the next publish that
+    // FIFO-evicts a victim parks right after pruning the victim's
+    // reverse-index registration.
+    let prune_parked = Arc::new(Barrier::new(2));
+    let _gate_guard = store.test_publish_post_reverse_index_prune_gate(Arc::clone(&prune_parked));
+
+    // Publish family C (/w/c.ts) — ledger overflows [A, B] → C, victim A
+    // is FIFO-evicted. The publish parks after pruning A's reverse-index
+    // registration, with the `entries` lock still held.
+    let store_p = Arc::clone(&store);
+    let publisher = thread::spawn(move || {
+        let node = store_p.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        store_p.publish_with_carrier_for_tests(
+            SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                scope: scope("/w/c.ts"),
+                name: Arc::from("C"),
+            }),
+            QueryResult::Value(node),
+            carrier_naming("/w/c.ts", 3),
+            Arc::from([]),
+        )
+    });
+
+    // The publisher has evicted victim A, pruned A's reverse-index
+    // registration, and parked. With the fence in place the `entries`
+    // lock is STILL held — a concurrent fresh re-publisher would block.
+    prune_parked.wait();
+    assert!(
+        store.entries.try_lock().is_none(),
+        "REVERSE-INDEX DESYNC: a FIFO budget-eviction does NOT hold the \
+         `entries` lock while pruning the evicted victim's \
+         `canonical_to_entries` registration — a concurrent fresh \
+         same-`(family, slot)` re-publish could register into \
+         `canonical_to_entries` between the victim's `entries` removal \
+         and the deferred key-only prune, and the prune would then \
+         delete the fresh registration, leaving the live re-published \
+         memo slot invisible to `invalidate_canonical`. The victim's \
+         reverse-index prune must run under the `entries` lock.",
+    );
+    prune_parked.wait();
+    let populated = publisher.join().expect("publisher thread");
+    assert_eq!(populated, 1, "C's publish landed one slot");
+
+    // End-state: victim A's reverse-index registration is gone; B and C
+    // — the two families within the cap — keep theirs intact.
+    assert_eq!(
+        store.memo_family_count_for_test(),
+        2,
+        "the memo holds exactly the two families within the cap (B, C)",
+    );
+    assert_eq!(
+        store.canonical_to_entries_count("/w/a.ts"),
+        0,
+        "the FIFO-evicted victim A's reverse-index registration is pruned",
+    );
+    assert_eq!(
+        store.canonical_to_entries_count("/w/b.ts"),
+        1,
+        "surviving family B's reverse-index registration is intact",
+    );
+    assert_eq!(
+        store.canonical_to_entries_count("/w/c.ts"),
+        1,
+        "freshly-published family C's reverse-index registration is intact",
+    );
+}
+
 #[test]
 fn recursive_sentinel_does_not_promote_to_warm_memo() {
     let host = ctx_host();

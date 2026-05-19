@@ -268,6 +268,43 @@ pub struct SemanticGraphStore {
     /// process-global. `cfg`-gated to `test` / `debug_assertions`.
     #[cfg(any(test, debug_assertions))]
     cold_winner_pre_backfill_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+    /// Per-store test-only injection point inside [`Self::invalidate_all`],
+    /// fired right BEFORE the `canonical_to_entries` reverse-index clear —
+    /// and, in final-state code, with the `entries` lock STILL held. A
+    /// race test arms it (via
+    /// [`Self::test_invalidate_all_pre_reverse_index_clear_gate`]) and,
+    /// with `invalidate_all` parked here, asserts `entries.try_lock()` is
+    /// `None`: the reverse-index clear runs in the SAME `entries` lock
+    /// domain as the `entries` + `memo_budget` clears, so a concurrent
+    /// publisher cannot register into `canonical_to_entries` between the
+    /// `entries` clear and the reverse-index clear (which would strand a
+    /// live memo entry with no reverse-index registration, or a
+    /// registration with no entry).
+    ///
+    /// **Per-store scope (test hermeticity).** Per-store, never a
+    /// process-global. `cfg`-gated to `test` / `debug_assertions`.
+    #[cfg(any(test, debug_assertions))]
+    invalidate_all_pre_reverse_index_clear_gate:
+        parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+    /// Per-store test-only injection point inside
+    /// [`Self::record_family_admission_locked`], fired right AFTER the
+    /// FIFO budget-eviction victims' `canonical_to_entries` reverse-index
+    /// registrations are pruned — and, in final-state code, with the
+    /// `entries` lock STILL held. A race test arms it (via
+    /// [`Self::test_publish_post_reverse_index_prune_gate`]) and, with the
+    /// publisher parked here, asserts `entries.try_lock()` is `None`: the
+    /// FIFO victim's reverse-index pruning runs in the SAME `entries` lock
+    /// domain as the `entries` removal + `memo_budget` eviction, so a
+    /// concurrent fresh same-`(family, slot)` re-publish cannot register
+    /// into `canonical_to_entries` between the victim's `entries` removal
+    /// and the victim's reverse-index pruning (which would delete the
+    /// fresh registration, leaving the live re-published memo slot
+    /// invisible to `invalidate_canonical`).
+    ///
+    /// **Per-store scope (test hermeticity).** Per-store, never a
+    /// process-global. `cfg`-gated to `test` / `debug_assertions`.
+    #[cfg(any(test, debug_assertions))]
+    publish_post_reverse_index_prune_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Γ.B reverse index. For each canonical id,
     /// holds the set of `(family, slot)` pairs whose published
     /// dep_signature references it, paired with the dep_signature
@@ -283,11 +320,22 @@ pub struct SemanticGraphStore {
     /// path stored, so ptr_eq distinguishes our entry from any later
     /// fresh build's distinct Arc.
     ///
-    /// **Lock order.** `entries → canonical_to_entries shards`. Code
-    /// must NEVER acquire a `canonical_to_entries` shard mutex while
-    /// holding `entries`, and never acquire `entries` while holding
-    /// any `canonical_to_entries` shard mutex. The DashMap shard
-    /// boundary is the per-canonical Mutex.
+    /// **Lock order — `entries → canonical_to_entries shards`.** The
+    /// family `entries` `Mutex` is OUTERMOST; a `canonical_to_entries`
+    /// shard mutex (the `DashMap` per-canonical `Mutex`) is INNER. The
+    /// publish-side registration, the [`Self::invalidate_all`] clear,
+    /// the FIFO budget-eviction cleanup, and the
+    /// [`Self::invalidate_canonical`] drain all mutate
+    /// `canonical_to_entries` WHILE holding `entries` — that is exactly
+    /// what this order permits, and it makes the family memo's
+    /// three-member consistency cluster (`entries`, `memo_budget`,
+    /// `canonical_to_entries`) mutate atomically. The order is
+    /// load-bearing in one direction only: NO path may acquire a
+    /// `canonical_to_entries` shard mutex and THEN the `entries` `Mutex`
+    /// — that would be an AB-BA deadlock. Every reverse-index helper
+    /// (`register_reverse_index`, `prune_reverse_index_registration`)
+    /// takes only shard mutexes and never re-enters `entries`, so the
+    /// order holds.
     canonical_to_entries: CanonicalToEntries,
     /// Global insertion-ordered total-size budget for the family memo.
     /// Each `FamilyKey` is built from content-derived `SemanticNodeId`s
@@ -298,19 +346,20 @@ pub struct SemanticGraphStore {
     /// publishing a newly-keyed family records an admission and the
     /// oldest families past the cap are FIFO-evicted write-side.
     ///
-    /// **Map/budget lifecycle fence.** The `entries` map and this budget
-    /// are mutated within ONE lock domain — the `entries` `Mutex`. Every
-    /// publish records the family admission while holding the `entries`
-    /// lock that landed the slot; every reset
-    /// ([`Self::invalidate_all`]) and per-canonical drain
-    /// ([`Self::invalidate_canonical`]) mutates this budget while holding
-    /// that same lock. A `clear` therefore cannot interleave with a
-    /// concurrent publish, so the budget never strands a live `entries`
-    /// family with no admission record (which would make the family
-    /// invisible to FIFO eviction and break the cap). The
-    /// `canonical_to_entries` reverse-index work alone runs after the
-    /// `entries` lock is dropped, per the `entries → canonical_to_entries`
-    /// lock order.
+    /// **Consistency-cluster fence.** The family memo's three members —
+    /// `entries` (the memo map), this budget, and `canonical_to_entries`
+    /// (the reverse index) — are ALL mutated within ONE lock domain, the
+    /// `entries` `Mutex`. Every publish records the family admission AND
+    /// registers the reverse index while holding the `entries` lock that
+    /// landed the slot; every reset ([`Self::invalidate_all`]) and
+    /// per-canonical drain ([`Self::invalidate_canonical`]) mutates this
+    /// budget AND `canonical_to_entries` while holding that same lock. A
+    /// `clear` therefore cannot interleave with a concurrent publish, so
+    /// the budget never strands a live `entries` family with no admission
+    /// record (which would make the family invisible to FIFO eviction and
+    /// break the cap) and the reverse index never strands a live entry
+    /// with no registration. The `entries → canonical_to_entries shards`
+    /// lock order permits taking a shard mutex while `entries` is held.
     memo_budget: crate::bounded_query_retention::GlobalRetentionBudget<FamilyKey>,
 }
 
@@ -674,84 +723,101 @@ impl SemanticGraphStore {
     pub fn invalidate_canonical(&self, canonical_id: &str) -> usize {
         use rustc_hash::FxHashSet;
 
-        // Drain the per-canonical
-        // (family, slot) → registered_dep_signature map for
-        // `canonical_id`. The drain releases the per-canonical mutex
-        // before acquires `entries`, preserving the
-        // documented `entries → canonical_to_entries shards` lock
-        // order. `affected_pairs` is retained so (in-flight
-        // abort) can drop matching in-flight entries even when phase
-        // 2's `Arc::ptr_eq` check rejects an entry (e.g., a fresh
-        // post-publish write replaced the registered dep_signature).
-        let mut affected_pairs: FxHashSet<(FamilyKey, ModeSlot)> = FxHashSet::default();
-        let drained: Vec<((FamilyKey, ModeSlot), DepSignature)> = {
-            let timing_on = verter_scheduler::request_context::current_timing_enabled();
-            match self.canonical_to_entries.remove(canonical_id) {
-                Some((_, mutex)) => {
-                    let lock_start = if timing_on {
-                        Some(Instant::now())
-                    } else {
-                        None
-                    };
-                    let mut map = mutex.lock();
-                    let lock_wait = lock_start
-                        .map(|t| t.elapsed())
-                        .unwrap_or(std::time::Duration::ZERO);
-                    crate::host_manage::record_family_map_lock_acquisition(lock_wait);
-                    let drained: Vec<_> = map.drain().collect();
-                    drained
-                }
-                None => {
-                    // Still account for the canonical-shard removal itself
-                    // as one observed acquisition; the DashMap shard read
-                    // is implicit in `remove`. When the entry was absent
-                    // there is no inner mutex to time, so the wait is
-                    // zero.
-                    crate::host_manage::record_family_map_lock_acquisition(
-                        std::time::Duration::ZERO,
-                    );
-                    Vec::new()
-                }
-            }
-        };
-        for ((family, slot), _) in &drained {
-            affected_pairs.insert((family.clone(), *slot));
-        }
-
-        // Walk the
-        // drained set under the entries lock. Drop each slot whose
-        // current dep_signature `Arc::ptr_eq`-matches the registered
-        // dep_signature. ptr_eq distinguishes "our entry" from "a
-        // fresh post-publish write that beat us". Track a fallback
-        // dep-sig walk for any slot that did not ptr_eq (the
-        // registered dep_sig was replaced by a fresh build whose
-        // dep_sig also references the canonical).
-        let mut evicted = 0usize;
-        // Track each evicted entry's `(family, slot)` key together
-        // with its full carrier so the cross-canonical drain can
-        // remove that exact entry's registrations from every
-        // canonical it referenced — both the legacy `DepSignature`
-        // rail AND the path-precise `facts` rail (the union returned
-        // by `ReadSetSignature::canonical_ids()`).
+        // The family memo is a three-member consistency cluster —
+        // `entries` (the memo map), `memo_budget` (its FIFO ledger), and
+        // `canonical_to_entries` (this reverse index). Every mutation
+        // that touches more than one of them runs under ONE lock domain,
+        // the `entries` `Mutex`. This per-canonical drain mutates all
+        // three, so the whole drain — the `canonical_to_entries` shard
+        // drain for `canonical_id`, the `entries` slot eviction +
+        // `memo_budget` forget, AND the cross-canonical
+        // `canonical_to_entries` cleanup — runs under a SINGLE
+        // `entries`-lock hold. The `entries → canonical_to_entries
+        // shards` lock order permits taking a shard mutex while `entries`
+        // is held (`entries` is outermost), and no path takes a
+        // `canonical_to_entries` shard mutex then `entries`, so this
+        // nesting is sound. Holding `entries` across the whole drain
+        // means a concurrent publish (which registers into
+        // `canonical_to_entries` under the same `entries` lock) cannot
+        // interleave — so the drain cannot strand a registration whose
+        // entry it removed, nor miss an entry whose registration a fresh
+        // publish landed mid-drain.
         //
-        // Keying the drain by entry identity `(FamilyKey, ModeSlot)`
-        // rather than by `Arc::ptr_eq` on the stored legacy
-        // `DepSignature` prevents the "shared legacy Arc" hazard:
-        // when two memo entries share the same legacy fence Arc and
-        // only one is evicted, the previous `map.retain` walked the
-        // other canonical shards with `Arc::ptr_eq(registered, sig)`
-        // and removed BOTH entries' registrations because they
-        // pointed to the same Arc. The surviving entry then had no
-        // reverse-index registration for its legacy canonicals and a
-        // later `invalidate_canonical` of those canonicals would
-        // miss it, leaving stale warm data. Keying the drain by entry
-        // identity is what makes that drain precise.
-        let mut evicted_entries: Vec<(
-            (FamilyKey, ModeSlot),
-            crate::fact_signature_helpers::ReadSetSignature,
-        )> = Vec::new();
+        // `affected_pairs` is collected from the drained set so the
+        // post-lock in-flight abort can drop matching in-flight entries
+        // even when the `Arc::ptr_eq` check rejects an entry (e.g., a
+        // fresh post-publish write replaced the registered dep_signature).
+        let mut affected_pairs: FxHashSet<(FamilyKey, ModeSlot)> = FxHashSet::default();
+        let mut evicted = 0usize;
         {
+            let timing_on = verter_scheduler::request_context::current_timing_enabled();
             let mut entries = self.entries_lock_diagnosed();
+
+            // Drain the per-canonical `(family, slot) →
+            // registered_dep_signature` map for `canonical_id`, UNDER the
+            // held `entries` lock.
+            let drained: Vec<((FamilyKey, ModeSlot), DepSignature)> =
+                match self.canonical_to_entries.remove(canonical_id) {
+                    Some((_, mutex)) => {
+                        let lock_start = if timing_on {
+                            Some(Instant::now())
+                        } else {
+                            None
+                        };
+                        let mut map = mutex.lock();
+                        let lock_wait = lock_start
+                            .map(|t| t.elapsed())
+                            .unwrap_or(std::time::Duration::ZERO);
+                        crate::host_manage::record_family_map_lock_acquisition(lock_wait);
+                        map.drain().collect()
+                    }
+                    None => {
+                        // Still account for the canonical-shard removal
+                        // itself as one observed acquisition; the DashMap
+                        // shard read is implicit in `remove`. When the
+                        // entry was absent there is no inner mutex to
+                        // time, so the wait is zero.
+                        crate::host_manage::record_family_map_lock_acquisition(
+                            std::time::Duration::ZERO,
+                        );
+                        Vec::new()
+                    }
+                };
+            for ((family, slot), _) in &drained {
+                affected_pairs.insert((family.clone(), *slot));
+            }
+
+            // Walk the drained set. Drop each slot whose current
+            // dep_signature `Arc::ptr_eq`-matches the registered
+            // dep_signature. ptr_eq distinguishes "our entry" from "a
+            // fresh post-publish write that beat us". A fallback dep-sig
+            // / fact-rail walk catches any slot that did not ptr_eq (the
+            // registered dep_sig was replaced by a fresh build whose
+            // dep_sig also references the canonical).
+            //
+            // Track each evicted entry's `(family, slot)` key together
+            // with its full carrier so the cross-canonical drain can
+            // remove that exact entry's registrations from every
+            // canonical it referenced — both the legacy `DepSignature`
+            // rail AND the path-precise `facts` rail (the union returned
+            // by `ReadSetSignature::canonical_ids()`).
+            //
+            // Keying the drain by entry identity `(FamilyKey, ModeSlot)`
+            // rather than by `Arc::ptr_eq` on the stored legacy
+            // `DepSignature` prevents the "shared legacy Arc" hazard:
+            // when two memo entries share the same legacy fence Arc and
+            // only one is evicted, a `map.retain` over the other
+            // canonical shards with `Arc::ptr_eq(registered, sig)` would
+            // remove BOTH entries' registrations because they point to
+            // the same Arc. The surviving entry would then have no
+            // reverse-index registration for its legacy canonicals and a
+            // later `invalidate_canonical` of those canonicals would miss
+            // it, leaving stale warm data. Keying the drain by entry
+            // identity is what makes that drain precise.
+            let mut evicted_entries: Vec<(
+                (FamilyKey, ModeSlot),
+                crate::fact_signature_helpers::ReadSetSignature,
+            )> = Vec::new();
             for ((family, slot), registered_sig) in &drained {
                 let Some(slots) = entries.get_mut(family) else {
                     continue;
@@ -777,12 +843,12 @@ impl SemanticGraphStore {
             // drop its retention-budget ledger record so the budget
             // does not later return an already-removed family. The
             // key-wide `forget` is sound HERE because this runs inside
-            // the `entries`-lock hold (see the enclosing block) — the
-            // exact lock domain `record_family_admission_locked` records
-            // every `memo_budget` admission under and `invalidate_all`
-            // clears it under. No concurrent publisher can record a
-            // fresh admission for `family` while this drain holds that
-            // lock, so the key-wide removal cannot clobber a concurrent
+            // the `entries`-lock hold — the exact lock domain
+            // `record_family_admission_locked` records every
+            // `memo_budget` admission under and `invalidate_all` clears
+            // it under. No concurrent publisher can record a fresh
+            // admission for `family` while this drain holds that lock, so
+            // the key-wide removal cannot clobber a concurrent
             // re-admission. `forget_key_under_exclusive_lock`'s contract
             // documents this serialization precondition.
             entries.retain(|family, slots| {
@@ -793,58 +859,29 @@ impl SemanticGraphStore {
                     false
                 }
             });
-        }
 
-        // For each evicted entry, walk every canonical its carrier
-        // referenced (union of `legacy` + path-precise `facts` via
-        // `canonical_ids()`) and remove THAT entry's `(family, slot)`
-        // registration from the canonical's shard. Removal is by entry
-        // identity, not by `Arc::ptr_eq` on the stored legacy
-        // signature — see the comment on `evicted_entries` above for
-        // the shared-Arc hazard this avoids. Walking the full
-        // `canonical_ids()` set (not only `legacy.iter()`) also drains
-        // the path-precise fact rail's registrations, matching what
-        // `register_reverse_index` populated. Lock order respected:
-        // `entries` was unlocked at the close of the previous block
-        // before any shard mutex is acquired here.
-        let timing_on = verter_scheduler::request_context::current_timing_enabled();
-        for (evicted_key, evicted_carrier) in &evicted_entries {
-            for other_canonical in evicted_carrier.canonical_ids() {
-                if other_canonical.as_ref() == canonical_id {
-                    continue;
-                }
-                if let Some(shard) = self.canonical_to_entries.get(&other_canonical) {
-                    let lock_start = if timing_on {
-                        Some(Instant::now())
-                    } else {
-                        None
-                    };
-                    let mut map = shard.value().lock();
-                    let lock_wait = lock_start
-                        .map(|t| t.elapsed())
-                        .unwrap_or(std::time::Duration::ZERO);
-                    crate::host_manage::record_family_map_lock_acquisition(lock_wait);
-                    // Remove only the registration keyed by THIS
-                    // evicted entry's `(family, slot)`. Other entries
-                    // sharing the same legacy `Arc<DepSignature>` keep
-                    // their reverse-index registrations intact.
-                    map.remove(evicted_key);
-                    // Release the per-canonical mutex before the outer
-                    // drop so `remove_if`'s predicate can re-lock it
-                    // under the `DashMap` shard write lock.
-                    drop(map);
-                    drop(shard);
-                    // Drop the outer shard when this removal emptied its
-                    // inner map — otherwise the cross-canonical cleanup
-                    // would strand an empty `Mutex<map>` under every
-                    // OTHER canonical the evicted entry referenced.
-                    self.canonical_to_entries
-                        .remove_if(&other_canonical, |_, mutex| mutex.lock().is_empty());
-                } else {
-                    // Shard absent: account for the canonical-shard
-                    // probe as one observed acquisition with zero wait.
-                    crate::host_manage::record_family_map_lock_acquisition(
-                        std::time::Duration::ZERO,
+            // For each evicted entry, walk every canonical its carrier
+            // referenced (union of `legacy` + path-precise `facts` via
+            // `canonical_ids()`) and remove THAT entry's `(family, slot)`
+            // registration from the canonical's shard. Removal is by
+            // entry identity, not by `Arc::ptr_eq` on the stored legacy
+            // signature — see the comment on `evicted_entries` above for
+            // the shared-Arc hazard this avoids. Walking the full
+            // `canonical_ids()` set (not only `legacy.iter()`) also
+            // drains the path-precise fact rail's registrations, matching
+            // what `register_reverse_index` populated. Runs UNDER the
+            // held `entries` lock (the `entries → canonical_to_entries`
+            // order permits it), so the cross-canonical cleanup is atomic
+            // with the `entries` eviction above.
+            for (evicted_key, evicted_carrier) in &evicted_entries {
+                for other_canonical in evicted_carrier.canonical_ids() {
+                    if other_canonical.as_ref() == canonical_id {
+                        continue;
+                    }
+                    Self::prune_reverse_index_registration(
+                        &self.canonical_to_entries,
+                        &other_canonical,
+                        evicted_key,
                     );
                 }
             }
@@ -916,23 +953,31 @@ impl SemanticGraphStore {
     ///   re-enters dispatch against the fresh project generation rather
     ///   than joining a stale build) and the table is drained. This
     ///   mirrors the per-canonical abort in [`Self::invalidate_canonical`].
-    /// - `named_type_index`, `relation_memo`, `derivation`,
-    ///   `canonical_to_entries` — the `SemanticNodeId`-keyed semantic
-    ///   caches. Clearing them on a project-generation bump drops the
-    ///   stale judgements those caches hold.
+    /// - `memo_budget`, `canonical_to_entries` — the family memo's FIFO
+    ///   retention ledger and reverse index. Both are cleared under the
+    ///   same `entries`-lock hold as `entries.clear()` (see below).
+    /// - `named_type_index`, `relation_memo`, `derivation` — the other
+    ///   `SemanticNodeId`-keyed semantic caches. Clearing them on a
+    ///   project-generation bump drops the stale judgements those caches
+    ///   hold.
     ///
     /// Each bounded cache has a retention ledger; the ledger is cleared
     /// in lockstep with the map it bounds so no budget retains a key
-    /// whose entry is gone. The family memo (`entries`) and its
-    /// `memo_budget` ledger live in one lock domain — the `entries`
-    /// `Mutex`: this method clears `memo_budget` while still holding the
-    /// lock that performed `entries.clear()`, and the publish path
-    /// records each admission while holding the `entries` lock that
-    /// landed the slot, so a publish cannot strand a live family with no
-    /// ledger record. For the relation memo and the resolved-named-type
-    /// index the map and its ledger live in one lock domain too — the
-    /// wrapper's `clear` holds a `retention_gate` write guard across both
-    /// clears, exclusive against concurrent inserts.
+    /// whose entry is gone. The family memo is a three-member consistency
+    /// cluster — `entries` (the memo map), `memo_budget` (its FIFO
+    /// ledger), and `canonical_to_entries` (the reverse index
+    /// [`Self::invalidate_canonical`] walks) — and all three live in one
+    /// lock domain, the `entries` `Mutex`: this method clears `memo_budget`
+    /// AND `canonical_to_entries` while still holding the lock that
+    /// performed `entries.clear()`, and the publish path records each
+    /// `memo_budget` admission and registers each `canonical_to_entries`
+    /// entry while holding the `entries` lock that landed the slot, so a
+    /// publish cannot strand a live family with no ledger record nor a
+    /// live memo entry with no reverse-index registration. For the
+    /// relation memo and the resolved-named-type index the map and its
+    /// ledger live in one lock domain too — the wrapper's `clear` holds a
+    /// `retention_gate` write guard across both clears, exclusive against
+    /// concurrent inserts.
     ///
     /// ## The node arena is append-only
     ///
@@ -1031,6 +1076,45 @@ impl SemanticGraphStore {
                 }
             }
             self.memo_budget.clear();
+            // Drop the family memo's `canonical_to_entries` reverse index
+            // UNDER THE SAME `entries`-lock hold as the `entries.clear()`
+            // and `memo_budget.clear()` above. The three are one
+            // consistency cluster — `entries` is the memo map,
+            // `memo_budget` its FIFO ledger, `canonical_to_entries` the
+            // reverse index `invalidate_canonical` walks. The publish path
+            // registers each `canonical_to_entries` entry while holding
+            // the `entries` lock that landed the slot (see
+            // `register_reverse_index`'s call sites), so all three members
+            // are mutated within one lock domain — the `entries` `Mutex`.
+            // A concurrent publisher therefore cannot register into
+            // `canonical_to_entries` between this `entries.clear()` and
+            // this reverse-index clear — which would otherwise leave a
+            // stranded registration with no entry, or (if the publish
+            // landed its `entries` slot before the clear) a live memo
+            // entry with no reverse-index registration, invisible to a
+            // later `invalidate_canonical`. The `entries →
+            // canonical_to_entries shards` lock order PERMITS taking a
+            // shard mutex while `entries` is held (`entries` is
+            // outermost), and no path takes a `canonical_to_entries` shard
+            // mutex then `entries`, so this nesting is sound.
+            // Test-only injection point: a barrier armed by
+            // `test_invalidate_all_pre_reverse_index_clear_gate` parks
+            // here, before the reverse-index clear and with the `entries`
+            // lock still held, so a race test can assert the clear runs in
+            // the `entries` lock domain. `None` (the production default)
+            // is a no-op.
+            #[cfg(any(test, debug_assertions))]
+            {
+                let gate = self
+                    .invalidate_all_pre_reverse_index_clear_gate
+                    .lock()
+                    .clone();
+                if let Some(barrier) = gate {
+                    barrier.wait();
+                    barrier.wait();
+                }
+            }
+            self.canonical_to_entries.clear();
             count
         };
         // Test-only injection point: a barrier armed by
@@ -1048,17 +1132,19 @@ impl SemanticGraphStore {
                 barrier.wait();
             }
         }
-        // Drop every `SemanticNodeId`-keyed semantic cache so no stale
-        // id-keyed judgement survives the project-generation bump. The
-        // relation memo and resolved-named-type index each clear their
+        // Drop every other `SemanticNodeId`-keyed semantic cache so no
+        // stale id-keyed judgement survives the project-generation bump.
+        // The relation memo and resolved-named-type index each clear their
         // map and retention budget under their own `retention_gate`
         // write guard — a concurrent insert is excluded across the
         // whole map+budget clear, so no insert strands a live entry
-        // whose budget admission this reset would otherwise erase.
+        // whose budget admission this reset would otherwise erase. The
+        // family memo's three-member cluster (`entries`, `memo_budget`,
+        // `canonical_to_entries`) was cleared above under the `entries`
+        // lock.
         self.named_type_index.clear();
         self.relation_memo.clear();
         self.derivation.lock().clear();
-        self.canonical_to_entries.clear();
         removed
     }
 
@@ -2736,37 +2822,36 @@ impl SemanticGraphStore {
                     .fetch_add(populated_slots.len() as u64, Ordering::Relaxed);
             }
         }
-        // Map/budget lifecycle fence: record the `memo_budget` admission
-        // for a newly-keyed family WHILE the `entries` lock is still
-        // held — so the `entries` slot landing and the ledger record
-        // are one atomic step against a concurrent `invalidate_all`
-        // (which clears `entries` + `memo_budget` under the same lock).
-        // The budget's FIFO victims are removed from the held `entries`
-        // map here too; only their `canonical_to_entries` reverse-index
-        // pruning is deferred to after the lock drop.
-        let budget_evictions = if family_was_new && !populated_slots.is_empty() {
-            self.record_family_admission_locked(&mut entries, &family)
-        } else {
-            Vec::new()
-        };
+        // Family-memo consistency-cluster fence: the three cluster
+        // members — `entries`, `memo_budget`, `canonical_to_entries` —
+        // are ALL mutated WHILE the `entries` lock is still held, so the
+        // publish's `(entries slot, memo_budget record, reverse-index
+        // register)` triple is one atomic step against a concurrent
+        // `invalidate_all` (which clears all three under the same lock).
+        // `record_family_admission_locked` records the `memo_budget`
+        // admission for a newly-keyed family and prunes the reverse index
+        // of any FIFO victim it evicts.
+        if family_was_new && !populated_slots.is_empty() {
+            self.record_family_admission_locked(&mut entries, &family);
+        }
         // Γ.B reverse-index registration. Carrier-aware: register
         // each populated slot under EVERY canonical the entry's
         // carrier references — the union of the legacy `dep_signature`
         // rail AND the path-precise `facts` rail (`Parse(...)`,
-        // `ResolveImports(...)`, `RouteSurface(...)`, etc.). Lock
-        // order is `entries → canonical_to_entries shards`: drop the
-        // entries lock before acquiring any per-canonical mutex. See
-        // `register_reverse_index`'s docstring for the carrier
-        // contract — the carrier-aware iteration closes the fact-only
-        // invalidation hole a legacy-rail-only registration left open.
-        drop(entries);
+        // `ResolveImports(...)`, `RouteSurface(...)`, etc.). Runs UNDER
+        // the held `entries` lock: the `entries → canonical_to_entries
+        // shards` lock order permits taking a shard mutex while `entries`
+        // is held, and registering here — rather than after the lock
+        // drop — keeps the live memo slot and its reverse-index
+        // registration atomic against a concurrent `invalidate_all`. See
+        // `register_reverse_index`'s docstring for the carrier contract.
         Self::register_reverse_index(
             &self.canonical_to_entries,
             &family,
             &populated_slots,
             &read_set_signature,
         );
-        self.prune_evicted_family_reverse_index(&budget_evictions);
+        drop(entries);
         // Published cleanly under a non-aborted in-flight entry — the
         // winner's id epoch is consistent, so the caller may proceed to
         // publish its narrower prefix-backfills.
@@ -2880,30 +2965,33 @@ impl SemanticGraphStore {
                     .fetch_add(populated_slots.len() as u64, Ordering::Relaxed);
             }
         }
-        // Map/budget lifecycle fence — record the `memo_budget`
-        // admission under the held `entries` lock; see `warm_publish_one`.
-        let budget_evictions = if family_was_new && !populated_slots.is_empty() {
-            self.record_family_admission_locked(&mut entries, &family)
-        } else {
-            Vec::new()
-        };
-        // Carrier-aware reverse-index registration — see
-        // `warm_publish_one` for the full carrier rationale.
-        drop(entries);
+        // Family-memo consistency-cluster fence — record the
+        // `memo_budget` admission under the held `entries` lock; see
+        // `warm_publish_one`.
+        if family_was_new && !populated_slots.is_empty() {
+            self.record_family_admission_locked(&mut entries, &family);
+        }
+        // Carrier-aware reverse-index registration — runs UNDER the held
+        // `entries` lock; see `warm_publish_one` for the full carrier and
+        // lock-order rationale.
         Self::register_reverse_index(
             &self.canonical_to_entries,
             &family,
             &populated_slots,
             &read_set_signature,
         );
-        self.prune_evicted_family_reverse_index(&budget_evictions);
+        drop(entries);
     }
 
     /// Γ.B reverse-index registration helper. Shared by
     /// [`Self::warm_publish_one`] and
-    /// [`Self::warm_publish_one_if_absent`]. Caller must have dropped
-    /// the `entries` lock before calling per the `entries →
-    /// canonical_to_entries shards` lock order.
+    /// [`Self::warm_publish_one_if_absent`]. The caller invokes this
+    /// WHILE holding the `entries` lock — the `entries →
+    /// canonical_to_entries shards` lock order permits taking a shard
+    /// mutex while `entries` is held (`entries` is outermost), and
+    /// registering under the lock keeps the live memo slot and its
+    /// reverse-index registration atomic against a concurrent
+    /// [`Self::invalidate_all`].
     ///
     /// **Carrier-aware registration.** The reverse index keys each
     /// populated slot under EVERY canonical the entry's
@@ -2970,34 +3058,43 @@ impl SemanticGraphStore {
     /// memo (a re-publish into a different slot of an already-present
     /// family does not re-record).
     ///
-    /// **Map/budget lifecycle fence.** The caller passes the `entries`
-    /// guard it is already holding — the `memo_budget` admission is
-    /// recorded, and the FIFO victims are removed from `entries`, WITHIN
-    /// that same lock hold. A concurrent [`Self::invalidate_all`] clears
-    /// `entries` + `memo_budget` under the SAME lock, so the publish's
-    /// `(entries slot, memo_budget record)` pair is atomic against the
-    /// reset's `(entries clear, memo_budget clear)` pair — the budget can
-    /// never strand a live `entries` family with no admission record.
+    /// **Family-memo consistency-cluster fence.** The caller passes the
+    /// `entries` guard it is already holding — the `memo_budget`
+    /// admission is recorded, the FIFO victims are removed from
+    /// `entries`, AND each evicted victim's `canonical_to_entries`
+    /// reverse-index registrations are pruned, ALL WITHIN that same lock
+    /// hold. The family memo is a three-member consistency cluster
+    /// (`entries`, `memo_budget`, `canonical_to_entries`); a concurrent
+    /// [`Self::invalidate_all`] clears all three under the SAME `entries`
+    /// lock, so the publish's `(entries slot, memo_budget record,
+    /// reverse-index register)` triple is atomic against the reset.
     ///
-    /// Only the evicted victims' `canonical_to_entries` reverse-index
-    /// registrations cannot be drained here (the `entries →
-    /// canonical_to_entries` lock order forbids taking a shard mutex
-    /// while holding `entries`). Each victim's `(slot, carrier)` pairs
-    /// are returned so the caller drains them via
-    /// [`Self::prune_evicted_family_reverse_index`] AFTER it drops the
-    /// `entries` lock. The injection point armed by
-    /// [`Self::test_publish_post_memo_budget_record_gate`] fires here,
-    /// after the admission lands and with the `entries` lock still held.
-    #[allow(clippy::type_complexity)]
+    /// Pruning the victim's reverse index here — rather than deferring it
+    /// past the `entries`-lock drop — closes the race where a fresh
+    /// same-`(family, slot)` re-publish registers into
+    /// `canonical_to_entries` between the victim's `entries` removal and
+    /// a deferred key-only reverse-index cleanup, which would delete the
+    /// fresh registration and leave the live re-published memo slot
+    /// invisible to `invalidate_canonical`. With the prune inside the
+    /// `entries` lock — and the publish-side `register_reverse_index`
+    /// also under that lock — no concurrent publish can register a fresh
+    /// `(family, slot)` in the gap, so there is no gap. The `entries →
+    /// canonical_to_entries shards` lock order PERMITS taking a shard
+    /// mutex while `entries` is held (`entries` is outermost), and no
+    /// path takes a `canonical_to_entries` shard mutex then `entries`, so
+    /// this nesting is sound.
+    ///
+    /// The injection point armed by
+    /// [`Self::test_publish_post_memo_budget_record_gate`] fires after
+    /// the admission lands; the one armed by
+    /// [`Self::test_publish_post_reverse_index_prune_gate`] fires after
+    /// the victims' reverse-index registrations are pruned — both with
+    /// the `entries` lock still held.
     fn record_family_admission_locked(
         &self,
         entries: &mut FxHashMap<FamilyKey, FamilySlots>,
         family: &FamilyKey,
-    ) -> Vec<(
-        FamilyKey,
-        ModeSlot,
-        crate::fact_signature_helpers::ReadSetSignature,
-    )> {
+    ) {
         const ALL_SLOTS: [ModeSlot; 6] = [
             ModeSlot::Single,
             ModeSlot::Identity,
@@ -3020,11 +3117,6 @@ impl SemanticGraphStore {
                 barrier.wait();
             }
         }
-        let mut evicted: Vec<(
-            FamilyKey,
-            ModeSlot,
-            crate::fact_signature_helpers::ReadSetSignature,
-        )> = Vec::new();
         // `record_admission` hands back `(seq, FamilyKey)` victims. The
         // removal here is by `FamilyKey` alone, NOT by admission seq —
         // sound because this whole method runs under the caller's
@@ -3038,45 +3130,51 @@ impl SemanticGraphStore {
         // re-admission. The `GlobalRetentionBudget` victim-identity
         // contract permits a key-based removal for exactly this
         // exclusive-lock-serialised case.
+        // Tracks whether at least one victim reverse-index registration
+        // was pruned, so the post-prune injection point fires only when a
+        // FIFO eviction actually happened. `cfg`-gated — absent from
+        // release builds, where the gate block is also compiled out.
+        #[cfg(any(test, debug_assertions))]
+        let mut pruned_any = false;
         for (_victim_seq, victim) in victims {
             // Remove the victim family from the held `entries` map (so
-            // map and budget stay in lockstep) and capture each
-            // populated slot's carrier for the deferred reverse-index
-            // drain.
+            // map and budget stay in lockstep), then immediately prune
+            // each populated slot's `canonical_to_entries` reverse-index
+            // registration under this same `entries`-lock hold so the
+            // three cluster members stay consistent.
             if let Some(slots) = entries.remove(&victim) {
                 for slot in ALL_SLOTS {
                     if let Some(entry) = slots.slot(slot) {
-                        evicted.push((victim.clone(), slot, entry.read_set_signature.clone()));
+                        for canonical in entry.read_set_signature.canonical_ids() {
+                            Self::prune_reverse_index_registration(
+                                &self.canonical_to_entries,
+                                &canonical,
+                                &(victim.clone(), slot),
+                            );
+                            #[cfg(any(test, debug_assertions))]
+                            {
+                                pruned_any = true;
+                            }
+                        }
                     }
                 }
             }
         }
-        evicted
-    }
-
-    /// Drain the `canonical_to_entries` reverse-index registrations for
-    /// families FIFO-evicted by [`Self::record_family_admission_locked`].
-    ///
-    /// Runs AFTER the caller drops the `entries` lock — the `entries →
-    /// canonical_to_entries` lock order forbids acquiring a per-canonical
-    /// shard mutex while holding `entries`. Each removal also drops the
-    /// outer shard when its inner map becomes empty, so a budget-driven
-    /// eviction wave does not leave empty shards resident.
-    fn prune_evicted_family_reverse_index(
-        &self,
-        evicted: &[(
-            FamilyKey,
-            ModeSlot,
-            crate::fact_signature_helpers::ReadSetSignature,
-        )],
-    ) {
-        for (family, slot, carrier) in evicted {
-            for canonical in carrier.canonical_ids() {
-                Self::prune_reverse_index_registration(
-                    &self.canonical_to_entries,
-                    &canonical,
-                    &(family.clone(), *slot),
-                );
+        // Test-only injection point — parked after the FIFO victims'
+        // `canonical_to_entries` reverse-index registrations have been
+        // pruned and with the `entries` lock still held, so a race test
+        // can assert the reverse-index prune runs in the `entries` lock
+        // domain. Fires only when at least one victim registration was
+        // pruned (so a publish that evicts nothing does not park).
+        // `None` (the production default) is a no-op.
+        #[cfg(any(test, debug_assertions))]
+        {
+            if pruned_any {
+                let gate = self.publish_post_reverse_index_prune_gate.lock().clone();
+                if let Some(barrier) = gate {
+                    barrier.wait();
+                    barrier.wait();
+                }
             }
         }
     }
@@ -3091,19 +3189,29 @@ impl SemanticGraphStore {
     /// distinct canonicals the reverse index would then grow unbounded,
     /// defeating the bound the `memo_budget` exists to enforce.
     ///
-    /// **Concurrency.** The outer `canonical_to_entries` is a `DashMap`.
-    /// The inner-map removal releases the per-canonical `Mutex` before
-    /// the outer drop is attempted; the outer drop is then a single
-    /// [`DashMap::remove_if`] whose emptiness predicate runs while the
-    /// `DashMap` shard write lock is held. A concurrent
-    /// [`Self::register_reverse_index`] inserter takes that same shard
-    /// write lock for the whole `entry(canonical).or_insert_with(...)` +
-    /// inner `insert`, so the two serialise: either the inserter runs
-    /// first and `remove_if`'s predicate observes the inner map
-    /// non-empty (drop skipped), or `remove_if` runs first, drops the
-    /// empty outer entry, and the inserter's later `or_insert_with`
-    /// re-creates a fresh shard cleanly. A registration can never be
-    /// stranded in a just-removed outer entry. This mirrors the
+    /// **Lock domain.** Both production callers —
+    /// [`Self::record_family_admission_locked`]'s FIFO-victim cleanup
+    /// and [`Self::invalidate_canonical`]'s cross-canonical cleanup —
+    /// invoke this WHILE holding the family memo's `entries` `Mutex`, the
+    /// single lock domain the consistency cluster (`entries`,
+    /// `memo_budget`, `canonical_to_entries`) is mutated under. The
+    /// publish-side [`Self::register_reverse_index`] inserter also runs
+    /// under `entries`, so a prune and a registration are serialised by
+    /// the `entries` lock and can never interleave.
+    ///
+    /// **Shard-detach safety.** Even absent the `entries` lock the
+    /// outer-shard drop is race-free: the inner-map removal releases the
+    /// per-canonical `Mutex` before the outer drop is attempted; the
+    /// outer drop is then a single [`DashMap::remove_if`] whose emptiness
+    /// predicate runs while the `DashMap` shard write lock is held. A
+    /// `register_reverse_index` inserter takes that same shard write lock
+    /// for the whole `entry(canonical).or_insert_with(...)` + inner
+    /// `insert`, so the two serialise: either the inserter runs first and
+    /// `remove_if`'s predicate observes the inner map non-empty (drop
+    /// skipped), or `remove_if` runs first, drops the empty outer entry,
+    /// and the inserter's later `or_insert_with` re-creates a fresh shard
+    /// cleanly. A registration can never be stranded in a just-removed
+    /// outer entry. This mirrors the
     /// `BoundedCandidateMap::remove_candidate_by_seq` slot-detach
     /// pattern.
     fn prune_reverse_index_registration(
@@ -3191,21 +3299,20 @@ impl SemanticGraphStore {
             .entry(family.clone())
             .or_default()
             .publish(slot, entry);
-        // Map/budget lifecycle fence — record the `memo_budget`
-        // admission under the held `entries` lock; see `warm_publish_one`.
-        let budget_evictions = if family_was_new && !populated_slots.is_empty() {
-            self.record_family_admission_locked(&mut entries, &family)
-        } else {
-            Vec::new()
-        };
-        drop(entries);
+        // Family-memo consistency-cluster fence — record the
+        // `memo_budget` admission and register the `canonical_to_entries`
+        // reverse index UNDER the held `entries` lock; see
+        // `warm_publish_one`.
+        if family_was_new && !populated_slots.is_empty() {
+            self.record_family_admission_locked(&mut entries, &family);
+        }
         Self::register_reverse_index(
             &self.canonical_to_entries,
             &family,
             &populated_slots,
             &read_set_signature,
         );
-        self.prune_evicted_family_reverse_index(&budget_evictions);
+        drop(entries);
         populated_slots.len()
     }
 }
@@ -3559,14 +3666,68 @@ impl SemanticGraphStore {
             gate: &self.cold_winner_pre_backfill_gate,
         }
     }
+
+    /// Test-only driver: arm the [`Self::invalidate_all`]
+    /// pre-`canonical_to_entries`-clear injection point with `barrier`.
+    /// The next `invalidate_all` on **this store** calls `barrier.wait()`
+    /// TWICE right before the `canonical_to_entries` reverse-index clear
+    /// and — in final-state code — with the `entries` lock that performed
+    /// `entries.clear()` still held, so a test can assert (via
+    /// `entries.try_lock()`) that the reverse-index clear runs in the same
+    /// `entries` lock domain as the `entries` + `memo_budget` clears.
+    ///
+    /// The returned guard disarms the gate on drop. Per-store scoped, so
+    /// it cannot park a concurrent unrelated test's `invalidate_all`.
+    /// `cfg`-gated to `test` / `debug_assertions`, mirroring the field.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_invalidate_all_pre_reverse_index_clear_gate(
+        &self,
+        barrier: Arc<std::sync::Barrier>,
+    ) -> TestInvalidateAllGateGuard<'_> {
+        *self.invalidate_all_pre_reverse_index_clear_gate.lock() = Some(barrier);
+        TestInvalidateAllGateGuard {
+            gate: &self.invalidate_all_pre_reverse_index_clear_gate,
+        }
+    }
+
+    /// Test-only driver: arm the
+    /// [`Self::record_family_admission_locked`]
+    /// post-reverse-index-prune injection point with `barrier`. The next
+    /// publish on **this store** that records a fresh family admission
+    /// AND FIFO-evicts at least one budget victim calls `barrier.wait()`
+    /// TWICE right after the evicted victims' `canonical_to_entries`
+    /// reverse-index registrations are pruned and — in final-state code —
+    /// with the `entries` lock still held, so a test can assert (via
+    /// `entries.try_lock()`) that the victim's reverse-index pruning runs
+    /// in the same `entries` lock domain as the victim's `entries`
+    /// removal.
+    ///
+    /// The returned guard disarms the gate on drop. Per-store scoped.
+    /// `cfg`-gated to `test` / `debug_assertions`, mirroring the field.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_publish_post_reverse_index_prune_gate(
+        &self,
+        barrier: Arc<std::sync::Barrier>,
+    ) -> TestInvalidateAllGateGuard<'_> {
+        *self.publish_post_reverse_index_prune_gate.lock() = Some(barrier);
+        TestInvalidateAllGateGuard {
+            gate: &self.publish_post_reverse_index_prune_gate,
+        }
+    }
 }
 
 /// RAII guard returned by the per-store test injection-point arming
 /// drivers on [`SemanticGraphStore`] —
 /// [`SemanticGraphStore::test_invalidate_all_post_entries_clear_gate`],
 /// [`SemanticGraphStore::test_invalidate_all_pre_memo_budget_clear_gate`],
-/// [`SemanticGraphStore::test_publish_post_memo_budget_record_gate`], and
-/// [`SemanticGraphStore::test_cold_winner_pre_backfill_gate`].
+/// [`SemanticGraphStore::test_publish_post_memo_budget_record_gate`],
+/// [`SemanticGraphStore::test_cold_winner_pre_backfill_gate`],
+/// [`SemanticGraphStore::test_invalidate_all_pre_reverse_index_clear_gate`],
+/// and [`SemanticGraphStore::test_publish_post_reverse_index_prune_gate`].
 /// Clears the per-store gate it borrows on drop so a later operation on
 /// the same store does not park on a stale barrier.
 #[cfg(any(test, debug_assertions))]
