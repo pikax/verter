@@ -250,6 +250,7 @@ fn imported_registry_db_untracked_self_root_rejects_warm_entry() {
             crate::component_meta_caches::ImportedRegistryEntry {
                 value: Some(Arc::new(imported_symbol(c, "stale"))),
                 fact_dep_signature: planted_self_root(c),
+                validated_at_generation: ctx.project_type_store().current_project_generation(),
             },
         )
     });
@@ -262,6 +263,7 @@ fn imported_registry_db_untracked_self_root_rejects_warm_entry() {
                 crate::component_meta_caches::ImportedRegistryEntry {
                     value: Some(Arc::new(imported_symbol(c, "recomputed"))),
                     fact_dep_signature: empty_fact_signature(),
+                    validated_at_generation: ctx.project_type_store().current_project_generation(),
                 },
             )
         })
@@ -1227,6 +1229,7 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
                 crate::component_meta_caches::ImportedRegistryEntry {
                     value: Some(Arc::new(imported_symbol(c, "stale"))),
                     fact_dep_signature: sig,
+                    validated_at_generation: ctx.project_type_store().current_project_generation(),
                 },
             )
         })
@@ -1243,6 +1246,7 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
                 crate::component_meta_caches::ImportedRegistryEntry {
                     value: Some(Arc::new(imported_symbol(c, "recomputed"))),
                     fact_dep_signature: empty_fact_signature(),
+                    validated_at_generation: ctx2.project_type_store().current_project_generation(),
                 },
             )
         })
@@ -4581,6 +4585,7 @@ fn imported_registry_cooperative_joiner_validates_against_follower_view() {
                 crate::component_meta_caches::ImportedRegistryEntry {
                     value: Some(Arc::new(imported_symbol(canonical, "winner-base"))),
                     fact_dep_signature: Arc::clone(&winner_self_root),
+                    validated_at_generation: ctx.project_type_store().current_project_generation(),
                 },
             )
         })
@@ -4625,6 +4630,9 @@ fn imported_registry_cooperative_joiner_validates_against_follower_view() {
                         canonical_id: canonical.to_string(),
                         hash: overlay_hash,
                     }]),
+                    validated_at_generation: session_ctx
+                        .project_type_store()
+                        .current_project_generation(),
                 },
             )
         })
@@ -4796,6 +4804,7 @@ fn imported_registry_joiner_fork_removal_keeps_live_counter_consistent() {
                 crate::component_meta_caches::ImportedRegistryEntry {
                     value: Some(Arc::new(imported_symbol(canonical, "winner-base"))),
                     fact_dep_signature: Arc::clone(&winner_self_root),
+                    validated_at_generation: ctx.project_type_store().current_project_generation(),
                 },
             )
         })
@@ -4838,6 +4847,9 @@ fn imported_registry_joiner_fork_removal_keeps_live_counter_consistent() {
                         canonical_id: canonical.to_string(),
                         hash: overlay_hash,
                     }]),
+                    validated_at_generation: session_ctx
+                        .project_type_store()
+                        .current_project_generation(),
                 },
             )
         })
@@ -5010,6 +5022,9 @@ fn imported_registry_removal_cleanup_preserves_fresh_reverse_index_registration(
                     crate::component_meta_caches::ImportedRegistryEntry {
                         value: Some(Arc::new(imported_symbol(canonical, "entry-A"))),
                         fact_dep_signature: Arc::clone(&base_self_root),
+                        validated_at_generation: ctx
+                            .project_type_store()
+                            .current_project_generation(),
                     },
                 )
             })
@@ -5069,6 +5084,9 @@ fn imported_registry_removal_cleanup_preserves_fresh_reverse_index_registration(
                     canonical_id: canonical.to_string(),
                     hash: overlay_hash,
                 }]),
+                validated_at_generation: hook_host
+                    .project_type_store()
+                    .current_project_generation(),
             });
             // Cold-publish B: inserts into `entries` AND registers in
             // the reverse index with B's own `EntryIdentity` — exactly
@@ -6148,5 +6166,510 @@ fn in_scope_query_identity_caches_all_have_self_root_coverage() {
          IN_SCOPE_QUERY_IDENTITY_SELF_ROOT_COVERAGE with a discriminator \
          test; a DB that is genuinely not a query-identity cache must be \
          added to `not_query_identity` with a justification",
+    );
+}
+
+// ===========================================================================
+// Project-generation staleness — every cooperative-admission cache must
+// reject an entry computed under a superseded project generation, and
+// every reap-on-peek that the generation gate creates must route through
+// the cache's COMPLETE removal cleanup (reverse-index unregister + ledger
+// forget), not just the bare map removal.
+//
+// A `ProjectGeneration` reset (tsconfig / path-alias / SDK /
+// workspace-folder change) bumps NO file content hash. The entries'
+// file-content carriers (`ReadSetSignature` / `fact_dep_signature`)
+// therefore validate a stale-by-project-generation entry vacuously
+// forever. The `validated_at_generation` tag is the project-shape
+// counterpart of the carrier check.
+//
+// The generation is advanced with the bare `bump_project_generation()`
+// (NOT `bump_project_generation_and_evict()`) so the entry is NOT evicted
+// by the bump itself — the warm read / peek must miss purely because the
+// entry's stamped generation no longer equals the current one. A cache
+// that carried no generation tag would leave the entry valid and serve it
+// stale.
+// ===========================================================================
+
+/// `MaterializeStructureDb`'s stale-`peek` reap (generation mismatch)
+/// routes through the cache's COMPLETE removal cleanup — every
+/// `canonical_to_keys` reverse-index registration the reaped entry held
+/// is unregistered and every now-empty shard is pruned.
+///
+/// Discriminating property — a planted entry references TWO canonicals,
+/// so `register_post_publish` creates TWO `canonical_to_keys` shards. A
+/// `bump_project_generation()` makes the entry generation-stale; the next
+/// `peek` reaps it. After the reap:
+///
+/// - A reap that drops only the map entry + the retention ledger (the
+///   pre-fix `MaterializeStructureDb::peek` body) leaves BOTH dead
+///   reverse-index shards resident — `canonical_to_keys_shard_count_for_test()`
+///   reads 2 and the assertion FAILS.
+/// - A reap routed through `unregister_post_publish` (loops the entry's
+///   `canonical_ids()`, prunes each shard) empties both shards' inner
+///   maps and drops the outer shards — the count reads 0 and the
+///   assertion PASSES.
+#[test]
+fn materialize_structure_peek_stale_reap_cleans_every_reverse_index_shard() {
+    use crate::component_meta_caches::MaterializeStructureEntry;
+    use crate::component_meta_materialize::{
+        MaterializationScope, MaterializeOutcome, MaterializeStructureCacheKey,
+    };
+    use crate::fact_signature_helpers::ReadSetSignature;
+    use crate::semantic_query::{ProjectionMode, SemanticNodeId};
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().materialize_structure_db();
+
+    let key = MaterializeStructureCacheKey {
+        scope_canonical_id: Arc::from("/owner.ts"),
+        base: SemanticNodeId(0),
+        scope_axis: MaterializationScope::TopLevel,
+        mode: ProjectionMode::Shallow,
+    };
+    // A fact rail naming TWO distinct cross-file-dependency canonicals.
+    // `register_post_publish` loops `canonical_ids()` (which folds in
+    // both the legacy and the fact rail) and creates one reverse-index
+    // shard per canonical, so the entry holds two registrations. The
+    // canonicals are untracked dependencies (NOT self-roots), so the
+    // carrier routes them through the lazy "untracked → accept" path
+    // and the entry is a valid warm hit until the generation gate
+    // rejects it.
+    let facts: Arc<[FactVersionRef]> = Arc::from(vec![
+        FactVersionRef::FileWholeHash {
+            canonical_id: "/dep-a.ts".to_string(),
+            hash: [1; 16],
+        },
+        FactVersionRef::FileWholeHash {
+            canonical_id: "/dep-b.ts".to_string(),
+            hash: [2; 16],
+        },
+    ]);
+    let generation_at_compute = host.project_type_store().current_project_generation();
+    let entry = Arc::new(MaterializeStructureEntry {
+        outcome: MaterializeOutcome::Miss(SemanticNodeId(0)),
+        read_set_signature: ReadSetSignature::new(
+            facts,
+            Arc::from(Vec::<(Arc<str>, crate::semantic_query::DepVersion)>::new()),
+        ),
+        self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
+        admission_seq: crate::bounded_query_retention::next_retention_seq(),
+        validated_at_generation: generation_at_compute,
+    });
+    db.entries().insert(key.clone(), Arc::clone(&entry));
+    db.bump_live_counter();
+    db.register_post_publish(key.clone(), &entry.read_set_signature, entry.admission_seq);
+    assert_eq!(
+        db.canonical_to_keys_shard_count_for_test(),
+        2,
+        "fixture invariant: a two-canonical entry registers two reverse-index shards",
+    );
+    // The entry's carrier validates against current store state (the
+    // planted canonicals are untracked → lazy-accepted), so `peek` would
+    // HIT were it not for the generation gate.
+    assert!(
+        db.peek(&key, ctx).is_some(),
+        "fixture invariant: the planted entry is a warm hit before the generation bump",
+    );
+
+    // Advance the project generation WITHOUT evicting — the entry stays
+    // resident; the next `peek` must reap it on the generation tag alone.
+    let g_after = host.project_type_store().bump_project_generation();
+    assert!(
+        g_after > generation_at_compute,
+        "fixture invariant: the project generation advanced past the stamped value",
+    );
+
+    // Generation-mismatch `peek` — reaps the entry.
+    assert!(
+        db.peek(&key, ctx).is_none(),
+        "fixture invariant: the generation-stale entry must miss on peek",
+    );
+    assert!(
+        db.entries().get(&key).is_none(),
+        "fixture invariant: the stale entry is reaped from the entry map",
+    );
+
+    assert_eq!(
+        db.canonical_to_keys_shard_count_for_test(),
+        0,
+        "INCOMPLETE STALE REAP: `MaterializeStructureDb::peek`'s \
+         generation-mismatch reap dropped the map entry and the retention \
+         ledger record but left the reaped entry's `canonical_to_keys` \
+         reverse-index registrations resident. The entry referenced two \
+         canonicals, so two dead shards accumulate and keep doing \
+         unnecessary invalidation work — a later invalidation of one shard \
+         cannot reach the others because the entry is already gone. The \
+         stale-peek reap must route through the same \
+         `unregister_post_publish` cleanup the cooperative-removal path \
+         uses, which loops the entry's `canonical_ids()` and prunes every \
+         emptied shard.",
+    );
+}
+
+/// `RefCycleResultDb`'s stale-`peek` reap (generation mismatch) routes
+/// through the cache's COMPLETE removal cleanup — the `RefCycleResultDb`
+/// mirror of `materialize_structure_peek_stale_reap_cleans_every_reverse_index_shard`.
+#[test]
+fn ref_cycle_peek_stale_reap_cleans_every_reverse_index_shard() {
+    use crate::component_meta_caches::RefCycleEntry;
+    use crate::fact_signature_helpers::ReadSetSignature;
+    use crate::semantic_query::{DeclIdentity, HashValue};
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().ref_cycle_db();
+
+    let key = DeclIdentity {
+        canonical_id: Arc::from("/owner.ts"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("RootHelper"),
+    };
+    // A fact rail naming TWO distinct cross-file-dependency canonicals —
+    // two reverse-index shards registered. Untracked dependencies (NOT
+    // self-roots) route through the lazy "untracked → accept" path, so
+    // the entry is a valid warm hit until the generation gate rejects it.
+    let facts: Arc<[FactVersionRef]> = Arc::from(vec![
+        FactVersionRef::FileWholeHash {
+            canonical_id: "/dep-a.ts".to_string(),
+            hash: [1; 16],
+        },
+        FactVersionRef::FileWholeHash {
+            canonical_id: "/dep-b.ts".to_string(),
+            hash: [2; 16],
+        },
+    ]);
+    let generation_at_compute = host.project_type_store().current_project_generation();
+    let entry = Arc::new(RefCycleEntry {
+        result: false,
+        read_set_signature: ReadSetSignature::new(
+            facts,
+            Arc::from(Vec::<(Arc<str>, crate::semantic_query::DepVersion)>::new()),
+        ),
+        self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
+        admission_seq: crate::bounded_query_retention::next_retention_seq(),
+        validated_at_generation: generation_at_compute,
+    });
+    db.entries().insert(key.clone(), Arc::clone(&entry));
+    db.bump_live_counter();
+    db.register_post_publish(key.clone(), &entry.read_set_signature, entry.admission_seq);
+    assert_eq!(
+        db.canonical_to_keys_shard_count_for_test(),
+        2,
+        "fixture invariant: a two-canonical entry registers two reverse-index shards",
+    );
+    assert!(
+        db.peek(&key, ctx).is_some(),
+        "fixture invariant: the planted entry is a warm hit before the generation bump",
+    );
+
+    let g_after = host.project_type_store().bump_project_generation();
+    assert!(
+        g_after > generation_at_compute,
+        "fixture invariant: the project generation advanced past the stamped value",
+    );
+
+    assert!(
+        db.peek(&key, ctx).is_none(),
+        "fixture invariant: the generation-stale entry must miss on peek",
+    );
+    assert!(
+        db.entries().get(&key).is_none(),
+        "fixture invariant: the stale entry is reaped from the entry map",
+    );
+
+    assert_eq!(
+        db.canonical_to_keys_shard_count_for_test(),
+        0,
+        "INCOMPLETE STALE REAP: `RefCycleResultDb::peek`'s \
+         generation-mismatch reap dropped the map entry and the budget \
+         record but left the reaped entry's `canonical_to_keys` \
+         reverse-index registrations resident — dead shards accumulate. \
+         The stale-peek reap must route through `unregister_post_publish`, \
+         which loops the entry's `canonical_ids()` and prunes every \
+         emptied shard.",
+    );
+}
+
+/// `ImportedRegistryDb::peek` rejects an entry computed under a
+/// superseded project generation.
+///
+/// Discriminating property — an entry is primed through the production
+/// `get_or_compute_admit` cold path (which stamps `validated_at_generation`
+/// with the project generation snapshotted before dispatch). A bare
+/// `bump_project_generation()` advances the counter without evicting. The
+/// next `peek`:
+///
+/// - With no generation tag (the pre-fix `ImportedRegistryEntry`) validates
+///   the entry by its file-content-only `fact_dep_signature` alone — the
+///   carrier still matches, so `peek` returns a stale HIT and the
+///   assertion FAILS.
+/// - With the `validated_at_generation` tag checked at `peek`, the stamped
+///   generation no longer equals the current one — `peek` MISSES and the
+///   assertion PASSES.
+#[test]
+fn imported_registry_peek_rejects_entry_from_superseded_generation() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/superseded_gen/imported_registry.ts";
+    upsert(
+        &host,
+        canonical,
+        "export type Probe = number;\nexport const probe = 1;\n",
+    );
+    assert!(
+        host.ensure_indexed_ready(canonical).is_some(),
+        "fixture invariant: canonical IndexedReady materialises",
+    );
+
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().imported_registry_db();
+    let key: crate::component_meta_caches::ImportedRegistryKey =
+        (Arc::from(canonical), Arc::from("Probe"));
+
+    // Prime the cache through the production cold path — the `Cacheable`
+    // arm stamps `validated_at_generation` with the project generation
+    // snapshotted before the compute dispatches, exactly as the
+    // production producer (`registry_decl.rs`) does, and registers the
+    // reverse index.
+    let g_before = host.project_type_store().current_project_generation();
+    let primed = db.get_or_compute_admit(&key, ctx, || {
+        let validated_at_generation = host.project_type_store().current_project_generation();
+        crate::cooperative_admission::ComputeAdmission::Cacheable(
+            crate::component_meta_caches::ImportedRegistryEntry {
+                value: None,
+                fact_dep_signature: empty_fact_signature(),
+                validated_at_generation,
+            },
+        )
+    });
+    assert!(
+        primed.is_some(),
+        "fixture invariant: the cold cooperative admission publishes the entry",
+    );
+    assert_eq!(
+        db.live_count(),
+        1,
+        "fixture invariant: the primed entry is admitted to ImportedRegistryDb",
+    );
+    assert!(
+        db.peek(&key, ctx).is_some(),
+        "fixture invariant: the primed entry is a warm peek hit before the generation bump",
+    );
+
+    // Advance the project generation WITHOUT evicting any cache.
+    let g_after = host.project_type_store().bump_project_generation();
+    assert!(
+        g_after > g_before,
+        "fixture invariant: the project generation advanced past the stamped value",
+    );
+    assert_eq!(
+        db.live_count(),
+        1,
+        "fixture invariant: bump_project_generation does NOT evict the entry — the \
+         peek must reject it on the generation tag alone",
+    );
+
+    assert!(
+        db.peek(&key, ctx).is_none(),
+        "PROJECT-GENERATION STALENESS: `ImportedRegistryDb::peek` served an \
+         entry computed under a superseded project generation. A \
+         `ProjectGeneration` reset (tsconfig / path-alias / SDK / \
+         workspace-folder change) bumps no file content, so the entry's \
+         file-content-only `fact_dep_signature` validates the stale entry \
+         vacuously forever. `peek` must additionally reject the entry when \
+         its `validated_at_generation` no longer equals the live project \
+         generation.",
+    );
+}
+
+/// `PreparedMemberDb::peek` rejects an entry computed under a superseded
+/// project generation — covers the fence-less `cooperative_get_or_insert`
+/// engine-DB path (the `ImportedRegistryDb` test covers the
+/// `cooperative_admit_with_post_publish` path).
+#[test]
+fn prepared_member_peek_rejects_entry_from_superseded_generation() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/superseded_gen/prepared_member.ts";
+    upsert(
+        &host,
+        canonical,
+        "export interface Holder { value: number; }\n",
+    );
+    assert!(
+        host.ensure_indexed_ready(canonical).is_some(),
+        "fixture invariant: canonical IndexedReady materialises",
+    );
+
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().prepared_member_db();
+    let key = PreparedMemberCacheKey {
+        canonical_id: Arc::from(canonical),
+        symbol_name: Arc::from("Holder"),
+        member_name: Arc::from("value"),
+        kind: PreparedMemberCacheKind::Requested,
+        substitutions: PreparedSubstitutionKey::Empty,
+    };
+
+    // Prime the cache through the production cold path — the cold
+    // `compute` stamps `validated_at_generation` with the pre-dispatch
+    // project generation.
+    let g_before = host.project_type_store().current_project_generation();
+    let primed = db.get_or_compute(&key, ctx, || Some((None, empty_fact_signature())));
+    assert!(
+        primed.is_some(),
+        "fixture invariant: the cold cooperative compute publishes the entry",
+    );
+    assert_eq!(
+        db.live_count(),
+        1,
+        "fixture invariant: the primed entry is admitted to PreparedMemberDb",
+    );
+    assert!(
+        db.peek(&key, ctx).is_some(),
+        "fixture invariant: the primed entry is a warm peek hit before the generation bump",
+    );
+
+    // Advance the project generation WITHOUT evicting any cache.
+    let g_after = host.project_type_store().bump_project_generation();
+    assert!(
+        g_after > g_before,
+        "fixture invariant: the project generation advanced past the stamped value",
+    );
+    assert_eq!(
+        db.live_count(),
+        1,
+        "fixture invariant: bump_project_generation does NOT evict the entry — the \
+         peek must reject it on the generation tag alone",
+    );
+
+    assert!(
+        db.peek(&key, ctx).is_none(),
+        "PROJECT-GENERATION STALENESS: `PreparedMemberDb::peek` served an \
+         entry computed under a superseded project generation. A \
+         `ProjectGeneration` reset bumps no file content, so the entry's \
+         file-content-only `fact_dep_signature` validates the stale entry \
+         vacuously forever. `peek` must additionally reject the entry when \
+         its `validated_at_generation` no longer equals the live project \
+         generation.",
+    );
+}
+
+/// `ImportedRegistryDb`'s cooperative warm-hit reject driven by a
+/// project-generation mismatch routes through the cache's COMPLETE
+/// removal cleanup — the substrate's `removal_cleanup` closure
+/// unregisters the reaped entry's `CanonicalIndex` reverse-index
+/// registration.
+///
+/// `ImportedRegistryDb` is the only fence-less cache that carries a
+/// reverse index, so it is the one Part-C coupling concern: adding the
+/// generation gate to the cooperative `validate` closure creates a new
+/// reject path, and that reject must clean the reverse index, not just
+/// drop the map entry. The cooperative substrate already routes a
+/// `validate`-rejected entry through `remove_published_entry_with_cleanup`,
+/// which runs the cache's `removal_cleanup` (here:
+/// `canonical_index.unregister`) — so the generation gate riding inside
+/// `validate` reuses that complete cleanup.
+///
+/// Discriminating property — an entry is primed through the production
+/// cold path (stamps `validated_at_generation`, registers the reverse
+/// index). A bare `bump_project_generation()` advances the counter. The
+/// next `get_or_compute_admit` reaches its warm-hit `validate` arm; its
+/// `compute` closure returns `ReturnOnly` (no republish, so the only
+/// reverse-index mutation observable afterwards is the reap's
+/// `unregister`):
+///
+/// - With no generation gate in `validate` (the pre-fix closure) the
+///   warm-hit `validate` accepts the stale entry by its file-content-only
+///   `fact_dep_signature`; the entry is served, never reaped, and its
+///   reverse-index registration survives — `reverse_index_contains_for_test`
+///   reads `true` and the assertion FAILS.
+/// - With the generation gate in `validate`, the stale entry is rejected,
+///   the substrate's `remove_published_entry_with_cleanup` removes it AND
+///   runs `removal_cleanup` → `canonical_index.unregister`; the
+///   registration is gone — `reverse_index_contains_for_test` reads
+///   `false` and the assertion PASSES.
+#[test]
+fn imported_registry_cooperative_generation_reject_cleans_reverse_index() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/superseded_gen/imported_registry_reverse_index.ts";
+    upsert(
+        &host,
+        canonical,
+        "export type Probe = number;\nexport const probe = 1;\n",
+    );
+    assert!(
+        host.ensure_indexed_ready(canonical).is_some(),
+        "fixture invariant: canonical IndexedReady materialises",
+    );
+
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().imported_registry_db();
+    let key: crate::component_meta_caches::ImportedRegistryKey =
+        (Arc::from(canonical), Arc::from("Probe"));
+
+    // Prime the cache through the production cold path — stamps
+    // `validated_at_generation` and registers `key` in the per-canonical
+    // reverse index.
+    let primed = db.get_or_compute_admit(&key, ctx, || {
+        let validated_at_generation = host.project_type_store().current_project_generation();
+        crate::cooperative_admission::ComputeAdmission::Cacheable(
+            crate::component_meta_caches::ImportedRegistryEntry {
+                value: None,
+                fact_dep_signature: empty_fact_signature(),
+                validated_at_generation,
+            },
+        )
+    });
+    assert!(
+        primed.is_some(),
+        "fixture invariant: the cold cooperative admission publishes the entry",
+    );
+    assert!(
+        db.reverse_index_contains_for_test(&key),
+        "fixture invariant: the primed entry registered `key` in the \
+         per-canonical reverse index",
+    );
+
+    // Advance the project generation WITHOUT evicting any cache.
+    let g_after_bump = host.project_type_store().bump_project_generation();
+    assert!(
+        g_after_bump > 0,
+        "fixture invariant: the project generation advanced",
+    );
+
+    // A second cooperative admission: its warm-hit `validate` arm
+    // re-reads the stale entry. The `compute` closure returns
+    // `ReturnOnly` so nothing republishes — the only reverse-index
+    // mutation observable afterwards is the reap's `unregister`.
+    let mut cold_ran = false;
+    let _ = db.get_or_compute_admit(&key, ctx, || {
+        cold_ran = true;
+        crate::cooperative_admission::ComputeAdmission::ReturnOnly(None)
+    });
+    assert!(
+        cold_ran,
+        "the warm-hit `validate` arm MUST reject the generation-stale entry so the \
+         cooperative cold path runs — a `validate` that accepted the stale entry on \
+         its file-content-only `fact_dep_signature` would short-circuit before \
+         `compute`.",
+    );
+
+    assert!(
+        !db.reverse_index_contains_for_test(&key),
+        "INCOMPLETE COOPERATIVE REAP: `ImportedRegistryDb`'s cooperative \
+         warm-hit reject of a generation-stale entry dropped the map entry \
+         but left its `CanonicalIndex` reverse-index registration resident. \
+         The generation gate rides inside the cooperative `validate` \
+         closure, and a `validate` rejection routes through the substrate's \
+         `remove_published_entry_with_cleanup`, which runs `removal_cleanup` \
+         → `canonical_index.unregister`. The reverse-index registration \
+         must be gone after the reap.",
+    );
+    assert_eq!(
+        db.live_count(),
+        0,
+        "the generation-stale entry must be reaped from the entry map and \
+         the `ReturnOnly` cold outcome must not republish",
     );
 }

@@ -48,6 +48,7 @@ fn invalidate_canonical_touches_only_indexed_entries() {
         let entry = Arc::new(ImportedRegistryEntry {
             value: None,
             fact_dep_signature: Arc::from(Vec::new()),
+            validated_at_generation: 0,
         });
         db.insert_for_test(key, entry);
         inserted += 1;
@@ -63,6 +64,7 @@ fn invalidate_canonical_touches_only_indexed_entries() {
             let entry = Arc::new(ImportedRegistryEntry {
                 value: None,
                 fact_dep_signature: Arc::from(Vec::new()),
+                validated_at_generation: 0,
             });
             db.insert_for_test(key, entry);
             inserted += 1;

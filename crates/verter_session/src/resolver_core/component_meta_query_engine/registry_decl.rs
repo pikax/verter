@@ -151,6 +151,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         std::sync::Arc::new(crate::component_meta_caches::ImportedRegistryEntry {
                             value: Some(std::sync::Arc::new(symbol)),
                             fact_dep_signature: fact_sig,
+                            // A simulated concurrent publish stamps the
+                            // live project generation, exactly as the
+                            // real cold-compute path does.
+                            validated_at_generation: ctx
+                                .project_type_store()
+                                .current_project_generation(),
                         }),
                     );
                 }
@@ -193,6 +199,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let host_value = host_db.get_or_compute_admit(&arc_key, ctx, || {
             #[cfg(test)]
             super::IMPORTED_REGISTRY_RESOLVE_INVOCATIONS.with(|n| n.set(n.get().saturating_add(1)));
+            // Snapshot the project generation BEFORE the resolution
+            // dispatches any work. The `fact_dep_signature` carrier
+            // validates only file-content whole-hashes; a
+            // `ProjectGeneration` reset (tsconfig / path-alias / SDK /
+            // workspace-folder change) bumps no file content, so the
+            // entry carries its compute-time generation explicitly. The
+            // read-side gates reject the entry once the live generation
+            // moves past this snapshot.
+            let validated_at_generation = ctx.project_type_store().current_project_generation();
             // The single, side-effecting resolution: the wildcard-route
             // fuse is consumed here at most once per key.
             let resolved: Option<ResolvedImportedRegistrySymbol> =
@@ -231,6 +246,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         crate::component_meta_caches::ImportedRegistryEntry {
                             value: resolved_value,
                             fact_dep_signature,
+                            validated_at_generation,
                         },
                     )
                 }

@@ -81,6 +81,18 @@ pub struct ImportedRegistryEntry {
     /// a same-canonical content edit, or a keyed canonical untracked by
     /// the live store view, rejects the entry.
     pub fact_dep_signature: Arc<[FactVersionRef]>,
+    /// Project generation this entry was computed under, snapshotted by
+    /// the producer before the cold compute dispatched any work. The
+    /// `fact_dep_signature` carrier validates only file-content
+    /// whole-hashes; a `ProjectGeneration` reset (tsconfig / path-alias /
+    /// SDK / workspace-folder change) bumps no file content, so without
+    /// this field a stale-by-project-generation entry would validate
+    /// forever. Every read-side gate ([`ImportedRegistryDb::peek`], the
+    /// cooperative `validate` closure, the cooperative
+    /// `revalidate_after_compute` closure) rejects the entry when
+    /// `validated_at_generation` differs from the live
+    /// [`crate::project_type_store::ProjectTypeStore::current_project_generation`].
+    pub validated_at_generation: u64,
 }
 
 pub type ImportedRegistryKey = (Arc<str>, Arc<str>);
@@ -144,7 +156,18 @@ impl ImportedRegistryDb {
     ) -> Option<Option<Arc<ResolvedImportedRegistrySymbol>>> {
         let self_roots: [&str; 1] = [key.0.as_ref()];
         let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-        if validate_fact_signature_with_self_roots(ctx, &entry_arc.fact_dep_signature, &self_roots)
+        // The carrier validates only file-content whole-hashes; a
+        // `ProjectGeneration` reset bumps no file content, so the
+        // generation gate is the project-shape counterpart of the
+        // carrier check. A stale-by-project-generation entry is rejected
+        // here even though its `fact_dep_signature` still validates.
+        if entry_arc.validated_at_generation
+            == ctx.project_type_store().current_project_generation()
+            && validate_fact_signature_with_self_roots(
+                ctx,
+                &entry_arc.fact_dep_signature,
+                &self_roots,
+            )
         {
             bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
             Some(entry_arc.value.clone())
@@ -208,11 +231,17 @@ impl ImportedRegistryDb {
             &self.inflight,
             key.clone(),
             |entry: &ImportedRegistryEntry| {
-                if validate_fact_signature_with_self_roots(
-                    ctx,
-                    &entry.fact_dep_signature,
-                    &self_roots,
-                ) {
+                // The carrier validates only file-content whole-hashes;
+                // the generation gate is the project-shape counterpart
+                // (a `ProjectGeneration` reset bumps no file content).
+                if entry.validated_at_generation
+                    == ctx.project_type_store().current_project_generation()
+                    && validate_fact_signature_with_self_roots(
+                        ctx,
+                        &entry.fact_dep_signature,
+                        &self_roots,
+                    )
+                {
                     bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
@@ -225,7 +254,17 @@ impl ImportedRegistryDb {
                 entry.value.clone()
             },
             |entry: &ImportedRegistryEntry| {
-                validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+                // Post-compute revalidation — generation gate plus the
+                // file-content carrier check, mirroring the warm-hit
+                // `validate` arm. A project-generation reset that landed
+                // during the cold window rejects the entry here.
+                entry.validated_at_generation
+                    == ctx.project_type_store().current_project_generation()
+                    && validate_fact_signature_with_self_roots(
+                        ctx,
+                        &entry.fact_dep_signature,
+                        &self_roots,
+                    )
             },
             // Removal-side counterpart of `post_publish`: when the
             // substrate removes an already-published entry (warm-hit
@@ -349,6 +388,7 @@ impl ImportedRegistryDb {
         let entry = Arc::new(ImportedRegistryEntry {
             value: None,
             fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+            validated_at_generation: 0,
         });
         self.insert_for_test(key, entry);
     }
@@ -427,6 +467,10 @@ pub struct DeclarationLookupEntry {
     /// R3/R26/R28 fact-precise dependency signature. See
     /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
     pub fact_dep_signature: Arc<[FactVersionRef]>,
+    /// Project generation this entry was computed under. See
+    /// [`ImportedRegistryEntry::validated_at_generation`] for the
+    /// project-generation staleness contract.
+    pub validated_at_generation: u64,
 }
 
 pub type DeclarationLookupKey = (Arc<str>, Arc<str>);
@@ -471,16 +515,26 @@ impl DeclarationLookupDb {
         // became untracked) rejects the entry instead of riding the
         // lazy "untracked → accept" rule.
         let self_roots: [&str; 1] = [key.0.as_ref()];
+        // Snapshot the project generation BEFORE the cold compute
+        // dispatches any work. The carrier validates only file-content
+        // whole-hashes; a `ProjectGeneration` reset bumps no file
+        // content, so the entry carries its compute-time generation
+        // explicitly. The read-side gates reject the entry once the live
+        // generation moves past this snapshot.
+        let generation_snapshot = ctx.project_type_store().current_project_generation();
         cooperative_get_or_insert(
             &self.entries,
             &self.inflight,
             key.clone(),
             |entry: &DeclarationLookupEntry| {
-                if validate_fact_signature_with_self_roots(
-                    ctx,
-                    &entry.fact_dep_signature,
-                    &self_roots,
-                ) {
+                if entry.validated_at_generation
+                    == ctx.project_type_store().current_project_generation()
+                    && validate_fact_signature_with_self_roots(
+                        ctx,
+                        &entry.fact_dep_signature,
+                        &self_roots,
+                    )
+                {
                     bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
@@ -493,6 +547,7 @@ impl DeclarationLookupDb {
                     DeclarationLookupEntry {
                         value: Arc::new(value),
                         fact_dep_signature,
+                        validated_at_generation: generation_snapshot,
                     }
                 })
             },
@@ -501,7 +556,13 @@ impl DeclarationLookupDb {
                 entry.value.clone()
             },
             |entry: &DeclarationLookupEntry| {
-                validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+                entry.validated_at_generation
+                    == ctx.project_type_store().current_project_generation()
+                    && validate_fact_signature_with_self_roots(
+                        ctx,
+                        &entry.fact_dep_signature,
+                        &self_roots,
+                    )
             },
             move |_key: &DeclarationLookupKey, _entry: &Arc<DeclarationLookupEntry>| {
                 live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
@@ -559,6 +620,10 @@ pub struct ResolvabilityEntry {
     /// R3/R26/R28 fact-precise dependency signature. See
     /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
     pub fact_dep_signature: Arc<[FactVersionRef]>,
+    /// Project generation this entry was computed under. See
+    /// [`ImportedRegistryEntry::validated_at_generation`] for the
+    /// project-generation staleness contract.
+    pub validated_at_generation: u64,
 }
 
 pub type ResolvabilityKey = (Arc<str>, Arc<str>);
@@ -601,16 +666,23 @@ impl ResolvabilityDb {
         // warm-read validation rejects a same-canonical edit or an
         // untracked keyed canonical.
         let self_roots: [&str; 1] = [key.0.as_ref()];
+        // Snapshot the project generation BEFORE the cold compute
+        // dispatches any work — see `DeclarationLookupDb::get_or_compute`
+        // for the project-generation staleness rationale.
+        let generation_snapshot = ctx.project_type_store().current_project_generation();
         cooperative_get_or_insert(
             &self.entries,
             &self.inflight,
             key.clone(),
             |entry: &ResolvabilityEntry| {
-                if validate_fact_signature_with_self_roots(
-                    ctx,
-                    &entry.fact_dep_signature,
-                    &self_roots,
-                ) {
+                if entry.validated_at_generation
+                    == ctx.project_type_store().current_project_generation()
+                    && validate_fact_signature_with_self_roots(
+                        ctx,
+                        &entry.fact_dep_signature,
+                        &self_roots,
+                    )
+                {
                     bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value)
                 } else {
@@ -623,6 +695,7 @@ impl ResolvabilityDb {
                     ResolvabilityEntry {
                         value,
                         fact_dep_signature,
+                        validated_at_generation: generation_snapshot,
                     }
                 })
             },
@@ -631,7 +704,13 @@ impl ResolvabilityDb {
                 entry.value
             },
             |entry: &ResolvabilityEntry| {
-                validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+                entry.validated_at_generation
+                    == ctx.project_type_store().current_project_generation()
+                    && validate_fact_signature_with_self_roots(
+                        ctx,
+                        &entry.fact_dep_signature,
+                        &self_roots,
+                    )
             },
             move |_key: &ResolvabilityKey, _entry: &Arc<ResolvabilityEntry>| {
                 live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
@@ -695,6 +774,10 @@ pub struct OwnerCollectionEntry {
     /// R3/R26/R28 fact-precise dependency signature. See
     /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
     pub fact_dep_signature: Arc<[FactVersionRef]>,
+    /// Project generation this entry was computed under. See
+    /// [`ImportedRegistryEntry::validated_at_generation`] for the
+    /// project-generation staleness contract.
+    pub validated_at_generation: u64,
 }
 
 pub type OwnerCollectionKey = (Arc<str>, Arc<str>); // (owner, name)
@@ -738,16 +821,23 @@ impl OwnerCollectionDb {
         // validation is the correctness floor — a content edit to the
         // owner file invalidates the cached collection expression.
         let self_roots: [&str; 1] = [key.0.as_ref()];
+        // Snapshot the project generation BEFORE the cold compute
+        // dispatches any work — see `DeclarationLookupDb::get_or_compute`
+        // for the project-generation staleness rationale.
+        let generation_snapshot = ctx.project_type_store().current_project_generation();
         cooperative_get_or_insert(
             &self.entries,
             &self.inflight,
             key.clone(),
             |entry: &OwnerCollectionEntry| {
-                if validate_fact_signature_with_self_roots(
-                    ctx,
-                    &entry.fact_dep_signature,
-                    &self_roots,
-                ) {
+                if entry.validated_at_generation
+                    == ctx.project_type_store().current_project_generation()
+                    && validate_fact_signature_with_self_roots(
+                        ctx,
+                        &entry.fact_dep_signature,
+                        &self_roots,
+                    )
+                {
                     bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
@@ -761,6 +851,7 @@ impl OwnerCollectionDb {
                         owner_canonical,
                         value: value.map(Arc::new),
                         fact_dep_signature,
+                        validated_at_generation: generation_snapshot,
                     }
                 })
             },
@@ -769,7 +860,13 @@ impl OwnerCollectionDb {
                 entry.value.clone()
             },
             |entry: &OwnerCollectionEntry| {
-                validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+                entry.validated_at_generation
+                    == ctx.project_type_store().current_project_generation()
+                    && validate_fact_signature_with_self_roots(
+                        ctx,
+                        &entry.fact_dep_signature,
+                        &self_roots,
+                    )
             },
             move |_key: &OwnerCollectionKey, _entry: &Arc<OwnerCollectionEntry>| {
                 live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
@@ -836,6 +933,10 @@ pub struct PreparedTargetEntry {
     /// entry carries the routed canonical explicitly — a content edit
     /// to the third declaring file rejects the entry.
     pub self_root_canonicals: Arc<[Arc<str>]>,
+    /// Project generation this entry was computed under. See
+    /// [`ImportedRegistryEntry::validated_at_generation`] for the
+    /// project-generation staleness contract.
+    pub validated_at_generation: u64,
 }
 
 pub struct PreparedTargetDb {
@@ -899,7 +1000,16 @@ impl PreparedTargetDb {
             .iter()
             .map(Arc::as_ref)
             .collect();
-        if validate_fact_signature_with_self_roots(ctx, &entry_arc.fact_dep_signature, &self_roots)
+        // The carrier validates only file-content whole-hashes; the
+        // generation gate is the project-shape counterpart (a
+        // `ProjectGeneration` reset bumps no file content).
+        if entry_arc.validated_at_generation
+            == ctx.project_type_store().current_project_generation()
+            && validate_fact_signature_with_self_roots(
+                ctx,
+                &entry_arc.fact_dep_signature,
+                &self_roots,
+            )
         {
             bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
             Some(entry_arc.value.clone())
@@ -937,7 +1047,15 @@ impl PreparedTargetDb {
         let validate = |entry: &PreparedTargetEntry| -> Option<Option<(Arc<str>, Arc<str>)>> {
             let self_roots: Vec<&str> =
                 entry.self_root_canonicals.iter().map(Arc::as_ref).collect();
-            if validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+            // The carrier validates only file-content whole-hashes; the
+            // generation gate is the project-shape counterpart.
+            if entry.validated_at_generation
+                == ctx.project_type_store().current_project_generation()
+                && validate_fact_signature_with_self_roots(
+                    ctx,
+                    &entry.fact_dep_signature,
+                    &self_roots,
+                )
             {
                 bubble_fact_signature(ctx, &entry.fact_dep_signature);
                 Some(entry.value.clone())
@@ -945,6 +1063,10 @@ impl PreparedTargetDb {
                 None
             }
         };
+        // Snapshot the project generation BEFORE the cold compute
+        // dispatches any work — see `DeclarationLookupDb::get_or_compute`
+        // for the project-generation staleness rationale.
+        let generation_snapshot = ctx.project_type_store().current_project_generation();
         cooperative_get_or_insert(
             &self.entries,
             &self.inflight,
@@ -957,6 +1079,7 @@ impl PreparedTargetDb {
                         value,
                         fact_dep_signature,
                         self_root_canonicals,
+                        validated_at_generation: generation_snapshot,
                     }
                 })
             },
@@ -967,7 +1090,13 @@ impl PreparedTargetDb {
             |entry: &PreparedTargetEntry| {
                 let self_roots: Vec<&str> =
                     entry.self_root_canonicals.iter().map(Arc::as_ref).collect();
-                validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+                entry.validated_at_generation
+                    == ctx.project_type_store().current_project_generation()
+                    && validate_fact_signature_with_self_roots(
+                        ctx,
+                        &entry.fact_dep_signature,
+                        &self_roots,
+                    )
             },
             move |_key: &PreparedTargetCacheKey, _entry: &Arc<PreparedTargetEntry>| {
                 live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
@@ -1041,6 +1170,7 @@ impl PreparedTargetDb {
             value: None,
             fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
+            validated_at_generation: 0,
         });
         self.entries.insert(key, entry);
         self.live_counter.fetch_add(1, Ordering::Relaxed);
@@ -1081,6 +1211,10 @@ pub struct MaterializeMemoEntry {
     /// R3/R26/R28 fact-precise dependency signature. See
     /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
     pub fact_dep_signature: Arc<[FactVersionRef]>,
+    /// Project generation this entry was computed under. See
+    /// [`ImportedRegistryEntry::validated_at_generation`] for the
+    /// project-generation staleness contract.
+    pub validated_at_generation: u64,
 }
 
 pub type MaterializeMemoKey = (Arc<str>, Arc<TypeExpr>, ProjectionMode);
@@ -1137,11 +1271,16 @@ impl MaterializeMemoDb {
         let self_roots: [&str; 1] = [key.0.as_ref()];
         let result = (|| -> Option<MaterializedTypeExpr> {
             let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-            if validate_fact_signature_with_self_roots(
-                ctx,
-                &entry_arc.fact_dep_signature,
-                &self_roots,
-            ) {
+            // The carrier validates only file-content whole-hashes; the
+            // generation gate is the project-shape counterpart.
+            if entry_arc.validated_at_generation
+                == ctx.project_type_store().current_project_generation()
+                && validate_fact_signature_with_self_roots(
+                    ctx,
+                    &entry_arc.fact_dep_signature,
+                    &self_roots,
+                )
+            {
                 bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
                 Some(entry_arc.value.clone())
             } else {
@@ -1181,16 +1320,23 @@ impl MaterializeMemoDb {
         // The keyed scope canonical is the entry's self-root — strict
         // warm-read validation.
         let self_roots: [&str; 1] = [key.0.as_ref()];
+        // Snapshot the project generation BEFORE the cold compute
+        // dispatches any work — see `DeclarationLookupDb::get_or_compute`
+        // for the project-generation staleness rationale.
+        let generation_snapshot = ctx.project_type_store().current_project_generation();
         cooperative_get_or_insert(
             &self.entries,
             &self.inflight,
             key.clone(),
             |entry: &MaterializeMemoEntry| {
-                if validate_fact_signature_with_self_roots(
-                    ctx,
-                    &entry.fact_dep_signature,
-                    &self_roots,
-                ) {
+                if entry.validated_at_generation
+                    == ctx.project_type_store().current_project_generation()
+                    && validate_fact_signature_with_self_roots(
+                        ctx,
+                        &entry.fact_dep_signature,
+                        &self_roots,
+                    )
+                {
                     bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
@@ -1203,6 +1349,7 @@ impl MaterializeMemoDb {
                     MaterializeMemoEntry {
                         value,
                         fact_dep_signature,
+                        validated_at_generation: generation_snapshot,
                     }
                 })
             },
@@ -1211,7 +1358,13 @@ impl MaterializeMemoDb {
                 entry.value.clone()
             },
             |entry: &MaterializeMemoEntry| {
-                validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+                entry.validated_at_generation
+                    == ctx.project_type_store().current_project_generation()
+                    && validate_fact_signature_with_self_roots(
+                        ctx,
+                        &entry.fact_dep_signature,
+                        &self_roots,
+                    )
             },
             move |_key: &MaterializeMemoKey, _entry: &Arc<MaterializeMemoEntry>| {
                 live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
@@ -1270,6 +1423,7 @@ impl MaterializeMemoDb {
                 dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
             },
             fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+            validated_at_generation: 0,
         });
         self.entries.insert(key, entry);
         self.live_counter.fetch_add(1, Ordering::Relaxed);
@@ -1324,6 +1478,10 @@ pub struct PreparedSurfaceEntry {
     /// R3/R26/R28 fact-precise dependency signature. See
     /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
     pub fact_dep_signature: Arc<[FactVersionRef]>,
+    /// Project generation this entry was computed under. See
+    /// [`ImportedRegistryEntry::validated_at_generation`] for the
+    /// project-generation staleness contract.
+    pub validated_at_generation: u64,
 }
 
 pub struct PreparedSurfaceDb {
@@ -1380,11 +1538,16 @@ impl PreparedSurfaceDb {
         let self_roots: [&str; 1] = [key.canonical_id.as_ref()];
         let result = (|| -> Option<PreparedSurfacePayload> {
             let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-            if validate_fact_signature_with_self_roots(
-                ctx,
-                &entry_arc.fact_dep_signature,
-                &self_roots,
-            ) {
+            // The carrier validates only file-content whole-hashes; the
+            // generation gate is the project-shape counterpart.
+            if entry_arc.validated_at_generation
+                == ctx.project_type_store().current_project_generation()
+                && validate_fact_signature_with_self_roots(
+                    ctx,
+                    &entry_arc.fact_dep_signature,
+                    &self_roots,
+                )
+            {
                 bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
                 Some(entry_arc.value.clone())
             } else {
@@ -1424,16 +1587,23 @@ impl PreparedSurfaceDb {
         // The keyed canonical is the entry's self-root — strict
         // warm-read validation (body-sensitive surface).
         let self_roots: [&str; 1] = [key.canonical_id.as_ref()];
+        // Snapshot the project generation BEFORE the cold compute
+        // dispatches any work — see `DeclarationLookupDb::get_or_compute`
+        // for the project-generation staleness rationale.
+        let generation_snapshot = ctx.project_type_store().current_project_generation();
         cooperative_get_or_insert(
             &self.entries,
             &self.inflight,
             key.clone(),
             |entry: &PreparedSurfaceEntry| {
-                if validate_fact_signature_with_self_roots(
-                    ctx,
-                    &entry.fact_dep_signature,
-                    &self_roots,
-                ) {
+                if entry.validated_at_generation
+                    == ctx.project_type_store().current_project_generation()
+                    && validate_fact_signature_with_self_roots(
+                        ctx,
+                        &entry.fact_dep_signature,
+                        &self_roots,
+                    )
+                {
                     bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
@@ -1446,6 +1616,7 @@ impl PreparedSurfaceDb {
                     PreparedSurfaceEntry {
                         value,
                         fact_dep_signature,
+                        validated_at_generation: generation_snapshot,
                     }
                 })
             },
@@ -1454,7 +1625,13 @@ impl PreparedSurfaceDb {
                 entry.value.clone()
             },
             |entry: &PreparedSurfaceEntry| {
-                validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+                entry.validated_at_generation
+                    == ctx.project_type_store().current_project_generation()
+                    && validate_fact_signature_with_self_roots(
+                        ctx,
+                        &entry.fact_dep_signature,
+                        &self_roots,
+                    )
             },
             move |_key: &PreparedSurfaceCacheKey, _entry: &Arc<PreparedSurfaceEntry>| {
                 live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
@@ -1509,6 +1686,7 @@ impl PreparedSurfaceDb {
         let entry = Arc::new(PreparedSurfaceEntry {
             value: PreparedSurfacePayload::Empty,
             fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+            validated_at_generation: 0,
         });
         self.entries.insert(key, entry);
         self.live_counter.fetch_add(1, Ordering::Relaxed);
@@ -1549,6 +1727,10 @@ pub struct PreparedMemberEntry {
     /// R3/R26/R28 fact-precise dependency signature. See
     /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
     pub fact_dep_signature: Arc<[FactVersionRef]>,
+    /// Project generation this entry was computed under. See
+    /// [`ImportedRegistryEntry::validated_at_generation`] for the
+    /// project-generation staleness contract.
+    pub validated_at_generation: u64,
 }
 
 pub struct PreparedMemberDb {
@@ -1603,11 +1785,16 @@ impl PreparedMemberDb {
         let self_roots: [&str; 1] = [key.canonical_id.as_ref()];
         let result = (|| -> Option<Option<Arc<ProjectedMember>>> {
             let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-            if validate_fact_signature_with_self_roots(
-                ctx,
-                &entry_arc.fact_dep_signature,
-                &self_roots,
-            ) {
+            // The carrier validates only file-content whole-hashes; the
+            // generation gate is the project-shape counterpart.
+            if entry_arc.validated_at_generation
+                == ctx.project_type_store().current_project_generation()
+                && validate_fact_signature_with_self_roots(
+                    ctx,
+                    &entry_arc.fact_dep_signature,
+                    &self_roots,
+                )
+            {
                 bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
                 Some(entry_arc.value.clone())
             } else {
@@ -1647,16 +1834,23 @@ impl PreparedMemberDb {
         // The keyed canonical is the entry's self-root — strict
         // warm-read validation.
         let self_roots: [&str; 1] = [key.canonical_id.as_ref()];
+        // Snapshot the project generation BEFORE the cold compute
+        // dispatches any work — see `DeclarationLookupDb::get_or_compute`
+        // for the project-generation staleness rationale.
+        let generation_snapshot = ctx.project_type_store().current_project_generation();
         cooperative_get_or_insert(
             &self.entries,
             &self.inflight,
             key.clone(),
             |entry: &PreparedMemberEntry| {
-                if validate_fact_signature_with_self_roots(
-                    ctx,
-                    &entry.fact_dep_signature,
-                    &self_roots,
-                ) {
+                if entry.validated_at_generation
+                    == ctx.project_type_store().current_project_generation()
+                    && validate_fact_signature_with_self_roots(
+                        ctx,
+                        &entry.fact_dep_signature,
+                        &self_roots,
+                    )
+                {
                     bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
@@ -1669,6 +1863,7 @@ impl PreparedMemberDb {
                     PreparedMemberEntry {
                         value: value.map(Arc::new),
                         fact_dep_signature,
+                        validated_at_generation: generation_snapshot,
                     }
                 })
             },
@@ -1677,7 +1872,13 @@ impl PreparedMemberDb {
                 entry.value.clone()
             },
             |entry: &PreparedMemberEntry| {
-                validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+                entry.validated_at_generation
+                    == ctx.project_type_store().current_project_generation()
+                    && validate_fact_signature_with_self_roots(
+                        ctx,
+                        &entry.fact_dep_signature,
+                        &self_roots,
+                    )
             },
             move |_key: &PreparedMemberCacheKey, _entry: &Arc<PreparedMemberEntry>| {
                 live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
@@ -1734,6 +1935,7 @@ impl PreparedMemberDb {
         let entry = Arc::new(PreparedMemberEntry {
             value: None,
             fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+            validated_at_generation: 0,
         });
         self.entries.insert(key, entry);
         self.live_counter.fetch_add(1, Ordering::Relaxed);
@@ -1774,6 +1976,10 @@ pub struct RoutedExprSurfaceEntry {
     /// R3/R26/R28 fact-precise dependency signature. See
     /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
     pub fact_dep_signature: Arc<[FactVersionRef]>,
+    /// Project generation this entry was computed under. See
+    /// [`ImportedRegistryEntry::validated_at_generation`] for the
+    /// project-generation staleness contract.
+    pub validated_at_generation: u64,
 }
 
 pub struct RoutedExprSurfaceDb {
@@ -1827,7 +2033,16 @@ impl RoutedExprSurfaceDb {
         // warm-read validation rejects a same-scope content edit.
         let self_roots: [&str; 1] = [key.scope_canonical_id.as_ref()];
         let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-        if validate_fact_signature_with_self_roots(ctx, &entry_arc.fact_dep_signature, &self_roots)
+        // The carrier validates only file-content whole-hashes; the
+        // generation gate is the project-shape counterpart (a
+        // `ProjectGeneration` reset bumps no file content).
+        if entry_arc.validated_at_generation
+            == ctx.project_type_store().current_project_generation()
+            && validate_fact_signature_with_self_roots(
+                ctx,
+                &entry_arc.fact_dep_signature,
+                &self_roots,
+            )
         {
             bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
             Some(entry_arc.value.clone())
@@ -1853,16 +2068,23 @@ impl RoutedExprSurfaceDb {
         // The keyed scope canonical is the entry's self-root — strict
         // warm-read validation.
         let self_roots: [&str; 1] = [key.scope_canonical_id.as_ref()];
+        // Snapshot the project generation BEFORE the cold compute
+        // dispatches any work — see `DeclarationLookupDb::get_or_compute`
+        // for the project-generation staleness rationale.
+        let generation_snapshot = ctx.project_type_store().current_project_generation();
         cooperative_get_or_insert(
             &self.entries,
             &self.inflight,
             key.clone(),
             |entry: &RoutedExprSurfaceEntry| {
-                if validate_fact_signature_with_self_roots(
-                    ctx,
-                    &entry.fact_dep_signature,
-                    &self_roots,
-                ) {
+                if entry.validated_at_generation
+                    == ctx.project_type_store().current_project_generation()
+                    && validate_fact_signature_with_self_roots(
+                        ctx,
+                        &entry.fact_dep_signature,
+                        &self_roots,
+                    )
+                {
                     bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
@@ -1875,6 +2097,7 @@ impl RoutedExprSurfaceDb {
                     RoutedExprSurfaceEntry {
                         value: Arc::new(value),
                         fact_dep_signature,
+                        validated_at_generation: generation_snapshot,
                     }
                 })
             },
@@ -1883,7 +2106,13 @@ impl RoutedExprSurfaceDb {
                 entry.value.clone()
             },
             |entry: &RoutedExprSurfaceEntry| {
-                validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+                entry.validated_at_generation
+                    == ctx.project_type_store().current_project_generation()
+                    && validate_fact_signature_with_self_roots(
+                        ctx,
+                        &entry.fact_dep_signature,
+                        &self_roots,
+                    )
             },
             move |_key: &RoutedExprSurfaceCacheKey, _entry: &Arc<RoutedExprSurfaceEntry>| {
                 live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
@@ -1938,6 +2167,7 @@ impl RoutedExprSurfaceDb {
         let entry = Arc::new(RoutedExprSurfaceEntry {
             value: Arc::new(TypeExpr::Unknown { raw: String::new() }),
             fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+            validated_at_generation: 0,
         });
         self.entries.insert(key, entry);
         self.live_counter.fetch_add(1, Ordering::Relaxed);
@@ -2306,20 +2536,31 @@ impl MaterializeStructureDb {
                     .read_set_signature
                     .validate_with_self_roots(ctx, &entry_arc.self_root_canonicals)
             {
-                // Stale-entry reap touches both `entries` and the
-                // retention budget — hold the retention gate (shared
-                // read) across the pair so it does not desync against
-                // a concurrent project-generation `clear`.
+                // Stale-entry reap touches `entries`, the
+                // `canonical_to_keys` reverse index, and the retention
+                // budget — hold the retention gate (shared read) across
+                // the whole removal so it does not desync against a
+                // concurrent project-generation `clear`.
                 let _retention = self.retention_gate.read();
                 let removed = self
                     .entries
                     .remove_if(key, |_, e| Arc::ptr_eq(e, &entry_arc));
                 if removed.is_some() {
                     self.live_counter.fetch_sub(1, Ordering::Relaxed);
-                    // Stale entry reaped — drop exactly its ledger
-                    // record (`forget_seq`), leaving a fresh
-                    // re-admission of the same key counted.
-                    self.retention_budget.forget_seq(entry_arc.admission_seq);
+                    // Route the reap through the SAME cleanup the
+                    // cooperative-removal path uses: `unregister_post_publish`
+                    // unregisters every `canonical_to_keys` registration
+                    // the reaped entry held (one per canonical its carrier
+                    // referenced) and prunes the now-empty shards, then
+                    // forgets exactly this entry's retention-ledger record
+                    // via `forget_seq`. A bare `forget_seq` here would
+                    // drop the ledger record but leave dead reverse-index
+                    // shards resident for a multi-canonical entry.
+                    self.unregister_post_publish(
+                        key,
+                        &entry_arc.read_set_signature,
+                        entry_arc.admission_seq,
+                    );
                 }
                 return None;
             }
@@ -2675,14 +2916,16 @@ impl MaterializeStructureDb {
         self.live_counter.fetch_sub(1, Ordering::Relaxed);
     }
 
-    /// Removal-side counterpart of [`Self::register_post_publish`].
-    /// When the cooperative-admission substrate removes one
+    /// Complete removal-side cleanup, the counterpart of
+    /// [`Self::register_post_publish`]. Two callers reach it: the
+    /// cooperative-admission substrate when it removes one
     /// already-published entry (a warm-hit reject or a joiner-fork
-    /// reject) the entry's reverse-index registration must be dropped
-    /// under EVERY canonical it referenced, symmetric with the
-    /// per-canonical `register_post_publish` insert. `Arc::ptr_eq`
-    /// against the entry's `legacy` rail discriminates "our
-    /// registration" from a concurrent fresh winner's.
+    /// reject), and [`Self::peek`]'s stale/generation-mismatch reap. The
+    /// entry's reverse-index registration must be dropped under EVERY
+    /// canonical it referenced, symmetric with the per-canonical
+    /// `register_post_publish` insert. `Arc::ptr_eq` against the entry's
+    /// `legacy` rail discriminates "our registration" from a concurrent
+    /// fresh winner's.
     ///
     /// `admission_seq` is the removed entry's
     /// [`MaterializeStructureEntry::admission_seq`]. The retention-ledger
@@ -3129,15 +3372,17 @@ impl RefCycleResultDb {
         }
     }
 
-    /// Removal-side counterpart of [`Self::register_post_publish`].
-    /// When the cooperative-admission substrate removes one
+    /// Complete removal-side cleanup, the counterpart of
+    /// [`Self::register_post_publish`]. Two callers reach it: the
+    /// cooperative-admission substrate when it removes one
     /// already-published entry (a warm-hit reject or a joiner-fork
-    /// reject) the entry's reverse-index registration must be dropped
-    /// under EVERY canonical it referenced, symmetric with the
-    /// per-canonical `register_post_publish` insert. `Arc::ptr_eq`
-    /// against the entry's `legacy` rail discriminates "our
-    /// registration" from a concurrent fresh winner's so a
-    /// re-published entry's registration is not stolen.
+    /// reject), and [`Self::peek`]'s stale/generation-mismatch reap. The
+    /// entry's reverse-index registration must be dropped under EVERY
+    /// canonical it referenced, symmetric with the per-canonical
+    /// `register_post_publish` insert. `Arc::ptr_eq` against the entry's
+    /// `legacy` rail discriminates "our registration" from a concurrent
+    /// fresh winner's so a re-published entry's registration is not
+    /// stolen.
     ///
     /// `admission_seq` is the removed entry's
     /// [`RefCycleEntry::admission_seq`]. The retention-ledger removal is
@@ -3200,10 +3445,11 @@ impl RefCycleResultDb {
                     .read_set_signature
                     .validate_with_self_roots(ctx, &entry_arc.self_root_canonicals)
             {
-                // Stale-entry reap touches both `entries` and the
-                // retention budget — hold the retention gate (shared
-                // read) across the pair so it does not desync against
-                // a concurrent project-generation `clear`.
+                // Stale-entry reap touches `entries`, the
+                // `canonical_to_keys` reverse index, and the retention
+                // budget — hold the retention gate (shared read) across
+                // the whole removal so it does not desync against a
+                // concurrent project-generation `clear`.
                 let _retention = self.retention_gate.read();
                 // R8-5 — decrement live_counter on stale removal so
                 // the shared counter tracks live entries, not stale ones.
@@ -3212,10 +3458,19 @@ impl RefCycleResultDb {
                     .remove_if(id, |_, e| Arc::ptr_eq(e, &entry_arc));
                 if removed.is_some() {
                     self.live_counter.fetch_sub(1, Ordering::Relaxed);
-                    // Stale entry reaped — drop exactly its ledger
-                    // record (`forget_seq`), leaving a fresh
-                    // re-admission of the same key counted.
-                    self.retention_budget.forget_seq(entry_arc.admission_seq);
+                    // Route the reap through the SAME cleanup the
+                    // cooperative-removal path uses: `unregister_post_publish`
+                    // unregisters every `canonical_to_keys` registration
+                    // the reaped entry held and prunes the now-empty
+                    // shards, then forgets exactly this entry's
+                    // retention-ledger record via `forget_seq`. A bare
+                    // `forget_seq` here would leave dead reverse-index
+                    // shards resident for a multi-canonical entry.
+                    self.unregister_post_publish(
+                        id,
+                        &entry_arc.read_set_signature,
+                        entry_arc.admission_seq,
+                    );
                 }
                 return None;
             }
