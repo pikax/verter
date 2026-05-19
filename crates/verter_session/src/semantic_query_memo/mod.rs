@@ -774,12 +774,21 @@ impl SemanticGraphStore {
             }
             // A family that loses its last slot is removed outright;
             // drop its retention-budget ledger record so the budget
-            // does not later return an already-removed family.
+            // does not later return an already-removed family. The
+            // key-wide `forget` is sound HERE because this runs inside
+            // the `entries`-lock hold (see the enclosing block) — the
+            // exact lock domain `record_family_admission_locked` records
+            // every `memo_budget` admission under and `invalidate_all`
+            // clears it under. No concurrent publisher can record a
+            // fresh admission for `family` while this drain holds that
+            // lock, so the key-wide removal cannot clobber a concurrent
+            // re-admission. `forget_key_under_exclusive_lock`'s contract
+            // documents this serialization precondition.
             entries.retain(|family, slots| {
                 if slots.populated_count() > 0 {
                     true
                 } else {
-                    self.memo_budget.forget(family);
+                    self.memo_budget.forget_key_under_exclusive_lock(family);
                     false
                 }
             });
@@ -1124,8 +1133,10 @@ impl SemanticGraphStore {
     /// [`ProjectTypeStore::evict_canonical`](crate::project_type_store::ProjectTypeStore::evict_canonical)
     /// so stale artifacts do not keep a retired file's spans alive.
     /// Returns the number of entries evicted. The map retention + the
-    /// per-entry budget `forget` run under the `BudgetedNamedTypeIndex`'s
-    /// `retention_gate` read guard.
+    /// per-entry budget removal run under the `BudgetedNamedTypeIndex`'s
+    /// `retention_gate` read guard; each removal is scoped to the dropped
+    /// entry's own `admission_seq` (`forget_seq`), so a concurrent
+    /// `insert` re-admitting the same key keeps its fresh admission.
     pub fn invalidate_resolved_named_types_for_canonical(&self, canonical_id: &str) -> usize {
         self.named_type_index.retain_for_canonical(canonical_id)
     }

@@ -214,14 +214,36 @@ impl BudgetedRelationMemo {
     }
 }
 
+/// One entry in the resolved-named-type identity map
+/// ([`BudgetedNamedTypeIndex`]).
+///
+/// `node_id` is the interned [`SemanticNodeId`] the key resolves to.
+/// `admission_seq` is the FIFO retention-ledger admission identity — the
+/// unique sequence number this entry was recorded under when its key
+/// first entered the map. Every budget removal is scoped to that exact
+/// seq (`forget_seq`), so a per-canonical drain that races a concurrent
+/// `insert` re-admitting the same key forgets only the stale entry's
+/// ledger record and never the fresh re-admission's (which carries a
+/// different seq). Carrying the seq on the entry is the established
+/// substrate pattern — see [`crate::component_meta_caches`]'s
+/// `MaterializeStructureEntry` / `RefCycleEntry`.
+#[derive(Clone, Copy)]
+pub(crate) struct NamedTypeIndexEntry {
+    /// The interned semantic node id the key resolves to.
+    pub(crate) node_id: SemanticNodeId,
+    /// FIFO retention-ledger admission identity — unique per admission,
+    /// survives a same-key re-admission.
+    admission_seq: u64,
+}
+
 /// Vue-macro resolved-named-type identity map:
-/// [`HostResolvedNamedTypeKey`] → [`SemanticNodeId`], bounded by a FIFO
-/// [`GlobalRetentionBudget`].
+/// [`HostResolvedNamedTypeKey`] → [`NamedTypeIndexEntry`], bounded by a
+/// FIFO [`GlobalRetentionBudget`].
 ///
 /// Owns the map, the budget, and the lifecycle `retention_gate`. See
 /// the module docs for the map/budget lock-domain invariant.
 pub(crate) struct BudgetedNamedTypeIndex {
-    index: DashMap<HostResolvedNamedTypeKey, SemanticNodeId>,
+    index: DashMap<HostResolvedNamedTypeKey, NamedTypeIndexEntry>,
     budget: GlobalRetentionBudget<HostResolvedNamedTypeKey>,
     /// Lifecycle gate. `insert` / `retain_for_canonical` take the read
     /// guard across the whole map + budget mutation; `clear` takes the
@@ -235,6 +257,15 @@ pub(crate) struct BudgetedNamedTypeIndex {
     /// [`Self::test_arm_insert_post_record_gate`].
     #[cfg(any(test, debug_assertions))]
     insert_post_record_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+    /// Test-only injection point inside [`Self::retain_for_canonical`],
+    /// parked AFTER the stale `index` entries are removed but BEFORE
+    /// their budget records are forgotten — with the `retention_gate`
+    /// read guard still held. A race test arms it to drive a concurrent
+    /// `insert` (re-admitting a just-removed key) into that gap and
+    /// assert the per-entry `forget_seq` does not clobber the fresh
+    /// admission. See [`Self::test_arm_retain_pre_forget_gate`].
+    #[cfg(any(test, debug_assertions))]
+    retain_pre_forget_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
 }
 
 impl Default for BudgetedNamedTypeIndex {
@@ -247,6 +278,8 @@ impl Default for BudgetedNamedTypeIndex {
             clear_midpoint_gate: parking_lot::Mutex::new(None),
             #[cfg(any(test, debug_assertions))]
             insert_post_record_gate: parking_lot::Mutex::new(None),
+            #[cfg(any(test, debug_assertions))]
+            retain_pre_forget_gate: parking_lot::Mutex::new(None),
         }
     }
 }
@@ -260,15 +293,51 @@ impl BudgetedNamedTypeIndex {
     /// guard, so it cannot interleave its map clear and budget clear
     /// with this insert's two-phase update.
     ///
-    /// New-key detection is atomic: `DashMap::insert` returns the prior
-    /// value (`Some` on a same-key replace), so the budget admission is
-    /// recorded exactly once per distinct key even when two writers
-    /// race the same key.
+    /// New-key detection is atomic: the slot is taken through the
+    /// `DashMap::entry` API, so the "vacant vs occupied" decision AND
+    /// the slot write happen under one held shard write guard. The
+    /// budget admission is therefore recorded exactly once per distinct
+    /// key even when two writers race the same key — a
+    /// `contains_key`-then-`insert` pair would let both racing writers
+    /// observe "absent" and double-record.
+    ///
+    /// On a same-key replace the entry keeps the PRIOR admission's
+    /// `admission_seq` — the FIFO ledger still tracks the original
+    /// admission, so the stored seq must stay equal to the ledger record
+    /// it identifies. A fresh seq on a replace would desync the entry
+    /// from its ledger record and leak it past a `forget_seq` removal.
     pub(crate) fn insert(&self, key: HostResolvedNamedTypeKey, node_id: SemanticNodeId) {
+        use dashmap::mapref::entry::Entry;
+
         let _retention = self.retention_gate.read();
-        let is_new = self.index.insert(key.clone(), node_id).is_none();
-        if is_new {
-            let seq = crate::bounded_query_retention::next_retention_seq();
+        // Decide new-vs-replace and write the slot atomically under the
+        // shard write guard the `entry` API holds. `admitted_seq` is
+        // `Some(seq)` only when this call freshly admitted the key — on
+        // a same-key replace the prior seq is carried forward (the
+        // ledger record was never removed) and no admission is recorded.
+        let admitted_seq = match self.index.entry(key.clone()) {
+            Entry::Occupied(mut occ) => {
+                // Same-key replace: keep the prior entry's seq so the
+                // stored entry stays paired with its live ledger record.
+                let admission_seq = occ.get().admission_seq;
+                occ.insert(NamedTypeIndexEntry {
+                    node_id,
+                    admission_seq,
+                });
+                None
+            }
+            Entry::Vacant(vac) => {
+                let admission_seq = crate::bounded_query_retention::next_retention_seq();
+                vac.insert(NamedTypeIndexEntry {
+                    node_id,
+                    admission_seq,
+                });
+                Some(admission_seq)
+            }
+        };
+        if let Some(seq) = admitted_seq {
+            // New key: record the admission and FIFO-evict the oldest
+            // entries past the cap.
             for victim in self.budget.record_admission(seq, key) {
                 self.index.remove(&victim);
             }
@@ -286,7 +355,7 @@ impl BudgetedNamedTypeIndex {
     /// Look up the [`SemanticNodeId`] for `key`. Refcount-only read —
     /// no gate (a read does not touch the budget).
     pub(crate) fn get(&self, key: &HostResolvedNamedTypeKey) -> Option<SemanticNodeId> {
-        self.index.get(key).map(|entry| *entry.value())
+        self.index.get(key).map(|entry| entry.value().node_id)
     }
 
     /// Drop every entry whose key's `canonical_id` matches
@@ -294,23 +363,56 @@ impl BudgetedNamedTypeIndex {
     /// Returns the number of entries removed.
     ///
     /// Holds the `retention_gate` read guard across BOTH the map
-    /// retention and the per-entry budget `forget`, so a concurrent
+    /// retention and the per-entry budget removal, so a concurrent
     /// `clear` cannot interleave its two clears with this drain.
+    ///
+    /// **Removal-identity invariant.** Each dropped entry is forgotten
+    /// from the budget by its own `admission_seq` (`forget_seq`), NOT by
+    /// a key-wide `forget`. The `index` `retain` and the budget removal
+    /// are two separate steps, both under only the shared read guard, so
+    /// a concurrent `insert` can interleave: it can re-admit a key this
+    /// drain just removed from `index` and record a FRESH admission
+    /// (a different seq). A key-wide `forget` of that key would then
+    /// delete the fresh admission's ledger record while the fresh
+    /// `index` entry survives — stranding it invisible to FIFO eviction
+    /// so repeated canonical edits grow the map past the cap. Scoping
+    /// the removal to each stale entry's captured `admission_seq` leaves
+    /// the fresh re-admission's distinct record intact. Mirrors the
+    /// `forget_seq` identity scoping in
+    /// [`crate::component_meta_caches`]'s per-canonical drains.
     pub(crate) fn retain_for_canonical(&self, canonical_id: &str) -> usize {
         let _retention = self.retention_gate.read();
         let mut removed = 0usize;
-        let mut forgotten: Vec<HostResolvedNamedTypeKey> = Vec::new();
-        self.index.retain(|key, _| {
+        // Capture each removed entry's OWN admission seq so the budget
+        // removal can be scoped to that exact ledger record.
+        let mut forgotten_seqs: Vec<u64> = Vec::new();
+        self.index.retain(|key, entry| {
             if key.canonical_id.as_ref() == canonical_id {
                 removed += 1;
-                forgotten.push(key.clone());
+                forgotten_seqs.push(entry.admission_seq);
                 false
             } else {
                 true
             }
         });
-        for key in &forgotten {
-            self.budget.forget(key);
+        // Test-only injection point — parked AFTER the stale `index`
+        // entries are removed but BEFORE their ledger records are
+        // forgotten, with the `retention_gate` read guard still held. A
+        // race test arms it so a concurrent `insert` re-admits one of
+        // the just-removed keys into this gap; the per-entry `forget_seq`
+        // below must then forget only the STALE seq and leave the fresh
+        // re-admission's record counted. `None` (production default) is
+        // a no-op.
+        #[cfg(any(test, debug_assertions))]
+        {
+            let gate = self.retain_pre_forget_gate.lock().clone();
+            if let Some(barrier) = gate {
+                barrier.wait();
+                barrier.wait();
+            }
+        }
+        for seq in forgotten_seqs {
+            self.budget.forget_seq(seq);
         }
         removed
     }
@@ -381,6 +483,26 @@ impl BudgetedNamedTypeIndex {
         *self.insert_post_record_gate.lock() = Some(barrier);
         BudgetedGateGuard {
             gate: &self.insert_post_record_gate,
+        }
+    }
+
+    /// Test-only driver: arm the [`Self::retain_for_canonical`]
+    /// injection point. The next `retain_for_canonical` on this index
+    /// calls `barrier.wait()` twice AFTER it removes the stale `index`
+    /// entries but BEFORE it forgets their budget records (read guard
+    /// held). A race test uses this to interleave a concurrent `insert`
+    /// that re-admits a just-removed key and prove the per-entry
+    /// `forget_seq` does not clobber the fresh admission.
+    #[cfg(test)]
+    #[doc(hidden)]
+    #[must_use]
+    pub(crate) fn test_arm_retain_pre_forget_gate(
+        &self,
+        barrier: Arc<std::sync::Barrier>,
+    ) -> BudgetedGateGuard<'_> {
+        *self.retain_pre_forget_gate.lock() = Some(barrier);
+        BudgetedGateGuard {
+            gate: &self.retain_pre_forget_gate,
         }
     }
 }
@@ -649,5 +771,103 @@ mod tests {
         index.clear();
         assert_eq!(index.len(), 0);
         assert_eq!(index.budget_tracked_len(), 0);
+    }
+
+    /// REMOVAL-IDENTITY RACE (named-type index) —
+    /// `retain_for_canonical` racing a concurrent `insert` that
+    /// re-admits a just-removed key MUST forget only the STALE entry's
+    /// budget record, never the fresh re-admission's. A key-wide
+    /// `forget` deletes the fresh admission's ledger record while the
+    /// fresh `index` entry survives — that entry then escapes FIFO
+    /// eviction and repeated canonical edits grow the map past the cap.
+    ///
+    /// Deterministic. `retain_for_canonical("/w/a.vue")` removes the
+    /// stale entry for `("/w/a.vue", "Props")` from `index`, then parks
+    /// at its pre-`forget` injection point — `index` entry gone, budget
+    /// record not yet forgotten, `retention_gate` read guard still held.
+    /// While it is parked a concurrent `insert` re-admits the SAME key:
+    /// `insert` sees a vacant slot (the retain pass already removed it)
+    /// and records a FRESH admission under a NEW seq. The retain pass is
+    /// then released and runs its budget removal.
+    ///
+    /// DISCRIMINATES. After the race the fresh entry is live in `index`
+    /// (`len() == 1`). Its budget admission must survive:
+    ///   - With the per-entry `forget_seq` fix the retain pass forgets
+    ///     ONLY the stale seq, so `budget_tracked_len() == 1` — the
+    ///     fresh entry is counted and FIFO-tracked. Assertion PASSES.
+    ///   - With a key-wide `forget(key)` the retain pass drops EVERY
+    ///     ledger record for the key, including the fresh
+    ///     re-admission's, so `budget_tracked_len() == 0` while
+    ///     `len() == 1` — the fresh entry is stranded, invisible to FIFO
+    ///     eviction. Assertion FAILS.
+    /// `budget_tracked_len()` is exactly the count
+    /// `GlobalRetentionBudget::record_admission` compares against the
+    /// cap, so a surviving record is a FIFO-counted record.
+    #[test]
+    fn named_type_index_retain_for_canonical_preserves_concurrent_readmission() {
+        let index = StdArc::new(BudgetedNamedTypeIndex::default());
+        let key = named_type_key("/w/a.vue", "Props");
+
+        // Seed the stale entry the retain pass will remove.
+        index.insert(key.clone(), SemanticNodeId(1));
+        assert_eq!(index.len(), 1);
+        assert_eq!(index.budget_tracked_len(), 1, "stale entry admitted");
+
+        // Park `retain_for_canonical` AFTER it removed the stale `index`
+        // entry but BEFORE it forgets the stale budget record.
+        let retain_parked = StdArc::new(Barrier::new(2));
+        let _guard = index.test_arm_retain_pre_forget_gate(StdArc::clone(&retain_parked));
+
+        let index_retain = StdArc::clone(&index);
+        let retainer = thread::spawn(move || index_retain.retain_for_canonical("/w/a.vue"));
+
+        // The retain pass has removed the stale entry from `index` and
+        // parked at its pre-`forget` midpoint.
+        retain_parked.wait();
+        assert_eq!(
+            index.len(),
+            0,
+            "retain pass removed the stale entry from the map",
+        );
+
+        // Concurrent `insert` re-admits the SAME key into the gap. The
+        // slot is vacant (retain removed it), so this records a FRESH
+        // admission under a new seq.
+        index.insert(key.clone(), SemanticNodeId(2));
+        assert_eq!(index.len(), 1, "fresh entry re-admitted");
+        assert_eq!(
+            index.budget_tracked_len(),
+            2,
+            "stale + fresh admissions both in the ledger before the \
+             retain pass runs its budget removal",
+        );
+
+        // Release the retain pass — it now runs its budget removal.
+        retain_parked.wait();
+        let removed = retainer.join().expect("retainer thread");
+        assert_eq!(removed, 1, "retain pass removed exactly the stale entry");
+
+        // The fresh re-admission's record MUST survive — the retain
+        // pass forgot only the stale seq, not the whole key.
+        assert_eq!(
+            index.len(),
+            1,
+            "the fresh re-admitted entry is still live in the map",
+        );
+        assert_eq!(
+            index.budget_tracked_len(),
+            1,
+            "REMOVAL-IDENTITY BUG: retain_for_canonical must forget only \
+             the STALE entry's budget record — a key-wide `forget` drops \
+             the concurrently-re-admitted fresh entry's record too, so \
+             the fresh entry escapes the GlobalRetentionBudget count and \
+             repeated canonical edits grow the map past the cap. The \
+             fresh admission must stay FIFO-tracked.",
+        );
+        assert_eq!(
+            index.get(&key),
+            Some(SemanticNodeId(2)),
+            "the surviving entry is the fresh re-admission",
+        );
     }
 }

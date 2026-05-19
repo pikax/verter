@@ -80,10 +80,20 @@ pub fn next_retention_seq() -> u64 {
 /// caller can evict them from its own map (running whatever reverse-index
 /// / counter cleanup the cache needs).
 ///
-/// The ledger holds keys only — never payloads — so it is cheap. A cache
-/// that removes an entry through its own invalidation path calls
-/// [`Self::forget`] so the ledger does not later hand back a key whose
-/// entry is already gone.
+/// The ledger holds `(seq, key)` pairs only — never payloads — so it is
+/// cheap. A cache that removes an entry through its own invalidation path
+/// keeps the ledger consistent so it does not later hand back a key whose
+/// entry is already gone:
+///
+/// - [`Self::forget_seq`] — drops exactly one admission by its unique
+///   sequence number. Removal-identity-safe: sound under a shared read
+///   guard because it can never delete a concurrent writer's fresh,
+///   distinctly-seq'd admission of the same key. Every identity-scoped
+///   cache uses this.
+/// - [`Self::forget_key_under_exclusive_lock`] — a KEY-WIDE removal that
+///   drops every admission for a key. Sound ONLY when the caller holds
+///   the cache's exclusive write lock so no concurrent admission can
+///   race; see that method's contract.
 pub struct GlobalRetentionBudget<K> {
     /// FIFO ledger of admitted entries, oldest at the front.
     ledger: parking_lot::Mutex<VecDeque<(u64, K)>>,
@@ -132,20 +142,44 @@ where
         evict
     }
 
-    /// Drop every ledger entry for `key`. Called when a cache removes an
-    /// entry through its own invalidation path (per-canonical drain,
-    /// project-generation reset, stale-read reaping) so the ledger never
-    /// later returns a key whose entry the cache already removed.
-    pub fn forget(&self, key: &K) {
+    /// Drop EVERY ledger entry for `key`, regardless of admission seq.
+    ///
+    /// **Removal-identity hazard — read this before calling.** This is a
+    /// KEY-WIDE removal: it deletes every `(seq, key)` pair the ledger
+    /// holds for `key`, including a record admitted by a *different*,
+    /// concurrent writer. If a caller runs this under only a shared read
+    /// guard while another thread is free to `record_admission` the same
+    /// key, the key-wide removal can delete that concurrent writer's
+    /// FRESH admission while the writer's fresh map entry survives —
+    /// stranding a live entry invisible to FIFO eviction so the cache
+    /// grows past its cap. That is the bug class
+    /// [`GlobalRetentionBudget::forget_seq`] exists to avoid.
+    ///
+    /// **Precondition (caller-enforced):** the caller MUST hold the
+    /// cache's exclusive write lock — the same lock domain every
+    /// `record_admission` of this budget runs under — for the whole
+    /// duration of this call, so no concurrent admission of `key` can
+    /// race. A caller that only holds a shared read guard MUST use
+    /// `forget_seq` with the removed entry's own admission seq instead.
+    ///
+    /// The single in-tree caller is the `SemanticGraphStore` family
+    /// memo's per-canonical drain, which runs inside the `entries`
+    /// `Mutex` hold — the exact lock domain `record_family_admission_locked`
+    /// records under and `invalidate_all` clears under. Identity-scoped
+    /// caches (`BoundedCandidateMap`, `BudgetedNamedTypeIndex`, the
+    /// `component_meta_caches` DBs) use `forget_seq` and never call this.
+    pub fn forget_key_under_exclusive_lock(&self, key: &K) {
         let mut ledger = self.ledger.lock();
         ledger.retain(|(_, k)| k != key);
     }
 
     /// Drop the single ledger entry identified by `seq`. Used when an
-    /// individual candidate (not a whole slot) is evicted — the sequence
-    /// number is unique per admission, so this removes exactly that
-    /// candidate's ledger record and never a re-admission under the same
-    /// key.
+    /// individual candidate / entry (not a whole key) is evicted — the
+    /// sequence number is unique per admission, so this removes exactly
+    /// that admission's ledger record and never a re-admission under the
+    /// same key. This is the removal-identity-safe primitive: it is
+    /// sound under only a shared read guard because it can never delete
+    /// a concurrent writer's fresh, distinctly-seq'd admission.
     pub fn forget_seq(&self, seq: u64) {
         let mut ledger = self.ledger.lock();
         ledger.retain(|(s, _)| *s != seq);
@@ -760,18 +794,49 @@ mod tests {
         assert_eq!(budget.tracked_len(), 3, "ledger stays bounded at cap");
     }
 
-    /// `forget` drops a key so a later overflow does not return it.
+    /// `forget_key_under_exclusive_lock` drops a key so a later overflow
+    /// does not return it.
     #[test]
-    fn budget_forget_drops_key_from_ledger() {
+    fn budget_forget_key_drops_key_from_ledger() {
         let budget: GlobalRetentionBudget<u32> = GlobalRetentionBudget::new(2);
         let _ = budget.record_admission(1, 100);
         let _ = budget.record_admission(2, 101);
-        budget.forget(&100);
+        budget.forget_key_under_exclusive_lock(&100);
         assert_eq!(budget.tracked_len(), 1, "forget removed key 100");
         // Next admission does NOT overflow (only one tracked entry left).
         assert!(
             budget.record_admission(3, 102).is_empty(),
             "after forget the ledger is within cap again",
+        );
+    }
+
+    /// `forget_seq` drops EXACTLY one admission by its seq — a
+    /// re-admission of the SAME key under a different seq survives. This
+    /// is the removal-identity property: a per-canonical drain that
+    /// races a concurrent re-admission must forget only the stale
+    /// admission, never the fresh one.
+    ///
+    /// DISCRIMINATES against a key-wide `forget`: a key-wide removal of
+    /// key 200 would drop BOTH the seq-1 and seq-3 records, leaving
+    /// `tracked_len() == 1`; the seq-scoped removal drops only seq 1, so
+    /// `tracked_len() == 2` and the fresh seq-3 record is still counted.
+    #[test]
+    fn budget_forget_seq_preserves_same_key_readmission() {
+        let budget: GlobalRetentionBudget<u32> = GlobalRetentionBudget::new(8);
+        // Two admissions of the SAME key under distinct seqs — models a
+        // stale admission and a concurrent fresh re-admission.
+        let _ = budget.record_admission(1, 200);
+        let _ = budget.record_admission(2, 201);
+        let _ = budget.record_admission(3, 200);
+        assert_eq!(budget.tracked_len(), 3, "three admissions recorded");
+        // Forget ONLY the stale seq-1 admission of key 200.
+        budget.forget_seq(1);
+        assert_eq!(
+            budget.tracked_len(),
+            2,
+            "forget_seq must drop exactly the seq-1 record — the fresh \
+             seq-3 re-admission of the same key 200 survives; a key-wide \
+             forget would have dropped it too",
         );
     }
 
