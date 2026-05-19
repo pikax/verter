@@ -378,6 +378,32 @@ guard across its candidate push, so an empty-slot reaper's
 an in-flight admit's push — a published candidate is never stranded in
 a detached slot.
 
+**Single write-side consistency domain (rule).** Every budgeted cache
+must have exactly one write-side consistency domain: either the map +
+budget + reverse index are mutated under one exclusive lock, or every
+gap is closed by BOTH atomic same-key admission AND identity-scoped
+removal. New budgeted caches must prefer structural (single-lock)
+serialization. Concretely: `BoundedCandidateMap::admit` runs the slot
+mutation, the removed-seq `forget_seq`, AND the new candidate's
+`record_admission` inside one continuously-held slot `Mutex` critical
+section (the `retention_gate` is only a reset fence — a shared read
+guard does not serialise two admits of the same content-free slot);
+global-budget victim eviction runs after that slot lock is released
+(lock order `retention_gate.read → DashMap shard/slot → slot Mutex →
+budget Mutex`, victim slot lock last — no AB-BA). The
+`SemanticGraphStore` relation memo / named-type index
+(`BudgetedRelationMemo` / `BudgetedNamedTypeIndex`) each hold a
+per-wrapper `admission_lock` across the `DashMap::entry` decision +
+`record_admission` + victim `remove_if` (and, for the named-type
+index, across `retain_for_canonical`'s map removal + `forget_seq`
+loop), making their single-write-domain structural rather than
+"safe-by-construction". The `MaterializeStructureDb` / `RefCycleResultDb`
+cooperative publish holds the `publish_fence` (the Db's `retention_gate`)
+across `entries.insert` + `post_publish`, and `post_publish` does
+`bump_live_counter` + `record_admission` together — so the map insert,
+the `live_counter` increment, and the budget admission are one
+fenced write-side step.
+
 `SemanticGraphStore::invalidate_all` (the project-generation bump)
 clears EVERY `SemanticNodeId`-keyed semantic cache on the store — the
 family memo, the in-flight admission table, the relation memo, the

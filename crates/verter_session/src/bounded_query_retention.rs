@@ -51,6 +51,26 @@
 //! insertion sequence number, unique per admitted candidate), so a
 //! concurrent re-admission under the same discriminant is never mistaken
 //! for the candidate being evicted.
+//!
+//! ## Single write-side consistency domain (rule)
+//!
+//! Every budgeted cache must have exactly one write-side consistency
+//! domain: either the map + budget + reverse index are mutated under
+//! one exclusive lock, or every gap is closed by BOTH atomic same-key
+//! admission AND identity-scoped removal. New budgeted caches must
+//! prefer structural (single-lock) serialization.
+//!
+//! [`BoundedCandidateMap::admit`] follows the single-lock form: the
+//! slot mutation, the `forget_seq` of the removed candidate seqs, and
+//! the `record_admission` of the newly-live candidate all run inside
+//! one continuously-held slot `Mutex` critical section, so the slot map
+//! and the [`GlobalRetentionBudget`] ledger move as one atomic
+//! write-side step. The `retention_gate` is a coarse reset fence only —
+//! a shared read guard does not serialise two admits of the same
+//! content-free slot; the slot `Mutex` does. Global-budget victim
+//! eviction runs after the slot lock is released (lock order:
+//! `retention_gate.read → DashMap shard/slot → slot Mutex → budget
+//! Mutex`, victim slot lock taken last — no AB-BA).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -356,11 +376,21 @@ pub struct BoundedCandidateMap<K, D, V> {
     /// the slot push and the budget `record_admission` complete but
     /// before `admit` returns. Pairs with `clear_midpoint_gate` to make
     /// the map/budget desync race deterministic: a test confirms the
-    /// admit's two-phase update has fully landed (admitter parked here)
-    /// before it releases a concurrently-parked `clear`. Per-instance;
-    /// absent from release builds.
+    /// admit's update has fully landed (admitter parked here) before it
+    /// releases a concurrently-parked `clear`. Per-instance; absent from
+    /// release builds.
     #[cfg(any(test, debug_assertions))]
     admit_post_record_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+    /// Test-only injection point inside [`Self::admit`], parked AFTER
+    /// the slot mutation + removed-seq `forget_seq` but BEFORE the
+    /// global-budget `record_admission` — with the slot `Mutex` AND the
+    /// `DashMap` shard guard for the admitted key STILL held. An
+    /// admit-vs-admit race test arms it to pin one admit there and prove
+    /// a concurrent admit of the same slot cannot record between this
+    /// admit's slot mutation and its `record_admission`. Per-instance;
+    /// absent from release builds.
+    #[cfg(any(test, debug_assertions))]
+    admit_pre_budget_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
 }
 
 impl<K, D, V> BoundedCandidateMap<K, D, V>
@@ -381,6 +411,8 @@ where
             clear_midpoint_gate: parking_lot::Mutex::new(None),
             #[cfg(any(test, debug_assertions))]
             admit_post_record_gate: parking_lot::Mutex::new(None),
+            #[cfg(any(test, debug_assertions))]
+            admit_pre_budget_gate: parking_lot::Mutex::new(None),
         }
     }
 
@@ -424,6 +456,30 @@ where
         }
     }
 
+    /// Test-only driver: arm the pre-budget [`Self::admit`] injection
+    /// point with `barrier`. The next `admit` on **this map** calls
+    /// `barrier.wait()` TWICE after its slot mutation + removed-seq
+    /// `forget_seq` but BEFORE the global-budget `record_admission` —
+    /// with the slot `Mutex` AND the `DashMap` shard guard for the
+    /// admitted key STILL held: the test's first `wait()` confirms
+    /// `admit` is pinned mid-flight, its second `wait()` releases it.
+    /// An admit-vs-admit race test uses this to prove a concurrent
+    /// admit of the same slot cannot record between the parked admit's
+    /// slot mutation and its `record_admission`. The returned guard
+    /// disarms the injection point on drop.
+    #[cfg(test)]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_arm_admit_pre_budget_gate(
+        &self,
+        barrier: Arc<std::sync::Barrier>,
+    ) -> AdmitPreBudgetGateGuard<'_> {
+        *self.admit_pre_budget_gate.lock() = Some(barrier);
+        AdmitPreBudgetGateGuard {
+            gate: &self.admit_pre_budget_gate,
+        }
+    }
+
     /// Test-only accessor for the lifecycle [`retention_gate`]. A race
     /// test parks a mutator mid-flight (via an injection point) and
     /// uses `try_read()` / `try_write()` on this gate to assert,
@@ -434,6 +490,29 @@ where
     #[must_use]
     pub fn test_retention_gate(&self) -> &parking_lot::RwLock<()> {
         &self.retention_gate
+    }
+
+    /// Test-only — `true` when the `DashMap` shard backing slot `key` is
+    /// currently write-locked by another thread (a `try_get` that
+    /// returns `Locked`).
+    ///
+    /// An admit-vs-admit race test parks an `admit` at the pre-budget
+    /// injection point and probes this: with the single-lock-domain
+    /// `admit`, the parked admit still holds the `entry()` shard write
+    /// guard for `key` across its `record_admission`, so this returns
+    /// `true`. A pre-fix `admit` that dropped the slot lock + shard
+    /// guard before `record_admission` leaves the shard unlocked, so
+    /// this returns `false` — the deterministic discriminator that the
+    /// slot mutation and the budget admission share one critical
+    /// section.
+    #[cfg(test)]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_key_shard_locked(&self, key: &K) -> bool {
+        matches!(
+            self.slots.try_get(key),
+            dashmap::try_result::TryResult::Locked
+        )
     }
 
     /// The per-slot candidate cap.
@@ -506,6 +585,42 @@ where
     /// to maintain an external live counter by net-delta accounting
     /// rather than an unsynchronised absolute snapshot.
     ///
+    /// ## Single-lock-domain write side
+    ///
+    /// The slot mutation AND the budget admission for this admit run
+    /// inside ONE continuously-held slot-lock critical section. The
+    /// outer slot key is content-free, so two concurrent cold admits
+    /// legitimately target the same slot; the `retention_gate` is only
+    /// a coarse reset fence (a shared *read* guard — it does not
+    /// serialise two admits). If the slot `Mutex` were dropped between
+    /// the slot mutation and `record_admission`, a later admit could
+    /// replace this admit's candidate and `forget_seq` it before this
+    /// admit recorded — this admit would then record a ghost seq for an
+    /// already-evicted candidate, and under a small global cap that
+    /// ghost can evict a live entry. Holding the slot lock across the
+    /// slot mutation, the `forget_seq` of the removed seqs, AND the
+    /// `record_admission` of the newly-live candidate makes the map and
+    /// the budget one atomic write-side step.
+    ///
+    /// The global-budget victims returned by `record_admission` are
+    /// evicted AFTER the slot lock (and the `DashMap` shard guard) are
+    /// released — `remove_candidate_by_seq` re-enters `self.slots` for a
+    /// victim that may live on this same shard, so it must not run under
+    /// the shard guard. The lock order is `retention_gate.read →
+    /// DashMap shard/slot → slot Mutex → budget Mutex`; the victim slot
+    /// lock is taken only after this admit's slot lock is released, so
+    /// there is no `slot-A → … → slot-B` AB-BA cycle.
+    ///
+    /// **Record only for a live admission.** `record_admission` runs
+    /// only when the newly-admitted candidate is still present in the
+    /// slot after the per-slot cap is applied. Recording a candidate the
+    /// per-slot cap immediately evicted would strand a ledger record for
+    /// a candidate the map does not hold. (A `per_slot_cap` of at least
+    /// `1` plus the monotonic `seq` means an appended candidate — the
+    /// largest seq — is never the per-slot cap's oldest-by-seq victim,
+    /// so this guard is structural insurance against a future cap or
+    /// eviction-policy change rather than a path reachable today.)
+    ///
     /// **Slot-detach safety.** The candidate push happens while the
     /// `DashMap` shard write guard for `key` (the `RefMut` returned by
     /// `entry().or_insert_with()`) is still held. An empty-slot reaper
@@ -518,14 +633,15 @@ where
     pub fn admit(&self, key: K, discriminant: D, value: V) -> AdmitOutcome {
         // Hold the retention-gate read guard across the WHOLE map +
         // budget mutation: the slot push, the per-slot eviction, the
-        // budget `forget_seq` cleanup, and the global-budget admission +
-        // victim eviction. A concurrent `clear` takes the write guard,
-        // so it cannot interleave its slot-map clear and budget clear
-        // with this admit's two-phase update — the budget never strands
-        // a record for a candidate this admit landed. The guard is a
-        // coarse reset fence: concurrent admits to other keys still run
-        // in parallel under the shared read guard (each on its own
-        // `DashMap` shard).
+        // budget `forget_seq` cleanup, the global-budget admission, and
+        // the victim eviction. A concurrent `clear` takes the write
+        // guard, so it cannot interleave its slot-map clear and budget
+        // clear with this admit's update — the budget never strands a
+        // record for a candidate this admit landed. The guard is a
+        // coarse reset fence: it does NOT serialise two admits of the
+        // same slot (that is the slot `Mutex`'s job below); concurrent
+        // admits to other keys still run in parallel under the shared
+        // read guard (each on its own `DashMap` shard).
         let _retention = self.retention_gate.read();
         let seq = next_retention_seq();
 
@@ -534,7 +650,9 @@ where
         // when it replaced an existing same-discriminant candidate in
         // place. A replace does not change live occupancy.
         let mut fresh = false;
-        let mut forget_seqs: Vec<u64> = Vec::new();
+        // Global-budget victims to evict AFTER the slot lock is released
+        // — see the "single-lock-domain write side" docs.
+        let over_budget;
         {
             // Hold the shard write guard for `key` across the candidate
             // push: a concurrent reaper's `remove_if`-empty needs this
@@ -543,7 +661,16 @@ where
                 .slots
                 .entry(key.clone())
                 .or_insert_with(|| Arc::new(CandidateSlot::new()));
+            // The slot `Mutex` is held continuously across the slot
+            // mutation, the `forget_seq` of the removed seqs, AND the
+            // `record_admission` of the newly-live candidate — so a
+            // concurrent admit of the same slot cannot replace+forget
+            // this admit's candidate before this admit records it.
             let mut candidates = slot_ref.candidates.lock();
+            // Seqs of candidates this admit removed (a replaced
+            // candidate or per-slot-cap victims) — forgotten from the
+            // budget below, still under the slot lock.
+            let mut forget_seqs: Vec<u64> = Vec::new();
             if let Some(existing) = candidates
                 .iter_mut()
                 .find(|c| c.discriminant == discriminant)
@@ -578,36 +705,71 @@ where
                     }
                 }
             }
+            // Whether the candidate this admit allocated `seq` for is
+            // still resident after the per-slot cap was applied. A
+            // replace leaves the new candidate in place; an append
+            // leaves it in place unless the per-slot cap immediately
+            // evicted it (structurally unreachable while `per_slot_cap
+            // >= 1` — see the doc comment).
+            let new_candidate_live = candidates.iter().any(|c| c.seq == seq);
+            // Forget the removed seqs — STILL holding the slot lock, so
+            // a concurrent same-slot admit cannot interleave between
+            // this forget and the `record_admission` below.
+            for s in forget_seqs {
+                self.budget.forget_seq(s);
+            }
+            // Test-only injection point — parked AFTER the slot mutation
+            // and the removed-seq `forget_seq` but BEFORE
+            // `record_admission`, with the slot `Mutex` AND the
+            // `DashMap` shard guard for `key` STILL held. A race test
+            // arms it with a barrier and calls `wait()` TWICE: the first
+            // `wait()` rendezvous lets the test observe this admit is
+            // pinned here; the second `wait()` releases it. Because the
+            // slot lock + shard guard are held, a concurrent admit of
+            // the same slot cannot record between this admit's slot
+            // mutation and its `record_admission` — the test drives that
+            // serialisation. `None` (the production default) is a no-op.
+            #[cfg(any(test, debug_assertions))]
+            {
+                let gate = self.admit_pre_budget_gate.lock().clone();
+                if let Some(barrier) = gate {
+                    barrier.wait();
+                    barrier.wait();
+                }
+            }
+            // Global budget: record this admission ONLY when its
+            // candidate is still live, then collect the oldest entries
+            // past the global cap. STILL holding the slot lock — the
+            // map mutation and the budget admission are one atomic
+            // write-side step. The budget ledger seq and the candidate
+            // seq embedded in the budget key are the same value, so
+            // `remove_candidate_by_seq` (identity-scoped) removes a
+            // victim slot candidate ONLY when its `seq` matches.
+            over_budget = if new_candidate_live {
+                self.budget.record_admission(seq, (key.clone(), seq))
+            } else {
+                Vec::new()
+            };
             // Release the candidate lock then the shard guard before the
-            // global-budget step: that step can re-enter `self.slots`
-            // for a victim on this same shard, which would deadlock if
-            // the shard guard were still held.
+            // global-budget victim eviction: `remove_candidate_by_seq`
+            // re-enters `self.slots` for a victim that may live on this
+            // same shard, which would deadlock if the shard guard were
+            // still held.
             drop(candidates);
             drop(slot_ref);
         }
-        for s in forget_seqs {
-            self.budget.forget_seq(s);
-        }
 
-        // Global budget: record the fresh admission, evict oldest across
-        // all slots if the total exceeds the global cap.
-        //
-        // Eviction is two-phase by design — the per-slot push above runs
-        // under the slot lock, this global trim runs after. Between the
-        // two phases a concurrent `live_count` may transiently observe
-        // one candidate over the global cap (this admit's push landed,
-        // its over-budget victim not yet removed). That is a momentary
-        // overcount of a *bounded* quantity (at most one admit's worth
-        // per concurrent admitter), not unbounded growth — the budget
-        // ledger is authoritative and the victim is removed before
-        // `admit` returns. A future reader should not treat the window
-        // as a bug.
-        let over_budget = self.budget.record_admission(seq, (key, seq));
-        // The budget ledger seq and the candidate seq embedded in the
-        // budget key are the same value (`record_admission(seq, (key,
-        // seq))`); `remove_candidate_by_seq` is already identity-scoped
-        // — it removes the slot candidate ONLY when its `seq` matches, so
-        // a concurrent same-key re-admission (a distinct seq) survives.
+        // Evict the global-budget victims. Runs AFTER the slot lock is
+        // released (lock order: this admit's slot lock is dropped before
+        // any victim slot lock is taken — no AB-BA). Between the slot
+        // push and this trim a concurrent `live_count` may transiently
+        // observe one candidate over the global cap (this admit's push
+        // landed, its over-budget victim not yet removed). That is a
+        // momentary overcount of a *bounded* quantity (at most one
+        // admit's worth per concurrent admitter), not unbounded growth —
+        // the budget ledger is authoritative and the victim is removed
+        // before `admit` returns. A future reader should not treat the
+        // window as a bug.
         for (_ledger_seq, (victim_key, victim_seq)) in over_budget {
             if self.remove_candidate_by_seq(&victim_key, victim_seq) {
                 evicted += 1;
@@ -797,459 +959,22 @@ impl Drop for AdmitPostRecordGateGuard<'_> {
     }
 }
 
+/// RAII guard returned by
+/// [`BoundedCandidateMap::test_arm_admit_pre_budget_gate`]. Disarms the
+/// per-instance pre-budget `admit` injection point on drop.
 #[cfg(test)]
-mod tests {
-    use super::*;
+#[doc(hidden)]
+pub struct AdmitPreBudgetGateGuard<'a> {
+    gate: &'a parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+}
 
-    /// `GlobalRetentionBudget` returns the oldest `(seq, key)` victims
-    /// once the ledger exceeds the cap, in FIFO order. DISCRIMINATES: an
-    /// unbounded ledger would return an empty eviction list forever. The
-    /// victim's `seq` is the admission identity the caller scopes its
-    /// removal to — proven here by asserting the exact `(seq, key)` pair.
-    #[test]
-    fn budget_evicts_oldest_first_past_cap() {
-        let budget: GlobalRetentionBudget<u32> = GlobalRetentionBudget::new(3);
-        assert!(budget.record_admission(1, 10).is_empty(), "1st within cap");
-        assert!(budget.record_admission(2, 11).is_empty(), "2nd within cap");
-        assert!(budget.record_admission(3, 12).is_empty(), "3rd within cap");
-        // 4th admission overflows — the oldest (seq 1, key 10) is
-        // evicted; the victim carries its admission seq.
-        assert_eq!(
-            budget.record_admission(4, 13),
-            vec![(1, 10)],
-            "4th admission must evict the oldest (seq, key) victim (FIFO)",
-        );
-        // 5th — (seq 2, key 11) is now oldest.
-        assert_eq!(
-            budget.record_admission(5, 14),
-            vec![(2, 11)],
-            "5th admission must evict the next-oldest (seq, key) victim",
-        );
-        assert_eq!(budget.tracked_len(), 3, "ledger stays bounded at cap");
-    }
-
-    /// `forget_key_under_exclusive_lock` drops a key so a later overflow
-    /// does not return it.
-    #[test]
-    fn budget_forget_key_drops_key_from_ledger() {
-        let budget: GlobalRetentionBudget<u32> = GlobalRetentionBudget::new(2);
-        let _ = budget.record_admission(1, 100);
-        let _ = budget.record_admission(2, 101);
-        budget.forget_key_under_exclusive_lock(&100);
-        assert_eq!(budget.tracked_len(), 1, "forget removed key 100");
-        // Next admission does NOT overflow (only one tracked entry left).
-        assert!(
-            budget.record_admission(3, 102).is_empty(),
-            "after forget the ledger is within cap again",
-        );
-    }
-
-    /// `forget_seq` drops EXACTLY one admission by its seq — a
-    /// re-admission of the SAME key under a different seq survives. This
-    /// is the removal-identity property: a per-canonical drain that
-    /// races a concurrent re-admission must forget only the stale
-    /// admission, never the fresh one.
-    ///
-    /// DISCRIMINATES against a key-wide `forget`: a key-wide removal of
-    /// key 200 would drop BOTH the seq-1 and seq-3 records, leaving
-    /// `tracked_len() == 1`; the seq-scoped removal drops only seq 1, so
-    /// `tracked_len() == 2` and the fresh seq-3 record is still counted.
-    #[test]
-    fn budget_forget_seq_preserves_same_key_readmission() {
-        let budget: GlobalRetentionBudget<u32> = GlobalRetentionBudget::new(8);
-        // Two admissions of the SAME key under distinct seqs — models a
-        // stale admission and a concurrent fresh re-admission.
-        let _ = budget.record_admission(1, 200);
-        let _ = budget.record_admission(2, 201);
-        let _ = budget.record_admission(3, 200);
-        assert_eq!(budget.tracked_len(), 3, "three admissions recorded");
-        // Forget ONLY the stale seq-1 admission of key 200.
-        budget.forget_seq(1);
-        assert_eq!(
-            budget.tracked_len(),
-            2,
-            "forget_seq must drop exactly the seq-1 record — the fresh \
-             seq-3 re-admission of the same key 200 survives; a key-wide \
-             forget would have dropped it too",
-        );
-    }
-
-    /// A zero cap is clamped to one — the cache always keeps its newest
-    /// entry.
-    #[test]
-    fn budget_zero_cap_clamps_to_one() {
-        let budget: GlobalRetentionBudget<u32> = GlobalRetentionBudget::new(0);
-        assert_eq!(budget.cap(), 1);
-        assert!(budget.record_admission(1, 1).is_empty());
-        assert_eq!(
-            budget.record_admission(2, 2),
-            vec![(1, 1)],
-            "second admission evicts the first (seq, key) victim under a cap of 1",
-        );
-    }
-
-    /// `BoundedCandidateMap` keeps at most `per_slot_cap` candidates in
-    /// one slot, evicting the oldest. DISCRIMINATES: an unbounded slot
-    /// would retain all five.
-    #[test]
-    fn candidate_map_bounds_one_slot_at_per_slot_cap() {
-        let map: BoundedCandidateMap<&str, u8, u32> = BoundedCandidateMap::with_caps(3, 100);
-        for v in 0u8..5 {
-            map.admit("owner", v, u32::from(v));
-        }
-        let slot = map.slot_candidates(&"owner");
-        assert_eq!(
-            slot.len(),
-            3,
-            "one slot must retain at most per_slot_cap (3) candidates",
-        );
-        // Oldest two discriminants (0, 1) evicted; newest three remain.
-        let mut discs: Vec<u8> = slot.iter().map(|c| c.discriminant).collect();
-        discs.sort_unstable();
-        assert_eq!(discs, vec![2, 3, 4], "oldest candidates evicted first");
-        assert_eq!(map.live_count(), 3);
-    }
-
-    /// Re-admitting the same discriminant replaces the candidate in
-    /// place — the slot does not grow.
-    #[test]
-    fn candidate_map_same_discriminant_replaces_in_place() {
-        let map: BoundedCandidateMap<&str, u8, u32> = BoundedCandidateMap::with_caps(4, 100);
-        map.admit("owner", 7, 1);
-        map.admit("owner", 7, 2);
-        map.admit("owner", 7, 3);
-        let slot = map.slot_candidates(&"owner");
-        assert_eq!(
-            slot.len(),
-            1,
-            "same-discriminant re-admit must not grow the slot"
-        );
-        assert_eq!(slot[0].value, 3, "re-admit refreshes the payload");
-    }
-
-    /// The global budget caps the total candidate count across distinct
-    /// slots — the per-slot cap alone would not bound a workload that
-    /// edits many DISTINCT owners once each.
-    #[test]
-    fn candidate_map_global_budget_bounds_across_slots() {
-        let map: BoundedCandidateMap<u32, u8, u32> = BoundedCandidateMap::with_caps(4, 5);
-        // 12 distinct slots, one candidate each — per-slot cap never
-        // triggers, only the global cap of 5 does.
-        for owner in 0u32..12 {
-            map.admit(owner, 0, owner);
-        }
-        assert!(
-            map.live_count() <= 5,
-            "global budget must bound total candidates across slots — got {}",
-            map.live_count(),
-        );
-    }
-
-    /// A reader's cloned candidate `Arc` survives a concurrent eviction
-    /// of that candidate — removal does not invalidate an in-flight
-    /// reader.
-    #[test]
-    fn candidate_map_reader_arc_survives_eviction() {
-        let map: BoundedCandidateMap<&str, u8, u32> = BoundedCandidateMap::with_caps(4, 100);
-        map.admit("owner", 1, 42);
-        let held = map.get_candidate(&"owner", &1).expect("candidate present");
-        let seq = held.seq;
-        // Evict the exact candidate the reader is holding.
-        assert!(map.evict_candidate(&"owner", seq), "candidate evicted");
-        assert!(
-            map.get_candidate(&"owner", &1).is_none(),
-            "evicted candidate is gone from the map",
-        );
-        // The reader's clone is still valid and unchanged.
-        assert_eq!(held.value, 42, "in-flight reader's Arc still resolves");
-    }
-
-    /// SLOT-DETACH REGRESSION — a candidate admitted into a slot that
-    /// was just emptied (and therefore eligible for opportunistic
-    /// detach) MUST remain reachable by `get_candidate` and counted by
-    /// `live_count`.
-    ///
-    /// Sequence: admit one candidate; remove it — the slot is now empty
-    /// and `remove_candidate_by_seq`'s `remove_if` detaches it from the
-    /// outer map. Then admit a fresh candidate under the SAME key:
-    /// `admit` re-creates the slot via `entry().or_insert_with()`. The
-    /// fresh candidate must be visible. A pre-fix `admit` that cloned the
-    /// slot `Arc` and dropped the shard guard before pushing could push
-    /// into a slot a concurrent reaper had detached; this test pins the
-    /// post-detach re-admit path so a regression to that shape would
-    /// leave the re-admitted candidate invisible (`live_count() == 0`).
-    #[test]
-    fn candidate_map_readmit_into_emptied_slot_stays_visible() {
-        let map: BoundedCandidateMap<&str, u8, u32> = BoundedCandidateMap::with_caps(4, 100);
-        // Admit, then evict — the slot is emptied and detached.
-        map.admit("owner", 1, 100);
-        let first = map.get_candidate(&"owner", &1).expect("first admitted");
-        assert!(
-            map.evict_candidate(&"owner", first.seq),
-            "first candidate evicted — slot now empty + detached",
-        );
-        assert_eq!(map.live_count(), 0, "slot emptied");
-        assert!(map.slot_candidates(&"owner").is_empty());
-
-        // Re-admit under the same key. The fresh candidate MUST be
-        // reachable — `admit` re-attaches the slot under its shard guard.
-        map.admit("owner", 2, 200);
-        let readmitted = map
-            .get_candidate(&"owner", &2)
-            .expect("re-admitted candidate must be reachable after slot detach");
-        assert_eq!(readmitted.value, 200, "re-admitted payload visible");
-        assert_eq!(
-            map.live_count(),
-            1,
-            "re-admitted candidate must be counted by live_count — a \
-             candidate pushed into a detached slot would read as 0",
-        );
-        assert_eq!(
-            map.slot_candidates(&"owner").len(),
-            1,
-            "the re-attached slot holds exactly the re-admitted candidate",
-        );
-    }
-
-    /// SLOT-DETACH RACE under real thread contention — a reaper emptying
-    /// a slot must never strand a concurrent admitter's candidate. Many
-    /// rounds of `{admit / evict-then-readmit}` race on one key; after
-    /// every round the key's live candidate must be reachable. Drives
-    /// the shard-guard serialisation between `admit`'s push and
-    /// `remove_if`'s detach.
-    #[test]
-    fn candidate_map_concurrent_admit_vs_detach_never_strands() {
-        use std::sync::Arc as StdArc;
-        use std::thread;
-
-        let map: StdArc<BoundedCandidateMap<u32, u8, u32>> =
-            StdArc::new(BoundedCandidateMap::with_caps(4, 4096));
-        // Seed every key so the first reaper round has something to
-        // evict (and thus a slot to attempt to detach).
-        for key in 0u32..8 {
-            map.admit(key, 0, key);
-        }
-
-        let rounds = 400usize;
-        let reaper = {
-            let map = StdArc::clone(&map);
-            thread::spawn(move || {
-                for r in 0..rounds {
-                    let key = (r % 8) as u32;
-                    // Evict whatever candidate currently holds disc 0,
-                    // emptying + detaching the slot, then re-admit it.
-                    if let Some(c) = map.get_candidate(&key, &0) {
-                        map.evict_candidate(&key, c.seq);
-                    }
-                    map.admit(key, 0, key);
-                }
-            })
-        };
-        let admitter = {
-            let map = StdArc::clone(&map);
-            thread::spawn(move || {
-                for r in 0..rounds {
-                    let key = (r % 8) as u32;
-                    // Admit a second discriminant concurrently with the
-                    // reaper churning disc 0 on the same slot.
-                    map.admit(key, 1, key + 1000);
-                }
-            })
-        };
-        reaper.join().expect("reaper thread");
-        admitter.join().expect("admitter thread");
-
-        // Every key must still resolve disc 0 — the reaper's final
-        // re-admit cannot have been stranded in a detached slot.
-        for key in 0u32..8 {
-            assert!(
-                map.get_candidate(&key, &0).is_some(),
-                "key {key}: disc-0 candidate stranded by a slot-detach race",
-            );
-        }
-        // Total live count must reflect reachable candidates only — a
-        // stranded candidate would be recorded in the budget but absent
-        // from `live_count`, so `live_count` would not exceed the number
-        // of reachable candidates. Assert at least the 8 disc-0 entries
-        // are reachable and counted.
-        assert!(
-            map.live_count() >= 8,
-            "live_count must count every reachable candidate — observed {}",
-            map.live_count(),
-        );
-    }
-
-    /// `evict_slot` drops every version in a slot and forgets them all
-    /// from the budget.
-    #[test]
-    fn candidate_map_evict_slot_drops_all_versions() {
-        let map: BoundedCandidateMap<&str, u8, u32> = BoundedCandidateMap::with_caps(4, 100);
-        map.admit("a", 0, 1);
-        map.admit("a", 1, 2);
-        map.admit("b", 0, 3);
-        assert_eq!(map.evict_slot(&"a"), 2, "both versions of slot a removed");
-        assert_eq!(map.live_count(), 1, "only slot b survives");
-        assert!(map.slot_candidates(&"a").is_empty());
-    }
-
-    /// MAP / BUDGET DESYNC RACE (admit side) — an in-flight `admit`
-    /// must engage the `retention_gate` so a concurrent `clear` (which
-    /// mutates both `slots` and `budget`) cannot interleave its two
-    /// clears with the admit's two-phase slot-push + budget-admission.
-    ///
-    /// Deterministic. The admitter is parked, via the `admit` injection
-    /// point, AFTER its `slots.push` + `budget.record_admission` have
-    /// landed but BEFORE `admit` returns — i.e. while `admit` still
-    /// holds its `retention_gate` read guard. With the admitter pinned
-    /// at that point the test asserts `retention_gate.try_write()` is
-    /// `None`: a `clear` reaching `retention_gate.write()` right now
-    /// WOULD block, so it cannot run its `slots.clear()` / `budget.clear()`
-    /// pair concurrently with the admit's half-applied update.
-    ///
-    /// DISCRIMINATES. Against the un-gated `admit` (read guard removed)
-    /// the in-flight admit holds nothing, so `try_write()` succeeds
-    /// (`Some`) — a `clear` could interleave and strand a live slot
-    /// candidate with no budget record. The assertion `try_write()` is
-    /// `None` FAILS. With the gate the in-flight admit holds the read
-    /// guard, `try_write()` returns `None`, the assertion PASSES. The
-    /// follow-up sequential `clear` + `admit` confirms the gate is a
-    /// reset fence, not a permanent block.
-    #[test]
-    fn candidate_map_inflight_admit_engages_gate_against_clear() {
-        use std::sync::Arc as StdArc;
-        use std::sync::Barrier;
-        use std::thread;
-
-        let map: StdArc<BoundedCandidateMap<u32, u8, u32>> =
-            StdArc::new(BoundedCandidateMap::with_caps(4, 4096));
-
-        // admit_parked: party 1 = the parked `admit`, party 2 = main.
-        let admit_parked = StdArc::new(Barrier::new(2));
-        let _admit_guard = map.test_arm_admit_post_record_gate(StdArc::clone(&admit_parked));
-
-        let map_admit = StdArc::clone(&map);
-        let admitter = thread::spawn(move || map_admit.admit(7, 0, 700));
-
-        // Wait until `admit` has pushed its candidate, recorded its
-        // budget admission, and parked — still inside `admit`, still
-        // holding the `retention_gate` read guard.
-        admit_parked.wait();
-
-        // A `clear` taking `retention_gate.write()` right now WOULD
-        // block: the in-flight `admit` holds the read guard. `try_write`
-        // returning `None` is the proof that `clear`'s `slots.clear()` /
-        // `budget.clear()` cannot interleave the admit's half-applied
-        // two-phase update.
-        assert!(
-            map.test_retention_gate().try_write().is_none(),
-            "MAP/BUDGET DESYNC: an in-flight `admit` does NOT hold the \
-             retention gate, so a concurrent `clear` could interleave its \
-             slots.clear()/budget.clear() between the admit's slot push \
-             and budget admission — stranding a live candidate with no \
-             budget record. The `admit` must hold `retention_gate.read()` \
-             across its whole map+budget mutation.",
-        );
-
-        // Release the parked admit; it drops the read guard and returns.
-        admit_parked.wait();
-        let outcome = admitter.join().expect("admitter thread");
-        assert_eq!(
-            outcome,
-            AdmitOutcome {
-                fresh: true,
-                evicted: 0
-            },
-            "admit of a fresh key adds one candidate and evicts nothing",
-        );
-        assert_eq!(map.live_count(), 1, "the admitted candidate is live");
-        assert_eq!(map.budget.tracked_len(), 1, "and tracked by the budget");
-
-        // Disarm the `admit` injection point BEFORE the follow-up
-        // mutations — otherwise the next `admit` would park on a stale
-        // barrier with no second party.
-        drop(_admit_guard);
-
-        // The gate is a reset fence, not a permanent block: a `clear`
-        // now runs to completion and leaves map + budget consistent.
-        assert_eq!(map.clear(), 1, "clear drops the one live candidate");
-        assert_eq!(map.live_count(), 0);
-        assert_eq!(map.budget.tracked_len(), 0);
-        map.admit(8, 0, 800);
-        assert_eq!(
-            map.live_count(),
-            map.budget.tracked_len(),
-            "post-clear admit keeps map and budget consistent",
-        );
-    }
-
-    /// MAP / BUDGET DESYNC RACE (clear side) — an in-flight `clear`
-    /// must hold the `retention_gate` write guard across BOTH its
-    /// `slots.clear()` and `budget.clear()`, so a concurrent `admit`
-    /// cannot land a slot candidate + budget admission that straddle
-    /// the two clears.
-    ///
-    /// Deterministic. The invalidator is parked, via the `clear`
-    /// injection point, BETWEEN `slots.clear()` and `budget.clear()` —
-    /// i.e. while `clear` still holds its `retention_gate` write guard.
-    /// With `clear` pinned there the test asserts `retention_gate.try_read()`
-    /// is `None`: an `admit` reaching `retention_gate.read()` right now
-    /// WOULD block, so it cannot push a candidate into the just-cleared
-    /// `slots` and record an admission the pending `budget.clear()`
-    /// would then erase.
-    ///
-    /// DISCRIMINATES. Against the un-gated `clear` (write guard removed)
-    /// the in-flight clear holds nothing, so `try_read()` succeeds
-    /// (`Some`) — an `admit` could interleave into the gap. The
-    /// assertion `try_read()` is `None` FAILS. With the gate the
-    /// in-flight clear holds the write guard, `try_read()` returns
-    /// `None`, the assertion PASSES.
-    #[test]
-    fn candidate_map_inflight_clear_engages_gate_against_admit() {
-        use std::sync::Arc as StdArc;
-        use std::sync::Barrier;
-        use std::thread;
-
-        let map: StdArc<BoundedCandidateMap<u32, u8, u32>> =
-            StdArc::new(BoundedCandidateMap::with_caps(4, 4096));
-        // Seed one candidate so `clear` has a slot to drop.
-        map.admit(1, 0, 100);
-
-        // clear_parked: party 1 = the parked `clear`, party 2 = main.
-        let clear_parked = StdArc::new(Barrier::new(2));
-        let _clear_guard = map.test_arm_clear_midpoint_gate(StdArc::clone(&clear_parked));
-
-        let map_clear = StdArc::clone(&map);
-        let invalidator = thread::spawn(move || map_clear.clear());
-
-        // Wait until `clear` has run `slots.clear()` and parked at its
-        // midpoint — still inside `clear`, still holding the
-        // `retention_gate` write guard, `budget.clear()` not yet run.
-        clear_parked.wait();
-
-        // An `admit` taking `retention_gate.read()` right now WOULD
-        // block: the in-flight `clear` holds the write guard. `try_read`
-        // returning `None` is the proof that `admit` cannot push a
-        // candidate into the just-cleared `slots` and record a budget
-        // admission the pending `budget.clear()` would then erase.
-        assert!(
-            map.test_retention_gate().try_read().is_none(),
-            "MAP/BUDGET DESYNC: an in-flight `clear` does NOT hold the \
-             retention write guard, so a concurrent `admit` could push a \
-             candidate into the just-cleared slot map and record a budget \
-             admission that the pending `budget.clear()` then erases — \
-             stranding a live candidate with no budget record. `clear` \
-             must hold `retention_gate.write()` across both clears.",
-        );
-
-        // Release the parked clear; it runs `budget.clear()`, drops the
-        // write guard, and returns.
-        clear_parked.wait();
-        let removed = invalidator.join().expect("invalidator thread");
-        assert_eq!(removed, 1, "clear removed the one seeded candidate");
-        assert_eq!(
-            map.live_count(),
-            map.budget.tracked_len(),
-            "after the clear, map and budget are both empty and consistent",
-        );
+#[cfg(test)]
+impl Drop for AdmitPreBudgetGateGuard<'_> {
+    fn drop(&mut self) {
+        *self.gate.lock() = None;
     }
 }
+
+#[cfg(test)]
+#[path = "bounded_query_retention_tests.rs"]
+mod tests;
