@@ -207,6 +207,24 @@ pub struct RetentionCandidate<D, V> {
     pub value: V,
 }
 
+/// Outcome of a [`BoundedCandidateMap::admit`] call.
+///
+/// The exact net live-candidate-count delta of the admission is
+/// `(fresh as i64) - (evicted as i64)`. A caller maintaining an external
+/// live counter applies that delta — `fetch_add` / `fetch_sub` — rather
+/// than re-deriving an absolute snapshot, which a concurrent admission
+/// could clobber.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdmitOutcome {
+    /// `true` when the admission appended a NEW candidate; `false` when
+    /// it replaced an existing same-discriminant candidate in place. A
+    /// replace leaves live occupancy unchanged.
+    pub fresh: bool,
+    /// Number of candidates evicted by this admission (per-slot cap +
+    /// global budget). Each eviction lowers live occupancy by one.
+    pub evicted: usize,
+}
+
 /// A query-identity slot — a bounded, insertion-ordered list of
 /// candidates. Held behind an `Arc` in the outer map; the candidate
 /// vector itself is behind a `Mutex` so admissions and stale reaping
@@ -421,8 +439,12 @@ where
     /// candidate is evicted. The global budget is consulted last and may
     /// evict an oldest candidate from a *different* slot.
     ///
-    /// Returns the count of candidates evicted (per-slot + global) so the
-    /// caller can keep an external live counter consistent.
+    /// Returns an [`AdmitOutcome`] reporting whether this admission added
+    /// a fresh candidate (vs. an in-place replace) and how many
+    /// candidates it evicted. The exact net live-count delta is
+    /// therefore `(fresh as i64) - (evicted as i64)`, which a caller uses
+    /// to maintain an external live counter by net-delta accounting
+    /// rather than an unsynchronised absolute snapshot.
     ///
     /// **Slot-detach safety.** The candidate push happens while the
     /// `DashMap` shard write guard for `key` (the `RefMut` returned by
@@ -433,7 +455,7 @@ where
     /// its candidate" — the slot the admitter populates is always still
     /// attached when the shard guard is released, and the published
     /// candidate is always reachable by later reads / `live_count`.
-    pub fn admit(&self, key: K, discriminant: D, value: V) -> usize {
+    pub fn admit(&self, key: K, discriminant: D, value: V) -> AdmitOutcome {
         // Hold the retention-gate read guard across the WHOLE map +
         // budget mutation: the slot push, the per-slot eviction, the
         // budget `forget_seq` cleanup, and the global-budget admission +
@@ -448,6 +470,10 @@ where
         let seq = next_retention_seq();
 
         let mut evicted = 0usize;
+        // `true` when this admission appended a NEW candidate; `false`
+        // when it replaced an existing same-discriminant candidate in
+        // place. A replace does not change live occupancy.
+        let mut fresh = false;
         let mut forget_seqs: Vec<u64> = Vec::new();
         {
             // Hold the shard write guard for `key` across the candidate
@@ -473,6 +499,7 @@ where
                     value,
                 });
             } else {
+                fresh = true;
                 candidates.push(Arc::new(RetentionCandidate {
                     discriminant,
                     seq,
@@ -537,7 +564,7 @@ where
                 barrier.wait();
             }
         }
-        evicted
+        AdmitOutcome { fresh, evicted }
     }
 
     /// Remove the single candidate identified by `(key, seq)`. Returns
@@ -1026,8 +1053,15 @@ mod tests {
 
         // Release the parked admit; it drops the read guard and returns.
         admit_parked.wait();
-        let evicted = admitter.join().expect("admitter thread");
-        assert_eq!(evicted, 0, "admit of a fresh key evicts nothing");
+        let outcome = admitter.join().expect("admitter thread");
+        assert_eq!(
+            outcome,
+            AdmitOutcome {
+                fresh: true,
+                evicted: 0
+            },
+            "admit of a fresh key adds one candidate and evicts nothing",
+        );
         assert_eq!(map.live_count(), 1, "the admitted candidate is live");
         assert_eq!(map.budget.tracked_len(), 1, "and tracked by the budget");
 

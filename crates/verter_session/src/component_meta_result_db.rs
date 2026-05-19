@@ -222,9 +222,12 @@ impl<P> Clone for ComponentMetaResultEntry<P> {
 /// the cache monotonically with the owner edit count.
 pub struct ComponentMetaResultDb<P> {
     inner: BoundedCandidateMap<ComponentMetaResultKey, Hash16, ComponentMetaResultEntry<P>>,
-    /// Tracks the substrate's live candidate count. Synced from
-    /// [`BoundedCandidateMap::live_count`] after every mutation so the
-    /// `ProjectTypeStore` counter snapshot reports true occupancy.
+    /// Tracks the substrate's live candidate count for the
+    /// `ProjectTypeStore` counter snapshot. Maintained by net-delta
+    /// accounting ([`Self::apply_live_delta`]): every mutation applies
+    /// the exact `added - removed` delta via atomic `fetch_add` /
+    /// `fetch_sub`, so concurrent mutations compose without an absolute
+    /// snapshot clobbering a newer count.
     live_counter: Arc<AtomicU64>,
     /// Counts every eviction / removal — replaces the historical
     /// "stale sweep" counter.
@@ -292,11 +295,27 @@ impl<P> ComponentMetaResultDb<P> {
         }
     }
 
-    /// Sync the external live counter to the substrate's authoritative
-    /// candidate count. Called after every mutation.
-    fn sync_live_counter(&self) {
-        self.live_counter
-            .store(self.inner.live_count() as u64, Ordering::Relaxed);
+    /// Apply a net live-count delta to the external counter.
+    ///
+    /// `added` candidates entered the cache and `removed` candidates left
+    /// it as part of one mutation. The counter is updated by atomic
+    /// `fetch_add` / `fetch_sub` so concurrent mutations compose exactly
+    /// — never by an absolute `store` of a re-derived snapshot, which a
+    /// racing mutation could clobber. The subtract is saturated against
+    /// the counter's current value because `live_counter` is shared via
+    /// `Arc<AtomicU64>` across the `ProjectTypeStore` and an underflow
+    /// would corrupt every sibling DB's contribution to the shared sum.
+    fn apply_live_delta(&self, added: usize, removed: usize) {
+        if added > removed {
+            self.live_counter
+                .fetch_add((added - removed) as u64, Ordering::Relaxed);
+        } else if removed > added {
+            let delta = (removed - added) as u64;
+            self.live_counter.fetch_sub(
+                delta.min(self.live_counter.load(Ordering::Relaxed)),
+                Ordering::Relaxed,
+            );
+        }
     }
 
     /// Per-slot candidate cap currently configured on the substrate.
@@ -440,12 +459,16 @@ impl<P> ComponentMetaResultDb<P> {
         owner_whole_hash: Hash16,
         entry: ComponentMetaResultEntry<P>,
     ) {
-        let evicted = self.inner.admit(key, owner_whole_hash, entry);
-        if evicted > 0 {
+        let outcome = self.inner.admit(key, owner_whole_hash, entry);
+        if outcome.evicted > 0 {
             self.stale_sweeps
-                .fetch_add(evicted as u64, Ordering::Relaxed);
+                .fetch_add(outcome.evicted as u64, Ordering::Relaxed);
         }
-        self.sync_live_counter();
+        // Net-delta the live counter: a fresh admission adds one live
+        // candidate, an in-place replace adds none, and any FIFO
+        // evictions remove that many. `fetch_add`/`fetch_sub` compose
+        // exactly under concurrent admissions.
+        self.apply_live_delta(usize::from(outcome.fresh), outcome.evicted);
     }
 
     /// Remove the candidate for one owner content version. Returns the
@@ -459,7 +482,8 @@ impl<P> ComponentMetaResultDb<P> {
         let removed = self.inner.evict_candidate(key, candidate.seq);
         if removed {
             self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
-            self.sync_live_counter();
+            // One live candidate left the cache — net-subtract one.
+            self.apply_live_delta(0, 1);
             Some(candidate.value.clone())
         } else {
             None
@@ -476,7 +500,12 @@ impl<P> ComponentMetaResultDb<P> {
             self.stale_sweeps
                 .fetch_add(removed as u64, Ordering::Relaxed);
         }
-        self.sync_live_counter();
+        // `clear` runs under the substrate's `retention_gate` write
+        // guard, so `removed` is the exact live count it dropped —
+        // net-subtract it. (Net-delta rather than `store(0)` keeps the
+        // accounting uniform with the other mutation sites and robust
+        // should the `component_meta_live` counter ever be shared.)
+        self.apply_live_delta(0, removed);
     }
 
     /// Invalidate every cached entry whose owner canonical matches
@@ -491,7 +520,8 @@ impl<P> ComponentMetaResultDb<P> {
             self.stale_sweeps
                 .fetch_add(removed as u64, Ordering::Relaxed);
         }
-        self.sync_live_counter();
+        // Net-subtract exactly the candidates this invalidation removed.
+        self.apply_live_delta(0, removed);
         removed
     }
 
@@ -615,7 +645,9 @@ impl<P> crate::cache_schema::CacheSchemaVersioned for ComponentMetaResultDb<P> {
         if count > 0 {
             self.stale_sweeps.fetch_add(count as u64, Ordering::Relaxed);
         }
-        self.sync_live_counter();
+        // `clear` ran under the write guard — `count` is the exact live
+        // count it dropped. Net-subtract it.
+        self.apply_live_delta(0, count);
         count
     }
 }
@@ -848,5 +880,90 @@ mod tests {
         assert!(db.get(&mk_key("/w/b.vue"), [1u8; 16]).is_some());
         // /w/a.vue is fully gone.
         assert!(db.get(&mk_key("/w/a.vue"), [1u8; 16]).is_none());
+    }
+
+    /// The external live counter is exact after a non-trivial
+    /// admit / evict / re-admit / invalidate sequence — it tracks live
+    /// occupancy, never lifetime inserts.
+    ///
+    /// DISCRIMINATES against a gross net-delta error: a missing
+    /// `fetch_sub` on `remove`/`invalidate_owner`, a doubled `fetch_add`,
+    /// a wrong sign, an `insert` that net-adds on a same-version
+    /// replace, or a per-slot/global eviction whose victim removal
+    /// skips the decrement would all leave the counter diverged from
+    /// `inner.live_count()` after this mixed sequence — every assertion
+    /// below would catch it.
+    ///
+    /// ## Why this is the discriminating form for the snapshot→delta fix
+    ///
+    /// The pre-fix bug (codex P3) is an unsynchronised `store(live_count())`
+    /// that loses a concurrent update. A *deterministic* reproduction
+    /// would need to pin one writer between its `live_count()` read and
+    /// its `store` — and the only place that read-then-write window
+    /// exists is inside `sync_live_counter`, which the net-delta fix
+    /// DELETES. No `cfg(test)` injection point can therefore survive
+    /// onto the post-fix tree to make the race deterministic there, so a
+    /// fully-deterministic FAIL-pre / PASS-post race test is genuinely
+    /// infeasible: the fix closes the window rather than guarding it. A
+    /// non-deterministic stress test that passes against both trees
+    /// would be non-discriminating, so none is committed. This
+    /// deterministic exactness test is the committed discriminator — it
+    /// fails against any net-delta accounting error on the post-fix
+    /// tree, which is the form of regression a future edit can
+    /// reintroduce.
+    #[test]
+    fn live_counter_exact_after_mixed_admit_evict_sequence() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let db: ComponentMetaResultDb<u32> =
+            ComponentMetaResultDb::with_counters(Arc::clone(&counter), Arc::new(AtomicU64::new(0)));
+        let mk_key = |owner: &str| ComponentMetaResultKey {
+            owner_canonical: Arc::from(owner),
+            options_fingerprint: [0u8; 16],
+        };
+        let mk_entry = |v: u32| ComponentMetaResultEntry {
+            payload: Arc::new(v),
+            read_set_signature: empty_sig(),
+        };
+
+        // Three fresh admissions under distinct owners → counter 3.
+        db.insert(mk_key("/w/a.vue"), [1u8; 16], mk_entry(1));
+        db.insert(mk_key("/w/b.vue"), [1u8; 16], mk_entry(2));
+        db.insert(mk_key("/w/c.vue"), [1u8; 16], mk_entry(3));
+        assert_eq!(counter.load(Ordering::Relaxed), 3, "three fresh admits");
+
+        // Re-admitting the SAME (key, owner_whole_hash) refreshes in
+        // place — it must NOT change the live count.
+        db.insert(mk_key("/w/a.vue"), [1u8; 16], mk_entry(11));
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            3,
+            "same-version re-admit must not change the live count",
+        );
+
+        // A second content version of /w/a.vue is a distinct candidate
+        // → counter 4.
+        db.insert(mk_key("/w/a.vue"), [2u8; 16], mk_entry(12));
+        assert_eq!(counter.load(Ordering::Relaxed), 4, "second a.vue version");
+
+        // Remove one candidate → counter 3.
+        assert!(db.remove(&mk_key("/w/b.vue"), [1u8; 16]).is_some());
+        assert_eq!(counter.load(Ordering::Relaxed), 3, "one candidate removed");
+
+        // Invalidate /w/a.vue (both versions) → counter 1 (only c.vue).
+        assert_eq!(db.invalidate_owner("/w/a.vue"), 2);
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            1,
+            "invalidate_owner must net-subtract every removed candidate",
+        );
+        assert_eq!(
+            counter.load(Ordering::Relaxed) as usize,
+            db.len(),
+            "the external counter must equal the substrate's live_count",
+        );
+
+        // Project-generation clear → counter 0.
+        db.invalidate_all();
+        assert_eq!(counter.load(Ordering::Relaxed), 0, "invalidate_all zeroes");
     }
 }
