@@ -576,3 +576,143 @@ fn ref_cycle_unregister_preserves_fresh_admission() {
          races grow the cache past MAX_ENTRIES",
     );
 }
+
+// ===========================================================================
+// Map / budget desync — `invalidate_all` must hold the retention-gate
+// write guard across its whole `entries` + `canonical_to_keys` +
+// `retention_budget` + `live_counter` clear, so a concurrent cooperative
+// publish (which takes the gate's read guard as the substrate
+// `publish_fence` across `entries.insert` + `post_publish`) cannot
+// interleave its map insert and budget admission with the clear.
+//
+// The two tests below pin `invalidate_all` mid-clear via the per-Db
+// `invalidate_all` injection point (parked between the `entries` clear
+// and the budget clear, write guard still held) and assert
+// `retention_gate.try_read()` is `None`: a concurrent publish reaching
+// the read fence right now WOULD block. DISCRIMINATES — against the
+// un-gated `invalidate_all` (write guard removed) `try_read()` succeeds
+// (`Some`) and the assertion FAILS; with the gate it returns `None` and
+// the assertion PASSES.
+// ===========================================================================
+
+/// `MaterializeStructureDb::invalidate_all` engages the retention-gate
+/// write guard across its whole clear — a concurrent publish's
+/// `publish_fence` read guard is excluded.
+#[test]
+fn materialize_structure_invalidate_all_engages_gate_against_publish() {
+    use crate::component_meta_caches::{MaterializeStructureDb, MaterializeStructureEntry};
+    use crate::component_meta_materialize::{
+        MaterializationScope, MaterializeOutcome, MaterializeStructureCacheKey,
+    };
+    use crate::fact_signature_helpers::ReadSetSignature;
+    use crate::semantic_query::{ProjectionMode, SemanticNodeId};
+    use std::sync::Barrier;
+    use std::thread;
+
+    let db = Arc::new(MaterializeStructureDb::new());
+    // Seed one entry so `invalidate_all` has something to clear.
+    let key = MaterializeStructureCacheKey {
+        scope_canonical_id: Arc::from("/owner.ts"),
+        base: SemanticNodeId(0),
+        scope_axis: MaterializationScope::TopLevel,
+        mode: ProjectionMode::Shallow,
+    };
+    db.entries().insert(
+        key,
+        Arc::new(MaterializeStructureEntry {
+            outcome: MaterializeOutcome::Miss(SemanticNodeId(0)),
+            read_set_signature: ReadSetSignature::empty(),
+            self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
+            admission_seq: crate::bounded_query_retention::next_retention_seq(),
+        }),
+    );
+    db.bump_live_counter();
+
+    // parked: party 1 = the parked `invalidate_all`, party 2 = main.
+    let parked = Arc::new(Barrier::new(2));
+    let _guard = db.test_arm_invalidate_all_midpoint_gate(Arc::clone(&parked));
+
+    let db_clear = Arc::clone(&db);
+    let invalidator = thread::spawn(move || db_clear.invalidate_all());
+
+    // `invalidate_all` has cleared `entries` + `canonical_to_keys` and
+    // parked at its midpoint, still holding the `retention_gate` write
+    // guard. The cooperative publish path takes this gate's read guard
+    // as its `publish_fence` across `entries.insert` + `post_publish`;
+    // `try_read` returning `None` is the proof that publish is blocked.
+    parked.wait();
+    assert!(
+        db.test_retention_gate().try_read().is_none(),
+        "MAP/BUDGET DESYNC: `MaterializeStructureDb::invalidate_all` does \
+         NOT hold the retention write guard while clearing — a concurrent \
+         cooperative publish could interleave its `entries.insert` + \
+         budget admission between the `entries` clear and the \
+         `retention_budget` clear, stranding a live entry with no budget \
+         record. `invalidate_all` must hold `retention_gate.write()` \
+         across the whole map+index+budget+counter clear.",
+    );
+    parked.wait();
+    invalidator.join().expect("invalidator thread");
+    assert_eq!(db.entry_count(), 0, "invalidate_all cleared the entry");
+    assert_eq!(
+        db.retention_tracked_len(),
+        0,
+        "map and budget cleared consistently",
+    );
+}
+
+/// `RefCycleResultDb::invalidate_all` engages the retention-gate write
+/// guard across its whole clear — a concurrent publish's `publish_fence`
+/// read guard is excluded. Mirror of the `MaterializeStructureDb` test.
+#[test]
+fn ref_cycle_invalidate_all_engages_gate_against_publish() {
+    use crate::component_meta_caches::{RefCycleEntry, RefCycleResultDb};
+    use crate::fact_signature_helpers::ReadSetSignature;
+    use crate::semantic_query::{DeclIdentity, HashValue};
+    use std::sync::Barrier;
+    use std::thread;
+
+    let db = Arc::new(RefCycleResultDb::new());
+    // Seed one entry so `invalidate_all` has something to clear.
+    let id = DeclIdentity {
+        canonical_id: Arc::from("/cycle.ts"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("Helper"),
+    };
+    db.entries().insert(
+        id,
+        Arc::new(RefCycleEntry {
+            result: false,
+            read_set_signature: ReadSetSignature::empty(),
+            self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
+            admission_seq: crate::bounded_query_retention::next_retention_seq(),
+        }),
+    );
+    db.bump_live_counter();
+
+    let parked = Arc::new(Barrier::new(2));
+    let _guard = db.test_arm_invalidate_all_midpoint_gate(Arc::clone(&parked));
+
+    let db_clear = Arc::clone(&db);
+    let invalidator = thread::spawn(move || db_clear.invalidate_all());
+
+    parked.wait();
+    assert!(
+        db.test_retention_gate().try_read().is_none(),
+        "MAP/BUDGET DESYNC: `RefCycleResultDb::invalidate_all` does NOT \
+         hold the retention write guard while clearing — a concurrent \
+         cooperative BFS publish could interleave its `entries.insert` + \
+         budget admission between the `entries` clear and the \
+         `retention_budget` clear, stranding a live entry with no budget \
+         record. `invalidate_all` must hold `retention_gate.write()` \
+         across the whole map+index+budget+counter clear.",
+    );
+    parked.wait();
+    invalidator.join().expect("invalidator thread");
+    assert_eq!(db.entries().len(), 0, "invalidate_all cleared the entry");
+    assert_eq!(
+        db.retention_tracked_len(),
+        0,
+        "map and budget cleared consistently",
+    );
+}

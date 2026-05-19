@@ -386,16 +386,30 @@ impl Drop for RemovalCleanupPreHookGuard {
 /// cross-view follower rejects the winner's entry. A raw `map.remove_if`
 /// in either site would skip the cleanup and leave caches with
 /// publish-side counters / reverse indexes out of sync after a removal.
+///
+/// `publish_fence`, when `Some`, is the cache's lifecycle
+/// `retention_gate`. The map removal and `removal_cleanup` (which drains
+/// the cache's reverse index and retention budget) run under a shared
+/// read guard so a concurrent project-generation `clear` — which holds
+/// the write guard across its own map+budget clear — cannot interleave
+/// its clears with this removal's map/budget mutation. A cache with no
+/// retention budget passes `None`.
 fn remove_published_entry_with_cleanup<K, Entry, RemovalCleanup>(
     map: &DashMap<K, Arc<Entry>>,
     key: &K,
     entry_arc: &Arc<Entry>,
     removal_cleanup: &mut RemovalCleanup,
+    publish_fence: Option<&parking_lot::RwLock<()>>,
 ) where
     K: Eq + Hash + Clone,
     Entry: Send + Sync + 'static,
     RemovalCleanup: FnMut(&K, &Arc<Entry>),
 {
+    // Hold the cache's retention gate (shared read) across the whole
+    // `remove_if` + `removal_cleanup` so the map removal and the
+    // reverse-index / budget / counter cleanup are one lock-domain
+    // mutation against a concurrent `clear`.
+    let _retention = publish_fence.map(parking_lot::RwLock::read);
     if let Some((removed_key, removed_entry)) =
         map.remove_if(key, |_, existing| Arc::ptr_eq(existing, entry_arc))
     {
@@ -502,6 +516,8 @@ where
         revalidate_after_compute,
         removal_cleanup,
         |_, _| {},
+        // No retention budget on this cache shape — no publish fence.
+        None,
     )
 }
 
@@ -523,14 +539,29 @@ where
 /// invalidation happened during compute, the entry is stale and
 /// revalidation fails BEFORE post_publish runs.
 ///
+/// **Retention-gate publish fence (`publish_fence`).** When the cache
+/// carries a retention budget it passes its lifecycle `retention_gate`
+/// here. `map.insert` and `post_publish` (the reverse-index +
+/// retention-budget admission) then run under a shared read guard, and
+/// a project-generation `clear` holds the write guard across its own
+/// map + budget clear — so a `clear` cannot interleave between this
+/// `insert` and its `post_publish`. That closes the desync window
+/// where the `clear` would erase the budget ledger after the map
+/// insert landed, leaving a live map entry with no budget admission
+/// (invisible to FIFO eviction). A cache with no retention budget
+/// passes `None`.
+///
 /// **Eventually-consistent reverse-index window.** A concurrent
-/// invalidator that drains a canonical's reverse-index between
-/// `entries.insert` and `post_publish` would miss the
-/// registration. The orphan registration is caught by the next
-/// peek's stale-check (the entry references the invalidated
-/// canonical with its old dep_signature; the host has the new
-/// state) and proactively removed. The orphan window is bounded
-/// per edit-cycle.
+/// PER-CANONICAL invalidator that drains a canonical's reverse-index
+/// between `entries.insert` and `post_publish` would miss the
+/// registration — per-canonical invalidation takes a *shared* read
+/// guard (or none), so it is not excluded from a concurrent publish.
+/// The orphan registration is caught by the next peek's stale-check
+/// (the entry references the invalidated canonical with its old
+/// dep_signature; the host has the new state) and proactively removed.
+/// The orphan window is bounded per edit-cycle. The `publish_fence`
+/// closes only the harder `clear` race — a valid entry whose budget
+/// record a project-generation reset erases is NOT stale-detectable.
 ///
 /// **Compute closure synchronicity contract.** The
 /// `compute` closure runs SYNCHRONOUSLY on the caller's thread.
@@ -572,6 +603,7 @@ pub fn cooperative_get_or_insert_with_post_publish<
     mut revalidate_after_compute: Revalidate,
     mut removal_cleanup: RemovalCleanup,
     post_publish: PostPublish,
+    publish_fence: Option<&parking_lot::RwLock<()>>,
 ) -> Option<V>
 where
     K: Eq + Hash + Clone,
@@ -601,8 +633,15 @@ where
             // concurrent fresh winner's entry is not evicted, and run
             // the cache's removal-side cleanup so its live counter /
             // reverse index stay symmetric with the publish-side
-            // bookkeeping.
-            remove_published_entry_with_cleanup(map, &key, &entry_arc, &mut removal_cleanup);
+            // bookkeeping. The removal runs under the cache's retention
+            // gate (if any) so it does not desync against a `clear`.
+            remove_published_entry_with_cleanup(
+                map,
+                &key,
+                &entry_arc,
+                &mut removal_cleanup,
+                publish_fence,
+            );
         }
 
         // Claim the inflight slot or join an in-progress build.
@@ -642,7 +681,13 @@ where
                 // in-flight slot (`ptr_eq`-guarded), and re-enter
                 // admission so the follower cold-computes for its own
                 // view.
-                remove_published_entry_with_cleanup(map, &key, &entry_arc, &mut removal_cleanup);
+                remove_published_entry_with_cleanup(
+                    map,
+                    &key,
+                    &entry_arc,
+                    &mut removal_cleanup,
+                    publish_fence,
+                );
             }
             retire_slot_if_current(&inflight.table, &key, &slot);
             drop(slot);
@@ -683,16 +728,26 @@ where
                     .expect("project is taken exactly once by the cold winner")(
                     &entry_arc
                 );
-                map.insert(key.clone(), Arc::clone(&entry_arc));
+                {
+                    // Hold the cache's retention gate (shared read) across
+                    // the `map.insert` AND the `post_publish` so the map
+                    // insertion and the reverse-index / budget / counter
+                    // registration are one lock-domain mutation. A
+                    // concurrent project-generation `clear` takes the
+                    // write guard across its own map+budget clear, so it
+                    // cannot interleave its clears between this insert and
+                    // its `post_publish` — closing the window where a live
+                    // map entry would survive with no budget admission. A
+                    // cache with no retention budget passes `None`.
+                    let _retention = publish_fence.map(parking_lot::RwLock::read);
+                    map.insert(key.clone(), Arc::clone(&entry_arc));
 
-                // post_publish: fires AFTER
-                // entries.insert AND AFTER successful revalidate.
-                // Reverse-index registration lives here. NOT inside
-                // the inflight slot's state lock — the race-closure
-                // is via the revalidate_after_compute check above
-                // (eventually-consistent for the reverse index per
-                // the function-level docs).
-                post_publish(&entry_arc, &key);
+                    // post_publish: fires AFTER entries.insert AND AFTER
+                    // successful revalidate. Reverse-index registration +
+                    // retention-budget admission live here. NOT inside the
+                    // inflight slot's state lock.
+                    post_publish(&entry_arc, &key);
+                }
 
                 // Mark slot completed; wake joiners.
                 {
@@ -776,6 +831,7 @@ pub fn cooperative_admit_with_post_publish<
     mut revalidate_after_compute: Revalidate,
     mut removal_cleanup: RemovalCleanup,
     post_publish: PostPublish,
+    publish_fence: Option<&parking_lot::RwLock<()>>,
 ) -> Option<V>
 where
     K: Eq + Hash + Clone,
@@ -802,7 +858,13 @@ where
             if let Some(value) = validate(&entry_arc) {
                 return Some(value);
             }
-            remove_published_entry_with_cleanup(map, &key, &entry_arc, &mut removal_cleanup);
+            remove_published_entry_with_cleanup(
+                map,
+                &key,
+                &entry_arc,
+                &mut removal_cleanup,
+                publish_fence,
+            );
         }
 
         // Claim the inflight slot or join an in-progress build.
@@ -848,7 +910,13 @@ where
                 // removal-side cleanup so its live counter / reverse
                 // index stay consistent, retire the slot, re-enter
                 // admission so the follower cold-computes for its view.
-                remove_published_entry_with_cleanup(map, &key, &entry_arc, &mut removal_cleanup);
+                remove_published_entry_with_cleanup(
+                    map,
+                    &key,
+                    &entry_arc,
+                    &mut removal_cleanup,
+                    publish_fence,
+                );
             }
             retire_slot_if_current(&inflight.table, &key, &slot);
             drop(slot);
@@ -885,8 +953,19 @@ where
                     .expect("project is taken exactly once by the cold winner")(
                     &entry_arc
                 );
-                map.insert(key.clone(), Arc::clone(&entry_arc));
-                post_publish(&entry_arc, &key);
+                {
+                    // Hold the cache's retention gate (shared read) across
+                    // the `map.insert` AND the `post_publish` so the map
+                    // insertion and the reverse-index / budget / counter
+                    // registration are one lock-domain mutation, exclusive
+                    // against a concurrent project-generation `clear`
+                    // (which takes the write guard across its own map +
+                    // budget clear). A cache with no retention budget
+                    // passes `None`.
+                    let _retention = publish_fence.map(parking_lot::RwLock::read);
+                    map.insert(key.clone(), Arc::clone(&entry_arc));
+                    post_publish(&entry_arc, &key);
+                }
                 {
                     let mut state = slot.state.lock();
                     state.completed = true;

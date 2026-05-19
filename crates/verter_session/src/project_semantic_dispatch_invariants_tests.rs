@@ -1511,13 +1511,22 @@ fn resolver_core_mod_no_longer_reexports_type_surface_db() {
 
 #[test]
 fn semantic_graph_store_has_relation_memo_field() {
-    // Plan §2 + §3 Change S: SemanticGraphStore must carry a
-    // `relation_memo` DashMap field for the  relation
-    // engine.
+    // SemanticGraphStore must carry a single `relation_memo` field for
+    // the relation engine. The field is a `BudgetedRelationMemo` — a
+    // wrapper owning the `(source, target)` map, its retention budget,
+    // and the `retention_gate` that keeps the map and the budget in one
+    // lock domain — so the relation memo and its retention ledger
+    // cannot desync (`clear` is exclusive against concurrent inserts).
     let memo_src = include_str!("semantic_query_memo/mod.rs");
     assert!(
-        memo_src.contains("relation_memo: DashMap<"),
-        "SemanticGraphStore must have a `relation_memo: DashMap<...>` field"
+        memo_src.contains("relation_memo: BudgetedRelationMemo"),
+        "SemanticGraphStore must have a `relation_memo: BudgetedRelationMemo` field"
+    );
+    // The relation memo's `DashMap` is owned by `BudgetedRelationMemo`.
+    let budgeted_src = include_str!("semantic_query_memo/budgeted_caches.rs");
+    assert!(
+        budgeted_src.contains("memo: DashMap<"),
+        "BudgetedRelationMemo must own the relation memo's DashMap"
     );
     // Behavioural verification: the field is accessible via the
     // `get_relation` / `insert_relation` API used by
@@ -1684,12 +1693,22 @@ fn semantic_node_to_type_expr_has_exactly_one_path() {
 
 #[test]
 fn relation_memo_has_exactly_one_owner() {
-    // `relation_memo: DashMap` field must appear exactly once in
-    // production code — on `SemanticGraphStore`.
-    let count = count_def_in_crates("relation_memo: DashMap");
+    // The `relation_memo` field must appear exactly once in production
+    // code — on `SemanticGraphStore`, typed `BudgetedRelationMemo`. The
+    // memo's backing `DashMap` is owned by that wrapper (which also
+    // owns the retention budget + `retention_gate`), so the relation
+    // memo still has exactly one owner.
+    let field_count = count_def_in_crates("relation_memo: BudgetedRelationMemo");
     assert_eq!(
-        count, 1,
-        "relation_memo field must have exactly one owner; got {count}"
+        field_count, 1,
+        "relation_memo field must have exactly one owner; got {field_count}"
+    );
+    // The wrapper owns the backing map exactly once.
+    let map_count = count_def_in_crates("memo: DashMap<(SemanticNodeId, SemanticNodeId)");
+    assert_eq!(
+        map_count, 1,
+        "the relation memo's DashMap must have exactly one owner \
+         (BudgetedRelationMemo); got {map_count}"
     );
 }
 

@@ -431,6 +431,8 @@ fn cacheable_joiner_runs_validate_on_its_own_thread() {
             |_entry: &String| -> bool { true },
             |_k: &u32, _e: &Arc<String>| {},
             |_entry_arc: &Arc<String>, _k: &u32| {},
+            // No retention budget on this test cache — no publish fence.
+            None,
         )
     });
 
@@ -467,6 +469,8 @@ fn cacheable_joiner_runs_validate_on_its_own_thread() {
             |_entry: &String| -> bool { true },
             |_k: &u32, _e: &Arc<String>| {},
             |_entry_arc: &Arc<String>, _k: &u32| {},
+            // No retention budget on this test cache — no publish fence.
+            None,
         )
     });
 
@@ -734,6 +738,8 @@ fn cooperative_admit_joiner_validate_reject_forks() {
             |_entry: &String| true,
             |_k: &u32, _e: &Arc<String>| {},
             |_entry_arc: &Arc<String>, _k: &u32| {},
+            // No retention budget on this test cache — no publish fence.
+            None,
         )
     });
 
@@ -764,6 +770,8 @@ fn cooperative_admit_joiner_validate_reject_forks() {
             |_entry: &String| true,
             |_k: &u32, _e: &Arc<String>| {},
             |_entry_arc: &Arc<String>, _k: &u32| {},
+            // No retention budget on this test cache — no publish fence.
+            None,
         )
     });
 
@@ -850,6 +858,8 @@ fn return_only_winner_not_broadcast_cross_view_joiner_forks() {
             |_entry: &String| true,
             |_k: &u32, _e: &Arc<String>| {},
             |_entry_arc: &Arc<String>, _k: &u32| {},
+            // No retention budget on this test cache — no publish fence.
+            None,
         )
     });
 
@@ -880,6 +890,8 @@ fn return_only_winner_not_broadcast_cross_view_joiner_forks() {
             |_entry: &String| true,
             |_k: &u32, _e: &Arc<String>| {},
             |_entry_arc: &Arc<String>, _k: &u32| {},
+            // No retention budget on this test cache — no publish fence.
+            None,
         )
     });
 

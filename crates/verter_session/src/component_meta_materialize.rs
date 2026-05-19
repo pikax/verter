@@ -1367,6 +1367,12 @@ pub(crate) fn materialize_component_meta_structure(
             );
             let _ = k; // unused — key_for_register is the same key
         },
+        // publish_fence — the Db's `retention_gate`. The substrate
+        // holds it (shared read) across `entries.insert` + `post_publish`
+        // so the map insert and the reverse-index + budget admission are
+        // one lock-domain mutation, exclusive against `invalidate_all`'s
+        // map+budget clear.
+        Some(db.publish_fence()),
     );
 
     match result {

@@ -268,6 +268,10 @@ impl ImportedRegistryDb {
                     crate::invalidation_domain::EntryIdentity::of(entry_arc),
                 );
             },
+            // `ImportedRegistryDb` carries no `GlobalRetentionBudget` —
+            // its reverse index is the `CanonicalIndex` and there is no
+            // map/budget desync class to fence. No publish fence.
+            None,
         )
     }
 
@@ -2049,6 +2053,28 @@ pub struct MaterializeStructureDb {
     retention_budget:
         crate::bounded_query_retention::GlobalRetentionBudget<MaterializeStructureCacheKey>,
     live_counter: Arc<AtomicU64>,
+    /// Lifecycle gate keeping `entries`, `canonical_to_keys`,
+    /// `retention_budget`, and `live_counter` in one lock domain. Every
+    /// mutation that touches the map and the budget — the cooperative
+    /// publish (`map.insert` + `post_publish`), the cooperative removal
+    /// cleanup, a budget-FIFO eviction, a stale-`peek` removal, and a
+    /// per-canonical drain — runs under a shared read guard; the
+    /// project-generation `clear` (`invalidate_all` /
+    /// `evict_if_schema_mismatch`) takes the exclusive write guard
+    /// across the whole map+index+budget+counter clear. A `clear`
+    /// therefore cannot interleave its clears with a concurrent
+    /// publish, so the budget never strands a live `entries` item with
+    /// no admission record. `DashMap` stays for hot-path concurrency;
+    /// the gate is a coarse reset fence.
+    retention_gate: parking_lot::RwLock<()>,
+    /// Test-only injection point inside [`Self::invalidate_all`],
+    /// parked between the `entries` clear and the budget clear with the
+    /// `retention_gate` write guard still held. A race test arms it
+    /// with a barrier and calls `wait()` twice to assert the in-flight
+    /// clear engages the gate against a concurrent publish. Per-instance;
+    /// absent from release builds.
+    #[cfg(any(test, debug_assertions))]
+    invalidate_all_midpoint_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`crate::cache_schema`] for the contract.
     schema_version: u32,
@@ -2089,6 +2115,9 @@ impl MaterializeStructureDb {
                 Self::MAX_ENTRIES,
             ),
             live_counter,
+            retention_gate: parking_lot::RwLock::new(()),
+            #[cfg(any(test, debug_assertions))]
+            invalidate_all_midpoint_gate: parking_lot::Mutex::new(None),
             schema_version,
         }
     }
@@ -2106,6 +2135,18 @@ impl MaterializeStructureDb {
     #[must_use]
     pub(crate) fn retention_tracked_len(&self) -> usize {
         self.retention_budget.tracked_len()
+    }
+
+    /// Test-only accessor for the lifecycle `retention_gate`. A race
+    /// test parks `invalidate_all` mid-flight (via the `invalidate_all`
+    /// injection point) and uses `try_read()` on this gate to assert,
+    /// deterministically, that the in-flight clear has engaged the
+    /// write guard against concurrent publishes.
+    #[cfg(test)]
+    #[doc(hidden)]
+    #[must_use]
+    pub(crate) fn test_retention_gate(&self) -> &parking_lot::RwLock<()> {
+        &self.retention_gate
     }
 
     /// Read-only test accessor for the shared
@@ -2151,6 +2192,11 @@ impl MaterializeStructureDb {
                 .read_set_signature
                 .validate_with_self_roots(ctx, &entry_arc.self_root_canonicals)
             {
+                // Stale-entry reap touches both `entries` and the
+                // retention budget — hold the retention gate (shared
+                // read) across the pair so it does not desync against
+                // a concurrent project-generation `clear`.
+                let _retention = self.retention_gate.read();
                 let removed = self
                     .entries
                     .remove_if(key, |_, e| Arc::ptr_eq(e, &entry_arc));
@@ -2192,7 +2238,14 @@ impl MaterializeStructureDb {
     /// `canonical_id`. — uses the `canonical_to_keys`
     /// reverse index to find affected keys; uses `Arc::ptr_eq` to
     /// discriminate "our entry" from concurrent fresh writes.
+    ///
+    /// Holds the `retention_gate` read guard across the whole
+    /// reverse-index drain + `entries` removal + budget `forget_seq` +
+    /// counter decrement, so this per-canonical invalidation does not
+    /// desync the map and the budget against a concurrent
+    /// project-generation `clear` (which takes the write guard).
     pub fn invalidate_for_canonical(&self, canonical_id: &str) {
+        let _retention = self.retention_gate.read();
         let drained: Vec<(MaterializeStructureCacheKey, DepSignature)> =
             match self.canonical_to_keys.remove(canonical_id) {
                 Some((_, mutex)) => mutex.lock().drain().collect(),
@@ -2232,7 +2285,15 @@ impl MaterializeStructureDb {
 
     /// Drop every cache entry. Used on project-generation bumps.
     ///
-    /// Plan R8-5 — saturating-subtract pattern (NOT `store(0)`) because
+    /// Holds the `retention_gate` WRITE guard across the whole
+    /// `entries` + `canonical_to_keys` + `retention_budget` +
+    /// `live_counter` clear. A concurrent cooperative publish, removal
+    /// cleanup, stale-`peek` reap, or per-canonical drain holds the
+    /// gate's read guard, so it blocks until this clear completes — no
+    /// publish can land a live `entries` item whose budget admission
+    /// this reset then erases.
+    ///
+    /// Saturating-subtract pattern (NOT `store(0)`) because
     /// `live_counter` is shared via `Arc<AtomicU64>` across every typed DB
     /// in `ProjectTypeStore` (`component_meta_cache_live`). A per-DB
     /// `store(0)` would corrupt other DBs' contributions to the shared
@@ -2241,14 +2302,45 @@ impl MaterializeStructureDb {
     /// counter's current value to prevent underflow under
     /// concurrent invalidation.
     pub fn invalidate_all(&self) {
+        let _retention = self.retention_gate.write();
         let n = self.entries.len() as u64;
         self.entries.clear();
         self.canonical_to_keys.clear();
+        // Test-only injection point — parked between the `entries`
+        // clear and the budget clear with the `retention_gate` write
+        // guard still held. A race test arms it to assert a concurrent
+        // publish is blocked. `None` (production default) is a no-op.
+        #[cfg(any(test, debug_assertions))]
+        {
+            let gate = self.invalidate_all_midpoint_gate.lock().clone();
+            if let Some(barrier) = gate {
+                barrier.wait();
+                barrier.wait();
+            }
+        }
         self.retention_budget.clear();
         self.live_counter.fetch_sub(
             n.min(self.live_counter.load(Ordering::Relaxed)),
             Ordering::Relaxed,
         );
+    }
+
+    /// Test-only driver: arm the [`Self::invalidate_all`] injection
+    /// point with `barrier`. The next `invalidate_all` on this Db calls
+    /// `barrier.wait()` twice between the `entries` clear and the
+    /// budget clear (with the `retention_gate` write guard held). The
+    /// returned guard disarms the injection point on drop.
+    #[cfg(test)]
+    #[doc(hidden)]
+    #[must_use]
+    pub(crate) fn test_arm_invalidate_all_midpoint_gate(
+        &self,
+        barrier: Arc<std::sync::Barrier>,
+    ) -> MaterializeInvalidateGateGuard<'_> {
+        *self.invalidate_all_midpoint_gate.lock() = Some(barrier);
+        MaterializeInvalidateGateGuard {
+            gate: &self.invalidate_all_midpoint_gate,
+        }
     }
 
     /// Number of warm entries.
@@ -2390,6 +2482,15 @@ impl MaterializeStructureDb {
         &self.entries
     }
 
+    /// Internal — the lifecycle `retention_gate`, passed as the
+    /// `publish_fence` to `cooperative_admit_with_post_publish` so the
+    /// substrate holds it across `entries.insert` + `post_publish`.
+    /// Keeps the cooperative publish in the same lock domain as
+    /// `invalidate_all`'s map+budget clear.
+    pub(crate) fn publish_fence(&self) -> &parking_lot::RwLock<()> {
+        &self.retention_gate
+    }
+
     /// Internal — bump the live counter. Called from the
     /// materialiser's compute closure on successful publish.
     pub(crate) fn bump_live_counter(&self) {
@@ -2453,6 +2554,22 @@ impl Default for MaterializeStructureDb {
     }
 }
 
+/// RAII guard returned by
+/// [`MaterializeStructureDb::test_arm_invalidate_all_midpoint_gate`].
+/// Disarms the per-instance `invalidate_all` injection point on drop.
+#[cfg(test)]
+#[doc(hidden)]
+pub(crate) struct MaterializeInvalidateGateGuard<'a> {
+    gate: &'a parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+}
+
+#[cfg(test)]
+impl Drop for MaterializeInvalidateGateGuard<'_> {
+    fn drop(&mut self) {
+        *self.gate.lock() = None;
+    }
+}
+
 impl crate::cache_schema::CacheSchemaVersioned for MaterializeStructureDb {
     fn schema_version(&self) -> u32 {
         self.schema_version
@@ -2462,6 +2579,10 @@ impl crate::cache_schema::CacheSchemaVersioned for MaterializeStructureDb {
         if self.schema_version == current {
             return 0;
         }
+        // Same map + index + budget + counter clear as `invalidate_all`
+        // — take the `retention_gate` write guard across the whole
+        // clear so a concurrent publish cannot interleave.
+        let _retention = self.retention_gate.write();
         let count = self.entries.len();
         self.entries.clear();
         self.canonical_to_keys.clear();
@@ -2556,6 +2677,23 @@ pub struct RefCycleResultDb {
     /// entries past [`Self::MAX_ENTRIES`].
     retention_budget: crate::bounded_query_retention::GlobalRetentionBudget<DeclIdentity>,
     live_counter: Arc<AtomicU64>,
+    /// Lifecycle gate keeping `entries`, `canonical_to_keys`,
+    /// `retention_budget`, and `live_counter` in one lock domain. Every
+    /// mutation that touches the map and the budget — the cooperative
+    /// publish (`map.insert` + `post_publish`), the cooperative removal
+    /// cleanup, a budget-FIFO eviction, a stale-`peek` removal, and a
+    /// per-canonical drain — runs under a shared read guard;
+    /// `invalidate_all` takes the exclusive write guard across the
+    /// whole map+index+budget+counter clear. A `clear` therefore cannot
+    /// interleave its clears with a concurrent publish, so the budget
+    /// never strands a live `entries` item with no admission record.
+    retention_gate: parking_lot::RwLock<()>,
+    /// Test-only injection point inside [`Self::invalidate_all`],
+    /// parked between the `entries` clear and the budget clear with the
+    /// `retention_gate` write guard still held. Per-instance; absent
+    /// from release builds.
+    #[cfg(any(test, debug_assertions))]
+    invalidate_all_midpoint_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
 }
 
 impl RefCycleResultDb {
@@ -2582,6 +2720,9 @@ impl RefCycleResultDb {
                 Self::MAX_ENTRIES,
             ),
             live_counter,
+            retention_gate: parking_lot::RwLock::new(()),
+            #[cfg(any(test, debug_assertions))]
+            invalidate_all_midpoint_gate: parking_lot::Mutex::new(None),
         }
     }
 
@@ -2589,6 +2730,34 @@ impl RefCycleResultDb {
     #[must_use]
     pub fn retention_cap(&self) -> usize {
         self.retention_budget.cap()
+    }
+
+    /// Test-only accessor for the lifecycle `retention_gate`. A race
+    /// test parks `invalidate_all` mid-flight and uses `try_read()` on
+    /// this gate to assert the in-flight clear engages the write guard
+    /// against concurrent publishes.
+    #[cfg(test)]
+    #[doc(hidden)]
+    #[must_use]
+    pub(crate) fn test_retention_gate(&self) -> &parking_lot::RwLock<()> {
+        &self.retention_gate
+    }
+
+    /// Test-only driver: arm the [`Self::invalidate_all`] injection
+    /// point with `barrier`. The next `invalidate_all` on this Db calls
+    /// `barrier.wait()` twice between the `entries` clear and the
+    /// budget clear (with the `retention_gate` write guard held).
+    #[cfg(test)]
+    #[doc(hidden)]
+    #[must_use]
+    pub(crate) fn test_arm_invalidate_all_midpoint_gate(
+        &self,
+        barrier: Arc<std::sync::Barrier>,
+    ) -> RefCycleInvalidateGateGuard<'_> {
+        *self.invalidate_all_midpoint_gate.lock() = Some(barrier);
+        RefCycleInvalidateGateGuard {
+            gate: &self.invalidate_all_midpoint_gate,
+        }
     }
 
     /// Test-only — number of admission records currently in the
@@ -2610,6 +2779,15 @@ impl RefCycleResultDb {
     /// closure for `cooperative_get_or_insert_with_post_publish`.
     pub(crate) fn inflight(&self) -> &InflightTable<DeclIdentity> {
         &self.inflight
+    }
+
+    /// Internal — the lifecycle `retention_gate`, passed as the
+    /// `publish_fence` to `cooperative_admit_with_post_publish` so the
+    /// substrate holds it across `entries.insert` + `post_publish`,
+    /// keeping the cooperative publish in the same lock domain as
+    /// `invalidate_all`'s map+budget clear.
+    pub(crate) fn publish_fence(&self) -> &parking_lot::RwLock<()> {
+        &self.retention_gate
     }
 
     /// Internal — bump the live counter. Called from the BFS-cache
@@ -2776,6 +2954,11 @@ impl RefCycleResultDb {
                 .read_set_signature
                 .validate_with_self_roots(ctx, &entry_arc.self_root_canonicals)
             {
+                // Stale-entry reap touches both `entries` and the
+                // retention budget — hold the retention gate (shared
+                // read) across the pair so it does not desync against
+                // a concurrent project-generation `clear`.
+                let _retention = self.retention_gate.read();
                 // R8-5 — decrement live_counter on stale removal so
                 // the shared counter tracks live entries, not stale ones.
                 let removed = self
@@ -2818,7 +3001,13 @@ impl RefCycleResultDb {
     /// references `canonical_id`. Uses the `canonical_to_keys` reverse
     /// index to find affected keys; `Arc::ptr_eq` discriminates "our
     /// entry" from concurrent fresh writes.
+    ///
+    /// Holds the `retention_gate` read guard across the whole
+    /// reverse-index drain + `entries` removal + budget `forget_seq` +
+    /// counter decrement, so this per-canonical invalidation does not
+    /// desync the map and the budget against a concurrent `clear`.
     pub fn invalidate_for_canonical(&self, canonical_id: &str) {
+        let _retention = self.retention_gate.read();
         let drained: Vec<(DeclIdentity, DepSignature)> =
             match self.canonical_to_keys.remove(canonical_id) {
                 Some((_, mutex)) => mutex.lock().drain().collect(),
@@ -2856,19 +3045,57 @@ impl RefCycleResultDb {
         }
     }
 
+    /// Drop every cache entry. Used on project-generation bumps.
+    ///
+    /// Holds the `retention_gate` WRITE guard across the whole
+    /// `entries` + `canonical_to_keys` + `retention_budget` +
+    /// `live_counter` clear, so a concurrent cooperative publish,
+    /// removal cleanup, stale-`peek` reap, or per-canonical drain
+    /// (each holding the read guard) blocks until this clear completes
+    /// — no publish can land a live `entries` item whose budget
+    /// admission this reset then erases.
+    ///
     /// Saturating-subtract pattern (NOT `store(0)`)
     /// because `live_counter` is shared via `Arc<AtomicU64>` across all
     /// typed DBs in `ProjectTypeStore`. A per-DB `store(0)` would
     /// corrupt sibling DBs' contributions to the shared sum.
     pub fn invalidate_all(&self) {
+        let _retention = self.retention_gate.write();
         let n = self.entries.len() as u64;
         self.entries.clear();
         self.canonical_to_keys.clear();
+        // Test-only injection point — parked between the `entries`
+        // clear and the budget clear with the `retention_gate` write
+        // guard still held. `None` (production default) is a no-op.
+        #[cfg(any(test, debug_assertions))]
+        {
+            let gate = self.invalidate_all_midpoint_gate.lock().clone();
+            if let Some(barrier) = gate {
+                barrier.wait();
+                barrier.wait();
+            }
+        }
         self.retention_budget.clear();
         self.live_counter.fetch_sub(
             n.min(self.live_counter.load(Ordering::Relaxed)),
             Ordering::Relaxed,
         );
+    }
+}
+
+/// RAII guard returned by
+/// [`RefCycleResultDb::test_arm_invalidate_all_midpoint_gate`]. Disarms
+/// the per-instance `invalidate_all` injection point on drop.
+#[cfg(test)]
+#[doc(hidden)]
+pub(crate) struct RefCycleInvalidateGateGuard<'a> {
+    gate: &'a parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+}
+
+#[cfg(test)]
+impl Drop for RefCycleInvalidateGateGuard<'_> {
+    fn drop(&mut self) {
+        *self.gate.lock() = None;
     }
 }
 
@@ -3397,6 +3624,12 @@ where
                 entry_arc.admission_seq,
             );
         },
+        // publish_fence — the Db's `retention_gate`. The substrate
+        // holds it (shared read) across `entries.insert` + `post_publish`
+        // so the map insert and the reverse-index + budget admission are
+        // one lock-domain mutation, exclusive against `invalidate_all`'s
+        // map+budget clear.
+        Some(db.publish_fence()),
     )
 }
 

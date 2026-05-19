@@ -44,6 +44,7 @@ use crate::semantic_query::{
 use crate::semantic_query::{PathSegment, ProjectionMode};
 
 mod arena;
+mod budgeted_caches;
 mod derivation;
 mod family;
 mod inflight;
@@ -58,6 +59,7 @@ use interner::SWEEP_INTERVAL;
 use arena::NodeArena;
 #[cfg(test)]
 use arena::{shard_index_for, NUM_SHARDS};
+use budgeted_caches::{BudgetedNamedTypeIndex, BudgetedRelationMemo, RelationMemoEntry};
 use derivation::{sorted_percentile, DerivationStore};
 pub use family::AuditEagerKeyRow;
 use family::{
@@ -132,11 +134,18 @@ pub struct SemanticGraphStore {
     inflight: Mutex<FxHashMap<SemanticQueryKey, Arc<InflightEntry>>>,
     /// Identity map for Vue macro resolution artifacts keyed by
     /// [`HostResolvedNamedTypeKey`]. See the struct-level docs for the
-    /// read-path shape. Per, `SemanticQueryKey::ResolvedNamedType`
-    /// bypasses the family memo entirely — this `DashMap` is the cache,
-    /// and `execute_cooperative` short-circuits straight to the build
+    /// read-path shape. `SemanticQueryKey::ResolvedNamedType` bypasses
+    /// the family memo entirely — this map is the cache, and
+    /// `execute_cooperative` short-circuits straight to the build
     /// closure for that variant.
-    named_type_index: DashMap<HostResolvedNamedTypeKey, SemanticNodeId>,
+    ///
+    /// The map and its retention budget are mutated within one lock
+    /// domain ([`BudgetedNamedTypeIndex`]) — every insert / per-canonical
+    /// drain runs under the wrapper's `retention_gate` read guard,
+    /// `clear` under its write guard — so a concurrent insert can never
+    /// strand a live map entry whose budget admission a project-
+    /// generation `clear` then erases.
+    named_type_index: BudgetedNamedTypeIndex,
     /// Relation-engine memo. Maps `(source, target)` semantic-node pairs
     /// to the tri-state
     /// [`RelationResult`](crate::semantic_query::RelationResult) plus the
@@ -144,12 +153,17 @@ pub struct SemanticGraphStore {
     /// for strict warm-hit validation. Separate from the family memo
     /// because relation identity is pairwise, not single-node.
     ///
-    /// The stored [`RelationMemoEntry`] is validated on every warm read
+    /// The stored `RelationMemoEntry` is validated on every warm read
     /// (`get_relation`) — every self-root canonical's `FileWholeHash` is
     /// validated strictly, so a same-canonical content edit to either
     /// the source's or the target's originating file misses the warm
     /// relation judgement and forces a recompute.
-    relation_memo: DashMap<(SemanticNodeId, SemanticNodeId), RelationMemoEntry>,
+    ///
+    /// The map and its retention budget are mutated within one lock
+    /// domain ([`BudgetedRelationMemo`]) — `insert` runs under the
+    /// wrapper's `retention_gate` read guard, `clear` under its write
+    /// guard.
+    relation_memo: BudgetedRelationMemo,
     /// Sibling derivation/origin layer (plan B2 + Derivation/Origin Layer
     /// Contract). Edges are keyed by `(result_node, kind)`; multiple
     /// derivations of the same structural result store multiple edges per
@@ -236,46 +250,11 @@ pub struct SemanticGraphStore {
     /// publishing a newly-keyed family records an admission and the
     /// oldest families past the cap are FIFO-evicted write-side.
     memo_budget: crate::bounded_query_retention::GlobalRetentionBudget<FamilyKey>,
-    /// Global total-size budget for the relation memo. `(source,
-    /// target)` `SemanticNodeId` pairs are content-derived, so the
-    /// relation memo grows with content edits without this cap.
-    relation_budget:
-        crate::bounded_query_retention::GlobalRetentionBudget<(SemanticNodeId, SemanticNodeId)>,
-    /// Global total-size budget for the Vue-macro resolved-named-type
-    /// identity map. `HostResolvedNamedTypeKey` embeds the owner's
-    /// content hash, so each owner content version is a fresh key.
-    named_type_budget:
-        crate::bounded_query_retention::GlobalRetentionBudget<HostResolvedNamedTypeKey>,
 }
 
 /// Γ.B reverse-index type alias. See
 /// [`SemanticGraphStore::canonical_to_entries`] for the contract.
 type CanonicalToEntries = DashMap<Arc<str>, Mutex<FxHashMap<(FamilyKey, ModeSlot), DepSignature>>>;
-
-/// One entry in the relation memo
-/// ([`SemanticGraphStore::relation_memo`]).
-///
-/// A relation judgement for a `(source, target)` semantic-node pair is
-/// self-version-rooted: `carrier` leads with a self-root `FileWholeHash`
-/// for each file-derived input node's originating file, so a content
-/// edit to either the source's or the target's file misses the warm
-/// relation read. `self_root_canonicals` is the strict self-root
-/// canonical set the warm validator
-/// ([`SemanticGraphStore::get_relation`]) checks via
-/// [`crate::fact_signature_helpers::ReadSetSignature::validate_with_self_roots`].
-#[derive(Clone)]
-struct RelationMemoEntry {
-    /// The self-version-rooted carrier — built by
-    /// [`semantic_graph_read_set_signature`] from the relation build's
-    /// observed self-roots, the traced fact set, and the legacy
-    /// `DepSignature` rail.
-    carrier: crate::fact_signature_helpers::ReadSetSignature,
-    /// The strict self-root canonical set — the file-derived origins of
-    /// `source` and `target`.
-    self_root_canonicals: Arc<[Arc<str>]>,
-    /// The cached tri-state relation result.
-    result: crate::semantic_query::RelationResult,
-}
 
 impl std::fmt::Debug for SemanticGraphStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -345,7 +324,8 @@ impl SemanticGraphStore {
     /// The constructor installs provenance via field mutation on a
     /// `Default`-built store so it stays compatible with the dispatch
     /// invariant tests that require single-owner cardinality for
-    /// `arena: NodeArena` and `relation_memo: DashMap` in production code.
+    /// `arena: NodeArena` and `relation_memo: BudgetedRelationMemo` in
+    /// production code.
     #[must_use]
     pub fn with_provenance(provenance: Arc<crate::types::MetaProvenance>) -> Self {
         let mut store = Self::default();
@@ -809,10 +789,12 @@ impl SemanticGraphStore {
     ///   caches. Clearing them on a project-generation bump drops the
     ///   stale judgements those caches hold.
     ///
-    /// Each `SemanticNodeId`-keyed cache has a retention ledger
-    /// (`memo_budget`, `relation_budget`, `named_type_budget`); the
+    /// Each `SemanticNodeId`-keyed cache has a retention ledger; the
     /// ledger is cleared in lockstep with the map it bounds so no budget
-    /// retains a key whose entry is gone.
+    /// retains a key whose entry is gone. For the relation memo and the
+    /// resolved-named-type index the map and its ledger live in one lock
+    /// domain — the wrapper's `clear` holds a `retention_gate` write
+    /// guard across both clears, exclusive against concurrent inserts.
     ///
     /// ## The node arena is append-only
     ///
@@ -847,8 +829,11 @@ impl SemanticGraphStore {
     /// The acquisition order `entries → inflight` matches
     /// [`Self::invalidate_canonical`] and every other multi-lock path —
     /// no path acquires `inflight` then `entries`, so there is no AB-BA
-    /// cycle. The `SemanticNodeId`-keyed caches and the retention ledgers
-    /// are individually synchronised and need no outer lock.
+    /// cycle. The relation memo and resolved-named-type index each carry
+    /// their own `retention_gate`; their `clear` takes that gate's
+    /// write guard independently of `entries` — no path holds `entries`
+    /// across a `retention_gate` acquisition, so the gates add no AB-BA
+    /// cycle to the `entries → inflight` order.
     pub fn invalidate_all(&self) -> usize {
         let removed: usize = {
             let mut entries = self.entries_lock_diagnosed();
@@ -899,16 +884,19 @@ impl SemanticGraphStore {
             }
         }
         // Drop every `SemanticNodeId`-keyed semantic cache so no stale
-        // id-keyed judgement survives the project-generation bump.
+        // id-keyed judgement survives the project-generation bump. The
+        // relation memo and resolved-named-type index each clear their
+        // map and retention budget under their own `retention_gate`
+        // write guard — a concurrent insert is excluded across the
+        // whole map+budget clear, so no insert strands a live entry
+        // whose budget admission this reset would otherwise erase.
         self.named_type_index.clear();
         self.relation_memo.clear();
         self.derivation.lock().clear();
         self.canonical_to_entries.clear();
-        // Drop the retention ledgers in lockstep so no budget retains a
-        // stale family / relation / named-type key.
+        // Drop the family memo's retention ledger in lockstep with the
+        // `entries` clear above so no budget retains a stale family key.
         self.memo_budget.clear();
-        self.relation_budget.clear();
-        self.named_type_budget.clear();
         removed
     }
 
@@ -917,24 +905,20 @@ impl SemanticGraphStore {
     /// arena and records the identity mapping in
     /// [`named_type_index`](Self::named_type_index). Subsequent reads via
     /// [`Self::get_resolved_named_type`] are refcount-only.
+    ///
+    /// The map insert + retention-budget admission run under the
+    /// `BudgetedNamedTypeIndex`'s `retention_gate` read guard, and
+    /// new-key detection is atomic (via the `DashMap::insert` return
+    /// value), so a project-generation `clear` cannot interleave its
+    /// map/budget clears with this insert and two writers racing the
+    /// same key cannot double-record the admission.
     pub fn insert_resolved_named_type(
         &self,
         key: HostResolvedNamedTypeKey,
         elements: Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
     ) -> SemanticNodeId {
         let node_id = self.intern_node(SemanticNodeData::VueMacroElements(elements));
-        let is_new = !self.named_type_index.contains_key(&key);
-        self.named_type_index.insert(key.clone(), node_id);
-        // Global retention budget: a newly-keyed resolved-named-type
-        // entry records an admission; the oldest entries past the cap
-        // are FIFO-evicted. The key embeds the owner's content hash, so
-        // each owner content version is a distinct, accumulating key.
-        if is_new {
-            let seq = crate::bounded_query_retention::next_retention_seq();
-            for victim in self.named_type_budget.record_admission(seq, key) {
-                self.named_type_index.remove(&victim);
-            }
-        }
+        self.named_type_index.insert(key, node_id);
         node_id
     }
 
@@ -948,7 +932,7 @@ impl SemanticGraphStore {
         &self,
         key: &HostResolvedNamedTypeKey,
     ) -> Option<Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>> {
-        let node_id = *self.named_type_index.get(key)?;
+        let node_id = self.named_type_index.get(key)?;
         match &*self.arena.get(node_id)? {
             SemanticNodeData::VueMacroElements(arc) => Some(Arc::clone(arc)),
             _ => None,
@@ -966,7 +950,7 @@ impl SemanticGraphStore {
         &self,
         key: &HostResolvedNamedTypeKey,
     ) -> Option<SemanticNodeId> {
-        self.named_type_index.get(key).map(|entry| *entry.value())
+        self.named_type_index.get(key)
     }
 
     /// Drop every entry in the Vue macro resolution identity map. Invoked
@@ -975,32 +959,23 @@ impl SemanticGraphStore {
     /// [`SemanticNodeData::VueMacroElements`] payloads alive only as long
     /// as something else references their ids, which is fine because the
     /// identity map was the only external reachability path to them.
+    ///
+    /// The map and its retention budget are cleared in one lock domain
+    /// under the `BudgetedNamedTypeIndex`'s `retention_gate` write
+    /// guard, exclusive against concurrent inserts.
     pub fn clear_resolved_named_types(&self) {
         self.named_type_index.clear();
-        self.named_type_budget.clear();
     }
 
     /// Remove every entry in the Vue macro resolution identity map whose
     /// key's `canonical_id` matches `canonical_id`. Called from
     /// [`ProjectTypeStore::evict_canonical`](crate::project_type_store::ProjectTypeStore::evict_canonical)
     /// so stale artifacts do not keep a retired file's spans alive.
-    /// Returns the number of entries evicted.
+    /// Returns the number of entries evicted. The map retention + the
+    /// per-entry budget `forget` run under the `BudgetedNamedTypeIndex`'s
+    /// `retention_gate` read guard.
     pub fn invalidate_resolved_named_types_for_canonical(&self, canonical_id: &str) -> usize {
-        let mut removed = 0usize;
-        let mut forgotten: Vec<HostResolvedNamedTypeKey> = Vec::new();
-        self.named_type_index.retain(|key, _| {
-            if key.canonical_id.as_ref() == canonical_id {
-                removed += 1;
-                forgotten.push(key.clone());
-                false
-            } else {
-                true
-            }
-        });
-        for key in &forgotten {
-            self.named_type_budget.forget(key);
-        }
-        removed
+        self.named_type_index.retain_for_canonical(canonical_id)
     }
 
     /// Number of Vue macro resolution entries. Useful for tests and
@@ -1039,11 +1014,9 @@ impl SemanticGraphStore {
         // validating: `validate_with_self_roots` / `bubble` consult the
         // resolver store view and fan into TLS tracers, which may
         // re-enter the relation memo — holding the shard guard across
-        // that re-entry would deadlock.
-        let entry = self
-            .relation_memo
-            .get(&(source, target))
-            .map(|e| e.value().clone())?;
+        // that re-entry would deadlock. `BudgetedRelationMemo::get_cloned`
+        // performs exactly that clone-out-of-guard.
+        let entry = self.relation_memo.get_cloned(source, target)?;
         if !entry
             .carrier
             .validate_with_self_roots(ctx, &entry.self_root_canonicals)
@@ -1072,24 +1045,21 @@ impl SemanticGraphStore {
         self_root_canonicals: Arc<[Arc<str>]>,
         result: crate::semantic_query::RelationResult,
     ) {
-        let key = (source, target);
-        let is_new = !self.relation_memo.contains_key(&key);
+        // The map insert + retention-budget admission run under the
+        // `BudgetedRelationMemo`'s `retention_gate` read guard, and
+        // new-key detection is atomic (via the `DashMap::insert` return
+        // value) — a `contains_key`-then-`insert` pair would let two
+        // writers racing the same key both observe "absent" and
+        // double-record the admission.
         self.relation_memo.insert(
-            key,
+            source,
+            target,
             RelationMemoEntry {
                 carrier,
                 self_root_canonicals,
                 result,
             },
         );
-        // Global retention budget: a newly-keyed relation records an
-        // admission; the oldest relations past the cap are FIFO-evicted.
-        if is_new {
-            let seq = crate::bounded_query_retention::next_retention_seq();
-            for victim in self.relation_budget.record_admission(seq, key) {
-                self.relation_memo.remove(&victim);
-            }
-        }
     }
 
     /// Count of relation memo entries. Useful for tests and counters.
@@ -1100,10 +1070,12 @@ impl SemanticGraphStore {
 
     /// Drop every entry in the relation memo. Invoked on
     /// project-generation bumps so warm relation judgements cannot leak
-    /// across a version boundary.
+    /// across a version boundary. The map and its retention budget are
+    /// cleared in one lock domain under the `BudgetedRelationMemo`'s
+    /// `retention_gate` write guard, exclusive against concurrent
+    /// inserts.
     pub fn clear_relation_memo(&self) {
         self.relation_memo.clear();
-        self.relation_budget.clear();
     }
 
     // ──────────────────────────────────────────────────────────────────

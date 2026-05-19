@@ -240,10 +240,49 @@ impl<D, V> CandidateSlot<D, V> {
 /// same query identity are candidates inside one slot, capped at
 /// `per_slot_cap`. A `GlobalRetentionBudget` caps the total candidate
 /// count across all slots; both caps evict oldest-first.
+///
+/// ## Map / budget lock domain
+///
+/// The slot map and its `GlobalRetentionBudget` are two structures that
+/// must stay consistent: the budget's ledger tracks which live slot
+/// candidates exist so it can FIFO-evict the oldest past the cap. Every
+/// mutation that changes BOTH — `admit`, `evict_candidate`,
+/// `evict_slot`, `retain_slots` — runs under a shared `retention_gate`
+/// read guard, and `clear` runs under the `retention_gate` write guard.
+/// A concurrent `admit` and `clear` therefore cannot interleave their
+/// map and budget steps, so the budget never strands a record for a
+/// candidate the map dropped (or vice versa) — the cache bound stays
+/// guaranteed across a project-generation reset. `DashMap` stays for
+/// hot-path per-shard concurrency; the gate is a coarse reset fence,
+/// not a hot-path serialiser, so concurrent admits to different keys
+/// still run in parallel under the shared read guard.
 pub struct BoundedCandidateMap<K, D, V> {
     slots: DashMap<K, Arc<CandidateSlot<D, V>>>,
     budget: GlobalRetentionBudget<(K, u64)>,
     per_slot_cap: usize,
+    /// Lifecycle gate. Mutations that touch both `slots` and `budget`
+    /// take the read guard for the whole map+budget mutation; `clear`
+    /// takes the write guard for the whole map+budget clear. See the
+    /// struct-level "Map / budget lock domain" docs.
+    retention_gate: parking_lot::RwLock<()>,
+    /// Test-only injection point inside [`Self::clear`], parked between
+    /// the slot-map clear and the budget clear. A test arms it to drive
+    /// a concurrent `admit` deterministically into the gap and assert
+    /// the gate closes the desync. Per-instance (not process-global) so
+    /// arming it on one map never parks an unrelated concurrent test's
+    /// `clear`. Absent from release builds — the production reset path
+    /// is unchanged.
+    #[cfg(any(test, debug_assertions))]
+    clear_midpoint_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+    /// Test-only injection point inside [`Self::admit`], parked AFTER
+    /// the slot push and the budget `record_admission` complete but
+    /// before `admit` returns. Pairs with `clear_midpoint_gate` to make
+    /// the map/budget desync race deterministic: a test confirms the
+    /// admit's two-phase update has fully landed (admitter parked here)
+    /// before it releases a concurrently-parked `clear`. Per-instance;
+    /// absent from release builds.
+    #[cfg(any(test, debug_assertions))]
+    admit_post_record_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
 }
 
 impl<K, D, V> BoundedCandidateMap<K, D, V>
@@ -259,7 +298,64 @@ where
             slots: DashMap::new(),
             budget: GlobalRetentionBudget::new(global_cap),
             per_slot_cap: per_slot_cap.max(1),
+            retention_gate: parking_lot::RwLock::new(()),
+            #[cfg(any(test, debug_assertions))]
+            clear_midpoint_gate: parking_lot::Mutex::new(None),
+            #[cfg(any(test, debug_assertions))]
+            admit_post_record_gate: parking_lot::Mutex::new(None),
         }
+    }
+
+    /// Test-only driver: arm the [`Self::clear`] injection point with
+    /// `barrier`. The next `clear` on **this map** calls `barrier.wait()`
+    /// TWICE between the slot-map clear and the budget clear (with the
+    /// `retention_gate` write guard still held): the test's first
+    /// `wait()` confirms `clear` is pinned mid-flight, its second
+    /// `wait()` releases it. The returned guard disarms the injection
+    /// point on drop.
+    #[cfg(test)]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_arm_clear_midpoint_gate(
+        &self,
+        barrier: Arc<std::sync::Barrier>,
+    ) -> ClearMidpointGateGuard<'_> {
+        *self.clear_midpoint_gate.lock() = Some(barrier);
+        ClearMidpointGateGuard {
+            gate: &self.clear_midpoint_gate,
+        }
+    }
+
+    /// Test-only driver: arm the [`Self::admit`] injection point with
+    /// `barrier`. The next `admit` on **this map** calls `barrier.wait()`
+    /// TWICE after its slot push + budget admission complete but before
+    /// it returns (with the `retention_gate` read guard still held): the
+    /// test's first `wait()` confirms `admit` is pinned mid-flight, its
+    /// second `wait()` releases it. The returned guard disarms the
+    /// injection point on drop.
+    #[cfg(test)]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_arm_admit_post_record_gate(
+        &self,
+        barrier: Arc<std::sync::Barrier>,
+    ) -> AdmitPostRecordGateGuard<'_> {
+        *self.admit_post_record_gate.lock() = Some(barrier);
+        AdmitPostRecordGateGuard {
+            gate: &self.admit_post_record_gate,
+        }
+    }
+
+    /// Test-only accessor for the lifecycle [`retention_gate`]. A race
+    /// test parks a mutator mid-flight (via an injection point) and
+    /// uses `try_read()` / `try_write()` on this gate to assert,
+    /// deterministically, that the in-flight mutator has engaged the
+    /// gate against the opposing access mode.
+    #[cfg(test)]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_retention_gate(&self) -> &parking_lot::RwLock<()> {
+        &self.retention_gate
     }
 
     /// The per-slot candidate cap.
@@ -338,6 +434,17 @@ where
     /// attached when the shard guard is released, and the published
     /// candidate is always reachable by later reads / `live_count`.
     pub fn admit(&self, key: K, discriminant: D, value: V) -> usize {
+        // Hold the retention-gate read guard across the WHOLE map +
+        // budget mutation: the slot push, the per-slot eviction, the
+        // budget `forget_seq` cleanup, and the global-budget admission +
+        // victim eviction. A concurrent `clear` takes the write guard,
+        // so it cannot interleave its slot-map clear and budget clear
+        // with this admit's two-phase update — the budget never strands
+        // a record for a candidate this admit landed. The guard is a
+        // coarse reset fence: concurrent admits to other keys still run
+        // in parallel under the shared read guard (each on its own
+        // `DashMap` shard).
+        let _retention = self.retention_gate.read();
         let seq = next_retention_seq();
 
         let mut evicted = 0usize;
@@ -414,6 +521,22 @@ where
                 evicted += 1;
             }
         }
+        // Test-only injection point — parked AFTER the slot push and
+        // budget admission have fully landed but BEFORE `admit` returns,
+        // so the `retention_gate` read guard is still held. A race test
+        // arms it with a barrier and calls `wait()` TWICE: the first
+        // `wait()` rendezvous lets the test observe that `admit` is
+        // pinned here (read guard engaged); the second `wait()` releases
+        // `admit` to drop the guard and return. `None` (the production
+        // default) is a no-op.
+        #[cfg(any(test, debug_assertions))]
+        {
+            let gate = self.admit_post_record_gate.lock().clone();
+            if let Some(barrier) = gate {
+                barrier.wait();
+                barrier.wait();
+            }
+        }
         evicted
     }
 
@@ -458,6 +581,10 @@ where
     /// a candidate they found stale on read. Returns `true` when a
     /// candidate was removed.
     pub fn evict_candidate(&self, key: &K, seq: u64) -> bool {
+        // Read guard across the slot removal AND the budget `forget_seq`
+        // — a concurrent `clear` (write guard) cannot interleave its
+        // map/budget clear with this removal's two steps.
+        let _retention = self.retention_gate.read();
         let removed = self.remove_candidate_by_seq(key, seq);
         if removed {
             self.budget.forget_seq(seq);
@@ -470,6 +597,9 @@ where
     /// per-owner invalidation goes through [`Self::retain_slots`].
     #[cfg(test)]
     pub fn evict_slot(&self, key: &K) -> usize {
+        // Read guard across the slot removal AND the per-candidate
+        // budget `forget_seq` — consistent with `admit` / `clear`.
+        let _retention = self.retention_gate.read();
         let Some((_, slot)) = self.slots.remove(key) else {
             return 0;
         };
@@ -482,12 +612,35 @@ where
 
     /// Drop every slot and every candidate. Returns the number of
     /// candidates removed. Used on a project-generation reset.
+    ///
+    /// Takes the `retention_gate` write guard across BOTH the slot-map
+    /// clear and the budget clear. A concurrent `admit` / `evict_*` /
+    /// `retain_slots` holds the read guard, so it blocks until this
+    /// clear completes — no admit can land a candidate in `slots` whose
+    /// budget record this clear then erases (or land a budget record
+    /// for a candidate this clear already dropped).
     pub fn clear(&self) -> usize {
+        let _retention = self.retention_gate.write();
         let mut removed = 0usize;
         for slot in self.slots.iter() {
             removed += slot.value().candidates.lock().len();
         }
         self.slots.clear();
+        // Test-only injection point — parked between the slot-map clear
+        // and the budget clear, with the `retention_gate` write guard
+        // still held. A race test arms it with a barrier and calls
+        // `wait()` TWICE: the first `wait()` rendezvous lets the test
+        // observe that `clear` is pinned here (write guard engaged); the
+        // second `wait()` releases `clear` to finish. `None` (the
+        // production default) is a no-op.
+        #[cfg(any(test, debug_assertions))]
+        {
+            let gate = self.clear_midpoint_gate.lock().clone();
+            if let Some(barrier) = gate {
+                barrier.wait();
+                barrier.wait();
+            }
+        }
         self.budget.clear();
         removed
     }
@@ -499,6 +652,9 @@ where
     where
         F: FnMut(&K) -> bool,
     {
+        // Read guard across the slot retention AND the per-candidate
+        // budget `forget_seq` — consistent with `admit` / `clear`.
+        let _retention = self.retention_gate.read();
         let mut removed = 0usize;
         self.slots.retain(|key, slot| {
             if keep(key) {
@@ -513,6 +669,39 @@ where
             }
         });
         removed
+    }
+}
+
+/// RAII guard returned by
+/// [`BoundedCandidateMap::test_arm_clear_midpoint_gate`]. Disarms the
+/// per-instance `clear` injection point on drop so a later `clear` on
+/// the same map does not park on a stale barrier.
+#[cfg(test)]
+#[doc(hidden)]
+pub struct ClearMidpointGateGuard<'a> {
+    gate: &'a parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+}
+
+#[cfg(test)]
+impl Drop for ClearMidpointGateGuard<'_> {
+    fn drop(&mut self) {
+        *self.gate.lock() = None;
+    }
+}
+
+/// RAII guard returned by
+/// [`BoundedCandidateMap::test_arm_admit_post_record_gate`]. Disarms the
+/// per-instance `admit` injection point on drop.
+#[cfg(test)]
+#[doc(hidden)]
+pub struct AdmitPostRecordGateGuard<'a> {
+    gate: &'a parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+}
+
+#[cfg(test)]
+impl Drop for AdmitPostRecordGateGuard<'_> {
+    fn drop(&mut self) {
+        *self.gate.lock() = None;
     }
 }
 
@@ -775,5 +964,159 @@ mod tests {
         assert_eq!(map.evict_slot(&"a"), 2, "both versions of slot a removed");
         assert_eq!(map.live_count(), 1, "only slot b survives");
         assert!(map.slot_candidates(&"a").is_empty());
+    }
+
+    /// MAP / BUDGET DESYNC RACE (admit side) — an in-flight `admit`
+    /// must engage the `retention_gate` so a concurrent `clear` (which
+    /// mutates both `slots` and `budget`) cannot interleave its two
+    /// clears with the admit's two-phase slot-push + budget-admission.
+    ///
+    /// Deterministic. The admitter is parked, via the `admit` injection
+    /// point, AFTER its `slots.push` + `budget.record_admission` have
+    /// landed but BEFORE `admit` returns — i.e. while `admit` still
+    /// holds its `retention_gate` read guard. With the admitter pinned
+    /// at that point the test asserts `retention_gate.try_write()` is
+    /// `None`: a `clear` reaching `retention_gate.write()` right now
+    /// WOULD block, so it cannot run its `slots.clear()` / `budget.clear()`
+    /// pair concurrently with the admit's half-applied update.
+    ///
+    /// DISCRIMINATES. Against the un-gated `admit` (read guard removed)
+    /// the in-flight admit holds nothing, so `try_write()` succeeds
+    /// (`Some`) — a `clear` could interleave and strand a live slot
+    /// candidate with no budget record. The assertion `try_write()` is
+    /// `None` FAILS. With the gate the in-flight admit holds the read
+    /// guard, `try_write()` returns `None`, the assertion PASSES. The
+    /// follow-up sequential `clear` + `admit` confirms the gate is a
+    /// reset fence, not a permanent block.
+    #[test]
+    fn candidate_map_inflight_admit_engages_gate_against_clear() {
+        use std::sync::Arc as StdArc;
+        use std::sync::Barrier;
+        use std::thread;
+
+        let map: StdArc<BoundedCandidateMap<u32, u8, u32>> =
+            StdArc::new(BoundedCandidateMap::with_caps(4, 4096));
+
+        // admit_parked: party 1 = the parked `admit`, party 2 = main.
+        let admit_parked = StdArc::new(Barrier::new(2));
+        let _admit_guard = map.test_arm_admit_post_record_gate(StdArc::clone(&admit_parked));
+
+        let map_admit = StdArc::clone(&map);
+        let admitter = thread::spawn(move || map_admit.admit(7, 0, 700));
+
+        // Wait until `admit` has pushed its candidate, recorded its
+        // budget admission, and parked — still inside `admit`, still
+        // holding the `retention_gate` read guard.
+        admit_parked.wait();
+
+        // A `clear` taking `retention_gate.write()` right now WOULD
+        // block: the in-flight `admit` holds the read guard. `try_write`
+        // returning `None` is the proof that `clear`'s `slots.clear()` /
+        // `budget.clear()` cannot interleave the admit's half-applied
+        // two-phase update.
+        assert!(
+            map.test_retention_gate().try_write().is_none(),
+            "MAP/BUDGET DESYNC: an in-flight `admit` does NOT hold the \
+             retention gate, so a concurrent `clear` could interleave its \
+             slots.clear()/budget.clear() between the admit's slot push \
+             and budget admission — stranding a live candidate with no \
+             budget record. The `admit` must hold `retention_gate.read()` \
+             across its whole map+budget mutation.",
+        );
+
+        // Release the parked admit; it drops the read guard and returns.
+        admit_parked.wait();
+        let evicted = admitter.join().expect("admitter thread");
+        assert_eq!(evicted, 0, "admit of a fresh key evicts nothing");
+        assert_eq!(map.live_count(), 1, "the admitted candidate is live");
+        assert_eq!(map.budget.tracked_len(), 1, "and tracked by the budget");
+
+        // Disarm the `admit` injection point BEFORE the follow-up
+        // mutations — otherwise the next `admit` would park on a stale
+        // barrier with no second party.
+        drop(_admit_guard);
+
+        // The gate is a reset fence, not a permanent block: a `clear`
+        // now runs to completion and leaves map + budget consistent.
+        assert_eq!(map.clear(), 1, "clear drops the one live candidate");
+        assert_eq!(map.live_count(), 0);
+        assert_eq!(map.budget.tracked_len(), 0);
+        map.admit(8, 0, 800);
+        assert_eq!(
+            map.live_count(),
+            map.budget.tracked_len(),
+            "post-clear admit keeps map and budget consistent",
+        );
+    }
+
+    /// MAP / BUDGET DESYNC RACE (clear side) — an in-flight `clear`
+    /// must hold the `retention_gate` write guard across BOTH its
+    /// `slots.clear()` and `budget.clear()`, so a concurrent `admit`
+    /// cannot land a slot candidate + budget admission that straddle
+    /// the two clears.
+    ///
+    /// Deterministic. The invalidator is parked, via the `clear`
+    /// injection point, BETWEEN `slots.clear()` and `budget.clear()` —
+    /// i.e. while `clear` still holds its `retention_gate` write guard.
+    /// With `clear` pinned there the test asserts `retention_gate.try_read()`
+    /// is `None`: an `admit` reaching `retention_gate.read()` right now
+    /// WOULD block, so it cannot push a candidate into the just-cleared
+    /// `slots` and record an admission the pending `budget.clear()`
+    /// would then erase.
+    ///
+    /// DISCRIMINATES. Against the un-gated `clear` (write guard removed)
+    /// the in-flight clear holds nothing, so `try_read()` succeeds
+    /// (`Some`) — an `admit` could interleave into the gap. The
+    /// assertion `try_read()` is `None` FAILS. With the gate the
+    /// in-flight clear holds the write guard, `try_read()` returns
+    /// `None`, the assertion PASSES.
+    #[test]
+    fn candidate_map_inflight_clear_engages_gate_against_admit() {
+        use std::sync::Arc as StdArc;
+        use std::sync::Barrier;
+        use std::thread;
+
+        let map: StdArc<BoundedCandidateMap<u32, u8, u32>> =
+            StdArc::new(BoundedCandidateMap::with_caps(4, 4096));
+        // Seed one candidate so `clear` has a slot to drop.
+        map.admit(1, 0, 100);
+
+        // clear_parked: party 1 = the parked `clear`, party 2 = main.
+        let clear_parked = StdArc::new(Barrier::new(2));
+        let _clear_guard = map.test_arm_clear_midpoint_gate(StdArc::clone(&clear_parked));
+
+        let map_clear = StdArc::clone(&map);
+        let invalidator = thread::spawn(move || map_clear.clear());
+
+        // Wait until `clear` has run `slots.clear()` and parked at its
+        // midpoint — still inside `clear`, still holding the
+        // `retention_gate` write guard, `budget.clear()` not yet run.
+        clear_parked.wait();
+
+        // An `admit` taking `retention_gate.read()` right now WOULD
+        // block: the in-flight `clear` holds the write guard. `try_read`
+        // returning `None` is the proof that `admit` cannot push a
+        // candidate into the just-cleared `slots` and record a budget
+        // admission the pending `budget.clear()` would then erase.
+        assert!(
+            map.test_retention_gate().try_read().is_none(),
+            "MAP/BUDGET DESYNC: an in-flight `clear` does NOT hold the \
+             retention write guard, so a concurrent `admit` could push a \
+             candidate into the just-cleared slot map and record a budget \
+             admission that the pending `budget.clear()` then erases — \
+             stranding a live candidate with no budget record. `clear` \
+             must hold `retention_gate.write()` across both clears.",
+        );
+
+        // Release the parked clear; it runs `budget.clear()`, drops the
+        // write guard, and returns.
+        clear_parked.wait();
+        let removed = invalidator.join().expect("invalidator thread");
+        assert_eq!(removed, 1, "clear removed the one seeded candidate");
+        assert_eq!(
+            map.live_count(),
+            map.budget.tracked_len(),
+            "after the clear, map and budget are both empty and consistent",
+        );
     }
 }
