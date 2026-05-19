@@ -1378,8 +1378,13 @@ fn evict_canonical_drops_resolved_named_types_for_that_canonical_only() {
 
     let key_a = mk("/w/a.ts", "Foo");
     let key_b = mk("/w/b.ts", "Bar");
-    graph.insert_resolved_named_type(key_a.clone(), Arc::new(ResolvedElements::default()));
-    graph.insert_resolved_named_type(key_b.clone(), Arc::new(ResolvedElements::default()));
+    let gen = graph.named_type_generation();
+    graph
+        .insert_resolved_named_type(key_a.clone(), Arc::new(ResolvedElements::default()), gen)
+        .expect("current-generation insert is accepted");
+    graph
+        .insert_resolved_named_type(key_b.clone(), Arc::new(ResolvedElements::default()), gen)
+        .expect("current-generation insert is accepted");
     assert_eq!(graph.resolved_named_type_count(), 2);
 
     store.evict_canonical("/w/a.ts");
@@ -1412,7 +1417,13 @@ fn bump_project_generation_clears_resolved_named_types() {
             type_param_bindings: Arc::from(Vec::new().into_boxed_slice()),
         },
     };
-    graph.insert_resolved_named_type(key.clone(), Arc::new(ResolvedElements::default()));
+    graph
+        .insert_resolved_named_type(
+            key.clone(),
+            Arc::new(ResolvedElements::default()),
+            graph.named_type_generation(),
+        )
+        .expect("current-generation insert is accepted");
     assert_eq!(graph.resolved_named_type_count(), 1);
 
     store.bump_project_generation_and_evict();

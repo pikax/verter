@@ -2462,7 +2462,13 @@ fn resolved_named_type_insert_and_get_round_trip() {
     let store = SemanticGraphStore::new();
     let key = make_key("/w/a.ts", [1u8; 16], "Foo");
     let payload = Arc::new(ResolvedElements::default());
-    let node_id = store.insert_resolved_named_type(key.clone(), Arc::clone(&payload));
+    let node_id = store
+        .insert_resolved_named_type(
+            key.clone(),
+            Arc::clone(&payload),
+            store.named_type_generation(),
+        )
+        .expect("current-generation insert is accepted");
 
     // Identity lookup and payload lookup both succeed.
     assert_eq!(store.resolved_named_type_node_id(&key), Some(node_id));
@@ -2491,8 +2497,13 @@ fn resolved_named_type_per_canonical_invalidation() {
     let hash = [5u8; 16];
     let key_a = make_key("/w/a.ts", hash, "Foo");
     let key_b = make_key("/w/b.ts", hash, "Bar");
-    store.insert_resolved_named_type(key_a.clone(), Arc::new(ResolvedElements::default()));
-    store.insert_resolved_named_type(key_b.clone(), Arc::new(ResolvedElements::default()));
+    let gen = store.named_type_generation();
+    store
+        .insert_resolved_named_type(key_a.clone(), Arc::new(ResolvedElements::default()), gen)
+        .expect("current-generation insert is accepted");
+    store
+        .insert_resolved_named_type(key_b.clone(), Arc::new(ResolvedElements::default()), gen)
+        .expect("current-generation insert is accepted");
     assert_eq!(store.resolved_named_type_count(), 2);
 
     let removed = store.invalidate_resolved_named_types_for_canonical("/w/a.ts");
@@ -2507,7 +2518,13 @@ fn resolved_named_type_per_canonical_invalidation() {
 fn resolved_named_type_global_clear() {
     let store = SemanticGraphStore::new();
     let key = make_key("/w/a.ts", [1u8; 16], "Foo");
-    store.insert_resolved_named_type(key.clone(), Arc::new(ResolvedElements::default()));
+    store
+        .insert_resolved_named_type(
+            key.clone(),
+            Arc::new(ResolvedElements::default()),
+            store.named_type_generation(),
+        )
+        .expect("current-generation insert is accepted");
     assert_eq!(store.resolved_named_type_count(), 1);
     store.clear_resolved_named_types();
     assert_eq!(store.resolved_named_type_count(), 0);
@@ -2528,8 +2545,13 @@ fn resolved_named_type_repeated_insert_overwrites_identity_mapping() {
         ..ResolvedElements::default()
     });
 
-    store.insert_resolved_named_type(key.clone(), Arc::clone(&first));
-    store.insert_resolved_named_type(key.clone(), Arc::clone(&second));
+    let gen = store.named_type_generation();
+    store
+        .insert_resolved_named_type(key.clone(), Arc::clone(&first), gen)
+        .expect("current-generation insert is accepted");
+    store
+        .insert_resolved_named_type(key.clone(), Arc::clone(&second), gen)
+        .expect("current-generation insert is accepted");
 
     assert_eq!(
         store.resolved_named_type_count(),
@@ -3568,7 +3590,13 @@ fn resolved_named_type_refcount_path_unchanged_after_family_rewrite() {
     let store = SemanticGraphStore::new();
     let key = make_key("/w/named.ts", [9u8; 16], "Foo");
     let payload = Arc::new(ResolvedElements::default());
-    let inserted_id = store.insert_resolved_named_type(key.clone(), Arc::clone(&payload));
+    let inserted_id = store
+        .insert_resolved_named_type(
+            key.clone(),
+            Arc::clone(&payload),
+            store.named_type_generation(),
+        )
+        .expect("current-generation insert is accepted");
 
     // The family memo has zero entries — ResolvedNamedType is exempt.
     assert_eq!(
@@ -3743,7 +3771,13 @@ fn vue_macro_elements_nodes_do_not_populate_node_scope_sidecar() {
     // unchanged — the sidecar exemption does not affect payload
     // retrieval.
     let key = make_key("/w/named.ts", [9u8; 16], "Foo");
-    let inserted = store.insert_resolved_named_type(key.clone(), Arc::clone(&payload));
+    let inserted = store
+        .insert_resolved_named_type(
+            key.clone(),
+            Arc::clone(&payload),
+            store.named_type_generation(),
+        )
+        .expect("current-generation insert is accepted");
     assert_eq!(store.node_scope(inserted), None);
     assert!(store.get_resolved_named_type(&key).is_some());
 }

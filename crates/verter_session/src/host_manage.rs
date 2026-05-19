@@ -365,6 +365,17 @@ pub(in crate::host_manage) struct HostNamedTypeCacheAdapter {
     /// `instantiate_type_params_ctx`) don't each allocate a fresh `String`.
     pub(in crate::host_manage) canonical_id: Arc<str>,
     pub(in crate::host_manage) whole_hash: Hash16,
+    /// Resolved-named-type reset epoch snapshotted when this adapter was
+    /// constructed (a fresh adapter per `build_type_context` call). Every
+    /// `insert` threads this snapshot into
+    /// [`SemanticGraphStore::insert_resolved_named_type`](crate::semantic_query_memo::SemanticGraphStore::insert_resolved_named_type),
+    /// which rejects the insert when the snapshot no longer matches the
+    /// live epoch — the airtight fence against a macro-resolution build
+    /// that straggles past a `bump_project_generation_and_evict` and tries
+    /// to land a stale artifact. The snapshot is frozen at construction,
+    /// so the rejection is timing-independent: a build aborted by the
+    /// bump carries the pre-bump epoch however long it straggles.
+    pub(in crate::host_manage) named_type_generation: u64,
 }
 
 impl verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache
@@ -397,7 +408,11 @@ impl verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache
             whole_hash: self.whole_hash,
             inner: key,
         };
-        self.graph.insert_resolved_named_type(host_key, value);
+        // Threads the construction-time epoch snapshot: the insert is
+        // dropped if a project-generation bump moved the epoch since this
+        // adapter (hence this build) started — see `named_type_generation`.
+        let g = self.named_type_generation;
+        let _ = self.graph.insert_resolved_named_type(host_key, value, g);
     }
 }
 

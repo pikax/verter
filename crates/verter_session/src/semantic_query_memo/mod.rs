@@ -146,6 +146,21 @@ pub struct SemanticGraphStore {
     /// strand a live map entry whose budget admission a project-
     /// generation `clear` then erases.
     named_type_index: BudgetedNamedTypeIndex,
+    /// Monotonic reset epoch for the Vue macro resolved-named-type map.
+    ///
+    /// [`Self::invalidate_all`] increments this counter inside the SAME
+    /// `entries`-lock-held critical section that aborts every in-flight
+    /// build and clears `named_type_index` — bump, abort, and clear are
+    /// one atomic step. Every macro-resolution build snapshots the epoch
+    /// when its
+    /// [`HostNamedTypeCacheAdapter`](crate::host_manage::HostNamedTypeCacheAdapter)
+    /// is constructed (a fresh adapter per `build_type_context` call) and
+    /// threads the snapshot into [`Self::insert_resolved_named_type`],
+    /// which rejects an insert whose snapshot no longer matches. This is
+    /// the airtight fence against a straggler insert from a build that
+    /// `bump_project_generation_and_evict` superseded — see
+    /// `insert_resolved_named_type`'s docs for the no-window argument.
+    named_type_generation: std::sync::atomic::AtomicU64,
     /// Relation-engine memo. Maps `(source, target)` semantic-node pairs
     /// to the tri-state
     /// [`RelationResult`](crate::semantic_query::RelationResult) plus the
@@ -305,24 +320,6 @@ pub struct SemanticGraphStore {
     /// process-global. `cfg`-gated to `test` / `debug_assertions`.
     #[cfg(any(test, debug_assertions))]
     publish_post_reverse_index_prune_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
-    /// Per-store test-only injection point inside [`Self::invalidate_all`],
-    /// fired right AFTER the `named_type_index` (Vue macro resolved-named-
-    /// type identity map) clear and BEFORE this method returns. A race
-    /// test arms it (via
-    /// [`Self::test_invalidate_all_post_named_type_clear_gate`]) and, with
-    /// `invalidate_all` parked here, has a second thread call
-    /// [`Self::insert_resolved_named_type`] — landing a stale insert in
-    /// the exact window the in-flight-abort drain occupies (an aborted
-    /// macro-resolution build keeps running until its next abort check
-    /// and can insert after this internal clear). The test then asserts
-    /// [`ProjectTypeStore::bump_project_generation_and_evict`](crate::project_type_store::ProjectTypeStore::bump_project_generation_and_evict)'s
-    /// post-`invalidate_all` resolved-named-type sweep removes that
-    /// straggler before the new generation admits queries.
-    ///
-    /// **Per-store scope (test hermeticity).** Per-store, never a
-    /// process-global. `cfg`-gated to `test` / `debug_assertions`.
-    #[cfg(any(test, debug_assertions))]
-    invalidate_all_post_named_type_clear_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Γ.B reverse index. For each canonical id,
     /// holds the set of `(family, slot)` pairs whose published
     /// dep_signature references it, paired with the dep_signature
@@ -1066,6 +1063,14 @@ impl SemanticGraphStore {
                 }
                 table.clear();
             }
+            // Advance the Vue macro resolved-named-type reset epoch in the
+            // SAME `entries`-lock-held step as the in-flight abort above,
+            // so every build this reset aborts is fenced out of
+            // `insert_resolved_named_type` on any straggler insert (see
+            // that method's no-window argument). `Release` pairs with the
+            // `Acquire` load in `named_type_generation`.
+            self.named_type_generation
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
             entries.clear();
             // Drop the family memo's retention ledger UNDER THE SAME
             // `entries`-lock hold as the `entries.clear()` above. The
@@ -1161,52 +1166,94 @@ impl SemanticGraphStore {
         // `canonical_to_entries`) was cleared above under the `entries`
         // lock.
         self.named_type_index.clear();
-        // Test-only injection point: a barrier armed by
-        // `test_invalidate_all_post_named_type_clear_gate` parks here,
-        // right after the `named_type_index` clear, so a race test can
-        // have a second thread land a `insert_resolved_named_type` in
-        // exactly the post-internal-clear window an aborted macro-
-        // resolution build occupies while it drains to its next abort
-        // check. The test then asserts the post-`invalidate_all`
-        // resolved-named-type sweep in `bump_project_generation_and_evict`
-        // removes that straggler. `None` (the production default) is a
-        // no-op.
-        #[cfg(any(test, debug_assertions))]
-        {
-            let gate = self
-                .invalidate_all_post_named_type_clear_gate
-                .lock()
-                .clone();
-            if let Some(barrier) = gate {
-                barrier.wait();
-                barrier.wait();
-            }
-        }
         self.relation_memo.clear();
         self.derivation.lock().clear();
         removed
     }
 
-    /// Insert a Vue macro resolution artifact under `key`. Interns the
-    /// payload as a [`SemanticNodeData::VueMacroElements`] node in the
-    /// arena and records the identity mapping in
-    /// [`named_type_index`](Self::named_type_index). Subsequent reads via
-    /// [`Self::get_resolved_named_type`] are refcount-only.
+    /// Current Vue macro resolved-named-type reset epoch.
+    ///
+    /// A macro-resolution build snapshots this value when its
+    /// [`HostNamedTypeCacheAdapter`](crate::host_manage::HostNamedTypeCacheAdapter)
+    /// is constructed and threads the snapshot into
+    /// [`Self::insert_resolved_named_type`] so a stale build's insert is
+    /// fenced out. See [`named_type_generation`](Self::named_type_generation).
+    #[must_use]
+    pub fn named_type_generation(&self) -> u64 {
+        self.named_type_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Insert a Vue macro resolution artifact under `key`, fenced by the
+    /// resolved-named-type reset epoch.
+    ///
+    /// `observed_named_type_generation` is the epoch the calling build
+    /// snapshotted when its
+    /// [`HostNamedTypeCacheAdapter`](crate::host_manage::HostNamedTypeCacheAdapter)
+    /// was constructed. The insert is **rejected** (returns `None`,
+    /// nothing is interned or recorded) when that snapshot no longer
+    /// equals the live epoch. On an accepted insert the payload is
+    /// interned as a [`SemanticNodeData::VueMacroElements`] node and the
+    /// identity mapping is recorded in
+    /// [`named_type_index`](Self::named_type_index); reads via
+    /// [`Self::get_resolved_named_type`] are then refcount-only.
+    ///
+    /// ## The fence has no timing window
+    ///
+    /// Every potentially-stale insert comes from a macro-resolution build
+    /// in flight when
+    /// [`ProjectTypeStore::bump_project_generation_and_evict`](crate::project_type_store::ProjectTypeStore::bump_project_generation_and_evict)
+    /// ran; that bump's [`Self::invalidate_all`] increments
+    /// [`named_type_generation`](Self::named_type_generation) atomically
+    /// with the in-flight abort, under the `entries` lock. Exhaustive
+    /// over every build relative to the bump:
+    ///
+    /// - Started **before** the bump, inserts **after** it: snapshotted
+    ///   the OLD epoch. The snapshot is frozen at construction — it does
+    ///   not advance as the build straggles — so the insert carries the
+    ///   stale epoch and is rejected here *however long the build
+    ///   straggles past its next abort check*. The rejection is decided
+    ///   by a construction-time value, not a race against the bump, so
+    ///   there is no drain window.
+    /// - Started **after** the bump: the increment landed before adapter
+    ///   construction, so it snapshotted the NEW epoch — its inserts
+    ///   match and are accepted (correct: a new-generation build).
+    /// - Started and finished **before** the bump: not stale — it
+    ///   inserted under the old epoch while that epoch was live, and
+    ///   `invalidate_all`'s own map clear drops the entry.
+    ///
+    /// So the comparison admits exactly the current-generation inserts
+    /// and rejects exactly the superseded ones, with no window between.
+    /// This mirrors the substrate's abort fences (`warm_publish_one`
+    /// re-checks `aborted` before publishing) but is stronger here: the
+    /// adapter holds no [`InflightEntry`] handle, so the build's own
+    /// abort flag is unreachable at the insert site — the epoch snapshot
+    /// is the reachable equivalent (`invalidate_all` aborts and bumps the
+    /// epoch together).
     ///
     /// The map insert + retention-budget admission run under the
     /// `BudgetedNamedTypeIndex`'s `retention_gate` read guard, and
-    /// new-key detection is atomic (via the `DashMap::insert` return
-    /// value), so a project-generation `clear` cannot interleave its
-    /// map/budget clears with this insert and two writers racing the
-    /// same key cannot double-record the admission.
+    /// new-key detection is atomic (via the `DashMap::entry` API), so a
+    /// project-generation `clear` cannot interleave its map/budget clears
+    /// with this insert and two writers racing the same key cannot
+    /// double-record the admission.
     pub fn insert_resolved_named_type(
         &self,
         key: HostResolvedNamedTypeKey,
         elements: Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
-    ) -> SemanticNodeId {
+        observed_named_type_generation: u64,
+    ) -> Option<SemanticNodeId> {
+        // Generation fence — reject a straggler insert from a build whose
+        // generation a `bump_project_generation_and_evict` has superseded.
+        // `Acquire` pairs with the `Release` increment in `invalidate_all`,
+        // so a build that observes the bump's effects (an aborted in-flight
+        // entry, a cleared map) also observes the bumped epoch.
+        if observed_named_type_generation != self.named_type_generation() {
+            return None;
+        }
         let node_id = self.intern_node(SemanticNodeData::VueMacroElements(elements));
         self.named_type_index.insert(key, node_id);
-        node_id
+        Some(node_id)
     }
 
     /// Fast-path read of a Vue macro resolution artifact. Walks
@@ -3757,34 +3804,6 @@ impl SemanticGraphStore {
             gate: &self.publish_post_reverse_index_prune_gate,
         }
     }
-
-    /// Test-only driver: arm the [`Self::invalidate_all`]
-    /// post-`named_type_index`-clear injection point with `barrier`. The
-    /// next `invalidate_all` on **this store** calls `barrier.wait()`
-    /// TWICE right after the `named_type_index` (Vue macro resolved-
-    /// named-type identity map) clear, so a test can have a second thread
-    /// land a `insert_resolved_named_type` in that window — modelling an
-    /// aborted macro-resolution build that drains past its abort check —
-    /// and then assert
-    /// [`ProjectTypeStore::bump_project_generation_and_evict`](crate::project_type_store::ProjectTypeStore::bump_project_generation_and_evict)'s
-    /// post-`invalidate_all` resolved-named-type sweep removes that
-    /// straggler.
-    ///
-    /// The returned guard disarms the gate on drop. Per-store scoped, so
-    /// it cannot park a concurrent unrelated test's `invalidate_all`.
-    /// `cfg`-gated to `test` / `debug_assertions`, mirroring the field.
-    #[cfg(any(test, debug_assertions))]
-    #[doc(hidden)]
-    #[must_use]
-    pub fn test_invalidate_all_post_named_type_clear_gate(
-        &self,
-        barrier: Arc<std::sync::Barrier>,
-    ) -> TestInvalidateAllGateGuard<'_> {
-        *self.invalidate_all_post_named_type_clear_gate.lock() = Some(barrier);
-        TestInvalidateAllGateGuard {
-            gate: &self.invalidate_all_post_named_type_clear_gate,
-        }
-    }
 }
 
 /// RAII guard returned by the per-store test injection-point arming
@@ -3794,8 +3813,7 @@ impl SemanticGraphStore {
 /// [`SemanticGraphStore::test_publish_post_memo_budget_record_gate`],
 /// [`SemanticGraphStore::test_cold_winner_pre_backfill_gate`],
 /// [`SemanticGraphStore::test_invalidate_all_pre_reverse_index_clear_gate`],
-/// [`SemanticGraphStore::test_publish_post_reverse_index_prune_gate`],
-/// and [`SemanticGraphStore::test_invalidate_all_post_named_type_clear_gate`].
+/// and [`SemanticGraphStore::test_publish_post_reverse_index_prune_gate`].
 /// Clears the per-store gate it borrows on drop so a later operation on
 /// the same store does not park on a stale barrier.
 #[cfg(any(test, debug_assertions))]

@@ -830,7 +830,13 @@ fn resolved_named_type_dispatch_returns_value_after_insert() {
     assert!(matches!(miss, QueryResult::Error(QueryError::Miss)));
 
     // Write via the semantic graph (adapter-side path).
-    let expected_id = graph.insert_resolved_named_type(key.clone(), Arc::clone(&payload));
+    let expected_id = graph
+        .insert_resolved_named_type(
+            key.clone(),
+            Arc::clone(&payload),
+            graph.named_type_generation(),
+        )
+        .expect("current-generation insert is accepted");
 
     // Hit after insert: the formal entry point hands back the same
     // interned node id.

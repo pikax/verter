@@ -434,14 +434,23 @@ impl VerterHost {
             return None;
         }
 
+        let graph = std::sync::Arc::clone(self.project_type_store.semantic_graph());
+        // Snapshot the resolved-named-type reset epoch at adapter
+        // construction. Every `insert` this adapter performs is fenced
+        // against this snapshot: if a `bump_project_generation_and_evict`
+        // moves the epoch while this build is in flight, the build's
+        // straggler inserts are rejected — see
+        // `SemanticGraphStore::insert_resolved_named_type`.
+        let named_type_generation = graph.named_type_generation();
         let adapter: std::sync::Arc<
             dyn verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache
                 + Send
                 + Sync,
         > = std::sync::Arc::new(HostNamedTypeCacheAdapter {
-            graph: std::sync::Arc::clone(self.project_type_store.semantic_graph()),
+            graph,
             canonical_id: Arc::<str>::from(canonical_id),
             whole_hash,
+            named_type_generation,
         });
         let type_context = Rc::new(crate::ParsedTypeResolutionContext::new(
             Rc::clone(&parsed_eval_program.program),
