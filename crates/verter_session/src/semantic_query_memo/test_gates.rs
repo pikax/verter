@@ -170,6 +170,26 @@ impl SemanticGraphStore {
             gate: &self.invalidate_all_inflight_abort_gate,
         }
     }
+
+    /// Test-only driver: arm the [`Self::invalidate_canonical`]
+    /// in-flight-abort injection point. The next `invalidate_canonical` on
+    /// **this store** calls `barrier.wait()` TWICE while iterating the
+    /// collected entry handles and locking each `state`, with the
+    /// `inflight` table lock NOT held, so a test can assert (via
+    /// `inflight.try_lock()`) that `invalidate_canonical` honours the same
+    /// collect-then-release lock order as [`Self::invalidate_all`]. The
+    /// returned guard disarms the gate on drop. Per-store scoped.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_invalidate_canonical_inflight_abort_gate(
+        &self,
+        barrier: Arc<std::sync::Barrier>,
+    ) -> TestInvalidateAllGateGuard<'_> {
+        *self.invalidate_canonical_inflight_abort_gate.lock() = Some(barrier);
+        TestInvalidateAllGateGuard {
+            gate: &self.invalidate_canonical_inflight_abort_gate,
+        }
+    }
 }
 
 /// RAII guard returned by the per-store test injection-point arming

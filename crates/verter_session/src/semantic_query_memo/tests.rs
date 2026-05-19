@@ -1611,13 +1611,17 @@ fn invalidate_all_aborts_pending_inflight_and_skips_aborted_publish() {
 /// NOT hold the `inflight` table lock while it takes each entry's
 /// per-entry `state` lock.
 ///
-/// `InflightPanicGuard::drop` (the cold-build panic / early-return path)
-/// acquires `state` and THEN the `inflight` table lock. An abort loop
-/// that held the table lock across the per-entry `state` acquisition
-/// would establish the opposite `table → state` order — an AB-BA cycle
-/// with a concurrently-panicking build. The fix is collect-then-release:
-/// snapshot the `Arc<InflightEntry>` handles AND drain the table under
-/// the table lock, RELEASE the table lock, THEN lock each `state`.
+/// The module documents one global rule — `state` is never taken while
+/// the `inflight` table lock is held. An abort loop that held the table
+/// lock across the per-entry `state` acquisition would establish a
+/// `table → state` nesting that violates that rule — a latent lock-order
+/// inconsistency. (It is not a live deadlock: `InflightPanicGuard::drop`,
+/// the only other path touching both locks, acquires `state`, *releases*
+/// it, and only then acquires the `inflight` table lock — two sequential,
+/// non-nested acquisitions — so it cannot AB-BA against either order.)
+/// The fix is collect-then-release: snapshot the `Arc<InflightEntry>`
+/// handles AND drain the table under the table lock, RELEASE the table
+/// lock, THEN lock each `state` — keeping the rule uniform.
 ///
 /// Deterministic. A cold winner is parked mid-build so one in-flight
 /// entry is registered. `invalidate_all` is run on a second thread; it
@@ -1632,8 +1636,7 @@ fn invalidate_all_aborts_pending_inflight_and_skips_aborted_publish() {
 /// lock held across the whole `for inflight in table.values()` body and
 /// its nested `state.lock()`), the table lock is still held while the
 /// loop is parked, `try_lock` returns `None`, and the assertion FAILS —
-/// the exact `table → state` nesting that AB-BA-deadlocks against
-/// `InflightPanicGuard::drop`.
+/// the exact `table → state` nesting the global rule forbids.
 #[test]
 fn invalidate_all_inflight_abort_loop_releases_table_lock_before_state() {
     use std::sync::Barrier;
@@ -1695,12 +1698,11 @@ fn invalidate_all_inflight_abort_loop_releases_table_lock_before_state() {
         store.test_inflight_table_is_unlocked(),
         "ABORT-LOOP LOCK INVERSION: `invalidate_all`'s in-flight abort \
          loop is holding the `inflight` table lock while it takes a \
-         per-entry `state` lock. `InflightPanicGuard::drop` locks `state` \
-         then the table — holding `table → state` here is an AB-BA cycle \
-         that can deadlock against a cold build panicking during the \
-         reset. The loop must collect the entry handles + drain the table \
-         under the table lock, RELEASE the table lock, THEN lock each \
-         `state`.",
+         per-entry `state` lock. That `table → state` nesting violates \
+         the module-global rule (`state` is never taken while the \
+         `inflight` table lock is held). The loop must collect the entry \
+         handles + drain the table under the table lock, RELEASE the \
+         table lock, THEN lock each `state`.",
     );
 
     // Release `invalidate_all`, then the winner; both must complete.
@@ -1713,6 +1715,166 @@ fn invalidate_all_inflight_abort_loop_releases_table_lock_before_state() {
         store.memo_entry_count(),
         0,
         "no memo entry may survive the project-generation reset",
+    );
+}
+
+/// ABORT-LOOP LOCK ORDER — `invalidate_canonical`'s in-flight abort loop
+/// MUST NOT hold the `inflight` table lock while it takes each entry's
+/// per-entry `state` lock. This mirrors the same invariant
+/// `invalidate_all_inflight_abort_loop_releases_table_lock_before_state`
+/// asserts for `invalidate_all`: the module documents one global rule —
+/// `state` is never taken while the `inflight` table lock is held — and
+/// both invalidation paths must honour it. Holding `table` across the
+/// per-entry `state` acquisition is the inverse of the sequential
+/// `state`-then-`table` order in `InflightPanicGuard::drop`; the
+/// collect-then-release shape keeps the two acquisitions from ever
+/// nesting in opposite directions.
+///
+/// Deterministic, and it preserves `invalidate_canonical`'s SELECTIVE
+/// semantics — only the in-flight entry whose `(family, slot)` was swept
+/// is aborted. A cold winner is parked mid-build for `(F, Identity)` so
+/// one in-flight entry is registered at that pair; an `Expanded` publish
+/// then backfills the warm `Identity` slot with a dep-sig referencing
+/// `/w/abortcanon.ts`, so the canonical sweep finds `(F, Identity)` in
+/// its reverse index and aborts the parked winner. `invalidate_canonical`
+/// runs on a second thread; it is parked — via the
+/// `invalidate_canonical_inflight_abort_gate` injection point — while
+/// iterating the COLLECTED entry handles and locking each `state`.
+///
+/// DISCRIMINATES. With the collect-then-release fix the `inflight` table
+/// lock is released before the per-entry `state` loop, so
+/// `test_inflight_table_is_unlocked()` is `true` and the assertion
+/// PASSES. Against the pre-fix loop (the per-entry `state.lock()` taken
+/// inside the `table.retain` closure, with the table lock held across
+/// the whole closure), the table lock is still held while the loop is
+/// parked, `try_lock` returns `None`, and the assertion FAILS.
+#[test]
+fn invalidate_canonical_inflight_abort_loop_releases_table_lock_before_state() {
+    use std::sync::Barrier;
+    use std::thread;
+
+    let store = Arc::new(SemanticGraphStore::new());
+    let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let path: Arc<[PathSegment]> =
+        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
+
+    let key_identity = SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::clone(&path),
+        mode: ProjectionMode::Identity,
+    };
+    let key_expanded = SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::clone(&path),
+        mode: ProjectionMode::Expanded,
+    };
+
+    // Park a cold winner mid-build for `(F, Identity)` so exactly one
+    // in-flight entry is registered + claimed at that pair.
+    let in_build = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let store_w = Arc::clone(&store);
+    let in_build_w = Arc::clone(&in_build);
+    let release_w = Arc::clone(&release);
+    let key_w = key_identity.clone();
+    let a_result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let winner = thread::spawn(move || {
+        let host = ctx_host();
+        store_w.execute_cooperative(
+            &host,
+            key_w,
+            || store_w.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                in_build_w.wait();
+                release_w.wait();
+                // Dep-sig deliberately does NOT reference the swept
+                // canonical — the winner is aborted by the sweep, so its
+                // result must never re-warm the slot.
+                (
+                    QueryResult::Value(a_result),
+                    dep_sig_for("/w/unrelated.ts", 9),
+                )
+            },
+        )
+    });
+
+    // Winner is parked mid-build with a claimed in-flight entry at
+    // `(F, Identity)`.
+    in_build.wait();
+    assert_eq!(
+        store.test_inflight_strong_count(&key_identity),
+        WINNER_ONLY_INFLIGHT_REFS,
+        "winner's in-flight entry must be registered before invalidate_canonical",
+    );
+
+    // Publish `(F, Expanded)` with a dep-sig referencing the canonical
+    // to be swept. Expanded's backfill fills the currently-empty
+    // `Identity` slot directly (not gated on the winner's in-flight
+    // claim), so `(F, Identity)` is registered under `/w/abortcanon.ts`
+    // in the reverse index — making it land in `affected_pairs` when the
+    // canonical is swept.
+    let host = ctx_host();
+    let exp_result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+    let _ = store.execute_cooperative(
+        &host,
+        key_expanded,
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || {
+            (
+                QueryResult::Value(exp_result),
+                dep_sig_for("/w/abortcanon.ts", 2),
+            )
+        },
+    );
+    assert!(
+        store.get_unvalidated(&key_identity).is_some(),
+        "Expanded's backfill must populate the Identity slot before the sweep",
+    );
+
+    // Arm the abort-loop injection point and run `invalidate_canonical`
+    // on a second thread. It collects the matching in-flight handles +
+    // drains them from the table under the table lock, RELEASES the
+    // table lock, then iterates the collected entries — parking on this
+    // barrier while a per-entry `state` lock is held.
+    let abort_parked = Arc::new(Barrier::new(2));
+    let _gate = store.test_invalidate_canonical_inflight_abort_gate(Arc::clone(&abort_parked));
+    let store_inv = Arc::clone(&store);
+    let invalidator = thread::spawn(move || store_inv.invalidate_canonical("/w/abortcanon.ts"));
+
+    // `invalidate_canonical` is parked inside the per-entry `state`-lock
+    // loop.
+    abort_parked.wait();
+
+    // THE DISCRIMINATOR. The `inflight` table lock must already be
+    // released — the loop is iterating COLLECTED handles, not the table.
+    assert!(
+        store.test_inflight_table_is_unlocked(),
+        "ABORT-LOOP LOCK INVERSION: `invalidate_canonical`'s in-flight \
+         abort loop is holding the `inflight` table lock while it takes a \
+         per-entry `state` lock. The module documents a global rule — \
+         `state` is never taken while the `inflight` table lock is held — \
+         and `invalidate_canonical` must honour it. The loop must collect \
+         the matching entry handles + drain them from the table under the \
+         table lock, RELEASE the table lock, THEN lock each `state`.",
+    );
+
+    // Release `invalidate_canonical`, then the winner; both must complete.
+    abort_parked.wait();
+    let removed = invalidator.join().expect("invalidator thread");
+    assert_eq!(
+        removed, 4,
+        "the sweep evicts all four warm slots backfilled from the Expanded publish",
+    );
+    release.wait();
+    let _ = winner.join().expect("winner thread must not panic");
+
+    // SELECTIVE-SEMANTICS GUARD. The aborted winner observed the sweep
+    // under the entries lock and skipped its warm publish — the Identity
+    // slot stays evicted, it did not re-warm with the winner's stale
+    // `/w/unrelated.ts`-dep-sig result.
+    assert!(
+        store.get_unvalidated(&key_identity).is_none(),
+        "aborted winner must skip warm publish — Identity slot stays evicted",
     );
 }
 

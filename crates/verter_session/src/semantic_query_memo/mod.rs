@@ -320,10 +320,22 @@ pub struct SemanticGraphStore {
     /// table lock NOT held. A race test arms it (via
     /// [`Self::test_invalidate_all_inflight_abort_gate`]) and asserts
     /// `inflight.try_lock()` is `Some`, proving the collect-then-release
-    /// lock order that rules out an AB-BA with `InflightPanicGuard::drop`.
-    /// Per-store scoped; `cfg`-gated to `test` / `debug_assertions`.
+    /// lock order that keeps the abort loop within the module's global
+    /// rule (`state` is never taken while the `inflight` table lock is
+    /// held). Per-store scoped; `cfg`-gated to `test` / `debug_assertions`.
     #[cfg(any(test, debug_assertions))]
     invalidate_all_inflight_abort_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+    /// Per-store test-only injection point inside
+    /// [`Self::invalidate_canonical`]'s in-flight abort loop, fired while
+    /// iterating the COLLECTED entry handles and locking each entry's
+    /// `state` — with the `inflight` table lock NOT held. A race test arms
+    /// it (via [`Self::test_invalidate_canonical_inflight_abort_gate`]) and
+    /// asserts `inflight.try_lock()` is `Some`, proving `invalidate_canonical`
+    /// honours the same collect-then-release lock order as
+    /// [`Self::invalidate_all`]. Per-store scoped; `cfg`-gated to `test` /
+    /// `debug_assertions`.
+    #[cfg(any(test, debug_assertions))]
+    invalidate_canonical_inflight_abort_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Γ.B reverse index. For each canonical id,
     /// holds the set of `(family, slot)` pairs whose published
     /// dep_signature references it, paired with the dep_signature
@@ -921,13 +933,37 @@ impl SemanticGraphStore {
         // The `affected_pairs.is_empty()` guard short-circuits the
         // whole phase when no canonical-keyed entries existed,
         // avoiding an unnecessary `self.inflight.lock()` acquisition.
+        //
+        // **Lock order — collect-then-release.** This loop is SELECTIVE
+        // (it aborts only the in-flight entries whose `(family, slot)`
+        // is in `affected_pairs`, not every entry like `invalidate_all`)
+        // — but it obeys the SAME lock discipline: it must NOT hold the
+        // `inflight` table lock while it takes each entry's `state`
+        // lock. Under the table lock, `retain` keeps the unmatched
+        // entries and COLLECTS the `Arc<InflightEntry>` handles of the
+        // matched ones (removing them from the table); the table lock is
+        // then released; only THEN is each collected entry's `state`
+        // locked to set `aborted`. Global rule: `state` is never taken
+        // while the `inflight` table lock is held — see the matching
+        // comment in `invalidate_all`.
         if !affected_pairs.is_empty() {
-            let mut table = self.inflight.lock();
-            table.retain(|key, inflight| {
-                let (family, slot) = family_and_slot(key);
-                if !affected_pairs.contains(&(family, slot)) {
-                    return true; // keep
-                }
+            let aborted_entries: Vec<Arc<InflightEntry>> = {
+                let mut table = self.inflight.lock();
+                let mut collected: Vec<Arc<InflightEntry>> = Vec::new();
+                table.retain(|key, inflight| {
+                    let (family, slot) = family_and_slot(key);
+                    if affected_pairs.contains(&(family, slot)) {
+                        collected.push(Arc::clone(inflight));
+                        false // remove — this entry's slot was swept
+                    } else {
+                        true // keep — unrelated in-flight build
+                    }
+                });
+                collected
+            };
+            // Table lock released — now mark each collected entry
+            // `aborted` and wake its waiters with no table lock held.
+            for inflight in &aborted_entries {
                 {
                     let mut state = inflight.state.lock();
                     state.aborted = true;
@@ -939,8 +975,22 @@ impl SemanticGraphStore {
                     }
                 }
                 inflight.ready.notify_all();
-                false // remove
-            });
+                // Test-only injection point: parked while iterating the
+                // collected entries and locking per-entry `state` — with
+                // the `inflight` table lock NOT held. A race test arms it
+                // (via `test_invalidate_canonical_inflight_abort_gate`)
+                // and asserts `inflight.try_lock()` succeeds, proving the
+                // collect-then-release lock order. `None` (production
+                // default) is a no-op.
+                #[cfg(any(test, debug_assertions))]
+                {
+                    let gate = self.invalidate_canonical_inflight_abort_gate.lock().clone();
+                    if let Some(barrier) = gate {
+                        barrier.wait();
+                        barrier.wait();
+                    }
+                }
+            }
         }
 
         // Drop
@@ -1026,11 +1076,15 @@ impl SemanticGraphStore {
     /// [`Self::invalidate_canonical`] and every other multi-lock path, so
     /// there is no AB-BA cycle. The abort loop additionally never holds
     /// the `inflight` table lock while taking a per-entry `state` lock
-    /// (collect-then-release — see the inline comment), so it cannot
-    /// AB-BA against [`InflightPanicGuard`]'s `drop`. The relation memo
-    /// and resolved-named-type index take their own `retention_gate`
-    /// write guard independently of `entries` — no path holds `entries`
-    /// across a `retention_gate` acquisition.
+    /// (collect-then-release — see the inline comment), keeping it within
+    /// the module-global lock rule. [`InflightPanicGuard`]'s `drop` is not
+    /// a counter-acquirer of these two locks at all: it locks `state`,
+    /// *releases* it, and only then acquires the `inflight` table lock —
+    /// two sequential acquisitions, never nested — so it can neither
+    /// deadlock nor establish a competing order. The relation memo and
+    /// resolved-named-type index take their own `retention_gate` write
+    /// guard independently of `entries` — no path holds `entries` across a
+    /// `retention_gate` acquisition.
     pub fn invalidate_all(&self) -> usize {
         let removed: usize = {
             let mut entries = self.entries_lock_diagnosed();
@@ -1048,14 +1102,20 @@ impl SemanticGraphStore {
             //
             // **Lock order — collect-then-release.** This loop must NOT
             // hold the `inflight` table lock while it takes each entry's
-            // `state` lock: `InflightPanicGuard::drop` acquires `state`
-            // then the `inflight` table lock, so a loop holding `table`
-            // across the per-entry `state` acquisition would establish
-            // the opposite `table → state` order. Instead: snapshot the
+            // `state` lock. A loop holding `table` across the per-entry
+            // `state` acquisition would establish a `table → state`
+            // nesting — a latent lock-order inconsistency against the
+            // module-global rule below. (It is not a live deadlock today:
+            // the only other path touching both locks,
+            // `InflightPanicGuard::drop`, acquires `state`, *releases* it,
+            // and only then acquires the `inflight` table lock — two
+            // sequential, non-nested acquisitions — so it cannot AB-BA
+            // against either order. Collect-then-release keeps the rule
+            // uniform regardless.) Instead: snapshot the
             // `Arc<InflightEntry>` handles AND drain the table under the
             // table lock, RELEASE the table lock, THEN lock each entry's
             // `state`. Global rule: `state` is never taken while the
-            // `inflight` table lock is held — no AB-BA cycle.
+            // `inflight` table lock is held.
             let aborted_entries: Vec<Arc<InflightEntry>> = {
                 let mut table = self.inflight.lock();
                 let collected: Vec<Arc<InflightEntry>> = table.values().map(Arc::clone).collect();
