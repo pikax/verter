@@ -15,10 +15,18 @@
 //! the test constructs a populated `ValidatedFactCache` in-process
 //! and exercises the warm-hit path with the `PermissiveStoreView`
 //! adapter from `resolver_core`.
+//!
+//! Measurement isolation: the `#[global_allocator]` counter is
+//! process-global, so the `discrimination_companion_*` test's
+//! allocations would race into the measurement window if the harness
+//! ran the two tests concurrently. They are serialised via the
+//! `ALLOC_TEST_SERIAL` gate so the measured delta reflects only the
+//! warm-hit path. See that static's doc comment for the rationale.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 /// Counting global allocator. Increments [`ALLOCATIONS`] on every
 /// `alloc` / `alloc_zeroed` / `realloc` invocation. The counter is
@@ -27,6 +35,30 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct CountingAllocator;
 
 pub static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+
+/// Mutual-exclusion gate between the two tests in this binary.
+///
+/// `ALLOCATIONS` is a process-global `#[global_allocator]` counter:
+/// every thread's heap traffic advances the *same* counter. The
+/// default test harness runs the two tests in this file concurrently
+/// on separate threads, so without a gate the
+/// `discrimination_companion_*` test's per-iteration `String`
+/// allocations land inside `warm_hit_validates_*`'s measurement
+/// window and inflate its delta — a non-deterministic failure whose
+/// magnitude tracks machine load (heavier load widens the overlap).
+///
+/// The measurement test holds this lock across its baseline read,
+/// warm-hit loop, and `after` read; the companion test holds it
+/// across its allocating loop. The two allocation windows are thereby
+/// serialised and the global counter is never advanced by the sibling
+/// mid-measurement. Locking is allocation-free (`std::sync::Mutex`
+/// fast path is stack-only) and, for the measurement test, happens
+/// *before* the baseline read regardless — so the gate itself never
+/// contributes to the measured delta. This mirrors the
+/// one-measurement-test-per-binary isolation that
+/// `baseline_trace_alloc_count.rs` documents and achieves by file
+/// separation.
+static ALLOC_TEST_SERIAL: Mutex<()> = Mutex::new(());
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -82,6 +114,17 @@ fn dummy_fact(canonical: &str, name: &str, expected_hash: HashValue) -> FactVers
 /// allocation would push the delta to ~10 000.
 #[test]
 fn warm_hit_validates_with_zero_allocations() {
+    // Serialise against the companion test: both advance the same
+    // process-global `ALLOCATIONS` counter, and the harness runs them
+    // concurrently by default. Holding this lock for the whole
+    // measurement (baseline read → loop → `after` read) guarantees the
+    // companion's allocating loop cannot pollute the delta. The lock is
+    // acquired before the baseline read, so it never contributes to the
+    // measured count.
+    let _serial = ALLOC_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
     // Setup phase — allocations during cache construction are
     // pre-loop and are NOT counted toward the warm-hit delta.
     let cache: ValidatedFactCache<&'static str, u32> = ValidatedFactCache::default();
@@ -148,6 +191,14 @@ fn warm_hit_validates_with_zero_allocations() {
 /// real allocations).
 #[test]
 fn discrimination_companion_string_allocation_is_observed() {
+    // Serialise against `warm_hit_validates_with_zero_allocations`:
+    // this test's per-iteration `String` allocations would otherwise
+    // race into that test's measurement window via the shared
+    // process-global `ALLOCATIONS` counter.
+    let _serial = ALLOC_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
     // Burn iterations to settle any lazy init.
     for i in 0..32 {
         let _ = black_box(format!("warmup-{i}"));
