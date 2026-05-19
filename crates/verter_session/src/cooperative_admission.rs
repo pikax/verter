@@ -15,10 +15,13 @@
 //!     callers retry the cold path.
 //!   - **Post-compute revalidation.** After `compute()` returns, the caller-
 //!     supplied `revalidate_after_compute` runs against the freshly-built
-//!     `Entry` BEFORE the entry is inserted. This catches the race where
-//!     a file mutation occurred during the cold compute window: the entry's
-//!     dep-signature is no longer valid against host state, so the publish
-//!     is skipped and waiters fall through to retry.
+//!     `Entry` BEFORE the entry is inserted — and, when the cache passes a
+//!     `publish_fence`, UNDER that fence's read guard, atomically with the
+//!     insert. This catches the race where a file mutation or a
+//!     project-generation reset occurred during the cold compute window:
+//!     the entry's dep-signature / generation is no longer valid against
+//!     host state, so the publish is skipped and waiters fall through to
+//!     retry.
 //!   - **Value projection.** Three callbacks separate concerns:
 //!     - `validate(&Entry) -> Option<V>`: read-side validation. Runs on the
 //!       warm-hit fast path AND on every cooperative joiner that wakes onto
@@ -375,6 +378,65 @@ impl Drop for RemovalCleanupPreHookGuard {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only rendezvous: a hook fired by the cold winner in
+    /// [`cooperative_admit_with_post_publish`] /
+    /// [`cooperative_get_or_insert_with_post_publish`] AFTER
+    /// `revalidate_after_compute` returns `true` and BEFORE `map.insert`
+    /// — i.e. inside the `publish_fence` read-guard region, at the exact
+    /// point a project-generation `clear` must not be able to interleave.
+    ///
+    /// A race test installs a hook that parks the winner on a barrier
+    /// there, runs a concurrent project-generation `invalidate_all` on
+    /// another thread, and asserts the `clear`'s `retention_gate.write()`
+    /// is blocked (the winner already holds the read guard). It is a
+    /// deterministic rendezvous — the hook IS the synchronisation point —
+    /// not a timing sleep. The hook is thread-local so it only affects
+    /// the installing test's winner thread; production fires nothing.
+    static POST_REVALIDATE_PRE_PUBLISH_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only: install a hook fired by the cold winner between a
+/// successful `revalidate_after_compute` and `map.insert`, inside the
+/// `publish_fence` read-guard region. Returns a guard that clears the
+/// hook on drop so it cannot leak into a later test on the same worker
+/// thread.
+#[cfg(test)]
+pub(crate) fn install_post_revalidate_pre_publish_hook(
+    hook: Box<dyn Fn()>,
+) -> PostRevalidatePrePublishHookGuard {
+    POST_REVALIDATE_PRE_PUBLISH_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+    PostRevalidatePrePublishHookGuard
+}
+
+/// RAII guard that clears the thread-local post-revalidate pre-publish
+/// hook.
+#[cfg(test)]
+pub(crate) struct PostRevalidatePrePublishHookGuard;
+
+#[cfg(test)]
+impl Drop for PostRevalidatePrePublishHookGuard {
+    fn drop(&mut self) {
+        POST_REVALIDATE_PRE_PUBLISH_HOOK.with(|h| *h.borrow_mut() = None);
+    }
+}
+
+/// Fire the test-only post-revalidate / pre-publish rendezvous hook (a
+/// no-op in production — the thread-local is always `None` unless a test
+/// installed one). Defined as a single helper so both cooperative APIs
+/// fire it at the identical point inside the `publish_fence` region.
+#[inline]
+fn fire_post_revalidate_pre_publish_hook() {
+    #[cfg(test)]
+    POST_REVALIDATE_PRE_PUBLISH_HOOK.with(|h| {
+        if let Some(hook) = h.borrow().as_ref() {
+            hook();
+        }
+    });
+}
+
 /// Remove the exact published `Arc<Entry>` the caller validated — a
 /// `ptr_eq` guard so a concurrent fresh winner's entry is not evicted —
 /// and, on a real removal, run the caller's `removal_cleanup` so the
@@ -535,21 +597,31 @@ where
 /// **Race-closure contract.** post_publish is NOT inside the
 /// inflight slot's state lock. Synchronisation against concurrent
 /// invalidation comes from `revalidate_after_compute`'s
-/// dep-signature check, which sees the host's CURRENT state. If
-/// invalidation happened during compute, the entry is stale and
-/// revalidation fails BEFORE post_publish runs.
+/// dep-signature / generation check, which sees the host's CURRENT
+/// state. If invalidation happened during compute, the entry is stale
+/// and revalidation fails BEFORE post_publish runs.
 ///
 /// **Retention-gate publish fence (`publish_fence`).** When the cache
 /// carries a retention budget it passes its lifecycle `retention_gate`
-/// here. `map.insert` and `post_publish` (the reverse-index +
-/// retention-budget admission) then run under a shared read guard, and
-/// a project-generation `clear` holds the write guard across its own
-/// map + budget clear — so a `clear` cannot interleave between this
-/// `insert` and its `post_publish`. That closes the desync window
-/// where the `clear` would erase the budget ledger after the map
-/// insert landed, leaving a live map entry with no budget admission
-/// (invisible to FIFO eviction). A cache with no retention budget
-/// passes `None`.
+/// here. `revalidate_after_compute`, `map.insert`, and `post_publish`
+/// (the reverse-index + retention-budget admission) then ALL run under
+/// ONE continuously-held shared read guard, and a project-generation
+/// `clear` holds the write guard across its own map + budget clear.
+/// The guard covers the revalidation deliberately: the revalidation is
+/// the last generation / dep-signature check before the entry lands,
+/// so it must be atomic with the `insert`. If the guard were acquired
+/// only at `map.insert` (after revalidation already returned), a
+/// project-generation `clear` could take the write guard in the gap,
+/// clear the map+budget, and then this winner would insert an entry
+/// validated against the SUPERSEDED generation into the
+/// freshly-cleared cache — defeating the reset. Because `RwLock` read
+/// and write guards mutually exclude, this winner's
+/// revalidate→insert→post_publish runs wholly before the `clear` (its
+/// entry is then cleared by the `clear`) or wholly after it (its
+/// generation-aware revalidation observes the bumped generation and
+/// rejects). No interleaving leaves a stale entry, and no interleaving
+/// leaves a live map entry with no budget admission. A cache with no
+/// retention budget passes `None` (the publish runs unfenced).
 ///
 /// **Eventually-consistent reverse-index window.** A concurrent
 /// PER-CANONICAL invalidator that drains a canonical's reverse-index
@@ -560,8 +632,9 @@ where
 /// (the entry references the invalidated canonical with its old
 /// dep_signature; the host has the new state) and proactively removed.
 /// The orphan window is bounded per edit-cycle. The `publish_fence`
-/// closes only the harder `clear` race — a valid entry whose budget
-/// record a project-generation reset erases is NOT stale-detectable.
+/// closes the harder project-generation `clear` race — both the budget
+/// desync AND a stale-generation entry publishing into the cleared
+/// cache.
 ///
 /// **Compute closure synchronicity contract.** The
 /// `compute` closure runs SYNCHRONOUSLY on the caller's thread.
@@ -706,6 +779,22 @@ where
 
         let value = match computed {
             Some(entry) => {
+                // Hold the cache's retention gate (shared read) across the
+                // WHOLE publish sequence — `revalidate_after_compute`, the
+                // `map.insert`, AND the `post_publish`. The revalidation is
+                // the last generation / dep-signature check before the
+                // entry lands; it must be atomic with the insert. If the
+                // guard were acquired only at `map.insert` (after
+                // revalidation already returned), a project-generation
+                // `invalidate_all` could take the write guard in the gap,
+                // clear the map+budget, and then this winner would publish
+                // an entry validated against the SUPERSEDED generation
+                // into the freshly-cleared cache. `invalidate_all` takes
+                // the write guard across its own map+budget clear, and
+                // `RwLock` read/write mutual exclusion fully orders the
+                // two. A cache with no retention budget passes `None` —
+                // the publish then runs unfenced, as before.
+                let _retention = publish_fence.map(parking_lot::RwLock::read);
                 // Post-compute revalidation. If a mutation invalidated the
                 // entry's dep-signature during the cold window, skip publish
                 // and signal failure to waiters.
@@ -729,17 +818,10 @@ where
                     &entry_arc
                 );
                 {
-                    // Hold the cache's retention gate (shared read) across
-                    // the `map.insert` AND the `post_publish` so the map
-                    // insertion and the reverse-index / budget / counter
-                    // registration are one lock-domain mutation. A
-                    // concurrent project-generation `clear` takes the
-                    // write guard across its own map+budget clear, so it
-                    // cannot interleave its clears between this insert and
-                    // its `post_publish` — closing the window where a live
-                    // map entry would survive with no budget admission. A
-                    // cache with no retention budget passes `None`.
-                    let _retention = publish_fence.map(parking_lot::RwLock::read);
+                    // Test-only rendezvous fired inside the `publish_fence`
+                    // read-guard region, AFTER a successful revalidation
+                    // and BEFORE `map.insert`. Production fires nothing.
+                    fire_post_revalidate_pre_publish_hook();
                     map.insert(key.clone(), Arc::clone(&entry_arc));
 
                     // post_publish: fires AFTER entries.insert AND AFTER
@@ -935,6 +1017,28 @@ where
 
         let value = match admission {
             ComputeAdmission::Cacheable(entry) => {
+                // Hold the cache's retention gate (shared read) across
+                // the WHOLE publish sequence — `revalidate_after_compute`,
+                // the `map.insert`, AND the `post_publish`. The
+                // revalidation is part of the publish: it is the last
+                // generation / dep-signature check before the entry
+                // lands, so it must be atomic with the insert. If the
+                // guard were acquired only at `map.insert` (after
+                // revalidation already returned), a project-generation
+                // `invalidate_all` could take the write guard in the gap,
+                // clear the map+budget, and then this winner would insert
+                // an entry validated against the SUPERSEDED generation
+                // into the freshly-cleared cache — defeating the reset.
+                // `invalidate_all` takes the write guard across its own
+                // map+budget clear, and `RwLock` read/write mutual
+                // exclusion fully orders the two: this winner's
+                // revalidate→insert runs wholly before the clear (its
+                // entry is then cleared) or wholly after it (its
+                // generation-aware revalidate observes the bumped
+                // generation and rejects). No interleaving leaves a
+                // stale entry. A cache with no retention budget passes
+                // `None` — the publish then runs unfenced, as before.
+                let _retention = publish_fence.map(parking_lot::RwLock::read);
                 if !revalidate_after_compute(&entry) {
                     {
                         let mut state = slot.state.lock();
@@ -954,15 +1058,12 @@ where
                     &entry_arc
                 );
                 {
-                    // Hold the cache's retention gate (shared read) across
-                    // the `map.insert` AND the `post_publish` so the map
-                    // insertion and the reverse-index / budget / counter
-                    // registration are one lock-domain mutation, exclusive
-                    // against a concurrent project-generation `clear`
-                    // (which takes the write guard across its own map +
-                    // budget clear). A cache with no retention budget
-                    // passes `None`.
-                    let _retention = publish_fence.map(parking_lot::RwLock::read);
+                    // Test-only rendezvous fired inside the `publish_fence`
+                    // read-guard region, AFTER a successful revalidation
+                    // and BEFORE `map.insert` — the exact point a
+                    // project-generation `clear` must not be able to
+                    // interleave. Production fires nothing.
+                    fire_post_revalidate_pre_publish_hook();
                     map.insert(key.clone(), Arc::clone(&entry_arc));
                     post_publish(&entry_arc, &key);
                 }

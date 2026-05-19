@@ -2020,6 +2020,21 @@ pub struct MaterializeStructureEntry {
     /// record — symmetric with the `Arc::ptr_eq` guard on the
     /// reverse-index removal.
     pub admission_seq: u64,
+    /// Project generation this entry was computed under, captured by the
+    /// cold `compute` closure before it dispatched any work. The carrier
+    /// (`read_set_signature`) validates only file-content whole-hashes;
+    /// a `ProjectGeneration` reset (tsconfig / path-alias / SDK /
+    /// workspace-folder change) bumps no file content, so without this
+    /// field a stale-by-project-generation entry would validate forever.
+    /// Every read-side gate (`peek`, the cooperative `validate` closure)
+    /// AND the cooperative post-compute revalidation reject the entry
+    /// when `validated_at_generation` differs from the live
+    /// [`crate::project_type_store::ProjectTypeStore::current_project_generation`].
+    /// The revalidation runs under the `MaterializeStructureDb`'s
+    /// `retention_gate` read guard, so it is atomic against the
+    /// `invalidate_all` clear+bump — a stale entry can neither survive a
+    /// reset nor be published into a freshly-cleared cache.
+    pub validated_at_generation: u64,
 }
 
 /// Remove the `Arc::ptr_eq`-matching `key` registration from
@@ -2242,14 +2257,11 @@ impl MaterializeStructureDb {
     }
 
     /// Read-only test accessor for the shared
-    /// live_counter. Used by `materialize_publish_after_invalidation_*`
-    /// tests to verify that revalidation failures do NOT increment the
-    /// counter (entries are removed without inflating the live count).
+    /// live_counter. Used by the publish-fence / generation-revalidation
+    /// race tests to verify that revalidation failures do NOT increment
+    /// the counter (entries are removed without inflating the live
+    /// count).
     #[cfg(test)]
-    #[allow(
-        dead_code,
-        reason = "B1's validated_at_generation field + the test that consumes this accessor are pending; this accessor is reserved for that wiring"
-    )]
     pub(crate) fn live_counter_for_test(&self) -> u64 {
         self.live_counter.load(Ordering::Relaxed)
     }
@@ -2280,9 +2292,19 @@ impl MaterializeStructureDb {
             // entry; every other fact keeps the lazy cross-file
             // permissiveness. A stale entry never bubbles into the
             // active outer tracer.
-            if !entry_arc
-                .read_set_signature
-                .validate_with_self_roots(ctx, &entry_arc.self_root_canonicals)
+            //
+            // The generation gate is the project-shape counterpart of
+            // the carrier check: the carrier validates only file-content
+            // whole-hashes, but a `ProjectGeneration` reset (tsconfig /
+            // path-alias / SDK / workspace-folder change) bumps no file
+            // content. An entry whose `validated_at_generation` no longer
+            // equals the live project generation is stale even though its
+            // carrier still validates — reap it.
+            if entry_arc.validated_at_generation
+                != ctx.project_type_store().current_project_generation()
+                || !entry_arc
+                    .read_set_signature
+                    .validate_with_self_roots(ctx, &entry_arc.self_root_canonicals)
             {
                 // Stale-entry reap touches both `entries` and the
                 // retention budget — hold the retention gate (shared
@@ -2500,6 +2522,7 @@ impl MaterializeStructureDb {
             read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
             admission_seq: crate::bounded_query_retention::next_retention_seq(),
+            validated_at_generation: 0,
         });
         self.entries.insert(key, entry);
         self.live_counter.fetch_add(1, Ordering::Relaxed);
@@ -2799,6 +2822,21 @@ pub struct RefCycleEntry {
     /// record — symmetric with the `Arc::ptr_eq` guard on the
     /// reverse-index removal.
     pub admission_seq: u64,
+    /// Project generation this entry was computed under, captured by the
+    /// cold BFS `compute` closure before it dispatched any work. The
+    /// carrier (`read_set_signature`) validates only file-content
+    /// whole-hashes; a `ProjectGeneration` reset (tsconfig / path-alias /
+    /// SDK / workspace-folder change) bumps no file content, so without
+    /// this field a stale-by-project-generation entry would validate
+    /// forever. Every read-side gate (`peek`, the cooperative `validate`
+    /// closure) AND the cooperative post-compute revalidation reject the
+    /// entry when `validated_at_generation` differs from the live
+    /// [`crate::project_type_store::ProjectTypeStore::current_project_generation`].
+    /// The revalidation runs under the `RefCycleResultDb`'s
+    /// `retention_gate` read guard, so it is atomic against the
+    /// `invalidate_all` clear+bump — a stale entry can neither survive a
+    /// reset nor be published into a freshly-cleared cache.
+    pub validated_at_generation: u64,
 }
 
 /// R — host-owned cache for transitive
@@ -3133,14 +3171,17 @@ impl RefCycleResultDb {
     /// Strict-validation peek.
     ///
     /// Every read validates the entry's carrier against the live store
-    /// view BEFORE returning — there is no generation-equal fast return
-    /// that bypasses validation. The entry's `self_root_canonicals`
-    /// (the BFS root file plus every visited declaration's file)
-    /// validate **strictly**: a same-canonical content edit, or a
-    /// self-root canonical the live store view no longer tracks,
-    /// rejects the entry; every other fact keeps the lazy cross-file
-    /// permissiveness. A stale entry never returns and never bubbles;
-    /// it is removed (with `live_counter` decrement per R8-5).
+    /// view BEFORE returning — there is no carrier-bypassing fast
+    /// return. The entry's `self_root_canonicals` (the BFS root file
+    /// plus every visited declaration's file) validate **strictly**: a
+    /// same-canonical content edit, or a self-root canonical the live
+    /// store view no longer tracks, rejects the entry; every other fact
+    /// keeps the lazy cross-file permissiveness. The entry's
+    /// `validated_at_generation` must additionally still equal the live
+    /// project generation — a `ProjectGeneration` reset bumps no file
+    /// content, so the carrier alone cannot detect it. A stale entry
+    /// never returns and never bubbles; it is removed (with
+    /// `live_counter` decrement per R8-5).
     pub(crate) fn peek(
         &self,
         id: &DeclIdentity,
@@ -3149,11 +3190,15 @@ impl RefCycleResultDb {
         let result = (|| -> Option<crate::semantic_query::CacheRead<bool>> {
             let entry_arc = self.entries.get(id).map(|e| Arc::clone(&*e))?;
             // Carrier-aware validate-before-bubble with strict
-            // self-root validation. A stale entry never returns and
-            // never bubbles.
-            if !entry_arc
-                .read_set_signature
-                .validate_with_self_roots(ctx, &entry_arc.self_root_canonicals)
+            // self-root validation, plus the project-generation gate
+            // (the carrier validates only file-content whole-hashes; a
+            // `ProjectGeneration` reset bumps no file content). A stale
+            // entry never returns and never bubbles.
+            if entry_arc.validated_at_generation
+                != ctx.project_type_store().current_project_generation()
+                || !entry_arc
+                    .read_set_signature
+                    .validate_with_self_roots(ctx, &entry_arc.self_root_canonicals)
             {
                 // Stale-entry reap touches both `entries` and the
                 // retention budget — hold the retention gate (shared
@@ -3661,11 +3706,19 @@ where
         db.entries(),
         db.inflight(),
         id.clone(),
-        // Validate(&Entry) -> Option<V> — strict self-root validation.
+        // Validate(&Entry) -> Option<V> — strict self-root validation
+        // plus the project-generation gate. The carrier validates only
+        // file-content whole-hashes; a `ProjectGeneration` reset
+        // (tsconfig / SDK / workspace-folder change) bumps no file
+        // content, so an entry whose `validated_at_generation` no longer
+        // matches the live generation is stale even though its carrier
+        // still validates.
         |entry: &RefCycleEntry| {
-            if entry
-                .read_set_signature
-                .validate_with_self_roots(ctx, &entry.self_root_canonicals)
+            if entry.validated_at_generation
+                == ctx.project_type_store().current_project_generation()
+                && entry
+                    .read_set_signature
+                    .validate_with_self_roots(ctx, &entry.self_root_canonicals)
             {
                 entry.read_set_signature.bubble(ctx);
                 Some(crate::semantic_query::CacheRead {
@@ -3680,6 +3733,13 @@ where
         },
         // Compute() -> ComputeAdmission<V, Entry>
         || -> ComputeAdmission<crate::semantic_query::CacheRead<bool>, RefCycleEntry> {
+            // Snapshot the project generation BEFORE the BFS dispatches
+            // any work. A `ProjectGeneration` reset that lands during
+            // the cold BFS window bumps this; the post-compute
+            // revalidation (run under the `publish_fence` read guard)
+            // then rejects the entry, and a stale entry can neither
+            // survive a reset nor publish into a freshly-cleared cache.
+            let validated_at_generation = ctx.project_type_store().current_project_generation();
             let mut compute_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
             let mut observed_self_roots: Vec<(Arc<str>, crate::types::Hash16)> = Vec::new();
             let (result, finalise) =
@@ -3759,6 +3819,7 @@ where
                                     ),
                                 self_root_canonicals,
                                 admission_seq: crate::bounded_query_retention::next_retention_seq(),
+                                validated_at_generation,
                             })
                         }
                         None => {
@@ -3796,11 +3857,19 @@ where
                 cache_suppress: false,
             }
         },
-        // revalidate_after_compute(&Entry) -> bool — strict self-root.
+        // revalidate_after_compute(&Entry) -> bool — strict self-root
+        // validation plus the project-generation gate. Runs under the
+        // `publish_fence` read guard (the substrate holds it across
+        // revalidate→insert→post_publish), so the generation check and
+        // the `entries.insert` are atomic against a concurrent
+        // `invalidate_all` clear+bump: a BFS entry computed under a
+        // superseded project generation is rejected here rather than
+        // published into the freshly-cleared cache.
         |entry: &RefCycleEntry| {
-            entry
-                .read_set_signature
-                .validate_with_self_roots(ctx, &entry.self_root_canonicals)
+            entry.validated_at_generation == ctx.project_type_store().current_project_generation()
+                && entry
+                    .read_set_signature
+                    .validate_with_self_roots(ctx, &entry.self_root_canonicals)
         },
         // removal_cleanup(&K, &Arc<Entry>) — removal-side counterpart
         // of `post_publish`. When the substrate removes an

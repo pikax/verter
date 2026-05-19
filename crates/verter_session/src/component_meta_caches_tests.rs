@@ -439,6 +439,7 @@ fn materialize_structure_unregister_preserves_fresh_admission() {
             ),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
             admission_seq: crate::bounded_query_retention::next_retention_seq(),
+            validated_at_generation: 0,
         }
     };
 
@@ -525,6 +526,7 @@ fn ref_cycle_unregister_preserves_fresh_admission() {
             ),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
             admission_seq: crate::bounded_query_retention::next_retention_seq(),
+            validated_at_generation: 0,
         }
     };
 
@@ -624,6 +626,7 @@ fn materialize_structure_invalidate_all_engages_gate_against_publish() {
             read_set_signature: ReadSetSignature::empty(),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
             admission_seq: crate::bounded_query_retention::next_retention_seq(),
+            validated_at_generation: 0,
         }),
     );
     db.bump_live_counter();
@@ -686,6 +689,7 @@ fn ref_cycle_invalidate_all_engages_gate_against_publish() {
             read_set_signature: ReadSetSignature::empty(),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
             admission_seq: crate::bounded_query_retention::next_retention_seq(),
+            validated_at_generation: 0,
         }),
     );
     db.bump_live_counter();
@@ -776,6 +780,7 @@ fn materialize_structure_budget_eviction_prunes_empty_reverse_index_shards() {
             ),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
             admission_seq: crate::bounded_query_retention::next_retention_seq(),
+            validated_at_generation: 0,
         });
         db.entries().insert(key.clone(), Arc::clone(&entry));
         db.register_post_publish(key, &entry.read_set_signature, entry.admission_seq);
@@ -835,6 +840,7 @@ fn ref_cycle_budget_eviction_prunes_empty_reverse_index_shards() {
             ),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
             admission_seq: crate::bounded_query_retention::next_retention_seq(),
+            validated_at_generation: 0,
         });
         db.entries().insert(key.clone(), Arc::clone(&entry));
         db.register_post_publish(key, &entry.read_set_signature, entry.admission_seq);
@@ -929,6 +935,7 @@ fn materialize_structure_budget_victim_eviction_is_admission_seq_scoped() {
             ),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
             admission_seq: crate::bounded_query_retention::next_retention_seq(),
+            validated_at_generation: 0,
         }
     };
 
