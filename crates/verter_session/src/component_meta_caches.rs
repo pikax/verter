@@ -12,7 +12,7 @@
 //!   primitive for one-winner-cold-build, panic-safety, and
 //!   post-compute revalidation. Most wrappers expose
 //!   `get_or_compute<F>(key, host, compute) -> Option<value>` over
-//!   [`cooperative_get_or_insert`]. Two consume the
+//!   [`cooperative_get_or_insert_with_post_publish`]. Two consume the
 //!   [`ComputeAdmission`](crate::cooperative_admission::ComputeAdmission)
 //!   API of `cooperative_admit_with_post_publish` so a
 //!   valid-but-non-cacheable cold outcome is broadcast to joiners
@@ -21,6 +21,24 @@
 //!   fuse-consuming resolution inside the singleflight `compute`
 //!   closure), and `MaterializeStructureDb` via the materialiser's
 //!   direct use of its `entries()` / `inflight()` accessors.
+//!
+//! ## Live-counter accounting invariant
+//!
+//! The shared `component_meta_cache_live` counter must equal the number
+//! of entries actually live in the cache maps on EVERY admission path.
+//! Every wrapper therefore bumps the counter in the substrate's
+//! winner-only `post_publish` callback — fired exactly once, after
+//! `map.insert` and a successful `revalidate_after_compute` — and
+//! decrements it in the `removal_cleanup` callback (and on every direct
+//! map removal: per-canonical / project-generation invalidation, budget
+//! eviction, stale-`peek` reap, schema-mismatch evict). The increment is
+//! never placed in the `compute` closure: a cold compute that fails
+//! `revalidate_after_compute` (a project-generation reset landed during
+//! the cold window) publishes no map entry and the substrate runs no
+//! `removal_cleanup`, so a pre-publication bump would leak permanently.
+//! `post_publish` is structurally unreachable on the revalidation-fail
+//! path, so the bump is correct-by-construction: an entry contributes
+//! `+1` exactly while it is live in the map.
 //! - `validate(&Entry)` and `revalidate_after_compute(&Entry)` consult
 //!   [`HostFenceValidator`](crate::host_manage::HostFenceValidator) to
 //!   reject entries whose `dep_signature` no longer matches host state.
@@ -50,7 +68,7 @@ use dashmap::DashMap;
 use verter_semantic::analysis::type_solver::query_engine::ProjectedMember;
 use verter_type_expr::TypeExpr;
 
-use crate::cooperative_admission::{cooperative_get_or_insert, InflightTable};
+use crate::cooperative_admission::{cooperative_get_or_insert_with_post_publish, InflightTable};
 use crate::fact_signature_helpers::{
     bubble_fact_signature, validate_fact_signature_with_self_roots,
 };
@@ -503,8 +521,13 @@ impl DeclarationLookupDb {
     where
         F: FnOnce() -> Option<(ResolvedTypeDeclaration, Arc<[FactVersionRef]>)>,
     {
-        let live_counter = Arc::clone(&self.live_counter);
-        // Removal-side counterpart of the `compute`-closure increment:
+        // Publish-side counterpart: the live counter is bumped in the
+        // winner-only `post_publish` callback (after `map.insert` + a
+        // successful `revalidate_after_compute`), NOT in `compute` — a
+        // pre-publication bump leaks when post-compute revalidation
+        // rejects the entry (no map entry, no `removal_cleanup`).
+        let live_counter_for_publish = Arc::clone(&self.live_counter);
+        // Removal-side counterpart of the `post_publish` increment:
         // when the substrate removes an already-published entry (warm-hit
         // reject or joiner-fork reject), the live counter must decrement
         // symmetrically so it tracks live entries, not lifetime inserts.
@@ -522,7 +545,7 @@ impl DeclarationLookupDb {
         // explicitly. The read-side gates reject the entry once the live
         // generation moves past this snapshot.
         let generation_snapshot = ctx.project_type_store().current_project_generation();
-        cooperative_get_or_insert(
+        cooperative_get_or_insert_with_post_publish(
             &self.entries,
             &self.inflight,
             key.clone(),
@@ -542,13 +565,10 @@ impl DeclarationLookupDb {
                 }
             },
             move || {
-                compute().map(|(value, fact_dep_signature)| {
-                    live_counter.fetch_add(1, Ordering::Relaxed);
-                    DeclarationLookupEntry {
-                        value: Arc::new(value),
-                        fact_dep_signature,
-                        validated_at_generation: generation_snapshot,
-                    }
+                compute().map(|(value, fact_dep_signature)| DeclarationLookupEntry {
+                    value: Arc::new(value),
+                    fact_dep_signature,
+                    validated_at_generation: generation_snapshot,
                 })
             },
             |entry: &DeclarationLookupEntry| {
@@ -567,6 +587,16 @@ impl DeclarationLookupDb {
             move |_key: &DeclarationLookupKey, _entry: &Arc<DeclarationLookupEntry>| {
                 live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
             },
+            // post_publish — fires once on the cold winner's thread,
+            // AFTER `entries.insert` AND a successful
+            // `revalidate_after_compute`. The live-counter bump rides
+            // here so it is paired with the published map entry and is
+            // structurally unreachable on the revalidation-fail path.
+            move |_entry_arc: &Arc<DeclarationLookupEntry>, _key: &DeclarationLookupKey| {
+                live_counter_for_publish.fetch_add(1, Ordering::Relaxed);
+            },
+            // No retention budget on this cache shape — no publish fence.
+            None,
         )
     }
 
@@ -656,8 +686,11 @@ impl ResolvabilityDb {
     where
         F: FnOnce() -> Option<(bool, Arc<[FactVersionRef]>)>,
     {
-        let live_counter = Arc::clone(&self.live_counter);
-        // Removal-side counterpart of the `compute`-closure increment —
+        // Publish-side counterpart: the live counter is bumped in the
+        // winner-only `post_publish` callback, NOT in `compute` — see
+        // `DeclarationLookupDb::get_or_compute` for the leak rationale.
+        let live_counter_for_publish = Arc::clone(&self.live_counter);
+        // Removal-side counterpart of the `post_publish` increment —
         // decrements when the substrate removes an already-published
         // entry so the live counter tracks live entries, not lifetime
         // inserts.
@@ -670,7 +703,7 @@ impl ResolvabilityDb {
         // dispatches any work — see `DeclarationLookupDb::get_or_compute`
         // for the project-generation staleness rationale.
         let generation_snapshot = ctx.project_type_store().current_project_generation();
-        cooperative_get_or_insert(
+        cooperative_get_or_insert_with_post_publish(
             &self.entries,
             &self.inflight,
             key.clone(),
@@ -690,13 +723,10 @@ impl ResolvabilityDb {
                 }
             },
             move || {
-                compute().map(|(value, fact_dep_signature)| {
-                    live_counter.fetch_add(1, Ordering::Relaxed);
-                    ResolvabilityEntry {
-                        value,
-                        fact_dep_signature,
-                        validated_at_generation: generation_snapshot,
-                    }
+                compute().map(|(value, fact_dep_signature)| ResolvabilityEntry {
+                    value,
+                    fact_dep_signature,
+                    validated_at_generation: generation_snapshot,
                 })
             },
             |entry: &ResolvabilityEntry| {
@@ -715,6 +745,15 @@ impl ResolvabilityDb {
             move |_key: &ResolvabilityKey, _entry: &Arc<ResolvabilityEntry>| {
                 live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
             },
+            // post_publish — fires once on the cold winner's thread,
+            // AFTER `entries.insert` AND a successful
+            // `revalidate_after_compute`. The live-counter bump rides
+            // here so it is paired with the published map entry.
+            move |_entry_arc: &Arc<ResolvabilityEntry>, _key: &ResolvabilityKey| {
+                live_counter_for_publish.fetch_add(1, Ordering::Relaxed);
+            },
+            // No retention budget on this cache shape — no publish fence.
+            None,
         )
     }
 
@@ -811,8 +850,11 @@ impl OwnerCollectionDb {
         F: FnOnce() -> Option<(Option<TypeExpr>, Arc<[FactVersionRef]>)>,
     {
         let owner_canonical = key.0.clone();
-        let live_counter = Arc::clone(&self.live_counter);
-        // Removal-side counterpart of the `compute`-closure increment —
+        // Publish-side counterpart: the live counter is bumped in the
+        // winner-only `post_publish` callback, NOT in `compute` — see
+        // `DeclarationLookupDb::get_or_compute` for the leak rationale.
+        let live_counter_for_publish = Arc::clone(&self.live_counter);
+        // Removal-side counterpart of the `post_publish` increment —
         // decrements when the substrate removes an already-published
         // entry so the live counter tracks live entries.
         let live_counter_for_removal = Arc::clone(&self.live_counter);
@@ -825,7 +867,7 @@ impl OwnerCollectionDb {
         // dispatches any work — see `DeclarationLookupDb::get_or_compute`
         // for the project-generation staleness rationale.
         let generation_snapshot = ctx.project_type_store().current_project_generation();
-        cooperative_get_or_insert(
+        cooperative_get_or_insert_with_post_publish(
             &self.entries,
             &self.inflight,
             key.clone(),
@@ -845,14 +887,11 @@ impl OwnerCollectionDb {
                 }
             },
             move || {
-                compute().map(|(value, fact_dep_signature)| {
-                    live_counter.fetch_add(1, Ordering::Relaxed);
-                    OwnerCollectionEntry {
-                        owner_canonical,
-                        value: value.map(Arc::new),
-                        fact_dep_signature,
-                        validated_at_generation: generation_snapshot,
-                    }
+                compute().map(|(value, fact_dep_signature)| OwnerCollectionEntry {
+                    owner_canonical,
+                    value: value.map(Arc::new),
+                    fact_dep_signature,
+                    validated_at_generation: generation_snapshot,
                 })
             },
             |entry: &OwnerCollectionEntry| {
@@ -871,6 +910,15 @@ impl OwnerCollectionDb {
             move |_key: &OwnerCollectionKey, _entry: &Arc<OwnerCollectionEntry>| {
                 live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
             },
+            // post_publish — fires once on the cold winner's thread,
+            // AFTER `entries.insert` AND a successful
+            // `revalidate_after_compute`. The live-counter bump rides
+            // here so it is paired with the published map entry.
+            move |_entry_arc: &Arc<OwnerCollectionEntry>, _key: &OwnerCollectionKey| {
+                live_counter_for_publish.fetch_add(1, Ordering::Relaxed);
+            },
+            // No retention budget on this cache shape — no publish fence.
+            None,
         )
     }
 
@@ -1031,13 +1079,16 @@ impl PreparedTargetDb {
             Arc<[Arc<str>]>,
         )>,
     {
-        let live_counter = Arc::clone(&self.live_counter);
-        // Removal-side counterpart of the `compute`-closure increment —
+        // Publish-side counterpart: the live counter is bumped in the
+        // winner-only `post_publish` callback, NOT in `compute` — see
+        // `DeclarationLookupDb::get_or_compute` for the leak rationale.
+        let live_counter_for_publish = Arc::clone(&self.live_counter);
+        // Removal-side counterpart of the `post_publish` increment —
         // decrements when the substrate removes an already-published
         // entry so the live counter tracks live entries. The cooperative
         // substrate runs this on its own warm-hit stale-eviction path,
         // so a lazily-evicted entry decrements `live_counter`
-        // symmetrically with the `compute`-closure increment.
+        // symmetrically with the `post_publish` increment.
         let live_counter_for_removal = Arc::clone(&self.live_counter);
         // The entry's `self_root_canonicals` (active scope + original
         // declaring canonical + final routed declaring canonical)
@@ -1067,14 +1118,13 @@ impl PreparedTargetDb {
         // dispatches any work — see `DeclarationLookupDb::get_or_compute`
         // for the project-generation staleness rationale.
         let generation_snapshot = ctx.project_type_store().current_project_generation();
-        cooperative_get_or_insert(
+        cooperative_get_or_insert_with_post_publish(
             &self.entries,
             &self.inflight,
             key.clone(),
             validate,
             move || {
                 compute().map(|(value, fact_dep_signature, self_root_canonicals)| {
-                    live_counter.fetch_add(1, Ordering::Relaxed);
                     PreparedTargetEntry {
                         value,
                         fact_dep_signature,
@@ -1101,6 +1151,15 @@ impl PreparedTargetDb {
             move |_key: &PreparedTargetCacheKey, _entry: &Arc<PreparedTargetEntry>| {
                 live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
             },
+            // post_publish — fires once on the cold winner's thread,
+            // AFTER `entries.insert` AND a successful
+            // `revalidate_after_compute`. The live-counter bump rides
+            // here so it is paired with the published map entry.
+            move |_entry_arc: &Arc<PreparedTargetEntry>, _key: &PreparedTargetCacheKey| {
+                live_counter_for_publish.fetch_add(1, Ordering::Relaxed);
+            },
+            // No retention budget on this cache shape — no publish fence.
+            None,
         )
     }
 
@@ -1312,8 +1371,11 @@ impl MaterializeMemoDb {
     where
         F: FnOnce() -> Option<(MaterializedTypeExpr, Arc<[FactVersionRef]>)>,
     {
-        let live_counter = Arc::clone(&self.live_counter);
-        // Removal-side counterpart of the `compute`-closure increment —
+        // Publish-side counterpart: the live counter is bumped in the
+        // winner-only `post_publish` callback, NOT in `compute` — see
+        // `DeclarationLookupDb::get_or_compute` for the leak rationale.
+        let live_counter_for_publish = Arc::clone(&self.live_counter);
+        // Removal-side counterpart of the `post_publish` increment —
         // decrements when the substrate removes an already-published
         // entry so the live counter tracks live entries.
         let live_counter_for_removal = Arc::clone(&self.live_counter);
@@ -1324,7 +1386,7 @@ impl MaterializeMemoDb {
         // dispatches any work — see `DeclarationLookupDb::get_or_compute`
         // for the project-generation staleness rationale.
         let generation_snapshot = ctx.project_type_store().current_project_generation();
-        cooperative_get_or_insert(
+        cooperative_get_or_insert_with_post_publish(
             &self.entries,
             &self.inflight,
             key.clone(),
@@ -1344,13 +1406,10 @@ impl MaterializeMemoDb {
                 }
             },
             move || {
-                compute().map(|(value, fact_dep_signature)| {
-                    live_counter.fetch_add(1, Ordering::Relaxed);
-                    MaterializeMemoEntry {
-                        value,
-                        fact_dep_signature,
-                        validated_at_generation: generation_snapshot,
-                    }
+                compute().map(|(value, fact_dep_signature)| MaterializeMemoEntry {
+                    value,
+                    fact_dep_signature,
+                    validated_at_generation: generation_snapshot,
                 })
             },
             |entry: &MaterializeMemoEntry| {
@@ -1369,6 +1428,15 @@ impl MaterializeMemoDb {
             move |_key: &MaterializeMemoKey, _entry: &Arc<MaterializeMemoEntry>| {
                 live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
             },
+            // post_publish — fires once on the cold winner's thread,
+            // AFTER `entries.insert` AND a successful
+            // `revalidate_after_compute`. The live-counter bump rides
+            // here so it is paired with the published map entry.
+            move |_entry_arc: &Arc<MaterializeMemoEntry>, _key: &MaterializeMemoKey| {
+                live_counter_for_publish.fetch_add(1, Ordering::Relaxed);
+            },
+            // No retention budget on this cache shape — no publish fence.
+            None,
         )
     }
 
@@ -1579,8 +1647,11 @@ impl PreparedSurfaceDb {
     where
         F: FnOnce() -> Option<(PreparedSurfacePayload, Arc<[FactVersionRef]>)>,
     {
-        let live_counter = Arc::clone(&self.live_counter);
-        // Removal-side counterpart of the `compute`-closure increment —
+        // Publish-side counterpart: the live counter is bumped in the
+        // winner-only `post_publish` callback, NOT in `compute` — see
+        // `DeclarationLookupDb::get_or_compute` for the leak rationale.
+        let live_counter_for_publish = Arc::clone(&self.live_counter);
+        // Removal-side counterpart of the `post_publish` increment —
         // decrements when the substrate removes an already-published
         // entry so the live counter tracks live entries.
         let live_counter_for_removal = Arc::clone(&self.live_counter);
@@ -1591,7 +1662,7 @@ impl PreparedSurfaceDb {
         // dispatches any work — see `DeclarationLookupDb::get_or_compute`
         // for the project-generation staleness rationale.
         let generation_snapshot = ctx.project_type_store().current_project_generation();
-        cooperative_get_or_insert(
+        cooperative_get_or_insert_with_post_publish(
             &self.entries,
             &self.inflight,
             key.clone(),
@@ -1611,13 +1682,10 @@ impl PreparedSurfaceDb {
                 }
             },
             move || {
-                compute().map(|(value, fact_dep_signature)| {
-                    live_counter.fetch_add(1, Ordering::Relaxed);
-                    PreparedSurfaceEntry {
-                        value,
-                        fact_dep_signature,
-                        validated_at_generation: generation_snapshot,
-                    }
+                compute().map(|(value, fact_dep_signature)| PreparedSurfaceEntry {
+                    value,
+                    fact_dep_signature,
+                    validated_at_generation: generation_snapshot,
                 })
             },
             |entry: &PreparedSurfaceEntry| {
@@ -1636,6 +1704,15 @@ impl PreparedSurfaceDb {
             move |_key: &PreparedSurfaceCacheKey, _entry: &Arc<PreparedSurfaceEntry>| {
                 live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
             },
+            // post_publish — fires once on the cold winner's thread,
+            // AFTER `entries.insert` AND a successful
+            // `revalidate_after_compute`. The live-counter bump rides
+            // here so it is paired with the published map entry.
+            move |_entry_arc: &Arc<PreparedSurfaceEntry>, _key: &PreparedSurfaceCacheKey| {
+                live_counter_for_publish.fetch_add(1, Ordering::Relaxed);
+            },
+            // No retention budget on this cache shape — no publish fence.
+            None,
         )
     }
 
@@ -1826,8 +1903,11 @@ impl PreparedMemberDb {
     where
         F: FnOnce() -> Option<(Option<ProjectedMember>, Arc<[FactVersionRef]>)>,
     {
-        let live_counter = Arc::clone(&self.live_counter);
-        // Removal-side counterpart of the `compute`-closure increment —
+        // Publish-side counterpart: the live counter is bumped in the
+        // winner-only `post_publish` callback, NOT in `compute` — see
+        // `DeclarationLookupDb::get_or_compute` for the leak rationale.
+        let live_counter_for_publish = Arc::clone(&self.live_counter);
+        // Removal-side counterpart of the `post_publish` increment —
         // decrements when the substrate removes an already-published
         // entry so the live counter tracks live entries.
         let live_counter_for_removal = Arc::clone(&self.live_counter);
@@ -1838,7 +1918,7 @@ impl PreparedMemberDb {
         // dispatches any work — see `DeclarationLookupDb::get_or_compute`
         // for the project-generation staleness rationale.
         let generation_snapshot = ctx.project_type_store().current_project_generation();
-        cooperative_get_or_insert(
+        cooperative_get_or_insert_with_post_publish(
             &self.entries,
             &self.inflight,
             key.clone(),
@@ -1858,13 +1938,10 @@ impl PreparedMemberDb {
                 }
             },
             move || {
-                compute().map(|(value, fact_dep_signature)| {
-                    live_counter.fetch_add(1, Ordering::Relaxed);
-                    PreparedMemberEntry {
-                        value: value.map(Arc::new),
-                        fact_dep_signature,
-                        validated_at_generation: generation_snapshot,
-                    }
+                compute().map(|(value, fact_dep_signature)| PreparedMemberEntry {
+                    value: value.map(Arc::new),
+                    fact_dep_signature,
+                    validated_at_generation: generation_snapshot,
                 })
             },
             |entry: &PreparedMemberEntry| {
@@ -1883,6 +1960,15 @@ impl PreparedMemberDb {
             move |_key: &PreparedMemberCacheKey, _entry: &Arc<PreparedMemberEntry>| {
                 live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
             },
+            // post_publish — fires once on the cold winner's thread,
+            // AFTER `entries.insert` AND a successful
+            // `revalidate_after_compute`. The live-counter bump rides
+            // here so it is paired with the published map entry.
+            move |_entry_arc: &Arc<PreparedMemberEntry>, _key: &PreparedMemberCacheKey| {
+                live_counter_for_publish.fetch_add(1, Ordering::Relaxed);
+            },
+            // No retention budget on this cache shape — no publish fence.
+            None,
         )
     }
 
@@ -2060,8 +2146,11 @@ impl RoutedExprSurfaceDb {
     where
         F: FnOnce() -> Option<(TypeExpr, Arc<[FactVersionRef]>)>,
     {
-        let live_counter = Arc::clone(&self.live_counter);
-        // Removal-side counterpart of the `compute`-closure increment —
+        // Publish-side counterpart: the live counter is bumped in the
+        // winner-only `post_publish` callback, NOT in `compute` — see
+        // `DeclarationLookupDb::get_or_compute` for the leak rationale.
+        let live_counter_for_publish = Arc::clone(&self.live_counter);
+        // Removal-side counterpart of the `post_publish` increment —
         // decrements when the substrate removes an already-published
         // entry so the live counter tracks live entries.
         let live_counter_for_removal = Arc::clone(&self.live_counter);
@@ -2072,7 +2161,7 @@ impl RoutedExprSurfaceDb {
         // dispatches any work — see `DeclarationLookupDb::get_or_compute`
         // for the project-generation staleness rationale.
         let generation_snapshot = ctx.project_type_store().current_project_generation();
-        cooperative_get_or_insert(
+        cooperative_get_or_insert_with_post_publish(
             &self.entries,
             &self.inflight,
             key.clone(),
@@ -2092,13 +2181,10 @@ impl RoutedExprSurfaceDb {
                 }
             },
             move || {
-                compute().map(|(value, fact_dep_signature)| {
-                    live_counter.fetch_add(1, Ordering::Relaxed);
-                    RoutedExprSurfaceEntry {
-                        value: Arc::new(value),
-                        fact_dep_signature,
-                        validated_at_generation: generation_snapshot,
-                    }
+                compute().map(|(value, fact_dep_signature)| RoutedExprSurfaceEntry {
+                    value: Arc::new(value),
+                    fact_dep_signature,
+                    validated_at_generation: generation_snapshot,
                 })
             },
             |entry: &RoutedExprSurfaceEntry| {
@@ -2117,6 +2203,15 @@ impl RoutedExprSurfaceDb {
             move |_key: &RoutedExprSurfaceCacheKey, _entry: &Arc<RoutedExprSurfaceEntry>| {
                 live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
             },
+            // post_publish — fires once on the cold winner's thread,
+            // AFTER `entries.insert` AND a successful
+            // `revalidate_after_compute`. The live-counter bump rides
+            // here so it is paired with the published map entry.
+            move |_entry_arc: &Arc<RoutedExprSurfaceEntry>, _key: &RoutedExprSurfaceCacheKey| {
+                live_counter_for_publish.fetch_add(1, Ordering::Relaxed);
+            },
+            // No retention budget on this cache shape — no publish fence.
+            None,
         )
     }
 

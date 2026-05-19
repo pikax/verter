@@ -65,6 +65,7 @@ use std::sync::Arc;
 use verter_semantic::analysis::type_solver::query_engine::ProjectedMember;
 use verter_type_expr::TypeExpr;
 
+use crate::component_meta_caches::PreparedSurfacePayload;
 use crate::fact_signature_helpers::empty_fact_signature;
 use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
 use crate::resolver_core::cache_keys::{
@@ -76,6 +77,7 @@ use crate::resolver_core::{
     FactVersionRef, MaterializeScopeObservation, ResolvedDeclarationKind, ResolvedTypeDeclaration,
     ResolverContext, RouteDemand, StoreView,
 };
+use crate::semantic_query::ProjectionMode;
 use crate::{HostConfig, UpsertRequest, VerterHost};
 
 /// A self-root `FileWholeHash` byte pattern for a planted (untracked)
@@ -6671,5 +6673,545 @@ fn imported_registry_cooperative_generation_reject_cleans_reverse_index() {
         0,
         "the generation-stale entry must be reaped from the entry map and \
          the `ReturnOnly` cold outcome must not republish",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cooperative-admission `live_counter` accounting invariant.
+//
+// The shared `component_meta_cache_live` counter must equal the number of
+// entries actually live in the cache maps on EVERY admission path. The
+// failure mode under test: a cold `cooperative_get_or_insert` compute that
+// fails `revalidate_after_compute` (a project-generation reset landed
+// during the cold window) publishes NO map entry — the substrate marks the
+// slot failed and returns `None` WITHOUT running `removal_cleanup` (nothing
+// was inserted). If the live-counter `fetch_add` happens inside the
+// `compute` closure (before publication), that failed cold compute leaks a
+// permanent `+1` against the shared counter with no backing map entry.
+//
+// The fix moves the `fetch_add` into the substrate's winner-only
+// `post_publish` callback — fired exactly once, AFTER `map.insert` and a
+// successful `revalidate_after_compute`. `post_publish` is structurally
+// unreachable on the revalidation-fail path, so the leak is impossible by
+// construction: an entry contributes `+1` exactly while it is live in the
+// map, paired with the `removal_cleanup` decrement.
+//
+// Each test below drives one of the 8 `cooperative_get_or_insert` engine
+// DBs through its production `get_or_compute`. The `compute` closure bumps
+// the project generation INSIDE itself: `get_or_compute` snapshots the
+// generation as `G` before the cooperative call, the closure advances it
+// to `G+1` and stamps the entry `validated_at_generation: G`, and the
+// substrate's `revalidate_after_compute` then rejects `G == G+1`. The
+// publish is skipped deterministically — no map entry, no `post_publish`.
+// The discriminating assertion: the shared `component_meta_cache_live`
+// counter is UNCHANGED across the failed cold compute. Pre-fix the
+// in-`compute` `fetch_add` leaks `+1` (RED); post-fix the bump rides
+// `post_publish`, which never fires, so the counter holds (GREEN).
+
+/// Read the shared `component_meta_cache_live` counter — the value that
+/// must always equal the number of entries live across every
+/// component-meta cache map.
+fn component_meta_cache_live(host: &VerterHost) -> u64 {
+    host.project_type_store()
+        .counters
+        .component_meta_cache_live
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `DeclarationLookupDb` — a cold `cooperative_get_or_insert` compute
+/// whose `revalidate_after_compute` fails (project-generation reset
+/// mid-compute) must NOT leak the shared `component_meta_cache_live`
+/// counter: the entry is never published, so it must contribute `0`.
+#[test]
+fn declaration_lookup_failed_revalidation_does_not_leak_live_counter() {
+    let host = host_with_unrelated_file();
+    let c = "/live_counter_qdb/declaration_lookup.ts";
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().declaration_db();
+    let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
+
+    let counter_before = component_meta_cache_live(&host);
+    let map_before = db.live_count();
+
+    // Cold compute: advance the project generation INSIDE the closure.
+    // `get_or_compute` snapshotted the generation BEFORE this closure ran,
+    // so the entry is stamped with the now-superseded generation and the
+    // substrate's `revalidate_after_compute` rejects the publish.
+    let outcome = db.get_or_compute(&key, ctx, || {
+        host.project_type_store().bump_project_generation();
+        Some((decl("stale", c), empty_fact_signature()))
+    });
+    assert!(
+        outcome.is_none(),
+        "fixture invariant: the cold compute's `revalidate_after_compute` must \
+         reject the entry (it was stamped with a superseded project generation), \
+         so `get_or_compute` returns `None` and nothing is published",
+    );
+    assert_eq!(
+        db.live_count(),
+        map_before,
+        "fixture invariant: a rejected cold compute publishes NO map entry",
+    );
+    assert_eq!(
+        component_meta_cache_live(&host),
+        counter_before,
+        "LIVE-COUNTER LEAK: `DeclarationLookupDb`'s cold `cooperative_get_or_insert` \
+         compute incremented the shared `component_meta_cache_live` counter, but its \
+         `revalidate_after_compute` then rejected the entry — no map entry was \
+         published and the substrate ran no `removal_cleanup`. The counter is now \
+         permanently overcounted with no backing entry. The live-counter bump must \
+         ride the winner-only `post_publish` callback (fired only after a successful \
+         publish), not the `compute` closure.",
+    );
+}
+
+/// `ResolvabilityDb` — failed-revalidation cold compute must not leak the
+/// shared live counter. See
+/// [`declaration_lookup_failed_revalidation_does_not_leak_live_counter`].
+#[test]
+fn resolvability_failed_revalidation_does_not_leak_live_counter() {
+    let host = host_with_unrelated_file();
+    let c = "/live_counter_qdb/resolvability.ts";
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().resolvable_db();
+    let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
+
+    let counter_before = component_meta_cache_live(&host);
+    let map_before = db.live_count();
+
+    let outcome = db.get_or_compute(&key, ctx, || {
+        host.project_type_store().bump_project_generation();
+        Some((true, empty_fact_signature()))
+    });
+    assert!(
+        outcome.is_none(),
+        "fixture invariant: the cold compute's `revalidate_after_compute` must \
+         reject the entry, so `get_or_compute` returns `None`",
+    );
+    assert_eq!(
+        db.live_count(),
+        map_before,
+        "fixture invariant: a rejected cold compute publishes NO map entry",
+    );
+    assert_eq!(
+        component_meta_cache_live(&host),
+        counter_before,
+        "LIVE-COUNTER LEAK: `ResolvabilityDb`'s cold `cooperative_get_or_insert` \
+         compute leaked the shared `component_meta_cache_live` counter on a \
+         `revalidate_after_compute` rejection. The bump must ride `post_publish`.",
+    );
+}
+
+/// `OwnerCollectionDb` — failed-revalidation cold compute must not leak the
+/// shared live counter. See
+/// [`declaration_lookup_failed_revalidation_does_not_leak_live_counter`].
+#[test]
+fn owner_collection_failed_revalidation_does_not_leak_live_counter() {
+    let host = host_with_unrelated_file();
+    let c = "/live_counter_qdb/owner_collection.ts";
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().owner_collection_db();
+    let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
+
+    let counter_before = component_meta_cache_live(&host);
+    let map_before = db.live_count();
+
+    let outcome = db.get_or_compute(&key, ctx, || {
+        host.project_type_store().bump_project_generation();
+        Some((None, empty_fact_signature()))
+    });
+    assert!(
+        outcome.is_none(),
+        "fixture invariant: the cold compute's `revalidate_after_compute` must \
+         reject the entry, so `get_or_compute` returns `None`",
+    );
+    assert_eq!(
+        db.live_count(),
+        map_before,
+        "fixture invariant: a rejected cold compute publishes NO map entry",
+    );
+    assert_eq!(
+        component_meta_cache_live(&host),
+        counter_before,
+        "LIVE-COUNTER LEAK: `OwnerCollectionDb`'s cold `cooperative_get_or_insert` \
+         compute leaked the shared `component_meta_cache_live` counter on a \
+         `revalidate_after_compute` rejection. The bump must ride `post_publish`.",
+    );
+}
+
+/// `PreparedTargetDb` — failed-revalidation cold compute must not leak the
+/// shared live counter. See
+/// [`declaration_lookup_failed_revalidation_does_not_leak_live_counter`].
+#[test]
+fn prepared_target_failed_revalidation_does_not_leak_live_counter() {
+    let host = host_with_unrelated_file();
+    let c = "/live_counter_qdb/prepared_target.ts";
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().prepared_target_db();
+    let key = PreparedTargetCacheKey {
+        active_scope_canonical_id: Arc::from(c),
+        decl_canonical_id: Arc::from(c),
+        decl_symbol_name: Arc::from("Probe"),
+        requested_name: Arc::from("Probe"),
+    };
+
+    let counter_before = component_meta_cache_live(&host);
+    let map_before = db.live_count();
+
+    let outcome = db.get_or_compute(&key, ctx, || {
+        host.project_type_store().bump_project_generation();
+        Some((None, empty_fact_signature(), empty_self_root_canonicals()))
+    });
+    assert!(
+        outcome.is_none(),
+        "fixture invariant: the cold compute's `revalidate_after_compute` must \
+         reject the entry, so `get_or_compute` returns `None`",
+    );
+    assert_eq!(
+        db.live_count(),
+        map_before,
+        "fixture invariant: a rejected cold compute publishes NO map entry",
+    );
+    assert_eq!(
+        component_meta_cache_live(&host),
+        counter_before,
+        "LIVE-COUNTER LEAK: `PreparedTargetDb`'s cold `cooperative_get_or_insert` \
+         compute leaked the shared `component_meta_cache_live` counter on a \
+         `revalidate_after_compute` rejection. The bump must ride `post_publish`.",
+    );
+}
+
+/// `MaterializeMemoDb` — failed-revalidation cold compute must not leak the
+/// shared live counter. See
+/// [`declaration_lookup_failed_revalidation_does_not_leak_live_counter`].
+#[test]
+fn materialize_memo_failed_revalidation_does_not_leak_live_counter() {
+    let host = host_with_unrelated_file();
+    let c = "/live_counter_qdb/materialize_memo.ts";
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().materialize_memo_db();
+    let key = (
+        Arc::<str>::from(c),
+        Arc::new(TypeExpr::Unknown { raw: String::new() }),
+        ProjectionMode::Shallow,
+    );
+
+    let counter_before = component_meta_cache_live(&host);
+    let map_before = db.live_count();
+
+    let outcome = db.get_or_compute(&key, ctx, || {
+        host.project_type_store().bump_project_generation();
+        Some((
+            MaterializedTypeExpr {
+                node_id: None,
+                type_expr: TypeExpr::Unknown { raw: String::new() },
+                dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+            },
+            empty_fact_signature(),
+        ))
+    });
+    assert!(
+        outcome.is_none(),
+        "fixture invariant: the cold compute's `revalidate_after_compute` must \
+         reject the entry, so `get_or_compute` returns `None`",
+    );
+    assert_eq!(
+        db.live_count(),
+        map_before,
+        "fixture invariant: a rejected cold compute publishes NO map entry",
+    );
+    assert_eq!(
+        component_meta_cache_live(&host),
+        counter_before,
+        "LIVE-COUNTER LEAK: `MaterializeMemoDb`'s cold `cooperative_get_or_insert` \
+         compute leaked the shared `component_meta_cache_live` counter on a \
+         `revalidate_after_compute` rejection. The bump must ride `post_publish`.",
+    );
+}
+
+/// `PreparedSurfaceDb` — failed-revalidation cold compute must not leak the
+/// shared live counter. See
+/// [`declaration_lookup_failed_revalidation_does_not_leak_live_counter`].
+#[test]
+fn prepared_surface_failed_revalidation_does_not_leak_live_counter() {
+    let host = host_with_unrelated_file();
+    let c = "/live_counter_qdb/prepared_surface.ts";
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().prepared_surface_db();
+    let key = PreparedSurfaceCacheKey {
+        canonical_id: Arc::from(c),
+        symbol_name: Arc::from("Probe"),
+        substitutions: PreparedSubstitutionKey::Empty,
+    };
+
+    let counter_before = component_meta_cache_live(&host);
+    let map_before = db.live_count();
+
+    let outcome = db.get_or_compute(&key, ctx, || {
+        host.project_type_store().bump_project_generation();
+        Some((PreparedSurfacePayload::Empty, empty_fact_signature()))
+    });
+    assert!(
+        outcome.is_none(),
+        "fixture invariant: the cold compute's `revalidate_after_compute` must \
+         reject the entry, so `get_or_compute` returns `None`",
+    );
+    assert_eq!(
+        db.live_count(),
+        map_before,
+        "fixture invariant: a rejected cold compute publishes NO map entry",
+    );
+    assert_eq!(
+        component_meta_cache_live(&host),
+        counter_before,
+        "LIVE-COUNTER LEAK: `PreparedSurfaceDb`'s cold `cooperative_get_or_insert` \
+         compute leaked the shared `component_meta_cache_live` counter on a \
+         `revalidate_after_compute` rejection. The bump must ride `post_publish`.",
+    );
+}
+
+/// `PreparedMemberDb` — failed-revalidation cold compute must not leak the
+/// shared live counter. See
+/// [`declaration_lookup_failed_revalidation_does_not_leak_live_counter`].
+#[test]
+fn prepared_member_failed_revalidation_does_not_leak_live_counter() {
+    let host = host_with_unrelated_file();
+    let c = "/live_counter_qdb/prepared_member.ts";
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().prepared_member_db();
+    let key = PreparedMemberCacheKey {
+        canonical_id: Arc::from(c),
+        symbol_name: Arc::from("Probe"),
+        member_name: Arc::from("value"),
+        kind: PreparedMemberCacheKind::Requested,
+        substitutions: PreparedSubstitutionKey::Empty,
+    };
+
+    let counter_before = component_meta_cache_live(&host);
+    let map_before = db.live_count();
+
+    let outcome = db.get_or_compute(&key, ctx, || {
+        host.project_type_store().bump_project_generation();
+        Some((None, empty_fact_signature()))
+    });
+    assert!(
+        outcome.is_none(),
+        "fixture invariant: the cold compute's `revalidate_after_compute` must \
+         reject the entry, so `get_or_compute` returns `None`",
+    );
+    assert_eq!(
+        db.live_count(),
+        map_before,
+        "fixture invariant: a rejected cold compute publishes NO map entry",
+    );
+    assert_eq!(
+        component_meta_cache_live(&host),
+        counter_before,
+        "LIVE-COUNTER LEAK: `PreparedMemberDb`'s cold `cooperative_get_or_insert` \
+         compute leaked the shared `component_meta_cache_live` counter on a \
+         `revalidate_after_compute` rejection. The bump must ride `post_publish`.",
+    );
+}
+
+/// `RoutedExprSurfaceDb` — failed-revalidation cold compute must not leak
+/// the shared live counter. See
+/// [`declaration_lookup_failed_revalidation_does_not_leak_live_counter`].
+#[test]
+fn routed_expr_surface_failed_revalidation_does_not_leak_live_counter() {
+    let host = host_with_unrelated_file();
+    let c = "/live_counter_qdb/routed_expr_surface.ts";
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().routed_expr_surface_db();
+    let key = RoutedExprSurfaceCacheKey {
+        scope_canonical_id: Arc::from(c),
+        root_symbol: Arc::from("Probe"),
+        route: RouteDemand::Whole,
+    };
+
+    let counter_before = component_meta_cache_live(&host);
+    let map_before = db.live_count();
+
+    let outcome = db.get_or_compute(&key, ctx, || {
+        host.project_type_store().bump_project_generation();
+        Some((
+            TypeExpr::Unknown { raw: String::new() },
+            empty_fact_signature(),
+        ))
+    });
+    assert!(
+        outcome.is_none(),
+        "fixture invariant: the cold compute's `revalidate_after_compute` must \
+         reject the entry, so `get_or_compute` returns `None`",
+    );
+    assert_eq!(
+        db.live_count(),
+        map_before,
+        "fixture invariant: a rejected cold compute publishes NO map entry",
+    );
+    assert_eq!(
+        component_meta_cache_live(&host),
+        counter_before,
+        "LIVE-COUNTER LEAK: `RoutedExprSurfaceDb`'s cold `cooperative_get_or_insert` \
+         compute leaked the shared `component_meta_cache_live` counter on a \
+         `revalidate_after_compute` rejection. The bump must ride `post_publish`.",
+    );
+}
+
+/// Class-level invariant: after the 8 `cooperative_get_or_insert` engine
+/// DBs each absorb a failed-revalidation cold compute, the shared
+/// `component_meta_cache_live` counter still equals the TOTAL number of
+/// entries live across every component-meta cache map. This is the
+/// whole-class consistency check — `live_counter == sum of live map
+/// entries` on the failed-revalidation path, for all 8 DBs at once.
+///
+/// Pre-fix every one of the 8 failed computes leaks `+1`, so the counter
+/// ends `8` above the true live total (RED). Post-fix every bump rides
+/// `post_publish` (never fired on the rejection path), so the counter
+/// equals the true total (GREEN).
+#[test]
+fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
+    let host = host_with_unrelated_file();
+    let ctx: &dyn ResolverContext = &host;
+    let store = host.project_type_store();
+
+    // Sum of every component-meta cache map that contributes to the
+    // shared `component_meta_cache_live` counter.
+    let live_map_total = |store: &crate::project_type_store::ProjectTypeStore| -> usize {
+        store.imported_registry_db().live_count()
+            + store.declaration_db().live_count()
+            + store.resolvable_db().live_count()
+            + store.owner_collection_db().live_count()
+            + store.prepared_target_db().live_count()
+            + store.materialize_memo_db().live_count()
+            + store.prepared_surface_db().live_count()
+            + store.prepared_member_db().live_count()
+            + store.routed_expr_surface_db().live_count()
+            + store.materialize_structure_db().live_count()
+            + store.ref_cycle_db().entries().len()
+    };
+
+    // Drive a failed-revalidation cold compute through each of the 8
+    // `cooperative_get_or_insert` engine DBs.
+    let bump = || {
+        host.project_type_store().bump_project_generation();
+    };
+
+    let _ = store.declaration_db().get_or_compute(
+        &(Arc::<str>::from("/lc_total/decl.ts"), Arc::<str>::from("P")),
+        ctx,
+        || {
+            bump();
+            Some((decl("stale", "/lc_total/decl.ts"), empty_fact_signature()))
+        },
+    );
+    let _ = store.resolvable_db().get_or_compute(
+        &(
+            Arc::<str>::from("/lc_total/resolv.ts"),
+            Arc::<str>::from("P"),
+        ),
+        ctx,
+        || {
+            bump();
+            Some((true, empty_fact_signature()))
+        },
+    );
+    let _ = store.owner_collection_db().get_or_compute(
+        &(
+            Arc::<str>::from("/lc_total/owner.ts"),
+            Arc::<str>::from("P"),
+        ),
+        ctx,
+        || {
+            bump();
+            Some((None, empty_fact_signature()))
+        },
+    );
+    let _ = store.prepared_target_db().get_or_compute(
+        &PreparedTargetCacheKey {
+            active_scope_canonical_id: Arc::from("/lc_total/ptarget.ts"),
+            decl_canonical_id: Arc::from("/lc_total/ptarget.ts"),
+            decl_symbol_name: Arc::from("P"),
+            requested_name: Arc::from("P"),
+        },
+        ctx,
+        || {
+            bump();
+            Some((None, empty_fact_signature(), empty_self_root_canonicals()))
+        },
+    );
+    let _ = store.materialize_memo_db().get_or_compute(
+        &(
+            Arc::<str>::from("/lc_total/memo.ts"),
+            Arc::new(TypeExpr::Unknown { raw: String::new() }),
+            ProjectionMode::Shallow,
+        ),
+        ctx,
+        || {
+            bump();
+            Some((
+                MaterializedTypeExpr {
+                    node_id: None,
+                    type_expr: TypeExpr::Unknown { raw: String::new() },
+                    dep_signature: Arc::from(
+                        [] as [(Arc<str>, crate::semantic_query::DepVersion); 0]
+                    ),
+                },
+                empty_fact_signature(),
+            ))
+        },
+    );
+    let _ = store.prepared_surface_db().get_or_compute(
+        &PreparedSurfaceCacheKey {
+            canonical_id: Arc::from("/lc_total/psurface.ts"),
+            symbol_name: Arc::from("P"),
+            substitutions: PreparedSubstitutionKey::Empty,
+        },
+        ctx,
+        || {
+            bump();
+            Some((PreparedSurfacePayload::Empty, empty_fact_signature()))
+        },
+    );
+    let _ = store.prepared_member_db().get_or_compute(
+        &PreparedMemberCacheKey {
+            canonical_id: Arc::from("/lc_total/pmember.ts"),
+            symbol_name: Arc::from("P"),
+            member_name: Arc::from("v"),
+            kind: PreparedMemberCacheKind::Requested,
+            substitutions: PreparedSubstitutionKey::Empty,
+        },
+        ctx,
+        || {
+            bump();
+            Some((None, empty_fact_signature()))
+        },
+    );
+    let _ = store.routed_expr_surface_db().get_or_compute(
+        &RoutedExprSurfaceCacheKey {
+            scope_canonical_id: Arc::from("/lc_total/routed.ts"),
+            root_symbol: Arc::from("P"),
+            route: RouteDemand::Whole,
+        },
+        ctx,
+        || {
+            bump();
+            Some((
+                TypeExpr::Unknown { raw: String::new() },
+                empty_fact_signature(),
+            ))
+        },
+    );
+
+    assert_eq!(
+        component_meta_cache_live(&host) as usize,
+        live_map_total(store),
+        "LIVE-COUNTER CLASS LEAK: after driving a failed-revalidation cold compute \
+         through all 8 `cooperative_get_or_insert` engine DBs, the shared \
+         `component_meta_cache_live` counter no longer equals the total number of \
+         entries live across the component-meta cache maps. Each failed cold compute \
+         that bumped the counter inside its `compute` closure (before the \
+         substrate's `revalidate_after_compute` rejected the publish) leaked `+1`. \
+         The live-counter bump must ride the winner-only `post_publish` callback so \
+         the counter equals the live map total on every admission path.",
     );
 }
