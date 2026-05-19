@@ -50,6 +50,8 @@ mod family;
 mod inflight;
 mod interner;
 mod stats;
+#[cfg(any(test, debug_assertions))]
+mod test_gates;
 
 #[allow(unused_imports)]
 pub use interner::DepSignatureInterner;
@@ -145,22 +147,14 @@ pub struct SemanticGraphStore {
     /// `clear` under its write guard — so a concurrent insert can never
     /// strand a live map entry whose budget admission a project-
     /// generation `clear` then erases.
+    /// The monotonic resolved-named-type reset epoch is owned INSIDE
+    /// [`BudgetedNamedTypeIndex`]: [`Self::invalidate_all`] bumps it under
+    /// the same `retention_gate.write()` that clears the map+budget, and
+    /// the [`Self::insert_resolved_named_type`] fence checks it under the
+    /// same `retention_gate.read()` that performs the insert — so a
+    /// straggler insert is fully ordered against a project-generation
+    /// reset with no window (see `BudgetedNamedTypeIndex`'s docs).
     named_type_index: BudgetedNamedTypeIndex,
-    /// Monotonic reset epoch for the Vue macro resolved-named-type map.
-    ///
-    /// [`Self::invalidate_all`] increments this counter inside the SAME
-    /// `entries`-lock-held critical section that aborts every in-flight
-    /// build and clears `named_type_index` — bump, abort, and clear are
-    /// one atomic step. Every macro-resolution build snapshots the epoch
-    /// when its
-    /// [`HostNamedTypeCacheAdapter`](crate::host_manage::HostNamedTypeCacheAdapter)
-    /// is constructed (a fresh adapter per `build_type_context` call) and
-    /// threads the snapshot into [`Self::insert_resolved_named_type`],
-    /// which rejects an insert whose snapshot no longer matches. This is
-    /// the airtight fence against a straggler insert from a build that
-    /// `bump_project_generation_and_evict` superseded — see
-    /// `insert_resolved_named_type`'s docs for the no-window argument.
-    named_type_generation: std::sync::atomic::AtomicU64,
     /// Relation-engine memo. Maps `(source, target)` semantic-node pairs
     /// to the tri-state
     /// [`RelationResult`](crate::semantic_query::RelationResult) plus the
@@ -320,6 +314,16 @@ pub struct SemanticGraphStore {
     /// process-global. `cfg`-gated to `test` / `debug_assertions`.
     #[cfg(any(test, debug_assertions))]
     publish_post_reverse_index_prune_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+    /// Per-store test-only injection point inside [`Self::invalidate_all`]'s
+    /// in-flight abort loop, fired while iterating the COLLECTED entry
+    /// handles and locking each entry's `state` — with the `inflight`
+    /// table lock NOT held. A race test arms it (via
+    /// [`Self::test_invalidate_all_inflight_abort_gate`]) and asserts
+    /// `inflight.try_lock()` is `Some`, proving the collect-then-release
+    /// lock order that rules out an AB-BA with `InflightPanicGuard::drop`.
+    /// Per-store scoped; `cfg`-gated to `test` / `debug_assertions`.
+    #[cfg(any(test, debug_assertions))]
+    invalidate_all_inflight_abort_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Γ.B reverse index. For each canonical id,
     /// holds the set of `(family, slot)` pairs whose published
     /// dep_signature references it, paired with the dep_signature
@@ -1006,32 +1010,27 @@ impl SemanticGraphStore {
     /// ## Locking — no winner may publish into a cleared `entries`
     ///
     /// The in-flight abort and the `entries` clear are performed under a
-    /// SINGLE `entries`-lock hold: the `entries` lock is acquired, then
-    /// the `inflight` lock is acquired nested inside it, every in-flight
-    /// entry is marked `aborted`, the in-flight table is drained, and
-    /// `entries` is cleared — all before the `entries` lock is released.
-    ///
-    /// This ordering is load-bearing. A cold winner publishes through
-    /// [`Self::warm_publish_one`], which acquires the `entries` lock and
-    /// then re-checks `inflight.state.aborted` under it before writing a
-    /// memo slot. Because this method holds `entries` across BOTH the
-    /// abort and the clear, any winner is strictly one of two cases: it
-    /// acquired `entries` and published BEFORE this method's clear (its
-    /// entry is dropped by the clear), or it acquires `entries` AFTER
-    /// this method releases it — by which point `aborted` is already set
-    /// on its in-flight entry, so its `warm_publish_one` re-check skips
-    /// the publish (and its prefix backfills). There is no window in
-    /// which a winner sees `aborted == false` and publishes a slot the
+    /// SINGLE `entries`-lock hold (the abort loop's lock discipline is
+    /// detailed in the inline comment below). This is load-bearing: a
+    /// cold winner publishes through [`Self::warm_publish_one`], which
+    /// acquires `entries` and re-checks `inflight.state.aborted` under it
+    /// before writing a memo slot. Holding `entries` across BOTH the
+    /// abort and the clear leaves a winner with strictly two cases — it
+    /// published BEFORE the clear (its entry is dropped by the clear), or
+    /// it acquires `entries` AFTER this method releases it, by which
+    /// point `aborted` is set so its `warm_publish_one` re-check skips
+    /// the publish. No window lets a winner publish a slot the
     /// abort/clear then fails to remove.
     ///
     /// The acquisition order `entries → inflight` matches
-    /// [`Self::invalidate_canonical`] and every other multi-lock path —
-    /// no path acquires `inflight` then `entries`, so there is no AB-BA
-    /// cycle. The relation memo and resolved-named-type index each carry
-    /// their own `retention_gate`; their `clear` takes that gate's
+    /// [`Self::invalidate_canonical`] and every other multi-lock path, so
+    /// there is no AB-BA cycle. The abort loop additionally never holds
+    /// the `inflight` table lock while taking a per-entry `state` lock
+    /// (collect-then-release — see the inline comment), so it cannot
+    /// AB-BA against [`InflightPanicGuard`]'s `drop`. The relation memo
+    /// and resolved-named-type index take their own `retention_gate`
     /// write guard independently of `entries` — no path holds `entries`
-    /// across a `retention_gate` acquisition, so the gates add no AB-BA
-    /// cycle to the `entries → inflight` order.
+    /// across a `retention_gate` acquisition.
     pub fn invalidate_all(&self) -> usize {
         let removed: usize = {
             let mut entries = self.entries_lock_diagnosed();
@@ -1046,31 +1045,53 @@ impl SemanticGraphStore {
             // window: a cold winner that acquires `entries` afterwards
             // re-checks `aborted` in `warm_publish_one` and skips. Mirrors
             // the per-canonical abort in `invalidate_canonical`.
-            {
+            //
+            // **Lock order — collect-then-release.** This loop must NOT
+            // hold the `inflight` table lock while it takes each entry's
+            // `state` lock: `InflightPanicGuard::drop` acquires `state`
+            // then the `inflight` table lock, so a loop holding `table`
+            // across the per-entry `state` acquisition would establish
+            // the opposite `table → state` order. Instead: snapshot the
+            // `Arc<InflightEntry>` handles AND drain the table under the
+            // table lock, RELEASE the table lock, THEN lock each entry's
+            // `state`. Global rule: `state` is never taken while the
+            // `inflight` table lock is held — no AB-BA cycle.
+            let aborted_entries: Vec<Arc<InflightEntry>> = {
                 let mut table = self.inflight.lock();
-                for inflight in table.values() {
-                    {
-                        let mut state = inflight.state.lock();
-                        state.aborted = true;
-                        if state.completed.is_none() {
-                            state.completed = Some(QueryResult::Error(QueryError::Other(
-                                Arc::from("aborted by project-generation reset"),
-                            )));
-                            state.dep_signature = Some(empty_signature());
-                        }
-                    }
-                    inflight.ready.notify_all();
-                }
+                let collected: Vec<Arc<InflightEntry>> = table.values().map(Arc::clone).collect();
                 table.clear();
+                collected
+            };
+            // Table lock released — now mark each collected entry
+            // `aborted` and wake its waiters with no table lock held.
+            for inflight in &aborted_entries {
+                {
+                    let mut state = inflight.state.lock();
+                    state.aborted = true;
+                    if state.completed.is_none() {
+                        state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
+                            "aborted by project-generation reset",
+                        ))));
+                        state.dep_signature = Some(empty_signature());
+                    }
+                }
+                inflight.ready.notify_all();
+                // Test-only injection point: parked while iterating the
+                // collected entries and locking per-entry `state` — with
+                // the `inflight` table lock NOT held. A race test arms it
+                // (via `test_invalidate_all_inflight_abort_gate`) and
+                // asserts `inflight.try_lock()` succeeds, proving the
+                // collect-then-release lock order. `None` (production
+                // default) is a no-op.
+                #[cfg(any(test, debug_assertions))]
+                {
+                    let gate = self.invalidate_all_inflight_abort_gate.lock().clone();
+                    if let Some(barrier) = gate {
+                        barrier.wait();
+                        barrier.wait();
+                    }
+                }
             }
-            // Advance the Vue macro resolved-named-type reset epoch in the
-            // SAME `entries`-lock-held step as the in-flight abort above,
-            // so every build this reset aborts is fenced out of
-            // `insert_resolved_named_type` on any straggler insert (see
-            // that method's no-window argument). `Release` pairs with the
-            // `Acquire` load in `named_type_generation`.
-            self.named_type_generation
-                .fetch_add(1, std::sync::atomic::Ordering::Release);
             entries.clear();
             // Drop the family memo's retention ledger UNDER THE SAME
             // `entries`-lock hold as the `entries.clear()` above. The
@@ -1157,15 +1178,18 @@ impl SemanticGraphStore {
         }
         // Drop every other `SemanticNodeId`-keyed semantic cache so no
         // stale id-keyed judgement survives the project-generation bump.
-        // The relation memo and resolved-named-type index each clear their
-        // map and retention budget under their own `retention_gate`
-        // write guard — a concurrent insert is excluded across the
-        // whole map+budget clear, so no insert strands a live entry
-        // whose budget admission this reset would otherwise erase. The
-        // family memo's three-member cluster (`entries`, `memo_budget`,
-        // `canonical_to_entries`) was cleared above under the `entries`
-        // lock.
-        self.named_type_index.clear();
+        // The relation memo and resolved-named-type index each clear
+        // their map and retention budget under their own `retention_gate`
+        // write guard — a concurrent insert is excluded across the whole
+        // map+budget clear. `clear_and_bump_generation` additionally
+        // advances the resolved-named-type reset epoch inside that same
+        // `retention_gate.write()` section, so the epoch bump and the map
+        // clear are one atomic step — a straggler `insert_resolved_named_type`
+        // is fully ordered against it with no window (see that method's
+        // docs). The family memo's three-member cluster (`entries`,
+        // `memo_budget`, `canonical_to_entries`) was cleared above under
+        // the `entries` lock.
+        self.named_type_index.clear_and_bump_generation();
         self.relation_memo.clear();
         self.derivation.lock().clear();
         removed
@@ -1177,11 +1201,12 @@ impl SemanticGraphStore {
     /// [`HostNamedTypeCacheAdapter`](crate::host_manage::HostNamedTypeCacheAdapter)
     /// is constructed and threads the snapshot into
     /// [`Self::insert_resolved_named_type`] so a stale build's insert is
-    /// fenced out. See [`named_type_generation`](Self::named_type_generation).
+    /// fenced out. The epoch counter is owned inside
+    /// [`BudgetedNamedTypeIndex`] so the bump-under-write-guard /
+    /// check-under-read-guard invariant is structural.
     #[must_use]
     pub fn named_type_generation(&self) -> u64 {
-        self.named_type_generation
-            .load(std::sync::atomic::Ordering::Acquire)
+        self.named_type_index.generation()
     }
 
     /// Insert a Vue macro resolution artifact under `key`, fenced by the
@@ -1191,8 +1216,8 @@ impl SemanticGraphStore {
     /// snapshotted when its
     /// [`HostNamedTypeCacheAdapter`](crate::host_manage::HostNamedTypeCacheAdapter)
     /// was constructed. The insert is **rejected** (returns `None`,
-    /// nothing is interned or recorded) when that snapshot no longer
-    /// equals the live epoch. On an accepted insert the payload is
+    /// nothing is recorded in the identity map) when that snapshot no
+    /// longer equals the live epoch. On an accepted insert the payload is
     /// interned as a [`SemanticNodeData::VueMacroElements`] node and the
     /// identity mapping is recorded in
     /// [`named_type_index`](Self::named_type_index); reads via
@@ -1200,60 +1225,55 @@ impl SemanticGraphStore {
     ///
     /// ## The fence has no timing window
     ///
-    /// Every potentially-stale insert comes from a macro-resolution build
-    /// in flight when
-    /// [`ProjectTypeStore::bump_project_generation_and_evict`](crate::project_type_store::ProjectTypeStore::bump_project_generation_and_evict)
-    /// ran; that bump's [`Self::invalidate_all`] increments
-    /// [`named_type_generation`](Self::named_type_generation) atomically
-    /// with the in-flight abort, under the `entries` lock. Exhaustive
-    /// over every build relative to the bump:
+    /// A potentially-stale insert comes from a macro-resolution build
+    /// aborted by
+    /// [`ProjectTypeStore::bump_project_generation_and_evict`](crate::project_type_store::ProjectTypeStore::bump_project_generation_and_evict);
+    /// that bump's [`Self::invalidate_all`] advances the reset epoch via
+    /// [`BudgetedNamedTypeIndex::clear_and_bump_generation`]. The decisive
+    /// epoch check is performed by
+    /// [`BudgetedNamedTypeIndex::insert_if_generation_matches`] UNDER the
+    /// same `retention_gate.read()` guard that performs the map insert,
+    /// while `clear_and_bump_generation` bumps the epoch + clears the map
+    /// under `retention_gate.write()`. `RwLock` read/write mutual
+    /// exclusion fully orders a straggler against the clear+bump: it runs
+    /// wholly before it (inserts; the clear then drops the entry) or
+    /// wholly after it (its in-guard epoch read sees the bumped epoch —
+    /// rejected). There is no interleaving in which a stale entry
+    /// survives — see `insert_if_generation_matches`'s no-window proof.
+    /// The snapshot is frozen at adapter construction, so a build aborted
+    /// by the bump carries the pre-bump epoch however long it straggles.
     ///
-    /// - Started **before** the bump, inserts **after** it: snapshotted
-    ///   the OLD epoch. The snapshot is frozen at construction — it does
-    ///   not advance as the build straggles — so the insert carries the
-    ///   stale epoch and is rejected here *however long the build
-    ///   straggles past its next abort check*. The rejection is decided
-    ///   by a construction-time value, not a race against the bump, so
-    ///   there is no drain window.
-    /// - Started **after** the bump: the increment landed before adapter
-    ///   construction, so it snapshotted the NEW epoch — its inserts
-    ///   match and are accepted (correct: a new-generation build).
-    /// - Started and finished **before** the bump: not stale — it
-    ///   inserted under the old epoch while that epoch was live, and
-    ///   `invalidate_all`'s own map clear drops the entry.
-    ///
-    /// So the comparison admits exactly the current-generation inserts
-    /// and rejects exactly the superseded ones, with no window between.
-    /// This mirrors the substrate's abort fences (`warm_publish_one`
-    /// re-checks `aborted` before publishing) but is stronger here: the
-    /// adapter holds no [`InflightEntry`] handle, so the build's own
-    /// abort flag is unreachable at the insert site — the epoch snapshot
-    /// is the reachable equivalent (`invalidate_all` aborts and bumps the
-    /// epoch together).
-    ///
-    /// The map insert + retention-budget admission run under the
-    /// `BudgetedNamedTypeIndex`'s `retention_gate` read guard, and
-    /// new-key detection is atomic (via the `DashMap::entry` API), so a
-    /// project-generation `clear` cannot interleave its map/budget clears
-    /// with this insert and two writers racing the same key cannot
-    /// double-record the admission.
+    /// The cheap pre-filter below is an optimization only; the in-guard
+    /// check in `insert_if_generation_matches` is the airtight authority.
     pub fn insert_resolved_named_type(
         &self,
         key: HostResolvedNamedTypeKey,
         elements: Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
         observed_named_type_generation: u64,
     ) -> Option<SemanticNodeId> {
-        // Generation fence — reject a straggler insert from a build whose
-        // generation a `bump_project_generation_and_evict` has superseded.
-        // `Acquire` pairs with the `Release` increment in `invalidate_all`,
-        // so a build that observes the bump's effects (an aborted in-flight
-        // entry, a cleared map) also observes the bumped epoch.
+        // Cheap pre-filter — reject the common straggler without interning
+        // a node the in-gate fence would only discard. Optimization only,
+        // NOT the airtight authority (this load is unsynchronised against
+        // a concurrent `clear_and_bump_generation`).
         if observed_named_type_generation != self.named_type_generation() {
             return None;
         }
         let node_id = self.intern_node(SemanticNodeData::VueMacroElements(elements));
-        self.named_type_index.insert(key, node_id);
-        Some(node_id)
+        // Airtight fence: `insert_if_generation_matches` re-reads + compares
+        // the epoch UNDER the same `retention_gate.read()` guard that
+        // performs the map insert, so a concurrent reset's bump+clear
+        // (write guard) is fully ordered against the whole check+insert.
+        // On a rejected straggler the interned `node_id` is left
+        // unreferenced — harmless: the node arena is append-only.
+        if self.named_type_index.insert_if_generation_matches(
+            key,
+            node_id,
+            observed_named_type_generation,
+        ) {
+            Some(node_id)
+        } else {
+            None
+        }
     }
 
     /// Fast-path read of a Vue macro resolution artifact. Walks
@@ -3640,6 +3660,18 @@ impl SemanticGraphStore {
         table.get(key).map_or(0, Arc::strong_count)
     }
 
+    /// Test-only probe: `true` when the `inflight` table `Mutex` can be
+    /// `try_lock`-acquired right now (no thread is holding it). The
+    /// abort-loop lock-order test uses it to assert [`Self::invalidate_all`]
+    /// does not hold the table lock while locking each collected entry's
+    /// `state` (the collect-then-release order).
+    #[cfg(test)]
+    #[doc(hidden)]
+    #[must_use]
+    pub(crate) fn test_inflight_table_is_unlocked(&self) -> bool {
+        self.inflight.try_lock().is_some()
+    }
+
     /// Public test driver: set this store's per-store cold-abort
     /// trigger for the duration of the returned guard so the next
     /// `execute_cooperative` cold-build on **this store**
@@ -3659,173 +3691,6 @@ impl SemanticGraphStore {
         TestForceColdAbortGuard {
             flag: &self.force_cold_abort_sweep,
         }
-    }
-
-    /// Test-only driver: arm the [`Self::invalidate_all`] post-`entries`-
-    /// clear injection point with `barrier`. The next `invalidate_all` on
-    /// **this store** calls `barrier.wait()` right after releasing the
-    /// `entries` lock that performed the in-flight abort + memo clear, so
-    /// a test holding the other `barrier` party can deterministically
-    /// drive a cold winner's `warm_publish_one` against that tail.
-    ///
-    /// The returned guard disarms the gate on drop. Per-store scoped, so
-    /// it cannot park a concurrent unrelated test's `invalidate_all`.
-    /// `cfg`-gated to `test` / `debug_assertions`, mirroring the field.
-    #[cfg(any(test, debug_assertions))]
-    #[doc(hidden)]
-    #[must_use]
-    pub fn test_invalidate_all_post_entries_clear_gate(
-        &self,
-        barrier: Arc<std::sync::Barrier>,
-    ) -> TestInvalidateAllGateGuard<'_> {
-        *self.invalidate_all_post_entries_clear_gate.lock() = Some(barrier);
-        TestInvalidateAllGateGuard {
-            gate: &self.invalidate_all_post_entries_clear_gate,
-        }
-    }
-
-    /// Test-only driver: arm the [`Self::invalidate_all`] pre-`memo_budget`-
-    /// clear injection point with `barrier`. The next `invalidate_all` on
-    /// **this store** calls `barrier.wait()` TWICE right before the
-    /// `memo_budget` clear and — in final-state code — with the `entries`
-    /// lock that performed `entries.clear()` still held, so a test can
-    /// assert (via `entries.try_lock()`) that the `entries` + `memo_budget`
-    /// clears run in one lock domain.
-    ///
-    /// The returned guard disarms the gate on drop. Per-store scoped, so
-    /// it cannot park a concurrent unrelated test's `invalidate_all`.
-    /// `cfg`-gated to `test` / `debug_assertions`, mirroring the field.
-    #[cfg(any(test, debug_assertions))]
-    #[doc(hidden)]
-    #[must_use]
-    pub fn test_invalidate_all_pre_memo_budget_clear_gate(
-        &self,
-        barrier: Arc<std::sync::Barrier>,
-    ) -> TestInvalidateAllGateGuard<'_> {
-        *self.invalidate_all_pre_memo_budget_clear_gate.lock() = Some(barrier);
-        TestInvalidateAllGateGuard {
-            gate: &self.invalidate_all_pre_memo_budget_clear_gate,
-        }
-    }
-
-    /// Test-only driver: arm the warm-slot-publish post-`memo_budget`-
-    /// record injection point with `barrier`. The next publish on **this
-    /// store** that records a fresh family admission calls `barrier.wait()`
-    /// TWICE right after the `memo_budget` admission lands and — in
-    /// final-state code — with the `entries` lock still held, so a test
-    /// can assert (via `entries.try_lock()`) that the `entries` publish
-    /// and the `memo_budget` admission run in one lock domain.
-    ///
-    /// The returned guard disarms the gate on drop. Per-store scoped.
-    /// `cfg`-gated to `test` / `debug_assertions`, mirroring the field.
-    #[cfg(any(test, debug_assertions))]
-    #[doc(hidden)]
-    #[must_use]
-    pub fn test_publish_post_memo_budget_record_gate(
-        &self,
-        barrier: Arc<std::sync::Barrier>,
-    ) -> TestInvalidateAllGateGuard<'_> {
-        *self.publish_post_memo_budget_record_gate.lock() = Some(barrier);
-        TestInvalidateAllGateGuard {
-            gate: &self.publish_post_memo_budget_record_gate,
-        }
-    }
-
-    /// Test-only driver: arm the [`Self::execute_cooperative`] cold-winner
-    /// pre-prefix-backfill injection point with `barrier`. The next
-    /// cold-winner publish on **this store** calls `barrier.wait()` TWICE
-    /// after `warm_publish_one` published the parent and before the
-    /// prefix-backfill loop runs, so a test can run `invalidate_all` in
-    /// that window and assert the winner's backfills are skipped.
-    ///
-    /// The returned guard disarms the gate on drop. Per-store scoped.
-    /// `cfg`-gated to `test` / `debug_assertions`, mirroring the field.
-    #[cfg(any(test, debug_assertions))]
-    #[doc(hidden)]
-    #[must_use]
-    pub fn test_cold_winner_pre_backfill_gate(
-        &self,
-        barrier: Arc<std::sync::Barrier>,
-    ) -> TestInvalidateAllGateGuard<'_> {
-        *self.cold_winner_pre_backfill_gate.lock() = Some(barrier);
-        TestInvalidateAllGateGuard {
-            gate: &self.cold_winner_pre_backfill_gate,
-        }
-    }
-
-    /// Test-only driver: arm the [`Self::invalidate_all`]
-    /// pre-`canonical_to_entries`-clear injection point with `barrier`.
-    /// The next `invalidate_all` on **this store** calls `barrier.wait()`
-    /// TWICE right before the `canonical_to_entries` reverse-index clear
-    /// and — in final-state code — with the `entries` lock that performed
-    /// `entries.clear()` still held, so a test can assert (via
-    /// `entries.try_lock()`) that the reverse-index clear runs in the same
-    /// `entries` lock domain as the `entries` + `memo_budget` clears.
-    ///
-    /// The returned guard disarms the gate on drop. Per-store scoped, so
-    /// it cannot park a concurrent unrelated test's `invalidate_all`.
-    /// `cfg`-gated to `test` / `debug_assertions`, mirroring the field.
-    #[cfg(any(test, debug_assertions))]
-    #[doc(hidden)]
-    #[must_use]
-    pub fn test_invalidate_all_pre_reverse_index_clear_gate(
-        &self,
-        barrier: Arc<std::sync::Barrier>,
-    ) -> TestInvalidateAllGateGuard<'_> {
-        *self.invalidate_all_pre_reverse_index_clear_gate.lock() = Some(barrier);
-        TestInvalidateAllGateGuard {
-            gate: &self.invalidate_all_pre_reverse_index_clear_gate,
-        }
-    }
-
-    /// Test-only driver: arm the
-    /// [`Self::record_family_admission_locked`]
-    /// post-reverse-index-prune injection point with `barrier`. The next
-    /// publish on **this store** that records a fresh family admission
-    /// AND FIFO-evicts at least one budget victim calls `barrier.wait()`
-    /// TWICE right after the evicted victims' `canonical_to_entries`
-    /// reverse-index registrations are pruned and — in final-state code —
-    /// with the `entries` lock still held, so a test can assert (via
-    /// `entries.try_lock()`) that the victim's reverse-index pruning runs
-    /// in the same `entries` lock domain as the victim's `entries`
-    /// removal.
-    ///
-    /// The returned guard disarms the gate on drop. Per-store scoped.
-    /// `cfg`-gated to `test` / `debug_assertions`, mirroring the field.
-    #[cfg(any(test, debug_assertions))]
-    #[doc(hidden)]
-    #[must_use]
-    pub fn test_publish_post_reverse_index_prune_gate(
-        &self,
-        barrier: Arc<std::sync::Barrier>,
-    ) -> TestInvalidateAllGateGuard<'_> {
-        *self.publish_post_reverse_index_prune_gate.lock() = Some(barrier);
-        TestInvalidateAllGateGuard {
-            gate: &self.publish_post_reverse_index_prune_gate,
-        }
-    }
-}
-
-/// RAII guard returned by the per-store test injection-point arming
-/// drivers on [`SemanticGraphStore`] —
-/// [`SemanticGraphStore::test_invalidate_all_post_entries_clear_gate`],
-/// [`SemanticGraphStore::test_invalidate_all_pre_memo_budget_clear_gate`],
-/// [`SemanticGraphStore::test_publish_post_memo_budget_record_gate`],
-/// [`SemanticGraphStore::test_cold_winner_pre_backfill_gate`],
-/// [`SemanticGraphStore::test_invalidate_all_pre_reverse_index_clear_gate`],
-/// and [`SemanticGraphStore::test_publish_post_reverse_index_prune_gate`].
-/// Clears the per-store gate it borrows on drop so a later operation on
-/// the same store does not park on a stale barrier.
-#[cfg(any(test, debug_assertions))]
-#[doc(hidden)]
-pub struct TestInvalidateAllGateGuard<'a> {
-    gate: &'a parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
-}
-
-#[cfg(any(test, debug_assertions))]
-impl Drop for TestInvalidateAllGateGuard<'_> {
-    fn drop(&mut self) {
-        *self.gate.lock() = None;
     }
 }
 

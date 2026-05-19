@@ -329,14 +329,52 @@ pub(crate) struct NamedTypeIndexEntry {
 /// [`HostResolvedNamedTypeKey`] → [`NamedTypeIndexEntry`], bounded by a
 /// FIFO [`GlobalRetentionBudget`].
 ///
-/// Owns the map, the budget, and the lifecycle `retention_gate`. See
-/// the module docs for the map/budget lock-domain invariant.
+/// Owns the map, the budget, the lifecycle `retention_gate`, AND the
+/// resolved-named-type reset epoch (`generation`). See the module docs
+/// for the map/budget lock-domain invariant.
+///
+/// **Reset-epoch / insert atomicity.** A macro-resolution build aborted
+/// by a project-generation reset keeps running until its next abort
+/// check, so it can perform a straggler `insert` after the reset. The
+/// reset epoch fences that straggler out, but the fence only holds if
+/// the epoch check and the map insert are atomic against the epoch bump
+/// and the map clear. This wrapper makes them atomic by serialising all
+/// four under the one `retention_gate`:
+///
+/// - [`Self::clear_and_bump_generation`] takes `retention_gate.write()`
+///   and, under that ONE guard, clears the map, clears the budget, AND
+///   bumps `generation` — bump + clear are one critical section.
+/// - [`Self::insert_if_generation_matches`] takes `retention_gate.read()`
+///   and, under ONE continuously-held read guard, reads the live epoch,
+///   compares it to the caller's frozen snapshot, and — only on a match
+///   — performs the map insert. The read guard is never released between
+///   the check and the insert.
+///
+/// Because `retention_gate` is an `RwLock` (read and write mutually
+/// exclude), a straggler insert (read guard held across check+insert) is
+/// fully ordered against a concurrent clear+bump (write guard held): it
+/// runs entirely before the write section — it inserts, then the clear
+/// empties the map, no survival — or entirely after it — its in-guard
+/// epoch read sees the bumped epoch and the insert is rejected. There is
+/// no interleaving in which a stale entry survives.
 pub(crate) struct BudgetedNamedTypeIndex {
     index: DashMap<HostResolvedNamedTypeKey, NamedTypeIndexEntry>,
     budget: GlobalRetentionBudget<HostResolvedNamedTypeKey>,
-    /// Lifecycle gate. `insert` / `retain_for_canonical` take the read
-    /// guard across the whole map + budget mutation; `clear` takes the
-    /// write guard across the whole map + budget clear.
+    /// Monotonic resolved-named-type reset epoch. Bumped ONLY by
+    /// [`Self::clear_and_bump_generation`], inside the SAME
+    /// `retention_gate.write()` critical section that clears the map and
+    /// the budget. Read by [`Self::generation`] and — co-located with
+    /// the insert under one `retention_gate.read()` guard — by
+    /// [`Self::insert_if_generation_matches`]. Owning the counter inside
+    /// this wrapper makes the "every bump is under the gate write guard,
+    /// every fence read is under the gate read guard" invariant
+    /// structural: a caller cannot bump or fence-check the epoch outside
+    /// the gate.
+    generation: std::sync::atomic::AtomicU64,
+    /// Lifecycle gate. `insert` / `insert_if_generation_matches` /
+    /// `retain_for_canonical` take the read guard across the whole map +
+    /// budget mutation; `clear` / `clear_and_bump_generation` take the
+    /// write guard across the whole map + budget clear (+ epoch bump).
     retention_gate: parking_lot::RwLock<()>,
     /// Write-side consistency-domain lock. `insert` holds it across the
     /// `DashMap::entry` new-vs-replace decision, the `record_admission`,
@@ -371,6 +409,16 @@ pub(crate) struct BudgetedNamedTypeIndex {
     /// admission. See [`Self::test_arm_retain_pre_forget_gate`].
     #[cfg(any(test, debug_assertions))]
     retain_pre_forget_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+    /// Test-only injection point inside
+    /// [`Self::insert_if_generation_matches`], parked AFTER the in-guard
+    /// epoch read + epoch comparison but BEFORE the map insert — with
+    /// the `retention_gate` read guard STILL held. A race test arms it
+    /// to park a straggler insert in that window and run a concurrent
+    /// [`Self::clear_and_bump_generation`]; the test then proves the
+    /// `RwLock` mutual-exclusion fully orders the two, so no stale entry
+    /// survives. See [`Self::test_arm_insert_post_epoch_check_gate`].
+    #[cfg(any(test, debug_assertions))]
+    insert_post_epoch_check_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
 }
 
 impl Default for BudgetedNamedTypeIndex {
@@ -378,6 +426,7 @@ impl Default for BudgetedNamedTypeIndex {
         Self {
             index: DashMap::new(),
             budget: GlobalRetentionBudget::default(),
+            generation: std::sync::atomic::AtomicU64::new(0),
             retention_gate: parking_lot::RwLock::new(()),
             admission_lock: parking_lot::Mutex::new(()),
             #[cfg(any(test, debug_assertions))]
@@ -386,41 +435,98 @@ impl Default for BudgetedNamedTypeIndex {
             insert_post_record_gate: parking_lot::Mutex::new(None),
             #[cfg(any(test, debug_assertions))]
             retain_pre_forget_gate: parking_lot::Mutex::new(None),
+            #[cfg(any(test, debug_assertions))]
+            insert_post_epoch_check_gate: parking_lot::Mutex::new(None),
         }
     }
 }
 
 impl BudgetedNamedTypeIndex {
-    /// Insert the `key → node_id` identity mapping.
+    /// Reset-epoch-fenced insert: record `key → node_id` ONLY when the
+    /// caller's frozen epoch snapshot still equals the live reset epoch.
     ///
-    /// Holds the `retention_gate` read guard across the WHOLE map +
-    /// budget mutation: the map insert, the new-key budget admission,
-    /// and the victim eviction. A concurrent `clear` takes the write
-    /// guard, so it cannot interleave its map clear and budget clear
-    /// with this insert's two-phase update.
+    /// Returns `true` when the entry was inserted, `false` when the
+    /// snapshot is stale (nothing is recorded).
+    ///
+    /// ## Atomic against [`Self::clear_and_bump_generation`] — no window
+    ///
+    /// This method holds ONE `retention_gate.read()` guard across the
+    /// epoch read, the epoch comparison, AND the map insert — it never
+    /// releases the guard between the check and the insert.
+    /// `clear_and_bump_generation` holds `retention_gate.write()` across
+    /// its map clear, budget clear, and epoch bump. `RwLock` read and
+    /// write guards mutually exclude, so a straggler insert and a
+    /// concurrent clear+bump cannot interleave:
+    ///
+    /// - **Straggler acquires the read guard before clear+bump acquires
+    ///   the write guard.** The straggler reads the still-old epoch
+    ///   under its guard, matches, and inserts. clear+bump then blocks
+    ///   until the read guard drops, takes the write guard, and clears
+    ///   the map — the just-inserted entry is dropped. No survival.
+    /// - **clear+bump acquires the write guard before the straggler
+    ///   acquires the read guard.** clear+bump clears the map and bumps
+    ///   the epoch, then releases the write guard. The straggler then
+    ///   takes the read guard, reads the BUMPED epoch, the snapshot no
+    ///   longer matches, and the insert is rejected — nothing recorded.
+    ///
+    /// There is no third case: a reader and a writer can never hold the
+    /// gate simultaneously, so the straggler's check+insert runs wholly
+    /// before or wholly after the clear+bump. In every interleaving the
+    /// stale entry is either cleared or never inserted.
+    pub(crate) fn insert_if_generation_matches(
+        &self,
+        key: HostResolvedNamedTypeKey,
+        node_id: SemanticNodeId,
+        observed_generation: u64,
+    ) -> bool {
+        // ONE continuously-held read guard across the epoch check AND
+        // the map insert. A concurrent `clear_and_bump_generation`
+        // (write guard) is fully ordered against this whole span.
+        let _retention = self.retention_gate.read();
+        // In-guard epoch read — `Acquire` pairs with the `Release` bump
+        // in `clear_and_bump_generation`.
+        if self.generation.load(std::sync::atomic::Ordering::Acquire) != observed_generation {
+            // Snapshot superseded — the bump landed (and the map was
+            // cleared) before this guard was acquired. Reject; record
+            // nothing.
+            return false;
+        }
+        // Test-only injection point: parked AFTER the in-guard epoch
+        // check but BEFORE the map insert, with the `retention_gate`
+        // read guard STILL held. A race test arms it to prove the gate
+        // orders a parked straggler against a concurrent clear+bump.
+        // `None` (the production default) is a no-op.
+        #[cfg(any(test, debug_assertions))]
+        {
+            let gate = self.insert_post_epoch_check_gate.lock().clone();
+            if let Some(barrier) = gate {
+                barrier.wait();
+                barrier.wait();
+            }
+        }
+        self.insert_under_read_guard(key, node_id);
+        true
+    }
+
+    /// Map + budget write step, run by [`Self::insert_if_generation_matches`]
+    /// with the `retention_gate` read guard ALREADY held by the caller.
+    ///
+    /// Takes the `admission_lock` across the `DashMap::entry`
+    /// new-vs-replace decision, the `record_admission`, and the
+    /// returned-victim `remove_if`, so the map mutation and the budget
+    /// mutation are one structurally-serialised write step.
     ///
     /// New-key detection is atomic: the slot is taken through the
     /// `DashMap::entry` API, so the "vacant vs occupied" decision AND
-    /// the slot write happen under one held shard write guard. The
-    /// budget admission is therefore recorded exactly once per distinct
-    /// key even when two writers race the same key — a
-    /// `contains_key`-then-`insert` pair would let both racing writers
-    /// observe "absent" and double-record.
-    ///
-    /// The `admission_lock` is held across the `DashMap::entry`
-    /// decision, the `record_admission`, and the returned-victim
-    /// `remove_if`, so the map mutation and the budget mutation are one
-    /// structurally-serialised write step (see the field docs).
+    /// the slot write happen under one held shard write guard.
     ///
     /// On a same-key replace the entry keeps the PRIOR admission's
     /// `admission_seq` — the FIFO ledger still tracks the original
     /// admission, so the stored seq must stay equal to the ledger record
-    /// it identifies. A fresh seq on a replace would desync the entry
-    /// from its ledger record and leak it past a `forget_seq` removal.
-    pub(crate) fn insert(&self, key: HostResolvedNamedTypeKey, node_id: SemanticNodeId) {
+    /// it identifies.
+    fn insert_under_read_guard(&self, key: HostResolvedNamedTypeKey, node_id: SemanticNodeId) {
         use dashmap::mapref::entry::Entry;
 
-        let _retention = self.retention_gate.read();
         // Single write-side consistency domain — held across the
         // `DashMap::entry` decision, the `record_admission`, and the
         // victim `remove_if`.
@@ -472,6 +578,13 @@ impl BudgetedNamedTypeIndex {
                 barrier.wait();
             }
         }
+    }
+
+    /// Current resolved-named-type reset epoch. A macro-resolution build
+    /// snapshots this when its adapter is constructed and threads the
+    /// snapshot back into [`Self::insert_if_generation_matches`].
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Look up the [`SemanticNodeId`] for `key`. Refcount-only read —
@@ -550,6 +663,11 @@ impl BudgetedNamedTypeIndex {
     /// Holds the `retention_gate` write guard across BOTH the map clear
     /// and the budget clear, so a concurrent `insert` (read guard)
     /// blocks until this clear completes.
+    ///
+    /// Does NOT bump the reset epoch — used by per-canonical eviction
+    /// paths that drop the whole map without superseding a project
+    /// generation. A project-generation reset uses
+    /// [`Self::clear_and_bump_generation`] instead.
     pub(crate) fn clear(&self) {
         let _retention = self.retention_gate.write();
         self.index.clear();
@@ -562,6 +680,40 @@ impl BudgetedNamedTypeIndex {
             }
         }
         self.budget.clear();
+    }
+
+    /// Project-generation reset: drop every entry, drop the budget
+    /// ledger, AND advance the resolved-named-type reset epoch — all
+    /// under ONE `retention_gate.write()` critical section.
+    ///
+    /// Bumping the epoch inside the same write section that clears the
+    /// map is what makes the reset-epoch fence airtight. A straggler
+    /// [`Self::insert_if_generation_matches`] holds `retention_gate.read()`
+    /// across its epoch check + map insert; `RwLock` read/write mutual
+    /// exclusion then orders the straggler wholly before this write
+    /// section (its entry is cleared) or wholly after it (its in-guard
+    /// epoch read sees the bumped epoch and the insert is rejected).
+    /// There is no interleaving in which a stale entry survives — see
+    /// `insert_if_generation_matches`'s no-window argument.
+    ///
+    /// `Release` on the bump pairs with the `Acquire` load in
+    /// `insert_if_generation_matches` / [`Self::generation`].
+    pub(crate) fn clear_and_bump_generation(&self) {
+        let _retention = self.retention_gate.write();
+        self.index.clear();
+        #[cfg(any(test, debug_assertions))]
+        {
+            let gate = self.clear_midpoint_gate.lock().clone();
+            if let Some(barrier) = gate {
+                barrier.wait();
+                barrier.wait();
+            }
+        }
+        self.budget.clear();
+        // Advance the reset epoch under the SAME write guard as the
+        // clears above — bump + clear are one atomic critical section.
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
     }
 
     /// Number of resolved-named-type entries.
@@ -642,6 +794,26 @@ impl BudgetedNamedTypeIndex {
         *self.retain_pre_forget_gate.lock() = Some(barrier);
         BudgetedGateGuard {
             gate: &self.retain_pre_forget_gate,
+        }
+    }
+
+    /// Test-only driver: arm the [`Self::insert_if_generation_matches`]
+    /// injection point. The next `insert_if_generation_matches` on this
+    /// index calls `barrier.wait()` twice AFTER its in-guard epoch check
+    /// passes but BEFORE its map insert (read guard held). A race test
+    /// uses this to park a straggler insert between its epoch check and
+    /// its map insert and prove a concurrent `clear_and_bump_generation`
+    /// is fully ordered against the parked straggler.
+    #[cfg(test)]
+    #[doc(hidden)]
+    #[must_use]
+    pub(crate) fn test_arm_insert_post_epoch_check_gate(
+        &self,
+        barrier: Arc<std::sync::Barrier>,
+    ) -> BudgetedGateGuard<'_> {
+        *self.insert_post_epoch_check_gate.lock() = Some(barrier);
+        BudgetedGateGuard {
+            gate: &self.insert_post_epoch_check_gate,
         }
     }
 }
@@ -890,23 +1062,28 @@ mod tests {
         }
     }
 
-    /// `insert` records a budget admission exactly once per distinct
-    /// key — the named-type-index counterpart of the relation-memo
-    /// atomic-new-key test. DISCRIMINATES against a `contains_key`-then-
-    /// `insert` shape.
+    /// `insert_if_generation_matches` records a budget admission exactly
+    /// once per distinct key — the named-type-index counterpart of the
+    /// relation-memo atomic-new-key test. DISCRIMINATES against a
+    /// `contains_key`-then-`insert` shape.
     #[test]
     fn named_type_index_insert_records_admission_once_per_key() {
         let index = BudgetedNamedTypeIndex::default();
+        let g = index.generation();
         let key = named_type_key("/w/a.vue", "Props");
-        index.insert(key.clone(), SemanticNodeId(1));
+        assert!(index.insert_if_generation_matches(key.clone(), SemanticNodeId(1), g));
         assert_eq!(index.budget_tracked_len(), 1, "first insert recorded once");
-        index.insert(key, SemanticNodeId(2));
+        assert!(index.insert_if_generation_matches(key, SemanticNodeId(2), g));
         assert_eq!(
             index.budget_tracked_len(),
             1,
             "re-insert of the same key must NOT record a second admission",
         );
-        index.insert(named_type_key("/w/b.vue", "Emits"), SemanticNodeId(3));
+        assert!(index.insert_if_generation_matches(
+            named_type_key("/w/b.vue", "Emits"),
+            SemanticNodeId(3),
+            g,
+        ));
         assert_eq!(index.budget_tracked_len(), 2, "distinct key recorded");
     }
 
@@ -921,7 +1098,12 @@ mod tests {
     #[test]
     fn named_type_index_inflight_clear_engages_gate_against_insert() {
         let index = StdArc::new(BudgetedNamedTypeIndex::default());
-        index.insert(named_type_key("/w/a.vue", "Props"), SemanticNodeId(1));
+        let g = index.generation();
+        index.insert_if_generation_matches(
+            named_type_key("/w/a.vue", "Props"),
+            SemanticNodeId(1),
+            g,
+        );
 
         let clear_parked = StdArc::new(Barrier::new(2));
         let _guard = index.test_arm_clear_midpoint_gate(StdArc::clone(&clear_parked));
@@ -958,7 +1140,10 @@ mod tests {
 
         let index_insert = StdArc::clone(&index);
         let key = named_type_key("/w/c.vue", "Model");
-        let inserter = thread::spawn(move || index_insert.insert(key, SemanticNodeId(9)));
+        let g = index.generation();
+        let inserter = thread::spawn(move || {
+            index_insert.insert_if_generation_matches(key, SemanticNodeId(9), g)
+        });
 
         insert_parked.wait();
         assert!(
@@ -1015,9 +1200,10 @@ mod tests {
     fn named_type_index_retain_for_canonical_serialises_concurrent_insert() {
         let index = StdArc::new(BudgetedNamedTypeIndex::default());
         let key = named_type_key("/w/a.vue", "Props");
+        let g = index.generation();
 
         // Seed the stale entry the retain pass will remove.
-        index.insert(key.clone(), SemanticNodeId(1));
+        index.insert_if_generation_matches(key.clone(), SemanticNodeId(1), g);
         assert_eq!(index.len(), 1);
         assert_eq!(index.budget_tracked_len(), 1, "stale entry admitted");
 
@@ -1057,7 +1243,9 @@ mod tests {
         drop(guard);
         let index_insert = StdArc::clone(&index);
         let key_insert = key.clone();
-        let inserter = thread::spawn(move || index_insert.insert(key_insert, SemanticNodeId(2)));
+        let inserter = thread::spawn(move || {
+            index_insert.insert_if_generation_matches(key_insert, SemanticNodeId(2), g)
+        });
 
         // Release the retain pass — it runs its budget `forget_seq`,
         // drops `admission_lock`; the blocked `insert` then proceeds.
@@ -1085,5 +1273,159 @@ mod tests {
             Some(SemanticNodeId(2)),
             "the surviving entry is the re-admitted one",
         );
+    }
+
+    /// RESET-EPOCH FENCE ATOMICITY (named-type index) — a straggler
+    /// `insert_if_generation_matches` must hold the `retention_gate` read
+    /// guard CONTINUOUSLY across its in-guard epoch check AND its map
+    /// insert, so the check+insert is one critical section atomic against
+    /// a concurrent `clear_and_bump_generation`'s write-guarded map clear
+    /// + epoch bump.
+    ///
+    /// A macro-resolution build aborted by a project-generation reset can
+    /// straggle and perform a late `insert_if_generation_matches`. The
+    /// epoch fence rejects it ONLY if the epoch read and the map insert
+    /// are atomic against the bump+clear; a non-atomic check-then-insert
+    /// (read guard released between the check and the insert) lets the
+    /// straggler pass the check, lose the race to `clear_and_bump_generation`,
+    /// and then land its stale entry AFTER the clear — the entry survives
+    /// the reset.
+    ///
+    /// Deterministic. The straggler is parked, via the
+    /// `insert_post_epoch_check_gate` injection point, AFTER its in-guard
+    /// epoch check passes but BEFORE its map insert.
+    ///
+    /// DISCRIMINATES on the atomicity. With the parked straggler still
+    /// holding ONE continuously-held `retention_gate.read()` guard across
+    /// check+insert, `test_retention_gate().try_write()` returns `None` —
+    /// a `clear_and_bump_generation` reaching `retention_gate.write()`
+    /// right now WOULD block. Were the check and the insert two
+    /// separately-guarded sections (read guard released between them),
+    /// the parked straggler would hold NO guard, `try_write()` would
+    /// succeed (`Some`), and the assertion FAILS — the exact non-atomic
+    /// shape the fence forbids. The test then runs a real
+    /// `clear_and_bump_generation` concurrently and proves the straggler's
+    /// entry does NOT survive the reset and the next stale-snapshot
+    /// insert is rejected.
+    #[test]
+    fn named_type_index_insert_epoch_check_atomic_against_clear_bump() {
+        let index = StdArc::new(BudgetedNamedTypeIndex::default());
+        // The straggler's frozen epoch snapshot — the live (pre-reset)
+        // epoch, exactly what a macro-resolution build records.
+        let straggler_epoch = index.generation();
+        let key = named_type_key("/w/aborted.vue", "Props");
+
+        // Park `insert_if_generation_matches` AFTER its in-guard epoch
+        // check passes but BEFORE its map insert — `retention_gate` read
+        // guard still held.
+        let straggler_parked = StdArc::new(Barrier::new(2));
+        let gate_guard =
+            index.test_arm_insert_post_epoch_check_gate(StdArc::clone(&straggler_parked));
+
+        let index_straggler = StdArc::clone(&index);
+        let key_straggler = key.clone();
+        let straggler = thread::spawn(move || {
+            index_straggler.insert_if_generation_matches(
+                key_straggler,
+                SemanticNodeId(1),
+                straggler_epoch,
+            )
+        });
+
+        // The straggler has passed its in-guard epoch check and parked,
+        // still holding the `retention_gate` read guard.
+        straggler_parked.wait();
+
+        // THE DISCRIMINATOR — the parked straggler holds ONE
+        // continuously-held read guard across its epoch check AND its map
+        // insert, so a concurrent `clear_and_bump_generation`'s
+        // `retention_gate.write()` would block right now.
+        assert!(
+            index.test_retention_gate().try_write().is_none(),
+            "RESET-EPOCH FENCE NON-ATOMIC: a straggler parked between its \
+             in-guard epoch check and its map insert does NOT hold the \
+             `retention_gate` read guard — the check and the insert are \
+             two separately-guarded sections, so a concurrent \
+             `clear_and_bump_generation` can interleave its map clear + \
+             epoch bump between them and the straggler's stale entry \
+             survives the reset. `insert_if_generation_matches` must hold \
+             ONE continuously-held `retention_gate.read()` guard across \
+             the epoch check AND the map insert.",
+        );
+
+        // Run a real project-generation reset (`clear_and_bump_generation`)
+        // on a second thread. It must take `retention_gate.write()` — it
+        // blocks behind the straggler's still-held read guard.
+        let index_reset = StdArc::clone(&index);
+        let resetter = thread::spawn(move || index_reset.clear_and_bump_generation());
+
+        // Release the straggler: it completes its map insert under the
+        // read guard it still holds, then drops the guard. Only THEN can
+        // `clear_and_bump_generation` take the write guard and clear the
+        // map — dropping the just-inserted entry.
+        straggler_parked.wait();
+
+        let straggler_inserted = straggler.join().expect("straggler thread");
+        resetter.join().expect("resetter thread");
+        // Disarm the injection point — the straggler has finished; the
+        // stale-snapshot insert below rejects at the epoch check before
+        // the gate, but disarm anyway so nothing can park.
+        drop(gate_guard);
+
+        // The straggler's `insert_if_generation_matches` ran under the
+        // still-old epoch (its in-guard read saw the pre-bump value, so
+        // it inserted), but `clear_and_bump_generation`'s subsequent
+        // write-guarded clear dropped that entry. The stale entry does
+        // NOT survive the reset.
+        assert!(
+            straggler_inserted,
+            "the straggler inserted under the still-old epoch (in-guard \
+             read saw the pre-bump value)",
+        );
+        assert_eq!(
+            index.len(),
+            0,
+            "RESET-EPOCH FENCE: the straggler's stale entry must NOT \
+             survive the project-generation reset — `clear_and_bump_generation`'s \
+             write-guarded map clear, fully ordered after the straggler's \
+             read-guarded insert, drops it.",
+        );
+        assert_eq!(
+            index.budget_tracked_len(),
+            0,
+            "map and budget both cleared by the reset",
+        );
+        assert_ne!(
+            index.generation(),
+            straggler_epoch,
+            "`clear_and_bump_generation` advanced the reset epoch",
+        );
+
+        // The fence now rejects an insert carrying the superseded
+        // snapshot: the in-guard epoch read sees the bumped epoch.
+        let stale_rejected = index.insert_if_generation_matches(
+            named_type_key("/w/aborted2.vue", "Emits"),
+            SemanticNodeId(2),
+            straggler_epoch,
+        );
+        assert!(
+            !stale_rejected,
+            "an insert carrying the pre-reset epoch snapshot must be \
+             rejected after `clear_and_bump_generation` advanced the epoch",
+        );
+        assert_eq!(index.len(), 0, "the rejected insert recorded nothing");
+
+        // A current-generation insert (fresh snapshot) is still accepted.
+        let fresh = index.insert_if_generation_matches(
+            named_type_key("/w/fresh.vue", "Model"),
+            SemanticNodeId(3),
+            index.generation(),
+        );
+        assert!(
+            fresh,
+            "a current-generation insert (fresh epoch snapshot) is \
+             accepted — the fence rejects only superseded snapshots",
+        );
+        assert_eq!(index.len(), 1, "the fresh insert landed");
     }
 }

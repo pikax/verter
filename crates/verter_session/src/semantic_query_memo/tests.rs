@@ -1607,6 +1607,115 @@ fn invalidate_all_aborts_pending_inflight_and_skips_aborted_publish() {
     );
 }
 
+/// ABORT-LOOP LOCK ORDER — `invalidate_all`'s in-flight abort loop MUST
+/// NOT hold the `inflight` table lock while it takes each entry's
+/// per-entry `state` lock.
+///
+/// `InflightPanicGuard::drop` (the cold-build panic / early-return path)
+/// acquires `state` and THEN the `inflight` table lock. An abort loop
+/// that held the table lock across the per-entry `state` acquisition
+/// would establish the opposite `table → state` order — an AB-BA cycle
+/// with a concurrently-panicking build. The fix is collect-then-release:
+/// snapshot the `Arc<InflightEntry>` handles AND drain the table under
+/// the table lock, RELEASE the table lock, THEN lock each `state`.
+///
+/// Deterministic. A cold winner is parked mid-build so one in-flight
+/// entry is registered. `invalidate_all` is run on a second thread; it
+/// is parked — via the `invalidate_all_inflight_abort_gate` injection
+/// point — while iterating the COLLECTED entries and locking per-entry
+/// `state`. With `invalidate_all` pinned there the test asserts
+/// `test_inflight_table_is_unlocked()` is `true`.
+///
+/// DISCRIMINATES. With the collect-then-release fix the `inflight` table
+/// lock is released before the per-entry `state` loop, so `try_lock`
+/// succeeds and the assertion PASSES. Against the pre-fix loop (table
+/// lock held across the whole `for inflight in table.values()` body and
+/// its nested `state.lock()`), the table lock is still held while the
+/// loop is parked, `try_lock` returns `None`, and the assertion FAILS —
+/// the exact `table → state` nesting that AB-BA-deadlocks against
+/// `InflightPanicGuard::drop`.
+#[test]
+fn invalidate_all_inflight_abort_loop_releases_table_lock_before_state() {
+    use std::sync::Barrier;
+    use std::thread;
+
+    let store = Arc::new(SemanticGraphStore::new());
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope("/w/abortlock.ts"),
+        name: Arc::from("W"),
+    });
+
+    // Park a cold winner mid-build so exactly one in-flight entry is
+    // registered for `invalidate_all`'s abort loop to iterate.
+    let in_build = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let store_w = Arc::clone(&store);
+    let in_build_w = Arc::clone(&in_build);
+    let release_w = Arc::clone(&release);
+    let key_w = key.clone();
+    let winner = thread::spawn(move || {
+        let host = ctx_host();
+        store_w.execute_cooperative(
+            &host,
+            key_w,
+            || store_w.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                in_build_w.wait();
+                release_w.wait();
+                let id = store_w.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+                (QueryResult::Value(id), empty_signature())
+            },
+        )
+    });
+
+    // Winner is parked mid-build with a claimed in-flight entry.
+    in_build.wait();
+    assert_eq!(
+        store.test_inflight_strong_count(&key),
+        WINNER_ONLY_INFLIGHT_REFS,
+        "winner's in-flight entry must be registered before invalidate_all",
+    );
+
+    // Arm the abort-loop injection point and run `invalidate_all` on a
+    // second thread. It collects + drains the in-flight table under the
+    // table lock, RELEASES the table lock, then iterates the collected
+    // entries — parking on this barrier while a per-entry `state` lock is
+    // held.
+    let abort_parked = Arc::new(Barrier::new(2));
+    let _gate = store.test_invalidate_all_inflight_abort_gate(Arc::clone(&abort_parked));
+    let store_inv = Arc::clone(&store);
+    let invalidator = thread::spawn(move || store_inv.invalidate_all());
+
+    // `invalidate_all` is parked inside the per-entry `state`-lock loop.
+    abort_parked.wait();
+
+    // THE DISCRIMINATOR. The `inflight` table lock must already be
+    // released — the loop is iterating COLLECTED handles, not the table.
+    assert!(
+        store.test_inflight_table_is_unlocked(),
+        "ABORT-LOOP LOCK INVERSION: `invalidate_all`'s in-flight abort \
+         loop is holding the `inflight` table lock while it takes a \
+         per-entry `state` lock. `InflightPanicGuard::drop` locks `state` \
+         then the table — holding `table → state` here is an AB-BA cycle \
+         that can deadlock against a cold build panicking during the \
+         reset. The loop must collect the entry handles + drain the table \
+         under the table lock, RELEASE the table lock, THEN lock each \
+         `state`.",
+    );
+
+    // Release `invalidate_all`, then the winner; both must complete.
+    abort_parked.wait();
+    let _ = invalidator.join().expect("invalidator thread");
+    release.wait();
+    let _ = winner.join().expect("winner thread must not panic");
+
+    assert_eq!(
+        store.memo_entry_count(),
+        0,
+        "no memo entry may survive the project-generation reset",
+    );
+}
+
 /// `invalidate_all` TORN-PUBLISH WINDOW — a cold winner that finishes its
 /// build and reaches `warm_publish_one` in the tail of a concurrent
 /// `invalidate_all` MUST NOT strand a memo entry computed against the

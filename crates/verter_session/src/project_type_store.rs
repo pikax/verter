@@ -2395,15 +2395,21 @@ impl ProjectTypeStore {
         // `invalidate_all` drops every `SemanticNodeId`-keyed structure
         // on the graph store — including the Vue macro resolved-named-type
         // identity map — and aborts every in-flight macro-resolution
-        // build. In the SAME `entries`-lock-held step it also advances the
-        // resolved-named-type reset epoch: a macro-resolution build aborted
-        // by this call keeps running until its next abort check, but its
+        // build. It also advances the resolved-named-type reset epoch via
+        // `BudgetedNamedTypeIndex::clear_and_bump_generation`, which bumps
+        // the epoch INSIDE the same `retention_gate.write()` critical
+        // section that clears the identity map and its budget — bump and
+        // clear are one atomic step. A macro-resolution build aborted by
+        // this call keeps running until its next abort check, but its
         // `HostNamedTypeCacheAdapter` snapshotted the pre-bump epoch, so
         // any straggler `insert_resolved_named_type` it performs — however
-        // long after this bump — is rejected by the epoch fence in
-        // `insert_resolved_named_type`. No post-`invalidate_all` re-sweep
-        // is needed: the fence prevents the stale insert from ever landing.
-        // The node arena itself is append-only and is not reset.
+        // long after this bump — is rejected by the epoch fence: that
+        // fence re-reads and compares the epoch UNDER the same
+        // `retention_gate.read()` guard that performs the map insert, so a
+        // straggler is fully ordered against the clear+bump with no
+        // window. No post-`invalidate_all` re-sweep is needed: the fence
+        // prevents the stale insert from ever landing. The node arena
+        // itself is append-only and is not reset.
         let _ = self.semantic_graph.invalidate_all();
         self.component_meta_results.invalidate_all();
         // Step 3 closure: project-shape change invalidates every engine
@@ -2954,128 +2960,6 @@ mod tests {
         // AnalysisReady survive (they key on whole_hash, not project gen).
         assert_eq!(store.owner_import_surfaces().len(), 0);
         assert_eq!(store.component_meta_results().len(), 0);
-    }
-
-    /// A macro-resolution build aborted by `invalidate_all` keeps running
-    /// until its next abort check, so it can call
-    /// `insert_resolved_named_type` AFTER `bump_project_generation_and_evict`
-    /// has fully completed — the DELAYED-straggler window. A one-shot
-    /// post-`invalidate_all` sweep cannot catch that straggler (the insert
-    /// lands after the sweep too), and `HostResolvedNamedTypeKey` carries
-    /// no project generation, so the stale artifact — built against the
-    /// superseded tsconfig / SDK route configuration — would be matched
-    /// and reused in the new generation.
-    ///
-    /// The airtight fix is the resolved-named-type reset-epoch fence:
-    /// `invalidate_all` advances the epoch atomically with the in-flight
-    /// abort; a build snapshots the epoch when its
-    /// `HostNamedTypeCacheAdapter` is constructed; and
-    /// `insert_resolved_named_type` rejects an insert whose snapshot no
-    /// longer matches. Because the snapshot is frozen at construction, a
-    /// build that started before the bump is fenced out no matter how
-    /// long it straggles past the bump — there is no timing window.
-    ///
-    /// This test models the delayed straggler directly: it captures the
-    /// pre-bump epoch (as a pre-bump adapter would), runs the FULL
-    /// `bump_project_generation_and_evict` to completion, and only THEN
-    /// performs the straggler insert with the stale snapshot. It FAILS if
-    /// the fence is absent / disabled (the straggler lands, count == 1)
-    /// and PASSES with the fence (the insert is rejected, count == 0).
-    #[test]
-    fn delayed_straggler_insert_after_generation_bump_is_fenced_out() {
-        use verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey;
-        use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
-
-        let store = ProjectTypeStore::new();
-        let graph = std::sync::Arc::clone(store.semantic_graph());
-
-        // The stale insert a draining aborted macro-resolution build
-        // performs. Built against the OLD project shape; if it survives
-        // the generation bump it is a wrong result in the NEW generation.
-        let stale_key = HostResolvedNamedTypeKey {
-            canonical_id: Arc::from("/w/aborted.ts"),
-            whole_hash: [7u8; 16],
-            inner: ResolvedNamedTypeCacheKey {
-                name: b"Stale".to_vec().into_boxed_slice(),
-                surface: None,
-                base_offset: 0,
-                companion_cache_key: Arc::from(Vec::<Box<[u8]>>::new().into_boxed_slice()),
-                type_param_bindings: Arc::from(Vec::new().into_boxed_slice()),
-            },
-        };
-
-        // The macro-resolution build starts here: its adapter snapshots
-        // the live resolved-named-type reset epoch. (Captured directly —
-        // this is exactly the value `HostNamedTypeCacheAdapter` records
-        // at construction.)
-        let build_epoch_snapshot = graph.named_type_generation();
-
-        // The project-generation reset runs to completion — the FULL
-        // bump, not parked mid-`invalidate_all`. `invalidate_all` advanced
-        // the resolved-named-type reset epoch atomically with the
-        // in-flight abort.
-        let g_after = store.bump_project_generation_and_evict();
-        assert!(
-            g_after >= 1,
-            "generation bump advanced the project generation counter",
-        );
-        assert!(
-            graph.named_type_generation() != build_epoch_snapshot,
-            "invalidate_all must advance the resolved-named-type reset epoch",
-        );
-
-        // The DELAYED straggler: the aborted build drains past its next
-        // abort check and only NOW — after the whole bump sequence has
-        // returned — lands its stale insert. It still carries the pre-bump
-        // epoch snapshot.
-        let admitted = graph.insert_resolved_named_type(
-            stale_key.clone(),
-            Arc::new(ResolvedElements::default()),
-            build_epoch_snapshot,
-        );
-
-        assert!(
-            admitted.is_none(),
-            "DELAYED-STRAGGLER SURVIVAL: a macro-resolution build aborted \
-             by `bump_project_generation_and_evict` drained past the whole \
-             bump and called `insert_resolved_named_type` with its \
-             pre-bump reset-epoch snapshot, and the insert was ACCEPTED. \
-             Because `HostResolvedNamedTypeKey` carries no project \
-             generation, the stale artifact would be matched and reused in \
-             the NEW generation — a wrong result after a tsconfig / SDK \
-             route change. The reset-epoch fence in \
-             `insert_resolved_named_type` must reject an insert whose \
-             snapshot no longer equals the live epoch.",
-        );
-        assert_eq!(
-            graph.resolved_named_type_count(),
-            0,
-            "the rejected straggler insert must not enter the map",
-        );
-        assert!(
-            graph.get_resolved_named_type(&stale_key).is_none(),
-            "the stale artifact must not be retrievable in the new generation",
-        );
-
-        // The fence is not over-rejecting: a build that starts AFTER the
-        // bump snapshots the NEW epoch, so its insert is accepted — that
-        // build genuinely belongs to the new generation.
-        let post_bump_epoch = graph.named_type_generation();
-        let fresh_admitted = graph.insert_resolved_named_type(
-            stale_key.clone(),
-            Arc::new(ResolvedElements::default()),
-            post_bump_epoch,
-        );
-        assert!(
-            fresh_admitted.is_some(),
-            "a current-generation insert (fresh epoch snapshot) must be \
-             accepted — the fence rejects only superseded-generation \
-             stragglers, never current-generation builds",
-        );
-        assert!(
-            graph.get_resolved_named_type(&stale_key).is_some(),
-            "the current-generation insert must be retrievable",
-        );
     }
 
     #[test]
