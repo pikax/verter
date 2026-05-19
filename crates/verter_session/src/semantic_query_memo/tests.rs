@@ -1737,6 +1737,353 @@ fn invalidate_all_closes_torn_publish_window_against_cold_winner() {
     );
 }
 
+/// PREFIX-BACKFILL ABORT FENCE (P1, unit) — `warm_publish_one_if_absent`
+/// MUST re-check the parent winner's in-flight `aborted` flag and skip
+/// the publish when the parent build was aborted.
+///
+/// A parent cold winner accumulates prefix-backfill records, then
+/// publishes them via `warm_publish_one_if_absent`. If a project-
+/// generation reset (`invalidate_all`) aborts the parent build, every
+/// backfill it accumulated was interned against a now-stale
+/// `SemanticNodeId` epoch and MUST NOT enter the warm memo — exactly
+/// the contract `warm_publish_one` already enforces for the parent slot.
+///
+/// This unit test drives the helper directly: it publishes one backfill
+/// through `warm_publish_one_if_absent` under an `aborted` in-flight
+/// entry, then a second through a fresh (non-aborted) one.
+///
+/// DISCRIMINATES: against a `warm_publish_one_if_absent` with no abort
+/// re-check the aborted-parent publish lands an entry and
+/// `memo_entry_count()` is `1` after the aborted call — the assertion
+/// FAILS. With the abort fence the aborted-parent publish is skipped
+/// (count `0`) and the non-aborted publish still lands (count `1`) —
+/// both assertions PASS, proving the fence is precise (skips ONLY the
+/// aborted case, never a healthy one).
+#[test]
+fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
+    let store = SemanticGraphStore::new();
+
+    let aborted_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope("/w/backfill_aborted.ts"),
+        name: Arc::from("Stale"),
+    });
+    let healthy_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope("/w/backfill_healthy.ts"),
+        name: Arc::from("Fresh"),
+    });
+    let node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+
+    // An ABORTED parent in-flight entry — models a project-generation
+    // reset that aborted the parent cold build mid-flight.
+    let aborted_parent = Arc::new(InflightEntry::new());
+    aborted_parent.state.lock().aborted = true;
+    store.warm_publish_one_if_absent(
+        aborted_key.clone(),
+        QueryResult::Value(node),
+        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        Arc::from([]),
+        &aborted_parent,
+    );
+    assert!(
+        store.get_unvalidated(&aborted_key).is_none(),
+        "ABORT-FENCE BUG: `warm_publish_one_if_absent` published a \
+         backfill under an `aborted` parent in-flight entry. An aborted \
+         winner's backfills were interned against a stale id epoch and \
+         must NOT enter the warm memo.",
+    );
+    assert_eq!(
+        store.memo_entry_count(),
+        0,
+        "ABORT-FENCE BUG: a backfill survived an aborted-parent publish",
+    );
+
+    // A fresh (non-aborted) parent — the negative control. The same
+    // call MUST publish; the abort fence is precise, not a blanket
+    // refusal.
+    let healthy_parent = Arc::new(InflightEntry::new());
+    store.warm_publish_one_if_absent(
+        healthy_key.clone(),
+        QueryResult::Value(node),
+        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        Arc::from([]),
+        &healthy_parent,
+    );
+    assert!(
+        store.get_unvalidated(&healthy_key).is_some(),
+        "the abort fence must skip ONLY the aborted parent — a healthy \
+         parent's backfill must still publish",
+    );
+    assert_eq!(
+        store.memo_entry_count(),
+        1,
+        "exactly the one non-aborted backfill is warm",
+    );
+}
+
+/// PREFIX-BACKFILL ABORT FENCE (P1, end-to-end) — a cold winner whose
+/// in-flight entry is aborted AFTER `warm_publish_one` returned `true`
+/// but BEFORE its prefix-backfill loop runs MUST skip ALL its backfills.
+///
+/// The window the `published`-gate alone does not cover: `warm_publish_one`
+/// re-checks `aborted` and publishes the parent (returns `true`); a
+/// project-generation reset then starts and marks the winner's still-
+/// registered in-flight entry `aborted`; the winner's backfill loop runs
+/// next. Each `warm_publish_one_if_absent` call therefore re-checks
+/// `aborted` under the `entries` lock too — so an aborted winner skips
+/// every backfill regardless of when the reset lands.
+///
+/// This test pins the window deterministically with the per-store
+/// cold-winner pre-prefix-backfill injection point: the winner parks
+/// AFTER `warm_publish_one` and BEFORE the backfill loop; `invalidate_all`
+/// runs while it is parked.
+///
+/// DISCRIMINATES: against a `warm_publish_one_if_absent` with no abort
+/// re-check the backfill is published into the just-cleared `entries`
+/// and `memo_entry_count()` is `1` — the assertion FAILS. With the abort
+/// fence the backfill is skipped and the memo stays empty — PASSES.
+#[test]
+fn prefix_backfill_loop_skips_all_backfills_when_winner_aborted_mid_loop() {
+    use crate::project_semantic_dispatch::walk::{PrefixBackfill, QueryBuildOutput};
+    use std::sync::Barrier;
+    use std::thread;
+
+    let store = Arc::new(SemanticGraphStore::new());
+    let parent_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope("/w/backfill_parent.ts"),
+        name: Arc::from("Parent"),
+    });
+    let backfill_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope("/w/backfill_child.ts"),
+        name: Arc::from("Child"),
+    });
+
+    // Park the winner AFTER `warm_publish_one` and BEFORE the backfill
+    // loop. Two `wait()` calls: party-1 rendezvous, then held at party-2.
+    let pre_backfill = Arc::new(Barrier::new(2));
+    let _gate_guard = store.test_cold_winner_pre_backfill_gate(Arc::clone(&pre_backfill));
+
+    let store_w = Arc::clone(&store);
+    let parent_w = parent_key.clone();
+    let backfill_w = backfill_key.clone();
+    let winner = thread::spawn(move || {
+        let host = ctx_host();
+        store_w.execute_cooperative(
+            &host,
+            parent_w,
+            || store_w.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                let parent_node =
+                    store_w.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+                let child_node =
+                    store_w.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                // A build output that carries one pending prefix
+                // backfill — published by the cooperative-admission
+                // flow AFTER `warm_publish_one` lands the parent.
+                QueryBuildOutput {
+                    result: QueryResult::Value(parent_node),
+                    dep_signature: empty_signature(),
+                    walker_diagnostics: Vec::new(),
+                    cache_suppress: false,
+                    observed_self_roots: Vec::new(),
+                    graph_carrier: None,
+                    self_root_canonicals: Arc::from([]),
+                    pending_prefix_backfills: vec![PrefixBackfill {
+                        key: backfill_w,
+                        node: child_node,
+                    }],
+                }
+            },
+        )
+    });
+
+    // The winner has published its parent via `warm_publish_one` and is
+    // now parked at the pre-prefix-backfill injection point.
+    pre_backfill.wait();
+    assert!(
+        store.get_unvalidated(&parent_key).is_some(),
+        "winner must have published its parent entry before parking",
+    );
+
+    // Project-generation reset while the winner is parked: clears
+    // `entries` (dropping the parent) and marks the winner's still-
+    // registered in-flight entry `aborted`.
+    let _ = store.invalidate_all();
+
+    // Release the winner — its prefix-backfill loop now runs. Every
+    // `warm_publish_one_if_absent` call re-checks `aborted` and skips.
+    pre_backfill.wait();
+    let _ = winner.join().expect("winner thread must not panic");
+
+    assert!(
+        store.get_unvalidated(&backfill_key).is_none(),
+        "ABORT-FENCE BUG: a prefix backfill from an aborted winner was \
+         published into the warm memo. The winner was aborted by a \
+         project-generation reset AFTER `warm_publish_one` returned but \
+         BEFORE the backfill loop; `warm_publish_one_if_absent` must \
+         re-check `aborted` and skip.",
+    );
+    assert_eq!(
+        store.memo_entry_count(),
+        0,
+        "ABORT-FENCE BUG: no memo entry — parent or backfill — may \
+         survive a project-generation reset that aborted the winner",
+    );
+}
+
+/// MAP/BUDGET LIFECYCLE FENCE (P2, clear side) — `invalidate_all` MUST
+/// clear the `memo_budget` retention ledger UNDER the `entries` lock
+/// that performed `entries.clear()`, so the two clears are one atomic
+/// step against a concurrent publisher.
+///
+/// Without the fence `invalidate_all` clears `entries` under the lock,
+/// releases it, then clears `memo_budget` separately — a publisher can
+/// land an `entries` family + `memo_budget` admission in that gap, and
+/// the trailing `memo_budget.clear()` then strands a live family with no
+/// ledger record (invisible to FIFO eviction → the retention cap can be
+/// exceeded).
+///
+/// Deterministic. `invalidate_all` is parked, via the pre-`memo_budget`-
+/// clear injection point, right before the `memo_budget` clear. With it
+/// pinned there the test asserts `entries.try_lock()` is `None`: a
+/// publisher reaching `entries_lock_diagnosed()` right now WOULD block.
+///
+/// DISCRIMINATES: against an un-fenced `invalidate_all` (the
+/// `memo_budget` clear runs after the `entries` lock is released)
+/// `try_lock()` succeeds (`Some`) and the assertion FAILS. With the
+/// fence the `memo_budget` clear runs while the `entries` lock is held,
+/// `try_lock()` is `None`, and the assertion PASSES.
+#[test]
+fn invalidate_all_clears_memo_budget_under_entries_lock() {
+    use std::sync::Barrier;
+    use std::thread;
+
+    let store = Arc::new(SemanticGraphStore::new());
+    // Seed one family so `entries` and `memo_budget` are both non-empty.
+    let node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    store.publish_with_carrier_for_tests(
+        SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: scope("/w/seed.ts"),
+            name: Arc::from("Seed"),
+        }),
+        QueryResult::Value(node),
+        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        Arc::from([]),
+    );
+    assert_eq!(store.memo_family_count_for_test(), 1, "seeded one family");
+    assert_eq!(
+        store.memo_budget_tracked_len_for_test(),
+        1,
+        "seed recorded one budget admission",
+    );
+
+    let clear_parked = Arc::new(Barrier::new(2));
+    let _gate_guard =
+        store.test_invalidate_all_pre_memo_budget_clear_gate(Arc::clone(&clear_parked));
+
+    let store_i = Arc::clone(&store);
+    let invalidator = thread::spawn(move || store_i.invalidate_all());
+
+    // `invalidate_all` has cleared `entries` and parked right before the
+    // `memo_budget` clear. With the fence in place the `entries` lock is
+    // STILL held — a concurrent publisher would block.
+    clear_parked.wait();
+    assert!(
+        store.entries.try_lock().is_none(),
+        "MAP/BUDGET DESYNC: `invalidate_all` does NOT hold the `entries` \
+         lock while clearing `memo_budget` — a concurrent publish could \
+         land an `entries` family + `memo_budget` admission between the \
+         `entries` clear and the `memo_budget` clear, stranding a live \
+         family with no ledger record. The `memo_budget` clear must run \
+         under the `entries` lock.",
+    );
+    clear_parked.wait();
+    let _ = invalidator.join().expect("invalidator thread");
+
+    assert_eq!(
+        store.memo_family_count_for_test(),
+        0,
+        "invalidate_all cleared every family",
+    );
+    assert_eq!(
+        store.memo_budget_tracked_len_for_test(),
+        0,
+        "invalidate_all cleared the budget ledger — map and budget consistent",
+    );
+}
+
+/// MAP/BUDGET LIFECYCLE FENCE (P2, publish side) — a warm-slot publish
+/// MUST record the `memo_budget` admission UNDER the `entries` lock that
+/// landed the slot, so the slot landing and the ledger record are one
+/// atomic step against a concurrent `invalidate_all`.
+///
+/// Without the fence the publish lands the `entries` slot under the
+/// lock, releases it, then records `memo_budget` separately — a
+/// concurrent `invalidate_all` can clear both structures in that gap,
+/// and the publish's trailing `memo_budget` record then re-populates the
+/// ledger for an `entries` slot the reset dropped (or, symmetrically,
+/// the reset's `memo_budget.clear()` erases the record for a live slot).
+///
+/// Deterministic. A publisher is parked, via the post-`memo_budget`-
+/// record injection point, right after the `memo_budget` admission
+/// lands. With it pinned there the test asserts `entries.try_lock()` is
+/// `None`: an `invalidate_all` reaching `entries_lock_diagnosed()` right
+/// now WOULD block.
+///
+/// DISCRIMINATES: against an un-fenced publish (the `memo_budget` record
+/// runs after the `entries` lock is released) `try_lock()` succeeds
+/// (`Some`) and the assertion FAILS. With the fence the `memo_budget`
+/// record runs while the `entries` lock is held, `try_lock()` is
+/// `None`, and the assertion PASSES.
+#[test]
+fn warm_publish_records_memo_budget_under_entries_lock() {
+    use std::sync::Barrier;
+    use std::thread;
+
+    let store = Arc::new(SemanticGraphStore::new());
+    let node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+
+    let publish_parked = Arc::new(Barrier::new(2));
+    let _gate_guard = store.test_publish_post_memo_budget_record_gate(Arc::clone(&publish_parked));
+
+    let store_p = Arc::clone(&store);
+    let publisher = thread::spawn(move || {
+        store_p.publish_with_carrier_for_tests(
+            SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                scope: scope("/w/publish.ts"),
+                name: Arc::from("Pub"),
+            }),
+            QueryResult::Value(node),
+            crate::fact_signature_helpers::ReadSetSignature::empty(),
+            Arc::from([]),
+        )
+    });
+
+    // The publisher has landed its `entries` slot and recorded the
+    // `memo_budget` admission, and is parked. With the fence in place
+    // the `entries` lock is STILL held — a concurrent `invalidate_all`
+    // would block.
+    publish_parked.wait();
+    assert!(
+        store.entries.try_lock().is_none(),
+        "MAP/BUDGET DESYNC: a warm-slot publish does NOT hold the \
+         `entries` lock while recording the `memo_budget` admission — a \
+         concurrent `invalidate_all` could clear `entries` + `memo_budget` \
+         between the slot landing and the admission record. The \
+         `memo_budget` admission must be recorded under the `entries` lock.",
+    );
+    publish_parked.wait();
+    let populated = publisher.join().expect("publisher thread");
+    assert_eq!(populated, 1, "the publish landed one slot");
+
+    // Map and budget agree once the publish completes.
+    assert_eq!(store.memo_family_count_for_test(), 1);
+    assert_eq!(
+        store.memo_budget_tracked_len_for_test(),
+        1,
+        "the family has exactly one budget ledger record",
+    );
+}
+
 #[test]
 fn recursive_sentinel_does_not_promote_to_warm_memo() {
     let host = ctx_host();

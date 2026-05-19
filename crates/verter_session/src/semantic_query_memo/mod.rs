@@ -220,6 +220,53 @@ pub struct SemanticGraphStore {
     /// production reset path is unchanged.
     #[cfg(any(test, debug_assertions))]
     invalidate_all_post_entries_clear_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+    /// Per-store test-only injection point inside [`Self::invalidate_all`],
+    /// fired immediately before the `memo_budget` clear — and, in
+    /// final-state code, while the `entries` lock that performed the
+    /// `entries.clear()` is STILL held. A race test arms it (via
+    /// [`Self::test_invalidate_all_pre_memo_budget_clear_gate`]) and, with
+    /// `invalidate_all` parked here, asserts `entries.try_lock()` is
+    /// `None`: the `entries` + `memo_budget` clears run in one lock
+    /// domain, so a concurrent publisher cannot strand a live `entries`
+    /// family with no `memo_budget` ledger record.
+    ///
+    /// **Per-store scope (test hermeticity).** Like
+    /// `invalidate_all_post_entries_clear_gate`, the gate lives on the
+    /// store the test drives, never in a process-global.
+    ///
+    /// `cfg`-gated to `test` / `debug_assertions`; absent from release
+    /// builds, so the production reset path is unchanged.
+    #[cfg(any(test, debug_assertions))]
+    invalidate_all_pre_memo_budget_clear_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+    /// Per-store test-only injection point inside the warm-slot publish
+    /// path ([`Self::warm_publish_one`] / [`Self::warm_publish_one_if_absent`]
+    /// / [`Self::publish_with_carrier_for_tests`]), fired right after the
+    /// family `entries` publish and the `memo_budget` admission land — and,
+    /// in final-state code, while the `entries` lock is STILL held. A race
+    /// test arms it (via [`Self::test_publish_post_memo_budget_record_gate`])
+    /// and, with a publisher parked here, asserts `entries.try_lock()` is
+    /// `None`: the `entries` publish and the `memo_budget` admission run in
+    /// one lock domain, so a concurrent `invalidate_all` cannot erase the
+    /// ledger record for the family this publish just landed.
+    ///
+    /// **Per-store scope (test hermeticity).** Per-store, never a
+    /// process-global. `cfg`-gated to `test` / `debug_assertions`.
+    #[cfg(any(test, debug_assertions))]
+    publish_post_memo_budget_record_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+    /// Per-store test-only injection point inside
+    /// [`Self::execute_cooperative`]'s cold-winner path, fired AFTER
+    /// [`Self::warm_publish_one`] published the parent entry
+    /// (`published == true`) and BEFORE the prefix-backfill loop runs.
+    /// A race test arms it (via [`Self::test_cold_winner_pre_backfill_gate`])
+    /// and, with the winner parked here, runs `invalidate_all` so the
+    /// winner's in-flight entry is marked `aborted`; when the winner is
+    /// released its prefix-backfill loop must skip every backfill (the
+    /// abort fence in `warm_publish_one_if_absent`).
+    ///
+    /// **Per-store scope (test hermeticity).** Per-store, never a
+    /// process-global. `cfg`-gated to `test` / `debug_assertions`.
+    #[cfg(any(test, debug_assertions))]
+    cold_winner_pre_backfill_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Γ.B reverse index. For each canonical id,
     /// holds the set of `(family, slot)` pairs whose published
     /// dep_signature references it, paired with the dep_signature
@@ -249,6 +296,20 @@ pub struct SemanticGraphStore {
     /// no longer triggers — this budget is the routine reclamation:
     /// publishing a newly-keyed family records an admission and the
     /// oldest families past the cap are FIFO-evicted write-side.
+    ///
+    /// **Map/budget lifecycle fence.** The `entries` map and this budget
+    /// are mutated within ONE lock domain — the `entries` `Mutex`. Every
+    /// publish records the family admission while holding the `entries`
+    /// lock that landed the slot; every reset
+    /// ([`Self::invalidate_all`]) and per-canonical drain
+    /// ([`Self::invalidate_canonical`]) mutates this budget while holding
+    /// that same lock. A `clear` therefore cannot interleave with a
+    /// concurrent publish, so the budget never strands a live `entries`
+    /// family with no admission record (which would make the family
+    /// invisible to FIFO eviction and break the cap). The
+    /// `canonical_to_entries` reverse-index work alone runs after the
+    /// `entries` lock is dropped, per the `entries → canonical_to_entries`
+    /// lock order.
     memo_budget: crate::bounded_query_retention::GlobalRetentionBudget<FamilyKey>,
 }
 
@@ -504,6 +565,28 @@ impl SemanticGraphStore {
             .memo_entry_count()
     }
 
+    /// Test-only — number of distinct `FamilyKey`s currently resident in
+    /// the warm `entries` memo. The `memo_budget` retention ledger is
+    /// keyed by family, so the map/budget lifecycle-fence tests compare
+    /// this against [`Self::memo_budget_tracked_len_for_test`].
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn memo_family_count_for_test(&self) -> usize {
+        self.entries.lock().len()
+    }
+
+    /// Test-only — number of admission records currently in the
+    /// `memo_budget` retention ledger. With the map/budget lifecycle
+    /// fence in place this stays consistent with
+    /// [`Self::memo_family_count_for_test`]: every live `entries` family
+    /// has exactly one ledger record, so a desync (a live family with no
+    /// record, invisible to FIFO eviction) is observable as a mismatch.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn memo_budget_tracked_len_for_test(&self) -> usize {
+        self.memo_budget.tracked_len()
+    }
+
     /// Audit-only dump of the warm memo entries, keyed by the
     /// debug-formatted [`FamilyKey`]. Returns one row per populated slot
     /// (a single family with N slot variants populated yields N rows).
@@ -660,7 +743,8 @@ impl SemanticGraphStore {
         // pointed to the same Arc. The surviving entry then had no
         // reverse-index registration for its legacy canonicals and a
         // later `invalidate_canonical` of those canonicals would
-        // miss it, leaving stale warm data. Codex round-3 P2.
+        // miss it, leaving stale warm data. Keying the drain by entry
+        // identity is what makes that drain precise.
         let mut evicted_entries: Vec<(
             (FamilyKey, ModeSlot),
             crate::fact_signature_helpers::ReadSetSignature,
@@ -827,12 +911,18 @@ impl SemanticGraphStore {
     ///   caches. Clearing them on a project-generation bump drops the
     ///   stale judgements those caches hold.
     ///
-    /// Each `SemanticNodeId`-keyed cache has a retention ledger; the
-    /// ledger is cleared in lockstep with the map it bounds so no budget
-    /// retains a key whose entry is gone. For the relation memo and the
-    /// resolved-named-type index the map and its ledger live in one lock
-    /// domain — the wrapper's `clear` holds a `retention_gate` write
-    /// guard across both clears, exclusive against concurrent inserts.
+    /// Each bounded cache has a retention ledger; the ledger is cleared
+    /// in lockstep with the map it bounds so no budget retains a key
+    /// whose entry is gone. The family memo (`entries`) and its
+    /// `memo_budget` ledger live in one lock domain — the `entries`
+    /// `Mutex`: this method clears `memo_budget` while still holding the
+    /// lock that performed `entries.clear()`, and the publish path
+    /// records each admission while holding the `entries` lock that
+    /// landed the slot, so a publish cannot strand a live family with no
+    /// ledger record. For the relation memo and the resolved-named-type
+    /// index the map and its ledger live in one lock domain too — the
+    /// wrapper's `clear` holds a `retention_gate` write guard across both
+    /// clears, exclusive against concurrent inserts.
     ///
     /// ## The node arena is append-only
     ///
@@ -904,6 +994,33 @@ impl SemanticGraphStore {
                 table.clear();
             }
             entries.clear();
+            // Drop the family memo's retention ledger UNDER THE SAME
+            // `entries`-lock hold as the `entries.clear()` above. The
+            // publish path records each `memo_budget` admission while
+            // holding the `entries` lock that landed the slot, so the
+            // map and its budget are mutated within one lock domain. A
+            // concurrent publisher therefore cannot land an `entries`
+            // family + `memo_budget` admission straddling these two
+            // clears — which would otherwise strand a live family with
+            // no ledger record, making it invisible to FIFO eviction.
+            // Test-only injection point: a barrier armed by
+            // `test_invalidate_all_pre_memo_budget_clear_gate` parks
+            // here, before the `memo_budget` clear and with the `entries`
+            // lock still held, so a race test can assert the clear runs
+            // in the `entries` lock domain. `None` (the production
+            // default) is a no-op.
+            #[cfg(any(test, debug_assertions))]
+            {
+                let gate = self
+                    .invalidate_all_pre_memo_budget_clear_gate
+                    .lock()
+                    .clone();
+                if let Some(barrier) = gate {
+                    barrier.wait();
+                    barrier.wait();
+                }
+            }
+            self.memo_budget.clear();
             count
         };
         // Test-only injection point: a barrier armed by
@@ -932,9 +1049,6 @@ impl SemanticGraphStore {
         self.relation_memo.clear();
         self.derivation.lock().clear();
         self.canonical_to_entries.clear();
-        // Drop the family memo's retention ledger in lockstep with the
-        // `entries` clear above so no budget retains a stale family key.
-        self.memo_budget.clear();
         removed
     }
 
@@ -2354,15 +2468,36 @@ impl SemanticGraphStore {
                 &self_root_canonicals,
                 &inflight,
             );
+            // Test-only injection point — parked AFTER `warm_publish_one`
+            // published the parent and BEFORE the prefix-backfill loop,
+            // so a race test can run `invalidate_all` (which marks this
+            // winner's still-registered in-flight entry `aborted`) in the
+            // exact window the `published` gate alone does not cover.
+            // `None` (the production default) is a no-op.
+            #[cfg(any(test, debug_assertions))]
+            {
+                let gate = self.cold_winner_pre_backfill_gate.lock().clone();
+                if let Some(barrier) = gate {
+                    barrier.wait();
+                    barrier.wait();
+                }
+            }
             // Prefix backfill: publish each accumulated backfill
-            // record AFTER the parent entry is warm — but ONLY when the
-            // parent publish was not skipped by an abort. A `false`
-            // return means the TOCTOU re-check saw `aborted == true`
+            // record AFTER the parent entry is warm. The `published`
+            // gate is the first abort check — a `false` return means
+            // `warm_publish_one`'s TOCTOU re-check saw `aborted == true`
             // (a canonical invalidation or a project-generation reset
             // raced this cold build): the build's `SemanticNodeId`s were
             // interned against a now-stale id epoch, so the narrower
             // backfill nodes are equally stale and must NOT enter the
-            // memo. See `invalidate_all`'s serialization docs.
+            // memo. But the gate alone is not sufficient: a reset can
+            // start AFTER `warm_publish_one` returned `true` and before /
+            // during this loop. Each `warm_publish_one_if_absent` call
+            // therefore re-checks `inflight`'s `aborted` flag UNDER the
+            // `entries` lock as well — symmetric with `warm_publish_one`,
+            // so an aborted winner skips ALL its backfills regardless of
+            // when the reset lands. See `invalidate_all`'s serialization
+            // docs and `warm_publish_one_if_absent`'s abort fence.
             if published {
                 for backfill in pending_prefix_backfills {
                     self.warm_publish_one_if_absent(
@@ -2370,6 +2505,7 @@ impl SemanticGraphStore {
                         QueryResult::Value(backfill.node),
                         carrier.clone(),
                         Arc::clone(&self_root_canonicals),
+                        &inflight,
                     );
                 }
             }
@@ -2614,6 +2750,19 @@ impl SemanticGraphStore {
                     .fetch_add(populated_slots.len() as u64, Ordering::Relaxed);
             }
         }
+        // Map/budget lifecycle fence: record the `memo_budget` admission
+        // for a newly-keyed family WHILE the `entries` lock is still
+        // held — so the `entries` slot landing and the ledger record
+        // are one atomic step against a concurrent `invalidate_all`
+        // (which clears `entries` + `memo_budget` under the same lock).
+        // The budget's FIFO victims are removed from the held `entries`
+        // map here too; only their `canonical_to_entries` reverse-index
+        // pruning is deferred to after the lock drop.
+        let budget_evictions = if family_was_new && !populated_slots.is_empty() {
+            self.record_family_admission_locked(&mut entries, &family)
+        } else {
+            Vec::new()
+        };
         // Γ.B reverse-index registration. Carrier-aware: register
         // each populated slot under EVERY canonical the entry's
         // carrier references — the union of the legacy `dep_signature`
@@ -2622,8 +2771,8 @@ impl SemanticGraphStore {
         // order is `entries → canonical_to_entries shards`: drop the
         // entries lock before acquiring any per-canonical mutex. See
         // `register_reverse_index`'s docstring for the carrier
-        // contract — codex P2.B closes the fact-only invalidation
-        // hole this widening covers.
+        // contract — the carrier-aware iteration closes the fact-only
+        // invalidation hole a legacy-rail-only registration left open.
         drop(entries);
         Self::register_reverse_index(
             &self.canonical_to_entries,
@@ -2631,9 +2780,7 @@ impl SemanticGraphStore {
             &populated_slots,
             &read_set_signature,
         );
-        if family_was_new && !populated_slots.is_empty() {
-            self.note_memo_family_admission(&family);
-        }
+        self.prune_evicted_family_reverse_index(&budget_evictions);
         // Published cleanly under a non-aborted in-flight entry — the
         // winner's id epoch is consistent, so the caller may proceed to
         // publish its narrower prefix-backfills.
@@ -2643,8 +2790,7 @@ impl SemanticGraphStore {
     /// Variant of [`Self::warm_publish_one`]: publish
     /// `(key, result, dep_signature)` into the warm map only when no
     /// entry already exists AND no concurrent in-flight build owns the
-    /// key. No TOCTOU re-check (the caller does not own an in-flight
-    /// entry). Used by the prefix-backfill path in
+    /// key. Used by the prefix-backfill path in
     /// [`crate::project_semantic_dispatch`]'s `build_project_path` so
     /// intermediate `(base, path[..k], Navigate)` hops land in the same
     /// warm map and reverse index as cooperative-admission publishes,
@@ -2657,6 +2803,21 @@ impl SemanticGraphStore {
     /// 3. `self.get_unvalidated(&key).is_some()` — slot is already warm.
     /// 4. The in-flight table contains `key` — a cold winner is
     ///    currently building this exact key; let it publish.
+    /// 5. The parent winner's in-flight entry is `aborted` (re-checked
+    ///    under the `entries` lock — see the abort fence below).
+    ///
+    /// **Abort fence.** The caller owns an in-flight entry (the parent
+    /// cold winner whose prefix backfills these are) and passes it as
+    /// `parent_inflight`. This helper re-checks `parent_inflight`'s
+    /// `aborted` flag UNDER the `entries` lock, symmetric with
+    /// [`Self::warm_publish_one`]'s TOCTOU re-check: if a project-
+    /// generation reset ([`Self::invalidate_all`]) or a canonical
+    /// invalidation aborted the parent build, every backfill it
+    /// accumulated was interned against a now-stale id epoch and MUST
+    /// NOT enter the memo. Making the re-check structural here — rather
+    /// than only gating the caller's loop — guarantees a future caller
+    /// of this helper cannot forget it: an aborted winner skips ALL its
+    /// backfills.
     ///
     /// **Carrier contract.** The published `MemoEntry` stores the
     /// caller-supplied [`ReadSetSignature`] verbatim. Prefix-backfill
@@ -2664,18 +2825,15 @@ impl SemanticGraphStore {
     /// rail + path-precise traced facts captured under
     /// `install_fact_tracer`) so the backfilled entry's facts rail
     /// contains the parent's `Parse(...)` / `ResolveImports(...)` /
-    /// `RouteSurface(...)` observations. Pre-fix the caller passed
-    /// only a legacy `DepSignature` and this helper reconstructed
-    /// facts via `fact_signature_from_fence` — that bridge drops
-    /// path-precise facts, leaving a sibling-share short-circuit
-    /// through the prefix unable to validate or bubble those
-    /// dependencies (codex P2.C).
-    pub(crate) fn warm_publish_one_if_absent(
+    /// `RouteSurface(...)` observations — never a fence-only
+    /// reconstruction, which drops path-precise facts.
+    fn warm_publish_one_if_absent(
         &self,
         key: SemanticQueryKey,
         result: QueryResult<SemanticNodeId>,
         read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
+        parent_inflight: &Arc<InflightEntry>,
     ) {
         if !matches!(result, QueryResult::Value(_)) {
             return;
@@ -2706,6 +2864,21 @@ impl SemanticGraphStore {
             walker_diagnostics: Arc::from([]),
         };
         let mut entries = self.entries_lock_diagnosed();
+        // Abort fence — re-check the parent winner's in-flight `aborted`
+        // flag UNDER the `entries` lock, symmetric with
+        // `warm_publish_one`. `invalidate_all` sets `aborted` and clears
+        // `entries` under the SAME `entries` lock; acquiring it here
+        // serialises this backfill publish against that reset. If the
+        // parent was aborted (a project-generation reset or canonical
+        // invalidation raced the parent cold build), the parent's — and
+        // therefore this backfill's — `SemanticNodeId`s were interned
+        // against a now-stale id epoch: skip the publish so no stale
+        // warm slot survives the reset.
+        if parent_inflight.state.lock().aborted {
+            drop(entries);
+            record_cold_abort_swept(&self.stats);
+            return;
+        }
         let family_was_new = !entries.contains_key(&family);
         let populated_slots = entries
             .entry(family.clone())
@@ -2721,6 +2894,13 @@ impl SemanticGraphStore {
                     .fetch_add(populated_slots.len() as u64, Ordering::Relaxed);
             }
         }
+        // Map/budget lifecycle fence — record the `memo_budget`
+        // admission under the held `entries` lock; see `warm_publish_one`.
+        let budget_evictions = if family_was_new && !populated_slots.is_empty() {
+            self.record_family_admission_locked(&mut entries, &family)
+        } else {
+            Vec::new()
+        };
         // Carrier-aware reverse-index registration — see
         // `warm_publish_one` for the full carrier rationale.
         drop(entries);
@@ -2730,9 +2910,7 @@ impl SemanticGraphStore {
             &populated_slots,
             &read_set_signature,
         );
-        if family_was_new && !populated_slots.is_empty() {
-            self.note_memo_family_admission(&family);
-        }
+        self.prune_evicted_family_reverse_index(&budget_evictions);
     }
 
     /// Γ.B reverse-index registration helper. Shared by
@@ -2763,12 +2941,12 @@ impl SemanticGraphStore {
     /// fact for a canonical that the legacy signature does not name
     /// would leave the memo entry orphaned across invalidation.
     ///
-    /// **Why match `MaterializeStructureDb::register_post_publish`.**
-    /// Track 4 introduced the same canonical-ids() iteration for
-    /// `MaterializeStructureDb` and `RefCycleResultDb` so their
-    /// reverse-indexes drain on fact-only invalidation. The memo
-    /// equivalent was missed in the original Block 1.I landing
-    /// (codex P2.B). This helper now matches that pattern.
+    /// **Consistency with `MaterializeStructureDb::register_post_publish`.**
+    /// `MaterializeStructureDb` and `RefCycleResultDb` register their
+    /// reverse indexes over the same `canonical_ids()` iteration so they
+    /// drain on fact-only invalidation; this helper registers the family
+    /// memo's reverse index over the identical iteration, so all three
+    /// reverse indexes drain consistently.
     fn register_reverse_index(
         canonical_to_entries: &CanonicalToEntries,
         family: &FamilyKey,
@@ -2805,11 +2983,102 @@ impl SemanticGraphStore {
     /// Called exactly once per family that newly enters the `entries`
     /// memo (a re-publish into a different slot of an already-present
     /// family does not re-record).
-    fn note_memo_family_admission(&self, family: &FamilyKey) {
+    ///
+    /// **Map/budget lifecycle fence.** The caller passes the `entries`
+    /// guard it is already holding — the `memo_budget` admission is
+    /// recorded, and the FIFO victims are removed from `entries`, WITHIN
+    /// that same lock hold. A concurrent [`Self::invalidate_all`] clears
+    /// `entries` + `memo_budget` under the SAME lock, so the publish's
+    /// `(entries slot, memo_budget record)` pair is atomic against the
+    /// reset's `(entries clear, memo_budget clear)` pair — the budget can
+    /// never strand a live `entries` family with no admission record.
+    ///
+    /// Only the evicted victims' `canonical_to_entries` reverse-index
+    /// registrations cannot be drained here (the `entries →
+    /// canonical_to_entries` lock order forbids taking a shard mutex
+    /// while holding `entries`). Each victim's `(slot, carrier)` pairs
+    /// are returned so the caller drains them via
+    /// [`Self::prune_evicted_family_reverse_index`] AFTER it drops the
+    /// `entries` lock. The injection point armed by
+    /// [`Self::test_publish_post_memo_budget_record_gate`] fires here,
+    /// after the admission lands and with the `entries` lock still held.
+    #[allow(clippy::type_complexity)]
+    fn record_family_admission_locked(
+        &self,
+        entries: &mut FxHashMap<FamilyKey, FamilySlots>,
+        family: &FamilyKey,
+    ) -> Vec<(
+        FamilyKey,
+        ModeSlot,
+        crate::fact_signature_helpers::ReadSetSignature,
+    )> {
+        const ALL_SLOTS: [ModeSlot; 6] = [
+            ModeSlot::Single,
+            ModeSlot::Identity,
+            ModeSlot::Navigate,
+            ModeSlot::Shallow,
+            ModeSlot::Expanded,
+            ModeSlot::Skeleton,
+        ];
         let seq = crate::bounded_query_retention::next_retention_seq();
         let victims = self.memo_budget.record_admission(seq, family.clone());
+        // Test-only injection point — parked after the `memo_budget`
+        // admission lands and with the `entries` lock still held, so a
+        // race test can assert the admission is recorded in the `entries`
+        // lock domain. `None` (the production default) is a no-op.
+        #[cfg(any(test, debug_assertions))]
+        {
+            let gate = self.publish_post_memo_budget_record_gate.lock().clone();
+            if let Some(barrier) = gate {
+                barrier.wait();
+                barrier.wait();
+            }
+        }
+        let mut evicted: Vec<(
+            FamilyKey,
+            ModeSlot,
+            crate::fact_signature_helpers::ReadSetSignature,
+        )> = Vec::new();
         for victim in victims {
-            self.evict_memo_family_for_budget(&victim);
+            // Remove the victim family from the held `entries` map (so
+            // map and budget stay in lockstep) and capture each
+            // populated slot's carrier for the deferred reverse-index
+            // drain.
+            if let Some(slots) = entries.remove(&victim) {
+                for slot in ALL_SLOTS {
+                    if let Some(entry) = slots.slot(slot) {
+                        evicted.push((victim.clone(), slot, entry.read_set_signature.clone()));
+                    }
+                }
+            }
+        }
+        evicted
+    }
+
+    /// Drain the `canonical_to_entries` reverse-index registrations for
+    /// families FIFO-evicted by [`Self::record_family_admission_locked`].
+    ///
+    /// Runs AFTER the caller drops the `entries` lock — the `entries →
+    /// canonical_to_entries` lock order forbids acquiring a per-canonical
+    /// shard mutex while holding `entries`. Each removal also drops the
+    /// outer shard when its inner map becomes empty, so a budget-driven
+    /// eviction wave does not leave empty shards resident.
+    fn prune_evicted_family_reverse_index(
+        &self,
+        evicted: &[(
+            FamilyKey,
+            ModeSlot,
+            crate::fact_signature_helpers::ReadSetSignature,
+        )],
+    ) {
+        for (family, slot, carrier) in evicted {
+            for canonical in carrier.canonical_ids() {
+                Self::prune_reverse_index_registration(
+                    &self.canonical_to_entries,
+                    &canonical,
+                    &(family.clone(), *slot),
+                );
+            }
         }
     }
 
@@ -2852,53 +3121,6 @@ impl SemanticGraphStore {
         canonical_to_entries.remove_if(canonical, |_, mutex| mutex.lock().is_empty());
     }
 
-    /// Remove one whole family chosen by the retention budget for FIFO
-    /// eviction: drop it from the `entries` memo and drain its
-    /// reverse-index registrations under every canonical its carrier
-    /// referenced. Mirrors the per-canonical drain `invalidate_canonical`
-    /// performs for one entry, but keyed by the budget's victim family.
-    fn evict_memo_family_for_budget(&self, victim: &FamilyKey) {
-        const ALL_SLOTS: [ModeSlot; 6] = [
-            ModeSlot::Single,
-            ModeSlot::Identity,
-            ModeSlot::Navigate,
-            ModeSlot::Shallow,
-            ModeSlot::Expanded,
-            ModeSlot::Skeleton,
-        ];
-        // Drop the family from the memo, capturing each populated
-        // slot's carrier so the reverse-index registrations can be
-        // drained.
-        let evicted_carriers: Vec<(ModeSlot, crate::fact_signature_helpers::ReadSetSignature)> = {
-            let mut entries = self.entries_lock_diagnosed();
-            match entries.remove(victim) {
-                Some(slots) => ALL_SLOTS
-                    .iter()
-                    .filter_map(|&slot| {
-                        slots
-                            .slot(slot)
-                            .map(|entry| (slot, entry.read_set_signature.clone()))
-                    })
-                    .collect(),
-                None => return,
-            }
-        };
-        // Lock order: `entries` released above before any
-        // `canonical_to_entries` shard mutex is acquired. Each removal
-        // also drops the outer shard when its inner map becomes empty,
-        // so a budget-driven eviction wave does not leave empty shards
-        // resident.
-        for (slot, carrier) in &evicted_carriers {
-            for canonical in carrier.canonical_ids() {
-                Self::prune_reverse_index_registration(
-                    &self.canonical_to_entries,
-                    &canonical,
-                    &(victim.clone(), *slot),
-                );
-            }
-        }
-    }
-
     /// Test-only accessor: read the entry's full
     /// [`ReadSetSignature`] (both rails) for `key`. Returns `None`
     /// when no entry is present.
@@ -2908,9 +3130,9 @@ impl SemanticGraphStore {
     /// surfaces the path-precise `facts` rail so integration tests
     /// can assert what facts the entry's carrier actually holds.
     /// Used by the `prefix_backfill_carries_traced_facts` discriminator
-    /// (codex P2.C) to assert that a backfilled prefix entry's
-    /// `facts` rail contains the parent's traced `Parse(...)` fact
-    /// rather than a fence-only reconstruction.
+    /// to assert that a backfilled prefix entry's `facts` rail contains
+    /// the parent's traced `Parse(...)` fact rather than a fence-only
+    /// reconstruction.
     #[doc(hidden)]
     #[must_use]
     pub fn entry_read_set_signature_for_tests(
@@ -2935,10 +3157,11 @@ impl SemanticGraphStore {
     /// drive the strict self-root warm-read validator.
     ///
     /// A newly-keyed family records an admission against the
-    /// `memo_budget` (matching `warm_publish_one`'s
-    /// `note_memo_family_admission` call) so a test publishing many
-    /// distinct families drives the same FIFO budget eviction the
-    /// production path does.
+    /// `memo_budget` while holding the `entries` lock (matching
+    /// `warm_publish_one`'s `record_family_admission_locked` call) so a
+    /// test publishing many distinct families drives the same FIFO
+    /// budget eviction — under the same map/budget lifecycle fence — as
+    /// the production path does.
     ///
     /// Returns the number of populated slots after publish (always
     /// ≥1 for a `Value` result on a previously-empty slot).
@@ -2969,6 +3192,13 @@ impl SemanticGraphStore {
             .entry(family.clone())
             .or_default()
             .publish(slot, entry);
+        // Map/budget lifecycle fence — record the `memo_budget`
+        // admission under the held `entries` lock; see `warm_publish_one`.
+        let budget_evictions = if family_was_new && !populated_slots.is_empty() {
+            self.record_family_admission_locked(&mut entries, &family)
+        } else {
+            Vec::new()
+        };
         drop(entries);
         Self::register_reverse_index(
             &self.canonical_to_entries,
@@ -2976,9 +3206,7 @@ impl SemanticGraphStore {
             &populated_slots,
             &read_set_signature,
         );
-        if family_was_new && !populated_slots.is_empty() {
-            self.note_memo_family_admission(&family);
-        }
+        self.prune_evicted_family_reverse_index(&budget_evictions);
         populated_slots.len()
     }
 }
@@ -3263,12 +3491,85 @@ impl SemanticGraphStore {
             gate: &self.invalidate_all_post_entries_clear_gate,
         }
     }
+
+    /// Test-only driver: arm the [`Self::invalidate_all`] pre-`memo_budget`-
+    /// clear injection point with `barrier`. The next `invalidate_all` on
+    /// **this store** calls `barrier.wait()` TWICE right before the
+    /// `memo_budget` clear and — in final-state code — with the `entries`
+    /// lock that performed `entries.clear()` still held, so a test can
+    /// assert (via `entries.try_lock()`) that the `entries` + `memo_budget`
+    /// clears run in one lock domain.
+    ///
+    /// The returned guard disarms the gate on drop. Per-store scoped, so
+    /// it cannot park a concurrent unrelated test's `invalidate_all`.
+    /// `cfg`-gated to `test` / `debug_assertions`, mirroring the field.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_invalidate_all_pre_memo_budget_clear_gate(
+        &self,
+        barrier: Arc<std::sync::Barrier>,
+    ) -> TestInvalidateAllGateGuard<'_> {
+        *self.invalidate_all_pre_memo_budget_clear_gate.lock() = Some(barrier);
+        TestInvalidateAllGateGuard {
+            gate: &self.invalidate_all_pre_memo_budget_clear_gate,
+        }
+    }
+
+    /// Test-only driver: arm the warm-slot-publish post-`memo_budget`-
+    /// record injection point with `barrier`. The next publish on **this
+    /// store** that records a fresh family admission calls `barrier.wait()`
+    /// TWICE right after the `memo_budget` admission lands and — in
+    /// final-state code — with the `entries` lock still held, so a test
+    /// can assert (via `entries.try_lock()`) that the `entries` publish
+    /// and the `memo_budget` admission run in one lock domain.
+    ///
+    /// The returned guard disarms the gate on drop. Per-store scoped.
+    /// `cfg`-gated to `test` / `debug_assertions`, mirroring the field.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_publish_post_memo_budget_record_gate(
+        &self,
+        barrier: Arc<std::sync::Barrier>,
+    ) -> TestInvalidateAllGateGuard<'_> {
+        *self.publish_post_memo_budget_record_gate.lock() = Some(barrier);
+        TestInvalidateAllGateGuard {
+            gate: &self.publish_post_memo_budget_record_gate,
+        }
+    }
+
+    /// Test-only driver: arm the [`Self::execute_cooperative`] cold-winner
+    /// pre-prefix-backfill injection point with `barrier`. The next
+    /// cold-winner publish on **this store** calls `barrier.wait()` TWICE
+    /// after `warm_publish_one` published the parent and before the
+    /// prefix-backfill loop runs, so a test can run `invalidate_all` in
+    /// that window and assert the winner's backfills are skipped.
+    ///
+    /// The returned guard disarms the gate on drop. Per-store scoped.
+    /// `cfg`-gated to `test` / `debug_assertions`, mirroring the field.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_cold_winner_pre_backfill_gate(
+        &self,
+        barrier: Arc<std::sync::Barrier>,
+    ) -> TestInvalidateAllGateGuard<'_> {
+        *self.cold_winner_pre_backfill_gate.lock() = Some(barrier);
+        TestInvalidateAllGateGuard {
+            gate: &self.cold_winner_pre_backfill_gate,
+        }
+    }
 }
 
-/// RAII guard returned by
-/// [`SemanticGraphStore::test_invalidate_all_post_entries_clear_gate`].
-/// Clears the per-store gate on drop so a later `invalidate_all` on the
-/// same store does not park on a stale barrier.
+/// RAII guard returned by the per-store test injection-point arming
+/// drivers on [`SemanticGraphStore`] —
+/// [`SemanticGraphStore::test_invalidate_all_post_entries_clear_gate`],
+/// [`SemanticGraphStore::test_invalidate_all_pre_memo_budget_clear_gate`],
+/// [`SemanticGraphStore::test_publish_post_memo_budget_record_gate`], and
+/// [`SemanticGraphStore::test_cold_winner_pre_backfill_gate`].
+/// Clears the per-store gate it borrows on drop so a later operation on
+/// the same store does not park on a stale barrier.
 #[cfg(any(test, debug_assertions))]
 #[doc(hidden)]
 pub struct TestInvalidateAllGateGuard<'a> {
