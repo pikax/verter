@@ -3799,6 +3799,115 @@ fn origin_edge_dedup_survives_signature_pool_flood() {
     );
 }
 
+/// BOUND PROOF — a SINGLE `(result, kind)` derivation bucket's
+/// `Vec<OriginEdge>` MUST NOT grow without bound.
+///
+/// `record` (the write-side of `record_origin_edge`) appends one
+/// `OriginEdge` per distinct derivation of the same structural
+/// `result` for the same `kind`. Distinct derivations carry distinct
+/// fences, so the identity-tuple dedup at `record_origin_edge` never
+/// suppresses them — they all land in the SAME `(result, kind)`
+/// bucket. In a long-lived session that re-derives one result many
+/// times, that one bucket grows monotonically, and each retained
+/// `OriginEdge` keeps its interned dep-signature `Arc` alive, so the
+/// `Weak`-based signature pool stays live for every same-bucket fence.
+///
+/// DISCRIMINATES: against HEAD `397a51211` the per-bucket edge growth
+/// is unbounded — the FIFO `edge_budget` only records an admission for
+/// a NEWLY-KEYED bucket (`if is_new_bucket`), so appending another
+/// distinct edge to an EXISTING bucket bypasses the budget entirely.
+/// Recording `DERIVATION_EDGES_PER_BUCKET_CAP + 600` distinct edges
+/// into one bucket leaves all of them resident (and all their fences
+/// pool-live). After the fix the per-bucket FIFO cap evicts the oldest
+/// edge on every append past the cap, so the bucket length stays at /
+/// under `DERIVATION_EDGES_PER_BUCKET_CAP` and an evicted edge drops
+/// its `Arc<DepSignature>` — once the last edge holding a pooled fence
+/// is evicted that fence's `Weak` goes dead and stops counting toward
+/// the live pool size.
+#[test]
+fn derivation_store_bounds_per_bucket_edge_growth() {
+    use super::derivation::{DERIVATION_EDGES_PER_BUCKET_CAP, DERIVATION_EDGE_BUCKET_CAP};
+
+    let store = SemanticGraphStore::new();
+    // ONE shared `(result, kind)` bucket. `result` and the lone
+    // `source` are fixed, stable node ids — every emission targets the
+    // SAME `(result, Normalize)` key, so this exercises per-bucket
+    // growth in isolation (the bucket COUNT stays at 1, well under
+    // `DERIVATION_EDGE_BUCKET_CAP`, so bucket-level FIFO never fires).
+    let result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+    // Emit far more DISTINCT edges into that one bucket than the
+    // per-bucket cap. Each edge carries a distinct fence, so the
+    // `record_origin_edge` identity-tuple dedup never suppresses it —
+    // every emission is a genuine `store.record` append into the SAME
+    // bucket.
+    let edge_count = DERIVATION_EDGES_PER_BUCKET_CAP + 600;
+    for i in 0..edge_count {
+        let canonical = format!("/w/edge-{i}.ts");
+        store.record_origin_edge(
+            result,
+            OriginEdgeKind::Normalize,
+            Arc::from(vec![source].into_boxed_slice()),
+            crate::semantic_query::OriginMeta::None,
+            dep_sig_for(&canonical, (i % 251) as u8),
+        );
+    }
+
+    // (1) The single bucket's `Vec<OriginEdge>` must stay at / under
+    // the per-bucket cap — NOT grow to `edge_count`.
+    let bucket_len = store
+        .origins_of_kind(result, OriginEdgeKind::Normalize)
+        .len();
+    assert!(
+        bucket_len <= DERIVATION_EDGES_PER_BUCKET_CAP,
+        "bounded retention proof: after recording {edge_count} distinct \
+         origin edges into ONE (result, Normalize) bucket the bucket's \
+         Vec<OriginEdge> must stay bounded by the per-bucket cap \
+         ({DERIVATION_EDGES_PER_BUCKET_CAP}), not grow with the \
+         derivation count. Observed bucket length={bucket_len}.",
+    );
+    // Discrimination floor — the bucket still retains its newest edges
+    // (it is a cap, not a wipe).
+    assert!(
+        bucket_len >= 1,
+        "the derivation bucket must still retain its most recent edges — \
+         observed bucket length={bucket_len}",
+    );
+    // The total derivation edge count across the whole store is the
+    // same single bucket — also bounded by the per-bucket cap.
+    let total_edges = store.origin_edge_count();
+    assert!(
+        total_edges <= DERIVATION_EDGES_PER_BUCKET_CAP,
+        "the store's total origin-edge count must equal the one bounded \
+         bucket — observed total_edges={total_edges}",
+    );
+
+    // (2) The `Weak`-based signature pool must not retain entries for
+    // edges the per-bucket cap evicted. Every emitted fence is
+    // distinct; once an edge is FIFO-evicted from the bucket its
+    // `Arc<DepSignature>` drops, so its pooled `Weak` goes dead. The
+    // count of LIVE pooled signatures therefore cannot exceed the
+    // surviving edge count, which is bounded by the per-bucket cap.
+    let live_pool_size = store.derivation_signature_pool_size();
+    assert!(
+        live_pool_size <= DERIVATION_EDGES_PER_BUCKET_CAP,
+        "bounded retention proof: after interning {edge_count} distinct \
+         fences into ONE bucket the LIVE signature pool must stay \
+         bounded by the per-bucket cap ({DERIVATION_EDGES_PER_BUCKET_CAP}) \
+         — a `Weak` goes dead when its edge is FIFO-evicted from the \
+         bucket. Observed live pool size={live_pool_size}.",
+    );
+    // The bucket count stayed at 1 throughout — this test isolates
+    // per-bucket growth, never the bucket-level FIFO budget.
+    assert_eq!(
+        store.derivation_bucket_count(),
+        1,
+        "this test exercises ONE bucket — the bucket count must stay 1, \
+         well under DERIVATION_EDGE_BUCKET_CAP ({DERIVATION_EDGE_BUCKET_CAP})",
+    );
+}
+
 /// A panic inside the cold-build closure must NOT leak the
 /// `in_flight_current` counter. The `InFlightStatsGuard`'s Drop impl
 /// fires on the unwind path so the next non-panicking call sees a

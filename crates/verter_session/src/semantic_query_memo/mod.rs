@@ -1507,7 +1507,12 @@ impl SemanticGraphStore {
     ///
     /// Multiple derivations of the same structural `result` produce
     /// multiple edges with the same `(result, kind)` — the layer supports
-    /// this; the walker walks all edges.
+    /// this; the walker walks all edges. The per-`(result, kind)` edge
+    /// list is FIFO-capped (`DERIVATION_EDGES_PER_BUCKET_CAP`): a result
+    /// re-derived more times than the cap retains only its most recent
+    /// edges, so one bucket cannot grow without bound in a long-lived
+    /// session. An evicted edge loses only best-effort provenance —
+    /// origin edges are not an invalidation source.
     ///
     /// Edges are deduplicated by identity at the call site: before
     /// recording into [`DerivationStore::edges`], an edge with the exact
