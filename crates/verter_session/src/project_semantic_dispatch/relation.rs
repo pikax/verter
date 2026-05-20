@@ -108,12 +108,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
         graph.record_relation_check();
         // Strict warm-hit fast path: a memoised judgement returns only
         // when its self-version-rooted carrier validates against the
-        // live store view — a content edit to the source's or the
-        // target's originating file misses the warm read and the
+        // live store view AND its `validated_at_generation` still
+        // equals the live project generation — a content edit to the
+        // source's or the target's originating file, OR a
+        // project-shape change, misses the warm read and the
         // judgement recomputes below.
         if let Some((fence, cached)) = graph.get_relation(self.ctx, source, target) {
             return (cached, fence);
         }
+        // Snapshot the project generation BEFORE the cold compute
+        // dispatches any work. The carrier validates only file-content
+        // whole-hashes; a `ProjectGeneration` reset (tsconfig /
+        // path-alias / SDK / workspace-folder change) bumps no file
+        // content, so without this snapshot a `clear_relation_memo`
+        // racing this `relate_nodes` could land a
+        // stale-by-project-generation judgement whose carrier still
+        // validates on file-content terms. The published entry stamps
+        // this snapshot; `get_relation` rejects on warm read when the
+        // live generation differs.
+        let validated_at_generation = self.ctx.project_type_store().current_project_generation();
         let fence = self.project_generation_signature();
         let result = if enter_relation_guard(source, target) {
             let mut bindings: Vec<InferBinding> = Vec::new();
@@ -147,6 +160,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 carrier,
                 std::sync::Arc::from(self_root_canonicals),
                 result.clone(),
+                validated_at_generation,
             );
         }
         (result, fence)

@@ -61,6 +61,7 @@ fn component_meta_signature_carries_module_augmentation_index_shape() {
     let entry: ComponentMetaResultEntry<u32> = ComponentMetaResultEntry {
         payload: Arc::new(0u32),
         read_set_signature: ReadSetSignature::new(Arc::clone(&signature)),
+        validated_at_generation: 0,
     };
     assert!(
         !entry.read_set_signature.facts.is_empty(),

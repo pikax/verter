@@ -60,6 +60,7 @@ fn component_meta_result_signature_carries_module_aug_index_shape() {
         read_set_signature: verter_session::for_tests::ReadSetSignature::new(Arc::clone(
             &signature,
         )),
+        validated_at_generation: 0,
     };
     assert!(
         !entry.read_set_signature.facts.is_empty(),

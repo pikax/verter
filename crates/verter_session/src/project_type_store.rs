@@ -2920,6 +2920,7 @@ mod tests {
                 owner_whole_hash: hash,
                 bindings: Arc::new(FxHashMap::default()),
                 read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+                validated_at_generation: 0,
             }),
         );
         store.component_meta_results().insert(
@@ -2946,6 +2947,7 @@ mod tests {
                     whole_hash: hash,
                 }),
                 read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+                validated_at_generation: 0,
             },
         );
 

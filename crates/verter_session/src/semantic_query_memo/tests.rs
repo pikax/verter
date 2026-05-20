@@ -1485,6 +1485,7 @@ fn invalidate_all_clears_id_keyed_semantic_caches() {
         crate::fact_signature_helpers::ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
         crate::semantic_query::RelationResult::NotAssignable,
+        0,
     );
     // Sanity-check the pre-bump state is actually populated, else the
     // test would not discriminate.

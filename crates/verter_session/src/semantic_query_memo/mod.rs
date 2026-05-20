@@ -1469,9 +1469,11 @@ impl SemanticGraphStore {
         // that re-entry would deadlock. `BudgetedRelationMemo::get_cloned`
         // performs exactly that clone-out-of-guard.
         let entry = self.relation_memo.get_cloned(source, target)?;
-        if !entry
-            .carrier
-            .validate_with_self_roots(ctx, &entry.self_root_canonicals)
+        // Project-generation gate — carrier alone misses a reset.
+        if entry.validated_at_generation != ctx.project_type_store().current_project_generation()
+            || !entry
+                .carrier
+                .validate_with_self_roots(ctx, &entry.self_root_canonicals)
         {
             return None;
         }
@@ -1490,10 +1492,8 @@ impl SemanticGraphStore {
     ///
     /// The entry is self-version-rooted: `carrier` is built by
     /// [`semantic_graph_read_set_signature`] from the relation build's
-    /// observed self-roots (the file-derived origins of `source` and
-    /// `target`), so a content edit to either originating file misses
-    /// the warm relation read. `self_root_canonicals` is the strict
-    /// self-root canonical set the warm validator checks.
+    /// observed self-roots; `self_root_canonicals` is checked strictly,
+    /// and `validated_at_generation` gates on a project-shape bump.
     pub fn insert_relation(
         &self,
         source: SemanticNodeId,
@@ -1501,17 +1501,19 @@ impl SemanticGraphStore {
         carrier: crate::fact_signature_helpers::ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
         result: crate::semantic_query::RelationResult,
+        validated_at_generation: u64,
     ) {
-        // The map insert + retention-budget admission run under the
-        // `BudgetedRelationMemo`'s `retention_gate` read guard, and
-        // new-key detection is atomic (via the `DashMap::entry` API) —
-        // a `contains_key`-then-`insert` pair would let two writers
-        // racing the same key both observe "absent" and double-record
-        // the admission. `insert` stamps the entry's retention-ledger
-        // `admission_seq` so it stays paired with its FIFO ledger
-        // record.
-        self.relation_memo
-            .insert(source, target, carrier, self_root_canonicals, result);
+        // Map insert + budget admission run under the gate's read
+        // guard; `DashMap::entry` makes the new-vs-replace decision
+        // atomic. `admission_seq` stays paired with the ledger record.
+        self.relation_memo.insert(
+            source,
+            target,
+            carrier,
+            self_root_canonicals,
+            result,
+            validated_at_generation,
+        );
     }
 
     /// Count of relation memo entries. Useful for tests and counters.

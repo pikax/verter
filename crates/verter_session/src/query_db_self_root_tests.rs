@@ -7213,3 +7213,282 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
          the counter equals the live map total on every admission path.",
     );
 }
+
+/// `ComponentMetaResultDb::get_with_view` rejects an entry whose
+/// `validated_at_generation` no longer equals the live project
+/// generation — a `ProjectGeneration` reset bumps no file content, so
+/// the carrier alone cannot detect it.
+///
+/// Mirror of `materialize_structure_peek_rejects_entry_from_superseded_generation`:
+/// plant a `ComponentMetaResultEntry` with a valid carrier (empty
+/// signature validates vacuously) tagged with the CURRENT project
+/// generation. The first lookup HITs. Then `bump_project_generation()`
+/// (the bare version that increments the counter WITHOUT clearing the
+/// cache) — the planted entry's carrier is still valid, only its
+/// generation stamp is now stale. The second lookup MUST MISS purely
+/// because of the generation-stamp mismatch. Without the gate,
+/// `get_with_view`'s carrier check alone still passes (no file
+/// content changed) and the stale entry is served.
+#[test]
+fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generation() {
+    use crate::component_meta_result_db::{
+        CachedComponentMetaResult, ComponentMetaResultEntry, ComponentMetaResultKey,
+        ResolutionTemplate,
+    };
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let owner = "/gen_peek_cmr/owner.vue";
+    upsert(&host, owner, "<script setup lang=\"ts\"></script>\n");
+
+    let store = host.project_type_store();
+    let key = ComponentMetaResultKey {
+        owner_canonical: Arc::from(owner),
+        options_fingerprint: [0u8; 16],
+    };
+    let owner_whole_hash = [0xCDu8; 16];
+    let gen0 = store.current_project_generation();
+    let analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis = {
+        use verter_semantic::analysis::component_meta::{
+            AcceptedSurfaceCompleteness, ComponentMetaAnalysis, ComponentMetaFlags,
+            FallthroughSurface, NoFallthroughReason, RootReachability,
+        };
+        ComponentMetaAnalysis {
+            props: Vec::new(),
+            events: Vec::new(),
+            slots: Vec::new(),
+            models: Vec::new(),
+            exposed: Vec::new(),
+            public_instance: None,
+            sfc_blocks: None,
+            type_registry: Vec::new(),
+            components: Vec::new(),
+            template_refs: Vec::new(),
+            imports: Vec::new(),
+            bindings: Vec::new(),
+            vue_api_calls: Vec::new(),
+            styles: Vec::new(),
+            flags: ComponentMetaFlags::default(),
+            root_reachability: RootReachability::NoFallthrough {
+                reason: NoFallthroughReason::NoTemplate,
+            },
+            accepted_props: Vec::new(),
+            accepted_events: Vec::new(),
+            accepted_surface_completeness: AcceptedSurfaceCompleteness::Exact,
+            fallthrough_surface: FallthroughSurface::None {
+                reason: NoFallthroughReason::NoTemplate,
+            },
+            macro_expansion_diagnostics: Vec::new(),
+            options_api: false,
+            file_path: String::new(),
+        }
+    };
+    let cached = CachedComponentMetaResult {
+        analysis,
+        resolution_template: ResolutionTemplate {
+            mode: crate::types::ProjectionMode::Expanded,
+            whole_hash: owner_whole_hash,
+            resolved_macros: Vec::new(),
+            resolved_type_registry: Vec::new(),
+            resolved_type_registry_meta: Vec::new(),
+            evaluated_types: None,
+            fact_versions: Vec::new(),
+            surface_identities: None,
+            origin_graph: None,
+        },
+        canonical_id: Arc::from(owner),
+        whole_hash: owner_whole_hash,
+    };
+    let entry = ComponentMetaResultEntry {
+        payload: Arc::new(cached),
+        read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+        validated_at_generation: gen0,
+    };
+    store
+        .component_meta_results()
+        .insert(key.clone(), owner_whole_hash, entry);
+
+    let view = host.resolver_store_view();
+    let db = store.component_meta_results();
+
+    // Same generation — the carrier validates vacuously and the
+    // generation matches, so `get_with_view` HITs.
+    assert!(
+        db.get_with_view(&host, &view, &key, owner_whole_hash)
+            .is_some(),
+        "an entry with a valid carrier and a matching project \
+         generation must warm-hit",
+    );
+
+    // Bump ONLY the project generation (a tsconfig / SDK /
+    // workspace-folder change bumps no file content) WITHOUT clearing
+    // the cache. The planted entry's carrier is still valid — only
+    // its `validated_at_generation` is now stale.
+    store.bump_project_generation();
+    assert_eq!(
+        db.len(),
+        1,
+        "fixture invariant: bump_project_generation does NOT evict the \
+         entry — the warm read must reject it on the generation stamp \
+         alone",
+    );
+
+    let view_after = host.resolver_store_view();
+    // DISCRIMINATOR: `get_with_view` must now MISS — the entry's
+    // `validated_at_generation` no longer equals the live generation.
+    // Without the generation gate `get_with_view`'s carrier check
+    // alone still passes (no file content changed) and the stale
+    // entry is served.
+    assert!(
+        db.get_with_view(&host, &view_after, &key, owner_whole_hash)
+            .is_none(),
+        "STALE-GENERATION READ: `ComponentMetaResultDb::get_with_view` \
+         served an entry whose `validated_at_generation` is \
+         superseded — a `ProjectGeneration` reset bumps no file \
+         content, so the carrier check alone cannot detect it. \
+         `get_with_view` must reject an entry whose generation stamp \
+         no longer matches.",
+    );
+}
+
+/// `SemanticGraphStore::get_relation` rejects an entry whose
+/// `validated_at_generation` no longer equals the live project
+/// generation — a `ProjectGeneration` reset bumps no file content, so
+/// the relation carrier's `FileWholeHash`-only fact rail cannot
+/// detect a project-shape change. Mirror of the `ComponentMetaResultDb`
+/// test for the relation memo carrier.
+#[test]
+fn relation_memo_get_relation_rejects_entry_from_superseded_generation() {
+    use crate::semantic_query::{PrimitiveKind, RelationResult, SemanticNodeData, SemanticNodeId};
+    use crate::semantic_query_memo::SemanticGraphStore;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let ctx: &dyn ResolverContext = &host;
+    let store = SemanticGraphStore::new();
+    let source: SemanticNodeId =
+        store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let target: SemanticNodeId =
+        store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+    // Plant a relation judgement with a valid (empty + empty
+    // self-roots) carrier tagged at the CURRENT project generation.
+    let gen0 = host.project_type_store().current_project_generation();
+    store.insert_relation(
+        source,
+        target,
+        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        Arc::from(Vec::<Arc<str>>::new()),
+        RelationResult::NotAssignable,
+        gen0,
+    );
+
+    // Same generation — the carrier validates vacuously and the
+    // generation matches, so `get_relation` HITs.
+    assert!(
+        store.get_relation(ctx, source, target).is_some(),
+        "a relation memo entry with a valid carrier and a matching \
+         project generation must warm-hit",
+    );
+
+    // Bump ONLY the project generation WITHOUT clearing the relation
+    // memo. The planted entry's carrier is still valid — only its
+    // `validated_at_generation` is now stale.
+    host.project_type_store().bump_project_generation();
+    assert_eq!(
+        store.relation_memo_count(),
+        1,
+        "fixture invariant: bump_project_generation does NOT clear \
+         the relation memo — the warm read must reject the entry on \
+         the generation stamp alone",
+    );
+
+    // DISCRIMINATOR: `get_relation` must now MISS — the entry's
+    // `validated_at_generation` no longer equals the live generation.
+    // Without the generation gate `get_relation`'s carrier check
+    // alone still passes (no file content changed) and the stale
+    // relation judgement is served.
+    assert!(
+        store.get_relation(ctx, source, target).is_none(),
+        "STALE-GENERATION READ: `SemanticGraphStore::get_relation` \
+         served a relation memo entry whose `validated_at_generation` \
+         is superseded — a `ProjectGeneration` reset bumps no file \
+         content, so the carrier's `FileWholeHash`-only rail cannot \
+         detect it. `get_relation` must reject an entry whose \
+         generation stamp no longer matches.",
+    );
+}
+
+/// `OwnerImportSurfaceDb::get_with_view` rejects a surface whose
+/// `validated_at_generation` no longer equals the live project
+/// generation — a `ProjectGeneration` reset bumps no file content, so
+/// the surface's chain-fact carrier cannot detect a project-shape
+/// change. Mirror of the `ComponentMetaResultDb` test for the
+/// owner-import-surface carrier.
+#[test]
+fn owner_import_surface_get_with_view_rejects_surface_from_superseded_generation() {
+    use crate::owner_import_surface::build_owner_import_surface;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let owner = "/gen_peek_owner_import/owner.ts";
+    upsert(&host, owner, "export const anchor = 1;\n");
+    // Use the REAL owner whole-hash so the surface's
+    // owner-`FileWholeHash` fact validates against the live store
+    // view (the carrier `build_owner_import_surface` always emits an
+    // owner `FileWholeHash`, so a synthetic hash would never match).
+    let owner_whole_hash = host
+        .ensure_indexed_ready(owner)
+        .expect("owner IndexedReady materialises")
+        .whole_hash;
+
+    let surfaces = host.project_type_store().owner_import_surfaces();
+    let gen0 = host.project_type_store().current_project_generation();
+    let surface = build_owner_import_surface(
+        Arc::from(owner),
+        owner_whole_hash,
+        Vec::<(Arc<str>, Arc<str>, Arc<str>, Option<crate::types::Hash16>)>::new(),
+        Vec::new(),
+        gen0,
+    );
+    surfaces.insert(Arc::from(owner), Arc::clone(&surface));
+
+    let view = host.resolver_store_view();
+
+    // Same generation — the carrier validates against the real owner
+    // hash and the generation matches, so `get_with_view` HITs.
+    assert!(
+        surfaces
+            .get_with_view(&host, owner, owner_whole_hash, &view)
+            .is_some(),
+        "an owner-import surface with a valid carrier and a matching \
+         project generation must warm-hit",
+    );
+
+    // Bump ONLY the project generation WITHOUT clearing the cache.
+    // The planted surface's carrier is still valid — only its
+    // `validated_at_generation` is now stale.
+    host.project_type_store().bump_project_generation();
+    assert_eq!(
+        surfaces.len(),
+        1,
+        "fixture invariant: bump_project_generation does NOT clear \
+         the owner-import-surface cache — the warm read must reject \
+         the surface on the generation stamp alone",
+    );
+
+    let view_after = host.resolver_store_view();
+    // DISCRIMINATOR: `get_with_view` must now MISS — the surface's
+    // `validated_at_generation` no longer equals the live generation.
+    // Without the generation gate the carrier check alone still
+    // passes (no file content changed) and the stale surface is
+    // served.
+    assert!(
+        surfaces
+            .get_with_view(&host, owner, owner_whole_hash, &view_after)
+            .is_none(),
+        "STALE-GENERATION READ: `OwnerImportSurfaceDb::get_with_view` \
+         served a surface whose `validated_at_generation` is \
+         superseded — a `ProjectGeneration` reset bumps no file \
+         content, so the carrier check alone cannot detect it. \
+         `get_with_view` must reject a surface whose generation stamp \
+         no longer matches.",
+    );
+}

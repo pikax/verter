@@ -2562,12 +2562,14 @@ fn type_surface_db_identity_moved_to_semantic_graph_store_memo() {
     // an empty carrier + empty self-root set so the warm read validates
     // vacuously.
     let carrier = crate::fact_signature_helpers::ReadSetSignature::empty();
+    let generation = host.project_type_store().current_project_generation();
     graph.insert_relation(
         a,
         b,
         carrier,
         std::sync::Arc::from([]),
         RelationResult::NotAssignable,
+        generation,
     );
     // Warm: must return the same judgement.
     let (_, cached) = graph

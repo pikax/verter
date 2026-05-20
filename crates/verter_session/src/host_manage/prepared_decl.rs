@@ -1846,7 +1846,8 @@ impl VerterHost {
         // bounded — when the chain facts no longer validate, we
         // drop the entry outright so the next build replaces it.
         let live_view = self.resolver_store_view();
-        if let Some(cached) = surfaces.get_with_view(owner_canonical, whole_hash, &live_view) {
+        if let Some(cached) = surfaces.get_with_view(self, owner_canonical, whole_hash, &live_view)
+        {
             return Some(cached);
         }
         if surfaces.get(owner_canonical, whole_hash).is_some() {
@@ -1857,6 +1858,17 @@ impl VerterHost {
             "owner_import_surface_build",
             format!("owner={}", owner_canonical),
         );
+
+        // Snapshot the project generation BEFORE the cold compute
+        // dispatches any work. The carrier validates only file-content
+        // whole-hashes; a `ProjectGeneration` reset (tsconfig /
+        // path-alias / SDK / workspace-folder change) bumps no file
+        // content, so without this snapshot a
+        // `bump_project_generation_and_evict` racing this cold publish
+        // could strand a stale-by-project-generation surface whose
+        // carrier still validates. `OwnerImportSurfaceDb::get_with_view`
+        // rejects on warm read when the live generation differs.
+        let validated_at_generation = self.project_type_store().current_project_generation();
 
         // Block 1.H: wrap the cold body with `install_fact_tracer` so
         // the surface's `fact_dep_signature` reflects every fact the
@@ -1961,6 +1973,7 @@ impl VerterHost {
                     whole_hash,
                     entries,
                     chain_facts,
+                    validated_at_generation,
                 );
                 return Some(surface);
             }
@@ -1971,6 +1984,7 @@ impl VerterHost {
             whole_hash,
             entries,
             chain_facts,
+            validated_at_generation,
         );
         surfaces.insert(Arc::from(owner_canonical), Arc::clone(&surface));
         Some(surface)

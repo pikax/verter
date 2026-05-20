@@ -149,6 +149,19 @@ impl VerterHost {
         // The warm-hit fast path above returned before reaching
         // here, so no tracer is installed for hot reads (zero
         // allocation per hit).
+        //
+        // Snapshot the project generation BEFORE the cold compute
+        // dispatches any work. The carrier
+        // (`fact_dep_signature`) validates only file-content
+        // whole-hashes; a `ProjectGeneration` reset (tsconfig /
+        // path-alias / SDK / workspace-folder change) bumps no file
+        // content, so without this snapshot a
+        // `bump_project_generation_and_evict` racing this cold publish
+        // could strand a stale-by-project-generation entry whose
+        // carrier still validates. The published entry stamps the
+        // snapshotted generation; `ComponentMetaResultDb::get_with_view`
+        // rejects on warm read when the live generation differs.
+        let validated_at_generation = self.project_type_store.current_project_generation();
         let ((resolved_opt, meta_opt), read_set) = self.with_fact_tracer(|| {
             let resolved = match self
                 .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)
@@ -178,6 +191,7 @@ impl VerterHost {
                     &resolved,
                     meta.clone(),
                     fact_dep_signature,
+                    validated_at_generation,
                 );
             }
             crate::resolver_core::FactReadSetFinalise::Overflow => {
@@ -269,6 +283,14 @@ impl VerterHost {
         // `observe` wiring accumulates a real `FactReadSet` that
         // becomes the candidate's `fact_dep_signature`. R24: tracer
         // installs on cold-path only; warm-hits returned above.
+        //
+        // Snapshot the project generation BEFORE the cold compute
+        // dispatches any work. See `get_component_meta` above for the
+        // race rationale — a `bump_project_generation_and_evict`
+        // landing while this cold publish is in flight would otherwise
+        // strand a stale-by-project-generation entry whose carrier
+        // still validates on file-content terms.
+        let validated_at_generation = self.project_type_store.current_project_generation();
         let ((resolved_opt, meta_opt), read_set) = self.with_fact_tracer(|| {
             let resolved = match self.resolve_component_meta_with_view(
                 canonical.as_str(),
@@ -301,6 +323,7 @@ impl VerterHost {
                     &resolved,
                     meta.clone(),
                     fact_dep_signature,
+                    validated_at_generation,
                 );
             }
             crate::resolver_core::FactReadSetFinalise::Overflow => {
@@ -446,6 +469,7 @@ impl VerterHost {
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
         meta: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
         fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>,
+        validated_at_generation: u64,
     ) {
         if resolved.synthesis_should_suppress {
             tracing::debug!(
@@ -487,6 +511,7 @@ impl VerterHost {
                 read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
                     admitted_signature,
                 ),
+                validated_at_generation,
             },
         );
     }
@@ -513,6 +538,7 @@ impl VerterHost {
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
         meta: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
         fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>,
+        validated_at_generation: u64,
     ) {
         if resolved.synthesis_should_suppress {
             tracing::debug!(
@@ -552,6 +578,7 @@ impl VerterHost {
                 read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
                     admitted_signature,
                 ),
+                validated_at_generation,
             },
         );
     }
@@ -681,6 +708,13 @@ impl VerterHost {
         // observations from the extractor are captured. R24: tracer
         // installs on cold-path only; the warm-hit short-circuit
         // above returns before this block runs.
+        //
+        // Snapshot the project generation BEFORE the cold compute
+        // dispatches any work — see `get_component_meta` for the
+        // race rationale. The published entry stamps this snapshot;
+        // `ComponentMetaResultDb::get_with_view` rejects on warm read
+        // when the live generation differs.
+        let validated_at_generation = self.project_type_store.current_project_generation();
         let (maybe_resolved_analysis, read_set) = self.with_fact_tracer(|| {
             let mut resolved = match self
                 .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)
@@ -736,6 +770,7 @@ impl VerterHost {
                     &resolved,
                     analysis.clone(),
                     fact_dep_signature,
+                    validated_at_generation,
                 );
             }
             crate::resolver_core::FactReadSetFinalise::Overflow => {

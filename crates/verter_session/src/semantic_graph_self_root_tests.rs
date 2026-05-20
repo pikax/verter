@@ -595,6 +595,7 @@ fn relation_memo_warm_read_validates_self_root() {
         crate::semantic_query::RelationResult::Assignable {
             bindings: Arc::from(Vec::new().into_boxed_slice()),
         },
+        host.project_type_store().current_project_generation(),
     );
 
     assert!(
@@ -627,6 +628,7 @@ fn relation_memo_warm_read_serves_validated_entry() {
         crate::semantic_query::RelationResult::Assignable {
             bindings: Arc::from(Vec::new().into_boxed_slice()),
         },
+        host.project_type_store().current_project_generation(),
     );
 
     let cached = store.get_relation(ctx, source, target);

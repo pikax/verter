@@ -65,12 +65,25 @@ pub struct ComponentMetaResultKey {
 ///
 /// `read_set_signature.facts` is the path-precise signature produced
 /// by the `with_fact_tracer` scope wrapping the cold compute — the
-/// sole cache-validity rail. Warm-hit reads gate on
+/// primary cache-validity rail. Warm-hit reads gate on
 /// [`StoreView::validates_fact_signature`]: a fact-version bump on any
 /// cross-file dep invalidates the warm hit.
+///
+/// `validated_at_generation` is the project-generation snapshot the
+/// producer captured before its cold compute dispatched any work. The
+/// `read_set_signature` carrier validates only file-content
+/// whole-hashes; a `ProjectGeneration` reset (tsconfig / path-alias /
+/// SDK / workspace-folder change) bumps no file content, so without
+/// this stamp a stale-by-project-generation entry that raced a
+/// `bump_project_generation_and_evict` cold-publish window would
+/// validate forever on file-content terms. Every read-side gate
+/// ([`ComponentMetaResultDb::get`] / [`ComponentMetaResultDb::get_with_view`])
+/// rejects the entry when `validated_at_generation` differs from the
+/// live [`crate::project_type_store::ProjectTypeStore::current_project_generation`].
 pub struct ComponentMetaResultEntry<P> {
     pub payload: Arc<P>,
     pub read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+    pub validated_at_generation: u64,
 }
 
 /// Sanitized snapshot of a
@@ -202,6 +215,7 @@ impl<P> Clone for ComponentMetaResultEntry<P> {
         Self {
             payload: self.payload.clone(),
             read_set_signature: self.read_set_signature.clone(),
+            validated_at_generation: self.validated_at_generation,
         }
     }
 }
@@ -367,19 +381,25 @@ impl<P> ComponentMetaResultDb<P> {
 
     /// View-aware lookup. Returns the cached entry only when a candidate
     /// matches the owner content version AND that candidate's
-    /// `fact_dep_signature` validates under the supplied [`StoreView`];
-    /// otherwise returns `None` (caller falls through to cold recompute).
+    /// `read_set_signature` validates under the supplied [`StoreView`]
+    /// AND its `validated_at_generation` still equals the live project
+    /// generation; otherwise returns `None` (caller falls through to
+    /// cold recompute).
     ///
-    /// Fact-precise validation is the sole cache oracle: a fact
-    /// version shift on any transitively observed cross-file dep
-    /// invalidates the warm hit. Validation reads only
-    /// `candidate.read_set_signature.facts` against the supplied
-    /// `StoreView`; there is no separate bundled-signature rail.
+    /// Fact-precise validation gates file-content edits: a fact-version
+    /// shift on any transitively observed cross-file dep invalidates
+    /// the warm hit. The project-generation gate is the project-shape
+    /// counterpart: a `ProjectGeneration` reset (tsconfig / path-alias /
+    /// SDK / workspace-folder change) bumps no file content, so the
+    /// carrier alone cannot detect it — a `bump_project_generation_and_
+    /// evict` racing a cold publish can otherwise strand a stale entry
+    /// whose carrier still validates on file-content terms.
     ///
     /// Increments [`crate::types::MetaProvenance::component_meta_result_cache_hits`]
     /// on a validated warm return and
     /// [`crate::types::MetaProvenance::component_meta_result_cache_misses`]
-    /// on every miss path (absent candidate OR fact-validation failure).
+    /// on every miss path (absent candidate, fact-validation failure,
+    /// or project-generation mismatch).
     #[must_use]
     pub fn get_with_view<V: StoreView + ?Sized>(
         &self,
@@ -416,6 +436,18 @@ impl<P> ComponentMetaResultDb<P> {
                 return None;
             }
         };
+        // Project-generation gate. The carrier validates only
+        // file-content whole-hashes; a `ProjectGeneration` reset bumps
+        // no file content, so an entry whose `validated_at_generation`
+        // no longer equals the live generation is stale even though its
+        // carrier still validates. Reject before the fact rail so the
+        // miss is attributed correctly.
+        if candidate.value.validated_at_generation
+            != host.project_type_store().current_project_generation()
+        {
+            bump_miss(host);
+            return None;
+        }
         // Fact-precise validation: every entry in the signature must
         // validate under the live view. An empty signature trivially
         // passes (entries published outside an installed tracer scope —
@@ -545,6 +577,7 @@ impl<P> ComponentMetaResultDb<P> {
         let entry = ComponentMetaResultEntry {
             payload: Arc::new(payload),
             read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+            validated_at_generation: 0,
         };
         self.insert(key, [0u8; 16], entry);
     }
@@ -703,6 +736,7 @@ mod tests {
                     hash: [1u8; 16],
                 }],
             )),
+            validated_at_generation: 0,
         };
         db.insert(key.clone(), [1u8; 16], entry);
         let hit = db.get(&key, [1u8; 16]).unwrap();
@@ -727,6 +761,7 @@ mod tests {
             ComponentMetaResultEntry {
                 payload: Arc::new(1u32),
                 read_set_signature: empty_sig(),
+                validated_at_generation: 0,
             },
         );
         assert!(db.get(&k1, [1u8; 16]).is_some());
@@ -749,6 +784,7 @@ mod tests {
             ComponentMetaResultEntry {
                 payload: Arc::new(1u32),
                 read_set_signature: empty_sig(),
+                validated_at_generation: 0,
             },
         );
         db.insert(
@@ -757,6 +793,7 @@ mod tests {
             ComponentMetaResultEntry {
                 payload: Arc::new(2u32),
                 read_set_signature: empty_sig(),
+                validated_at_generation: 0,
             },
         );
         assert_eq!(*db.get(&key, [1u8; 16]).unwrap().payload, 1);
@@ -779,6 +816,7 @@ mod tests {
             ComponentMetaResultEntry {
                 payload: Arc::new(5u32),
                 read_set_signature: empty_sig(),
+                validated_at_generation: 0,
             },
         );
         assert!(db.remove(&key, [1u8; 16]).is_some());
@@ -806,6 +844,7 @@ mod tests {
                 ComponentMetaResultEntry {
                     payload: Arc::new(v as u32),
                     read_set_signature: empty_sig(),
+                    validated_at_generation: 0,
                 },
             );
         }
@@ -851,6 +890,7 @@ mod tests {
         let mk_entry = || ComponentMetaResultEntry {
             payload: Arc::new(1u32),
             read_set_signature: empty_sig(),
+            validated_at_generation: 0,
         };
 
         // Two versions for /w/a.vue, one for /w/b.vue.
@@ -907,6 +947,7 @@ mod tests {
         let mk_entry = |v: u32| ComponentMetaResultEntry {
             payload: Arc::new(v),
             read_set_signature: empty_sig(),
+            validated_at_generation: 0,
         };
 
         // Three fresh admissions under distinct owners → counter 3.

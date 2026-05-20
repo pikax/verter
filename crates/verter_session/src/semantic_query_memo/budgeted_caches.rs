@@ -43,14 +43,26 @@ use crate::semantic_query::{HostResolvedNamedTypeKey, SemanticNodeId};
 pub(crate) struct RelationMemoEntry {
     /// The self-version-rooted carrier — built by
     /// `semantic_graph_read_set_signature` from the relation build's
-    /// observed self-roots, the traced fact set, and the legacy
-    /// `DepSignature` rail.
+    /// observed self-roots and the traced fact set.
     pub(crate) carrier: crate::fact_signature_helpers::ReadSetSignature,
     /// The strict self-root canonical set — the file-derived origins of
     /// `source` and `target`.
     pub(crate) self_root_canonicals: Arc<[Arc<str>]>,
     /// The cached tri-state relation result.
     pub(crate) result: crate::semantic_query::RelationResult,
+    /// Project generation this judgement was computed under,
+    /// snapshotted by the relation engine before `decide_relation`
+    /// dispatched any work. The `carrier` validates only file-content
+    /// whole-hashes; a `ProjectGeneration` reset (tsconfig /
+    /// path-alias / SDK / workspace-folder change) bumps no file
+    /// content, so without this stamp a `clear_relation_memo` racing
+    /// `relate_nodes` could land a stale-by-project-generation
+    /// judgement whose carrier still validates on file-content terms.
+    /// Every read-side gate ([`super::SemanticGraphStore::get_relation`])
+    /// rejects the entry when `validated_at_generation` differs from
+    /// the live
+    /// [`crate::project_type_store::ProjectTypeStore::current_project_generation`].
+    pub(crate) validated_at_generation: u64,
     /// FIFO retention-ledger admission identity — the unique sequence
     /// number this entry's key was first recorded under. A budget FIFO
     /// victim carries its admission seq; the victim removal is scoped to
@@ -162,6 +174,7 @@ impl BudgetedRelationMemo {
         carrier: crate::fact_signature_helpers::ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
         result: crate::semantic_query::RelationResult,
+        validated_at_generation: u64,
     ) {
         use dashmap::mapref::entry::Entry;
 
@@ -183,6 +196,7 @@ impl BudgetedRelationMemo {
                     carrier,
                     self_root_canonicals,
                     result,
+                    validated_at_generation,
                     admission_seq,
                 });
                 None
@@ -193,6 +207,7 @@ impl BudgetedRelationMemo {
                     carrier,
                     self_root_canonicals,
                     result,
+                    validated_at_generation,
                     admission_seq,
                 });
                 Some(admission_seq)
@@ -856,6 +871,7 @@ mod tests {
             crate::fact_signature_helpers::ReadSetSignature::empty(),
             StdArc::from(Vec::<StdArc<str>>::new()),
             RelationResult::Unknown,
+            0,
         );
     }
 

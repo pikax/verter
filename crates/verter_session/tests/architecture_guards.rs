@@ -5052,8 +5052,9 @@ mod foundations_guards {
     // origin-graph trace. It is bounded best-effort provenance — the
     // FIFO `edge_budget` evicts the oldest buckets, so the snapshots are
     // NOT load-bearing for invalidation. The load-bearing invalidation
-    // record is the memo entry's own `fact_dep_signature` /
-    // `ReadSetSignature` carrier, rooted by `HostFenceValidator`.
+    // record is the memo entry's own `ReadSetSignature` carrier — the
+    // path-precise fact rail validated strictly on every warm read via
+    // `ReadSetSignature::validate_with_self_roots`.
     //
     // Reconstructing a `CompletionFence` from origin-edge dep signatures
     // would couple correctness to a best-effort, FIFO-evicted structure
@@ -5140,7 +5141,8 @@ mod foundations_guards {
              Origin edges are bounded best-effort provenance for the audit origin-graph\n\
              trace; the FIFO `edge_budget` evicts the oldest buckets, so an `edge_dep_signature`\n\
              is NOT load-bearing for invalidation. The load-bearing record is the memo entry's\n\
-             own `fact_dep_signature` / `ReadSetSignature` carrier (`HostFenceValidator`).\n\
+             own `ReadSetSignature` carrier, validated strictly on every warm read via\n\
+             `ReadSetSignature::validate_with_self_roots`.\n\
              Do not reintroduce `origins_with_fence` or fold an `edge_dep_signature` into a\n\
              `CompletionFence`.\n\n\
              Violations:\n  {}",

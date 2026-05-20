@@ -54,7 +54,7 @@ pub struct OwnerImportSurface {
     pub owner_whole_hash: Hash16,
     /// Local binding name → resolved root identity.
     pub bindings: Arc<FxHashMap<Arc<str>, ResolvedOwnerImport>>,
-    /// Path-precise fact-tracer carrier — the sole cache-validity
+    /// Path-precise fact-tracer carrier — the primary cache-validity
     /// oracle (R28). Carries the materialisation's
     /// `facts: Arc<[FactVersionRef]>` observed under the active
     /// fact tracer (parse / resolve-imports / route-surface facts on
@@ -62,6 +62,18 @@ pub struct OwnerImportSurface {
     /// `FileWholeHash`). Warm reads validate this carrier against the
     /// live `StoreView` BEFORE bubbling.
     pub read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+    /// Project generation this surface was built under, snapshotted by
+    /// the producer before its materialisation walk dispatched any
+    /// work. The `read_set_signature` carrier validates only
+    /// file-content whole-hashes; a `ProjectGeneration` reset (tsconfig /
+    /// path-alias / SDK / workspace-folder change) bumps no file
+    /// content, so without this stamp a stale-by-project-generation
+    /// surface racing a `bump_project_generation_and_evict` cold-publish
+    /// window would validate forever on file-content terms. Every
+    /// read-side gate ([`OwnerImportSurfaceDb::get_with_view`]) rejects
+    /// the surface when `validated_at_generation` differs from the live
+    /// [`crate::project_type_store::ProjectTypeStore::current_project_generation`].
+    pub validated_at_generation: u64,
 }
 
 /// Host-owned cache of owner import surfaces. Keyed by owner canonical;
@@ -155,14 +167,23 @@ impl OwnerImportSurfaceDb {
 
     /// Look up the owner surface for `owner_canonical` and validate
     /// every fact recorded in its `fact_dep_signature` against the
-    /// caller's `StoreView`. R3/R26/R28: the producer threads
+    /// caller's `StoreView` AND its `validated_at_generation` against
+    /// the live project generation. R3/R26/R28: the producer threads
     /// every barrel/reexport chain participant's fact into the
     /// signature so a chain-internal change (barrel retarget, route
     /// surface edit) invalidates the cached surface on read — no
-    /// eager `evict_canonical` required.
+    /// eager `evict_canonical` required. The project-generation gate
+    /// is the project-shape counterpart of the carrier check: a
+    /// `ProjectGeneration` reset (tsconfig / path-alias / SDK /
+    /// workspace-folder change) bumps no file content, so a surface
+    /// whose `validated_at_generation` no longer equals the live
+    /// generation is stale even though its carrier still validates
+    /// — a `bump_project_generation_and_evict` racing a cold publish
+    /// can otherwise strand a stale surface.
     #[must_use]
     pub fn get_with_view<V>(
         &self,
+        host: &crate::VerterHost,
         owner_canonical: &str,
         expected_owner_whole_hash: Hash16,
         view: &V,
@@ -171,6 +192,11 @@ impl OwnerImportSurfaceDb {
         V: crate::resolver_core::StoreView,
     {
         let candidate = self.get(owner_canonical, expected_owner_whole_hash)?;
+        if candidate.validated_at_generation
+            != host.project_type_store().current_project_generation()
+        {
+            return None;
+        }
         if candidate
             .read_set_signature
             .facts
@@ -230,6 +256,7 @@ impl OwnerImportSurfaceDb {
             owner_whole_hash: [0u8; 16],
             bindings: Arc::new(FxHashMap::default()),
             read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+            validated_at_generation: 0,
         });
         self.insert(canonical, surface);
     }
@@ -284,17 +311,21 @@ impl crate::invalidation_domain::InvalidationByCanonical for OwnerImportSurfaceD
 /// Build a fresh `OwnerImportSurface` from the owner's resolved-import
 /// iterator. Callers provide the owner identity, content hash, the
 /// pre-resolved `(local_name, canonical_id, exported_name,
-/// target_whole_hash)` tuples, and the full chain of route-facts
-/// observed during resolution (one entry per intermediate barrel /
-/// reexport hop). R3/R26/R28 Gap 1: `chain_facts` MUST include every
-/// barrel participant's `DerivedFactHash::Route` so a barrel retarget
-/// that leaves the final target unchanged still invalidates the
-/// cached surface on read.
+/// target_whole_hash)` tuples, the full chain of route-facts observed
+/// during resolution (one entry per intermediate barrel / reexport
+/// hop), and the project-generation snapshot the producer captured
+/// before its materialisation walk dispatched any work. R3/R26/R28 Gap
+/// 1: `chain_facts` MUST include every barrel participant's
+/// `DerivedFactHash::Route` so a barrel retarget that leaves the final
+/// target unchanged still invalidates the cached surface on read.
+/// `validated_at_generation` is the project-shape counterpart of the
+/// carrier and is checked on every warm read.
 pub fn build_owner_import_surface<I>(
     owner_canonical: Arc<str>,
     owner_whole_hash: Hash16,
     resolved_imports: I,
     chain_facts: Vec<crate::resolver_core::FactVersionRef>,
+    validated_at_generation: u64,
 ) -> Arc<OwnerImportSurface>
 where
     I: IntoIterator<Item = (Arc<str>, Arc<str>, Arc<str>, Option<Hash16>)>,
@@ -366,6 +397,7 @@ where
         read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
             fact_dep_signature,
         ),
+        validated_at_generation,
     })
 }
 
@@ -392,6 +424,7 @@ mod tests {
                 ),
             ],
             Vec::new(),
+            0,
         )
     }
 
@@ -449,7 +482,7 @@ mod tests {
     fn empty_imports_produces_owner_only_signature() {
         use crate::resolver_core::FactVersionRef;
         let surface =
-            build_owner_import_surface(Arc::from("/w/o.ts"), [1u8; 16], vec![], Vec::new());
+            build_owner_import_surface(Arc::from("/w/o.ts"), [1u8; 16], vec![], Vec::new(), 0);
         assert_eq!(surface.bindings.len(), 0);
         let owner_target_facts: Vec<&FactVersionRef> = surface
             .read_set_signature

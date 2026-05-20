@@ -964,10 +964,12 @@ fn delete_in_session_a_does_not_hide_from_session_b() {
 
 // Overlay-visible semantics depend on the consumer paths
 // (`get_analysis`, `get_component_meta`, `evaluate_types`) routing
-// host reads through `ResolverContext::view()`. The R20 multi-candidate
-// cache substrate is landed but the consumer wiring is pending; until
-// it lands the tests below observe base-host state for overlayed
-// canonicals and stay ignored.
+// host reads through the overlay-aware
+// `SessionResolverContext::resolver_store_view`, which wraps the base
+// `HostStoreView` via `with_session_overlay` so cross-file dep facts
+// pinned to BASE content miss whenever a session overlays or
+// tombstones a dep. The R20 multi-candidate cache substrate plus that
+// view wiring is what these tests exercise end-to-end.
 #[test]
 fn get_analysis_sees_overlay_content() {
     let project = make_project();
