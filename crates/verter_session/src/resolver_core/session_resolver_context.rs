@@ -47,6 +47,8 @@ use crate::resolver_core::resolver_context::ResolverContext;
 use crate::resolver_core::{FactReadSetCell, FactVersionRef, ShallowFileState};
 use crate::resolver_store::HostStoreView;
 use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
+use crate::resolver_core::request_store_view::{CanonicalCompletionOverlay, RequestStoreView};
+use crate::resolver_core::StoreView;
 use crate::session_view::SessionView;
 use crate::types::Hash16;
 use crate::FileAnalysisSnapshot;
@@ -70,45 +72,73 @@ use crate::HostConfig;
 /// [`crate::VerterHost::prepared_decl_bundle_with_context`]) that the
 /// `ResolverContext` trait surface itself does not expose.
 ///
-/// `store_view` is a borrow into an overlay-rooted [`HostStoreView`]
-/// owned by the caller — built ONCE at the request boundary via
+/// The owned [`RequestStoreView`] field chains a
+/// [`CanonicalCompletionOverlay`] in front of an overlay-rooted base
+/// [`HostStoreView`] built ONCE at the request boundary via
 /// [`crate::VerterHost::resolver_store_view`] followed by
 /// [`HostStoreView::with_session_overlay`]. Per the 6.c per-request
 /// view-hoisting rail the overlay re-rooting runs exactly once per
-/// session-bearing request, not per resolver method call.
+/// session-bearing request, not per resolver method call. Canonicals
+/// loaded mid-request through `ensure_loaded` / `ensure_indexed_ready`
+/// are promoted into the completion overlay so the self-root validator
+/// observes them on subsequent reads.
 pub(crate) struct SessionResolverContext<'a> {
     inner: &'a crate::VerterHost,
     view: &'a dyn SessionView,
-    // `#[allow(dead_code)]` is intentional during the 6.c substrate
-    // window — the `store_view()` borrow accessor returns this field
-    // but no hot-path caller consumes it yet. The hot-path conversion
-    // commit (C) wires consumers; removing the allow at that point is
-    // a stub-prevention follow-up.
-    #[allow(dead_code)]
-    store_view: &'a HostStoreView,
+    request_view: RequestStoreView<'a>,
 }
 
 impl<'a> SessionResolverContext<'a> {
-    /// Construct a session-bound wrapper over `(inner, view, store_view)`.
+    /// Construct a session-bound wrapper over `(inner, view, base, overlay)`.
     ///
-    /// `store_view` MUST be an overlay-rooted view — typically
+    /// `base` MUST be an overlay-rooted view — typically
     /// `host.resolver_store_view().with_session_overlay(host, view)`.
-    /// The caller owns the view; this wrapper borrows it. The borrow
-    /// shape matches [`ProjectSemanticDispatch::new`]: callers create
-    /// the wrapper on the stack, pass `&wrapper` to the dispatcher, and
-    /// drop it at the end of the query. The wrapper does not retain
-    /// references after the call returns.
+    /// The caller owns `base`; this wrapper borrows it. The completion
+    /// overlay is owned via `Arc` so cooperative-admission lanes can
+    /// share it. The borrow shape matches
+    /// [`ProjectSemanticDispatch::new`]: callers create the wrapper on
+    /// the stack, pass `&wrapper` to the dispatcher, and drop it at
+    /// the end of the query. The wrapper does not retain references
+    /// after the call returns.
     #[must_use]
     pub(crate) fn new(
         inner: &'a crate::VerterHost,
         view: &'a dyn SessionView,
-        store_view: &'a HostStoreView,
+        base: &'a HostStoreView,
+        overlay: Arc<CanonicalCompletionOverlay>,
     ) -> Self {
         Self {
             inner,
             view,
-            store_view,
+            request_view: RequestStoreView::new(base, overlay),
         }
+    }
+
+    /// Borrow the request-scoped overlay.
+    ///
+    /// Cooperative-admission lanes that inherit the context call this
+    /// to clone the `Arc` and seed a sibling wrapper that shares the
+    /// same per-request completion state.
+    #[allow(dead_code)]
+    pub(crate) fn overlay(&self) -> &Arc<CanonicalCompletionOverlay> {
+        self.request_view.overlay()
+    }
+
+    /// Idempotently promote a newly-loaded canonical into the overlay
+    /// (epoch-guarded; codex refinement #5).
+    ///
+    /// Called from `ensure_loaded` / `ensure_indexed_ready` success
+    /// paths so subsequent self-root fact validation observes the
+    /// freshly-loaded canonical's current content rather than
+    /// false-missing because the request-entry base view did not track
+    /// it.
+    #[allow(dead_code)]
+    pub(crate) fn complete_canonical(&self, canonical: &str) {
+        self.request_view.overlay().complete_canonical(
+            self.inner,
+            self.request_view.base(),
+            canonical,
+        );
     }
 }
 
@@ -153,20 +183,34 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         // host's own ensure-loaded already covers the non-overlay
         // case; overlay-aware materialisation routes through the
         // shared helper in `host_manage::overlay_priority`.
-        crate::host_manage::overlay_priority::ensure_indexed_ready_with_view(
+        let result = crate::host_manage::overlay_priority::ensure_indexed_ready_with_view(
             self.inner,
             self.view,
             canonical_id,
-        )
+        );
+        if result.is_some() {
+            // Eager canonical completion (codex refinement #3 / #5):
+            // promote the freshly-loaded canonical's per-canonical
+            // facts into the request overlay so subsequent self-root
+            // validation does not false-miss on a canonical the
+            // request-entry base view did not track. Idempotent +
+            // epoch-guarded inside `complete_canonical`.
+            self.complete_canonical(canonical_id);
+        }
+        result
     }
 
     #[inline]
     fn ensure_loaded(&self, canonical_id: &str) -> bool {
-        crate::host_manage::overlay_priority::ensure_loaded_with_view(
+        let loaded = crate::host_manage::overlay_priority::ensure_loaded_with_view(
             self.inner,
             self.view,
             canonical_id,
-        )
+        );
+        if loaded {
+            self.complete_canonical(canonical_id);
+        }
+        loaded
     }
 
     #[inline]
@@ -349,30 +393,23 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
     }
 
     /// Owned-view variant — preserves the pre-6.c semantics of building
-    /// a fresh overlay-rooted snapshot per call.
-    ///
-    /// Production hot-path callers should prefer [`Self::store_view`]
-    /// (the borrow into the request-bound view), but this method
-    /// survives until the canonical-completion overlay lands and the
-    /// per-call rebuild rail can be retired in full.
-    ///
-    /// This intentionally does NOT delegate to
-    /// `self.store_view.clone()`: the stored borrow is the view captured
-    /// at request construction, which does NOT track dependencies
-    /// loaded mid-request (the canonical-completion hidden risk codex
-    /// flagged). Callers that depend on freshness across additive loads
-    /// read through the fresh build until the overlay is in place.
+    /// a fresh overlay-rooted snapshot per call. Retained for cold-path
+    /// callers that need an owned snapshot; production hot-path callers
+    /// should prefer [`Self::store_view`] (the borrow into the
+    /// request-bound view with shadowing completion overlay) for
+    /// zero-allocation cache-validity reads.
     #[inline]
     fn resolver_store_view(&self) -> HostStoreView {
         ResolverContext::resolver_store_view(self.inner).with_session_overlay(self.inner, self.view)
     }
 
-    /// Borrowed access to the request-bound overlay-rooted
-    /// [`HostStoreView`].
+    /// Borrowed access to the request-bound overlay-rooted store view
+    /// chained behind a per-request
+    /// [`CanonicalCompletionOverlay`].
     ///
-    /// The view is built ONCE at the request boundary —
-    /// `host.resolver_store_view().with_session_overlay(host, view)` —
-    /// and threaded into this wrapper by reference. The overlay
+    /// The base [`HostStoreView`] is built ONCE at the request boundary
+    /// — `host.resolver_store_view().with_session_overlay(host, view)`
+    /// — and threaded into this wrapper by reference. The overlay
     /// re-rooting therefore runs exactly once per session-bearing
     /// request, not per resolver method call.
     ///
@@ -383,9 +420,15 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
     /// canonical's snapshots are dropped and the canonical is recorded
     /// in [`HostStoreView`]'s `tombstoned_canonicals` set so the strict
     /// validators reject any warm entry rooted on the deleted file.
+    ///
+    /// The chained [`CanonicalCompletionOverlay`] shadows the base view
+    /// with any canonicals loaded mid-request — additive loads observed
+    /// through `ensure_loaded` / `ensure_indexed_ready` successes.
+    /// Shadowing reads are authoritative: a mismatched overlay value
+    /// rejects (no fallthrough to the base view).
     #[inline]
-    fn store_view(&self) -> &HostStoreView {
-        self.store_view
+    fn store_view(&self) -> &dyn StoreView {
+        &self.request_view
     }
 
     #[inline]

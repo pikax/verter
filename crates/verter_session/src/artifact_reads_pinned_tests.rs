@@ -395,7 +395,12 @@ fn indexed_for_current_content_pins_overlay_artifact_through_session_context() {
     let store_view = host
         .resolver_store_view()
         .with_session_overlay(&host, &view);
-    let ctx = SessionResolverContext::new(&host, &view, &store_view);
+    let ctx = SessionResolverContext::new(
+        &host,
+        &view,
+        &store_view,
+        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
 
     // The session view's authoritative current-content hash must be the
     // OVERLAY hash, not the base hash.

@@ -313,8 +313,18 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// window — the borrow-returning method has no production callers
     /// yet. The hot-path conversion commit (C) wires consumers; removing
     /// the allow at that point is a stub-prevention follow-up.
+    ///
+    /// Returns `&dyn StoreView` (not the concrete [`HostStoreView`]) so
+    /// the trait stays dyn-compatible AND so a request-bound implementer
+    /// can hand back a [`crate::resolver_core::RequestStoreView`]
+    /// wrapper that chains a
+    /// [`crate::resolver_core::CanonicalCompletionOverlay`] in front of
+    /// the request-entry base view. The overlay records additive loads
+    /// observed mid-request (`ensure_loaded` / `ensure_indexed_ready`
+    /// successes) so the self-root validator does not false-miss on
+    /// canonicals loaded after the request-entry snapshot.
     #[allow(dead_code)]
-    fn store_view(&self) -> &HostStoreView;
+    fn store_view(&self) -> &dyn crate::resolver_core::StoreView;
 
     fn project_type_store(&self) -> &Arc<ProjectTypeStore>;
 
@@ -664,17 +674,18 @@ impl ResolverContext for crate::VerterHost {
     }
 
     #[inline]
-    fn store_view(&self) -> &HostStoreView {
+    fn store_view(&self) -> &dyn crate::resolver_core::StoreView {
         // The bare `impl ResolverContext for VerterHost` cannot satisfy
         // a borrow contract — `&VerterHost` owns no `HostStoreView`.
         // Production resolver-tier code MUST construct a
-        // `HostResolverContext::new(host, &view)` at the request boundary
-        // and pass `&host_ctx` (or `&host_ctx as &dyn ResolverContext`)
-        // into the pipeline. This panic is an architectural guard:
-        // reaching it means the request-binding boundary was bypassed.
+        // `HostResolverContext::new(host, &view, overlay)` at the request
+        // boundary and pass `&host_ctx` (or
+        // `&host_ctx as &dyn ResolverContext`) into the pipeline. This
+        // panic is an architectural guard: reaching it means the
+        // request-binding boundary was bypassed.
         panic!(
             "ResolverContext::store_view() called on bare &VerterHost — \
-             construct HostResolverContext::new(host, &view) at the request entry"
+             construct HostResolverContext::new(host, &view, overlay) at the request entry"
         );
     }
 

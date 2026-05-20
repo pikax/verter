@@ -2585,9 +2585,24 @@ mod resolver_context_seal {
                 // wrapper that owns the `&VerterHost` borrow needed to
                 // reach view-aware host internals
                 // (`prepared_decl_bundle_with_context` etc.) without
-                // widening the trait surface. Both are seal-bridge
-                // exemptions per sub-plan §10a.0.A.
-                n == "resolver_context.rs" || n == "session_resolver_context.rs"
+                // widening the trait surface.
+                // `host_resolver_context.rs` is the request-bound
+                // wrapper that owns the `&VerterHost` borrow needed to
+                // reach the view-taking `*_with_store_view` helpers
+                // and the canonical-completion hook.
+                // `request_store_view.rs` owns the
+                // `CanonicalCompletionOverlay::complete_canonical`
+                // helper, which threads through the host's
+                // `current_store_view_epoch` / `scheduler` /
+                // `derived_raw_cache` / `project_type_store` to
+                // promote freshly-loaded canonicals into the request
+                // overlay.
+                // All four are seal-bridge exemptions per sub-plan
+                // §10a.0.A.
+                n == "resolver_context.rs"
+                    || n == "session_resolver_context.rs"
+                    || n == "host_resolver_context.rs"
+                    || n == "request_store_view.rs"
             })
             .unwrap_or(false)
     }

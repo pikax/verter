@@ -397,16 +397,23 @@ impl VerterHost {
         view: &dyn crate::session_view::SessionView,
     ) -> Option<ResolvedComponentMetaState> {
         // NOTE: the Block 6.c per-request store-view hoist remains
-        // pending the canonical-completion overlay design (see
-        // `D:/tmp/block-6.c-canonical-completion-design.md` once
-        // written). Build the overlay-rooted view ONCE here, but the
-        // [`SessionResolverContext`] still resolves per-method-call
-        // freshness through the `with_session_overlay` view stored on
-        // construction — the borrow flows through without altering the
-        // per-call rebuild semantics until the overlay lands.
+        // Build the overlay-rooted view ONCE here so the
+        // [`SessionResolverContext`] threads a borrow down through the
+        // entire cold-compute pipeline (per Block 6.c per-request
+        // hoist). Canonicals additively loaded mid-request are promoted
+        // into the request-scoped
+        // [`crate::resolver_core::CanonicalCompletionOverlay`] so the
+        // self-root fact validator observes them without false-missing.
         let store_view = self.resolver_store_view().with_session_overlay(self, view);
-        let session_ctx =
-            crate::resolver_core::SessionResolverContext::new(self, view, &store_view);
+        let overlay = std::sync::Arc::new(
+            crate::resolver_core::CanonicalCompletionOverlay::new(),
+        );
+        let session_ctx = crate::resolver_core::SessionResolverContext::new(
+            self,
+            view,
+            &store_view,
+            overlay,
+        );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
         self.compute_component_meta_state_inner(
             canonical,
@@ -433,9 +440,20 @@ impl VerterHost {
         // Build the overlay-rooted store view ONCE here so the
         // SessionResolverContext threads a borrow down through the entire
         // cold-compute pipeline (per Block 6.c per-request hoist).
+        // Canonicals additively loaded mid-request are promoted into
+        // the request-scoped
+        // [`crate::resolver_core::CanonicalCompletionOverlay`] so the
+        // self-root fact validator observes them without false-missing.
         let store_view = self.resolver_store_view().with_session_overlay(self, view);
-        let session_ctx =
-            crate::resolver_core::SessionResolverContext::new(self, view, &store_view);
+        let overlay = std::sync::Arc::new(
+            crate::resolver_core::CanonicalCompletionOverlay::new(),
+        );
+        let session_ctx = crate::resolver_core::SessionResolverContext::new(
+            self,
+            view,
+            &store_view,
+            overlay,
+        );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
         self.compute_component_meta_state_inner(
             canonical,

@@ -40,6 +40,7 @@ pub mod fact_read_set;
 pub mod fuses;
 pub(crate) mod host_resolver_context;
 pub mod imported_root_db;
+pub(crate) mod request_store_view;
 pub(crate) mod resolver_context;
 pub mod route_db;
 pub(crate) mod scope_shadowing;
@@ -51,6 +52,8 @@ pub use fact_read_set::{FactReadSet, FactReadSetCell, FactReadSetFinalise};
 // hot-path conversion commit (C).
 #[allow(unused_imports)]
 pub(crate) use host_resolver_context::HostResolverContext;
+#[allow(unused_imports)]
+pub(crate) use request_store_view::{CanonicalCompletionOverlay, RequestStoreView};
 pub(crate) use resolver_context::{MaterializeScopeObservation, ResolverContext};
 pub(crate) use session_resolver_context::SessionResolverContext;
 

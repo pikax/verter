@@ -133,7 +133,15 @@ pub(crate) fn prewarm_view_overlays(host: &VerterHost, view: &dyn SessionView) {
     // rather than rebuilding the view per-overlay-canonical (per Block
     // 6.c per-request hoist).
     let store_view = host.resolver_store_view().with_session_overlay(host, view);
-    let session_ctx = crate::resolver_core::SessionResolverContext::new(host, view, &store_view);
+    let overlay = std::sync::Arc::new(
+        crate::resolver_core::CanonicalCompletionOverlay::new(),
+    );
+    let session_ctx = crate::resolver_core::SessionResolverContext::new(
+        host,
+        view,
+        &store_view,
+        overlay,
+    );
     for canonical in view.overlay_canonicals() {
         let _ = ResolverContext::ensure_indexed_ready(&session_ctx, canonical.as_str());
     }

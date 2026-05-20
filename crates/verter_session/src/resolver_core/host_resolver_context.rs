@@ -52,8 +52,9 @@ use crate::host_manage::ValueDeclIdentity;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::project_type_store::{IndexedReady, ProjectTypeStore};
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
+use crate::resolver_core::request_store_view::{CanonicalCompletionOverlay, RequestStoreView};
 use crate::resolver_core::resolver_context::ResolverContext;
-use crate::resolver_core::{FactReadSetCell, FactVersionRef, ShallowFileState};
+use crate::resolver_core::{FactReadSetCell, FactVersionRef, ShallowFileState, StoreView};
 use crate::resolver_store::HostStoreView;
 use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
 use crate::types::Hash16;
@@ -62,38 +63,82 @@ use crate::HostConfig;
 
 /// Request-bound [`ResolverContext`] wrapper.
 ///
-/// Holds `(&'a VerterHost, &'a HostStoreView)`. Every [`ResolverContext`]
-/// method delegates to the inner host except [`Self::store_view`], which
-/// returns the borrowed view. The view is built ONCE at the request
-/// boundary; resolver-tier callers that consult cached-validity-bound
-/// state read through the borrow instead of triggering a per-call full
-/// workspace snapshot.
+/// Holds `(&'a VerterHost, RequestStoreView<'a>)`. Every
+/// [`ResolverContext`] method delegates to the inner host except
+/// [`Self::store_view`], which returns a borrow into the owned
+/// [`RequestStoreView`] field. The base [`HostStoreView`] is built
+/// ONCE at the request boundary; resolver-tier callers that consult
+/// cached-validity-bound state read through the borrow instead of
+/// triggering a per-call full workspace snapshot.
+///
+/// The owned [`RequestStoreView`] chains a
+/// [`CanonicalCompletionOverlay`] in front of the borrowed base view
+/// so canonicals loaded mid-request (`ensure_loaded` /
+/// `ensure_indexed_ready` successes) are promoted into the overlay and
+/// observed by the self-root fact validator on subsequent reads. The
+/// overlay lives behind an `Arc` so cooperative-admission lanes that
+/// inherit the request's context can share it.
 pub(crate) struct HostResolverContext<'a> {
     inner: &'a crate::VerterHost,
-    store_view: &'a HostStoreView,
+    view: RequestStoreView<'a>,
 }
 
 impl<'a> HostResolverContext<'a> {
-    /// Construct a request-bound wrapper over `(inner, store_view)`.
+    /// Construct a request-bound wrapper over `(inner, base, overlay)`.
     ///
-    /// Callers build `store_view` once via
+    /// Callers build `base` once via
     /// [`crate::VerterHost::resolver_store_view`] at the request entry,
     /// then pass `&wrapper` to the resolver-tier pipeline. The wrapper
-    /// does not retain references after the call returns.
+    /// owns its own [`RequestStoreView`]; the base view is borrowed for
+    /// the duration of the wrapper. Pass an `Arc<CanonicalCompletionOverlay>`
+    /// so cooperative-admission lanes that inherit the context share
+    /// the same overlay.
     // `#[allow(dead_code)]` is intentional during the 6.c substrate
     // window — the call sites that construct this wrapper land in the
     // hot-path conversion commit (C). Removing the allow once those
     // sites land is a stub-prevention follow-up.
     #[allow(dead_code)]
     #[must_use]
-    pub(crate) fn new(inner: &'a crate::VerterHost, store_view: &'a HostStoreView) -> Self {
-        Self { inner, store_view }
+    pub(crate) fn new(
+        inner: &'a crate::VerterHost,
+        base: &'a HostStoreView,
+        overlay: Arc<CanonicalCompletionOverlay>,
+    ) -> Self {
+        Self {
+            inner,
+            view: RequestStoreView::new(base, overlay),
+        }
     }
 
     /// Borrow the inner host.
     #[allow(dead_code)]
     pub(crate) fn host(&self) -> &'a crate::VerterHost {
         self.inner
+    }
+
+    /// Borrow the request-scoped overlay.
+    ///
+    /// Cooperative-admission lanes that inherit the context call this
+    /// to clone the `Arc` and seed a sibling wrapper that shares the
+    /// same per-request completion state.
+    #[allow(dead_code)]
+    pub(crate) fn overlay(&self) -> &Arc<CanonicalCompletionOverlay> {
+        self.view.overlay()
+    }
+
+    /// Idempotently promote a newly-loaded canonical into the overlay
+    /// (epoch-guarded; codex refinement #5).
+    ///
+    /// Called from `ensure_loaded` / `ensure_indexed_ready` success
+    /// paths so subsequent self-root fact validation observes the
+    /// freshly-loaded canonical's current content rather than
+    /// false-missing because the request-entry base view did not track
+    /// it.
+    #[allow(dead_code)]
+    pub(crate) fn complete_canonical(&self, canonical: &str) {
+        self.view
+            .overlay()
+            .complete_canonical(self.inner, self.view.base(), canonical);
     }
 }
 
@@ -103,7 +148,7 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
     #[inline]
     fn prepared_decl_bundle(&self, canonical_id: &str) -> Option<Arc<PreparedDeclBundle>> {
         self.inner
-            .prepared_decl_bundle_with_store_view(self.store_view, canonical_id)
+            .prepared_decl_bundle_with_store_view(self.view.base(), canonical_id)
     }
 
     #[inline]
@@ -113,7 +158,7 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         symbol_name: &str,
     ) -> Option<Arc<PreparedTypeDecl>> {
         self.inner
-            .prepared_type_decl_with_store_view(self.store_view, canonical_id, symbol_name)
+            .prepared_type_decl_with_store_view(self.view.base(), canonical_id, symbol_name)
     }
 
     #[inline]
@@ -123,17 +168,31 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         symbol_name: &str,
     ) -> Option<Arc<PreparedValueDecl>> {
         self.inner
-            .prepared_value_decl_with_store_view(self.store_view, canonical_id, symbol_name)
+            .prepared_value_decl_with_store_view(self.view.base(), canonical_id, symbol_name)
     }
 
     #[inline]
     fn ensure_indexed_ready(&self, canonical_id: &str) -> Option<Arc<IndexedReady>> {
-        crate::VerterHost::ensure_indexed_ready(self.inner, canonical_id)
+        let result = crate::VerterHost::ensure_indexed_ready(self.inner, canonical_id);
+        if result.is_some() {
+            // Eager canonical completion (codex refinement #3 / #5):
+            // promote the freshly-loaded canonical's per-canonical
+            // facts into the request overlay so subsequent self-root
+            // validation does not false-miss on a canonical the
+            // request-entry base view did not track. Idempotent +
+            // epoch-guarded inside `complete_canonical`.
+            self.complete_canonical(canonical_id);
+        }
+        result
     }
 
     #[inline]
     fn ensure_loaded(&self, canonical_id: &str) -> bool {
-        crate::VerterHost::ensure_loaded(self.inner, canonical_id)
+        let loaded = crate::VerterHost::ensure_loaded(self.inner, canonical_id);
+        if loaded {
+            self.complete_canonical(canonical_id);
+        }
+        loaded
     }
 
     #[inline]
@@ -166,23 +225,17 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
     #[inline]
     fn resolver_store_view(&self) -> HostStoreView {
         // Owned-view variant — preserves the pre-6.c semantics of
-        // building a fresh snapshot per call.
-        //
-        // Intentionally does NOT delegate to `self.store_view.clone()`:
-        // the borrow is the view captured at request construction, which
-        // does NOT track dependencies loaded mid-request (the
-        // canonical-completion hidden risk codex flagged). Callers that
-        // depend on freshness across additive loads read through the
-        // fresh build until the overlay is in place.
-        //
-        // Production hot-path callers should prefer [`Self::store_view`]
-        // (the borrow) for zero-allocation cache-validity reads.
+        // building a fresh snapshot per call. Retained for cold-path
+        // callers that need an owned snapshot; production hot-path
+        // callers should prefer [`Self::store_view`] (the borrow into
+        // the request-bound view with shadowing overlay) for
+        // zero-allocation cache-validity reads.
         crate::VerterHost::resolver_store_view(self.inner)
     }
 
     #[inline]
-    fn store_view(&self) -> &HostStoreView {
-        self.store_view
+    fn store_view(&self) -> &dyn StoreView {
+        &self.view
     }
 
     #[inline]
@@ -239,7 +292,7 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         local_name: &str,
     ) -> Option<(String, String)> {
         self.inner.resolve_owner_direct_import_with_store_view(
-            self.store_view,
+            self.view.base(),
             owner_canonical,
             local_name,
         )
