@@ -148,9 +148,17 @@ impl VerterHost {
         // discriminates the singleflight slot (R20) and overlay source
         // flows through `capture_component_meta_inputs_with_view` into
         // the cold compute path.
+        //
+        // Block 6.c Shape 1: the request-scoped
+        // `CanonicalCompletionOverlay` is built ONCE here at the request
+        // boundary and stored on the adapter struct. Every resolver
+        // call inside the request shares this same `Arc` so promoted
+        // canonicals accumulate across capture / try-get-cached /
+        // compute boundaries.
         let request_host = crate::host_manage::component_meta_request_impl::ViewBoundRequestHost {
             host: self,
             view,
+            overlay: std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
         };
         let result = run_component_meta_request(
             &request_host,
@@ -395,8 +403,8 @@ impl VerterHost {
         mode: ProjectionMode,
         whole_hash: Hash16,
         view: &dyn crate::session_view::SessionView,
+        overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
     ) -> Option<ResolvedComponentMetaState> {
-        // NOTE: the Block 6.c per-request store-view hoist remains
         // Build the overlay-rooted view ONCE here so the
         // [`SessionResolverContext`] threads a borrow down through the
         // entire cold-compute pipeline (per Block 6.c per-request
@@ -404,10 +412,21 @@ impl VerterHost {
         // into the request-scoped
         // [`crate::resolver_core::CanonicalCompletionOverlay`] so the
         // self-root fact validator observes them without false-missing.
+        //
+        // Block 6.c Shape 1: the `overlay` parameter is the
+        // request-scoped overlay owned by the
+        // [`ViewBoundRequestHost`](crate::host_manage::component_meta_request_impl::ViewBoundRequestHost)
+        // adapter. Pre-Shape-1 each call allocated `Arc::new(CCO::new())`
+        // — a fresh empty overlay per cold compute — and paid the
+        // shadowing write cost without cross-call accumulation
+        // (codex consult #3 diagnosis).
         let store_view = self.resolver_store_view().with_session_overlay(self, view);
-        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let session_ctx =
-            crate::resolver_core::SessionResolverContext::new(self, view, &store_view, overlay);
+        let session_ctx = crate::resolver_core::SessionResolverContext::new(
+            self,
+            view,
+            &store_view,
+            std::sync::Arc::clone(overlay),
+        );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
         self.compute_component_meta_state_inner(
             canonical,
@@ -430,6 +449,7 @@ impl VerterHost {
         mode: ProjectionMode,
         captured: &CapturedComponentMetaInputs,
         view: &dyn crate::session_view::SessionView,
+        overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
     ) -> Option<ResolvedComponentMetaState> {
         // Build the overlay-rooted store view ONCE here so the
         // SessionResolverContext threads a borrow down through the entire
@@ -438,11 +458,91 @@ impl VerterHost {
         // the request-scoped
         // [`crate::resolver_core::CanonicalCompletionOverlay`] so the
         // self-root fact validator observes them without false-missing.
+        //
+        // Block 6.c Shape 1: `overlay` is the request-scoped overlay
+        // owned by the
+        // [`ViewBoundRequestHost`](crate::host_manage::component_meta_request_impl::ViewBoundRequestHost)
+        // adapter; see
+        // [`Self::compute_component_meta_state_with_view`] for the
+        // rationale.
         let store_view = self.resolver_store_view().with_session_overlay(self, view);
-        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let session_ctx =
-            crate::resolver_core::SessionResolverContext::new(self, view, &store_view, overlay);
+        let session_ctx = crate::resolver_core::SessionResolverContext::new(
+            self,
+            view,
+            &store_view,
+            std::sync::Arc::clone(overlay),
+        );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
+        self.compute_component_meta_state_inner(
+            canonical,
+            mode,
+            captured.whole_hash,
+            Some(captured),
+            crate::resolver_core::ComponentMetaResolutionPurpose::Full,
+            RegistryMaterialization::Full,
+            Some(ctx),
+        )
+    }
+
+    /// Bare-host overlay-aware cold compute entry (Block 6.c Shape 1).
+    ///
+    /// Routes the bare-host (no [`SessionView`](crate::session_view::SessionView))
+    /// cold-compute through a
+    /// [`HostResolverContext`](crate::resolver_core::HostResolverContext)
+    /// rooted on `overlay`, so the resolver-tier reads inside
+    /// [`Self::compute_component_meta_state_inner`] observe canonicals
+    /// promoted by mid-request `ensure_loaded` /
+    /// `ensure_indexed_ready` through the shared overlay.
+    ///
+    /// Used by
+    /// [`SessionRequestHost::compute_component_meta`](crate::host_manage::component_meta_request_impl::SessionRequestHost).
+    /// Pre-Shape-1 the bare-host path constructed no overlay at all —
+    /// every cold compute call paid the per-call workspace sweep cost
+    /// without any cross-call accumulation benefit (codex consult #3
+    /// diagnosis).
+    pub(crate) fn compute_component_meta_state_with_overlay(
+        &self,
+        canonical: &str,
+        mode: ProjectionMode,
+        whole_hash: Hash16,
+        overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
+    ) -> Option<ResolvedComponentMetaState> {
+        let store_view = self.resolver_store_view();
+        let host_ctx = crate::resolver_core::HostResolverContext::new(
+            self,
+            &store_view,
+            std::sync::Arc::clone(overlay),
+        );
+        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
+        self.compute_component_meta_state_inner(
+            canonical,
+            mode,
+            whole_hash,
+            None,
+            crate::resolver_core::ComponentMetaResolutionPurpose::Full,
+            RegistryMaterialization::Full,
+            Some(ctx),
+        )
+    }
+
+    /// Overlay-aware variant of
+    /// [`Self::compute_component_meta_state_from_captured`] (Block 6.c
+    /// Shape 1). See [`Self::compute_component_meta_state_with_overlay`]
+    /// for the rationale.
+    pub(crate) fn compute_component_meta_state_from_captured_with_overlay(
+        &self,
+        canonical: &str,
+        mode: ProjectionMode,
+        captured: &CapturedComponentMetaInputs,
+        overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
+    ) -> Option<ResolvedComponentMetaState> {
+        let store_view = self.resolver_store_view();
+        let host_ctx = crate::resolver_core::HostResolverContext::new(
+            self,
+            &store_view,
+            std::sync::Arc::clone(overlay),
+        );
+        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
         self.compute_component_meta_state_inner(
             canonical,
             mode,

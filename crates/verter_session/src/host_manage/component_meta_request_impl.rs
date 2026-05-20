@@ -93,9 +93,29 @@ pub struct CapturedComponentMetaInputs {
 /// view's overlay source is consulted in `capture_component_meta_inputs`
 /// so cold-compute reads observe overlay content for the owner
 /// canonical. All other methods delegate to the inner host.
+///
+/// ## Block 6.c Shape 1: attempt-scoped overlay carrier
+///
+/// `overlay` is the request-scoped
+/// [`CanonicalCompletionOverlay`](crate::resolver_core::CanonicalCompletionOverlay)
+/// — built ONCE at adapter construction time and shared by every
+/// resolver call inside the request. Mid-request `ensure_loaded` /
+/// `ensure_indexed_ready` successes promote canonicals into THIS
+/// overlay; subsequent reads through the same request observe the
+/// promotions through the `RequestStoreView` shadowing rail.
+///
+/// Pre-Shape-1 (commit F), the overlay was constructed inside each
+/// `compute_component_meta_state_*_with_view` helper call — that
+/// allocated a fresh empty overlay per cold compute and paid the
+/// shadowing write overhead with zero cross-call accumulation
+/// benefit, regressing the bench by +49% (codex consult #3
+/// diagnosis). Hoisting the overlay onto the adapter struct closes
+/// the gap by letting `compute_component_meta_state_*_with_view`
+/// borrow the shared `Arc` instead of `Arc::new()`-ing one per call.
 pub(crate) struct ViewBoundRequestHost<'a> {
     pub(crate) host: &'a VerterHost,
     pub(crate) view: &'a dyn crate::session_view::SessionView,
+    pub(crate) overlay: std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
 }
 
 impl ComponentMetaRequestHost for VerterHost {
@@ -308,19 +328,36 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
         // declarations, dep-source materialisation, registry+macro
         // shapes) observe overlay candidates published by the
         // prewarm pass.
+        //
+        // Block 6.c Shape 1: pass the request-scoped overlay
+        // (`self.overlay`) into the `_with_view` helpers so the
+        // SessionResolverContext built inside them shares the SAME
+        // overlay across capture / try-get-cached / compute boundaries.
+        // Pre-Shape-1 each helper invocation called `Arc::new(...)`
+        // and produced a fresh empty overlay per call (codex consult
+        // #3 diagnosis).
         if let Some(captured) = captured {
             return self
                 .host
                 .compute_component_meta_state_from_captured_with_view(
-                    canonical, mode, captured, self.view,
+                    canonical,
+                    mode,
+                    captured,
+                    self.view,
+                    &self.overlay,
                 );
         }
         let whole_hash = self
             .host
             .current_or_read_whole_hash(canonical)
             .unwrap_or_default();
-        self.host
-            .compute_component_meta_state_with_view(canonical, mode, whole_hash, self.view)
+        self.host.compute_component_meta_state_with_view(
+            canonical,
+            mode,
+            whole_hash,
+            self.view,
+            &self.overlay,
+        )
     }
 
     fn store_component_meta_result(
@@ -350,8 +387,17 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
 /// session-scoped callers. The generic executor at
 /// `component_meta_request.rs` calls these methods on the trait object,
 /// so every axis is session-aware end to end.
+///
+/// ## Block 6.c Shape 1: attempt-scoped overlay carrier
+///
+/// `overlay` is the request-scoped
+/// [`CanonicalCompletionOverlay`](crate::resolver_core::CanonicalCompletionOverlay)
+/// — built ONCE at adapter construction time and shared by every
+/// resolver call inside the request. See [`ViewBoundRequestHost`]'s
+/// doc for the full rationale.
 pub struct SessionRequestHost<'a> {
     pub(crate) runtime: &'a crate::session_runtime::SessionRuntime,
+    pub(crate) overlay: std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
 }
 
 impl<'a> ComponentMetaRequestHost for SessionRequestHost<'a> {
@@ -443,14 +489,27 @@ impl<'a> ComponentMetaRequestHost for SessionRequestHost<'a> {
         captured: Option<&Self::CapturedInputs>,
         _store_view: Option<&Self::View>,
     ) -> Option<Self::Resolution> {
+        // Block 6.c Shape 1: route through the overlay-bearing
+        // bare-host helpers so the resolver-tier reads inside cold
+        // compute observe canonicals promoted by mid-request
+        // `ensure_loaded` / `ensure_indexed_ready`. The overlay
+        // (`self.overlay`) is shared across capture / try-get-cached
+        // / compute boundaries; before Shape 1 the bare-host path
+        // had no overlay at all, so every `ensure_indexed_ready`
+        // result was visible only locally to the call site.
         let host = self.runtime.host();
         if let Some(captured) = captured {
-            return host.compute_component_meta_state_from_captured(canonical, mode, captured);
+            return host.compute_component_meta_state_from_captured_with_overlay(
+                canonical,
+                mode,
+                captured,
+                &self.overlay,
+            );
         }
         let whole_hash = host
             .current_or_read_whole_hash(canonical)
             .unwrap_or_default();
-        host.compute_component_meta_state(canonical, mode, whole_hash)
+        host.compute_component_meta_state_with_overlay(canonical, mode, whole_hash, &self.overlay)
     }
 
     fn store_component_meta_result(

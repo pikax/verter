@@ -119,7 +119,18 @@ impl SessionRuntime {
         let host = self.host();
         let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
 
-        let request_host = crate::meta_resolve::SessionRequestHost { runtime: self };
+        // Block 6.c Shape 1: the request-scoped
+        // `CanonicalCompletionOverlay` is built ONCE here at the request
+        // boundary and stored on the adapter struct. Every resolver
+        // call inside the request shares this same `Arc` so promoted
+        // canonicals accumulate across capture / try-get-cached /
+        // compute boundaries. See
+        // `meta_resolve::SessionRequestHost` doc for the full
+        // rationale.
+        let request_host = crate::meta_resolve::SessionRequestHost {
+            runtime: self,
+            overlay: std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        };
         let result = crate::resolver_core::run_component_meta_request(
             &request_host,
             host.resolver_runtime().component_meta.singleflight(),
