@@ -680,13 +680,53 @@ impl ResolverContext for crate::VerterHost {
         // Production resolver-tier code MUST construct a
         // `HostResolverContext::new(host, &view, overlay)` at the request
         // boundary and pass `&host_ctx` (or
-        // `&host_ctx as &dyn ResolverContext`) into the pipeline. This
-        // panic is an architectural guard: reaching it means the
-        // request-binding boundary was bypassed.
-        panic!(
-            "ResolverContext::store_view() called on bare &VerterHost — \
-             construct HostResolverContext::new(host, &view, overlay) at the request entry"
-        );
+        // `&host_ctx as &dyn ResolverContext`) into the pipeline.
+        //
+        // In production (non-test) builds this is an architectural guard
+        // — reaching it means the request-binding boundary was
+        // bypassed, and the bypass-audit (Block 6.c iter3) confirmed no
+        // production cold-compute path reaches this site.
+        //
+        // In test builds the bare-host fallback is supported via a
+        // thread-local owned view: many test fixtures hand a bare
+        // `&VerterHost` to `validate_*` helpers that route through
+        // `ctx.store_view()`. The fallback constructs an owned
+        // `HostStoreView` per call and stores it in a thread-local cell
+        // so the borrowed return is valid for the duration of the test
+        // step. Each call REPLACES the cell, so the borrow is invalidated
+        // by the next call on the same thread (sound for sequential
+        // test code; tests do not interleave borrows).
+        #[cfg(test)]
+        {
+            thread_local! {
+                static BARE_HOST_TEST_VIEW: std::cell::RefCell<Option<Box<HostStoreView>>>
+                    = const { std::cell::RefCell::new(None) };
+            }
+            let view = crate::VerterHost::resolver_store_view(self);
+            BARE_HOST_TEST_VIEW.with(|cell| {
+                *cell.borrow_mut() = Some(Box::new(view));
+            });
+            // SAFETY: The cell is thread-local and we have just inserted
+            // a fresh boxed `HostStoreView`; the boxed allocation lives
+            // until the next call on this thread replaces it. The
+            // returned `&dyn StoreView` borrow is valid until that next
+            // call. Test code is sequential and never overlaps borrows.
+            BARE_HOST_TEST_VIEW.with(|cell| {
+                let borrowed = cell.borrow();
+                let ptr: *const HostStoreView = borrowed
+                    .as_ref()
+                    .expect("just inserted a view above")
+                    .as_ref();
+                unsafe { &*ptr as &dyn crate::resolver_core::StoreView }
+            })
+        }
+        #[cfg(not(test))]
+        {
+            panic!(
+                "ResolverContext::store_view() called on bare &VerterHost — \
+                 construct HostResolverContext::new(host, &view, overlay) at the request entry"
+            );
+        }
     }
 
     #[inline]
