@@ -2762,22 +2762,7 @@ impl VerterHost {
         }
 
         // FileArtifactStore path: covers imported deps and non-scheduler files.
-        //
-        // Block 6.c context-routing: thread `ensure_indexed_ready` through
-        // a request-scoped `HostResolverContext` so the freshly-loaded
-        // canonical's facts enter the canonical-completion overlay (the
-        // request-bound view's shadow promotion). Without this, a
-        // subsequent self-root fact validation against a request-entry
-        // base view that did not track the canonical would false-miss
-        // and force a cold recompute on every load — the perf regression
-        // pattern Block 6.c is fixing.
-        let base_view = self.resolver_store_view();
-        let overlay = std::sync::Arc::new(
-            crate::resolver_core::CanonicalCompletionOverlay::new(),
-        );
-        let ctx = crate::resolver_core::HostResolverContext::new(self, &base_view, overlay);
-        let facts =
-            crate::resolver_core::ResolverContext::ensure_indexed_ready(&ctx, canonical)?;
+        let facts = self.ensure_indexed_ready(canonical)?;
         let mut snapshot = (*facts.snapshot).clone();
         self.resolve_snapshot_imports(canonical, &mut snapshot);
         self.enrich_destructured_bindings(&mut snapshot);

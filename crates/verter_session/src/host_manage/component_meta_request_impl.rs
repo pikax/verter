@@ -148,19 +148,7 @@ impl ComponentMetaRequestHost for VerterHost {
                 snapshot.template.is_some(),
             ),
         );
-        // Block 6.c context-routing: route `ensure_indexed_ready` through
-        // a request-scoped `HostResolverContext` so the freshly-loaded
-        // canonical's facts enter the canonical-completion overlay for
-        // subsequent self-root fact validation. This base-host path
-        // builds its own per-request context — the view-bearing capture
-        // path (`capture_component_meta_inputs_with_view`) goes through
-        // `SessionResolverContext` on the call site instead.
-        let base_view = self.resolver_store_view();
-        let overlay = std::sync::Arc::new(
-            crate::resolver_core::CanonicalCompletionOverlay::new(),
-        );
-        let ctx = crate::resolver_core::HostResolverContext::new(self, &base_view, overlay);
-        let facts = crate::resolver_core::ResolverContext::ensure_indexed_ready(&ctx, canonical)?;
+        let facts = self.ensure_indexed_ready(canonical)?;
         let whole_hash = facts.whole_hash;
         let store_read_ms = store_read_started
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
@@ -412,19 +400,7 @@ impl<'a> ComponentMetaRequestHost for SessionRequestHost<'a> {
             format!("owner={} session={}", canonical, self.runtime.session_id()),
         );
         let snapshot = host.get_raw_analysis_snapshot(canonical)?;
-        // Block 6.c context-routing: route `ensure_indexed_ready`
-        // through a request-scoped `HostResolverContext` so the
-        // freshly-loaded canonical enters the canonical-completion
-        // overlay before downstream self-root fact validation. The
-        // session-runtime path constructs a base-host context here
-        // (the session's session-view-bearing overlay is layered on
-        // separately by callers that need it).
-        let base_view = host.resolver_store_view();
-        let overlay = std::sync::Arc::new(
-            crate::resolver_core::CanonicalCompletionOverlay::new(),
-        );
-        let ctx = crate::resolver_core::HostResolverContext::new(host, &base_view, overlay);
-        let facts = crate::resolver_core::ResolverContext::ensure_indexed_ready(&ctx, canonical)?;
+        let facts = host.ensure_indexed_ready(canonical)?;
         let whole_hash = facts.whole_hash;
         let store_read_ms = store_read_started
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
