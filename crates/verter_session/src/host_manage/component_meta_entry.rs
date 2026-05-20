@@ -897,6 +897,8 @@ impl VerterHost {
         if self.config.audit_enabled {
             let store = crate::component_meta_audit::RequestStoreAudit {
                 cache_layers: crate::component_meta_audit::snapshot_cache_layers_from_tls(),
+                bypass_diagnostics:
+                    crate::component_meta_audit::snapshot_bypass_diagnostics_from_tls(),
                 ..Default::default()
             };
             // Warm-cache replay carries the same parent-request and

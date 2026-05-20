@@ -150,6 +150,27 @@ impl MaterializeScopeObservation {
 /// internal seal — no external integrators construct
 /// `&dyn ResolverContext`.
 pub(crate) trait ResolverContext: sealed::Sealed {
+    // -------- Identity --------------------------------------------
+
+    /// `true` when this context is request-bound — i.e. a
+    /// [`crate::resolver_core::HostResolverContext`] or
+    /// [`crate::resolver_core::SessionResolverContext`] backed by a
+    /// per-request [`HostStoreView`] (and overlay) constructed at the
+    /// request entry boundary. `false` for the bare-host
+    /// `impl ResolverContext for VerterHost` rail, which rebuilds an
+    /// owned view on every `resolver_store_view()` / `store_view()`
+    /// call (and which the Block 7.5 cleanup retires from production
+    /// resolver-tier code).
+    ///
+    /// Used by `ComponentMetaQueryEngine::new` to bump the
+    /// `bare_engine_constructions` diagnostic counter whenever the
+    /// engine is bound to a non-request-bound ctx — the empirical
+    /// signal the 3-way consult identified as the residual perf-gap
+    /// suspect.
+    fn is_request_bound(&self) -> bool {
+        false
+    }
+
     // -------- Cache accessors --------------------------------------
 
     fn prepared_decl_bundle(&self, canonical_id: &str) -> Option<Arc<PreparedDeclBundle>>;
@@ -670,6 +691,7 @@ impl ResolverContext for crate::VerterHost {
 
     #[inline]
     fn resolver_store_view(&self) -> HostStoreView {
+        crate::request_context::bump_resolver_store_view_call();
         crate::VerterHost::resolver_store_view(self)
     }
 

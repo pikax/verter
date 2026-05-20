@@ -266,6 +266,23 @@ struct PassRow {
     /// an unusually-deep materialiser walk or a regression in the
     /// trace surface).
     structured_events_count: usize,
+    /// Block 7.5 diagnostic counter: number of
+    /// `HostStoreView::from_host` invocations on the request. Per-request
+    /// hoist (Block 6.c) expects `~1`; counts >1 reveal resolver-tier
+    /// carriers that still build their own owned view.
+    host_store_view_builds: u64,
+    /// Block 7.5 diagnostic counter: number of bare-host
+    /// `ComponentMetaQueryEngine::new(ctx)` constructions on the
+    /// request where `ctx.is_request_bound() == false`. The 17 Class
+    /// B bypass sites are the surviving sources; post-Block-7.5
+    /// invariant: `0`.
+    bare_engine_constructions: u64,
+    /// Block 7.5 diagnostic counter: number of
+    /// `ResolverContext::resolver_store_view()` calls on the
+    /// request. Each call rebuilds an owned `HostStoreView`;
+    /// warm-hit validator paths in `fact_signature_helpers` rebuild
+    /// on EVERY cache lookup pre-Bug-2.
+    resolver_store_view_calls: u64,
     error: Option<String>,
 }
 
@@ -340,6 +357,12 @@ fn summarize(pass: &str, target: &str, elapsed_ms: f64, record: &RequestAuditRec
         // (manual instrumentation, not committed) measured corpus max = 11.
         bridge_max_depth_observed: 0,
         structured_events_count: fp.map(|f| f.structured_events.len()).unwrap_or(0),
+        host_store_view_builds: record
+            .store
+            .bypass_diagnostics
+            .host_store_view_from_host_builds,
+        bare_engine_constructions: record.store.bypass_diagnostics.bare_engine_constructions,
+        resolver_store_view_calls: record.store.bypass_diagnostics.resolver_store_view_calls,
         error: None,
     }
 }
@@ -386,6 +409,9 @@ fn error_row(pass: &str, target: &str, elapsed_ms: f64, error: String) -> PassRo
         has_orphan_edges: false,
         bridge_max_depth_observed: 0,
         structured_events_count: 0,
+        host_store_view_builds: 0,
+        bare_engine_constructions: 0,
+        resolver_store_view_calls: 0,
         error: Some(error),
     }
 }
@@ -521,10 +547,10 @@ fn run_pass_fresh_cold(
 fn write_summary_csv(out_dir: &Path, rows: &[PassRow]) -> io::Result<()> {
     let path = out_dir.join("summary.csv");
     let mut s = String::new();
-    s.push_str("pass,target,error,elapsed_ms,total_ms,capture_inputs_ms,store_read_ms,direct_import_proof_ms,imported_root_proof_ms,solver_ms,materialize_ms,serialize_ms,vfs_reads,vfs_disk,vfs_snapshot,vfs_overlay,vfs_missing,indexed_ready_builds,instantiations,projections,materializations,substitutions,alias_resolutions,conditional_decisions,cold_builds,warm_hits,joined_waits,inflight_aborted_retries,store_view_hits,store_view_misses,imported_dependency_entries,imported_dependency_kb,prepared_type_decls,prepared_value_decls,rss_delta_kb,derivation_nodes,derivation_edges,edges_truncated,has_orphan_edges,bridge_max_depth_observed,structured_events_count\n");
+    s.push_str("pass,target,error,elapsed_ms,total_ms,capture_inputs_ms,store_read_ms,direct_import_proof_ms,imported_root_proof_ms,solver_ms,materialize_ms,serialize_ms,vfs_reads,vfs_disk,vfs_snapshot,vfs_overlay,vfs_missing,indexed_ready_builds,instantiations,projections,materializations,substitutions,alias_resolutions,conditional_decisions,cold_builds,warm_hits,joined_waits,inflight_aborted_retries,store_view_hits,store_view_misses,imported_dependency_entries,imported_dependency_kb,prepared_type_decls,prepared_value_decls,rss_delta_kb,derivation_nodes,derivation_edges,edges_truncated,has_orphan_edges,bridge_max_depth_observed,structured_events_count,host_store_view_builds,bare_engine_constructions,resolver_store_view_calls\n");
     for r in rows {
         s.push_str(&format!(
-            "{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
             r.pass,
             r.target,
             r.error.as_deref().unwrap_or(""),
@@ -539,6 +565,7 @@ fn write_summary_csv(out_dir: &Path, rows: &[PassRow]) -> io::Result<()> {
             r.imported_dependency_kb, r.prepared_type_decls, r.prepared_value_decls,
             r.rss_delta_kb, r.derivation_nodes, r.derivation_edges, r.edges_truncated,
             r.has_orphan_edges, r.bridge_max_depth_observed, r.structured_events_count,
+            r.host_store_view_builds, r.bare_engine_constructions, r.resolver_store_view_calls,
         ));
     }
     fs::write(&path, s)?;

@@ -228,6 +228,98 @@ pub struct PerRequestCacheCounters {
     pub prepared_surface: HitMiss,
     /// `PreparedMemberDb` — prepared-member cache.
     pub prepared_member: HitMiss,
+    /// Block 7.5 rule-compliance diagnostic counters. Empirical
+    /// instrumentation that quantifies the bypass surfaces the 3-way
+    /// consult identified as the residual +19% perf gap suspects:
+    /// per-request `HostStoreView::from_host` builds, bare-host
+    /// `ComponentMetaQueryEngine::new(...)` constructions, and
+    /// `ResolverContext::resolver_store_view()` warm-hit validator
+    /// rebuilds. These counters are production-on (atomic, ~ns of
+    /// cost vs. the µs–ms work they observe) and snapshot into
+    /// [`verter_audit::store::BypassDiagnostics`] at request close.
+    pub bypass_diagnostics: BypassDiagnosticCounters,
+}
+
+/// Block 7.5 diagnostic counters that quantify the rule-compliance
+/// bypass surfaces. Bumped from the production code paths the
+/// 3-way consult identified as the residual +19% perf-gap suspects;
+/// snapshotted into [`verter_audit::store::BypassDiagnostics`] at
+/// request close so each component-meta request emits its own
+/// delta (no host-global accumulation, no cross-request leakage).
+///
+/// Atomic increments are negligible (~ns) compared with the µs–ms
+/// of work each bump observes, so the counters stay on in production
+/// builds — that is the only state in which the bench corpus surfaces
+/// the bypass leverage these counters measure.
+#[derive(Debug, Default)]
+pub struct BypassDiagnosticCounters {
+    /// Number of `HostStoreView::from_host` invocations on the
+    /// current request. The per-request hoist landed by Block 6.c
+    /// expects this to drop to a small constant; counts >1 reveal
+    /// resolver-tier carriers that still build their own owned view
+    /// instead of borrowing the request-bound view.
+    pub host_store_view_from_host_builds: AtomicU64,
+    /// Number of `ComponentMetaQueryEngine::new(ctx)` constructions
+    /// on the current request where `ctx.is_request_bound()` returned
+    /// `false` (i.e. the engine was bound to a bare `&VerterHost`
+    /// rather than a `HostResolverContext` / `SessionResolverContext`).
+    /// The 17 Class B sites enumerated in the bypass-audit-v2 are
+    /// the surviving sources; the post-Block-7.5 invariant is `0`.
+    pub bare_engine_constructions: AtomicU64,
+    /// Number of `ResolverContext::resolver_store_view()` calls on
+    /// the current request. Each call rebuilds a full owned
+    /// `HostStoreView` via `HostStoreView::from_host`; warm-hit
+    /// validator paths in `fact_signature_helpers` rebuild on EVERY
+    /// cache lookup. Bug 2 switches those helpers to the borrowed
+    /// `store_view()`, dropping this counter toward 0 in production.
+    pub resolver_store_view_calls: AtomicU64,
+}
+
+impl BypassDiagnosticCounters {
+    /// Snapshot the counter values with relaxed ordering. The
+    /// request is single-threaded at finalisation so relaxed reads
+    /// observe every prior bump.
+    #[must_use]
+    pub fn snapshot(&self) -> (u64, u64, u64) {
+        (
+            self.host_store_view_from_host_builds
+                .load(Ordering::Relaxed),
+            self.bare_engine_constructions.load(Ordering::Relaxed),
+            self.resolver_store_view_calls.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// Bump the per-request `resolver_store_view_calls` Block 7.5
+/// diagnostic counter when a request context is installed. The bump
+/// is a noop outside an audited request (synthesised tests,
+/// non-audited callers). Called from every
+/// `impl ResolverContext::resolver_store_view()` so the counter
+/// observes all trait-dispatched owned-view rebuilds — the
+/// warm-hit validator path is the dominant consumer pre-Bug-2.
+#[inline]
+pub fn bump_resolver_store_view_call() {
+    if let Some(ctx) = current_request_context() {
+        ctx.cache_counters
+            .bypass_diagnostics
+            .resolver_store_view_calls
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Bump the per-request `bare_engine_constructions` Block 7.5
+/// diagnostic counter when a request context is installed. Called
+/// from `ComponentMetaQueryEngine::new` whenever the ctx fails the
+/// `is_request_bound()` predicate (i.e. the engine is being bound
+/// to the bare `impl ResolverContext for VerterHost` rail).
+#[inline]
+pub fn bump_bare_engine_construction() {
+    if let Some(ctx) = current_request_context() {
+        ctx.cache_counters
+            .bypass_diagnostics
+            .bare_engine_constructions
+            .fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Per-request state. Held as `Arc<RequestContext>` and wrapped into
@@ -1025,6 +1117,52 @@ mod tests {
 
     fn make_ctx(id: u64, capture: bool) -> Arc<RequestContext> {
         RequestContext::new(id, Arc::from("/x.vue"), capture, None)
+    }
+
+    #[test]
+    fn bump_bare_engine_construction_increments_on_installed_context() {
+        // Discriminating: a bare-host `ResolverContext::is_request_bound()`
+        // returns false → calling `bump_bare_engine_construction()`
+        // under an installed RequestContext must increment the counter.
+        // Without an installed context the bump is a noop.
+        let ctx = make_ctx(101, false);
+        let (_, bare_before, _) = ctx.cache_counters.bypass_diagnostics.snapshot();
+        assert_eq!(bare_before, 0, "fresh context starts at 0");
+        {
+            let _g = RequestContextGuard::install(Arc::clone(&ctx));
+            bump_bare_engine_construction();
+            bump_bare_engine_construction();
+        }
+        let (_, bare_after, _) = ctx.cache_counters.bypass_diagnostics.snapshot();
+        assert_eq!(
+            bare_after, 2,
+            "counter must increment twice under an installed context"
+        );
+        // Outside the guard the bump is a noop.
+        bump_bare_engine_construction();
+        let (_, bare_outside, _) = ctx.cache_counters.bypass_diagnostics.snapshot();
+        assert_eq!(
+            bare_outside, 2,
+            "bump outside an installed context must be a noop"
+        );
+    }
+
+    #[test]
+    fn bump_resolver_store_view_call_increments_on_installed_context() {
+        let ctx = make_ctx(102, false);
+        let (_, _, calls_before) = ctx.cache_counters.bypass_diagnostics.snapshot();
+        assert_eq!(calls_before, 0, "fresh context starts at 0");
+        {
+            let _g = RequestContextGuard::install(Arc::clone(&ctx));
+            bump_resolver_store_view_call();
+            bump_resolver_store_view_call();
+            bump_resolver_store_view_call();
+        }
+        let (_, _, calls_after) = ctx.cache_counters.bypass_diagnostics.snapshot();
+        assert_eq!(
+            calls_after, 3,
+            "counter must increment three times under an installed context"
+        );
     }
 
     #[test]

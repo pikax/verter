@@ -191,6 +191,17 @@ impl HostStoreView {
     pub(crate) fn from_host(host: &VerterHost) -> Self {
         #[cfg(test)]
         HOST_STORE_VIEW_FROM_HOST_BUILDS.with(|c| c.set(c.get().saturating_add(1)));
+        // Block 7.5 diagnostic counter: bump the per-request
+        // `host_store_view_from_host_builds` counter so the bench
+        // surfaces how many owned-view rebuilds the request paid for.
+        // The bump is a noop when no `RequestContext` is installed
+        // (synthesised tests, non-audited callers).
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            ctx.cache_counters
+                .bypass_diagnostics
+                .host_store_view_from_host_builds
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         for _ in 0..STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS {
             let snapshot_epoch = host.current_store_view_epoch();
             let view = Self::build(host, snapshot_epoch, None);
@@ -1432,6 +1443,7 @@ impl VerterHost {
             prepared_type_decls,
             prepared_value_decls,
             cache_layers: Default::default(),
+            bypass_diagnostics: crate::component_meta_audit::snapshot_bypass_diagnostics_from_tls(),
         };
         (store_audit, component_meta_counters)
     }

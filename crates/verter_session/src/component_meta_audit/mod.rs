@@ -151,6 +151,28 @@ pub fn snapshot_cache_layers_from_tls() -> verter_audit::store::CacheLayerBreakd
     }
 }
 
+/// Snapshot the per-request Block-7.5 bypass diagnostic counters
+/// from the currently installed [`crate::request_context::RequestContext`]
+/// into a [`verter_audit::store::BypassDiagnostics`] DTO. Returns a
+/// default (all-zero) struct when no context is installed — the
+/// synthetic-record path lands here and emits zeros, which is the
+/// correct semantic for a request that did not exercise any
+/// resolver-tier carriers.
+#[must_use]
+pub fn snapshot_bypass_diagnostics_from_tls() -> verter_audit::store::BypassDiagnostics {
+    use verter_audit::store::BypassDiagnostics;
+    let Some(ctx) = crate::request_context::current_request_context() else {
+        return BypassDiagnostics::default();
+    };
+    let (builds, bare_engines, store_view_calls) =
+        ctx.cache_counters.bypass_diagnostics.snapshot();
+    BypassDiagnostics {
+        host_store_view_from_host_builds: builds,
+        bare_engine_constructions: bare_engines,
+        resolver_store_view_calls: store_view_calls,
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Audit builder — accumulates data during a request
 // ----------------------------------------------------------------------------
@@ -361,6 +383,7 @@ impl AuditBuilder {
         self.memory.process_rss_delta_bytes = self.memory.process_rss_after_bytes as i64
             - self.memory.process_rss_before_bytes as i64;
         self.store.cache_layers = snapshot_cache_layers_from_tls();
+        self.store.bypass_diagnostics = snapshot_bypass_diagnostics_from_tls();
 
         // Read scheduler attribution + parent-request correlation
         // from the active request context. Both are populated by the

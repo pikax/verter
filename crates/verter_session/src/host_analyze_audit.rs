@@ -180,6 +180,7 @@ impl VerterHost {
         };
         let store = RequestStoreAudit {
             cache_layers: crate::component_meta_audit::snapshot_cache_layers_from_tls(),
+            bypass_diagnostics: crate::component_meta_audit::snapshot_bypass_diagnostics_from_tls(),
             ..RequestStoreAudit::default()
         };
         let memory = RequestMemoryAudit {

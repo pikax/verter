@@ -51,6 +51,7 @@ use verter_workspace::{AmbientSymbolHit, ProjectStableKey};
 use crate::host_manage::ValueDeclIdentity;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::project_type_store::{IndexedReady, ProjectTypeStore};
+use crate::request_context::bump_resolver_store_view_call;
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
 use crate::resolver_core::request_store_view::{CanonicalCompletionOverlay, RequestStoreView};
 use crate::resolver_core::resolver_context::ResolverContext;
@@ -146,6 +147,13 @@ impl<'a> HostResolverContext<'a> {
 }
 
 impl<'a> ResolverContext for HostResolverContext<'a> {
+    // -------- Identity --------------------------------------------
+
+    #[inline]
+    fn is_request_bound(&self) -> bool {
+        true
+    }
+
     // -------- Cache accessors --------------------------------------
 
     #[inline]
@@ -243,6 +251,7 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         // callers should prefer [`Self::store_view`] (the borrow into
         // the request-bound view with shadowing overlay) for
         // zero-allocation cache-validity reads.
+        bump_resolver_store_view_call();
         crate::VerterHost::resolver_store_view(self.inner)
     }
 
