@@ -410,6 +410,7 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
     /// request-bound view with shadowing completion overlay) for
     /// zero-allocation cache-validity reads.
     #[inline]
+    #[track_caller]
     fn resolver_store_view(&self) -> HostStoreView {
         bump_resolver_store_view_call();
         ResolverContext::resolver_store_view(self.inner).with_session_overlay(self.inner, self.view)

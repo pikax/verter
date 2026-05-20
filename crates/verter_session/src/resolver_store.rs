@@ -1,5 +1,97 @@
 use crate::types::Hash16;
 use crate::VerterHost;
+use dashmap::DashMap;
+use std::panic::Location;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+
+/// Per-call-site counter for [`HostStoreView::from_host`] invocations.
+///
+/// **Block 6.e instrumentation.** `HostStoreView::from_host` rebuilds
+/// the entire workspace snapshot on every call; the dominant cost
+/// surfaces as `host_store_view_from_host_builds` per-Button counts in
+/// the audit-record diagnostic counters. To attribute those builds
+/// back to specific warm-hit validator call sites (the Bug 2 hypothesis
+/// codex's 3-way consult identified), every entry into `from_host`
+/// records `std::panic::Location::caller()` and bumps a per-site
+/// counter. The `#[track_caller]` rail on `from_host`,
+/// `VerterHost::resolver_store_view`, the
+/// `impl ResolverContext::resolver_store_view` trait impls, and the
+/// `fact_signature_helpers::validate_fact_signature*` helpers
+/// propagates the location all the way back to the warm-hit cache
+/// validator that triggered the build — so the dump attributes builds
+/// to the actual cache layer paying for them, not to the deepest
+/// `from_host` body call site.
+///
+/// **Cost is negligible:** each call performs one `DashMap` lookup
+/// (sub-µs) vs the multi-ms workspace sweep `from_host` itself does,
+/// so the counter stays production-on. The map is keyed by
+/// `&'static Location<'static>` — `track_caller` locations are
+/// `'static` by language guarantee, so pointer identity is stable and
+/// the key set is bounded by the number of distinct call sites in the
+/// linked binary.
+///
+/// Read via [`dump_from_host_call_sites`] (sorted descending by count).
+static FROM_HOST_BY_SITE: OnceLock<DashMap<&'static Location<'static>, AtomicU64>> =
+    OnceLock::new();
+
+#[inline]
+fn from_host_site_table() -> &'static DashMap<&'static Location<'static>, AtomicU64> {
+    FROM_HOST_BY_SITE.get_or_init(DashMap::new)
+}
+
+/// Record one entry into [`HostStoreView::from_host`] under the
+/// `#[track_caller]`-propagated call site. Bumped on every call;
+/// thread-safe; no allocation when the site already has an entry
+/// (the common case after the first call from each site).
+#[inline]
+fn record_from_host_call(loc: &'static Location<'static>) {
+    let table = from_host_site_table();
+    if let Some(entry) = table.get(loc) {
+        entry.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    // First call from this site — insert a fresh counter at 1. Two
+    // racing first-calls may both take the insert arm; the second's
+    // entry overwrites the first's 1-count with another 1-count, which
+    // is acceptable for diagnostic accounting (lost at most ~N
+    // first-call counts where N = number of racing threads at startup).
+    table.insert(loc, AtomicU64::new(1));
+}
+
+/// Reset the per-call-site counter table — only useful for tests / benches
+/// that want a clean delta. Production callers never invoke this; the
+/// table accumulates across the process lifetime.
+pub fn reset_from_host_call_sites() {
+    from_host_site_table().clear();
+}
+
+/// Snapshot the per-call-site counter table, sorted by count descending.
+/// Each tuple is `(file_line, call_count)` where `file_line` is the
+/// canonical `file:line:col` `Location` debug string.
+///
+/// **Block 6.e diagnostic accessor.** The bench example dumps this at
+/// the end of each pass to attribute `HostStoreView::from_host` builds
+/// to specific warm-hit validator call sites. The `#[track_caller]`
+/// rail on `from_host`, `VerterHost::resolver_store_view`, the trait
+/// `resolver_store_view` impls, and the `validate_fact_signature*`
+/// helpers reflects the location back to the cache layer triggering
+/// the build.
+#[must_use]
+pub fn dump_from_host_call_sites() -> Vec<(String, u64)> {
+    let table = from_host_site_table();
+    let mut rows: Vec<(String, u64)> = table
+        .iter()
+        .map(|entry| {
+            let loc = *entry.key();
+            let count = entry.value().load(Ordering::Relaxed);
+            let formatted = format!("{}:{}:{}", loc.file(), loc.line(), loc.column());
+            (formatted, count)
+        })
+        .collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    rows
+}
 
 /// Per-request component-meta store counters captured by
 /// [`VerterHost::component_meta_audit_store_snapshot`]. The fields
@@ -188,7 +280,18 @@ thread_local! {
 }
 
 impl HostStoreView {
+    #[track_caller]
     pub(crate) fn from_host(host: &VerterHost) -> Self {
+        // Block 6.e per-call-site instrumentation: record the
+        // `#[track_caller]`-propagated location so the bench can
+        // attribute `from_host` builds back to specific warm-hit
+        // validator call sites. The location flows back through the
+        // `#[track_caller]` rail on `VerterHost::resolver_store_view`,
+        // the trait `resolver_store_view` impls, and the
+        // `validate_fact_signature*` helpers — so the recorded site
+        // is the cache layer paying for the build, not the deepest
+        // `from_host` body.
+        record_from_host_call(Location::caller());
         #[cfg(test)]
         HOST_STORE_VIEW_FROM_HOST_BUILDS.with(|c| c.set(c.get().saturating_add(1)));
         // Block 7.5 diagnostic counter: bump the per-request
@@ -1362,6 +1465,7 @@ impl crate::resolver_core::ResolverStore for VerterHost {
 }
 
 impl VerterHost {
+    #[track_caller]
     pub(crate) fn resolver_store_view(&self) -> HostStoreView {
         HostStoreView::from_host(self)
     }

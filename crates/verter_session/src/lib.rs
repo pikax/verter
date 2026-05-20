@@ -508,6 +508,14 @@ pub use host_audit_runtime::{
 };
 pub use types::*;
 
+// Block 6.e per-call-site instrumentation accessors. Production-on
+// (the counter map is bumped on every `HostStoreView::from_host`
+// invocation) so the bench can dump the attribution table at the end
+// of each pass. The dump is keyed by `&'static Location` propagated
+// through the `#[track_caller]` rail from the warm-hit validator
+// down to `HostStoreView::from_host`.
+pub use resolver_store::{dump_from_host_call_sites, reset_from_host_call_sites};
+
 // Re-export for the LSP: standalone @verter/types .d.ts content.
 pub use verter_compiler::utils::oxc::vue::resolve_type::ResolvedMemberVisibility;
 pub use verter_compiler::VERTER_TYPES_STANDALONE_DTS;

@@ -310,6 +310,7 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// `impl ResolverContext for VerterHost::resolver_store_view` rebuilds
     /// a full workspace snapshot on every call — the cost Block 6.c
     /// hoists to per-request scope.
+    #[track_caller]
     fn resolver_store_view(&self) -> HostStoreView;
 
     /// Borrowed access to the request-bound [`HostStoreView`].
@@ -690,6 +691,7 @@ impl ResolverContext for crate::VerterHost {
     }
 
     #[inline]
+    #[track_caller]
     fn resolver_store_view(&self) -> HostStoreView {
         crate::request_context::bump_resolver_store_view_call();
         crate::VerterHost::resolver_store_view(self)

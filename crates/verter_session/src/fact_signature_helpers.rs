@@ -175,6 +175,7 @@ pub(crate) fn read_signature_overflow_at_install() -> u64 {
 /// outside an installed tracer scope; the cache stays correct under
 /// the legacy whole-hash regime).
 #[inline]
+#[track_caller]
 pub(crate) fn validate_fact_signature(
     ctx: &dyn ResolverContext,
     signature: &[FactVersionRef],
@@ -227,6 +228,7 @@ pub(crate) fn validate_fact_signature(
 /// content edit — or a keyed canonical that became untracked — fails
 /// validation strictly and the warm read recomputes.
 #[inline]
+#[track_caller]
 pub(crate) fn validate_fact_signature_with_self_roots(
     ctx: &dyn ResolverContext,
     signature: &[FactVersionRef],
@@ -700,6 +702,7 @@ impl ReadSetSignature {
     /// same-canonical content edit, or a self-root canonical the live
     /// store view no longer tracks, fails validation.
     #[inline]
+    #[track_caller]
     pub(crate) fn validate_with_self_roots(
         &self,
         ctx: &dyn ResolverContext,

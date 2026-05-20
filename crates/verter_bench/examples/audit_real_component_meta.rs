@@ -544,6 +544,60 @@ fn run_pass_fresh_cold(
     Ok(rows)
 }
 
+/// Block 6.e per-call-site attribution dump.
+///
+/// Snapshots [`verter_session::dump_from_host_call_sites`] (the
+/// `HostStoreView::from_host` per-`#[track_caller]`-propagated site
+/// counter), writes a sorted-descending table to
+/// `<out_dir>/<pass>--from_host_attribution.tsv`, and prints the
+/// top 30 lines to stderr so the run output surfaces the dominant
+/// validator sites without scraping the file. Called at the end of
+/// every pass (`fresh-cold`, `cold-seq`, `warm`, `warm2`) so each
+/// pass gets its own attribution snapshot — useful for distinguishing
+/// cold-build cost from warm-hit validator cost.
+fn write_from_host_attribution(out_dir: &Path, pass: &str) -> io::Result<()> {
+    let rows = verter_session::dump_from_host_call_sites();
+    let total: u64 = rows.iter().map(|(_, c)| *c).sum();
+    let path = out_dir.join(format!("{pass}--from_host_attribution.tsv"));
+    let mut s = String::new();
+    s.push_str("# Block 6.e per-call-site `HostStoreView::from_host` attribution\n");
+    s.push_str(&format!("# pass: {pass}\n"));
+    s.push_str(&format!("# total_builds: {total}\n"));
+    s.push_str("# Sites listed below are `#[track_caller]`-propagated\n");
+    s.push_str("# locations of the ORIGINAL caller (typically a warm-hit\n");
+    s.push_str("# validator inside `fact_signature_helpers` or a cache\n");
+    s.push_str("# layer reaching `resolver_store_view()`).\n");
+    s.push_str("count\tpercent\tlocation\n");
+    for (loc, count) in &rows {
+        let pct = if total == 0 {
+            0.0
+        } else {
+            (*count as f64) * 100.0 / (total as f64)
+        };
+        s.push_str(&format!("{count}\t{pct:.2}\t{loc}\n"));
+    }
+    fs::write(&path, &s)?;
+    eprintln!(
+        "from_host attribution: {} (total={})",
+        path.display(),
+        total
+    );
+    let head = rows.iter().take(30);
+    for (loc, count) in head {
+        let pct = if total == 0 {
+            0.0
+        } else {
+            (*count as f64) * 100.0 / (total as f64)
+        };
+        eprintln!("  {count:>10}  {pct:>5.1}%  {loc}");
+    }
+    if rows.len() > 30 {
+        eprintln!("  (... {} more sites in TSV)", rows.len() - 30);
+    }
+    eprintln!();
+    Ok(())
+}
+
 fn write_summary_csv(out_dir: &Path, rows: &[PassRow]) -> io::Result<()> {
     let path = out_dir.join("summary.csv");
     let mut s = String::new();
@@ -706,6 +760,10 @@ fn main() -> io::Result<()> {
     let mut shared_host: Option<Arc<VerterHost>> = None;
 
     for pass in &passes {
+        // Block 6.e: reset the per-call-site counter so each pass's
+        // attribution dump reflects ONLY that pass's `from_host`
+        // builds, not the cumulative count across earlier passes.
+        verter_session::reset_from_host_call_sites();
         match pass.as_str() {
             "fresh-cold" => {
                 eprintln!(
@@ -739,6 +797,9 @@ fn main() -> io::Result<()> {
                         h
                     }
                 };
+                // Reset AGAIN after prime so the per-pass dump excludes
+                // the silent prime work for the no-prior-host case.
+                verter_session::reset_from_host_call_sites();
                 let started = Instant::now();
                 let rows = run_pass_seq(&host, &project_root, &targets, "warm", &out_dir);
                 eprintln!("warm pass took {:?}\n", started.elapsed());
@@ -758,12 +819,21 @@ fn main() -> io::Result<()> {
                         h
                     }
                 };
+                verter_session::reset_from_host_call_sites();
                 let started = Instant::now();
                 let rows = run_pass_seq(&host, &project_root, &targets, "warm2", &out_dir);
                 eprintln!("warm2 pass took {:?}\n", started.elapsed());
                 all_rows.extend(rows);
             }
-            other => eprintln!("warn: unknown pass `{other}` — skipping"),
+            other => {
+                eprintln!("warn: unknown pass `{other}` — skipping");
+                continue;
+            }
+        }
+        // Block 6.e: dump the per-call-site attribution snapshot for
+        // this pass before moving on to the next.
+        if let Err(e) = write_from_host_attribution(&out_dir, pass) {
+            eprintln!("warn: from_host attribution dump failed: {e}");
         }
     }
 

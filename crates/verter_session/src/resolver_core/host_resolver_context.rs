@@ -244,6 +244,7 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
     }
 
     #[inline]
+    #[track_caller]
     fn resolver_store_view(&self) -> HostStoreView {
         // Owned-view variant — preserves the pre-6.c semantics of
         // building a fresh snapshot per call. Retained for cold-path

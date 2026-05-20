@@ -3829,6 +3829,16 @@ mod foundations_guards {
         "pub use verter_compiler::compile::CompileTarget",
         // tests/relative_path_session_parity.rs
         "pub use id::resolve_external",
+        // Block 6.e per-call-site instrumentation: bench example
+        // (crates/verter_bench/examples/audit_real_component_meta.rs)
+        // dumps the `HostStoreView::from_host` attribution table at the
+        // end of every pass via `dump_from_host_call_sites` and resets
+        // the table at pass entry via `reset_from_host_call_sites`. The
+        // `#[track_caller]` rail on `HostStoreView::from_host`,
+        // `VerterHost::resolver_store_view`, the trait `resolver_store_view`
+        // impls, and the `validate_fact_signature*` helpers propagates
+        // the warm-hit validator location back to the recorder.
+        "pub use resolver_store::{dump_from_host_call_sites, reset_from_host_call_sites}",
     ];
 
     /// Compare the live surface against the snapshot; report any
