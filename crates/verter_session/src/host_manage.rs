@@ -753,11 +753,14 @@ impl FallthroughRequestHost for VerterHost {
             prop_type_overrides,
         );
 
-        let live_view = self.resolver_store_view();
+        // Block 6.c per-request hoist: read through the caller-supplied
+        // `store_view` (built ONCE at the request boundary) instead of
+        // building a fresh owned snapshot per call.
+        let live_view = store_view;
         if let Some(node) = self
             .resolver_runtime()
             .fallthrough
-            .get_cached_node(&cache_key, &live_view)
+            .get_cached_node(&cache_key, live_view)
         {
             if let Some(resolution) = self.runtime_branch_union_node_to_resolution(node) {
                 let resolution = Arc::new(resolution);
@@ -778,7 +781,7 @@ impl FallthroughRequestHost for VerterHost {
         if let Some(node) = self
             .resolver_runtime()
             .fallthrough
-            .get_cached_node(&root_follow_key, &live_view)
+            .get_cached_node(&root_follow_key, live_view)
         {
             if let Some(resolution) = self.runtime_root_follow_node_to_resolution(node) {
                 let resolution = Arc::new(resolution);

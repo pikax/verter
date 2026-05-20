@@ -57,7 +57,7 @@ impl VerterHost {
     /// named hot-path site at `imported_type_root.rs:49`).
     pub(crate) fn resolve_imported_type_root_with_facts_with_store_view(
         &self,
-        view: &crate::resolver_store::HostStoreView,
+        view: &dyn crate::resolver_core::StoreView,
         dep_canonical: &str,
         imported_name: &str,
     ) -> (

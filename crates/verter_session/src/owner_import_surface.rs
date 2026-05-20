@@ -189,7 +189,7 @@ impl OwnerImportSurfaceDb {
         view: &V,
     ) -> Option<Arc<OwnerImportSurface>>
     where
-        V: crate::resolver_core::StoreView,
+        V: crate::resolver_core::StoreView + ?Sized,
     {
         let candidate = self.get(owner_canonical, expected_owner_whole_hash)?;
         if candidate.validated_at_generation

@@ -67,7 +67,7 @@ impl ImportedRootDb {
     }
 
     /// Look up a cached root for `(provider, imported_name)` if valid.
-    pub fn get<V: StoreView>(
+    pub fn get<V: StoreView + ?Sized>(
         &self,
         provider_canonical: &str,
         imported_name: &str,
@@ -96,7 +96,7 @@ impl ImportedRootDb {
         resolve: F,
     ) -> Option<Arc<ImportedRootResult>>
     where
-        V: StoreView,
+        V: StoreView + ?Sized,
         F: FnOnce() -> Option<ImportedRootResult>,
     {
         self.get_or_resolve_with_facts(provider_canonical, imported_name, view, || {
@@ -113,7 +113,7 @@ impl ImportedRootDb {
         resolve: F,
     ) -> Option<Arc<ImportedRootResult>>
     where
-        V: StoreView,
+        V: StoreView + ?Sized,
         F: FnOnce() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
     {
         self.get_or_resolve_returning_facts(provider_canonical, imported_name, view, resolve)
@@ -134,7 +134,7 @@ impl ImportedRootDb {
         resolve: F,
     ) -> Option<(Arc<ImportedRootResult>, Arc<[FactVersionRef]>)>
     where
-        V: StoreView,
+        V: StoreView + ?Sized,
         F: FnOnce() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
     {
         let key = (provider_canonical.to_owned(), imported_name.to_owned());

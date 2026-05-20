@@ -739,7 +739,7 @@ where
 {
     pub fn get_if_valid<TView>(&self, key: &K, view: &TView) -> Option<Arc<V>>
     where
-        TView: StoreView,
+        TView: StoreView + ?Sized,
     {
         // R24 counter: increments once per read attempt. Hot-path
         // single atomic. Producers fold the four `*_count()` reads
@@ -788,7 +788,7 @@ where
         self_root_canonicals: &[&str],
     ) -> Option<Arc<V>>
     where
-        TView: StoreView,
+        TView: StoreView + ?Sized,
     {
         self.validations_attempted
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -825,7 +825,7 @@ where
         view: &TView,
     ) -> Option<(Arc<V>, Arc<[FactVersionRef]>)>
     where
-        TView: StoreView,
+        TView: StoreView + ?Sized,
     {
         self.validations_attempted
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

@@ -57,7 +57,7 @@ impl VerterHost {
     /// canonical rejects the stale bundle.
     pub(crate) fn prepared_decl_bundle_with_store_view(
         &self,
-        view: &crate::resolver_store::HostStoreView,
+        view: &dyn crate::resolver_core::StoreView,
         canonical_id: &str,
     ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
         let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
@@ -78,7 +78,6 @@ impl VerterHost {
 
         // Cold path with singleflight: coalesce concurrent materializations
         // for the same canonical_id + store-view compat token.
-        use crate::resolver_core::StoreView;
         let token = view.compat_token();
         let singleflight = bundles.singleflight();
         let flight = singleflight.run(key.clone(), token, || {
@@ -515,7 +514,7 @@ impl VerterHost {
     /// triggering a fresh per-call workspace sweep.
     pub(crate) fn prepared_type_decl_with_store_view(
         &self,
-        view: &crate::resolver_store::HostStoreView,
+        view: &dyn crate::resolver_core::StoreView,
         canonical_id: &str,
         symbol_name: &str,
     ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>> {
@@ -563,7 +562,7 @@ impl VerterHost {
     /// down through [`Self::prepared_decl_bundle_with_store_view`].
     pub(crate) fn prepared_value_decl_with_store_view(
         &self,
-        view: &crate::resolver_store::HostStoreView,
+        view: &dyn crate::resolver_core::StoreView,
         canonical_id: &str,
         symbol_name: &str,
     ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
@@ -1912,7 +1911,7 @@ impl VerterHost {
     /// (Block 6.B-fix `987a3ce6d`) is preserved.
     pub(crate) fn owner_import_surface_with_store_view(
         &self,
-        view: &crate::resolver_store::HostStoreView,
+        view: &dyn crate::resolver_core::StoreView,
         owner_canonical: &str,
     ) -> Option<Arc<crate::owner_import_surface::OwnerImportSurface>> {
         let shallow = self.shallow_file_state(owner_canonical)?;
@@ -1993,8 +1992,14 @@ impl VerterHost {
                     &mut seen_facts,
                 );
 
+                // Block 6.c per-request hoist: thread the already-built
+                // request view down through the imported-root resolver
+                // instead of building a fresh owned snapshot per call
+                // (the diagnostic's named hot-path site at
+                // `imported_type_root.rs:49`).
                 let ((final_canonical, final_name), route_facts) = self
-                    .resolve_imported_type_root_with_facts(
+                    .resolve_imported_type_root_with_facts_with_store_view(
+                        view,
                         resolved_canonical_id.as_str(),
                         target.imported_name.as_str(),
                     );
@@ -2092,7 +2097,7 @@ impl VerterHost {
     /// [`Self::owner_import_surface_with_store_view`].
     pub(crate) fn resolve_owner_direct_import_with_store_view(
         &self,
-        view: &crate::resolver_store::HostStoreView,
+        view: &dyn crate::resolver_core::StoreView,
         owner_canonical: &str,
         local_name: &str,
     ) -> Option<(String, String)> {

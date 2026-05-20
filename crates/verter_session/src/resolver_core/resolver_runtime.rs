@@ -43,7 +43,7 @@ where
 
     pub fn get_if_valid<TView>(&self, key: &K, view: &TView) -> Option<Arc<V>>
     where
-        TView: StoreView,
+        TView: StoreView + ?Sized,
     {
         self.cache.get_if_valid(key, view)
     }
@@ -61,7 +61,7 @@ where
         self_root_canonicals: &[&str],
     ) -> Option<Arc<V>>
     where
-        TView: StoreView,
+        TView: StoreView + ?Sized,
     {
         self.cache
             .get_if_valid_self_rooted(key, view, self_root_canonicals)

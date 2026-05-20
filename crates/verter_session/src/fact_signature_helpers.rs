@@ -182,6 +182,18 @@ pub(crate) fn validate_fact_signature(
     if signature.is_empty() {
         return true;
     }
+    // The owned-view rail survives in this helper transitionally:
+    // bare-`VerterHost` callers (production code that has not yet
+    // been migrated to construct a `HostResolverContext` at the
+    // request entry, plus tests that pass `&host as &dyn
+    // ResolverContext`) hit this helper. `ctx.store_view()` would
+    // panic on the bare-host implementer; `ctx.resolver_store_view()`
+    // is the safe transitional rail. Block 6.c's per-request hoist
+    // is realised via the `*_with_store_view` thread-through on the
+    // production caller chain (`prepared_decl::owner_import_surface_with_store_view`
+    // and the resolved-import-root traversal); this helper's
+    // owned-view rebuild is the residual until the policy /
+    // extract entry points construct a request-bound context.
     let view = ctx.resolver_store_view();
     signature.iter().all(|fact| view.validates(fact))
 }
@@ -225,6 +237,9 @@ pub(crate) fn validate_fact_signature_with_self_roots(
     if signature.is_empty() {
         return true;
     }
+    // The owned-view rail survives in this helper transitionally
+    // for the same reason as [`validate_fact_signature`] above —
+    // see that helper's doc for the migration story.
     let view = ctx.resolver_store_view();
     signature.iter().all(|fact| match fact {
         FactVersionRef::FileWholeHash { canonical_id, hash }
