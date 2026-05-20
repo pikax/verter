@@ -4,7 +4,6 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use super::cache;
-use super::deps::{import_resolves_to_dep, strip_configured_extension, DependentView};
 use super::id::canonicalize_id;
 use super::parse::parse_vue_snapshot;
 use super::shared::{read_lock, write_lock};
@@ -14,6 +13,88 @@ use super::upsert::{
 use super::*;
 use verter_semantic::analysis::AnalysisScope;
 use verter_workspace::WorkspaceRead;
+
+/// Strip a configured extension from a path, returning the stem.
+/// Used by the import-resolution coverage tests below to match
+/// extensionless import specifiers (e.g. `./types` → `/src/types`)
+/// against canonical IDs that include extensions (e.g. `/src/types.ts`).
+///
+/// Extensions are tried in the given order. When `script_lang` is set
+/// (from the SFC's `<script lang="...">` attribute), matching
+/// extensions are tried first. For example, `script_lang = "ts"`
+/// prioritises `.ts`/`.tsx` over `.js`/`.jsx`.
+fn strip_configured_extension<'a>(
+    path: &'a str,
+    resolve_extensions: &[String],
+    script_lang: Option<&str>,
+) -> Option<&'a str> {
+    if let Some(lang) = script_lang {
+        let prefix = format!(".{}", lang);
+        for ext in resolve_extensions {
+            if ext.starts_with(&prefix) {
+                if let Some(stem) = path.strip_suffix(ext.as_str()) {
+                    return Some(stem);
+                }
+            }
+        }
+    }
+    for ext in resolve_extensions {
+        if let Some(stem) = path.strip_suffix(ext.as_str()) {
+            return Some(stem);
+        }
+    }
+    None
+}
+
+/// Lightweight view of a dependent file's data used by the
+/// import-resolution coverage tests below. Some fields mirror the
+/// LSP-side `DependentView` shape so the fixtures stay structurally
+/// representative even though the import-resolution helper only
+/// consumes a subset.
+#[allow(dead_code)]
+struct DependentView {
+    canonical_id: String,
+    import_routes: rustc_hash::FxHashMap<String, DependencyResolution>,
+    dependencies: BTreeSet<String>,
+    script_lang: Option<String>,
+    macro_type_deps: Vec<verter_semantic::analysis::MacroTypeDep>,
+    imports: Vec<verter_semantic::analysis::AnalyzedImport>,
+    resolved_type_hashes: rustc_hash::FxHashMap<(String, String), Hash16>,
+}
+
+/// Check if an import source from `view` resolves to `dependency_id`.
+/// Mirrors the LSP-side affected-files heuristic (`import_routes`
+/// fast path → relative-path resolution → bare-specifier dependency
+/// set) so the coverage tests below pin the heuristic shape.
+fn import_resolves_to_dep(
+    view: &DependentView,
+    import_source: &str,
+    dependency_id: &str,
+    resolve_extensions: &[String],
+) -> bool {
+    if let Some(resolution) = view.import_routes.get(import_source) {
+        if let Some(target) = resolution.effective_target() {
+            return target == dependency_id;
+        }
+    }
+
+    if import_source.starts_with('.') {
+        let resolved = id::resolve_external(&view.canonical_id, import_source);
+        if resolved == dependency_id {
+            return true;
+        }
+        if let Some(stem) = strip_configured_extension(
+            dependency_id,
+            resolve_extensions,
+            view.script_lang.as_deref(),
+        ) {
+            return resolved == stem;
+        }
+        false
+    } else {
+        view.dependencies.contains(dependency_id)
+    }
+}
 
 fn profile_dev() -> CompileProfile {
     CompileProfile {
@@ -2122,9 +2203,9 @@ fn ensure_compiled_hydrates_vue_compile_blockers_via_workspace_resolution() {
         "/workspace/src/App.vue",
         "<template src=\"@/partials/panel.html\"></template>\n<script setup lang=\"ts\">\nimport type { Props } from '@/types'\nconst props = defineProps<Props>()\n</script>",
     );
-    // Phase 6b sub-b.D2b reroute — host wrapper runs the route
-    // resolution invalidation cascade (bump_project_generation_and_evict +
-    // route_owned_shallow.clear_all + ws().set_exact_resolutions).
+    // Host wrapper runs the route-resolution invalidation cascade
+    // (bump_project_generation_and_evict + route_owned_shallow.clear_all
+    // + ws().set_exact_resolutions).
     host.set_exact_resolutions(
         "/workspace/src/App.vue",
         vec![
@@ -2436,13 +2517,14 @@ fn workspace_resolution_is_phase_0_primary() {
         }],
     );
 
-    // Positive: workspace Phase 0 should resolve ./types -> /src/types.ts
-    // even though the host's legacy Phase 1 has no import_routes for it.
+    // Positive: workspace-backed resolution should resolve ./types ->
+    // /src/types.ts even though the host's `import_routes` fast path
+    // has no entry for it.
     let result = host.resolve_import_via_workspace("/src/App.vue", "./types");
     assert_eq!(
         result.as_deref(),
         Some("/src/types.ts"),
-        "workspace Phase 0 should be primary resolution source"
+        "workspace-backed resolution should be primary resolution source"
     );
 
     // Negative: random specifiers still don't resolve.
@@ -3011,11 +3093,11 @@ mod phase1_structural_tests {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Phase 2A — Upsert populates compile_cache, scheduler is sole parser
+// Upsert populates compile_cache; scheduler is the sole parser
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(not(target_arch = "wasm32"))]
-mod phase2a_upsert_tests {
+mod upsert_compile_cache_tests {
     use super::*;
     use crate::host_executor::HostSourceData;
 
@@ -3248,9 +3330,9 @@ mod phase2a_upsert_tests {
     #[test]
     fn test_upsert_fast_path_is_a_true_no_op_after_scheduler_only_load() {
         // R1 / R2 — byte-identical re-upsert after a scheduler-only cold
-        // load is a true cache-state no-op. The pre-Stage-2 fast path
-        // materialised `DependencyState` (writing `generation = snap.generation`)
-        // and other per-canonical state; that behaviour is deleted.
+        // load is a true cache-state no-op. A regression that
+        // materialised `DependencyState` on the fast path (writing
+        // `generation = snap.generation`) would break this invariant.
         //
         // The new contract: scheduler-only loads do not create
         // `DependencyState`; byte-identical re-upserts do not create it
@@ -3311,10 +3393,11 @@ mod phase2a_upsert_tests {
             epoch_before,
             "R1: byte-identical re-upsert must not bump store_view_epoch"
         );
-        // R1: byte-identical re-upsert MUST NOT materialise DependencyState
-        // when none existed pre-call. The pre-Stage-2 fast path created
-        // the entry with `dep.generation = snap.generation`; the new
-        // contract leaves it absent.
+        // R1: byte-identical re-upsert MUST NOT materialise
+        // DependencyState when none existed pre-call. A regression that
+        // created the entry with `dep.generation = snap.generation` on
+        // the fast path would fail this assertion — the final-state
+        // contract leaves the entry absent.
         assert!(
             host.dependency_cache().get("/src/App.vue").is_none(),
             "R1: byte-identical re-upsert MUST NOT materialise DependencyState"
@@ -3577,13 +3660,13 @@ mod phase2a_upsert_tests {
     /// recovered via a STRUCTURAL re-upsert (`source` differs from
     /// cached), not via a byte-identical one.
     ///
-    /// Pre-Stage-2 contract (deleted): the fast path called
-    /// `record_parsed_edges` so a fresh workspace was re-populated by
-    /// a byte-identical re-upsert. That contract violated R1 (cache
-    /// mutation as a side effect of "source unchanged") and R2
-    /// ("`upsert` means the source changed").
+    /// A regression that called `record_parsed_edges` on the fast path
+    /// would let a byte-identical re-upsert re-populate a fresh
+    /// workspace; that would violate R1 (cache mutation as a side
+    /// effect of "source unchanged") and R2 ("`upsert` means the
+    /// source changed").
     ///
-    /// Post-Stage-2 contract (this test): a structural re-upsert
+    /// Final-state contract (this test): a structural re-upsert
     /// repopulates the fresh workspace; a byte-identical re-upsert
     /// does NOT. The fresh workspace stays empty until the source
     /// actually changes.
@@ -3614,8 +3697,8 @@ mod phase2a_upsert_tests {
         assert!(
             fresh.reverse_deps_for("/src/types.ts").is_empty(),
             "R1: byte-identical re-upsert MUST NOT re-write workspace edges. \
-             The pre-Stage-2 fast path called record_parsed_edges — that \
-             behaviour is deleted."
+             A fast path that called record_parsed_edges would fail this \
+             assertion."
         );
 
         // A STRUCTURAL re-upsert (different source) flows through the
@@ -3640,9 +3723,9 @@ mod phase2a_upsert_tests {
     /// probe extensions only; `.custom` is not stripped;
     /// `reverse_deps_for("/src/x.custom")` returns empty.
     ///
-    /// Post-Stage-2 the trigger is a STRUCTURAL re-upsert (different
-    /// source), because R1 makes byte-identical re-upsert a no-op that
-    /// no longer flows edges into the new workspace.
+    /// The trigger is a STRUCTURAL re-upsert (different source),
+    /// because R1 makes byte-identical re-upsert a no-op that does not
+    /// flow edges into the new workspace.
     #[test]
     fn host_set_workspace_swap_preserves_configured_extensions() {
         let mut config = HostConfig::default();
@@ -3751,8 +3834,8 @@ mod phase2a_upsert_tests {
         // accessible to the scheduler when ensure_loaded runs. We register a
         // MemoryWorkspace overlay so the WorkspaceSourceLoader can read the
         // file content during the load.
-        // Phase 6b sub-b.D2b reroute — host wrapper runs the
-        // route_owned_shallow eviction alongside the workspace overlay write.
+        // Host wrapper runs the route_owned_shallow eviction alongside
+        // the workspace overlay write.
         host.notify_upsert(
             "/lib/types.ts",
             std::sync::Arc::from("export interface Foo {}"),
@@ -3857,7 +3940,7 @@ mod phase2a_upsert_tests {
             "import type { Shared } from './shared'\nexport interface Foo { x: Shared }";
         let shared_src = "export interface Shared { v: number }";
 
-        // Phase 6b sub-b.D2b reroute — host wrapper.
+        // Host wrapper notify_upsert path.
         host.notify_upsert("/src/types.ts", std::sync::Arc::from(types_src));
         host.notify_upsert("/src/shared.ts", std::sync::Arc::from(shared_src));
 

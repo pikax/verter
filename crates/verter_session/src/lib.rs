@@ -105,7 +105,6 @@ mod component_meta_slot_binding_skip_tests;
 mod component_meta_terminal_mode_tests;
 pub mod cooperative_admission;
 pub mod cross_file;
-mod deps;
 pub mod fact_emission;
 pub(crate) mod fact_signature_helpers;
 pub mod file_artifact_store;
