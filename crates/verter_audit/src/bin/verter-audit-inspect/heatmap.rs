@@ -142,6 +142,7 @@ struct LayerSums {
     semantic_graph: (u64, u64),
     materialize_structure: (u64, u64),
     materialize_memo: (u64, u64),
+    member_shape_cache: (u64, u64),
     prepared_surface: (u64, u64),
     prepared_member: (u64, u64),
 }
@@ -212,6 +213,14 @@ impl LayerSums {
             .materialize_memo
             .1
             .saturating_add(breakdown.materialize_memo.misses);
+        self.member_shape_cache.0 = self
+            .member_shape_cache
+            .0
+            .saturating_add(breakdown.member_shape_cache.hits);
+        self.member_shape_cache.1 = self
+            .member_shape_cache
+            .1
+            .saturating_add(breakdown.member_shape_cache.misses);
         self.prepared_surface.0 = self
             .prepared_surface
             .0
@@ -286,6 +295,11 @@ impl LayerSums {
                 layer: "materialize_memo",
                 hits: self.materialize_memo.0,
                 misses: self.materialize_memo.1,
+            },
+            LayerTotals {
+                layer: "member_shape_cache",
+                hits: self.member_shape_cache.0,
+                misses: self.member_shape_cache.1,
             },
             LayerTotals {
                 layer: "prepared_surface",

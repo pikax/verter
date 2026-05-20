@@ -163,11 +163,11 @@ fn layer_route_owned_shallow_get_misses_increment_per_request_counter() {
 }
 
 #[test]
-fn all_thirteen_cache_layers_present_and_default_to_zero() {
+fn all_fourteen_cache_layers_present_and_default_to_zero() {
     let ctx = make_ctx();
     // Structural regression: each named layer must compile-time
     // exist. Reading the field forces the compiler to verify it.
-    let pairs: [(u64, u64); 13] = [
+    let pairs: [(u64, u64); 14] = [
         ctx.cache_counters.indexed.snapshot(),
         ctx.cache_counters.analysis.snapshot(),
         ctx.cache_counters.owner_import.snapshot(),
@@ -179,6 +179,7 @@ fn all_thirteen_cache_layers_present_and_default_to_zero() {
         ctx.cache_counters.semantic_graph.snapshot(),
         ctx.cache_counters.materialize_structure.snapshot(),
         ctx.cache_counters.materialize_memo.snapshot(),
+        ctx.cache_counters.member_shape_cache.snapshot(),
         ctx.cache_counters.prepared_surface.snapshot(),
         ctx.cache_counters.prepared_member.snapshot(),
     ];
@@ -282,6 +283,13 @@ fn cross_layer_non_leakage_indexed_to_analysis() {
     assert_eq!(
         ctx.cache_counters
             .materialize_memo
+            .misses
+            .load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        ctx.cache_counters
+            .member_shape_cache
             .misses
             .load(Ordering::Relaxed),
         0

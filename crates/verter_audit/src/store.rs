@@ -65,6 +65,8 @@ pub struct CacheLayerBreakdown {
     pub materialize_structure: CacheLayerHitMiss,
     /// `MaterializeMemoDb` — materialiser memo cache.
     pub materialize_memo: CacheLayerHitMiss,
+    /// `MemberShapeCacheDb` — per-member graph-native materialiser cache.
+    pub member_shape_cache: CacheLayerHitMiss,
     /// `PreparedSurfaceDb` — prepared-surface cache.
     pub prepared_surface: CacheLayerHitMiss,
     /// `PreparedMemberDb` — prepared-member cache.

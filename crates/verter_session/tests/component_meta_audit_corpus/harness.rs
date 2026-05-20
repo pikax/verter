@@ -370,6 +370,7 @@ fn aggregate_cache_hit_rate(record: &RequestAuditRecord) -> Option<f64> {
         &layers.semantic_graph,
         &layers.materialize_structure,
         &layers.materialize_memo,
+        &layers.member_shape_cache,
         &layers.prepared_surface,
         &layers.prepared_member,
     ];

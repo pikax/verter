@@ -232,6 +232,10 @@ materialize_structure: CacheLayerHitMiss,
  */
 materialize_memo: CacheLayerHitMiss, 
 /**
+ * `MemberShapeCacheDb` — per-member graph-native materialiser cache.
+ */
+member_shape_cache: CacheLayerHitMiss, 
+/**
  * `PreparedSurfaceDb` — prepared-surface cache.
  */
 prepared_surface: CacheLayerHitMiss, 

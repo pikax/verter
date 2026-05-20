@@ -35,6 +35,7 @@ fn total_cache_misses(b: &CacheLayerBreakdown) -> u64 {
         + b.semantic_graph.misses
         + b.materialize_structure.misses
         + b.materialize_memo.misses
+        + b.member_shape_cache.misses
         + b.prepared_surface.misses
         + b.prepared_member.misses
 }
