@@ -8213,6 +8213,8 @@ fn slot_binding_graph_no_phase_archaeology() {
         "phase-1",
         "phase 2",
         "phase-2",
+        "projector-cutover-1",
+        "projector-cutover-2",
         "cutover",
         "post-cutover",
         "pre-phase",

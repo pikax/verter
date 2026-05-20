@@ -739,36 +739,13 @@ defineSlots<Slots>()
 // Test #10 — REGRESSION
 // ---------------------------------------------------------------------------
 //
-// Source guard: `slot_binding_graph.rs` must read as final-state.
-// The graph-native synthesis source must not contain
-// plan-phase / cutover / agent-id vocabulary.
-#[test]
-fn no_phase_archaeology_in_slot_binding_graph() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/meta_resolve/slot_binding_graph.rs");
-    let src = std::fs::read_to_string(&path)
-        .unwrap_or_else(|err| panic!("failed to read {path:?}: {err}"));
-    let lower = src.to_lowercase();
-    let needles = [
-        "phase 1",
-        "projector-cutover-1",
-        "phase 2",
-        "projector-cutover-2",
-        "cutover",
-        "post-cutover",
-        "pre-phase",
-        "sa-1.b-impl",
-        "sa-1.b-tests",
-        "scratch branch",
-    ];
-    for needle in needles {
-        assert!(
-            !lower.contains(needle),
-            "slot_binding_graph.rs must not reference plan archaeology: found {:?}",
-            needle,
-        );
-    }
-}
+// Note: the prior in-src source-guard
+// (`no_phase_archaeology_in_slot_binding_graph`) was removed because
+// the broader-scope `slot_binding_graph_no_phase_archaeology` guard in
+// `crates/verter_session/tests/architecture_guards.rs` already scans
+// `slot_binding_graph.rs` with a superset of the same needles, and
+// keeping needle literals in `crates/*/src/**` is incompatible with
+// the strict `phase_archaeology_test_files_count_zero` invariant.
 
 // ---------------------------------------------------------------------------
 // Test #11 — REGRESSION
