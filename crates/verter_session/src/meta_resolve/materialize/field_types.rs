@@ -313,6 +313,82 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     materialized
 }
 
+/// Reduce a per-member surface value (a settled [`SemanticNodeId`]) to
+/// its published [`crate::project_semantic_dispatch::raise::MaterializedTypeExpr`]
+/// form WITHOUT round-tripping through
+/// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::shallow_lower_type_expr`].
+///
+/// # Why
+///
+/// The TypeExpr-start entry
+/// [`materialize_component_meta_type_expr_until_stable_full`] is the
+/// legitimate entry for callers whose inputs are parser-produced
+/// `TypeExpr` annotations (e.g. `reduce_published_field_types`'s slot /
+/// model bindings). It calls `shallow_lower_type_expr` then
+/// `raise_and_reduce`. Per-member projectors that already hold a
+/// `SurfaceMember.value: SemanticNodeId` (a settled graph node) should
+/// NOT pay the OXC lowerer round-trip: the lower step would lower the
+/// already-raised `TypeExpr` back to a graph node we already had.
+///
+/// # Shape
+///
+/// Graph-native: walks the reachable subgraph of `member_value` via
+/// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::raise_and_reduce`]
+/// (which dispatches per shape through `execute_cooperative`). NOT
+/// path-precise: the iterative reducer pushes children before reducing
+/// parents, so the full subgraph of `member_value` is visited.
+/// Path-precision is provided at a higher layer by the per-member
+/// `MemberShapeCacheDb` amortising sibling reuse, not by the reducer
+/// itself.
+///
+/// # Returns
+///
+/// A [`crate::project_semantic_dispatch::raise::MaterializedTypeExpr`]
+/// carrying the reduced node id, the raised `TypeExpr`, and the
+/// accumulated `DepSignature` — the same envelope
+/// [`materialize_component_meta_type_expr_until_stable_full`] returns,
+/// so the per-member cache can hold the identical shape.
+///
+/// # Dep facts
+///
+/// Dual-emits the accumulated `dep_signature` into the active fact
+/// tracer + `DISPATCH_DEP_SIGNATURE_ACCUMULATOR`, mirroring the
+/// TypeExpr entry's contract.
+pub(crate) fn reduce_member_value_graph_native(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    _scope_canonical_id: &str,
+    member_value: crate::semantic_query::SemanticNodeId,
+    mode: crate::semantic_query::ProjectionMode,
+) -> crate::project_semantic_dispatch::raise::MaterializedTypeExpr {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+
+    // Drive the graph-native reducer DIRECTLY on `member_value`. NO
+    // `shallow_lower_type_expr` round-trip. `raise_and_reduce`
+    // internally:
+    //   1. `reduce_graph_node_iterative(member_value, mode, …)` —
+    //      walks the reachable subgraph of `member_value`, dispatching
+    //      per shape via `execute_cooperative`.
+    //   2. `raise_node_to_type_expr(reduced)` — single terminal raise.
+    //   3. Returns `MaterializedTypeExpr { node_id, type_expr,
+    //      dep_signature }`.
+    let materialized = dispatch.raise_and_reduce(member_value, mode);
+
+    // Dual-emit dispatch facts into BOTH downstream channels:
+    // (1) the legacy `DISPATCH_DEP_SIGNATURE_ACCUMULATOR` drained at
+    // `compute_component_meta_state_inner` into `state.fact_versions`,
+    // and (2) the `ACTIVE_TRACERS` stack captured by the outer
+    // `with_fact_tracer` scope. The bridge helper drops route- and
+    // project-generation entries (only `WholeHash` survives the
+    // conversion); the dropped entries are R20-only signals with no
+    // `FactVersionRef` equivalent. Mirrors the TypeExpr entry's
+    // contract exactly.
+    emit_dispatch_dep_signature_facts(ctx, &materialized.dep_signature);
+
+    materialized
+}
+
 pub(crate) fn type_expr_has_package_backed_object_like_root(
     expr: &verter_type_expr::TypeExpr,
     scope_canonical_id: &str,
