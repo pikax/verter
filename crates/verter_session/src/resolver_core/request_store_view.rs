@@ -66,6 +66,7 @@
 //!   does not change what `traced_facts`, `dispatch_dep_signature`,
 //!   `canonical_ids()`, or FIFO prune register.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -119,6 +120,27 @@ pub(crate) struct CanonicalCompletionOverlay {
     /// owned tuple allocation).
     derived_hashes: RwLock<FxHashMap<String, RouteDerivedHashes>>,
     file_facts: RwLock<FxHashMap<String, Arc<FileFacts>>>,
+    /// Per-map monotonic "non-empty" flags (codex shape 1 read-path
+    /// hygiene). Set to `true` (Release) when the corresponding map
+    /// receives its first insert; never flip back to `false` within a
+    /// request (the overlay is append-only). Readers `load(Acquire)`
+    /// and skip the `RwLock::read` + map lookup when the flag is
+    /// `false` — a hot-path optimisation for the very common case of an
+    /// empty overlay (validations that fire before any
+    /// `complete_canonical` has run for the request).
+    ///
+    /// The flag is monotonic, so concurrent completion's
+    /// `store(true, Release)` synchronises with subsequent
+    /// `load(Acquire)`: when a reader observes `true`, every prior
+    /// write to the map that the writer performed before the store is
+    /// visible. When a reader observes `false` (because the flag flip
+    /// has not yet propagated), the worst case is one extra base-view
+    /// validation cycle — the cache will revalidate on the next call
+    /// and pick up the now-promoted overlay entry. Strict shadowing
+    /// correctness is preserved.
+    whole_hashes_nonempty: AtomicBool,
+    derived_hashes_nonempty: AtomicBool,
+    file_facts_nonempty: AtomicBool,
 }
 
 /// Per-canonical derived hashes captured by the overlay. The fields
@@ -156,6 +178,9 @@ impl CanonicalCompletionOverlay {
             whole_hashes: RwLock::new(FxHashMap::default()),
             derived_hashes: RwLock::new(FxHashMap::default()),
             file_facts: RwLock::new(FxHashMap::default()),
+            whole_hashes_nonempty: AtomicBool::new(false),
+            derived_hashes_nonempty: AtomicBool::new(false),
+            file_facts_nonempty: AtomicBool::new(false),
         }
     }
 
@@ -213,6 +238,9 @@ impl CanonicalCompletionOverlay {
         self.whole_hashes
             .write()
             .insert(canonical.to_owned(), whole_hash);
+        // Release-store after the insert so a reader that loads
+        // `Acquire == true` sees the new entry (monotonic flag).
+        self.whole_hashes_nonempty.store(true, Ordering::Release);
 
         // Per-canonical `IndexedReady` snapshot — populates `file_facts`
         // and the `Route` / `ImportRoute` derived-hash entries.
@@ -224,6 +252,7 @@ impl CanonicalCompletionOverlay {
             self.file_facts
                 .write()
                 .insert(canonical.to_owned(), Arc::clone(&file_artifacts.facts));
+            self.file_facts_nonempty.store(true, Ordering::Release);
 
             let indexed = &file_artifacts.indexed;
             let route_hash = if indexed.shallow_state.has_resolvable_surface() {
@@ -247,15 +276,26 @@ impl CanonicalCompletionOverlay {
                 if let Some(h) = import_route_hash {
                     entry.import_route = Some(h);
                 }
+                drop(derived);
+                self.derived_hashes_nonempty.store(true, Ordering::Release);
             }
         }
     }
 
     fn lookup_whole_hash(&self, canonical_id: &str) -> Option<Hash16> {
+        // Fast path: if no completion has written to this map within
+        // the request, skip the `RwLock::read` + map lookup entirely.
+        if !self.whole_hashes_nonempty.load(Ordering::Acquire) {
+            return None;
+        }
         self.whole_hashes.read().get(canonical_id).copied()
     }
 
     fn lookup_derived_hash(&self, canonical_id: &str, kind: DerivedFactKind) -> Option<Hash16> {
+        // Fast path: see `lookup_whole_hash`.
+        if !self.derived_hashes_nonempty.load(Ordering::Acquire) {
+            return None;
+        }
         // `&str` lookup against `FxHashMap<String, _>` — no per-read
         // allocation (the previous `(String, DerivedFactKind)` keying
         // forced a `to_owned()` on every probe of every cache validity
@@ -267,6 +307,10 @@ impl CanonicalCompletionOverlay {
     }
 
     fn lookup_file_facts(&self, canonical_id: &str) -> Option<Arc<FileFacts>> {
+        // Fast path: see `lookup_whole_hash`.
+        if !self.file_facts_nonempty.load(Ordering::Acquire) {
+            return None;
+        }
         self.file_facts.read().get(canonical_id).cloned()
     }
 
@@ -282,8 +326,15 @@ impl CanonicalCompletionOverlay {
     /// Whether the overlay tracks `canonical_id` (any per-canonical
     /// entry).
     fn tracks_file(&self, canonical_id: &str) -> bool {
-        self.whole_hashes.read().contains_key(canonical_id)
-            || self.file_facts.read().contains_key(canonical_id)
+        // Fast path: if both maps are empty (their `_nonempty` flags
+        // are still `false`), no lock acquisition is required.
+        let whole_nonempty = self.whole_hashes_nonempty.load(Ordering::Acquire);
+        let file_nonempty = self.file_facts_nonempty.load(Ordering::Acquire);
+        if !whole_nonempty && !file_nonempty {
+            return false;
+        }
+        (whole_nonempty && self.whole_hashes.read().contains_key(canonical_id))
+            || (file_nonempty && self.file_facts.read().contains_key(canonical_id))
     }
 }
 
