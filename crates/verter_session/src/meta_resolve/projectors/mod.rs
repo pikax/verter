@@ -471,6 +471,140 @@ pub(crate) fn resolve_payload_surface(
     }
 }
 
+/// Block 6.d — peek-before-raise per-member helper.
+///
+/// Wraps the cold compute path for one `(scope, member_value, mode)`
+/// triple around the host-owned
+/// [`crate::component_meta_caches::MemberShapeCacheDb`]. The contract:
+///
+///  1. **Peek first.** Warm hits return the cached
+///     [`crate::project_semantic_dispatch::raise::MaterializedTypeExpr`]
+///     WITHOUT paying any raise or gate cost — the goal of the cache
+///     is that the per-member hot path returns in `peek` time.
+///  2. **Cold path raises once.** A cold miss raises
+///     `member_value` to a `TypeExpr` shell via
+///     [`crate::project_semantic_dispatch::ProjectSemanticDispatch::raise_node_to_type_expr`],
+///     then runs the same shallow gates `reduce_field_type_expr` runs
+///     today (`type_expr_has_package_backed_object_like_root` +
+///     `lowered_root_reaches_transitive_cycle` +
+///     `type_expr_contains_reducible_operator`). The gates stay
+///     TypeExpr-keyed in this block per the codex caveat — migrating
+///     them to graph-native predicates widens blast radius into the
+///     cycle module and is punted to a follow-up.
+///  3. **Gate-rejected outcomes do NOT admit.** The raised TypeExpr
+///     is returned verbatim wrapped in a `MaterializedTypeExpr`
+///     envelope. Admitting a gate-rejected entry would store the
+///     raised input verbatim — the cache would grow for no compute
+///     win, since the gates are cheap to re-run.
+///  4. **Cold compute is single-shot.** When a reduction is required,
+///     `reduce_member_value_graph_native` runs ONCE
+///     (per the C2 single-compute pattern). The cache's
+///     `get_or_compute` closure captures the pre-computed
+///     `MaterializedTypeExpr` by move; if the fact signature cannot
+///     be built (no tear-free scope observation or a
+///     `RouteGeneration`-tagged dep), admission is refused but the
+///     pre-computed value is still returned to the caller — no second
+///     reducer call.
+fn member_shape_peek_or_compute(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    scope_canonical_id: &str,
+    member_value: SemanticNodeId,
+    mode: ProjectionMode,
+) -> crate::project_semantic_dispatch::raise::MaterializedTypeExpr {
+    use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
+
+    let ctx: &dyn ResolverContext = query_engine.ctx;
+    let key: crate::component_meta_caches::MemberShapeCacheKey = (
+        Arc::<str>::from(scope_canonical_id),
+        member_value,
+        mode,
+    );
+
+    // (1) Peek FIRST — warm path pays zero raise/gate cost. The cached
+    // entry's dep_signature must be re-emitted into the active fact
+    // tracer + dispatch dep-signature accumulator so the request's
+    // dep set sees the same facts the cold compute emitted.
+    let cache = ctx.project_type_store().member_shape_cache_db();
+    if let Some(cached) = cache.peek(&key, ctx) {
+        emit_dispatch_dep_signature_facts(ctx, &cached.dep_signature);
+        return cached;
+    }
+
+    // (2) Cold path: raise once.
+    let raised = {
+        let dispatch = ProjectSemanticDispatch::new(ctx);
+        dispatch
+            .raise_node_to_type_expr(member_value)
+            .unwrap_or(TypeExpr::Unknown { raw: String::new() })
+    };
+
+    // (3) Shallow gates on the raised TypeExpr — same predicates
+    // `reduce_field_type_expr` runs today. The codex caveat in the
+    // design doc forbids migrating gates to graph-native predicates
+    // in this block; keep the TypeExpr gates.
+    let route_is_package_backed = super::materialize::type_expr_has_package_backed_object_like_root(
+        &raised,
+        scope_canonical_id,
+        query_engine,
+    );
+    if route_is_package_backed {
+        // Gate short-circuit: return raised verbatim. Do NOT admit —
+        // the cached value would equal the raised input verbatim.
+        return MaterializedTypeExpr {
+            node_id: Some(member_value),
+            type_expr: raised,
+            dep_signature: Arc::from(Vec::new()),
+        };
+    }
+    let is_generic_instantiation =
+        matches!(&raised, TypeExpr::Ref { type_arguments, .. } if !type_arguments.is_empty());
+    if is_generic_instantiation
+        && super::lowered_root_reaches_transitive_cycle(query_engine, scope_canonical_id, &raised)
+    {
+        return MaterializedTypeExpr {
+            node_id: Some(member_value),
+            type_expr: raised,
+            dep_signature: Arc::from(Vec::new()),
+        };
+    }
+    let needs_reduction = type_expr_contains_reducible_operator(&raised) || is_generic_instantiation;
+    if !needs_reduction {
+        return MaterializedTypeExpr {
+            node_id: Some(member_value),
+            type_expr: raised,
+            dep_signature: Arc::from(Vec::new()),
+        };
+    }
+
+    // (4) Cold compute via the graph-native reducer. Single-shot —
+    // pre-computed ONCE outside the cache call (C2 single-compute
+    // pattern). The cache's `get_or_compute` closure either captures
+    // and moves the pre-computed `materialized` into the cache entry,
+    // or returns `None` (signature-refusal) — in either case the
+    // pre-computed value is the correct answer; no second reducer
+    // call.
+    let materialized = super::materialize::reduce_member_value_graph_native(
+        ctx,
+        scope_canonical_id,
+        member_value,
+        mode,
+    );
+    let observed_scope = ctx.observe_materialize_scope(scope_canonical_id);
+    let materialized_for_closure = materialized.clone();
+    let admitted = cache.get_or_compute(&key, ctx, move || {
+        let scope_obs = observed_scope?;
+        let parse_fact = scope_obs.syntactic_export_set.clone()?;
+        let fact_sig =
+            crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
+                &scope_obs,
+                parse_fact,
+                &materialized_for_closure.dep_signature,
+            )?;
+        Some((materialized_for_closure, fact_sig))
+    });
+    admitted.unwrap_or(materialized)
+}
+
 /// Build an [`ExpandedField`] for a single surface member.
 ///
 /// Raises the member's value node back to a [`TypeExpr`] (falling back
@@ -510,16 +644,28 @@ pub(crate) fn surface_member_to_expanded_field(
     shallow_type_expr_scope: Option<verter_type_expr::TypeExprScope>,
 ) -> ExpandedField {
     let ctx: &dyn ResolverContext = query_engine.ctx;
-    let (raised, exactness) = {
+    // Block 6.d — exactness classification is independent of the
+    // member's reduced TypeExpr; it walks the member's resolved-value
+    // graph. Keep it isolated in its own dispatch scope so the
+    // peek-before-raise contract for the type reduction is not coupled
+    // to a TypeExpr raise that exactness does not need.
+    let exactness = {
         let dispatch = ProjectSemanticDispatch::new(ctx);
         let resolved_value = resolve_member_value_for_classification(&dispatch, member.value);
-        let raised = dispatch
-            .raise_node_to_type_expr(member.value)
-            .unwrap_or(TypeExpr::Unknown { raw: String::new() });
-        let exactness = classify_node(&dispatch, resolved_value);
-        (raised, exactness)
+        classify_node(&dispatch, resolved_value)
     };
-    let r#type = reduce_field_type_expr(query_engine, scope_canonical_id, raised);
+    // Block 6.d — peek the per-member graph-native materialiser cache
+    // BEFORE any `raise_node_to_type_expr(member.value)` call. Warm
+    // hits return the cached `MaterializedTypeExpr` without paying the
+    // raise cost or the shallow-gate cost; cold misses raise once,
+    // run the gates, then dispatch the graph-native reducer + admit.
+    let materialized = member_shape_peek_or_compute(
+        query_engine,
+        scope_canonical_id,
+        member.value,
+        ProjectionMode::Expanded,
+    );
+    let r#type = materialized.type_expr;
     debug_assert_eq!(
         shallow_type_expr.is_some(),
         shallow_type_expr_scope.is_some(),

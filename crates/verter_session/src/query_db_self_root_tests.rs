@@ -899,6 +899,61 @@ fn materialize_memo_db_untracked_self_root_rejects_warm_entry() {
     );
 }
 
+/// Block 6.d / `MemberShapeCacheDb` validates the keyed scope
+/// canonical's self-root strictly.
+///
+/// Discriminating property: the prime attempt's materialized
+/// expression carries the marker `"stale"`; the recompute carries
+/// `"recomputed"`. A lazy validator admits the stale expression and
+/// the second `get_or_compute` returns it; the strict validator
+/// rejects admission for an untracked keyed canonical.
+///
+/// Mirrors `materialize_memo_db_untracked_self_root_rejects_warm_entry`
+/// exactly — both caches share the
+/// `cooperative_get_or_insert_with_post_publish` + fact-signature
+/// self-root contract.
+#[test]
+fn member_shape_cache_db_untracked_self_root_rejects_warm_entry() {
+    use crate::semantic_query::{ProjectionMode, SemanticNodeId};
+
+    let host = host_with_unrelated_file();
+    let c = "/self_root_qdb/member_shape_never_loaded.ts";
+    assert_untracked(&host, c);
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().member_shape_cache_db();
+    // Use a synthetic SemanticNodeId — the test exercises the cache's
+    // self-root validation contract, not the production graph.
+    let key = (Arc::<str>::from(c), SemanticNodeId(7), ProjectionMode::Expanded);
+
+    let _ = db.get_or_compute(&key, ctx, || {
+        Some((
+            materialized("stale", empty_dep_signature()),
+            planted_self_root(c),
+        ))
+    });
+
+    let mut cold_ran = false;
+    let warm = db
+        .get_or_compute(&key, ctx, || {
+            cold_ran = true;
+            Some((
+                materialized("recomputed", empty_dep_signature()),
+                empty_fact_signature(),
+            ))
+        })
+        .expect("warm path produces a value");
+
+    assert!(
+        cold_ran,
+        "MemberShapeCacheDb MUST NOT serve a warm entry whose self-root names an \
+         untracked keyed canonical",
+    );
+    assert!(
+        matches!(&warm.type_expr, TypeExpr::Unknown { raw } if raw == "recomputed"),
+        "the rejected entry must not bubble its stale materialized expression",
+    );
+}
+
 /// `MaterializeMemoDb`'s producer records a dependency `FileWholeHash`
 /// for every canonical the materialization walk observed. A content
 /// edit to an observed dependency invalidates the memo even though the
@@ -6099,6 +6154,10 @@ const IN_SCOPE_QUERY_IDENTITY_SELF_ROOT_COVERAGE: &[(&str, &str)] = &[
     (
         "materialize_memo_db",
         "materialize_memo_db_untracked_self_root_rejects_warm_entry",
+    ),
+    (
+        "member_shape_cache_db",
+        "member_shape_cache_db_untracked_self_root_rejects_warm_entry",
     ),
     (
         "materialize_structure_db",
