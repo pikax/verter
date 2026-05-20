@@ -2222,7 +2222,8 @@ fn prepared_member_db_self_root_sibling_edit_rejects_warm_entry() {
 ///
 /// Route generation is not a real production-validating fact: there is
 /// no authoritative route-generation counter, no production emitter,
-/// and `HostFenceValidator` treats `RouteGeneration` as always-valid.
+/// and `StoreView::validates_fact_signature` has no `RouteGeneration`
+/// arm — a `RouteGeneration`-only observation is unrooted.
 /// Rooting a `RouteGeneration`-observed dependency with any fact would
 /// be unsound — no fact can detect a content edit to that file — so
 /// [`engine_fact_signature_for_materialize_memo`] returns `None` and
@@ -5756,11 +5757,12 @@ fn ref_cycle_db_visited_canonical_edit_rejects_warm_entry() {
 /// self-root. The peek misses iff the validator is strict; reverting
 /// `RefCycleResultDb::peek` to `validate(ctx)` flips this test.
 ///
-/// (The legacy rail is left empty deliberately: `HostFenceValidator`'s
-/// `WholeHash` arm rejects an untracked canonical, so a `legacy`-rail
-/// untracked entry would mask the strict-vs-lax distinction. The
-/// untracked-accept permissiveness lives ONLY on the `facts` rail's
-/// `FileWholeHash` via `StoreView::validates`.)
+/// (The legacy rail is left empty deliberately: the legacy
+/// `DepSignature` validator's `WholeHash` arm rejects an untracked
+/// canonical, so a `legacy`-rail untracked entry would mask the
+/// strict-vs-lax distinction. The untracked-accept permissiveness lives
+/// ONLY on the `facts` rail's `FileWholeHash` via
+/// `StoreView::validates`.)
 #[test]
 fn ref_cycle_db_untracked_self_root_rejects_warm_entry() {
     use crate::component_meta_caches::RefCycleEntry;

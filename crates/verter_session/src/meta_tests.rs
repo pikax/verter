@@ -736,14 +736,11 @@ fn current_dependency_fact_versions_include_derived_resolver_facts_non_scheduler
     );
 }
 
-// Removed with slice 5 atomic cut: test asserted view-specific semantics
-// (captured `RequestStoreView::derived_hash` path) that the new live-host
-// architecture intentionally abandons. ImportRoute facts now emit only when
-// `current_cached_import_route_hash` (live-host read) returns Some; the live
-// path has no equivalent to "under store view" semantics, so the prior
-// store-view test was deleted outright. Stale deps are rejected by
-// `HostFenceValidator` revalidating the recorded dep-signature against the
-// live host at publish time.
+// `ImportRoute` facts emit only when `current_cached_import_route_hash`
+// (live-host read) returns Some; the live-host path has no equivalent
+// to "under store view" semantics. Stale deps are rejected at warm-read
+// time by `StoreView::validates_fact_signature` revalidating the
+// recorded fact signature against the live host.
 #[test]
 fn current_dependency_fact_versions_emits_import_route_hash_when_cache_populated() {
     let project = make_project();

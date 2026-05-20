@@ -1294,9 +1294,9 @@ fn backfilled_slot_with_wider_dep_sig_over_invalidates_conservatively_not_incorr
 /// canonical invalidation MUST NOT warm-publish its now-stale result.
 /// Otherwise the post-invalidation cache re-populates with a dep-sig
 /// that may not reference the invalidated canonical (because the
-/// winner's own reads never touched it) — stale data that even
-/// `HostFenceValidator` cannot catch, because the stored dep-sig is
-/// technically valid against the new state.
+/// winner's own reads never touched it) — stale data that
+/// `StoreView::validates_fact_signature` cannot catch, because the
+/// stored signature is technically valid against the new state.
 ///
 /// Scenario (exercises the winner-side `aborted` guard at step 5
 /// AND the TOCTOU re-check under the entries lock):
@@ -1366,8 +1366,8 @@ fn winner_skips_warm_publish_when_aborted_by_invalidation_during_build() {
                 // Wait for main to finish publish + invalidate.
                 main_done_owner.wait();
                 // Return a result whose dep-sig does NOT reference
-                // /w/target.ts — so even HostFenceValidator would
-                // NOT catch a stale publish of this result.
+                // /w/target.ts — so `StoreView::validates_fact_signature`
+                // would NOT catch a stale publish of this result.
                 (
                     QueryResult::Value(a_result),
                     dep_sig_for("/w/unrelated.ts", 9),
