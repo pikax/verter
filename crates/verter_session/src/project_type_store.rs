@@ -1688,6 +1688,19 @@ pub struct ProjectTypeStore {
     owner_collection_db: OwnerCollectionDb,
     prepared_target_db: PreparedTargetDb,
     materialize_memo_db: MaterializeMemoDb,
+    /// Block 6.d — per-member graph-native materialiser cache. Sibling
+    /// of `materialize_memo_db` keyed on `(scope, SemanticNodeId, mode)`
+    /// for the graph-native start point inside
+    /// `surface_member_to_expanded_field` (a settled
+    /// `SurfaceMember.value`). Eliminates the OXC `shallow_lower_type_expr`
+    /// round-trip per member and amortises sibling reuse — sibling
+    /// members of `Pick<Foo, 'a' | 'b' | ...>` whose underlying
+    /// `member.value` is the same settled node collapse onto each
+    /// other's warm hits, which the whole-expression
+    /// `materialize_memo_db` cannot (its key hashes a structurally
+    /// distinct raised `TypeExpr` per member). See
+    /// [`crate::component_meta_caches::MemberShapeCacheDb`].
+    member_shape_cache_db: crate::component_meta_caches::MemberShapeCacheDb,
     /// Cache for the structural
     /// materialiser. Sole authoritative host-owned materialiser cache.
     /// The canonical removed-symbol list lives in
@@ -1840,6 +1853,9 @@ impl ProjectTypeStore {
             PreparedTargetDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
         let materialize_memo_db =
             MaterializeMemoDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
+        let member_shape_cache_db = crate::component_meta_caches::MemberShapeCacheDb::with_counter(
+            Arc::clone(&counters.component_meta_cache_live),
+        );
         let materialize_structure_db =
             crate::component_meta_caches::MaterializeStructureDb::with_counter(Arc::clone(
                 &counters.component_meta_cache_live,
@@ -1877,6 +1893,7 @@ impl ProjectTypeStore {
             owner_collection_db,
             prepared_target_db,
             materialize_memo_db,
+            member_shape_cache_db,
             materialize_structure_db,
             ref_cycle_db,
             prepared_surface_db,
@@ -2090,6 +2107,12 @@ impl ProjectTypeStore {
         &self.materialize_memo_db
     }
 
+    /// Block 6.d — per-member graph-native materialiser cache.
+    /// See [`crate::component_meta_caches::MemberShapeCacheDb`].
+    pub fn member_shape_cache_db(&self) -> &crate::component_meta_caches::MemberShapeCacheDb {
+        &self.member_shape_cache_db
+    }
+
     /// For the structural-materialiser
     /// final-result cache. Sole authoritative materialiser cache; the
     /// canonical removed-symbol list lives in
@@ -2220,6 +2243,11 @@ impl ProjectTypeStore {
         self.owner_collection_db.invalidate_canonical(canonical_id);
         self.prepared_target_db.invalidate_canonical(canonical_id);
         self.materialize_memo_db.invalidate_canonical(canonical_id);
+        // Block 6.d — per-member graph-native materialiser cache joins
+        // the per-canonical eviction cascade. Sibling of
+        // `materialize_memo_db`; same invalidation contract.
+        self.member_shape_cache_db
+            .invalidate_canonical(canonical_id);
         // Reverse-index drain on the
         // structural-materialiser cache (sole materialiser cache).
         self.materialize_structure_db
@@ -2421,6 +2449,10 @@ impl ProjectTypeStore {
         self.owner_collection_db.invalidate_all();
         self.prepared_target_db.invalidate_all();
         self.materialize_memo_db.invalidate_all();
+        // Block 6.d — per-member graph-native materialiser cache joins
+        // the project-generation invalidation cascade. Same shape as
+        // `materialize_memo_db`.
+        self.member_shape_cache_db.invalidate_all();
         self.materialize_structure_db.invalidate_all();
         // R — project-shape change invalidates the
         // BFS cycle-result cache (entries depend on the same routes /
@@ -2495,6 +2527,7 @@ pub const PROJECT_TYPE_STORE_DB_INVENTORY: &[&str] = &[
     "owner_collection_db",
     "prepared_target_db",
     "materialize_memo_db",
+    "member_shape_cache_db",
     "materialize_structure_db",
     "ref_cycle_db",
     "prepared_surface_db",
@@ -2540,6 +2573,7 @@ impl ProjectTypeStore {
             &self.owner_collection_db,
             &self.prepared_target_db,
             &self.materialize_memo_db,
+            &self.member_shape_cache_db,
             &self.materialize_structure_db,
             &self.ref_cycle_db,
             &self.prepared_surface_db,
@@ -2624,6 +2658,10 @@ impl ProjectTypeStore {
         );
         total = total.saturating_add(
             self.materialize_memo_db
+                .invalidate_canonical_for(canonical_id),
+        );
+        total = total.saturating_add(
+            self.member_shape_cache_db
                 .invalidate_canonical_for(canonical_id),
         );
         total = total.saturating_add(
