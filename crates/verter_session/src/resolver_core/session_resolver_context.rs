@@ -134,11 +134,14 @@ impl<'a> SessionResolverContext<'a> {
     /// it.
     #[allow(dead_code)]
     pub(crate) fn complete_canonical(&self, canonical: &str) {
-        self.request_view.overlay().complete_canonical(
-            self.inner,
-            self.request_view.base(),
-            canonical,
-        );
+        self.request_view
+            .overlay()
+            .complete_canonical_with_session_view(
+                self.inner,
+                self.request_view.base(),
+                self.view,
+                canonical,
+            );
     }
 }
 

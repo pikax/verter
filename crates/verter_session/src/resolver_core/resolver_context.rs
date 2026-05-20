@@ -699,37 +699,20 @@ impl ResolverContext for crate::VerterHost {
         // than `ctx.store_view()`.
         //
         // In test builds the bare-host fallback is supported via a
-        // thread-local owned view: many test fixtures hand a bare
-        // `&VerterHost` to `validate_*` helpers that route through
-        // `ctx.store_view()`. The fallback constructs an owned
-        // `HostStoreView` per call and stores it in a thread-local cell
-        // so the borrowed return is valid for the duration of the test
-        // step. Each call REPLACES the cell, so the borrow is invalidated
-        // by the next call on the same thread (sound for sequential
-        // test code; tests do not interleave borrows).
+        // `Box::leak`'d owned view per call: many test fixtures hand a
+        // bare `&VerterHost` to `validate_*` helpers that route through
+        // `ctx.store_view()`. Leaking gives the borrow a `'static`
+        // lifetime — no `unsafe`, no thread-local lifetime hack, no
+        // sequential-borrow assumption to maintain. The leak is bounded
+        // by the number of test calls to this fallback (a few thousand
+        // at most across the entire test suite, ~1KB per view), which
+        // is fully acceptable for `cfg(test)`-only paths. Production
+        // builds reach the `cfg(not(test))` panic arm below.
         #[cfg(test)]
         {
-            thread_local! {
-                static BARE_HOST_TEST_VIEW: std::cell::RefCell<Option<Box<HostStoreView>>>
-                    = const { std::cell::RefCell::new(None) };
-            }
             let view = crate::VerterHost::resolver_store_view(self);
-            BARE_HOST_TEST_VIEW.with(|cell| {
-                *cell.borrow_mut() = Some(Box::new(view));
-            });
-            // SAFETY: The cell is thread-local and we have just inserted
-            // a fresh boxed `HostStoreView`; the boxed allocation lives
-            // until the next call on this thread replaces it. The
-            // returned `&dyn StoreView` borrow is valid until that next
-            // call. Test code is sequential and never overlaps borrows.
-            BARE_HOST_TEST_VIEW.with(|cell| {
-                let borrowed = cell.borrow();
-                let ptr: *const HostStoreView = borrowed
-                    .as_ref()
-                    .expect("just inserted a view above")
-                    .as_ref();
-                unsafe { &*ptr as &dyn crate::resolver_core::StoreView }
-            })
+            let leaked: &'static HostStoreView = Box::leak(Box::new(view));
+            leaked as &dyn crate::resolver_core::StoreView
         }
         #[cfg(not(test))]
         {

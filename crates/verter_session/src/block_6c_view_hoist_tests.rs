@@ -339,3 +339,130 @@ fn session_overlay_rooting_runs_once_per_request() {
         builds_after_calls - builds_after_warmup
     );
 }
+
+/// Session-overlay completion test (codex review B6.C-rfx fix).
+///
+/// When a `SessionResolverContext` calls `complete_canonical` for a
+/// canonical the session view has overlaid, the canonical completion
+/// overlay MUST record the SESSION OVERLAY hash, not the base host's
+/// scheduler hash. The session view is the authoritative source for
+/// overlaid canonicals; the request-entry base view was already re-
+/// rooted via `with_session_overlay` to carry the overlay hash. Writing
+/// the base hash on top of that overlay-rooted hash would break the 6.B
+/// session-overlay validation contract (`096e124a2`): subsequent self-
+/// root / parse-domain validation inside the request would
+/// false-validate the base hash and false-reject the overlay hash, even
+/// though the session is the only authority for the overlaid content.
+///
+/// Discriminating against the pre-fix tree:
+/// - **Pre-fix**: `complete_canonical` always reads
+///   `host.effective_file_state(canonical, None)` (the BASE scheduler
+///   hash) and inserts it into the completion overlay's `whole_hashes`.
+///   The wrapper's `validates_self_root_whole_hash` then consults the
+///   overlay FIRST — so a query for the OVERLAY hash falls into the
+///   shadowing-mismatch branch (returns `false`) and a query for the
+///   BASE hash matches the overlay (returns `true`). Both outcomes are
+///   wrong.
+/// - **Post-fix**: the session-aware `complete_canonical_with_session_view`
+///   path reads `view.overlay_content_hash_for(canonical)` first, finds
+///   the overlay hash, and writes that. Then a query for the overlay
+///   hash matches (`true`) and a query for the base hash mismatches
+///   (`false`).
+#[test]
+fn complete_canonical_writes_session_overlay_hash_not_base_hash() {
+    use crate::resolver_core::ResolverContext;
+    use crate::session_view::{OverlaidView, SessionView};
+    use rustc_hash::FxHashMap;
+
+    let (host, canonical) = small_host_with_one_component();
+
+    // Materialise the base IndexedReady so `with_session_overlay` and
+    // the overlay artifact lookup both have something to find.
+    let base_hash = host
+        .ensure_indexed_ready(&canonical)
+        .expect("base IndexedReady materialises")
+        .whole_hash;
+    let host = Arc::new(host);
+
+    // Construct a session view that overlays `canonical` with DIFFERENT
+    // content — the overlay hash must diverge from the base hash for
+    // this test to discriminate.
+    let overlay_source: Arc<str> = Arc::from(
+        r#"<script setup lang="ts">
+interface ButtonProps {
+  label: string
+  disabled?: boolean
+  variant?: 'primary' | 'secondary'
+}
+defineProps<ButtonProps>()
+</script>
+<template><button :disabled="disabled">{{ label }}</button></template>
+"#,
+    );
+    let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+    overlays.insert(canonical.clone(), Arc::clone(&overlay_source));
+    let view = OverlaidView::new(Arc::clone(&host), overlays);
+
+    let overlay_hash = view
+        .overlay_content_hash_for(&canonical)
+        .expect("OverlaidView reports an overlay hash for the masked canonical");
+    assert_ne!(
+        overlay_hash, base_hash,
+        "fixture invariant: overlay content must differ from base content so the \
+         two hashes diverge — otherwise this test cannot discriminate the bug"
+    );
+
+    // Materialise the overlay IndexedReady so the overlay artifact
+    // lookup inside `complete_canonical_with_session_view` finds the
+    // overlay `FileArtifacts` and writes the overlay-rooted derived
+    // hashes.
+    host.materialize_overlay_indexed_ready_with_view(&canonical, &view)
+        .expect("overlay IndexedReady materialises");
+
+    // Build the request-bound session-rooted base view ONCE (matches
+    // the production session-bearing request entry point).
+    let base = host
+        .resolver_store_view()
+        .with_session_overlay(&host, &view);
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = SessionResolverContext::new(&host, &view, &base, Arc::clone(&overlay));
+
+    // Mid-request: promote the overlaid canonical into the completion
+    // overlay. With the bug, this writes `base_hash`; with the fix, it
+    // writes `overlay_hash`.
+    ctx.complete_canonical(&canonical);
+
+    // Direct overlay-state inspection: the recorded `whole_hash` MUST
+    // be the overlay hash. Pre-fix value is `base_hash`.
+    let probe = crate::resolver_core::RequestStoreView::new(&base, Arc::clone(&overlay));
+    assert_eq!(
+        probe.peek_whole_hash_for_tests(&canonical),
+        Some(overlay_hash),
+        "complete_canonical (session-aware path) MUST record the SESSION OVERLAY \
+         hash for the canonical. Pre-fix it recorded the base scheduler hash \
+         (`host.effective_file_state(canonical, None)`), which violates the 6.B \
+         session-overlay validation contract (096e124a2): a session-overlaid \
+         canonical's overlay-rooted facts then false-miss in subsequent self-root \
+         validation inside the same request."
+    );
+
+    // End-to-end shadowing validation: the wrapper's StoreView trait
+    // honours the overlay value. Self-root validation against the
+    // OVERLAY hash succeeds (the overlay matches), and validation
+    // against the BASE hash fails (the overlay shadows with the
+    // overlay hash, mismatching the base hash).
+    let store_view = ctx.store_view();
+    assert!(
+        store_view.validates_self_root_whole_hash(&canonical, &overlay_hash),
+        "self-root validation against the overlay hash MUST succeed; pre-fix the \
+         completion overlay carried `base_hash`, so the overlay-shadowed \
+         comparison returned `false` for the overlay-hash query"
+    );
+    assert!(
+        !store_view.validates_self_root_whole_hash(&canonical, &base_hash),
+        "self-root validation against the base hash MUST FAIL on a session-overlaid \
+         canonical; pre-fix the completion overlay carried `base_hash`, so the \
+         shadowed comparison returned `true` for the base-hash query — \
+         false-validating a stale base-rooted fact against a session-overlaid file"
+    );
+}

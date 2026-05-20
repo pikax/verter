@@ -105,6 +105,7 @@ use crate::types::Hash16;
 ///   The shared `ResolvedImportFactsDb` is concurrently updated by
 ///   writers on both base and overlay paths, so the base validator
 ///   already sees mid-request additive entries.
+///
 /// Removing both eliminates hot-path probes + lock acquires per
 /// validation.
 ///
@@ -200,16 +201,87 @@ impl CanonicalCompletionOverlay {
     /// executor will retry the request with a fresh view; mutating an
     /// already-superseded overlay would risk steering validation toward
     /// stale data.
+    ///
+    /// This is the BASE-only variant — used by [`HostResolverContext`]
+    /// where no session view is present. Session-bearing contexts must
+    /// call [`Self::complete_canonical_with_session_view`] instead so
+    /// the completion overlay records the session-overlay hash (not the
+    /// base scheduler hash) for canonicals the session has masked. See
+    /// the codex review fix (B6.C-rfx) for the contract.
     pub(crate) fn complete_canonical(
         &self,
         host: &crate::VerterHost,
         base: &HostStoreView,
         canonical: &str,
     ) {
+        self.complete_canonical_inner(host, base, canonical, None);
+    }
+
+    /// Session-overlay-aware variant of [`Self::complete_canonical`].
+    ///
+    /// When `view` carries an explicit overlay-Upsert for `canonical`
+    /// the overlay hash (and overlay-published artifacts) is the
+    /// authoritative source for the completion overlay's entries, NOT
+    /// the base host's scheduler-rooted state. Without this routing the
+    /// completion overlay's `whole_hashes` would shadow the session-
+    /// overlay's hash with the base hash, breaking the 6.B session-
+    /// overlay validation contract (`096e124a2`): a session-overlaid
+    /// canonical's facts would mis-validate against the base hash on
+    /// subsequent reads inside the same request.
+    ///
+    /// Resolution order (mirrors [`SessionResolverContext::authoritative_current_content_hash`]):
+    /// 1. `view.overlay_content_hash_for(canonical)` returns `Some` →
+    ///    write the overlay hash; load the overlay's
+    ///    [`FileArtifacts`] (not the base) for `file_facts` / derived
+    ///    hashes.
+    /// 2. `view.is_tombstoned(canonical)` → skip entirely (the session
+    ///    deleted the file; there is no current content to promote).
+    /// 3. Otherwise → fall through to the base-only logic.
+    ///
+    /// Epoch-guarded identically to [`Self::complete_canonical`].
+    pub(crate) fn complete_canonical_with_session_view(
+        &self,
+        host: &crate::VerterHost,
+        base: &HostStoreView,
+        view: &dyn crate::session_view::SessionView,
+        canonical: &str,
+    ) {
+        self.complete_canonical_inner(host, base, canonical, Some(view));
+    }
+
+    fn complete_canonical_inner(
+        &self,
+        host: &crate::VerterHost,
+        base: &HostStoreView,
+        canonical: &str,
+        view: Option<&dyn crate::session_view::SessionView>,
+    ) {
         if host.current_store_view_epoch() != base.mutation_epoch() {
             // The base view is already superseded. Skip the write; the
             // outer executor will retry against a fresh view.
             return;
+        }
+
+        // Session-overlay precedence (codex review B6.C-rfx fix):
+        // if a session view is present and carries explicit overlay
+        // state for the canonical, that state is the request-scoped
+        // authority — NOT the base scheduler. Without this branch the
+        // completion overlay would shadow the session-rooted base
+        // view's overlay hash with the scheduler's base hash, breaking
+        // the 6.B session-overlay validation contract (096e124a2).
+        if let Some(view) = view {
+            if view.is_tombstoned(canonical) {
+                // The session deleted the file; there is no current
+                // content. The `with_session_overlay` re-rooting on
+                // `base` has already dropped any base per-canonical
+                // snapshot, so the completion overlay must not promote
+                // a stale state on top.
+                return;
+            }
+            if let Some(overlay_hash) = view.overlay_content_hash_for(canonical) {
+                self.write_completion_entry_from_overlay(host, view, canonical, overlay_hash);
+                return;
+            }
         }
 
         // Resolve the canonical's currently-tracked whole hash via the
@@ -235,6 +307,37 @@ impl CanonicalCompletionOverlay {
             return;
         };
 
+        self.write_completion_entry(host, canonical, whole_hash, None);
+    }
+
+    /// Write the completion-overlay entries for a session-overlaid
+    /// canonical. Reads the overlay [`FileArtifacts`] (not the base)
+    /// so `file_facts` and the derived hashes match the OVERLAY
+    /// content version — the same authority `HostStoreView::with_session_overlay`
+    /// re-rooted the base view's per-canonical snapshots from.
+    fn write_completion_entry_from_overlay(
+        &self,
+        host: &crate::VerterHost,
+        view: &dyn crate::session_view::SessionView,
+        canonical: &str,
+        overlay_hash: crate::types::Hash16,
+    ) {
+        let overlay_identity = host.overlay_artifact_identity(canonical);
+        let file_artifacts = overlay_identity.lookup_overlay_artifacts(host, view);
+        self.write_completion_entry(host, canonical, overlay_hash, file_artifacts);
+    }
+
+    /// Write the completion-overlay entries for `(canonical, whole_hash)`.
+    /// When `file_artifacts` is `None`, falls back to a content-hash-
+    /// keyed `get_artifacts_for_content` read on the project store (the
+    /// base-only path used when no session view is in play).
+    fn write_completion_entry(
+        &self,
+        host: &crate::VerterHost,
+        canonical: &str,
+        whole_hash: crate::types::Hash16,
+        file_artifacts: Option<Arc<crate::file_artifact_store::FileArtifacts>>,
+    ) {
         self.whole_hashes
             .write()
             .insert(canonical.to_owned(), whole_hash);
@@ -243,12 +346,16 @@ impl CanonicalCompletionOverlay {
         self.whole_hashes_nonempty.store(true, Ordering::Release);
 
         // Per-canonical `IndexedReady` snapshot — populates `file_facts`
-        // and the `Route` / `ImportRoute` derived-hash entries.
-        if let Some(file_artifacts) = host
-            .project_type_store()
-            .indexed()
-            .get_artifacts_for_content(canonical, whole_hash)
-        {
+        // and the `Route` / `ImportRoute` derived-hash entries. For a
+        // session-overlaid canonical the caller passes the overlay
+        // artifacts directly; for the base-only path we look them up by
+        // content hash here.
+        let file_artifacts = file_artifacts.or_else(|| {
+            host.project_type_store()
+                .indexed()
+                .get_artifacts_for_content(canonical, whole_hash)
+        });
+        if let Some(file_artifacts) = file_artifacts {
             self.file_facts
                 .write()
                 .insert(canonical.to_owned(), Arc::clone(&file_artifacts.facts));
@@ -262,14 +369,21 @@ impl CanonicalCompletionOverlay {
             } else {
                 None
             };
-            let import_route_hash = host.generation_current_import_route_hash(canonical);
+            // For session-overlaid canonicals the import-route hash is
+            // covered by the overlay `IndexedReady`'s own
+            // `import_route_hash` (the authority `with_session_overlay`
+            // also reads). For the base-only path we read it from the
+            // host's generation-current map. Both produce the same
+            // value for non-overlaid canonicals; for overlaid
+            // canonicals the indexed authority is the overlay one.
+            let import_route_hash = indexed
+                .import_route_hash
+                .or_else(|| host.generation_current_import_route_hash(canonical));
             if route_hash.is_some() || import_route_hash.is_some() {
                 // Single write-lock acquisition for both derived-hash
                 // variants per canonical.
                 let mut derived = self.derived_hashes.write();
-                let entry = derived
-                    .entry(canonical.to_owned())
-                    .or_insert_with(RouteDerivedHashes::default);
+                let entry = derived.entry(canonical.to_owned()).or_default();
                 if let Some(h) = route_hash {
                     entry.route = Some(h);
                 }

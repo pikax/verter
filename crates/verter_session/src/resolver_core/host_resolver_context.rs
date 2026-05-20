@@ -93,11 +93,6 @@ impl<'a> HostResolverContext<'a> {
     /// the duration of the wrapper. Pass an `Arc<CanonicalCompletionOverlay>`
     /// so cooperative-admission lanes that inherit the context share
     /// the same overlay.
-    // `#[allow(dead_code)]` is intentional during the 6.c substrate
-    // window — the call sites that construct this wrapper land in the
-    // hot-path conversion commit (C). Removing the allow once those
-    // sites land is a stub-prevention follow-up.
-    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn new(
         inner: &'a crate::VerterHost,
@@ -111,6 +106,13 @@ impl<'a> HostResolverContext<'a> {
     }
 
     /// Borrow the inner host.
+    ///
+    /// Reserved accessor for cooperative-admission lanes that inherit a
+    /// HostResolverContext and need to construct a sibling wrapper
+    /// (see also [`Self::overlay`]). Currently unused — every active
+    /// production caller goes through the impl blocks; the lane-
+    /// inheritance path lives in `SessionResolverContext` for now. Kept
+    /// here for symmetry with the session variant.
     #[allow(dead_code)]
     pub(crate) fn host(&self) -> &'a crate::VerterHost {
         self.inner
@@ -120,7 +122,9 @@ impl<'a> HostResolverContext<'a> {
     ///
     /// Cooperative-admission lanes that inherit the context call this
     /// to clone the `Arc` and seed a sibling wrapper that shares the
-    /// same per-request completion state.
+    /// same per-request completion state. Currently unused — the
+    /// active lane-inheritance path lives in `SessionResolverContext`;
+    /// kept here for symmetry with the session variant.
     #[allow(dead_code)]
     pub(crate) fn overlay(&self) -> &Arc<CanonicalCompletionOverlay> {
         self.view.overlay()
@@ -134,7 +138,6 @@ impl<'a> HostResolverContext<'a> {
     /// freshly-loaded canonical's current content rather than
     /// false-missing because the request-entry base view did not track
     /// it.
-    #[allow(dead_code)]
     pub(crate) fn complete_canonical(&self, canonical: &str) {
         self.view
             .overlay()
