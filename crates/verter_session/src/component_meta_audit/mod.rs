@@ -164,8 +164,7 @@ pub fn snapshot_bypass_diagnostics_from_tls() -> verter_audit::store::BypassDiag
     let Some(ctx) = crate::request_context::current_request_context() else {
         return BypassDiagnostics::default();
     };
-    let (builds, bare_engines, store_view_calls) =
-        ctx.cache_counters.bypass_diagnostics.snapshot();
+    let (builds, bare_engines, store_view_calls) = ctx.cache_counters.bypass_diagnostics.snapshot();
     BypassDiagnostics {
         host_store_view_from_host_builds: builds,
         bare_engine_constructions: bare_engines,

@@ -2416,6 +2416,7 @@ import Child from './Child.vue'
             &resolved,
             None,
             &mut visiting,
+            None,
         )
         .expect("fallthrough should resolve");
     assert!(
@@ -2508,7 +2509,8 @@ import { shared } from './shared'
         .resolve_component_meta("/src/Button.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved meta should be computed from the captured view");
 
-    let meta = extract_component_meta_from_resolved(&host, "/src/Button.vue", &resolved, true);
+    let meta =
+        extract_component_meta_from_resolved(&host, "/src/Button.vue", &resolved, true, None);
 
     assert!(
         matches!(

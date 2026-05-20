@@ -486,6 +486,7 @@ pub mod for_tests {
                         canonical.as_str(),
                         &resolved,
                         true,
+                        None,
                     );
                 })
         });

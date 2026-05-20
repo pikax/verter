@@ -91,13 +91,14 @@ const TYPE_ROLE_MACRO_KINDS: &[AnalyzedMacroKind] = &[
 ///
 /// The pass is host-bounded but never invokes dispatch — it walks the
 /// already-resolved registry plus on-demand declaration metadata.
-pub fn apply_component_meta_resolution_policy(
+pub(crate) fn apply_component_meta_resolution_policy(
     analysis: &mut ComponentMetaAnalysis,
     type_registry: &[ResolvedTypeAnalysis],
     type_registry_meta: &[ResolvedTypeRegistryMeta],
     host: &VerterHost,
     owner_canonical: &str,
     snapshot: Option<&FileAnalysisSnapshot>,
+    ctx: Option<&dyn crate::resolver_core::resolver_context::ResolverContext>,
 ) {
     let macro_participating_idents: FxHashSet<ResolvedRootIdentity> = match snapshot {
         Some(snap) => {
@@ -112,6 +113,7 @@ pub fn apply_component_meta_resolution_policy(
         host,
         owner_canonical,
         &macro_participating_idents,
+        ctx,
     );
 }
 
@@ -130,9 +132,18 @@ pub(crate) fn apply_component_meta_resolution_policy_with_participation(
     host: &VerterHost,
     owner_canonical: &str,
     macro_participating_idents: &FxHashSet<ResolvedRootIdentity>,
+    ctx: Option<&dyn crate::resolver_core::resolver_context::ResolverContext>,
 ) {
     let registry = PolicyRegistry::build(type_registry, type_registry_meta);
-    let mut engine = ComponentMetaQueryEngine::new(host);
+    // Block 7.5 Class B fix (audit-v2 §"Recommended priority order" #1):
+    // bind the engine to the supplied request-bound `ctx` when one is
+    // available so every nested dispatch / validator inherits the
+    // overlay-aware view. Bare-host fallback retained for the test
+    // entry points (`run_policy`, `run_policy_with_macro_participation`)
+    // that exercise this pass directly without a request boundary.
+    let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = host;
+    let engine_ctx = ctx.unwrap_or(base_ctx);
+    let mut engine = ComponentMetaQueryEngine::new(engine_ctx);
     let mut ctx = PolicyCtx {
         registry: &registry,
         engine: &mut engine,

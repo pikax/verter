@@ -866,6 +866,19 @@ pub(in crate::host_manage) struct HostFallthroughResolver<'a> {
     /// these methods fire ~per template element × per conditional
     /// branch on nuxt-ui's Button template).
     pub(in crate::host_manage) live_view: crate::resolver_store::HostStoreView,
+    /// Request-bound resolver context plumbed from the cold-compute
+    /// entry-point (`get_component_meta` / `..._via_view` /
+    /// `..._with_resolution`). The per-element fallthrough engine
+    /// constructions in `build_generic_child_prop_overrides`,
+    /// `resolve_root_consumption`, and `resolve_dynamic_root_candidates`
+    /// bind to this ctx (when present) so cache validators inside the
+    /// engine read through the overlay-aware
+    /// [`crate::resolver_core::HostResolverContext`] instead of paying
+    /// a fresh workspace-sweep cost per call. Tests / off-path callers
+    /// may pass `None`; the engine falls back to a bare-host ctx.
+    /// Block 7.5 Class B audit-v2 fix (sites: `fallthrough.rs:437/532/621`).
+    pub(in crate::host_manage) ctx:
+        Option<&'a dyn crate::resolver_core::resolver_context::ResolverContext>,
 }
 
 impl FallthroughResolverHost for HostFallthroughResolver<'_> {
@@ -1070,6 +1083,7 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
             base,
             has_unknown_spread,
             eval_env,
+            self.ctx,
         );
         self.host.resolver_runtime().fallthrough.store_node(
             cache_key,
@@ -1089,8 +1103,13 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
         eval_env: &mut Option<Self::EvalEnv>,
     ) -> Option<rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>> {
         debug_assert_eq!(self.parent_canonical_id, canonical_id);
-        self.host
-            .build_generic_child_prop_overrides(canonical_id, snapshot, usage_index, eval_env)
+        self.host.build_generic_child_prop_overrides(
+            canonical_id,
+            snapshot,
+            usage_index,
+            eval_env,
+            self.ctx,
+        )
     }
 
     fn resolve_dynamic_root_candidates(
@@ -1101,8 +1120,13 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
         eval_env: &mut Option<Self::EvalEnv>,
     ) -> Vec<DynamicRootCandidate> {
         debug_assert_eq!(self.parent_canonical_id, canonical_id);
-        self.host
-            .resolve_dynamic_root_candidates(canonical_id, snapshot, usage_index, eval_env)
+        self.host.resolve_dynamic_root_candidates(
+            canonical_id,
+            snapshot,
+            usage_index,
+            eval_env,
+            self.ctx,
+        )
     }
 }
 

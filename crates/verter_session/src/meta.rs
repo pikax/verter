@@ -744,11 +744,21 @@ impl MetaSession {
                     canonical.as_str(),
                     crate::types::ProjectionMode::Expanded,
                 )?;
+                // Block 7.5 audit-v2 Class B fix: bind a HostResolverContext
+                // around extract so engine ctors inherit the overlay-aware ctx.
+                let store_view = host.resolver_store_view();
+                let overlay =
+                    std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+                let host_ctx =
+                    crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+                let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext =
+                    &host_ctx;
                 let (analysis, fallthrough_fact_versions) =
                     crate::host_manage::extract_component_meta_from_resolved_with_facts(
                         host,
                         canonical.as_str(),
                         &resolved,
+                        Some(host_ctx_ref),
                     );
                 if component_meta_resolution_budget_error(
                     canonical.as_str(),
@@ -844,11 +854,21 @@ impl MetaSession {
                 return Ok(None);
             };
 
+            // Block 7.5 audit-v2 Class B fix: bind a HostResolverContext
+            // around extract so engine ctors inherit the overlay-aware ctx.
+            let store_view = host.resolver_store_view();
+            let overlay =
+                std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let host_ctx =
+                crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+            let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext =
+                &host_ctx;
             let (analysis, fallthrough_fact_versions) =
                 crate::host_manage::extract_component_meta_from_resolved_with_facts(
                     host,
                     canonical.as_str(),
                     &resolved,
+                    Some(host_ctx_ref),
                 );
 
             if let Some(err) = component_meta_resolution_budget_error(

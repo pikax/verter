@@ -1439,6 +1439,7 @@ pub(crate) fn extract_component_meta_from_resolved(
     canonical_or_alias: &str,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     include_fallthrough: bool,
+    ctx: Option<&dyn crate::resolver_core::resolver_context::ResolverContext>,
 ) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
     let resolved_macros = resolver_component_meta_resolved_macros(
@@ -1477,6 +1478,7 @@ pub(crate) fn extract_component_meta_from_resolved(
             resolved,
             None,
             &mut visiting,
+            ctx,
         ) {
             meta.accepted_props = resolution.accepted_props;
             meta.accepted_events = resolution.accepted_events;
@@ -1494,6 +1496,7 @@ pub(crate) fn extract_component_meta_from_resolved(
         host,
         canonical.as_str(),
         Some(&resolved.snapshot),
+        ctx,
     );
     // Merge graph-native slot-binding synthesis diagnostics into the
     // analysis-wide envelope so consumers see one canonical
@@ -1512,6 +1515,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
     host: &VerterHost,
     canonical_or_alias: &str,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
+    ctx: Option<&dyn crate::resolver_core::resolver_context::ResolverContext>,
 ) -> (
     verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
     Option<Vec<crate::resolver_core::FactVersionRef>>,
@@ -1540,8 +1544,13 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
     );
     let mut visiting = rustc_hash::FxHashSet::default();
     let fallthrough_facts = if let Some(resolution) = host
-        .compute_fallthrough_surface_from_resolved_state(&canonical, resolved, None, &mut visiting)
-    {
+        .compute_fallthrough_surface_from_resolved_state(
+            &canonical,
+            resolved,
+            None,
+            &mut visiting,
+            ctx,
+        ) {
         let facts = resolution.fact_versions.clone();
         meta.accepted_props = resolution.accepted_props;
         meta.accepted_events = resolution.accepted_events;
@@ -1563,6 +1572,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
         host,
         canonical.as_str(),
         Some(&resolved.snapshot),
+        ctx,
     );
     (meta, fallthrough_facts)
 }

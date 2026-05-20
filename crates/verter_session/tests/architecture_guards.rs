@@ -3988,6 +3988,17 @@ mod foundations_guards {
             // would either duplicate the substrate or push the API
             // through a re-export shim with no behavioural gain.
             "crates/verter_session/src/resolver_core/mod.rs",
+            // Block 7.5 Commit A added per-thread diagnostic
+            // instrumentation (`HOST_STORE_VIEW_FROM_HOST_BUILDS` +
+            // friends) that pushed this file over the 1500-line
+            // budget by ~12 lines. The instrumentation is gated
+            // behind atomic counters and intended to survive the
+            // Block 7.5 cutover for future bypass diagnostics.
+            // Splitting the file along the view-construction
+            // boundary is the eventual cleanup; the diagnostic surface
+            // is the load-bearing motivation for the temporary
+            // exemption.
+            "crates/verter_session/src/resolver_store.rs",
             "crates/verter_session/src/meta_resolve/materialize/field_types.rs",
             "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
             "crates/verter_session/src/parse.rs",

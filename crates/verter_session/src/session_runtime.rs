@@ -199,11 +199,20 @@ impl SessionRuntime {
         let host = self.host();
         let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
         let resolved = self.resolve_component_meta(canonical.as_str(), ProjectionMode::Expanded)?;
+        // Block 7.5 audit-v2 Class B fix: bind a request-scoped
+        // `HostResolverContext` around the extract so engine
+        // constructions in the policy / fallthrough path inherit the
+        // overlay-aware ctx instead of a bare-host.
+        let store_view = host.resolver_store_view();
+        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+        let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
         let (analysis, fallthrough_fact_versions) =
             crate::host_manage::extract_component_meta_from_resolved_with_facts(
                 host,
                 canonical.as_str(),
                 &resolved,
+                Some(host_ctx_ref),
             );
         Some((analysis, resolved, fallthrough_fact_versions))
     }

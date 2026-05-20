@@ -10058,6 +10058,7 @@ defineEmits<Emits>()
         "/src/App.vue",
         &resolved,
         true,
+        None,
     );
     let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
 
@@ -10304,6 +10305,7 @@ defineSlots<TabsSlots<T>>()
         "/src/App.vue",
         &resolved,
         true,
+        None,
     );
     let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
 
@@ -10582,6 +10584,7 @@ defineSlots<TabsSlots<T>>()
         "/src/App.vue",
         &resolved,
         true,
+        None,
     );
 
     let color = meta
@@ -10790,6 +10793,7 @@ defineSlots<TabsSlots<T>>()
         "/src/App.vue",
         &resolved,
         true,
+        None,
     );
     let content_slot = meta
         .slots
@@ -11035,6 +11039,7 @@ defineSlots<TabsSlots<T>>()
         "/src/App.vue",
         &resolved,
         true,
+        None,
     );
     let content_slot = meta
         .slots
@@ -11143,6 +11148,7 @@ defineProps<{
         "/src/App.vue",
         &resolved,
         true,
+        None,
     );
     assert!(
         meta.props.iter().any(|prop| prop.name == "valueKey"),
@@ -11222,6 +11228,7 @@ defineProps<{
         "/src/App.vue",
         &resolved,
         false,
+        None,
     );
     let elapsed = started.elapsed();
 
@@ -11320,6 +11327,7 @@ defineSlots<Slots<M>>()
         "/src/App.vue",
         &resolved,
         false,
+        None,
     );
     let elapsed = started.elapsed();
 

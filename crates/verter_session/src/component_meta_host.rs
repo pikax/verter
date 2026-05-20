@@ -677,6 +677,7 @@ fn extract_component_meta_from_resolved_with_evaluated(
             resolved,
             None,
             &mut visiting,
+            None,
         ) {
             meta.accepted_props = resolution.accepted_props;
             meta.accepted_events = resolution.accepted_events;

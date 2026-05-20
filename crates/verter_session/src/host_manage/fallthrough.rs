@@ -202,11 +202,18 @@ impl VerterHost {
                 .unwrap_or_default();
             self.compute_component_meta_state_for_fallthrough(canonical_id, whole_hash)?
         };
+        // Off-request entry (legacy `resolve_fallthrough_surface_internal*`
+        // callers): no request-bound ctx is available — bare-host
+        // fallback inside the engine constructions. Production
+        // component-meta paths go through
+        // `extract_component_meta_from_resolved[_with_facts]` which
+        // does plumb a ctx (Block 7.5 audit-v2 Class B fix).
         self.compute_fallthrough_surface_from_resolved_state(
             canonical_id,
             &resolved,
             prop_type_overrides,
             visiting,
+            None,
         )
     }
 
@@ -216,6 +223,7 @@ impl VerterHost {
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
         prop_type_overrides: Option<&rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>>,
         visiting: &mut rustc_hash::FxHashSet<String>,
+        ctx: Option<&dyn crate::resolver_core::resolver_context::ResolverContext>,
     ) -> Option<crate::types::FallthroughResolution> {
         let fallthrough_fact_versions = resolved.fact_versions.clone();
 
@@ -254,6 +262,14 @@ impl VerterHost {
             // fallthrough surface walk reuses this view (Block 6.c
             // iter3 — bypass audit #2 hottest fix).
             live_view: self.resolver_store_view(),
+            // Block 7.5 Class B fix (audit-v2 §"Recommended priority
+            // order" #4): carry the request-bound ctx through to the
+            // engine constructions in `build_generic_child_prop_overrides`,
+            // `resolve_root_consumption`, `resolve_dynamic_root_candidates`,
+            // and `intrinsic_members_for_tag` so they no longer bind a
+            // bare-host engine inside the cold-compute `with_fact_tracer`
+            // scope.
+            ctx,
         };
         // Build a lightweight fallthrough eval env: base owner env + runtime
         // values + prop overrides.
@@ -426,6 +442,7 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         usage_index: u32,
         eval_env: &mut Option<verter_semantic::analysis::type_eval::EvalEnv>,
+        ctx: Option<&dyn crate::resolver_core::resolver_context::ResolverContext>,
     ) -> Option<rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>> {
         if !self.config.generic_root_propagation {
             return None;
@@ -434,7 +451,13 @@ impl VerterHost {
         let template = snapshot.template.as_deref()?;
         let usage = template.components.get(usage_index as usize)?;
         let mut overrides = rustc_hash::FxHashMap::default();
-        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
+        // Block 7.5 Class B fix: bind the engine to the supplied
+        // request-bound `ctx` when one is available so cache validators
+        // inside the engine inherit the overlay-aware view. Bare-host
+        // fallback preserved for off-path callers.
+        let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = self;
+        let engine_ctx = ctx.unwrap_or(base_ctx);
+        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(engine_ctx);
         let env_ref = eval_env.as_ref();
 
         for prop in &usage.props {
@@ -473,6 +496,7 @@ impl VerterHost {
         base: &verter_semantic::analysis::component_meta::ConsumedRootBindings,
         has_unknown_spread: bool,
         eval_env: &mut Option<verter_semantic::analysis::type_eval::EvalEnv>,
+        ctx: Option<&dyn crate::resolver_core::resolver_context::ResolverContext>,
     ) -> ResolvedConsumedBindings {
         use verter_semantic::analysis::component_meta::PartialBranchReason;
 
@@ -529,7 +553,13 @@ impl VerterHost {
                 );
             }
 
-            let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
+            // Block 7.5 Class B fix: bind the engine to the supplied
+            // request-bound `ctx` when one is available so cache
+            // validators inside the engine inherit the overlay-aware
+            // view. Bare-host fallback preserved for off-path callers.
+            let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = self;
+            let engine_ctx = ctx.unwrap_or(base_ctx);
+            let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(engine_ctx);
             let env_ref = eval_env.as_ref();
             for directive in spread_directives {
                 let Some(expression) = directive.expression.as_deref() else {
@@ -590,6 +620,7 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         usage_index: u32,
         eval_env: &mut Option<verter_semantic::analysis::type_eval::EvalEnv>,
+        ctx: Option<&dyn crate::resolver_core::resolver_context::ResolverContext>,
     ) -> Vec<DynamicRootCandidate> {
         let Some(template) = snapshot.template.as_deref() else {
             return Vec::new();
@@ -618,7 +649,12 @@ impl VerterHost {
                 snapshot.imports.as_slice(),
             ));
         }
-        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
+        // Block 7.5 Class B fix: bind the engine to the supplied
+        // request-bound `ctx` when one is available so cache
+        // validators inside the engine inherit the overlay-aware view.
+        let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = self;
+        let engine_ctx = ctx.unwrap_or(base_ctx);
+        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(engine_ctx);
         if let Some(evaluated) = crate::resolver_core::evaluate_value_expression_via_env_or_dispatch(
             &expression,
             canonical_id,

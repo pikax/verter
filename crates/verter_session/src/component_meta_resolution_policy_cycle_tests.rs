@@ -162,6 +162,7 @@ fn run_policy_with_overflow_check(
             &host,
             "/owner.vue",
             None,
+            None,
         );
         meta
     })
