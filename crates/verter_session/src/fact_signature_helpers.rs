@@ -182,12 +182,15 @@ pub(crate) fn validate_fact_signature(
     if signature.is_empty() {
         return true;
     }
-    // The owned-view rail survives in this helper transitionally
-    // (see commit C body for the migration story + the
-    // STOP-and-escalate report explaining why the borrow-rail
-    // optimisation here regresses cache validity until the rest of
-    // the host-side `ensure_loaded` / `ensure_indexed_ready` call
-    // sites are migrated to thread the request context).
+    // The owned-view rail survives in this helper transitionally. The
+    // codex consult #3 diagnosis identified that `ctx.store_view()` is
+    // the architecturally correct choice (overlay-aware borrow) but
+    // adopting it requires the Block 6.c Shape 1 request scope to be
+    // wired through every call site that reaches this helper — the
+    // bare `&VerterHost` paths still in transit panic on
+    // `ctx.store_view()` (see the arch-guard at
+    // `resolver_context.rs::store_view` for bare host). The owned rail
+    // stays until the Shape 1 wiring lands.
     let view = ctx.resolver_store_view();
     signature.iter().all(|fact| view.validates(fact))
 }
@@ -231,8 +234,8 @@ pub(crate) fn validate_fact_signature_with_self_roots(
     if signature.is_empty() {
         return true;
     }
-    // Same shape as [`validate_fact_signature`] above; see that
-    // helper's doc for the migration story.
+    // Same shape as [`validate_fact_signature`] above; the owned-view
+    // rail survives transitionally for the same reason.
     let view = ctx.resolver_store_view();
     signature.iter().all(|fact| match fact {
         FactVersionRef::FileWholeHash { canonical_id, hash }

@@ -147,8 +147,16 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
 
     #[inline]
     fn prepared_decl_bundle(&self, canonical_id: &str) -> Option<Arc<PreparedDeclBundle>> {
+        // Pass the request-bound `RequestStoreView` (which chains the
+        // `CanonicalCompletionOverlay` in front of the base) so cache
+        // validation consults the overlay-shadowed view rather than
+        // bypassing it via `self.view.base()`. Block 6.c overlay-bypass
+        // bug fix (codex consult #3 diagnosis): the previous
+        // `self.view.base()` argument made every prepared-decl bundle
+        // warm-read pay the request-level snapshot cost without
+        // observing canonicals promoted by mid-request `ensure_loaded`.
         self.inner
-            .prepared_decl_bundle_with_store_view(self.view.base(), canonical_id)
+            .prepared_decl_bundle_with_store_view(&self.view, canonical_id)
     }
 
     #[inline]
@@ -157,8 +165,9 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         canonical_id: &str,
         symbol_name: &str,
     ) -> Option<Arc<PreparedTypeDecl>> {
+        // Overlay-aware view (same rationale as `prepared_decl_bundle`).
         self.inner
-            .prepared_type_decl_with_store_view(self.view.base(), canonical_id, symbol_name)
+            .prepared_type_decl_with_store_view(&self.view, canonical_id, symbol_name)
     }
 
     #[inline]
@@ -167,8 +176,9 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         canonical_id: &str,
         symbol_name: &str,
     ) -> Option<Arc<PreparedValueDecl>> {
+        // Overlay-aware view (same rationale as `prepared_decl_bundle`).
         self.inner
-            .prepared_value_decl_with_store_view(self.view.base(), canonical_id, symbol_name)
+            .prepared_value_decl_with_store_view(&self.view, canonical_id, symbol_name)
     }
 
     #[inline]
@@ -291,8 +301,10 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         owner_canonical: &str,
         local_name: &str,
     ) -> Option<(String, String)> {
+        // Overlay-aware view (Block 6.c overlay-bypass bug fix — see
+        // `prepared_decl_bundle` above for the diagnosis).
         self.inner.resolve_owner_direct_import_with_store_view(
-            self.view.base(),
+            &self.view,
             owner_canonical,
             local_name,
         )
