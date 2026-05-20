@@ -231,8 +231,11 @@ fix lands in a follow-up commit. The recommended approach:
 **Owner:** `verter_session::ProjectTypeStore`
 
 **Cache identity:** `(owner_canonical_id, member_name, expanded_route_signature)`
-keyed by `whole_hash` of the owner's `IndexedReady` and dependency-signature
-revalidation via `HostFenceValidator`.
+keyed by `whole_hash` of the owner's `IndexedReady` plus fact-signature
+revalidation against the live `StoreView` via
+`StoreView::validates_fact_signature` (and
+`ReadSetSignature::validate_with_self_roots` for self-rooted cache
+layers).
 
 **Cache value:** the `current_materialized` artifact that the compute phase
 produces in `materialize_member_route_current_result`.
@@ -247,8 +250,9 @@ walker entirely and use the cached materialized type.
 
 **Cache invariants** (per the project-global cache rule in CLAUDE.md):
 - Immutable `Arc<MaterializedRoute>` payload.
-- Validated cache writes record dep-signatures; warm reads revalidate via
-  `HostFenceValidator`.
+- Validated cache writes record a `ReadSetSignature.facts` fact
+  signature; warm reads revalidate against the live `StoreView` via
+  `StoreView::validates_fact_signature`.
 - Path-independent: the same materialized route from two different entry
   points must populate the same cache entry.
 - Cancelled / interrupted / partial results must NOT be promoted.

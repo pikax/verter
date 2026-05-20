@@ -48,8 +48,10 @@ method `try_with_resolution_cache_hit` runs AFTER the
 fresh id even on the warm path):
 
 1. Look up the result DB at `(canonical, whole_hash)`.
-2. Validate `dep_signature` against current host state via
-   `HostFenceValidator`.
+2. Revalidate the entry's `ReadSetSignature.facts` against the live
+   `StoreView` via `StoreView::validates_fact_signature` (and, for
+   cache layers that carry self-roots, also
+   `ReadSetSignature::validate_with_self_roots`).
 3. Rehydrate the cached `ResolutionTemplate` into a fresh per-request
    `ResolvedComponentMetaState` (snapshot reloaded from
    `ProjectTypeStore::indexed()`).

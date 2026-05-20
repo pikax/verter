@@ -88,7 +88,8 @@ pub struct DeclarationLookupDb {
 
 pub struct DeclarationLookupEntry {
     pub value: Arc<ResolvedTypeDeclaration>,
-    pub dep_signature: DepSignature,
+    pub fact_signature: ReadSetSignature,
+    pub self_roots: Arc<[VersionedDeclIdentity]>,
 }
 
 impl DeclarationLookupDb {
@@ -98,28 +99,38 @@ impl DeclarationLookupDb {
         host: &VerterHost,
         compute: F,
     ) -> Option<Arc<ResolvedTypeDeclaration>>
-    where F: FnOnce() -> Option<(Arc<ResolvedTypeDeclaration>, DepSignature)>,
+    where F: FnOnce() -> Option<(
+        Arc<ResolvedTypeDeclaration>,
+        ReadSetSignature,
+        Arc<[VersionedDeclIdentity]>,
+    )>,
     {
+        let store_view = host.store_view();
         cooperative_get_or_insert(
             &self.entries,
             &self.inflight,
             key.clone(),
             // validate
             |entry: &DeclarationLookupEntry| {
-                if HostFenceValidator::is_valid(&entry.dep_signature, host) {
+                if entry
+                    .fact_signature
+                    .validate_with_self_roots(&store_view, &entry.self_roots)
+                {
                     Some(entry.value.clone())
                 } else {
                     None
                 }
             },
             // compute
-            || compute().map(|(value, dep_signature)| DeclarationLookupEntry {
-                value, dep_signature,
+            || compute().map(|(value, fact_signature, self_roots)| DeclarationLookupEntry {
+                value, fact_signature, self_roots,
             }),
             // project
             |entry: &DeclarationLookupEntry| entry.value.clone(),
             // revalidate after compute
-            |entry| HostFenceValidator::is_valid(&entry.dep_signature, host),
+            |entry| entry
+                .fact_signature
+                .validate_with_self_roots(&store_view, &entry.self_roots),
         )
     }
     // ... invalidate_canonical(), clear_all(), live_count()
