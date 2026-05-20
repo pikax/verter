@@ -846,6 +846,110 @@ impl HostStoreView {
             session: self.session_id,
         }
     }
+
+    /// Overlay-aware variant of
+    /// [`crate::resolver_core::StoreView::validates_resolve_imports_domain`]:
+    /// composes the `ResolvedImportFactsKey` against the supplied
+    /// `content_hash` rather than `self.whole_hashes[canonical]`. Used
+    /// by [`crate::resolver_core::RequestStoreView`] when a canonical
+    /// was promoted into the per-request completion overlay after the
+    /// base view was built (codex re-review B6.C-rfx2). All other key
+    /// dimensions (`parse_env_hash`, `resolve_env_hash`,
+    /// `resolver_version`, `known_miss_generation`) compose against
+    /// the base view's snapshot unchanged.
+    pub(crate) fn validates_resolve_imports_domain_for_content_hash(
+        &self,
+        fact: &crate::resolver_core::ResolveImportsFactRef,
+        content_hash: Hash16,
+    ) -> bool {
+        use verter_semantic::facts::registry::FactLane;
+        use verter_semantic::facts::FactKey;
+        const ZERO_HASH: Hash16 = [0u8; 16];
+
+        let facts_db = match self.resolved_import_facts.as_ref() {
+            Some(db) => db,
+            None => return false,
+        };
+
+        // `known_miss_generation` (Codex P2.2 / Block 1.f-fix):
+        // captured at view-build time from
+        // `DerivedRawState::import_routes_known_miss_recorded_at_generation`.
+        // Absent entries → `[0u8; 16]` so an owner that never had
+        // `set_import_dependencies` called still composes the same
+        // key value the producer admitted under (the producer also
+        // reads `[0u8; 16]` when there is no `DerivedRawState`
+        // entry yet).
+        let known_miss_generation = self
+            .resolved_import_facts_known_miss_tags
+            .get(fact.canonical_id.as_str())
+            .copied()
+            .unwrap_or(ZERO_HASH);
+
+        let key = crate::resolved_import_facts::ResolvedImportFactsKey {
+            canonical: std::sync::Arc::from(fact.canonical_id.as_str()),
+            content_hash,
+            parse_env_hash: self.env_hashes.parse_env_hash,
+            resolve_env_hash: self.env_hashes.resolve_env_hash,
+            resolver_version: crate::resolved_import_facts::RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
+            known_miss_generation,
+        };
+
+        let facts = match facts_db.get(&key) {
+            Some(f) => f,
+            // Cache slot absent — the consumer observed a real fact
+            // hash but the resolve-imports producer has not yet
+            // populated the entry under this view. Reject so the
+            // caller recomputes through the producer (which will
+            // populate the cache + re-emit).
+            None => return fact.expected_hash == ZERO_HASH,
+        };
+
+        // Pick the lane that the consumer observed under.
+        let pick_lane = |f: &std::sync::Arc<verter_semantic::facts::registry::Fact>| match fact.lane
+        {
+            FactLane::Semantic => f.semantic_hash,
+            FactLane::Display => f.display_hash,
+        };
+
+        match &fact.key {
+            FactKey::ResolvedImportClause {
+                specifier,
+                binding,
+                space,
+                resolved_canonical,
+                resolved_source_name,
+            } => facts.import_clauses.iter().any(|entry| {
+                entry.specifier == *specifier
+                    && entry.binding == *binding
+                    && entry.space == *space
+                    && entry.resolved_canonical.as_ref().map(|c| c.as_ref())
+                        == Some(resolved_canonical.as_ref())
+                    && entry.resolved_source_name == *resolved_source_name
+                    && pick_lane(&entry.fact) == fact.expected_hash
+            }),
+            FactKey::ResolvedReexportBinding {
+                specifier,
+                source_name,
+                target_name,
+                space,
+                resolved_canonical,
+                resolved_source_name,
+            } => facts.reexport_bindings.iter().any(|entry| {
+                entry.specifier == *specifier
+                    && entry.source_name == *source_name
+                    && entry.target_name == *target_name
+                    && entry.space == *space
+                    && entry.resolved_canonical.as_ref().map(|c| c.as_ref())
+                        == Some(resolved_canonical.as_ref())
+                    && entry.resolved_source_name == *resolved_source_name
+                    && pick_lane(&entry.fact) == fact.expected_hash
+            }),
+            // Non-resolve-imports FactKey shapes do not belong to
+            // the resolve-imports domain. The dispatch layer routes
+            // by `FactDomain` so this arm is defensive.
+            _ => false,
+        }
+    }
 }
 
 pub(crate) fn hash_import_route_targets(
@@ -1147,14 +1251,7 @@ impl crate::resolver_core::StoreView for HostStoreView {
         &self,
         fact: &crate::resolver_core::ResolveImportsFactRef,
     ) -> bool {
-        use verter_semantic::facts::registry::FactLane;
-        use verter_semantic::facts::FactKey;
         const ZERO_HASH: Hash16 = [0u8; 16];
-
-        let facts_db = match self.resolved_import_facts.as_ref() {
-            Some(db) => db,
-            None => return false,
-        };
 
         // R26 producer: untracked-file optimistic-accept window. A
         // path-precise resolve-imports consumer that observed against
@@ -1166,84 +1263,7 @@ impl crate::resolver_core::StoreView for HostStoreView {
             None => return fact.expected_hash == ZERO_HASH,
         };
 
-        // `known_miss_generation` (Codex P2.2 / Block 1.f-fix):
-        // captured at view-build time from
-        // `DerivedRawState::import_routes_known_miss_recorded_at_generation`.
-        // Absent entries → `[0u8; 16]` so an owner that never had
-        // `set_import_dependencies` called still composes the same
-        // key value the producer admitted under (the producer also
-        // reads `[0u8; 16]` when there is no `DerivedRawState`
-        // entry yet).
-        let known_miss_generation = self
-            .resolved_import_facts_known_miss_tags
-            .get(fact.canonical_id.as_str())
-            .copied()
-            .unwrap_or(ZERO_HASH);
-
-        let key = crate::resolved_import_facts::ResolvedImportFactsKey {
-            canonical: std::sync::Arc::from(fact.canonical_id.as_str()),
-            content_hash,
-            parse_env_hash: self.env_hashes.parse_env_hash,
-            resolve_env_hash: self.env_hashes.resolve_env_hash,
-            resolver_version: crate::resolved_import_facts::RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
-            known_miss_generation,
-        };
-
-        let facts = match facts_db.get(&key) {
-            Some(f) => f,
-            // Cache slot absent — the consumer observed a real fact
-            // hash but the resolve-imports producer has not yet
-            // populated the entry under this view. Reject so the
-            // caller recomputes through the producer (which will
-            // populate the cache + re-emit).
-            None => return fact.expected_hash == ZERO_HASH,
-        };
-
-        // Pick the lane that the consumer observed under.
-        let pick_lane = |f: &std::sync::Arc<verter_semantic::facts::registry::Fact>| match fact.lane
-        {
-            FactLane::Semantic => f.semantic_hash,
-            FactLane::Display => f.display_hash,
-        };
-
-        match &fact.key {
-            FactKey::ResolvedImportClause {
-                specifier,
-                binding,
-                space,
-                resolved_canonical,
-                resolved_source_name,
-            } => facts.import_clauses.iter().any(|entry| {
-                entry.specifier == *specifier
-                    && entry.binding == *binding
-                    && entry.space == *space
-                    && entry.resolved_canonical.as_ref().map(|c| c.as_ref())
-                        == Some(resolved_canonical.as_ref())
-                    && entry.resolved_source_name == *resolved_source_name
-                    && pick_lane(&entry.fact) == fact.expected_hash
-            }),
-            FactKey::ResolvedReexportBinding {
-                specifier,
-                source_name,
-                target_name,
-                space,
-                resolved_canonical,
-                resolved_source_name,
-            } => facts.reexport_bindings.iter().any(|entry| {
-                entry.specifier == *specifier
-                    && entry.source_name == *source_name
-                    && entry.target_name == *target_name
-                    && entry.space == *space
-                    && entry.resolved_canonical.as_ref().map(|c| c.as_ref())
-                        == Some(resolved_canonical.as_ref())
-                    && entry.resolved_source_name == *resolved_source_name
-                    && pick_lane(&entry.fact) == fact.expected_hash
-            }),
-            // Non-resolve-imports FactKey shapes do not belong to
-            // the resolve-imports domain. The dispatch layer routes
-            // by `FactDomain` so this arm is defensive.
-            _ => false,
-        }
+        self.validates_resolve_imports_domain_for_content_hash(fact, content_hash)
     }
 
     /// Route-surface-domain validator (R26 + R29 + G1).
@@ -1448,5 +1468,25 @@ impl HostStoreView {
             whole_hashes,
             ..Self::default()
         }
+    }
+
+    /// Test-only: forget that `canonical` was tracked. The view loses
+    /// its `whole_hashes` entry (so the `FileWholeHash` / resolve-
+    /// imports validators see it as untracked) but retains all other
+    /// snapshot state (`resolved_import_facts`, `env_hashes`, etc.).
+    /// Used by the codex re-review B6.C-rfx2 P2 #2 discriminating
+    /// test to simulate a base view that pre-dates a mid-request
+    /// `ensure_loaded` promotion of the canonical.
+    pub(crate) fn forget_whole_hash_for_tests(&mut self, canonical: &str) {
+        self.whole_hashes.remove(canonical);
+    }
+
+    /// Test-only: peek the view's `whole_hashes` entry for a canonical
+    /// id. The codex re-review B6.C-rfx2 P2 #2 discriminating test
+    /// reads the owner's authoritative content hash here so it can
+    /// stage the overlay's `whole_hashes` entry with the same hash
+    /// the producer admitted under.
+    pub(crate) fn whole_hashes_get_for_tests(&self, canonical: &str) -> Option<Hash16> {
+        self.whole_hashes.get(canonical).copied()
     }
 }

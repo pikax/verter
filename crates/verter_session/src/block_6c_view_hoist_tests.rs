@@ -466,3 +466,328 @@ defineProps<ButtonProps>()
          false-validating a stale base-rooted fact against a session-overlaid file"
     );
 }
+
+/// Resolve-imports overlay-routing test (codex re-review B6.C-rfx2 P2 #2).
+///
+/// When `ensure_loaded` / `ensure_indexed_ready` promotes a canonical
+/// after the request-entry base view was built, the canonical's
+/// authoritative content hash lives in the per-request completion
+/// overlay, NOT in the base view's `whole_hashes` snapshot. Without
+/// the overlay-aware routing in
+/// [`crate::resolver_core::RequestStoreView::validates_resolve_imports_domain`],
+/// the base validator would compose its `ResolvedImportFactsKey` from
+/// the absent snapshot entry and reject every real `ResolveImports`
+/// fact on the promoted canonical — even when the shared
+/// `ResolvedImportFactsDb` was populated under the overlay's content
+/// hash.
+///
+/// Discriminating: this test wires a canonical into the host and its
+/// import-facts producer state in such a way that the base view
+/// (snapshotted BEFORE `set_import_dependencies`) does NOT track the
+/// owner canonical. After `set_import_dependencies` populates the
+/// shared `ResolvedImportFactsDb` and `complete_canonical` promotes
+/// the owner into the overlay, a `ResolveImportsFactRef` constructed
+/// from the admitted entry must validate through the
+/// `RequestStoreView`. Pre-fix the wrapper fell straight through to
+/// the base view, which rejected the fact via its
+/// `whole_hashes.get(...) -> None` arm (`fact.expected_hash !=
+/// ZERO_HASH`); post-fix the wrapper sees the canonical in the
+/// overlay, recomposes the key under the overlay's content hash,
+/// and the warm-hit `ResolvedImportFactsDb` lookup succeeds.
+#[test]
+fn request_store_view_validates_resolve_imports_for_overlay_promoted_canonical() {
+    use crate::resolver_core::{
+        CanonicalCompletionOverlay, FactVersionRef, RequestStoreView, ResolveImportsFactRef,
+        StoreView,
+    };
+    // `ResolverStore` is intentionally absent here — the test exercises
+    // the wrapper validator directly via `validates_fact_signature`
+    // and does not need the store-mutation surface.
+    use crate::session_view::{HostView, SessionView};
+    use crate::types::DependencyResolution;
+    use crate::{CompileErrorPolicy, FileKind, HostConfig, UpsertRequest, VerterHost};
+    use verter_semantic::facts::registry::{FactKey, FactLane, InternedName, InternedSpecifier};
+
+    let host = VerterHost::new_standalone(HostConfig {
+        dev_mode: false,
+        compile_error_policy: CompileErrorPolicy::StrictError,
+        ..HostConfig::default()
+    });
+
+    // Materialise the dep + owner files and drive the
+    // `set_import_dependencies` producer so the shared
+    // `ResolvedImportFactsDb` carries an entry keyed by the owner's
+    // current content hash.
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/dep.ts".to_string(),
+            source: Arc::from("export const v = 1;"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .expect("dep upsert");
+
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/owner.ts".to_string(),
+            source: Arc::from("import { v } from './dep';\nexport const o = v;\n"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .expect("owner upsert");
+
+    host.set_import_dependencies(
+        "/owner.ts",
+        vec![DependencyResolution {
+            specifier: "./dep".to_string(),
+            resolved_canonical_id: Some("/dep.ts".to_string()),
+            possible_canonical_ids: vec!["/dep.ts".to_string()],
+        }],
+    );
+
+    // Materialise the producer's payload — this is the admission path
+    // used in production (the producer admits under the owner's
+    // current content hash; the same hash the overlay records below).
+    let host_arc = Arc::new(host);
+    let session_view = HostView::new(Arc::clone(&host_arc));
+    let payload = session_view
+        .resolved_import_facts("/owner.ts")
+        .expect("producer admitted the resolved-import-facts payload for /owner.ts");
+
+    let entry = payload
+        .import_clauses
+        .iter()
+        .find(|e| e.binding.as_ref() == "v")
+        .expect("`v` binding admitted into the resolved-import-facts payload");
+
+    // Build the `ResolveImportsFactRef` shape the wrapper validator
+    // receives at runtime.
+    let fact_ref = ResolveImportsFactRef {
+        canonical_id: "/owner.ts".to_string(),
+        key: FactKey::ResolvedImportClause {
+            specifier: InternedSpecifier::from(entry.specifier.as_ref()),
+            binding: InternedName::from(entry.binding.as_ref()),
+            space: entry.space,
+            resolved_canonical: entry
+                .resolved_canonical
+                .as_ref()
+                .map(Arc::clone)
+                .expect("resolved-canonical present"),
+            resolved_source_name: InternedName::from(entry.resolved_source_name.as_ref()),
+        },
+        lane: FactLane::Semantic,
+        expected_hash: entry.fact.semantic_hash,
+    };
+    let sig = vec![FactVersionRef::ResolveImports(fact_ref.clone())];
+
+    // Build a base view that DOES NOT track `/owner.ts` — simulating
+    // a request-entry view captured before a mid-request
+    // `ensure_loaded` promoted the canonical. Production uses
+    // `ensure_loaded` (which does NOT bump `store_view_epoch`) to
+    // hit this state; the test reaches it via the
+    // `forget_whole_hash_for_tests` helper so the scenario isolates
+    // the validator routing under test from the scheduler / loader
+    // plumbing. The captured snapshot retains every other field
+    // (`resolved_import_facts` Arc, `env_hashes`, etc.), matching the
+    // production base view's shape minus the absent canonical entry.
+    let mut base = host_arc.resolver_store_view();
+    let owner_whole_hash = base
+        .whole_hashes_get_for_tests("/owner.ts")
+        .expect("base view tracks the owner immediately after upsert");
+    base.forget_whole_hash_for_tests("/owner.ts");
+    assert!(
+        !base.tracks_file("/owner.ts"),
+        "fixture invariant: base view must not track the owner after `forget` helper"
+    );
+
+    // Sanity: against the now-untracked base view, the validator MUST
+    // reject the fact via the `whole_hashes.get(...) -> None`
+    // untracked-file arm (the fact's `expected_hash` is the admitted
+    // entry's `semantic_hash`, NOT the zero sentinel, so the
+    // optimistic-accept window does not apply). This is the
+    // pre-fix observation: the request would have false-missed the
+    // warm-hit despite the shared DB being populated.
+    assert!(
+        !base.validates_fact_signature(&sig),
+        "fixture invariant: the base view without `/owner.ts` MUST reject the \
+         fact through the untracked-file arm. Pre-fix \
+         `RequestStoreView::validates_resolve_imports_domain` delegated straight \
+         to this rejected path."
+    );
+
+    // Build the per-request `RequestStoreView` wrapper over the same
+    // (stale-for-owner) base view + a fresh overlay. Record the
+    // owner's current content hash directly into the overlay (the
+    // production path is `complete_canonical` driven from
+    // `ensure_loaded`; the test takes the
+    // `insert_whole_hash_for_tests` shortcut so the scenario does not
+    // depend on the epoch guard being satisfied by a non-bumped
+    // load path).
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    overlay.insert_whole_hash_for_tests("/owner.ts", owner_whole_hash);
+
+    let request_view = RequestStoreView::new(&base, Arc::clone(&overlay));
+
+    // Discriminating: the overlay-aware wrapper MUST now route the
+    // resolve-imports validation through the OVERLAY's content hash
+    // and look up the populated shared `ResolvedImportFactsDb` entry,
+    // returning `true`. A pre-fix tree would delegate straight to
+    // `self.base.validates_resolve_imports_domain(fact)`, the base
+    // validator would compose the key from its absent
+    // `whole_hashes["/owner.ts"]`, and the assertion would fail.
+    assert!(
+        request_view.validates_fact_signature(&sig),
+        "post-fix RequestStoreView::validates_resolve_imports_domain MUST validate \
+         the fact via the overlay's content hash; pre-fix it delegated to the base \
+         view, which rejected the fact through its untracked-file arm despite the \
+         shared ResolvedImportFactsDb being populated under the overlay-recorded \
+         content hash. This is the codex re-review B6.C-rfx2 P2 #2 regression."
+    );
+}
+
+/// Overlay flag-ordering arch guard (codex re-review B6.C-rfx2 P2 #1).
+///
+/// Source-grep guard verifying the strict-ordering invariant in
+/// [`crate::resolver_core::request_store_view::CanonicalCompletionOverlay::write_completion_entry`]:
+/// each map insert AND the corresponding `_nonempty.store(true,
+/// Release)` MUST execute under the same write-lock critical section,
+/// so a concurrent reader that observes `_nonempty == false` is
+/// guaranteed to also observe the underlying map as empty for the
+/// canonical (no skip-the-overlay false-negative window).
+///
+/// Pre-fix shape (would FAIL this guard):
+/// ```ignore
+/// self.whole_hashes.write().insert(...);   // lock released here
+/// self.whole_hashes_nonempty.store(true, Ordering::Release);  // race window
+/// ```
+///
+/// Post-fix shape (passes this guard):
+/// ```ignore
+/// {
+///     let mut whole = self.whole_hashes.write();
+///     whole.insert(...);
+///     self.whole_hashes_nonempty.store(true, Ordering::Release);
+///     drop(whole);
+/// }
+/// ```
+///
+/// The arch guard reads the function source and asserts that each
+/// `_nonempty.store(true, Ordering::Release)` line is preceded
+/// (within the same brace-balanced block, immediately following the
+/// insert) by a write-lock guard binding that is NOT dropped before
+/// the store. The deterministic form here is: the function source
+/// must NOT contain the pre-fix sequence
+/// `self.whole_hashes.write().insert(...)` followed by the
+/// flag-store on the next non-comment line.
+///
+/// Discriminating: a pre-fix tree's `write_completion_entry` source
+/// would contain `self.whole_hashes.write().insert(canonical.to_owned(),
+/// whole_hash);` immediately followed by
+/// `self.whole_hashes_nonempty.store(true, Ordering::Release);`. The
+/// post-fix tree binds the write guard to a named variable
+/// (`let mut whole = self.whole_hashes.write();`) and stores the
+/// flag inside the brace-bounded critical section.
+#[test]
+fn write_completion_entry_flag_set_under_write_lock() {
+    use std::fs;
+    use std::path::Path;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("resolver_core")
+        .join("request_store_view.rs");
+    let src =
+        fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+
+    let fn_needle = "fn write_completion_entry(";
+    let fn_idx = src
+        .find(fn_needle)
+        .unwrap_or_else(|| panic!("expected `{fn_needle}` in {}", path.display()));
+    let fn_end = src[fn_idx..]
+        .find("\n    }\n")
+        .expect("write_completion_entry fn close");
+    let window = &src[fn_idx..fn_idx + fn_end];
+
+    // Pre-fix anti-patterns: the chained `.write().insert(...)`
+    // releases the lock at the statement-end semicolon, then the
+    // flag store runs without the lock.
+    let pre_fix_anti_patterns = [
+        "self.whole_hashes\n            .write()\n            .insert(",
+        "self.whole_hashes.write().insert(",
+        "self.file_facts\n                .write()\n                .insert(",
+        "self.file_facts.write().insert(",
+    ];
+    for pat in pre_fix_anti_patterns {
+        assert!(
+            !window.contains(pat),
+            "write_completion_entry MUST NOT use the chained \
+             `self.<map>.write().insert(...)` pattern — that releases the write \
+             lock at the statement-end semicolon and leaves a race window where \
+             a concurrent reader can observe `_nonempty == false` while the map \
+             is already populated. Bind the write guard to a named variable and \
+             store the `_nonempty` flag BEFORE dropping the guard. Pattern \
+             found:\n{pat}\n\nWindow:\n{window}"
+        );
+    }
+
+    // Post-fix invariant: each `_nonempty.store(true, Ordering::Release)`
+    // line must appear inside a brace-bounded block that also
+    // contains the corresponding `write()` lock guard binding —
+    // proxy: the named-guard pattern is present.
+    let post_fix_named_guard_patterns = [
+        "let mut whole = self.whole_hashes.write();",
+        "self.whole_hashes_nonempty.store(true, Ordering::Release);",
+        "let mut facts = self.file_facts.write();",
+        "self.file_facts_nonempty.store(true, Ordering::Release);",
+        "let mut derived = self.derived_hashes.write();",
+        "self.derived_hashes_nonempty.store(true, Ordering::Release);",
+    ];
+    for pat in post_fix_named_guard_patterns {
+        assert!(
+            window.contains(pat),
+            "write_completion_entry MUST bind each write-lock guard to a named \
+             variable and store the corresponding `_nonempty` flag under the \
+             same critical section (codex re-review B6.C-rfx2 P2 #1). Missing \
+             pattern:\n{pat}\n\nWindow:\n{window}"
+        );
+    }
+
+    // The post-fix shape stores the flag BEFORE dropping the guard.
+    // Verify each `_nonempty.store(...)` precedes the corresponding
+    // `drop(<guard>)` in the source. The relative ordering of these
+    // two lines is the actual safety invariant — if a future edit
+    // swaps `drop(whole)` before `self.whole_hashes_nonempty.store(...)`,
+    // the race window reopens.
+    for (guard, flag_store) in [
+        (
+            "drop(whole);",
+            "self.whole_hashes_nonempty.store(true, Ordering::Release);",
+        ),
+        (
+            "drop(facts);",
+            "self.file_facts_nonempty.store(true, Ordering::Release);",
+        ),
+        (
+            "drop(derived);",
+            "self.derived_hashes_nonempty.store(true, Ordering::Release);",
+        ),
+    ] {
+        let store_idx = window
+            .find(flag_store)
+            .unwrap_or_else(|| panic!("flag store `{flag_store}` not found in window"));
+        let drop_idx = window
+            .find(guard)
+            .unwrap_or_else(|| panic!("guard drop `{guard}` not found in window"));
+        assert!(
+            store_idx < drop_idx,
+            "write_completion_entry MUST store the `_nonempty` flag BEFORE \
+             dropping the write-lock guard. A reader that observes the flag as \
+             `false` must be guaranteed that the writer has not yet inserted \
+             into the map (the writer's insert + flag-store happen under the \
+             same critical section). Flag-store `{flag_store}` at byte \
+             {store_idx} appears AFTER guard drop `{guard}` at byte {drop_idx}."
+        );
+    }
+}

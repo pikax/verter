@@ -130,14 +130,21 @@ pub(crate) struct CanonicalCompletionOverlay {
     /// empty overlay (validations that fire before any
     /// `complete_canonical` has run for the request).
     ///
-    /// The flag is monotonic, so concurrent completion's
-    /// `store(true, Release)` synchronises with subsequent
-    /// `load(Acquire)`: when a reader observes `true`, every prior
-    /// write to the map that the writer performed before the store is
-    /// visible. When a reader observes `false` (because the flag flip
-    /// has not yet propagated), the worst case is one extra base-view
-    /// validation cycle — the cache will revalidate on the next call
-    /// and pick up the now-promoted overlay entry. Strict shadowing
+    /// **Strict ordering (codex re-review B6.C-rfx2):** the writer
+    /// sets the flag under the same write lock as the corresponding
+    /// map insert (see [`Self::write_completion_entry`]). The lock is
+    /// released only AFTER the flag has been stored. This pairs with
+    /// the reader's `load(Acquire)` to guarantee that if a reader
+    /// observes `_nonempty == false`, the writer has not yet inserted
+    /// into the underlying map (otherwise the writer would also have
+    /// stored `true` before releasing the lock). A reader can
+    /// therefore safely return `None` on the fast path without
+    /// falling into a stale base-view validation; reordering the
+    /// store before the lock release would have left a window in
+    /// which the map was populated but the flag still read `false`,
+    /// causing concurrent readers to skip a real overlay entry and
+    /// optimistically accept a stale cached dependency via the base
+    /// view's untracked-canonical accept rule. Strict shadowing
     /// correctness is preserved.
     whole_hashes_nonempty: AtomicBool,
     derived_hashes_nonempty: AtomicBool,
@@ -338,12 +345,24 @@ impl CanonicalCompletionOverlay {
         whole_hash: crate::types::Hash16,
         file_artifacts: Option<Arc<crate::file_artifact_store::FileArtifacts>>,
     ) {
-        self.whole_hashes
-            .write()
-            .insert(canonical.to_owned(), whole_hash);
-        // Release-store after the insert so a reader that loads
-        // `Acquire == true` sees the new entry (monotonic flag).
-        self.whole_hashes_nonempty.store(true, Ordering::Release);
+        // Flag-after-insert race fix (codex re-review P2 of b30005ed0):
+        // the `_nonempty` flag MUST be set BEFORE the write lock is
+        // released, otherwise a concurrent reader can observe
+        // `_nonempty == false` (and skip the overlay via the
+        // `lookup_*` fast paths) AFTER the map insert has already
+        // taken effect, falling through to the base view whose
+        // `FileWholeHash` validator optimistically accepts a stale
+        // cached dependency for an untracked canonical. Holding the
+        // lock across the flag-store closes that window: if a reader
+        // observes `false`, the writer has not yet inserted into the
+        // map (the writer's insert + flag-store + lock-release happen
+        // as one critical section).
+        {
+            let mut whole = self.whole_hashes.write();
+            whole.insert(canonical.to_owned(), whole_hash);
+            self.whole_hashes_nonempty.store(true, Ordering::Release);
+            drop(whole);
+        }
 
         // Per-canonical `IndexedReady` snapshot — populates `file_facts`
         // and the `Route` / `ImportRoute` derived-hash entries. For a
@@ -356,10 +375,12 @@ impl CanonicalCompletionOverlay {
                 .get_artifacts_for_content(canonical, whole_hash)
         });
         if let Some(file_artifacts) = file_artifacts {
-            self.file_facts
-                .write()
-                .insert(canonical.to_owned(), Arc::clone(&file_artifacts.facts));
-            self.file_facts_nonempty.store(true, Ordering::Release);
+            {
+                let mut facts = self.file_facts.write();
+                facts.insert(canonical.to_owned(), Arc::clone(&file_artifacts.facts));
+                self.file_facts_nonempty.store(true, Ordering::Release);
+                drop(facts);
+            }
 
             let indexed = &file_artifacts.indexed;
             let route_hash = if indexed.shallow_state.has_resolvable_surface() {
@@ -381,7 +402,11 @@ impl CanonicalCompletionOverlay {
                 .or_else(|| host.generation_current_import_route_hash(canonical));
             if route_hash.is_some() || import_route_hash.is_some() {
                 // Single write-lock acquisition for both derived-hash
-                // variants per canonical.
+                // variants per canonical. Flag-set is performed under
+                // the same lock so a reader observing `_nonempty == false`
+                // is guaranteed to also observe the map as still empty
+                // for the canonical (codex re-review P2 fix — same race
+                // as the `whole_hashes` / `file_facts` paths above).
                 let mut derived = self.derived_hashes.write();
                 let entry = derived.entry(canonical.to_owned()).or_default();
                 if let Some(h) = route_hash {
@@ -390,8 +415,8 @@ impl CanonicalCompletionOverlay {
                 if let Some(h) = import_route_hash {
                     entry.import_route = Some(h);
                 }
-                drop(derived);
                 self.derived_hashes_nonempty.store(true, Ordering::Release);
+                drop(derived);
             }
         }
     }
@@ -435,6 +460,21 @@ impl CanonicalCompletionOverlay {
     #[cfg(test)]
     pub(crate) fn peek_whole_hash_for_tests(&self, canonical_id: &str) -> Option<Hash16> {
         self.whole_hashes.read().get(canonical_id).copied()
+    }
+
+    /// Test-only: directly insert a `(canonical, whole_hash)` entry into
+    /// the overlay's `whole_hashes` map and toggle the `_nonempty`
+    /// flag. Bypasses [`Self::complete_canonical`]'s host-state
+    /// lookups + the epoch guard so a test can stage the exact
+    /// overlay shape it needs without driving the full
+    /// `ensure_loaded` flow. Used by the codex re-review B6.C-rfx2
+    /// P2 #2 discriminating test in `block_6c_view_hoist_tests`.
+    #[cfg(test)]
+    pub(crate) fn insert_whole_hash_for_tests(&self, canonical: &str, whole_hash: Hash16) {
+        let mut whole = self.whole_hashes.write();
+        whole.insert(canonical.to_owned(), whole_hash);
+        self.whole_hashes_nonempty.store(true, Ordering::Release);
+        drop(whole);
     }
 
     /// Whether the overlay tracks `canonical_id` (any per-canonical
@@ -603,17 +643,28 @@ impl<'a> StoreView for RequestStoreView<'a> {
         // by `(content_hash, known_miss_generation, env_hashes,
         // resolver_version)` and is an `Arc` shared between the base
         // and overlay paths. Concurrent completion writers update the
-        // shared DB directly, so the base validator already sees
-        // mid-request additive entries.
+        // shared DB directly.
         //
-        // The previous overlay-probe arm acquired two RwLock reads
-        // (`whole_hashes` + `known_miss_tags`) on every call and then
-        // unconditionally delegated to `self.base` regardless. That was
-        // pure overhead on the hot path — the shadowing contract is
-        // already preserved by the `FileWholeHash` / `Parse` /
-        // `DirectSource` arms above (a stale fact observed the wrong
-        // content hash will fail the `Parse` / `FileWholeHash` fact it
-        // depends on first).
+        // Overlay-promoted canonicals (codex re-review B6.C-rfx2): when
+        // `ensure_loaded` / `ensure_indexed_ready` promotes a canonical
+        // that the request-entry base view did not track, the overlay
+        // carries the authoritative whole hash but the base view's
+        // `whole_hashes` snapshot does not. Falling straight through to
+        // the base validator would then compose the
+        // `ResolvedImportFactsKey` against the absent snapshot entry
+        // and reject every real `ResolveImports` fact on the promoted
+        // canonical — even when the shared DB has been populated under
+        // the overlay's content hash. Compose the key using the
+        // overlay's whole hash via the
+        // `validates_resolve_imports_domain_for_content_hash` helper
+        // for any canonical the overlay tracks, so warm hits on
+        // freshly-promoted dependencies validate correctly inside the
+        // same request.
+        if let Some(overlay_hash) = self.overlay.lookup_whole_hash(fact.canonical_id.as_str()) {
+            return self
+                .base
+                .validates_resolve_imports_domain_for_content_hash(fact, overlay_hash);
+        }
         self.base.validates_resolve_imports_domain(fact)
     }
 
