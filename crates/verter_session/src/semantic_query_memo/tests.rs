@@ -5885,8 +5885,12 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
             .as_ref()
             .resolver_store_view()
             .with_session_overlay(follower_host.as_ref(), &view);
-        let session_ctx =
-            SessionResolverContext::new(follower_host.as_ref(), &view, &session_store_view, std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()));
+        let session_ctx = SessionResolverContext::new(
+            follower_host.as_ref(),
+            &view,
+            &session_store_view,
+            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
         let recompute_id =
             follower_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let cache_read = follower_store.execute_cooperative(
@@ -6257,8 +6261,12 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
             .as_ref()
             .resolver_store_view()
             .with_session_overlay(follower_host.as_ref(), &view);
-        let session_ctx =
-            SessionResolverContext::new(follower_host.as_ref(), &view, &session_store_view, std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()));
+        let session_ctx = SessionResolverContext::new(
+            follower_host.as_ref(),
+            &view,
+            &session_store_view,
+            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
         let recompute_id =
             follower_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let cache_read = follower_store.execute_cooperative(
@@ -6504,8 +6512,12 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
             .as_ref()
             .resolver_store_view()
             .with_session_overlay(follower_host.as_ref(), &view);
-        let session_ctx =
-            SessionResolverContext::new(follower_host.as_ref(), &view, &session_store_view, std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()));
+        let session_ctx = SessionResolverContext::new(
+            follower_host.as_ref(),
+            &view,
+            &session_store_view,
+            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
         let recompute_id =
             follower_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let cache_read = follower_store.execute_cooperative(
@@ -6780,8 +6792,12 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
             .as_ref()
             .resolver_store_view()
             .with_session_overlay(follower_host.as_ref(), &view);
-        let session_ctx =
-            SessionResolverContext::new(follower_host.as_ref(), &view, &session_store_view, std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()));
+        let session_ctx = SessionResolverContext::new(
+            follower_host.as_ref(),
+            &view,
+            &session_store_view,
+            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
         let recompute_id =
             follower_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let cache_read = follower_store.execute_cooperative(

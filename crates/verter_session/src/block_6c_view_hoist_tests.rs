@@ -49,11 +49,12 @@ use crate::{HostConfig, UpsertRequest, VerterHost};
 fn small_host_with_one_component() -> (VerterHost, String) {
     let host = VerterHost::new_standalone(HostConfig::default());
     let canonical = "/proj/Button.vue".to_string();
-    let _ = host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: canonical.clone(),
-        source: Arc::from(
-            r#"<script setup lang="ts">
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: canonical.clone(),
+            source: Arc::from(
+                r#"<script setup lang="ts">
 interface ButtonProps {
   label: string
   disabled?: boolean
@@ -62,11 +63,11 @@ defineProps<ButtonProps>()
 </script>
 <template><button :disabled="disabled">{{ label }}</button></template>
 "#,
-        ),
-        file_kind: FileKind::VueSfc,
-        aliases: Vec::new(),
-    })
-    .expect("upsert Button.vue must succeed");
+            ),
+            file_kind: FileKind::VueSfc,
+            aliases: Vec::new(),
+        })
+        .expect("upsert Button.vue must succeed");
     (host, canonical)
 }
 
@@ -163,7 +164,8 @@ fn repeated_prepared_type_decl_no_view_rebuild() {
     let builds_after_repeat = HOST_STORE_VIEW_FROM_HOST_BUILDS.with(|c| c.get());
 
     assert_eq!(
-        builds_after_warmup, builds_after_repeat,
+        builds_after_warmup,
+        builds_after_repeat,
         "post-warmup repeated prepared_type_decl reads MUST NOT trigger any \
          HostStoreView::build (warm-hit threads the borrow); observed delta \
          {} — a pre-6.c tree rebuilds the view on every warm-hit and would \
@@ -326,7 +328,8 @@ fn session_overlay_rooting_runs_once_per_request() {
 
     let builds_after_calls = HOST_STORE_VIEW_FROM_HOST_BUILDS.with(|c| c.get());
     assert_eq!(
-        builds_after_calls, builds_after_warmup,
+        builds_after_calls,
+        builds_after_warmup,
         "post-warmup SessionResolverContext resolver-method calls MUST NOT \
          rebuild the base HostStoreView; pre-6.c each call drove \
          `resolver_store_view().with_session_overlay(...)` per method, \

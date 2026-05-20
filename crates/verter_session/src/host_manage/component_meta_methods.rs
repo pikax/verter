@@ -405,15 +405,9 @@ impl VerterHost {
         // [`crate::resolver_core::CanonicalCompletionOverlay`] so the
         // self-root fact validator observes them without false-missing.
         let store_view = self.resolver_store_view().with_session_overlay(self, view);
-        let overlay = std::sync::Arc::new(
-            crate::resolver_core::CanonicalCompletionOverlay::new(),
-        );
-        let session_ctx = crate::resolver_core::SessionResolverContext::new(
-            self,
-            view,
-            &store_view,
-            overlay,
-        );
+        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let session_ctx =
+            crate::resolver_core::SessionResolverContext::new(self, view, &store_view, overlay);
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
         self.compute_component_meta_state_inner(
             canonical,
@@ -445,15 +439,9 @@ impl VerterHost {
         // [`crate::resolver_core::CanonicalCompletionOverlay`] so the
         // self-root fact validator observes them without false-missing.
         let store_view = self.resolver_store_view().with_session_overlay(self, view);
-        let overlay = std::sync::Arc::new(
-            crate::resolver_core::CanonicalCompletionOverlay::new(),
-        );
-        let session_ctx = crate::resolver_core::SessionResolverContext::new(
-            self,
-            view,
-            &store_view,
-            overlay,
-        );
+        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let session_ctx =
+            crate::resolver_core::SessionResolverContext::new(self, view, &store_view, overlay);
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
         self.compute_component_meta_state_inner(
             canonical,

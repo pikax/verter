@@ -215,10 +215,9 @@ impl CanonicalCompletionOverlay {
                 );
             }
             if let Some(hash) = host.generation_current_import_route_hash(canonical) {
-                self.derived_hashes.write().insert(
-                    (canonical.to_owned(), DerivedFactKind::ImportRoute),
-                    hash,
-                );
+                self.derived_hashes
+                    .write()
+                    .insert((canonical.to_owned(), DerivedFactKind::ImportRoute), hash);
             }
         }
     }
@@ -227,11 +226,7 @@ impl CanonicalCompletionOverlay {
         self.whole_hashes.read().get(canonical_id).copied()
     }
 
-    fn lookup_derived_hash(
-        &self,
-        canonical_id: &str,
-        kind: DerivedFactKind,
-    ) -> Option<Hash16> {
+    fn lookup_derived_hash(&self, canonical_id: &str, kind: DerivedFactKind) -> Option<Hash16> {
         self.derived_hashes
             .read()
             .get(&(canonical_id.to_owned(), kind))
@@ -391,11 +386,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
         self.overlay.tracks_file(canonical_id) || self.base.tracks_file(canonical_id)
     }
 
-    fn validates_self_root_whole_hash(
-        &self,
-        canonical_id: &str,
-        hash: &ResolverHash16,
-    ) -> bool {
+    fn validates_self_root_whole_hash(&self, canonical_id: &str, hash: &ResolverHash16) -> bool {
         if let Some(overlay_hash) = self.overlay.lookup_whole_hash(canonical_id) {
             // Shadowing: overlay is authoritative for the self-root
             // identity.

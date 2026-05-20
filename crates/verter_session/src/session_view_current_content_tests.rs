@@ -590,7 +590,12 @@ fn overlay_artifact_downstream_reachable_for_normalised_js() {
     let session_store_view = host
         .resolver_store_view()
         .with_session_overlay(&host, &view);
-    let ctx = SessionResolverContext::new(&host, &view, &session_store_view, std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()));
+    let ctx = SessionResolverContext::new(
+        &host,
+        &view,
+        &session_store_view,
+        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
 
     // The discriminating assertion: `indexed_for_current_content` keyed
     // by the RAW `/pkg/index.js` canonical MUST reach the overlay
@@ -756,7 +761,12 @@ fn observe_materialize_scope_recovers_parse_facts_for_normalised_js_overlay() {
     let session_store_view = host
         .resolver_store_view()
         .with_session_overlay(&host, &view);
-    let ctx = SessionResolverContext::new(&host, &view, &session_store_view, std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()));
+    let ctx = SessionResolverContext::new(
+        &host,
+        &view,
+        &session_store_view,
+        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
     let observation = ctx.observe_materialize_scope("/pkg/index.js").expect(
         "observe_materialize_scope MUST return an observation for the overlaid `.js` — \
          the overlay IndexedReady is reachable via OverlayArtifactIdentity",
@@ -941,7 +951,12 @@ fn shallow_file_state_observes_overlay_for_normalised_js() {
     let session_store_view = host
         .resolver_store_view()
         .with_session_overlay(&host, &view);
-    let ctx = SessionResolverContext::new(&host, &view, &session_store_view, std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()));
+    let ctx = SessionResolverContext::new(
+        &host,
+        &view,
+        &session_store_view,
+        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
     let observed = ctx.shallow_file_state("/pkg/index.js").expect(
         "shallow_file_state MUST resolve a shallow state for the overlaid \
          `.js` canonical",
