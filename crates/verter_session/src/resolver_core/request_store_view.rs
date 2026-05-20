@@ -76,22 +76,36 @@ use crate::resolver_core::{
     DerivedFactKind, FactVersionRef, ParseFactRef, ResolveImportsFactRef, ResolverHash16,
     RouteSurfaceFactRef, StoreView, StoreViewCompatToken,
 };
-use crate::resolver_store::{HostStoreView, RouteSurfaceIndexShapeKey};
+use crate::resolver_store::HostStoreView;
 use crate::types::Hash16;
 
 /// Per-request append-only side maps recording additive loads that the
 /// request-entry [`HostStoreView`] does not track.
 ///
-/// Codex refinement #3 specifies the required overlay shape:
+/// Overlay shape (post-iter3 bug audit):
 /// - `whole_hashes`
-/// - `derived_hashes`
+/// - `derived_hashes` (per-canonical bundled `RouteDerivedHashes`)
 /// - `file_facts`
-/// - `resolved_import_facts_known_miss_tags`
-/// - `route_surface_index_fingerprints`
 ///
 /// `import_routes`, `resolved_import_facts` handle, and `route_db`
 /// handle stay OUT — they are `Arc` clones of project-wide `DashMap`s
 /// and are already up-to-date through host-side concurrent writers.
+///
+/// The `route_surface_index_fingerprints` and
+/// `resolved_import_facts_known_miss_tags` fields that previously lived
+/// here were dead:
+/// - `route_surface_index_fingerprints` — `complete_canonical` never
+///   populated it (the augmentation index is a project-wide
+///   structural index, not a per-canonical fact), so the read site at
+///   `validates_route_surface_domain` always fell through to the base.
+/// - `resolved_import_facts_known_miss_tags` — `validates_resolve_imports_domain`
+///   probed `whole_hashes` + `known_miss_tags` and then
+///   unconditionally delegated to `self.base` regardless of the result.
+///   The shared `ResolvedImportFactsDb` is concurrently updated by
+///   writers on both base and overlay paths, so the base validator
+///   already sees mid-request additive entries.
+/// Removing both eliminates hot-path probes + lock acquires per
+/// validation.
 ///
 /// Reads are wait-free against concurrent writers within the request
 /// because [`RwLock`] readers do not block each other, and the
@@ -100,15 +114,32 @@ use crate::types::Hash16;
 /// critical section per first-cold canonical).
 pub(crate) struct CanonicalCompletionOverlay {
     whole_hashes: RwLock<FxHashMap<String, Hash16>>,
-    derived_hashes: RwLock<FxHashMap<(String, DerivedFactKind), Hash16>>,
+    /// Per-canonical derived hashes bundled by `DerivedFactKind` so a
+    /// read can locate the entry with a `&str` lookup (no per-read
+    /// owned tuple allocation).
+    derived_hashes: RwLock<FxHashMap<String, RouteDerivedHashes>>,
     file_facts: RwLock<FxHashMap<String, Arc<FileFacts>>>,
-    /// Known-miss generation tags keyed by canonical id (matches the
-    /// base view's `resolved_import_facts_known_miss_tags` shape).
-    resolved_import_facts_known_miss_tags: RwLock<FxHashMap<String, Hash16>>,
-    /// Route-surface augmentation-index fingerprints keyed by the
-    /// structural shape (matches the base view's
-    /// `route_surface_index_fingerprints` shape).
-    route_surface_index_fingerprints: RwLock<FxHashMap<RouteSurfaceIndexShapeKey, Hash16>>,
+}
+
+/// Per-canonical derived hashes captured by the overlay. The fields
+/// match the populated `DerivedFactKind` variants in
+/// `CanonicalCompletionOverlay::complete_canonical`.
+#[derive(Default)]
+struct RouteDerivedHashes {
+    route: Option<Hash16>,
+    import_route: Option<Hash16>,
+}
+
+impl RouteDerivedHashes {
+    fn get(&self, kind: DerivedFactKind) -> Option<Hash16> {
+        match kind {
+            DerivedFactKind::Route => self.route,
+            DerivedFactKind::ImportRoute => self.import_route,
+            // `DirectSource` is handled by the whole-hash arm in
+            // `validates`; no overlay-derived hash is recorded for it.
+            DerivedFactKind::DirectSource => None,
+        }
+    }
 }
 
 impl Default for CanonicalCompletionOverlay {
@@ -125,8 +156,6 @@ impl CanonicalCompletionOverlay {
             whole_hashes: RwLock::new(FxHashMap::default()),
             derived_hashes: RwLock::new(FxHashMap::default()),
             file_facts: RwLock::new(FxHashMap::default()),
-            resolved_import_facts_known_miss_tags: RwLock::new(FxHashMap::default()),
-            route_surface_index_fingerprints: RwLock::new(FxHashMap::default()),
         }
     }
 
@@ -185,17 +214,6 @@ impl CanonicalCompletionOverlay {
             .write()
             .insert(canonical.to_owned(), whole_hash);
 
-        // Known-miss generation tag — captured under the same authority
-        // the base view's `build` consults.
-        if let Some(entry) = host.derived_raw_cache().get(canonical) {
-            let tag = crate::resolved_import_facts::compute_known_miss_generation_tag(
-                &entry.import_routes_known_miss_recorded_at_generation,
-            );
-            self.resolved_import_facts_known_miss_tags
-                .write()
-                .insert(canonical.to_owned(), tag);
-        }
-
         // Per-canonical `IndexedReady` snapshot — populates `file_facts`
         // and the `Route` / `ImportRoute` derived-hash entries.
         if let Some(file_artifacts) = host
@@ -208,16 +226,27 @@ impl CanonicalCompletionOverlay {
                 .insert(canonical.to_owned(), Arc::clone(&file_artifacts.facts));
 
             let indexed = &file_artifacts.indexed;
-            if indexed.shallow_state.has_resolvable_surface() {
-                self.derived_hashes.write().insert(
-                    (canonical.to_owned(), DerivedFactKind::Route),
-                    crate::resolver_store::hash_route_surface(&indexed.shallow_state),
-                );
-            }
-            if let Some(hash) = host.generation_current_import_route_hash(canonical) {
-                self.derived_hashes
-                    .write()
-                    .insert((canonical.to_owned(), DerivedFactKind::ImportRoute), hash);
+            let route_hash = if indexed.shallow_state.has_resolvable_surface() {
+                Some(crate::resolver_store::hash_route_surface(
+                    &indexed.shallow_state,
+                ))
+            } else {
+                None
+            };
+            let import_route_hash = host.generation_current_import_route_hash(canonical);
+            if route_hash.is_some() || import_route_hash.is_some() {
+                // Single write-lock acquisition for both derived-hash
+                // variants per canonical.
+                let mut derived = self.derived_hashes.write();
+                let entry = derived
+                    .entry(canonical.to_owned())
+                    .or_insert_with(RouteDerivedHashes::default);
+                if let Some(h) = route_hash {
+                    entry.route = Some(h);
+                }
+                if let Some(h) = import_route_hash {
+                    entry.import_route = Some(h);
+                }
             }
         }
     }
@@ -227,31 +256,18 @@ impl CanonicalCompletionOverlay {
     }
 
     fn lookup_derived_hash(&self, canonical_id: &str, kind: DerivedFactKind) -> Option<Hash16> {
+        // `&str` lookup against `FxHashMap<String, _>` — no per-read
+        // allocation (the previous `(String, DerivedFactKind)` keying
+        // forced a `to_owned()` on every probe of every cache validity
+        // check on the hot path).
         self.derived_hashes
             .read()
-            .get(&(canonical_id.to_owned(), kind))
-            .copied()
+            .get(canonical_id)
+            .and_then(|h| h.get(kind))
     }
 
     fn lookup_file_facts(&self, canonical_id: &str) -> Option<Arc<FileFacts>> {
         self.file_facts.read().get(canonical_id).cloned()
-    }
-
-    fn lookup_known_miss_tag(&self, canonical_id: &str) -> Option<Hash16> {
-        self.resolved_import_facts_known_miss_tags
-            .read()
-            .get(canonical_id)
-            .copied()
-    }
-
-    fn lookup_route_surface_index_fingerprint(
-        &self,
-        key: &RouteSurfaceIndexShapeKey,
-    ) -> Option<Hash16> {
-        self.route_surface_index_fingerprints
-            .read()
-            .get(key)
-            .copied()
     }
 
     /// Test-only: peek the overlay's `whole_hashes` entry for a
@@ -418,64 +434,32 @@ impl<'a> StoreView for RequestStoreView<'a> {
     }
 
     fn validates_resolve_imports_domain(&self, fact: &ResolveImportsFactRef) -> bool {
-        // The resolve-imports validator composes its
-        // `ResolvedImportFactsKey` from
-        // `(content_hash, known_miss_generation, env_hashes,
-        // resolver_version)`. The overlay can refine
-        // `content_hash` (via `whole_hashes`) and
-        // `known_miss_generation` (via `resolved_import_facts_known_miss_tags`),
-        // but the resolve-imports DB itself is an `Arc` shared with the
-        // base view. So the shadowing behaviour is: if the overlay
-        // refines a key dimension, route the lookup through the
-        // refined key; if it does not, delegate to the base view.
-        let overlay_whole_hash = self.overlay.lookup_whole_hash(fact.canonical_id.as_str());
-        let overlay_known_miss = self
-            .overlay
-            .lookup_known_miss_tag(fact.canonical_id.as_str());
-
-        if overlay_whole_hash.is_none() && overlay_known_miss.is_none() {
-            return self.base.validates_resolve_imports_domain(fact);
-        }
-
-        // The base view's resolve-imports validator is private — it
-        // composes the lookup key from base-view state we cannot access
-        // directly here. The simplest correct approach is to delegate
-        // to the base view: the overlay's whole-hash/known-miss refines
-        // a per-canonical fact dimension that the resolve-imports lane
-        // does not consume on a per-canonical-only basis (the lookup
-        // depends on a project-wide `ResolvedImportFactsDb` that holds
-        // both base and overlay candidates). The base validator will
-        // either find the matching candidate via its content-addressed
-        // key composition or fail closed.
+        // The base view's `ResolvedImportFactsDb` is content-addressed
+        // by `(content_hash, known_miss_generation, env_hashes,
+        // resolver_version)` and is an `Arc` shared between the base
+        // and overlay paths. Concurrent completion writers update the
+        // shared DB directly, so the base validator already sees
+        // mid-request additive entries.
         //
-        // The shadowing contract is preserved by the `FileWholeHash` and
-        // `Parse` arms above: if a stale fact observed the wrong
-        // content hash, the underlying `Parse` / `FileWholeHash` facts
-        // it depends on will fail validation first.
+        // The previous overlay-probe arm acquired two RwLock reads
+        // (`whole_hashes` + `known_miss_tags`) on every call and then
+        // unconditionally delegated to `self.base` regardless. That was
+        // pure overhead on the hot path — the shadowing contract is
+        // already preserved by the `FileWholeHash` / `Parse` /
+        // `DirectSource` arms above (a stale fact observed the wrong
+        // content hash will fail the `Parse` / `FileWholeHash` fact it
+        // depends on first).
         self.base.validates_resolve_imports_domain(fact)
     }
 
     fn validates_route_surface_domain(&self, fact: &RouteSurfaceFactRef) -> bool {
-        use verter_semantic::facts::FactKey;
-        if let FactKey::ModuleAugmentationIndexShape {
-            target_kind_tag,
-            external_specifier,
-            resolved_relative_canonical,
-            wildcard_pattern,
-        } = &fact.key
-        {
-            let key = RouteSurfaceIndexShapeKey {
-                target_kind_tag: *target_kind_tag,
-                external_specifier: external_specifier.as_ref().map(|s| s.as_ref().to_owned()),
-                resolved_relative_canonical: resolved_relative_canonical
-                    .as_ref()
-                    .map(|s| s.as_ref().to_owned()),
-                wildcard_pattern: wildcard_pattern.as_ref().map(|s| s.as_ref().to_owned()),
-            };
-            if let Some(overlay_hash) = self.overlay.lookup_route_surface_index_fingerprint(&key) {
-                return overlay_hash == fact.expected_hash;
-            }
-        }
+        // The augmentation-index is a project-wide structural index
+        // populated only by the base view's `snapshot_augmentation_index`
+        // (a single one-shot pass during `HostStoreView::build`); it is
+        // NOT a per-canonical fact, so `complete_canonical` cannot
+        // meaningfully populate an overlay entry for it. Delegating
+        // directly to the base view eliminates the dead probe + lock
+        // acquire on every `ModuleAugmentationIndexShape` validation.
         self.base.validates_route_surface_domain(fact)
     }
 }
