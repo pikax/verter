@@ -55,6 +55,12 @@ impl VerterHost {
     /// Same strict self-root validation contract as
     /// [`Self::prepared_decl_bundle`]: a deleted (now-untracked) keyed
     /// canonical rejects the stale bundle.
+    ///
+    /// Block 6.c context-routing: the cold materialise path constructs a
+    /// short-lived `HostResolverContext` so `ensure_indexed_ready` flows
+    /// through the trait surface (`ctx.ensure_indexed_ready`). For
+    /// per-request overlay accumulation, hot-path callers should use
+    /// [`Self::prepared_decl_bundle_with_ctx`] instead.
     pub(crate) fn prepared_decl_bundle_with_store_view(
         &self,
         view: &dyn crate::resolver_core::StoreView,
@@ -90,9 +96,75 @@ impl VerterHost {
                     stable: true,
                 });
             }
+            // Block 6.c context-routing: route the cold materialise path
+            // through a short-lived `HostResolverContext` so
+            // `ensure_indexed_ready` flows through the trait surface
+            // (`ctx.ensure_indexed_ready`). The per-call overlay does NOT
+            // accumulate cross-call state — for that, callers must use
+            // `prepared_decl_bundle_with_ctx(ctx, canonical_id)` with
+            // their request-bound context directly.
+            let base_view = self.resolver_store_view();
+            let overlay = std::sync::Arc::new(
+                crate::resolver_core::CanonicalCompletionOverlay::new(),
+            );
+            let cold_ctx = crate::resolver_core::HostResolverContext::new(
+                self,
+                &base_view,
+                overlay,
+            );
             let result = self
                 .materialize_prepared_decl_bundle_from_route_owned_shallow(canonical_id)
-                .or_else(|| self.materialize_prepared_decl_bundle(canonical_id));
+                .or_else(|| self.materialize_prepared_decl_bundle(&cold_ctx, canonical_id));
+            let stable = result.is_some();
+            Ok(crate::resolver_core::StableExecutionValue {
+                value: result.map(|arc| (*arc).clone()),
+                stable,
+            })
+        });
+        match flight {
+            Ok(f) => f.value.value.clone().map(std::sync::Arc::new),
+            Err(()) => None,
+        }
+    }
+
+    /// Context-bound variant of [`Self::prepared_decl_bundle_with_store_view`].
+    ///
+    /// Hot-path entry for resolver-tier callers that hold a request-bound
+    /// `ctx`. Routes cold materialisation through `ctx` so newly-loaded
+    /// canonicals enter the per-request `CanonicalCompletionOverlay` and
+    /// subsequent self-root fact validation observes them — without
+    /// allocating a per-call overlay.
+    pub(crate) fn prepared_decl_bundle_with_ctx(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        canonical_id: &str,
+    ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
+        let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
+        let canonical_id = normalized_canonical_id.as_ref();
+
+        let view = ctx.store_view();
+
+        let bundles = &self.resolver.runtime.prepared_decl_bundles;
+        let key = canonical_id.to_string();
+        if let Some(bundle) = bundles.get_if_valid_self_rooted(&key, view, &[canonical_id]) {
+            self.provenance
+                .bundle_cache_hits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Some(bundle);
+        }
+
+        let token = view.compat_token();
+        let singleflight = bundles.singleflight();
+        let flight = singleflight.run(key.clone(), token, || {
+            if let Some(bundle) = bundles.get_if_valid_self_rooted(&key, view, &[canonical_id]) {
+                return Ok(crate::resolver_core::StableExecutionValue {
+                    value: Some((*bundle).clone()),
+                    stable: true,
+                });
+            }
+            let result = self
+                .materialize_prepared_decl_bundle_from_route_owned_shallow(canonical_id)
+                .or_else(|| self.materialize_prepared_decl_bundle(ctx, canonical_id));
             let stable = result.is_some();
             Ok(crate::resolver_core::StableExecutionValue {
                 value: result.map(|arc| (*arc).clone()),
@@ -176,11 +248,11 @@ impl VerterHost {
                 return self.materialize_prepared_decl_bundle_via_ctx(ctx, &identity);
             }
         }
-        // Block 6.c per-request hoist: route the non-overlay fall-through
-        // through the view-bound helper, threading `ctx.store_view()`
-        // (the request-bound borrow) instead of building a fresh owned
-        // snapshot via `self.prepared_decl_bundle(canonical_id)`.
-        self.prepared_decl_bundle_with_store_view(ctx.store_view(), canonical_id)
+        // Block 6.c per-request hoist + context-routing: thread `ctx`
+        // (the request-bound context that owns the overlay-promoting
+        // `ensure_*` rail) into the bundle helper instead of building a
+        // fresh owned snapshot via `self.prepared_decl_bundle(canonical_id)`.
+        self.prepared_decl_bundle_with_ctx(ctx, canonical_id)
     }
 
     /// Materialise a fresh prepared-decl bundle rooted at the overlay's
@@ -419,12 +491,22 @@ impl VerterHost {
 
     /// Materialize a fresh `PreparedDeclBundle` for a canonical file, insert it
     /// into the stable cache with the appropriate fact versions, and return it.
+    ///
+    /// Block 6.c context-routing: takes `ctx: &dyn ResolverContext` so the
+    /// canonical's `ensure_indexed_ready` flows through the request's
+    /// overlay-promoting context (the canonical-completion overlay is
+    /// updated for self-root fact validation on subsequent reads). Bare
+    /// `self.ensure_indexed_ready` would bypass the overlay and trigger
+    /// false self-root validation misses inside the request.
     fn materialize_prepared_decl_bundle(
         &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
         canonical_id: &str,
     ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
-        // 1. Ensure source/shallow data exists.
-        let facts = self.ensure_indexed_ready(canonical_id)?;
+        // 1. Ensure source/shallow data exists — routed through `ctx`
+        //    so the request's canonical-completion overlay tracks the
+        //    freshly-loaded canonical for subsequent self-root validation.
+        let facts = ctx.ensure_indexed_ready(canonical_id)?;
         let state = &facts.shallow_state;
         if state.symbols.is_empty()
             && state.value_symbols.is_empty()

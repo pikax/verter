@@ -147,8 +147,12 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
 
     #[inline]
     fn prepared_decl_bundle(&self, canonical_id: &str) -> Option<Arc<PreparedDeclBundle>> {
-        self.inner
-            .prepared_decl_bundle_with_store_view(self.view.base(), canonical_id)
+        // Block 6.c context-routing: route through `_with_ctx(self)` so
+        // the cold materialise path's `ensure_indexed_ready` flows
+        // through this context's overlay-promoting trait surface — the
+        // freshly-loaded canonical enters this request's
+        // `CanonicalCompletionOverlay` (not a per-call scratch overlay).
+        self.inner.prepared_decl_bundle_with_ctx(self, canonical_id)
     }
 
     #[inline]
