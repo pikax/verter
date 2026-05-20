@@ -684,8 +684,19 @@ impl ResolverContext for crate::VerterHost {
         //
         // In production (non-test) builds this is an architectural guard
         // — reaching it means the request-binding boundary was
-        // bypassed, and the bypass-audit (Block 6.c iter3) confirmed no
-        // production cold-compute path reaches this site.
+        // bypassed.
+        //
+        // The audit's claim that "every production cold-compute path
+        // now constructs a HostResolverContext" was incomplete: the
+        // iter3 bench surfaced bare-host
+        // `ComponentMetaQueryEngine::new(self)` constructions in
+        // `host_manage/fallthrough.rs`, `host_manage/intrinsic_projection.rs`,
+        // `host_manage/eval_env.rs`, and `host_manage/jsdoc_resolve.rs`.
+        // Until those construction sites migrate to
+        // `HostResolverContext`, callers reachable from those code
+        // paths that need a `StoreView` must route through
+        // `ctx.resolver_store_view()` (the owned-view rail) rather
+        // than `ctx.store_view()`.
         //
         // In test builds the bare-host fallback is supported via a
         // thread-local owned view: many test fixtures hand a bare

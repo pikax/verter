@@ -73,7 +73,7 @@ use std::sync::Arc;
 use verter_semantic::facts::registry::{FactKey, FactLane, InternedName, SymbolSpace};
 
 use crate::resolver_core::{
-    FactReadSetFinalise, FactVersionRef, ParseFactRef, ResolverContext,
+    FactReadSetFinalise, FactVersionRef, ParseFactRef, ResolverContext, StoreView,
     FACT_SIGNATURE_CAP,
 };
 use crate::semantic_query::{DepSignature, DepVersion};
@@ -182,15 +182,17 @@ pub(crate) fn validate_fact_signature(
     if signature.is_empty() {
         return true;
     }
-    // Use the borrowed request-bound view (`ctx.store_view()`) instead
-    // of rebuilding a full owned `HostStoreView` on every warm-hit
-    // probe. The bare-host `&VerterHost` impl panics on `store_view()`
-    // by design (see the arch-guard at `resolver_context.rs::store_view`
-    // for bare host); every production cold-compute path now constructs
-    // a `HostResolverContext` / `SessionResolverContext` before invoking
-    // the resolver pipeline (Block 6.c Shape 1 substrate + bypass audit
-    // confirmed), so this helper only sees a request-bound context.
-    let view = ctx.store_view();
+    // The owned-view rail survives in this helper transitionally. The
+    // codex consult #3 diagnosis identified that `ctx.store_view()` is
+    // the architecturally correct choice (overlay-aware borrow) but
+    // the iter3 bench surfaced production bare-host call sites
+    // (`ComponentMetaQueryEngine::new(self)` reachable from
+    // `extract_component_meta_from_resolved` → fallthrough /
+    // intrinsic_projection / jsdoc / eval-env) that hit the bare-host
+    // `store_view()` panic guard. Until those construction sites
+    // migrate to `HostResolverContext`, this helper must use the
+    // owned-view rail.
+    let view = ctx.resolver_store_view();
     signature.iter().all(|fact| view.validates(fact))
 }
 
@@ -233,18 +235,11 @@ pub(crate) fn validate_fact_signature_with_self_roots(
     if signature.is_empty() {
         return true;
     }
-    // Same shape as [`validate_fact_signature`] above; switched from
-    // `ctx.resolver_store_view()` (owned-view rebuild per warm hit) to
-    // the borrowed request-bound `ctx.store_view()` (Block 6.c Shape 1
-    // substrate + bypass audit). This is THE warm-read validation entry
-    // for every component-meta query-identity cache (`ImportedRegistryDb`,
-    // `DeclarationLookupDb`, `ResolvabilityDb`, `OwnerCollectionDb`,
-    // `PreparedTargetDb`, `PreparedSurfaceDb`, `PreparedMemberDb`,
-    // `MaterializeMemoDb`, `RoutedExprSurfaceDb`) — eliminating the
-    // owned-view rebuild here removes the per-warm-hit
-    // full-workspace-snapshot cost on the entire component-meta hot
-    // path.
-    let view = ctx.store_view();
+    // Same shape as [`validate_fact_signature`] above; the owned-view
+    // rail survives transitionally for the same reason — production
+    // bare-host call sites (`ComponentMetaQueryEngine::new(self)`)
+    // remain reachable from `extract_component_meta_from_resolved`.
+    let view = ctx.resolver_store_view();
     signature.iter().all(|fact| match fact {
         FactVersionRef::FileWholeHash { canonical_id, hash }
             if self_root_canonicals.contains(&canonical_id.as_str()) =>
