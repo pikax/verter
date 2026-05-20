@@ -923,7 +923,11 @@ fn member_shape_cache_db_untracked_self_root_rejects_warm_entry() {
     let db = host.project_type_store().member_shape_cache_db();
     // Use a synthetic SemanticNodeId — the test exercises the cache's
     // self-root validation contract, not the production graph.
-    let key = (Arc::<str>::from(c), SemanticNodeId(7), ProjectionMode::Expanded);
+    let key = (
+        Arc::<str>::from(c),
+        SemanticNodeId(7),
+        ProjectionMode::Expanded,
+    );
 
     let _ = db.get_or_compute(&key, ctx, || {
         Some((

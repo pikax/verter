@@ -514,11 +514,8 @@ fn member_shape_peek_or_compute(
     use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
 
     let ctx: &dyn ResolverContext = query_engine.ctx;
-    let key: crate::component_meta_caches::MemberShapeCacheKey = (
-        Arc::<str>::from(scope_canonical_id),
-        member_value,
-        mode,
-    );
+    let key: crate::component_meta_caches::MemberShapeCacheKey =
+        (Arc::<str>::from(scope_canonical_id), member_value, mode);
 
     // (1) Peek FIRST — warm path pays zero raise/gate cost. The cached
     // entry's dep_signature must be re-emitted into the active fact
@@ -567,7 +564,8 @@ fn member_shape_peek_or_compute(
             dep_signature: Arc::from(Vec::new()),
         };
     }
-    let needs_reduction = type_expr_contains_reducible_operator(&raised) || is_generic_instantiation;
+    let needs_reduction =
+        type_expr_contains_reducible_operator(&raised) || is_generic_instantiation;
     if !needs_reduction {
         return MaterializedTypeExpr {
             node_id: Some(member_value),

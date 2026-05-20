@@ -10650,14 +10650,16 @@ fn surface_member_field_consults_member_shape_cache_before_round_trip() {
     let body = stripped.as_str();
 
     // (1) The peek-before-raise helper must be invoked inside the body.
-    let cache_call_offset = body.find("member_shape_peek_or_compute(").unwrap_or_else(|| {
-        panic!(
-            "surface_member_to_expanded_field MUST call \
+    let cache_call_offset = body
+        .find("member_shape_peek_or_compute(")
+        .unwrap_or_else(|| {
+            panic!(
+                "surface_member_to_expanded_field MUST call \
              `member_shape_peek_or_compute(...)` for the type reduction path \
              (Block 6.d wire-up). A future refactor that bypasses the cache \
              will re-introduce the +52% regression Block 6.c surfaced."
-        )
-    });
+            )
+        });
 
     // (2) Any `raise_node_to_type_expr(member.value)` call MUST occur
     // AFTER the cache peek. The exactness path's
