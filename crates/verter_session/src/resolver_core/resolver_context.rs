@@ -278,7 +278,37 @@ pub(crate) trait ResolverContext: sealed::Sealed {
             .observe_materialize_scope(canonical)
     }
 
+    /// Build an owned [`HostStoreView`] for this context.
+    ///
+    /// Retained for backward compatibility — production resolver-tier
+    /// code on the per-component-meta hot path MUST use
+    /// [`Self::store_view`] (a borrow into the request-bound view)
+    /// instead so the view is built ONCE at the request boundary and
+    /// threaded down.
+    ///
+    /// `impl ResolverContext for VerterHost::resolver_store_view` rebuilds
+    /// a full workspace snapshot on every call — the cost Block 6.c
+    /// hoists to per-request scope.
     fn resolver_store_view(&self) -> HostStoreView;
+
+    /// Borrowed access to the request-bound [`HostStoreView`].
+    ///
+    /// The view is built ONCE at the request boundary via
+    /// [`crate::VerterHost::resolver_store_view`] and threaded through
+    /// the resolver pipeline by a
+    /// [`crate::resolver_core::HostResolverContext`] (or, for
+    /// session-bearing requests, a
+    /// [`crate::resolver_core::SessionResolverContext`]).
+    /// Resolver-tier consumers consult the borrow on every cache
+    /// validation; the per-call full-workspace snapshot the pre-6.c
+    /// rail performed is replaced by one snapshot per request.
+    ///
+    /// The bare `impl ResolverContext for VerterHost::store_view` panics —
+    /// a bare `&VerterHost` owns no view to borrow. Production code MUST
+    /// construct a `HostResolverContext::new(host, &view)` at the request
+    /// entry point. Tests / mocks that want the convenience of a bare host
+    /// MUST build a view first and wrap it.
+    fn store_view(&self) -> &HostStoreView;
 
     fn project_type_store(&self) -> &Arc<ProjectTypeStore>;
 
@@ -540,10 +570,13 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     fn host_for_fact_tracer_install(&self) -> &crate::VerterHost;
 }
 
-// Sealed marker — `VerterHost` is the base implementer and
-// `SessionResolverContext` is the overlay-aware wrapper that
-// delegates every method to a borrowed host.
+// Sealed marker — `VerterHost` is the base implementer,
+// `HostResolverContext` is the request-bound wrapper that carries a
+// borrowed `HostStoreView`, and `SessionResolverContext` is the
+// overlay-aware wrapper that delegates every method to a borrowed host
+// alongside an overlay-rooted view.
 impl sealed::Sealed for crate::VerterHost {}
+impl<'a> sealed::Sealed for crate::resolver_core::host_resolver_context::HostResolverContext<'a> {}
 impl<'a> sealed::Sealed
     for crate::resolver_core::session_resolver_context::SessionResolverContext<'a>
 {
@@ -622,6 +655,21 @@ impl ResolverContext for crate::VerterHost {
     #[inline]
     fn resolver_store_view(&self) -> HostStoreView {
         crate::VerterHost::resolver_store_view(self)
+    }
+
+    #[inline]
+    fn store_view(&self) -> &HostStoreView {
+        // The bare `impl ResolverContext for VerterHost` cannot satisfy
+        // a borrow contract — `&VerterHost` owns no `HostStoreView`.
+        // Production resolver-tier code MUST construct a
+        // `HostResolverContext::new(host, &view)` at the request boundary
+        // and pass `&host_ctx` (or `&host_ctx as &dyn ResolverContext`)
+        // into the pipeline. This panic is an architectural guard:
+        // reaching it means the request-binding boundary was bypassed.
+        panic!(
+            "ResolverContext::store_view() called on bare &VerterHost — \
+             construct HostResolverContext::new(host, &view) at the request entry"
+        );
     }
 
     #[inline]

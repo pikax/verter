@@ -396,7 +396,17 @@ impl VerterHost {
         whole_hash: Hash16,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<ResolvedComponentMetaState> {
-        let session_ctx = crate::resolver_core::SessionResolverContext::new(self, view);
+        // NOTE: the Block 6.c per-request store-view hoist remains
+        // pending the canonical-completion overlay design (see
+        // `D:/tmp/block-6.c-canonical-completion-design.md` once
+        // written). Build the overlay-rooted view ONCE here, but the
+        // [`SessionResolverContext`] still resolves per-method-call
+        // freshness through the `with_session_overlay` view stored on
+        // construction — the borrow flows through without altering the
+        // per-call rebuild semantics until the overlay lands.
+        let store_view = self.resolver_store_view().with_session_overlay(self, view);
+        let session_ctx =
+            crate::resolver_core::SessionResolverContext::new(self, view, &store_view);
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
         self.compute_component_meta_state_inner(
             canonical,
@@ -420,7 +430,12 @@ impl VerterHost {
         captured: &CapturedComponentMetaInputs,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<ResolvedComponentMetaState> {
-        let session_ctx = crate::resolver_core::SessionResolverContext::new(self, view);
+        // Build the overlay-rooted store view ONCE here so the
+        // SessionResolverContext threads a borrow down through the entire
+        // cold-compute pipeline (per Block 6.c per-request hoist).
+        let store_view = self.resolver_store_view().with_session_overlay(self, view);
+        let session_ctx =
+            crate::resolver_core::SessionResolverContext::new(self, view, &store_view);
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
         self.compute_component_meta_state_inner(
             canonical,

@@ -1563,7 +1563,10 @@ fn session_overlay_warm_validation_matrix() {
     {
         let graph = SemanticGraphStore::new();
         let published = publish_entry_rooted_on(&graph, overlay_hash);
-        let session_ctx = SessionResolverContext::new(&host, &view);
+        let session_store_view = host
+            .resolver_store_view()
+            .with_session_overlay(&host, &view);
+        let session_ctx = SessionResolverContext::new(&host, &view, &session_store_view);
         let (cold_ran, value, _recompute) = drive(&graph, &session_ctx);
         assert!(
             !cold_ran,
@@ -1588,7 +1591,10 @@ fn session_overlay_warm_validation_matrix() {
     {
         let graph = SemanticGraphStore::new();
         let _published = publish_entry_rooted_on(&graph, stale_overlay_hash);
-        let session_ctx = SessionResolverContext::new(&host, &view);
+        let session_store_view = host
+            .resolver_store_view()
+            .with_session_overlay(&host, &view);
+        let session_ctx = SessionResolverContext::new(&host, &view, &session_store_view);
         let (cold_ran, value, recompute) = drive(&graph, &session_ctx);
         assert!(
             cold_ran,
@@ -1611,7 +1617,10 @@ fn session_overlay_warm_validation_matrix() {
     {
         let graph = SemanticGraphStore::new();
         let _published = publish_entry_rooted_on(&graph, base_hash);
-        let session_ctx = SessionResolverContext::new(&host, &view);
+        let session_store_view = host
+            .resolver_store_view()
+            .with_session_overlay(&host, &view);
+        let session_ctx = SessionResolverContext::new(&host, &view, &session_store_view);
         let (cold_ran, value, recompute) = drive(&graph, &session_ctx);
         assert!(
             cold_ran,
@@ -1831,7 +1840,10 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
     {
         let graph = SemanticGraphStore::new();
         let published = publish_entry(&graph, overlay_hash, &overlay_parse_fact);
-        let session_ctx = SessionResolverContext::new(&host, &view);
+        let session_store_view = host
+            .resolver_store_view()
+            .with_session_overlay(&host, &view);
+        let session_ctx = SessionResolverContext::new(&host, &view, &session_store_view);
         let (cold_ran, value, _recompute) = drive(&graph, &session_ctx);
         assert!(
             !cold_ran,
@@ -1869,7 +1881,10 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
             expected_hash: base_parse_fact.expected_hash,
         };
         let _published = publish_entry(&graph, overlay_hash, &stale_parse_fact);
-        let session_ctx = SessionResolverContext::new(&host, &view);
+        let session_store_view = host
+            .resolver_store_view()
+            .with_session_overlay(&host, &view);
+        let session_ctx = SessionResolverContext::new(&host, &view, &session_store_view);
         let (cold_ran, value, recompute) = drive(&graph, &session_ctx);
         assert!(
             cold_ran,
@@ -2101,7 +2116,10 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
             }],
             deleted_canonical,
         );
-        let session_ctx = SessionResolverContext::new(&host, &view);
+        let session_store_view = host
+            .resolver_store_view()
+            .with_session_overlay(&host, &view);
+        let session_ctx = SessionResolverContext::new(&host, &view, &session_store_view);
         let (cold_ran, value, recompute) = drive(&graph, &key, &session_ctx);
         assert!(
             cold_ran,
@@ -2141,7 +2159,10 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
             ],
             deleted_canonical,
         );
-        let session_ctx = SessionResolverContext::new(&host, &view);
+        let session_store_view = host
+            .resolver_store_view()
+            .with_session_overlay(&host, &view);
+        let session_ctx = SessionResolverContext::new(&host, &view, &session_store_view);
         let (cold_ran, value, recompute) = drive(&graph, &key, &session_ctx);
         assert!(
             cold_ran,
@@ -2176,7 +2197,10 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
             }],
             sibling_canonical,
         );
-        let session_ctx = SessionResolverContext::new(&host, &view);
+        let session_store_view = host
+            .resolver_store_view()
+            .with_session_overlay(&host, &view);
+        let session_ctx = SessionResolverContext::new(&host, &view, &session_store_view);
         let (cold_ran, value, _recompute) = drive(&graph, &key, &session_ctx);
         assert!(
             !cold_ran,
@@ -2343,7 +2367,10 @@ fn session_tombstone_rejects_cross_file_dependency_whole_hash() {
             !view.is_tombstoned(parent_canonical),
             "fixture invariant: the parent canonical is NOT tombstoned",
         );
-        let session_ctx = SessionResolverContext::new(&host, &view);
+        let session_store_view = host
+            .resolver_store_view()
+            .with_session_overlay(&host, &view);
+        let session_ctx = SessionResolverContext::new(&host, &view, &session_store_view);
         let (cold_ran, value, recompute) = drive(&graph, &key, &session_ctx);
         assert!(
             cold_ran,
@@ -2381,7 +2408,10 @@ fn session_tombstone_rejects_cross_file_dependency_whole_hash() {
             !view.is_tombstoned(child_canonical),
             "fixture invariant: the child canonical is NOT tombstoned in case 2",
         );
-        let session_ctx = SessionResolverContext::new(&host, &view);
+        let session_store_view = host
+            .resolver_store_view()
+            .with_session_overlay(&host, &view);
+        let session_ctx = SessionResolverContext::new(&host, &view, &session_store_view);
         let (cold_ran, value, _recompute) = drive(&graph, &key, &session_ctx);
         assert!(
             !cold_ran,

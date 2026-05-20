@@ -3669,7 +3669,10 @@ fn resolvability_db_producer_overlay_discrimination() {
     host.materialize_overlay_indexed_ready_with_view(canonical, &view)
         .expect("overlay IndexedReady materialises");
 
-    let overlay_ctx = SessionResolverContext::new(&host, &view);
+    let overlay_store_view = host
+        .resolver_store_view()
+        .with_session_overlay(&host, &view);
+    let overlay_ctx = SessionResolverContext::new(&host, &view, &overlay_store_view);
     let mut overlay_engine = ComponentMetaQueryEngine::new(&overlay_ctx);
     let overlay_resolvable = overlay_engine.can_resolve_registry_symbol(canonical, "Probe", None);
     assert!(
@@ -3705,7 +3708,10 @@ fn prepared_surface_db_producer_overlay_discrimination() {
     let canonical = "/overlay_disc/prepared_surface.ts";
     let (host, view, _base_hash, _overlay_hash) = overlay_disc_fixture(canonical);
 
-    let overlay_ctx = SessionResolverContext::new(&host, &view);
+    let overlay_store_view = host
+        .resolver_store_view()
+        .with_session_overlay(&host, &view);
+    let overlay_ctx = SessionResolverContext::new(&host, &view, &overlay_store_view);
     let mut overlay_engine = ComponentMetaQueryEngine::new(&overlay_ctx);
     let overlay_surface = overlay_engine
         .cached_prepared_root_surface(canonical, "Probe")
@@ -3777,7 +3783,10 @@ fn prepared_member_db_producer_overlay_discrimination() {
     host.materialize_overlay_indexed_ready_with_view(canonical, &view)
         .expect("overlay IndexedReady materialises");
 
-    let overlay_ctx = SessionResolverContext::new(&host, &view);
+    let overlay_store_view = host
+        .resolver_store_view()
+        .with_session_overlay(&host, &view);
+    let overlay_ctx = SessionResolverContext::new(&host, &view, &overlay_store_view);
     let mut overlay_engine = ComponentMetaQueryEngine::new(&overlay_ctx);
     let mut active: FxHashSet<(String, String)> = FxHashSet::default();
     let overlay_member = overlay_engine
@@ -3854,7 +3863,10 @@ fn observed_prepared_type_decl_is_single_artifact_and_view_aware() {
     let canonical = "/overlay_disc/observed_prepared.ts";
     let (host, view, base_hash, overlay_hash) = overlay_disc_fixture(canonical);
 
-    let overlay_ctx = SessionResolverContext::new(&host, &view);
+    let overlay_store_view = host
+        .resolver_store_view()
+        .with_session_overlay(&host, &view);
+    let overlay_ctx = SessionResolverContext::new(&host, &view, &overlay_store_view);
     let mut overlay_engine = ComponentMetaQueryEngine::new(&overlay_ctx);
     let observed = overlay_engine
         .observed_prepared_type_decl(canonical, "Probe")
@@ -4069,7 +4081,10 @@ fn observe_materialize_scope_is_overlay_view_correct() {
     );
 
     // Overlay-session observation — the overlay content hash.
-    let overlay_ctx = SessionResolverContext::new(&host, &view);
+    let overlay_store_view = host
+        .resolver_store_view()
+        .with_session_overlay(&host, &view);
+    let overlay_ctx = SessionResolverContext::new(&host, &view, &overlay_store_view);
     let overlay_observation = ResolverContext::observe_materialize_scope(&overlay_ctx, canonical)
         .expect("overlay-session observe_materialize_scope resolves the overlay-pinned artifact");
     assert_eq!(
@@ -4621,7 +4636,10 @@ fn imported_registry_cooperative_joiner_validates_against_follower_view() {
         follower_host
             .materialize_overlay_indexed_ready_with_view(canonical, &view)
             .expect("overlay IndexedReady materialises");
-        let session_ctx = SessionResolverContext::new(&follower_host, &view);
+        let session_store_view = follower_host
+            .resolver_store_view()
+            .with_session_overlay(&follower_host, &view);
+        let session_ctx = SessionResolverContext::new(&follower_host, &view, &session_store_view);
         let db = follower_host.project_type_store().imported_registry_db();
         db.get_or_compute_admit(&follower_key, &session_ctx, || {
             follower_cold_flag.store(true, Ordering::SeqCst);
@@ -4838,7 +4856,10 @@ fn imported_registry_joiner_fork_removal_keeps_live_counter_consistent() {
         follower_host
             .materialize_overlay_indexed_ready_with_view(canonical, &view)
             .expect("overlay IndexedReady materialises");
-        let session_ctx = SessionResolverContext::new(&follower_host, &view);
+        let session_store_view = follower_host
+            .resolver_store_view()
+            .with_session_overlay(&follower_host, &view);
+        let session_ctx = SessionResolverContext::new(&follower_host, &view, &session_store_view);
         let db = follower_host.project_type_store().imported_registry_db();
         db.get_or_compute_admit(&follower_key, &session_ctx, || {
             follower_cold_flag.store(true, Ordering::SeqCst);
@@ -5104,7 +5125,10 @@ fn imported_registry_removal_cleanup_preserves_fresh_reverse_index_registration(
     // `compute` returns `Failed` so nothing publishes after the
     // removal — B is the sole live entry under `key`.
     {
-        let session_ctx = SessionResolverContext::new(&host, &view);
+        let session_store_view = host
+            .resolver_store_view()
+            .with_session_overlay(&host, &view);
+        let session_ctx = SessionResolverContext::new(&host, &view, &session_store_view);
         let db = host.project_type_store().imported_registry_db();
         let outcome = db.get_or_compute_admit(&key, &session_ctx, || {
             crate::cooperative_admission::ComputeAdmission::Failed

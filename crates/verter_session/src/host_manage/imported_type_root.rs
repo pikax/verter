@@ -41,12 +41,34 @@ impl VerterHost {
         (String, String),
         Arc<[crate::resolver_core::FactVersionRef]>,
     ) {
+        let view = self.resolver_store_view();
+        self.resolve_imported_type_root_with_facts_with_store_view(
+            &view,
+            dep_canonical,
+            imported_name,
+        )
+    }
+
+    /// View-bound variant of [`Self::resolve_imported_type_root_with_facts`].
+    ///
+    /// Validates the cached imported-root entry against the supplied
+    /// request-bound view; eliminates the per-call full-workspace
+    /// snapshot the pre-6.c rail performed at this site (the diagnostic's
+    /// named hot-path site at `imported_type_root.rs:49`).
+    pub(crate) fn resolve_imported_type_root_with_facts_with_store_view(
+        &self,
+        view: &crate::resolver_store::HostStoreView,
+        dep_canonical: &str,
+        imported_name: &str,
+    ) -> (
+        (String, String),
+        Arc<[crate::resolver_core::FactVersionRef]>,
+    ) {
         let audit_started = self.config.audit_enabled.then(Instant::now);
 
         let normalized_canonical = self
             .resolve_eval_dependency_canonical(dep_canonical)
             .unwrap_or_else(|| dep_canonical.to_string());
-        let live_view = self.resolver_store_view();
 
         let cached = self
             .resolver
@@ -55,7 +77,7 @@ impl VerterHost {
             .get_or_resolve_returning_facts(
                 normalized_canonical.as_str(),
                 imported_name,
-                &live_view,
+                view,
                 || {
                     // Trace inside the closure: the closure runs only on
                     // cache miss, so the trace event records actual

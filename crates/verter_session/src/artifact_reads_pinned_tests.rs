@@ -392,7 +392,10 @@ fn indexed_for_current_content_pins_overlay_artifact_through_session_context() {
     assert_eq!(base_indexed.whole_hash, base_hash);
 
     // Drive the content-pinned read through the session context.
-    let ctx = SessionResolverContext::new(&host, &view);
+    let store_view = host
+        .resolver_store_view()
+        .with_session_overlay(&host, &view);
+    let ctx = SessionResolverContext::new(&host, &view, &store_view);
 
     // The session view's authoritative current-content hash must be the
     // OVERLAY hash, not the base hash.

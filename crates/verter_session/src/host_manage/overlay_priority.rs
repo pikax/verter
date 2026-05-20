@@ -128,7 +128,12 @@ pub(crate) fn ensure_indexed_ready_with_view(
 /// materialisation (R18 — view passed explicitly via the
 /// `ResolverContext` trait surface, not a thread-local).
 pub(crate) fn prewarm_view_overlays(host: &VerterHost, view: &dyn SessionView) {
-    let session_ctx = crate::resolver_core::SessionResolverContext::new(host, view);
+    // Build the overlay-rooted store view ONCE here so the
+    // SessionResolverContext threads a borrow into the pre-warm loop
+    // rather than rebuilding the view per-overlay-canonical (per Block
+    // 6.c per-request hoist).
+    let store_view = host.resolver_store_view().with_session_overlay(host, view);
+    let session_ctx = crate::resolver_core::SessionResolverContext::new(host, view, &store_view);
     for canonical in view.overlay_canonicals() {
         let _ = ResolverContext::ensure_indexed_ready(&session_ctx, canonical.as_str());
     }

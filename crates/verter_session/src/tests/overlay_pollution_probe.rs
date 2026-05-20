@@ -70,7 +70,8 @@ pub fn overlay_prepared_decl_bundle_probe(
     let mut overlays: rustc_hash::FxHashMap<String, Arc<str>> = rustc_hash::FxHashMap::default();
     overlays.insert(raw_canonical.to_string(), Arc::from(overlay_source));
     let view = OverlaidView::new(Arc::clone(host), overlays);
-    let session_ctx = crate::resolver_core::SessionResolverContext::new(host, &view);
+    let store_view = host.resolver_store_view().with_session_overlay(host, &view);
+    let session_ctx = crate::resolver_core::SessionResolverContext::new(host, &view, &store_view);
 
     let bundle = ResolverContext::prepared_decl_bundle(&session_ctx, raw_canonical)?;
     let prepared = bundle.prepared_type_decls.get(symbol_name)?;

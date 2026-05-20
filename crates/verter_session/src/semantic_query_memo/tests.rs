@@ -5881,7 +5881,12 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
             &overlay_hashes,
             &tombstones,
         );
-        let session_ctx = SessionResolverContext::new(follower_host.as_ref(), &view);
+        let session_store_view = follower_host
+            .as_ref()
+            .resolver_store_view()
+            .with_session_overlay(follower_host.as_ref(), &view);
+        let session_ctx =
+            SessionResolverContext::new(follower_host.as_ref(), &view, &session_store_view);
         let recompute_id =
             follower_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let cache_read = follower_store.execute_cooperative(
@@ -6248,7 +6253,12 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
             &overlay_hashes,
             &tombstones,
         );
-        let session_ctx = SessionResolverContext::new(follower_host.as_ref(), &view);
+        let session_store_view = follower_host
+            .as_ref()
+            .resolver_store_view()
+            .with_session_overlay(follower_host.as_ref(), &view);
+        let session_ctx =
+            SessionResolverContext::new(follower_host.as_ref(), &view, &session_store_view);
         let recompute_id =
             follower_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let cache_read = follower_store.execute_cooperative(
@@ -6490,7 +6500,12 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
             &overlay_hashes,
             &tombstones,
         );
-        let session_ctx = SessionResolverContext::new(follower_host.as_ref(), &view);
+        let session_store_view = follower_host
+            .as_ref()
+            .resolver_store_view()
+            .with_session_overlay(follower_host.as_ref(), &view);
+        let session_ctx =
+            SessionResolverContext::new(follower_host.as_ref(), &view, &session_store_view);
         let recompute_id =
             follower_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let cache_read = follower_store.execute_cooperative(
@@ -6761,7 +6776,12 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
             &overlay_hashes,
             &tombstones,
         );
-        let session_ctx = SessionResolverContext::new(follower_host.as_ref(), &view);
+        let session_store_view = follower_host
+            .as_ref()
+            .resolver_store_view()
+            .with_session_overlay(follower_host.as_ref(), &view);
+        let session_ctx =
+            SessionResolverContext::new(follower_host.as_ref(), &view, &session_store_view);
         let recompute_id =
             follower_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let cache_read = follower_store.execute_cooperative(

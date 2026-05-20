@@ -38,6 +38,7 @@ pub mod checker_text_adapter;
 
 pub mod fact_read_set;
 pub mod fuses;
+pub(crate) mod host_resolver_context;
 pub mod imported_root_db;
 pub(crate) mod resolver_context;
 pub mod route_db;
@@ -45,6 +46,7 @@ pub(crate) mod scope_shadowing;
 pub(crate) mod session_resolver_context;
 
 pub use fact_read_set::{FactReadSet, FactReadSetCell, FactReadSetFinalise};
+pub(crate) use host_resolver_context::HostResolverContext;
 pub(crate) use resolver_context::{MaterializeScopeObservation, ResolverContext};
 pub(crate) use session_resolver_context::SessionResolverContext;
 

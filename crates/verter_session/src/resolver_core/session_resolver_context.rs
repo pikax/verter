@@ -57,7 +57,7 @@ use crate::HostConfig;
 /// Delegates every `ResolverContext` method to the inner
 /// [`crate::VerterHost`] except [`ResolverContext::active_session_view`]
 /// (returns `Some(view)`) and the overlay-aware overrides on
-/// [`ResolverContext::resolver_store_view`],
+/// [`ResolverContext::store_view`],
 /// [`ResolverContext::shallow_file_state`],
 /// [`ResolverContext::ensure_indexed_ready`], etc. Resolver-tier
 /// helpers that consult `active_session_view()` (or the per-method
@@ -69,21 +69,40 @@ use crate::HostConfig;
 /// view-aware internals (e.g.,
 /// [`crate::VerterHost::prepared_decl_bundle_with_context`]) that the
 /// `ResolverContext` trait surface itself does not expose.
+///
+/// `store_view` is a borrow into an overlay-rooted [`HostStoreView`]
+/// owned by the caller — built ONCE at the request boundary via
+/// [`crate::VerterHost::resolver_store_view`] followed by
+/// [`HostStoreView::with_session_overlay`]. Per the 6.c per-request
+/// view-hoisting rail the overlay re-rooting runs exactly once per
+/// session-bearing request, not per resolver method call.
 pub(crate) struct SessionResolverContext<'a> {
     inner: &'a crate::VerterHost,
     view: &'a dyn SessionView,
+    store_view: &'a HostStoreView,
 }
 
 impl<'a> SessionResolverContext<'a> {
-    /// Construct a session-bound wrapper over `(inner, view)`.
+    /// Construct a session-bound wrapper over `(inner, view, store_view)`.
     ///
-    /// The borrow shape matches [`ProjectSemanticDispatch::new`]:
-    /// callers create the wrapper on the stack, pass `&wrapper` to
-    /// the dispatcher, and drop it at the end of the query. The
-    /// wrapper does not retain references after the call returns.
+    /// `store_view` MUST be an overlay-rooted view — typically
+    /// `host.resolver_store_view().with_session_overlay(host, view)`.
+    /// The caller owns the view; this wrapper borrows it. The borrow
+    /// shape matches [`ProjectSemanticDispatch::new`]: callers create
+    /// the wrapper on the stack, pass `&wrapper` to the dispatcher, and
+    /// drop it at the end of the query. The wrapper does not retain
+    /// references after the call returns.
     #[must_use]
-    pub(crate) fn new(inner: &'a crate::VerterHost, view: &'a dyn SessionView) -> Self {
-        Self { inner, view }
+    pub(crate) fn new(
+        inner: &'a crate::VerterHost,
+        view: &'a dyn SessionView,
+        store_view: &'a HostStoreView,
+    ) -> Self {
+        Self {
+            inner,
+            view,
+            store_view,
+        }
     }
 }
 
@@ -323,29 +342,44 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         self.inner.current_content_pinned_indexed(canonical)
     }
 
-    /// Overlay-aware resolver store view.
+    /// Owned-view variant — preserves the pre-6.c semantics of building
+    /// a fresh overlay-rooted snapshot per call.
     ///
-    /// The base-host [`HostStoreView`] snapshots `whole_hashes` from
-    /// the scheduler / `FileArtifactStore` — the *base* content hash
-    /// of every tracked canonical. A query executed under this session
-    /// context roots its cached values (the semantic-graph
-    /// `MemoEntry` self-roots, the legacy whole-hash rail) on the
-    /// *overlay* content hash for every overlay-bearing canonical:
-    /// `ensure_indexed_ready` here resolves the overlay `IndexedReady`.
-    /// A warm read whose strict self-root validation routed through the
-    /// base view would compare an overlay-rooted self-root against the
-    /// base hash and miss on every call.
+    /// Production hot-path callers should prefer [`Self::store_view`]
+    /// (the borrow into the request-bound view), but this method
+    /// survives until the canonical-completion overlay lands and the
+    /// per-call rebuild rail can be retired in full.
     ///
-    /// [`HostStoreView::with_session_overlay`] re-roots the view's
-    /// `whole_hashes` against this session's overlay: an overlay-Upsert
-    /// canonical takes the overlay content hash; a session-tombstoned
-    /// canonical is dropped from the map. The result validates a
-    /// self-root against the session's CURRENT content identity — an
-    /// entry rooted on a superseded overlay hash, or on the base hash
-    /// while an overlay now covers the canonical, still misses.
+    /// This intentionally does NOT delegate to
+    /// `self.store_view.clone()`: the stored borrow is the view captured
+    /// at request construction, which does NOT track dependencies
+    /// loaded mid-request (the canonical-completion hidden risk codex
+    /// flagged). Callers that depend on freshness across additive loads
+    /// read through the fresh build until the overlay is in place.
     #[inline]
     fn resolver_store_view(&self) -> HostStoreView {
         ResolverContext::resolver_store_view(self.inner).with_session_overlay(self.inner, self.view)
+    }
+
+    /// Borrowed access to the request-bound overlay-rooted
+    /// [`HostStoreView`].
+    ///
+    /// The view is built ONCE at the request boundary —
+    /// `host.resolver_store_view().with_session_overlay(host, view)` —
+    /// and threaded into this wrapper by reference. The overlay
+    /// re-rooting therefore runs exactly once per session-bearing
+    /// request, not per resolver method call.
+    ///
+    /// Identity semantics of `with_session_overlay` are preserved: an
+    /// overlay-Upsert canonical's per-canonical / per-domain
+    /// (`whole_hashes`, `file_facts`, `derived_hashes`) snapshots are
+    /// re-rooted at the session's overlay content; a session-tombstoned
+    /// canonical's snapshots are dropped and the canonical is recorded
+    /// in [`HostStoreView`]'s `tombstoned_canonicals` set so the strict
+    /// validators reject any warm entry rooted on the deleted file.
+    #[inline]
+    fn store_view(&self) -> &HostStoreView {
+        self.store_view
     }
 
     #[inline]

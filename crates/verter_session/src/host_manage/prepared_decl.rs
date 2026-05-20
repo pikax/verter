@@ -29,15 +29,39 @@ impl VerterHost {
     /// Look up (or materialize) the fact-validated prepared-decl bundle for a
     /// canonical file.  On a warm read the cost is O(facts.len()) — no
     /// dependency-resolution or route-refresh work is performed.
+    ///
+    /// Builds a fresh `HostStoreView` at every call. Production
+    /// resolver-tier code on the per-component-meta hot path MUST use
+    /// [`Self::prepared_decl_bundle_with_store_view`] instead so the view
+    /// is built ONCE at the request boundary and threaded down (per the
+    /// Block 6.c per-request hoist). This entry point survives for
+    /// integration tests, harness helpers, and ambient-tier callers that
+    /// have no request-bound view available.
     pub(crate) fn prepared_decl_bundle(
         &self,
         canonical_id: &str,
     ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
+        let view = self.resolver_store_view();
+        self.prepared_decl_bundle_with_store_view(&view, canonical_id)
+    }
+
+    /// View-bound variant of [`Self::prepared_decl_bundle`].
+    ///
+    /// `view` is a borrow into the request-bound [`HostStoreView`] built
+    /// at the request entry point. The warm-hit path validates against
+    /// this view instead of building a fresh one — eliminating the
+    /// per-call full-workspace snapshot the pre-6.c rail performed.
+    ///
+    /// Same strict self-root validation contract as
+    /// [`Self::prepared_decl_bundle`]: a deleted (now-untracked) keyed
+    /// canonical rejects the stale bundle.
+    pub(crate) fn prepared_decl_bundle_with_store_view(
+        &self,
+        view: &crate::resolver_store::HostStoreView,
+        canonical_id: &str,
+    ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
         let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
         let canonical_id = normalized_canonical_id.as_ref();
-
-        // Live-host probe: use resolver_store_view for validation.
-        let view_for_get = self.resolver_store_view();
 
         // Fast path: fact-validated cache hit. The bundle's keyed
         // canonical is its self-root — validated **strictly** so a
@@ -45,8 +69,7 @@ impl VerterHost {
         // instead of riding the lazy untracked-accept rule.
         let bundles = &self.resolver.runtime.prepared_decl_bundles;
         let key = canonical_id.to_string();
-        if let Some(bundle) = bundles.get_if_valid_self_rooted(&key, &view_for_get, &[canonical_id])
-        {
+        if let Some(bundle) = bundles.get_if_valid_self_rooted(&key, view, &[canonical_id]) {
             self.provenance
                 .bundle_cache_hits
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -56,15 +79,13 @@ impl VerterHost {
         // Cold path with singleflight: coalesce concurrent materializations
         // for the same canonical_id + store-view compat token.
         use crate::resolver_core::StoreView;
-        let token = view_for_get.compat_token();
+        let token = view.compat_token();
         let singleflight = bundles.singleflight();
         let flight = singleflight.run(key.clone(), token, || {
             // Re-check cache inside the singleflight leader closure (another
             // thread may have populated it between our first check and winning
             // the flight). Strict self-root validation on the keyed canonical.
-            if let Some(bundle) =
-                bundles.get_if_valid_self_rooted(&key, &view_for_get, &[canonical_id])
-            {
+            if let Some(bundle) = bundles.get_if_valid_self_rooted(&key, view, &[canonical_id]) {
                 return Ok(crate::resolver_core::StableExecutionValue {
                     value: Some((*bundle).clone()),
                     stable: true,
@@ -482,7 +503,23 @@ impl VerterHost {
         canonical_id: &str,
         symbol_name: &str,
     ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>> {
-        let bundle = self.prepared_decl_bundle(canonical_id)?;
+        let view = self.resolver_store_view();
+        self.prepared_type_decl_with_store_view(&view, canonical_id, symbol_name)
+    }
+
+    /// View-bound variant of [`Self::prepared_type_decl`].
+    ///
+    /// Threads the request-bound [`crate::resolver_store::HostStoreView`]
+    /// down through [`Self::prepared_decl_bundle_with_store_view`] so the
+    /// warm-hit path validates against the request's snapshot rather than
+    /// triggering a fresh per-call workspace sweep.
+    pub(crate) fn prepared_type_decl_with_store_view(
+        &self,
+        view: &crate::resolver_store::HostStoreView,
+        canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>> {
+        let bundle = self.prepared_decl_bundle_with_store_view(view, canonical_id)?;
         let result = bundle.prepared_type_decls.get(symbol_name);
         component_meta_trace_custom!(
             "prepared_type_decl_result",
@@ -516,7 +553,21 @@ impl VerterHost {
         canonical_id: &str,
         symbol_name: &str,
     ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
-        let bundle = self.prepared_decl_bundle(canonical_id)?;
+        let view = self.resolver_store_view();
+        self.prepared_value_decl_with_store_view(&view, canonical_id, symbol_name)
+    }
+
+    /// View-bound variant of [`Self::prepared_value_decl`].
+    ///
+    /// Threads the request-bound [`crate::resolver_store::HostStoreView`]
+    /// down through [`Self::prepared_decl_bundle_with_store_view`].
+    pub(crate) fn prepared_value_decl_with_store_view(
+        &self,
+        view: &crate::resolver_store::HostStoreView,
+        canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
+        let bundle = self.prepared_decl_bundle_with_store_view(view, canonical_id)?;
         bundle.prepared_value_decls.get(symbol_name)
     }
 
@@ -1832,22 +1883,42 @@ impl VerterHost {
     /// versions miss at the key level; building populates
     /// `project_type_store().owner_import_surfaces()` with the fully-resolved
     /// root for each direct import binding in the owner file.
+    ///
+    /// Builds a fresh `HostStoreView` at every call. Production
+    /// resolver-tier code on the per-component-meta hot path MUST use
+    /// [`Self::owner_import_surface_with_store_view`] instead.
     pub(crate) fn owner_import_surface(
         &self,
+        owner_canonical: &str,
+    ) -> Option<Arc<crate::owner_import_surface::OwnerImportSurface>> {
+        let view = self.resolver_store_view();
+        self.owner_import_surface_with_store_view(&view, owner_canonical)
+    }
+
+    /// View-bound variant of [`Self::owner_import_surface`].
+    ///
+    /// Validates the cached surface against the supplied request-bound
+    /// view instead of building a fresh one — eliminating the per-call
+    /// full-workspace snapshot the pre-6.c rail performed at this site.
+    /// Same correctness contract: R3/R26/R28 fact-validation rejects a
+    /// stale entry on the next read; the producer's
+    /// `validated_at_generation` ProjectGeneration fencing
+    /// (Block 6.B-fix `987a3ce6d`) is preserved.
+    pub(crate) fn owner_import_surface_with_store_view(
+        &self,
+        view: &crate::resolver_store::HostStoreView,
         owner_canonical: &str,
     ) -> Option<Arc<crate::owner_import_surface::OwnerImportSurface>> {
         let shallow = self.shallow_file_state(owner_canonical)?;
         let whole_hash = shallow.whole_hash;
         let surfaces = self.project_type_store.owner_import_surfaces();
         // R3/R26/R28: fact-validate the cached surface against the
-        // live store view. A barrel retarget / chain-internal edit
-        // invalidates the entry on read via its recorded
+        // request-bound store view. A barrel retarget / chain-internal
+        // edit invalidates the entry on read via its recorded
         // `fact_dep_signature`. Stale-key cleanup keeps the cache
         // bounded — when the chain facts no longer validate, we
         // drop the entry outright so the next build replaces it.
-        let live_view = self.resolver_store_view();
-        if let Some(cached) = surfaces.get_with_view(self, owner_canonical, whole_hash, &live_view)
-        {
+        if let Some(cached) = surfaces.get_with_view(self, owner_canonical, whole_hash, view) {
             return Some(cached);
         }
         if surfaces.get(owner_canonical, whole_hash).is_some() {
@@ -2005,7 +2076,21 @@ impl VerterHost {
         owner_canonical: &str,
         local_name: &str,
     ) -> Option<(String, String)> {
-        let surface = self.owner_import_surface(owner_canonical)?;
+        let view = self.resolver_store_view();
+        self.resolve_owner_direct_import_with_store_view(&view, owner_canonical, local_name)
+    }
+
+    /// View-bound variant of [`Self::resolve_owner_direct_import`].
+    ///
+    /// Threads the request-bound view down through
+    /// [`Self::owner_import_surface_with_store_view`].
+    pub(crate) fn resolve_owner_direct_import_with_store_view(
+        &self,
+        view: &crate::resolver_store::HostStoreView,
+        owner_canonical: &str,
+        local_name: &str,
+    ) -> Option<(String, String)> {
+        let surface = self.owner_import_surface_with_store_view(view, owner_canonical)?;
         // `Arc<str>` borrows as `&str`, so the surface lookup uses the
         // caller-supplied slice directly without allocating a fresh Arc.
         let binding = surface.bindings.get(local_name)?;

@@ -587,7 +587,10 @@ fn overlay_artifact_downstream_reachable_for_normalised_js() {
 
     // Drive the content-pinned read through the session context — the
     // downstream reader that codex named as a genuine miss site.
-    let ctx = SessionResolverContext::new(&host, &view);
+    let session_store_view = host
+        .resolver_store_view()
+        .with_session_overlay(&host, &view);
+    let ctx = SessionResolverContext::new(&host, &view, &session_store_view);
 
     // The discriminating assertion: `indexed_for_current_content` keyed
     // by the RAW `/pkg/index.js` canonical MUST reach the overlay
@@ -750,7 +753,10 @@ fn observe_materialize_scope_recovers_parse_facts_for_normalised_js_overlay() {
 
     // Drive the materialize-scope observation through the session
     // context — the codex-named parse-fact-recovery site.
-    let ctx = SessionResolverContext::new(&host, &view);
+    let session_store_view = host
+        .resolver_store_view()
+        .with_session_overlay(&host, &view);
+    let ctx = SessionResolverContext::new(&host, &view, &session_store_view);
     let observation = ctx.observe_materialize_scope("/pkg/index.js").expect(
         "observe_materialize_scope MUST return an observation for the overlaid `.js` — \
          the overlay IndexedReady is reachable via OverlayArtifactIdentity",
@@ -932,7 +938,10 @@ fn shallow_file_state_observes_overlay_for_normalised_js() {
     // Drive the shallow-state read through the session context — the
     // codex-named miss site (`shallow_file_state_with_context`
     // normalises before the overlay-aware reads).
-    let ctx = SessionResolverContext::new(&host, &view);
+    let session_store_view = host
+        .resolver_store_view()
+        .with_session_overlay(&host, &view);
+    let ctx = SessionResolverContext::new(&host, &view, &session_store_view);
     let observed = ctx.shallow_file_state("/pkg/index.js").expect(
         "shallow_file_state MUST resolve a shallow state for the overlaid \
          `.js` canonical",
