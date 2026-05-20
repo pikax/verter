@@ -166,6 +166,15 @@ pub(crate) fn read_signature_overflow_at_install() -> u64 {
     SIGNATURE_OVERFLOW_AT_INSTALL.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Validate every fact in `signature` against `view` (lazy rule for
+/// every variant). The view-source-agnostic body shared between the
+/// borrowed (`ctx.store_view()`) and owned (`ctx.resolver_store_view()`)
+/// dispatch arms of [`validate_fact_signature`].
+#[inline]
+fn validate_with_view_lazy(view: &dyn StoreView, signature: &[FactVersionRef]) -> bool {
+    signature.iter().all(|fact| view.validates(fact))
+}
+
 /// Walk every `FactVersionRef` in `signature` against the current
 /// resolver-store view; return `false` on the first mismatch.
 ///
@@ -174,6 +183,27 @@ pub(crate) fn read_signature_overflow_at_install() -> u64 {
 /// have no R3 oracle to consult — typical for cache entries produced
 /// outside an installed tracer scope; the cache stays correct under
 /// the legacy whole-hash regime).
+///
+/// **Bug 2 fix (Block 6.e).** When `ctx.is_request_bound()` is true
+/// (the production path: `HostResolverContext` /
+/// `SessionResolverContext` constructed at the request entry boundary),
+/// validation borrows the request-bound `StoreView` via
+/// [`ResolverContext::store_view`] — built ONCE per request and threaded
+/// through. When the ctx is NOT request-bound (the bare-host fallback
+/// surfaced by the iter3 bench: `ComponentMetaQueryEngine::new(self)`
+/// reachable from `extract_component_meta_from_resolved` →
+/// fallthrough / intrinsic_projection / jsdoc / eval-env), validation
+/// falls back to the owned-view rail (`ctx.resolver_store_view()`)
+/// which rebuilds the full workspace snapshot per call. The owned-view
+/// rail is preserved transitionally for those bare-host carriers; the
+/// architectural target is to migrate them to request-bound contexts,
+/// after which this helper can drop the owned-view arm entirely.
+///
+/// Codex's binding 3-way-consult verdict identified the pre-Bug-2
+/// unconditional `ctx.resolver_store_view()` here as the dominant
+/// cost source: every warm-hit validation across the 9 query-identity
+/// caches rebuilt an owned view, matching the 178
+/// `resolver_store_view_calls` per-Button counter exactly.
 #[inline]
 #[track_caller]
 pub(crate) fn validate_fact_signature(
@@ -183,18 +213,18 @@ pub(crate) fn validate_fact_signature(
     if signature.is_empty() {
         return true;
     }
-    // The owned-view rail survives in this helper transitionally. The
-    // codex consult #3 diagnosis identified that `ctx.store_view()` is
-    // the architecturally correct choice (overlay-aware borrow) but
-    // the iter3 bench surfaced production bare-host call sites
-    // (`ComponentMetaQueryEngine::new(self)` reachable from
-    // `extract_component_meta_from_resolved` → fallthrough /
-    // intrinsic_projection / jsdoc / eval-env) that hit the bare-host
-    // `store_view()` panic guard. Until those construction sites
-    // migrate to `HostResolverContext`, this helper must use the
-    // owned-view rail.
-    let view = ctx.resolver_store_view();
-    signature.iter().all(|fact| view.validates(fact))
+    if ctx.is_request_bound() {
+        validate_with_view_lazy(ctx.store_view(), signature)
+    } else {
+        // Bare-host fallback: production carriers that still bind to
+        // `&VerterHost` (the bare `impl ResolverContext for VerterHost`
+        // rail) cannot satisfy `store_view()` — the borrow has no
+        // backing view — so they keep paying the per-call owned
+        // rebuild. Tests reach this via the `Box::leak` test
+        // fallback on `impl ResolverContext for VerterHost::store_view`.
+        let view = ctx.resolver_store_view();
+        validate_with_view_lazy(&view, signature)
+    }
 }
 
 /// Walk `signature` against the current resolver-store view, but
@@ -227,6 +257,28 @@ pub(crate) fn validate_fact_signature(
 /// keyed canonical(s) as `self_root_canonicals`, so a same-canonical
 /// content edit — or a keyed canonical that became untracked — fails
 /// validation strictly and the warm read recomputes.
+/// Validate every fact in `signature` against `view`, applying the
+/// strict self-root rule to any `FileWholeHash` whose canonical appears
+/// in `self_root_canonicals`. The view-source-agnostic body shared
+/// between the borrowed (`ctx.store_view()`) and owned
+/// (`ctx.resolver_store_view()`) dispatch arms of
+/// [`validate_fact_signature_with_self_roots`].
+#[inline]
+fn validate_with_view_self_roots(
+    view: &dyn StoreView,
+    signature: &[FactVersionRef],
+    self_root_canonicals: &[&str],
+) -> bool {
+    signature.iter().all(|fact| match fact {
+        FactVersionRef::FileWholeHash { canonical_id, hash }
+            if self_root_canonicals.contains(&canonical_id.as_str()) =>
+        {
+            view.validates_self_root_whole_hash(canonical_id, hash)
+        }
+        other => view.validates(other),
+    })
+}
+
 #[inline]
 #[track_caller]
 pub(crate) fn validate_fact_signature_with_self_roots(
@@ -237,19 +289,25 @@ pub(crate) fn validate_fact_signature_with_self_roots(
     if signature.is_empty() {
         return true;
     }
-    // Same shape as [`validate_fact_signature`] above; the owned-view
-    // rail survives transitionally for the same reason — production
-    // bare-host call sites (`ComponentMetaQueryEngine::new(self)`)
-    // remain reachable from `extract_component_meta_from_resolved`.
-    let view = ctx.resolver_store_view();
-    signature.iter().all(|fact| match fact {
-        FactVersionRef::FileWholeHash { canonical_id, hash }
-            if self_root_canonicals.contains(&canonical_id.as_str()) =>
-        {
-            view.validates_self_root_whole_hash(canonical_id, hash)
-        }
-        other => view.validates(other),
-    })
+    // **Bug 2 fix (Block 6.e).** Same dispatch shape as
+    // [`validate_fact_signature`]: borrow the request-bound view when
+    // the ctx is request-bound (the production hot path); fall back to
+    // the per-call owned rebuild only on the bare-host carriers.
+    //
+    // This is the warm-read validation entry point for every
+    // query-identity cache (`ComponentMetaResultDb`,
+    // `MaterializeStructureDb`, `RefCycleResultDb`,
+    // `OwnerImportSurfaceDb`, the family memo's `MemoEntry`, etc.).
+    // Pre-Bug-2 the unconditional owned rebuild here dominated the
+    // per-request `host_store_view_from_host_builds` counter — the
+    // 178 `resolver_store_view_calls` per Button traced back to this
+    // single call site multiplied across every warm-hit.
+    if ctx.is_request_bound() {
+        validate_with_view_self_roots(ctx.store_view(), signature, self_root_canonicals)
+    } else {
+        let view = ctx.resolver_store_view();
+        validate_with_view_self_roots(&view, signature, self_root_canonicals)
+    }
 }
 
 /// Bubble `signature` into **all** active fact tracers on the current
