@@ -6203,12 +6203,6 @@ mod w5f_test_archaeology {
 
     use super::workspace_root;
 
-    /// W5f cutoff baseline. Update only when test-file cleanup reduces
-    /// the count, or when intentional new fixture vocabulary is added
-    /// (e.g., the Stage-family deliberate-violation fixtures added
-    /// alongside the predicate extension).
-    pub(super) const W5F_BASELINE: usize = 269;
-
     pub(super) fn is_test_file(path: &Path) -> bool {
         let name = path
             .file_name()
@@ -6265,10 +6259,6 @@ mod w5f_test_archaeology {
             }
         }
         violations
-    }
-
-    pub(super) fn count_test_archaeology_lines() -> usize {
-        collect_test_archaeology_violations().len()
     }
 }
 
@@ -6371,44 +6361,13 @@ fn each_post_split_module_under_lines_budget() {
 }
 
 #[test]
-fn no_phase_archaeology_in_test_files() {
-    // Plan §4.6: phase-archaeology classifier (D111) applied to test
-    // files inside crates/*/src/ — tests.rs, *_tests.rs, and anything
-    // under a tests/ subdirectory.
-    //
-    // Until the Step 2.6 sweep completes, this guard operates as a
-    // regression backstop: the current count must stay at-or-below the
-    // baseline. Once the sweep finishes, the baseline drops to zero and
-    // phase_archaeology_test_files_count_zero becomes the strict
-    // invariant.
-    //
-    // Predicate is shared with foundations_guards::line_has_phase_archaeology_d111
-    // (the existing broader-D111 production-code guard) so the test-file
-    // and production-code classifiers stay byte-identical.
-    let count = w5f_test_archaeology::count_test_archaeology_lines();
-
-    // W5f cutoff baseline. Re-measured at this commit using the shared
-    // foundations_guards::line_has_phase_archaeology_d111 predicate.
-    // Update only when the Step 2.6 sweep actually removes occurrences.
-    const REGRESSION_BACKSTOP: usize = w5f_test_archaeology::W5F_BASELINE;
-    assert!(
-        count <= REGRESSION_BACKSTOP,
-        "no_phase_archaeology_in_test_files: count regressed beyond W5f baseline.\ncurrent: {count}\nbaseline (W5f cutoff): {REGRESSION_BACKSTOP}\nEither remove the new violations or update the baseline if the increase is intentional.",
-    );
-}
-
-#[test]
-#[ignore = "Pending Step 2.6 sweep — see plan §4 W5f. The non-zero baseline must drop to 0 before this guard activates. Tracked in phase-tier-2-complete marker."]
 fn phase_archaeology_test_files_count_zero() {
-    // Plan §4.6 strict invariant: zero phase-archaeology references in
-    // test files inside crates/*/src/. Currently ignored — the W5f
-    // baseline is non-zero. Step 2.6 (the sweep) removes the
-    // vocabulary; once that lands, flip this from #[ignore] to live and
-    // delete the regression backstop above.
-    //
-    // The predicate is shared with no_phase_archaeology_in_test_files
-    // via the w5f_test_archaeology helper module so both tests stay in
-    // lockstep with the broader-D111 classifier.
+    // Strict invariant: zero phase-archaeology references in test files
+    // inside `crates/*/src/` — `tests.rs`, `*_tests.rs`, and anything
+    // under a `tests/` subdirectory. The classifier is shared with the
+    // broader-D111 production-code guard
+    // (`foundations_guards::line_has_phase_archaeology_d111`), so the
+    // test-file and production-code predicates stay byte-identical.
     let violations = w5f_test_archaeology::collect_test_archaeology_violations();
     assert!(
         violations.is_empty(),
