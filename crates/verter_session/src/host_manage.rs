@@ -915,7 +915,7 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
 
         let members = self
             .host
-            .project_intrinsic_members_for_tag(canonical_id, tag)
+            .project_intrinsic_members_for_tag(canonical_id, tag, self.ctx)
             .unwrap_or_else(|| self.host.intrinsic_members_for_tag(tag));
         self.host.resolver_runtime().fallthrough.store_node(
             cache_key,

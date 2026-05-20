@@ -33,6 +33,7 @@ impl VerterHost {
         &self,
         owner_canonical_id: &str,
         tag: &str,
+        ctx: Option<&dyn crate::resolver_core::resolver_context::ResolverContext>,
     ) -> Option<Vec<verter_semantic::analysis::html_intrinsics::OwnedIntrinsicMember>> {
         let vue_canonical = self.resolve_project_intrinsic_canonical(owner_canonical_id, "vue")?;
         let jsx_canonical =
@@ -43,11 +44,11 @@ impl VerterHost {
         let _ = self.ensure_indexed_ready(&jsx_canonical);
 
         let fallback_members = self
-            .expand_project_intrinsic_shape_for_canonical(&vue_canonical, "HTMLAttributes")
+            .expand_project_intrinsic_shape_for_canonical(&vue_canonical, "HTMLAttributes", ctx)
             .map(Self::owned_intrinsic_members_from_shape);
 
         let tag_members =
-            self.expand_project_intrinsic_tag_members_for_canonical(&jsx_canonical, tag);
+            self.expand_project_intrinsic_tag_members_for_canonical(&jsx_canonical, tag, ctx);
 
         match (
             tag_members.filter(|members| !members.is_empty()),
@@ -85,6 +86,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         type_name: &str,
+        ctx: Option<&dyn crate::resolver_core::resolver_context::ResolverContext>,
     ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
         // JSX intrinsics resolve through the
         // bridge helper so the §5.14.1 pre-flight gate sees zero
@@ -93,7 +95,13 @@ impl VerterHost {
         // the prepared-decl fallback for re-exported /
         // namespace-qualified globals (e.g. `JSX.IntrinsicElements`)
         // is engine-internal until 5l atomic engine retirement.
-        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
+        // Block 7.5 Class B fix (audit-v2 §"Recommended priority
+        // order" #5): bind engine to the supplied request-bound `ctx`
+        // when present so cache validators inside the engine inherit
+        // the overlay-aware view.
+        let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = self;
+        let engine_ctx = ctx.unwrap_or(base_ctx);
+        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(engine_ctx);
         let expanded = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
             &mut engine,
             canonical_id,
@@ -113,9 +121,13 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         tag: &str,
+        ctx: Option<&dyn crate::resolver_core::resolver_context::ResolverContext>,
     ) -> Option<Vec<verter_semantic::analysis::html_intrinsics::OwnedIntrinsicMember>> {
-        let intrinsics_shape = self
-            .expand_project_intrinsic_shape_for_canonical(canonical_id, "JSX.IntrinsicElements")?;
+        let intrinsics_shape = self.expand_project_intrinsic_shape_for_canonical(
+            canonical_id,
+            "JSX.IntrinsicElements",
+            ctx,
+        )?;
         let tag_type = intrinsics_shape
             .properties
             .into_iter()
@@ -135,7 +147,10 @@ impl VerterHost {
         let expanded =
             crate::meta_resolve::project_expr_class_a_via_dispatch(self, scope, &tag_type)
                 .unwrap_or_else(|| tag_type.clone());
-        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
+        // Block 7.5 Class B fix: bind engine to the supplied request-bound ctx.
+        let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = self;
+        let engine_ctx = ctx.unwrap_or(base_ctx);
+        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(engine_ctx);
         let mut tag_shape =
             verter_semantic::analysis::type_expand::type_expr_to_object_shape(&expanded);
         Self::materialize_project_intrinsic_shape_members(&mut tag_shape, &mut engine, scope);

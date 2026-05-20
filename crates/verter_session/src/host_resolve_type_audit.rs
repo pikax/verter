@@ -118,16 +118,25 @@ impl VerterHost {
         // `RequestContextGuard`; Noop installs
         // `verter_audit::NoOpObserver` so emit sites still see
         // `Some(observer)` without paying downstream cost.
+        //
+        // Block 7.5 audit-v2 Class B fix: bind the dispatch ctor to a
+        // request-scoped `HostResolverContext` so cache validators
+        // inside the dispatch chain inherit the overlay-aware view
+        // instead of paying a fresh workspace-sweep cost per call.
+        let store_view = self.resolver_store_view();
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
+        let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
         let request_start = Instant::now();
         let result = match registration.as_ref() {
             AuditRequestRegistration::Active(_) => {
                 let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
-                let dispatch = ProjectSemanticDispatch::new(self);
+                let dispatch = ProjectSemanticDispatch::new(host_ctx_ref);
                 dispatch.execute(query)
             }
             AuditRequestRegistration::Noop => {
                 let _noop_guard = verter_audit::install_noop_observer();
-                let dispatch = ProjectSemanticDispatch::new(self);
+                let dispatch = ProjectSemanticDispatch::new(host_ctx_ref);
                 dispatch.execute(query)
             }
         };
