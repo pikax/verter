@@ -1886,7 +1886,13 @@ impl VerterHost {
     ///
     /// Builds a fresh `HostStoreView` at every call. Production
     /// resolver-tier code on the per-component-meta hot path MUST use
-    /// [`Self::owner_import_surface_with_store_view`] instead.
+    /// [`Self::owner_import_surface_with_store_view`] instead. The
+    /// `#[allow(dead_code)]` annotation is intentional during the 6.c
+    /// substrate window — the wrapper is retained for the host's
+    /// stand-alone entry-point contract and becomes live again when
+    /// callers without a request-bound view (test fixtures, ambient-tier
+    /// consumers) invoke it.
+    #[allow(dead_code)]
     pub(crate) fn owner_import_surface(
         &self,
         owner_canonical: &str,

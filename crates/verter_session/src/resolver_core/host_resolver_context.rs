@@ -80,6 +80,11 @@ impl<'a> HostResolverContext<'a> {
     /// [`crate::VerterHost::resolver_store_view`] at the request entry,
     /// then pass `&wrapper` to the resolver-tier pipeline. The wrapper
     /// does not retain references after the call returns.
+    // `#[allow(dead_code)]` is intentional during the 6.c substrate
+    // window — the call sites that construct this wrapper land in the
+    // hot-path conversion commit (C). Removing the allow once those
+    // sites land is a stub-prevention follow-up.
+    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn new(inner: &'a crate::VerterHost, store_view: &'a HostStoreView) -> Self {
         Self { inner, store_view }

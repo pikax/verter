@@ -79,6 +79,12 @@ use crate::HostConfig;
 pub(crate) struct SessionResolverContext<'a> {
     inner: &'a crate::VerterHost,
     view: &'a dyn SessionView,
+    // `#[allow(dead_code)]` is intentional during the 6.c substrate
+    // window — the `store_view()` borrow accessor returns this field
+    // but no hot-path caller consumes it yet. The hot-path conversion
+    // commit (C) wires consumers; removing the allow at that point is
+    // a stub-prevention follow-up.
+    #[allow(dead_code)]
     store_view: &'a HostStoreView,
 }
 

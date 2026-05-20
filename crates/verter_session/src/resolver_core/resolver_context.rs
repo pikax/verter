@@ -308,6 +308,12 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// construct a `HostResolverContext::new(host, &view)` at the request
     /// entry point. Tests / mocks that want the convenience of a bare host
     /// MUST build a view first and wrap it.
+    ///
+    /// `#[allow(dead_code)]` is intentional during the 6.c substrate
+    /// window — the borrow-returning method has no production callers
+    /// yet. The hot-path conversion commit (C) wires consumers; removing
+    /// the allow at that point is a stub-prevention follow-up.
+    #[allow(dead_code)]
     fn store_view(&self) -> &HostStoreView;
 
     fn project_type_store(&self) -> &Arc<ProjectTypeStore>;
