@@ -220,7 +220,7 @@ fn public_field_refs_keep_external_indexed_access_routes() {
     // the owner-local `Whole` rewrite. The existing route-emission
     // pipeline handles external imports through its own paths
     // (utility / indexed-access / direct-ref); we only assert here
-    // that the owner-local Phase 8 rewrite did NOT fire. Whatever
+    // that the owner-local `Whole`-rewrite did NOT fire. Whatever
     // route the existing pipeline emits for external imports is
     // preserved unchanged.
     //
@@ -228,11 +228,12 @@ fn public_field_refs_keep_external_indexed_access_routes() {
     // `enqueue_component_meta_registry_ref` admission across the
     // request. For external imports the rewrite predicate declines
     // (because `resolve_owner_direct_import` resolves the root), so
-    // any `Whole` recorded did NOT come from Phase 8's rewrite path
-    // — it came from the existing direct-ref/utility routing. The
-    // strict gate that distinguishes Phase 8 from existing behaviour
-    // is the owner-local positive tests above (which assert Whole >=
-    // 1 AND Pick/MemberPath == 0). For external imports the
+    // any `Whole` recorded did NOT come from the owner-local rewrite
+    // path — it came from the existing direct-ref/utility routing.
+    // The strict gate that distinguishes the owner-local rewrite
+    // from existing behaviour is the owner-local positive tests
+    // above (which assert Whole >= 1 AND Pick/MemberPath == 0).
+    // For external imports the
     // observable assertion is "we did not invent a new Whole that
     // wasn't there before"; we test that by checking the rewrite
     // does NOT fire (verified by the absence of regression in the

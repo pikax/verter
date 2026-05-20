@@ -1,5 +1,5 @@
-//! §5.D.4 no-cache-promotion-for-partial-failure tests for the §5.B
-//! variants (Phase 5g-supplement backfill for 5b/5e/5f).
+//! No-cache-promotion-for-partial-failure tests for the
+//! SemanticQueryKey variants.
 //!
 //! Per CLAUDE.md "cancelled, superseded, interrupted, budget-exceeded,
 //! or partial semantic results must not be promoted as warm shared
@@ -14,11 +14,9 @@
 //!    increment (the partial result was NOT promoted to the warm
 //!    cache); the warm counter MUST NOT increment.
 //!
-//! Per §5.D.4 r18 (Claude-N18): single-host, same-host re-query.
-//! r17's two-host design is non-discriminating because fresh hosts
-//! own their own ProjectTypeStore.
-//!
-//! Plan: §5.D.4 (Phase 5g-supplement.1.B for 5b/5e/5f backfill).
+//! Discrimination rule: single-host, same-host re-query. A two-host
+//! design would be non-discriminating because fresh hosts own their
+//! own ProjectTypeStore.
 
 use std::sync::Arc;
 
@@ -332,10 +330,10 @@ fn no_cache_promotion_for_budget_exceeded_exclude_extract_reduction() {
     );
 }
 
-/// 5j §5.D.4 — slot-binding-parameter lowering budget-exceeded must
-/// not warm. Phase 5j adds `project_slot_binding_member` which
-/// composes existing `ProjectPath` variants under the hood; the
-/// budget-exceeded contract therefore applies through the same
+/// Slot-binding-parameter lowering budget-exceeded must not warm.
+/// `project_slot_binding_member` composes existing `ProjectPath`
+/// variants under the hood; the budget-exceeded contract therefore
+/// applies through the same
 /// `ProjectPath` infrastructure. We exercise the contract through a
 /// `ProjectPath` key whose path length exceeds `depth_budget`; a
 /// regression in slot-binding lowering that accidentally cached

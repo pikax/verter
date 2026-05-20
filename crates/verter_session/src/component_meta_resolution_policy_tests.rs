@@ -1,4 +1,4 @@
-//! Unit tests for the Phase 4B policy pass.
+//! Unit tests for the resolution-policy pass.
 
 use std::sync::Arc;
 
@@ -588,9 +588,10 @@ fn pass_does_not_touch_public_instance_when_no_rewrite() {
 // source-annotation typed form) — never the raw text.
 //
 // These tests intentionally pass `raw_type_expr: Some(...)` while
-// leaving `raw_type: None` — that combination would not type-check
-// against the pre-W2.4 signature (`Option<&str>`), so the test FAILS
-// pre-cutover by construction and PASSES post-cutover.
+// leaving `raw_type: None`. The combination only type-checks against
+// the typed-form signature; reverting the signature to a text-only
+// `raw_type: Option<&str>` would break compilation, so these tests
+// pin the typed-form contract at the type level.
 
 #[test]
 fn w2_4_restore_macro_participating_from_typed_annotation_replaces_eager_object() {

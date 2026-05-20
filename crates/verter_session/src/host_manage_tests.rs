@@ -2843,8 +2843,7 @@ fn get_analysis_resolves_alias_import() {
         "/project/src/App.vue",
         "<script setup>\nimport Child from '@/components/Child.vue'\n</script>\n<template><Child/></template>",
     );
-    // Configure workspace resolver via host wrapper (Phase 6b sub-plan
-    // §6b.D2b reroute).
+    // Configure workspace resolver via host wrapper.
     {
         host.configure_projects(vec![
             verter_semantic::analysis::project_resolver::IdeProjectConfig {
@@ -6132,19 +6131,16 @@ defineProps<IconProps>()
     );
 }
 
-// D-Cutover §5.8 WIP-W: the two `declaration_scoped_solver_applies_omit_to_barrel_imported_types`
-// characterization tests (with + without store-view) were deleted when
-// `SessionSolverHost` + `type_solver::solve::solve_type` retired. Both
-// tests asserted `engine.solve(Omit<ButtonProps, 'color'> & { status })`
-// expanded an imported barrel type through the retired declaration-scoped
-// solver; dispatch owns that surface now via
-// `ComponentMetaQueryEngine::project_expr_surface_expr` and the observable
-// behaviour it returned (a flat property union) is not reproducible without
-// reconstructing the retired bridge. The tests were pre-existing reds in
-// the §5.8 handoff's "accepted regressions" list and are retired with the
-// solver rather than migrated to a dispatch-only shape — the migration
-// target for this scenario is the positive-direction coverage in
-// `component_meta_query_engine::tests` around barrel / Omit routes.
+// The `declaration_scoped_solver_applies_omit_to_barrel_imported_types`
+// characterization scenario is intentionally not exercised here. It
+// asserted `engine.solve(Omit<ButtonProps, 'color'> & { status })`
+// expanded an imported barrel type through a declaration-scoped solver
+// surface that is not part of the final design; dispatch owns that
+// surface via `ComponentMetaQueryEngine::project_expr_surface_expr`,
+// and the flat-property-union shape the previous bridge returned is
+// not reproducible without reintroducing the bridge. The positive-
+// direction coverage for barrel / Omit routes lives in
+// `component_meta_query_engine::tests`.
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
@@ -8767,7 +8763,7 @@ export interface UnusedProps {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 0 — Characterization tests for solver-host local-only env cutover
+// Characterization tests for solver-host local-only env behaviour
 // ---------------------------------------------------------------------------
 
 /// Test 1: local-only defineProps resolves from EvalEnv without walkers.
@@ -8799,8 +8795,9 @@ defineProps<Props>()
 /// Test 2: cross-file defineProps — the solver host must resolve imported types
 /// from the host prepared-decl cache, not from the fat owner env.
 ///
-/// This test exercises the full meta pipeline which currently uses the fat env.
-/// After Phase 1, it must still pass with only the local-only env + solver host.
+/// This test exercises the full meta pipeline and pins the
+/// invariant: cross-file `defineProps` must resolve through the host
+/// prepared-decl cache using only the local-only env + solver host.
 #[test]
 fn solver_host_resolves_cross_file_define_props_through_host_cache() {
     let host = VerterHost::new_standalone(HostConfig {
@@ -8843,8 +8840,8 @@ defineProps<ImportedProps>()
 }
 
 /// Test 3: transitive cross-file resolution — imported type extends same-file base.
-/// After Phase 1, the solver host must resolve both the direct import AND its
-/// same-file dependencies through the prepared-decl cache.
+/// Invariant: the solver host must resolve both the direct import
+/// AND its same-file dependencies through the prepared-decl cache.
 #[test]
 fn solver_host_resolves_transitive_same_file_deps_in_imported_type() {
     let host = VerterHost::new_standalone(HostConfig {
@@ -10001,10 +9998,10 @@ fn workspace_vfs_source_kind_includes_layer_detail_when_present() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn external_type_analysis_repeated_lookup_collapses_onto_host_cache() {
-    // Phase 4 replaced the per-request `external_inputs_memo` with
-    // lookups against the project-global `FileArtifactStore`. Repeated
-    // resolutions for the same canonical now go through that host-owned
-    // cache directly — no extra per-request lookup memo layer.
+    // External-type resolution looks up against the project-global
+    // `FileArtifactStore` directly — no per-request `external_inputs_memo`
+    // layer. Repeated resolutions for the same canonical go through that
+    // host-owned cache.
     //
     // The observable invariant is that repeated lookups return identical
     // `Arc`-backed external-type analysis payloads so downstream consumers
@@ -10039,24 +10036,23 @@ fn external_type_analysis_repeated_lookup_collapses_onto_host_cache() {
     );
 }
 
-// Test `request_store_view_extends_across_mid_request_ensure_loaded` removed
-// with the Phase 4/5 cutover: the `RequestStoreView` type and its
-// extension-store semantics are gone. Live-host probes validated via
-// `HostFenceValidator` replace the captured-view-plus-extension model, so the
-// semantics this test asserted no longer exist.
+// `request_store_view_extends_across_mid_request_ensure_loaded` is
+// intentionally not part of this suite: the `RequestStoreView` type
+// and its captured-view-plus-extension semantics are not part of the
+// final design. Live-host probes validated via the host's fact-
+// signature path are the authoritative substitute.
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn ensure_loaded_reload_with_identical_content_does_not_bump_epoch() {
-    // Phase 1 §4.6 Sub-task B test 5.6 Test 1 (regression lock-in).
-    //
-    // After an evict+ensure_loaded cycle for a file whose on-disk content is
-    // identical to the pre-evict snapshot, `store_view_epoch` must not bump.
-    // Pre-fix: the reload unconditionally bumped the epoch, clearing every
-    // thread-local cache (parsed-eval-program, type-context) and forcing a
-    // cold re-resolution on the follow-up lookup.
-    // Post-fix: the Sub-task B `pre_evict_hash == post_reload_hash` comparison
-    // short-circuits the bump on no-op reload; caches stay warm.
+    // Regression lock-in: after an evict + ensure_loaded cycle for a
+    // file whose on-disk content is identical to the pre-evict
+    // snapshot, `store_view_epoch` must NOT bump. A regression that
+    // bumped the epoch unconditionally would clear every thread-local
+    // cache (parsed-eval-program, type-context) and force a cold re-
+    // resolution on the follow-up lookup. The `pre_evict_hash ==
+    // post_reload_hash` comparison must short-circuit the bump on
+    // no-op reload; caches stay warm.
     let ws = std::sync::Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/App.vue",
@@ -10079,26 +10075,27 @@ fn ensure_loaded_reload_with_identical_content_does_not_bump_epoch() {
     assert_eq!(
         host.current_store_view_epoch(),
         post_evict_epoch,
-        "reload with identical content must NOT bump the epoch (Sub-task B)"
+        "reload with identical content must NOT bump the epoch"
     );
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn host_owned_resolved_named_types_serves_cross_request_lookups() {
-    // Phase 1 §4.7 test 5.7 Test 2.
+    // Cross-request cache-reuse invariant:
     //
     // Two separate queries for components that share the same imported interface
     // `(canonical, whole_hash, type_name, surface, type_param_bindings)` must
     // reuse the cached `Arc<ResolvedElements>` from the host-owned cache.
     //
-    // Pre-fix: the per-context `resolved_named_types: Rc<RefCell<FxHashMap>>` is
-    // dropped at the end of each `build_type_context` invocation, so cross-request
-    // reuse is impossible — every request pays the same resolution cost again.
+    // A regression that scoped `resolved_named_types` to a per-context
+    // `Rc<RefCell<FxHashMap>>` would drop the cache at the end of each
+    // `build_type_context` invocation; cross-request reuse would be impossible
+    // and every request would pay the same resolution cost again.
     //
-    // Post-fix: `VerterHost::host_owned_resolved_named_types` (DashMap) survives
-    // across requests within one workspace generation; the adapter injected into
-    // `TypeResolutionContext` hits the cache on the second request.
+    // `VerterHost::host_owned_resolved_named_types` (DashMap) must survive
+    // across requests within one workspace generation; the adapter injected
+    // into `TypeResolutionContext` hits the cache on the second request.
     let host = make_host();
     let props_src = r#"<script setup lang="ts">
 import type { SharedProps } from './shared'
@@ -10137,16 +10134,16 @@ defineProps<SharedProps>()
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn source_type_is_stable_across_callsites_for_same_canonical() {
-    // Phase 1 §4.6 Sub-task A — test 5.6 Test name 3.
+    // Single-authority invariant for `source_type`:
     //
-    // Pre-fix: `imported_eval_source_type(canonical, raw_source, cached_parse)` returns
-    // `SourceType::ts()` when `cached_parse: None`, but `sfc_script_source_type(parsed, raw_source)`
-    // when `cached_parse: Some(parsed)`. For a `lang="tsx"` SFC, those diverge — different cache
-    // slots for the same `(canonical, whole_hash)`.
+    // A regression that returned `SourceType::ts()` when `cached_parse: None`
+    // but `sfc_script_source_type(parsed, raw_source)` when
+    // `cached_parse: Some(parsed)` would diverge for a `lang="tsx"` SFC —
+    // different cache slots for the same `(canonical, whole_hash)`.
     //
-    // Post-fix: the scheduler computes `source_type` once at `execute_source` time with full
-    // access to the parsed SFC, stores it on `HostSourceData::source_type`, and every downstream
-    // cache-key site reads the authoritative value.
+    // The scheduler computes `source_type` once at `execute_source` time with
+    // full access to the parsed SFC, stores it on `HostSourceData::source_type`,
+    // and every downstream cache-key site must read the authoritative value.
     let host = make_host();
     let tsx_vue = r#"<script lang="tsx">
 const Button = () => <button />

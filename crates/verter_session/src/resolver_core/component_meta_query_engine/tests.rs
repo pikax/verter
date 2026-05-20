@@ -66,9 +66,9 @@ export interface AvatarProps {
         declaration.span.end > declaration.span.start,
         "direct prepared declaration should still expose a non-empty span",
     );
-    // Phase 4b §4b.3 — declaration text recovery via source-
-    // reparse is retired. The resolver returns kind/span from
-    // graph metadata; text stays None.
+    // Discriminating invariant: the resolver returns kind/span
+    // from graph metadata; declaration text recovery via source
+    // reparse is not supported (`text` stays `None`).
     assert_eq!(
         declaration.text, None,
         "graph-only resolver: declaration text is no longer recovered",
@@ -1335,19 +1335,16 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         "prepared projection should still materialize the routed object surface",
     );
 
-    // Phase 5c (sub-plan §A9 (c) — DELETION FORBIDDEN): migrate
-    // from the engine-internal method-invocation counter
-    // (`debug_prepared_type_decl_query_count`) to (1) a
-    // behavior assertion on the projected surface (correctness
-    // half) and (2) a `live_count()` check on the host
-    // `prepared_surface_db` (cache-reuse half — preserved per
-    // A9 (c) interning-efficiency rule). Pre-cutover the
-    // counter == 3 form asserted "ColorModeSelectProps +
-    // SelectMenuProps + RootProps queried once each"; the
-    //  form asserts a strict bound on host
+    // Discriminating invariant: this assertion has two halves —
+    // (1) a behaviour check on the projected surface (the merged
+    // Object surface includes the inherited Pick props with
+    // `items` omitted) and (2) a `live_count()` check on the
+    // host `prepared_surface_db` enforcing a strict bound on
     // prepared-surface entries written during the projection
-    // (must not exceed 3) AND the merged Object surface
-    // includes the inherited Pick props with `items` omitted.
+    // (must not exceed 3, i.e., ColorModeSelectProps +
+    // SelectMenuProps + RootProps queried once each — the
+    // interning-efficiency rule that prevents the engine from
+    // re-walking the same decl).
     let TypeExpr::Object(object) = &projected else {
         panic!("prepared projection should be an Object after surface trampoline conversion");
     };
@@ -3201,16 +3198,13 @@ defineProps<{
     );
 }
 
-/// Plan Step 2 Outcome 3 tombstone (architectural-debt-closure
-/// rev 10): `rematerialize_public_component_meta_types` and its
-/// helper `choose_less_symbolic_component_meta_type_expr` are
-/// deleted from `host_manage.rs`. Compute is the single resolution
-/// authority post-Outcome-3; the rematerialize phase is gone.
-///
-/// This was a static-text invariant over the rematerialize helper's
-/// Navigate-mode call. With rematerialize deleted, the invariant
-/// flips to a non-existence assertion: the function names must NOT
-/// appear in `host_manage.rs`.
+/// Tombstone guard: `rematerialize_public_component_meta_types` and
+/// its helper `choose_less_symbolic_component_meta_type_expr` must
+/// NOT exist in `host_manage.rs`. Compute is the single resolution
+/// authority; the rematerialize helper family is not part of the
+/// final design and re-introducing it would regress dispatch
+/// behaviour. The invariant is a non-existence assertion over the
+/// production source text.
 #[test]
 fn step7_rematerialize_function_deleted_post_outcome3() {
     let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -3316,9 +3310,10 @@ defineProps<Pick<HelperProps, 'size'>>()
             canonical_id == "/src/Helper.ts"
         }
         // R26 per-domain variants — not emitted on this code
-        // path yet at Stage 3. Stage 6 producers will populate
-        // them; this test continues to characterise the legacy
-        // whole-hash flow.
+        // path today; producers that populate them are not yet
+        // wired here. This test characterises the whole-hash flow
+        // and asserts the helper canonical participates regardless
+        // of which `FactVersionRef` variant carries it.
         crate::resolver_core::FactVersionRef::Parse(p) => p.canonical_id == "/src/Helper.ts",
         crate::resolver_core::FactVersionRef::ResolveImports(r) => {
             r.canonical_id == "/src/Helper.ts"

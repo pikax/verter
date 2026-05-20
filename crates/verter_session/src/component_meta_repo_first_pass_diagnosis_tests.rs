@@ -1,16 +1,14 @@
 //! `repo_first_pass` semantic-state regression diagnosis +
-//! Phase 11d acceptance tests.
+//! `record_origin_edge` dedup acceptance tests.
 //!
 //! The leading test (`repo_first_pass_diagnosis_emits_capture_curves`)
-//! exercises the four §10.4 overlay-isolation scenarios against a
-//! §4.2-shaped fixture (one root depending on a shared dep) and
-//! asserts that the Phase 11b instrumentation hooks capture
-//! **non-empty** counter data for each scenario. Its discriminating
-//! value is that it FAILS on the pre-instrumentation tree (counters
-//! never increment because production hooks are not wired) and PASSES
-//! on the post-instrumentation tree.
+//! exercises four overlay-isolation scenarios against a shape with one
+//! root depending on a shared dep and asserts that the production
+//! instrumentation hooks capture **non-empty** counter data for each
+//! scenario. A regression that disconnects the production hooks would
+//! leave the counters at zero and fail this guard.
 //!
-//! The Phase 11d (B-B7f-fix) tests further down assert the
+//! The dedup-contract tests further down assert the
 //! `record_origin_edge` dedup contract: identical edge identity
 //! tuples must NOT produce duplicate ledger entries while preserving
 //! the audit-mining contract (`request_context::current_accumulator`
@@ -271,8 +269,8 @@ fn repo_first_pass_diagnosis_emits_capture_curves() {
     // Scenario (iv) re-runs a cold target after `clear_compile_cache`.
     // The compile cache is reset, so per-component compile state is
     // cold; however the semantic-graph store and overlay state are
-    // intentionally NOT reset by `clear_compile_cache` (per the
-    // §10.4 prior measurements baked into Phase 11b's contract).
+    // intentionally NOT reset by `clear_compile_cache` (this is the
+    // documented behaviour the instrumentation contract is built on).
     // Counter shape recorded in the diagnosis report.
     let _ = &snap_after_clear;
 
@@ -293,7 +291,8 @@ fn repo_first_pass_diagnosis_emits_capture_curves() {
     );
 }
 
-/// Mint a fresh distinct interned node for the Phase 11d unit tests.
+/// Mint a fresh distinct interned node for the `record_origin_edge`
+/// dedup unit tests below.
 /// Uses [`SemanticNodeData::VueMacroElements`] which is sidecar-exempt
 /// and bypasses the sharded dedup (see `NodeArena::push_impl` —
 /// VueMacroElements always allocates a fresh slot), so each call
@@ -309,17 +308,18 @@ fn mint_distinct_node(
 }
 
 // =====================================================================
-// Phase 11d (B-B7f-fix) — Issue #11 acceptance tests
+// `record_origin_edge` dedup acceptance tests
 // =====================================================================
 //
 // The four tests below assert the structural and behavioural gates for
-// the Phase 11d fix: skip duplicate `record_origin_edge` emissions for
-// already-recorded edge identities, while preserving the audit-mining
-// contract (`request_context::current_accumulator` still observes every
-// derivation hop the production hot path would have emitted).
+// the `record_origin_edge` dedup contract: skip duplicate emissions
+// for already-recorded edge identities, while preserving the audit-
+// mining contract (`request_context::current_accumulator` still
+// observes every derivation hop the production hot path would have
+// emitted).
 //
 // Discriminating predicate per CLAUDE.md characterization-test rule:
-// Tests 1, 3, 4 FAIL on the pre-fix tree (which records duplicates as
+// Tests 1, 3, 4 FAIL on a tree that records duplicates as
 // ledger entries with `duplicate_edges > 0`) and PASS on the post-fix
 // tree (which dedups identity-equal emissions). Test 2 (cold
 // counterfixture) PASSES on both trees and discriminates against an
@@ -622,13 +622,13 @@ fn repo_first_pass_diagnosis_dup_edge_ratio_under_5_percent() {
     let ratio = (snap.duplicate_edges as f64) / (total as f64);
     assert!(
         ratio < 0.05,
-        "Phase 11d §4.3A gate: dup_edge_ratio must be < 0.05 (got \
-         {ratio} = {dups}/{total} dupes/total). Pre-fix this ratio is \
-         (BURST - 1) / (BURST + UNIQUE_DECOYS) ~= {pre_fix_ratio}; \
-         post-fix the dedup drives it to ~0%.",
+        "dup_edge_ratio must be < 0.05 (got \
+         {ratio} = {dups}/{total} dupes/total). Without dedup, this \
+         ratio would be (BURST - 1) / (BURST + UNIQUE_DECOYS) ~= \
+         {undedup_ratio}; the dedup contract drives it to ~0%.",
         dups = snap.duplicate_edges,
         total = total,
-        pre_fix_ratio = ((BURST - 1) as f64) / ((BURST + UNIQUE_DECOYS) as f64),
+        undedup_ratio = ((BURST - 1) as f64) / ((BURST + UNIQUE_DECOYS) as f64),
     );
 }
 

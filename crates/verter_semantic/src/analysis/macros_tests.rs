@@ -2512,9 +2512,9 @@ fn build_expanded_type_expr_consumes_type_expr_field_directly_without_reparse() 
 
     // A shape the producer captured but the text annotation does NOT
     // describe (the annotation says one thing, the typed form says
-    // another). Pre-cutover `build_expanded_type_expr` would have
-    // discarded the typed form and reparsed the text, producing a
-    // different shape. Post-cutover the typed form survives.
+    // another). Discriminating invariant: `build_expanded_type_expr`
+    // must consume the typed form directly without falling back to
+    // reparsing the text annotation; the typed shape survives end-to-end.
     let typed_indexed_access = TypeExpr::IndexedAccess {
         object: Arc::new(TypeExpr::Ref {
             name: "ImportedAlias".into(),

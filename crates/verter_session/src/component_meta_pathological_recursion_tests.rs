@@ -1,24 +1,21 @@
-//! §5.D.5 pathological recursion-safety fixtures (per-gap, sliced
-//! across receiving sub-phases per the §5.D.5 ownership table).
+//! Pathological recursion-safety fixtures, one per shape.
 //!
 //! Each test exercises a pathological recursive/nested shape that
 //! the static `no_unbounded_recursion_in_resolver_core` guard
-//! cannot fully cover — the static guard catches
-//! source patterns; runtime fixtures here close the loop by
-//! asserting terminate-without-stack-overflow + the expected
-//! sentinel/result on the runtime path.
+//! cannot fully cover — the static guard catches source patterns;
+//! runtime fixtures here close the loop by asserting
+//! terminate-without-stack-overflow + the expected sentinel/result
+//! on the runtime path.
 //!
-//! Ownership table (per §5.D.5 r15/Q2):
+//! Fixture inventory:
 //!
-//! | Sub-phase | Pathological fixture |
-//! |---|---|
-//! | 5h        | `pathological_self_shadowing_userland_pick`         |
-//! | 5i        | `pathological_exclude_self_recursive` (deferred)    |
-//! | 5i        | `pathological_extract_through_typeof` (deferred)    |
-//! | 5i        | `pathological_template_literal_key_recursion` (def) |
-//! | 5j        | `pathological_nested_slot_definitions` (deferred)   |
-//! | 5j        | `pathological_self_referential_slot_payload` (def)  |
-//! | 5k        | `pathological_typeof_substitution_cycle` (deferred) |
+//! - `pathological_self_shadowing_userland_pick`
+//! - `pathological_exclude_self_recursive`
+//! - `pathological_extract_through_typeof`
+//! - `pathological_template_literal_key_recursion`
+//! - `pathological_nested_slot_definitions`
+//! - `pathological_self_referential_slot_payload`
+//! - `pathological_typeof_substitution_cycle`
 //!
 //! Each fixture:
 //!   - Builds the pathological scenario via a hermetic host.
@@ -26,9 +23,6 @@
 //!     (`QueryResult::Recursive(_)` or `QueryResult::Error(_)`).
 //!   - Discriminates: a regression that fails the cycle gate would
 //!     stack-overflow OR return a wrongly-cached `Value(_)`.
-//!
-//! Plan: §5.D.5 (Phase 5h owns the userland-shadow self-reference;
-//! 5i/5j/5k own their respective shapes per the ownership table).
 
 use std::sync::Arc;
 
@@ -66,17 +60,17 @@ fn build_hermetic_host(files: &[(&str, &str)]) -> Arc<VerterHost> {
 // the parent `Instantiate(Pick, ...)` is still on the active stack.
 //
 // **Why test against the dispatch engine directly (not
-// `get_component_meta`):** the §5.D.5 r15/Q2 contract is "terminate
+// `get_component_meta`):** the contract under test is "terminate
 // with `Recursive`/sentinel, not stack overflow". The dispatch
 // engine's same-identity guard handles this case correctly — the
 // `instantiate_active` stack on a SINGLE dispatcher catches the
 // re-entry. A higher-layer caller that creates a fresh dispatcher
 // per logical call (e.g. the component-meta query engine's
 // `materialize_component_meta_type_expr_until_stable_full`) would
-// reset the guard at every recursion level; that is a separate
-// architectural concern (engine-layer recursion handling for
-// parametrised cycles) belonging to Phase 11+ rather than 5h's
-// shadow-gate-threading scope.
+// reset the guard at every recursion level; engine-layer recursion
+// handling for parametrised cycles is a separate architectural
+// concern outside the shadow-gate-threading scope this fixture
+// exercises.
 //
 // The test exercises 5h's contribution directly: the resolver-
 // context shadow gate ensures dispatch routes the bare-name `Pick`
@@ -95,15 +89,15 @@ interface Cfg {
 <template><div /></template>
 "#;
 
-/// 5h §5.D.5 — `pathological_self_shadowing_userland_pick`.
+/// `pathological_self_shadowing_userland_pick`.
 ///
 /// `type Pick<T, K> = Pick<T, K>` is a self-referential userland
-/// alias that shadows the ambient lib's `Pick`. Phase 5h's
-/// resolver-context shadow gate routes `Pick<Cfg, 'alpha'>` to the
-/// userland declaration (per the "user shadowing wins" rule); the
-/// engine's `push_instantiate_active` same-identity guard then
-/// catches the structural self-reference at the second `Instantiate`
-/// dispatch and emits `Opaque(RecursiveRef)` rather than recursing
+/// alias that shadows the ambient lib's `Pick`. The resolver-context
+/// shadow gate routes `Pick<Cfg, 'alpha'>` to the userland
+/// declaration (per the "user shadowing wins" rule); the engine's
+/// `push_instantiate_active` same-identity guard then catches the
+/// structural self-reference at the second `Instantiate` dispatch
+/// and emits `Opaque(RecursiveRef)` rather than recursing
 /// infinitely.
 ///
 /// **Terminate-without-stack-overflow** is the load-bearing
@@ -234,17 +228,18 @@ fn pathological_self_shadowing_userland_pick() {
 //        an unbound recursive alias) ─────────────────────────────────
 //
 // The userland alias R is its own first type argument to Exclude.
-// Phase 5i's `Extract` / `Exclude` arm in `build_builtin_utility`
-// resolves the source via `evaluate_deferred_semantic_node`, which
-// eventually hits the `Instantiate(R, [])` dispatch — the engine's
+// The `Extract` / `Exclude` arm in `build_builtin_utility` resolves
+// the source via `evaluate_deferred_semantic_node`, which eventually
+// hits the `Instantiate(R, [])` dispatch — the engine's
 // `push_instantiate_active` same-identity guard then catches the
 // re-entry and emits `Opaque(RecursiveRef)` at the back-edge.
 //
-// **Why test against the dispatch engine directly** (mirrors 5h):
-// the §5.D.5 r15/Q2 contract is "terminate with Recursive/sentinel,
-// not stack overflow". Single-dispatcher guards are exactly what we
-// need to verify; higher-layer per-call dispatcher recreation is a
-// separate engine-architecture concern out of scope for §5.D.5.
+// **Why test against the dispatch engine directly** (mirrors the
+// userland-Pick fixture): the contract under test is "terminate with
+// Recursive/sentinel, not stack overflow". Single-dispatcher guards
+// are exactly what this exercises; higher-layer per-call dispatcher
+// recreation is a separate engine-architecture concern outside this
+// fixture's scope.
 const PATHOLOGICAL_EXCLUDE_SELF_RECURSIVE_VUE: &str = r#"<script setup lang="ts">
 type R = Exclude<R, never>;
 </script>
@@ -454,10 +449,10 @@ type R = { [K in keyof R as `${K & string}_x`]: R[K] };
 /// `type R = { [K in keyof R as `${K & string}_x`]: R[K] }` carries
 /// two recursive references back into R: the source `keyof R` and
 /// the value `R[K]`. The mapper's `name_remap` is a TemplateLiteral
-/// referencing K; under Phase 5i, the template-literal evaluator
-/// folds the template only when every expression resolves to a
-/// literal — a cyclic K substitution must NOT cause the evaluator
-/// to recurse forever.
+/// referencing K; the template-literal evaluator must fold the
+/// template only when every expression resolves to a literal — a
+/// cyclic K substitution must NOT cause the evaluator to recurse
+/// forever.
 ///
 /// Expected: terminate with a Recursive / Opaque / RecursiveRef
 /// sentinel. A regression in either the mapper-name-remap path or
@@ -527,9 +522,9 @@ fn pathological_template_literal_key_recursion() {
 // nested 8 levels deep. Each level's binding param Object has one
 // member whose type is the next level's slot-typed Object literal
 // (a `Function` whose params[0].ty is again `{ <member>: { ... } }`).
-// Phase 5j's `project_slot_binding_member` helper must descend
-// through every level without budget-exceeded sentinel surfacing
-// (the dispatch has a `MAX_DEPTH` budget far above 8) AND without
+// The `project_slot_binding_member` helper must descend through
+// every level without budget-exceeded sentinel surfacing (the
+// dispatch has a `MAX_DEPTH` budget far above 8) AND without
 // stack-overflow.
 //
 // Expected: the resolver runs to completion. The depth-budget cap
@@ -580,7 +575,7 @@ defineSlots<{
 
 /// 5j §5.D.5 — `pathological_nested_slot_definitions`.
 ///
-/// 8-level nested slot binding type. Phase 5j's
+/// 8-level nested slot binding type. The
 /// `project_slot_binding_member` helper composes existing variants
 /// to descend through `Function -> params[0].ty -> Member(binding)`;
 /// at every level the binding's type is itself a `Function`-bearing
@@ -778,14 +773,13 @@ fn pathological_self_referential_slot_payload() {
 // resolver MUST catch via its existing recursion guards rather than
 // recursing infinitely.
 //
-// Phase 5k's substitution-layer fix changes how the `TypeExpr::TypeOf`
-// arm dispatches: single-segment first, then a tail
-// `ProjectPath { Navigate }`. The single-segment path is the same
-// `SemanticQueryKey::TypeOf { value_root }` query the pre-Phase-5k
-// branch already used (when path.len() == 1). So the cycle-detection
-// behaviour is governed by the engine's existing dispatch
-// admission table + memo Recursive sentinel — the §5.13 fix only
-// changes the path-decomposition shape, not the cycle gates.
+// The `TypeExpr::TypeOf` arm dispatches single-segment first, then
+// a tail `ProjectPath { Navigate }`. The single-segment path uses
+// `SemanticQueryKey::TypeOf { value_root }` (the same query as
+// when `path.len() == 1`). Cycle-detection behaviour is governed by
+// the engine's existing dispatch admission table + memo Recursive
+// sentinel; the path-decomposition shape does not change the cycle
+// gates.
 //
 // The discriminating proof: terminate-without-stack-overflow + the
 // resolved component-meta surface is materialised (i.e., the cycle
@@ -871,12 +865,12 @@ fn pathological_typeof_substitution_cycle() {
 }
 
 // ===========================================================================
-// Phase 5m §5.D.5 — engine state promotion pathological recursion
+// Engine state promotion: pathological recursion
 // ===========================================================================
 
 const PATHOLOGICAL_ENGINE_STATE_PROMOTION_VUE: &str = r#"<script setup lang="ts">
 // A self-referential type alias whose body re-instantiates itself
-// through a Pick wrapper. The 5m bridge migration routes the resolver
+// through a Pick wrapper. The bridge migration routes the resolver
 // through `project_type_surface_expr_via_host_threaded`; the
 // underlying engine retains its `push_instantiate_active` same-
 // identity guard, so the self-reference must terminate with a

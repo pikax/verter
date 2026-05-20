@@ -1,5 +1,4 @@
-//! §5.D.3 terminal-mode-only-expansion tests for the §5.B path-projection
-//! closures (Phase 5g-supplement backfill for 5e/5f).
+//! Terminal-mode-only-expansion tests for the path-projection closures.
 //!
 //! Per the path-precise rule: intermediate hops run in `Navigate`,
 //! the terminal hop runs in the caller's mode. Each test issues a
@@ -10,12 +9,9 @@
 //! 2. Only the terminal sub-key was published in the caller's
 //!    `Expanded` mode.
 //!
-//! Uses the §5.D.0 r17 instrumentation surface
-//! (`dispatch_trace_for(&key)` → `DispatchTrace::path_decomposition()`
-//! → `SubKey::mode()`) which lives behind bare `#[cfg(test)]` per
-//! r17/N12.
-//!
-//! Plan: §5.D.3 (Phase 5g-supplement.1.B for 5e/5f backfill).
+//! Uses the test-only `dispatch_trace_for(&key)` →
+//! `DispatchTrace::path_decomposition()` → `SubKey::mode()`
+//! instrumentation surface which lives behind bare `#[cfg(test)]`.
 
 use std::sync::Arc;
 
@@ -285,16 +281,16 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_exclude_extract_reducti
     }
 }
 
-/// 5j §5.D.3 — slot-binding-parameter lowering intermediate hops
-/// Navigate, terminal hop Expanded. The
-/// `project_slot_binding_member` helper that Phase 5j adds composes
-/// existing variants and explicitly threads `Navigate` through
-/// `ProjectPath { base, [Member(slot)], Navigate }` (intermediate
-/// hop), then runs the terminal `ProjectPath { base: param0_ty,
-/// [Member(binding)], <caller_mode> }` in the caller's mode. The
-/// path-precise contract (CLAUDE.md "Macro Type Traversal Rule")
-/// applies to ALL path-projection sub-phases including 5j's
-/// helper-composed dispatch.
+/// Slot-binding-parameter lowering: intermediate hops Navigate,
+/// terminal hop Expanded. The `project_slot_binding_member` helper
+/// composes existing variants and explicitly threads `Navigate`
+/// through `ProjectPath { base, [Member(slot)], Navigate }`
+/// (intermediate hop), then runs the terminal
+/// `ProjectPath { base: param0_ty, [Member(binding)], <caller_mode> }`
+/// in the caller's mode. The path-precise contract
+/// (CLAUDE.md "Macro Type Traversal Rule") applies to ALL
+/// path-projection sub-phases including the helper-composed
+/// dispatch tested here.
 ///
 /// The slot-binding-parameter lowering itself does not change the
 /// path-decomposition behaviour (terminal-mode-only expansion is a
@@ -346,10 +342,9 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_slot_binding_lowering()
     }
 }
 
-/// 5k §5.D.3 — value-member typeof substitution intermediate hops
-/// Navigate, terminal hop Expanded. The Phase 5k §5.13 fix in
-/// `shallow_lower_type_expr`'s `TypeExpr::TypeOf` arm explicitly
-/// projects the tail segments via
+/// Value-member typeof substitution: intermediate hops Navigate,
+/// terminal hop Expanded. `shallow_lower_type_expr`'s
+/// `TypeExpr::TypeOf` arm explicitly projects the tail segments via
 /// `ProjectPath { mode: Navigate }` (intermediate, terminal-as-leaf
 /// when only one segment remains). The path-precise contract
 /// (CLAUDE.md "Macro Type Traversal Rule") applies: when an outer
@@ -407,16 +402,16 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_typeof_substitution() {
     }
 }
 
-/// 5m §5.D.3 — `engine_state_promotion` intermediate hops Navigate,
-/// terminal hop Expanded. The Phase 5m caller migration routes the
-/// 18 external engine-method callsites through bridge helpers; the
-/// underlying dispatch path-decomposition contract is unchanged
-/// (CLAUDE.md "Macro Type Traversal Rule"). The discriminating
-/// proof: a multi-hop ProjectPath query in `Expanded` mode produces
-/// a decomposition where intermediate sub-keys ran in `Navigate` and
-/// only the terminal hop ran in `Expanded`.
+/// `engine_state_promotion`: intermediate hops Navigate, terminal
+/// hop Expanded. External engine-method callsites that route through
+/// the bridge helpers must not change the underlying dispatch
+/// path-decomposition contract (CLAUDE.md "Macro Type Traversal
+/// Rule"). The discriminating proof: a multi-hop ProjectPath query
+/// in `Expanded` mode produces a decomposition where intermediate
+/// sub-keys ran in `Navigate` and only the terminal hop ran in
+/// `Expanded`.
 ///
-/// A regression in 5m's bridge migration that accidentally promoted
+/// A regression in the bridge migration that accidentally promoted
 /// intermediate hops to `Expanded` (e.g. by routing route-fast-path
 /// through a sibling family that loses the mode-decomposition) would
 /// surface here as a non-Navigate intermediate.

@@ -683,8 +683,8 @@ fn seed_indexed_ready(
     set
 }
 
-/// Plan §3.4.3 test #1 / D33 reachability — unchanged live file is
-/// not re-lowered across publish cycles.
+/// Reachability invariant: an unchanged live file is not re-lowered
+/// across publish cycles.
 ///
 /// Discriminating predicate: when the same `(canonical,
 /// content_hash)` pair is in `live_publish_set` across two
@@ -743,7 +743,7 @@ fn unchanged_live_file_never_re_lowered_across_publish_cycles() {
     );
 }
 
-/// Plan §3.4.3 test #2 — the four off-store caches absent post-Tier 1.
+/// Architecture invariant: the four off-store caches are absent.
 ///
 /// Discriminating predicate: parse `lib.rs` via syn and assert that
 /// `VerterHost` has no field named `compile_cache`,
@@ -799,7 +799,7 @@ fn four_off_store_caches_absent_post_tier_1() {
     }
 }
 
-/// Plan §3.4.3 test #3 — host_manage thread-locals absent post-Tier 1.
+/// Architecture invariant: host_manage thread-locals are absent.
 ///
 /// Discriminating predicate: every `.rs` source file under
 /// `crates/verter_session/src/host_manage/` has no
@@ -882,7 +882,7 @@ fn host_manage_thread_local_caches_absent_post_tier_1() {
     );
 }
 
-/// Plan §3.4.3 test #4 — `phase_8_allow_list` shrunk to its final shape.
+/// Architecture invariant: `phase_8_allow_list` matches its final shape.
 ///
 /// Discriminating predicate: the architecture-guards allow-list
 /// contains exactly the documented final entries
@@ -942,7 +942,7 @@ fn no_off_store_host_caches_allow_list_shrunk() {
     }
 }
 
-/// Plan §3.4.3 test #5 — eviction-policy tunables exposed via HostConfig.
+/// Architecture invariant: eviction-policy tunables exposed via HostConfig.
 ///
 /// Discriminating predicate: `HostConfig::default()` produces a
 /// config whose `eviction_policy.memory_pressure_threshold ==
@@ -973,7 +973,7 @@ fn eviction_policy_tunables_exposed_via_host_config() {
     assert_eq!(policy.min_floor, config.eviction_policy.min_floor);
 }
 
-/// Plan §3.4.3 test #6 — LRU floor only triggers under memory pressure.
+/// Architecture invariant: the LRU floor only triggers under memory pressure.
 ///
 /// Discriminating predicate: seeded with N entries (well above the
 /// floor), a sweep with `memory_pressure: false` MUST leave entry

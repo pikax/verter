@@ -3662,7 +3662,7 @@ export * from './tv'
 }
 
 // ---------------------------------------------------------------------------
-// Phase 0.1: Inherited props/emits/slots through companion types
+// Inherited props/emits/slots through companion types.
 // These tests verify that extends + Omit/Pick chains resolve correctly
 // when the base type comes from a companion (cross-file import).
 // ---------------------------------------------------------------------------
@@ -4010,10 +4010,9 @@ type Test = TableSlots
 
 #[test]
 fn resolution_depth_is_bounded_per_call_chain() {
-    // Phase 1 §4.7 test 5.7 Test 3. Updated in Phase D §5.10 WIP-P — the
-    // parser cap is renamed `PARSER_SYNTACTIC_DEPTH_LIMIT = 256` and is
-    // documented as syntactic stack-safety ( Change H), not a
-    // semantic budget.
+    // Discriminating invariant: the parser cap
+    // `PARSER_SYNTACTIC_DEPTH_LIMIT = 256` enforces syntactic
+    // stack-safety, not a semantic budget.
     //
     // Depth-as-argument refactor replaced the `Rc<Cell<u16>>` in
     // `TypeResolutionContext` with a module-local thread-local. Deeply
@@ -4098,10 +4097,10 @@ fn parser_syntactic_depth_limit_records_structured_failure_shape() {
 
 #[test]
 fn resolved_elements_supports_deep_partial_eq() {
-    // Phase 1 §4.7 Commit B prerequisite for the `parser_cache_audit` feature
-    // (§2.7 item 7). `PartialEq` on `ResolvedElements`, `ResolvedProp`, and
-    // `ResolvedEmit` must be structural so cache-hit / recomputed-slow-path
-    // equality can be asserted.
+    // Prerequisite for the `parser_cache_audit` feature: `PartialEq`
+    // on `ResolvedElements`, `ResolvedProp`, and `ResolvedEmit` must
+    // be structural so cache-hit / recomputed-slow-path equality can
+    // be asserted.
     let (resolved_a, _) =
         resolve_with_ctx("interface Props { label: string; count?: number }\ntype Test = Props\n");
     let (resolved_b, _) =
@@ -4114,7 +4113,9 @@ fn resolved_elements_supports_deep_partial_eq() {
 
 #[test]
 fn type_resolution_context_handle_is_send_and_sync() {
-    // Phase 1 §4.7 test 5.7 Test 1 (fallback (a) + (b) combined).
+    // Discriminating invariant: `TypeResolutionContext`'s handle is
+    // `Send + Sync` so the resolved-named-types cache can live on the
+    // host-owned DashMap.
     //
     // Pre-fix: `TypeResolutionContext` carries `Rc<RefCell<...>>` and
     // `Rc<Cell<u16>>` — both are `!Send + !Sync`, which blocks moving the

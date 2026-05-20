@@ -1,7 +1,6 @@
-//! Step 3 closure perf probes (sub-task 3.0) + memo footprint audit
-//! (sub-task 3.3). Plan: D:/tmp/architectural-debt-closure.md (rev 10).
+//! Closure perf probes + memo footprint audit.
 //!
-//! ## Sub-task 3.0 — perf probes
+//! ## Closure perf probes
 //!
 //! Three probes verify the host-DB-routed read-through pattern does
 //! not regress:
@@ -14,7 +13,7 @@
 //! - `dispatch_lowering_thundering_herd_does_not_collapse`:
 //!   100 threads on the same key — multiplier ≤ 1.2× sequential.
 //!
-//! ## Sub-task 3.3 — memo footprint audit
+//! ## Memo footprint audit
 //!
 //! `instantiate_memo_node_count_within_budget`: the project-global
 //! semantic graph's node count after a fixed query suite stays
@@ -246,12 +245,11 @@ fn dispatch_lowering_thundering_herd_does_not_collapse() {
 
 #[test]
 fn instantiate_memo_node_count_within_budget() {
-    // Sub-task 3.3: after Step 3's host-DB migration, the project-
-    // global semantic graph's node count for a fixed query suite must
-    // not exceed the pre-Step-3 baseline by >20%. The baseline below
-    // is captured empirically — when the test fails because the count
-    // grew, investigate whether the read-through pattern is
-    // unintentionally adding new lowerings.
+    // Memo footprint contract: the project-global semantic graph's node
+    // count for a fixed query suite must not exceed the budget below by
+    // >20%. The budget is captured empirically — when the test fails
+    // because the count grew, investigate whether the read-through
+    // pattern is unintentionally adding new lowerings.
     //
     // The 1500 figure is conservative: on the EditorToolbar fixture
     // post-Step-2 the workspace measured ~700-1100 nodes depending on

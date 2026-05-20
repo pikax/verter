@@ -1008,7 +1008,7 @@ fn relative_import_resolves_via_directory_index_file() {
     );
 }
 
-/// Relative import `./type` resolves to `./type.d.ts` via Phase 3 probing.
+/// Relative import `./type` resolves to `./type.d.ts` via project-resolver probing.
 #[test]
 fn relative_import_resolves_dts_extension() {
     let host = strict_host();
@@ -1020,7 +1020,7 @@ fn relative_import_resolves_dts_extension() {
         "/src/components/type.d.ts",
         "export interface Props { order: string | null }\nexport interface Emits { updatePrice: [number]; updateStatus: [string]; }",
     );
-    // No set_import_dependencies — Phase 3 probing should find /src/components/type.d.ts
+    // No set_import_dependencies — project-resolver probing should find /src/components/type.d.ts
 
     let response = host
         .get_virtual_file(VirtualQuery {
@@ -1187,8 +1187,8 @@ fn directory_index_resolution_follows_extension_priority() {
 #[test]
 fn candidate_list_resolves_to_first_loaded() {
     let host = strict_host();
-    // Configure workspace with @/ alias via host wrapper (Phase 6b sub-plan
-    // §6b.D2b reroute — `host.workspace()` is `pub(crate)`).
+    // Configure workspace with @/ alias via host wrapper
+    // (`host.workspace()` is `pub(crate)`).
     host.configure_projects(vec![
         verter_semantic::analysis::project_resolver::IdeProjectConfig {
             root: "/src".to_string(),
@@ -3370,7 +3370,8 @@ fn upsert_syncs_relative_import_edges_to_workspace() {
 
     // Set up a project with a resolver so that relative imports can be resolved
     // by the VFS. Without a project resolver, the VFS can't resolve relative
-    // specifiers (it doesn't do bare path probing like the host's Phase 4).
+    // specifiers (it doesn't do bare path probing like the host's
+    // workspace-backed fallback).
     ws.add_explicit_project(verter_workspace::VfsProjectConfig {
         root: "/src".to_string(),
         rank: verter_workspace::ProjectRank::Explicit,
@@ -3509,10 +3510,11 @@ fn workspace_resolution_used_for_aliased_imports() {
         "<script setup lang=\"ts\">\nimport { helper } from '@/utils'\n</script>\n<template><div>{{ helper() }}</div></template>",
     );
 
-    // Now test resolution: the host's Phase 1 (import_routes) will miss
-    // because no set_import_dependencies was called. Phase 3 (project_resolver)
-    // will also miss because configure_projects was not called. But the workspace
-    // has the @/ alias configured, so workspace-backed resolution should find it.
+    // Now test resolution: the host's `import_routes` fast path will miss
+    // because no set_import_dependencies was called. The `project_resolver`
+    // fast path will also miss because configure_projects was not called.
+    // But the workspace has the @/ alias configured, so workspace-backed
+    // resolution should find it.
     let result = host.resolve_loaded_dependency_canonical(
         "/project/src/Comp.vue",
         "@/utils",
@@ -3566,7 +3568,7 @@ fn workspace_resolution_does_not_override_exact_resolution() {
         verter_workspace::ResolveRequestKind::EsmImport,
     );
 
-    // Phase 1 exact resolution should take priority
+    // The `import_routes` exact-match fast path should take priority
     assert_eq!(
         result,
         Some("/src/exact-target.ts".to_string()),
@@ -4121,7 +4123,7 @@ const AFTER_CLOSE = 1;
 }
 
 // ===========================================================================
-// Phase 5m §5.13a.1.1 + §5.13a.1.3 — host helper tests
+// Host helper tests
 // ===========================================================================
 
 #[test]

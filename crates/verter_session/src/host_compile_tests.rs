@@ -1,5 +1,5 @@
-//! Tests for [`crate::host_compile`] — Phase 9b host-backed parallel
-//! SFC batch compile.
+//! Tests for [`crate::host_compile`] — host-backed parallel SFC batch
+//! compile.
 //!
 //! Test matrix (sub-):
 //!
@@ -82,7 +82,7 @@ fn compile_many_returns_in_input_order() {
         assert_eq!(
             entry.canonical_id,
             format!("/A{i}.vue"),
-            "phase 3 must preserve input position {i}"
+            "Stage D must preserve input position {i}"
         );
         assert!(
             entry.errors.is_empty(),
@@ -254,7 +254,7 @@ fn compile_many_dedup_conflicting_source_rejects_entire_group() {
                 .errors
                 .iter()
                 .any(|e| e.contains("duplicate canonical_id with conflicting source")),
-            "phase 1 should reject /A.vue at position {i} with duplicate-conflict error: {:?}",
+            "Stage B should reject /A.vue at position {i} with duplicate-conflict error: {:?}",
             entry.errors
         );
         assert!(
@@ -312,7 +312,7 @@ fn compile_many_compiles_each_canonical_once() {
     assert_eq!(
         entries.len(),
         5,
-        "phase 3 must fan out to all 5 input positions"
+        "Stage D must fan out to all 5 input positions"
     );
     assert_eq!(
         after - baseline,
@@ -322,12 +322,12 @@ fn compile_many_compiles_each_canonical_once() {
         after - baseline
     );
 
-    // Phase 3 fan-out clones one Arc to all 5 positions.
+    // Stage D fan-out clones one Arc to all 5 positions.
     for i in 1..5 {
         assert!(
             Arc::ptr_eq(&entries[0].code, &entries[i].code),
             "entries[0].code and entries[{i}].code must share the same Arc allocation \
-             (phase 3 clones the Arc, not the string)"
+             (Stage D clones the Arc, not the string)"
         );
     }
     for entry in &entries {
@@ -529,9 +529,9 @@ fn compile_many_throughput_smoke() {
 
     // CARGO_TARGET_TMPDIR is only defined for integration tests (a
     // separate `tests/` binary); inline `#[cfg(test)] mod` tests use
-    // CARGO_MANIFEST_DIR/target/tmp instead. Plan §3.6 specifies
-    // `env!("CARGO_TARGET_TMPDIR")` but that path is for integration
-    // tests; the inline-mod equivalent is the workspace target dir.
+    // CARGO_MANIFEST_DIR/target/tmp instead. The integration-test
+    // form `env!("CARGO_TARGET_TMPDIR")` is for integration tests;
+    // the inline-mod equivalent is the workspace target dir.
     let out_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -547,7 +547,7 @@ fn compile_many_throughput_smoke() {
     std::fs::write(&out_path, serde_json::to_vec_pretty(&json_blob).unwrap())
         .expect("write phase09b-bench.json");
     eprintln!(
-        "phase-09b throughput smoke wrote: {} (cold={:.2}ms, warm={:.2}ms, hit_ratio={})",
+        "throughput smoke wrote: {} (cold={:.2}ms, warm={:.2}ms, hit_ratio={})",
         out_path.display(),
         cold_ms,
         warm_ms,

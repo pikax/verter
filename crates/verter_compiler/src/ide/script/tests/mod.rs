@@ -1,4 +1,4 @@
-//! IDE TSX script-generation test cohort (Phase 11d test sibling root).
+//! IDE TSX script-generation test cohort (sibling-root module).
 //!
 //! `tests/common.rs` hosts the shared `gen_tsx_script*` and `gen_jsx_script`
 //! helpers; the per-cohort sibling files alongside this `mod.rs` resolve

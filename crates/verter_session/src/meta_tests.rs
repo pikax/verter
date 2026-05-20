@@ -2903,8 +2903,8 @@ defineEmits<AppEmits>()
 
 #[test]
 fn get_component_meta_resolves_imported_helper_aliases_without_dep_env_merge() {
-    // Phase 4B (architectural-debt-closure rev 11.3): the publication policy
-    // pass `apply_component_meta_resolution_policy` resolves project-local
+    // Publication-policy contract: the policy pass
+    // `apply_component_meta_resolution_policy` resolves project-local
     // non-Props refs (Rule 3) — `Status` is a project-local alias, so the
     // public meta carries the resolved Union literal shape. Adapter pipelines
     // (storybook, json-schema, zod, histoire) require the resolved Object/
@@ -2948,7 +2948,7 @@ defineProps<ExternalProps>()
             TypeExpr::string_literal("idle"),
             TypeExpr::string_literal("busy"),
         ]),
-        "Phase 4B: publication policy resolves project-local non-Props alias body"
+        "publication policy must resolve project-local non-Props alias body"
     );
 }
 
@@ -12264,16 +12264,16 @@ defineSlots<ButtonSlots>()
         "slot binding contract should still point at the requested helper route, got {:?}",
         ui_binding.raw_type
     );
-    // Plan Step 2 Outcome 3 (architectural-debt-closure rev 10): with
-    // rematerialize deleted, compute is the single resolution authority.
-    // The meta carries the lazy `Button['ui']` indexed-access form;
-    // consumers navigate it via dispatch when they need the resolved
-    // members (e.g. `base`, `label`). Pre-Outcome-3 rematerialize
-    // eagerly resolved indexed-access through imported helper aliases;
-    // that policy is gone and the meta's binding type stays symbolic
-    // — same shape as the resolved registry's `ButtonSlots.default`
-    // params asserted above. The `raw_type = "Button['ui']"` contract
-    // (line 12099) is the canonical form consumers can re-resolve from.
+    // Resolution-authority contract: compute is the single resolution
+    // authority. The meta carries the lazy `Button['ui']` indexed-access
+    // form; consumers navigate it via dispatch when they need the
+    // resolved members (e.g. `base`, `label`). A regression that re-
+    // introduces eager indexed-access resolution through imported
+    // helper aliases would inline the members and fail this guard.
+    // The meta's binding type stays symbolic — same shape as the
+    // resolved registry's `ButtonSlots.default` params asserted above.
+    // The `raw_type = "Button['ui']"` contract (line 12099) is the
+    // canonical form consumers can re-resolve from.
     assert!(
         matches!(&ui_binding.type_expr, TypeExpr::IndexedAccess { .. }),
         "post-Outcome-3: slot binding stays symbolic IndexedAccess, got {:?}",
@@ -13946,10 +13946,10 @@ defineProps<{
         }
     }
 
-    // Phase 4B (architectural-debt-closure rev 11.3): the publication policy
-    // pass keeps *Props-suffix imports symbolic in the public meta so the
-    // compat layer (`compat/checker.ts`, `vue-component-meta` interop) emits
-    // named opaque schemas instead of inlined member properties. Rule 4
+    // Publication-policy contract: the policy pass keeps *Props-suffix
+    // imports symbolic in the public meta so the compat layer
+    // (`compat/checker.ts`, `vue-component-meta` interop) emits named
+    // opaque schemas instead of inlined member properties. Rule 4
     // covers bare *Props refs; Rule 5 (structural recursion) leaves the
     // *Props leaf unchanged inside Array/Union/Intersection/Pick/Omit
     // wrappers. Rule 1 keeps the symbolic shape for refs whose declaration
@@ -14014,13 +14014,12 @@ defineProps<{
 }
 
 // `public_component_meta_keeps_simple_imported_alias_union_surface`
-// retired in $5.8 WIP-W ($4.1 EXPLICIT_TEST_IDS Category 3): the
-// characterisation depended on the retired solver's
-// `should_preserve_shallow_field_expr` heuristic which pinned a
-// symbolic-vs-concrete mix at a specific granularity. Dispatch's
-// `project_type_surface_expr` expands via the hot path and no longer
-// emits that pinned shape. Import/alias resolution is covered by the
-// surviving dispatch-backed component-meta tests.
+// is intentionally not part of this suite: its characterisation
+// depended on a `should_preserve_shallow_field_expr` heuristic that
+// pinned a symbolic-vs-concrete mix at a specific granularity.
+// Dispatch's `project_type_surface_expr` expands via the hot path and
+// does not emit that pinned shape. Import/alias resolution is covered
+// by the surviving dispatch-backed component-meta tests.
 
 #[test]
 fn imported_utility_wrapped_field_stays_symbolic_in_evaluated_types() {
@@ -14329,10 +14328,10 @@ defineProps<{
         "publishing the alias should not recurse into package-backed helpers"
     );
 
-    // D-Cutover §5.8 WIP-W: `TypeSurfaceDb` retired — registry
-    // whole-surface warming observability moved to the semantic-graph
-    // memo. The behavioural contract (package unions stay symbolic in
-    // the registry) is already pinned by the assertions above: the
+    // Registry whole-surface warming observability lives on the
+    // semantic-graph memo, not on a separate `TypeSurfaceDb`. The
+    // behavioural contract (package unions stay symbolic in the
+    // registry) is already pinned by the assertions above: the
     // `.type_expr` is a `Ref`, and `VNode` is absent from the
     // registry — either would break if the whole-surface projection
     // had actually warmed and substituted.
@@ -15091,14 +15090,13 @@ const props = defineProps<ButtonProps>()
 }
 
 /// The JSDoc enrichment path for imported props goes through the host-
-/// cached parsed program + cached external type analysis. Pre-Phase-4b
-/// this test asserted that the enrichment path did NOT fall back to a
-/// raw-source reparse helper (which allocated a fresh oxc arena and
-/// reparsed dependency source). Post-Phase-4b that raw-source reparse
-/// helper is deleted — the architectural guarantee is now enforced
-/// statically by the `no_text_based_macro_surface_projection_helpers`
-/// architecture guard. The behaviour assertion (JSDoc descriptions
-/// propagate through imported `Omit<>`) is preserved here.
+/// cached parsed program + cached external type analysis. The
+/// enrichment path must NOT fall back to a raw-source reparse helper
+/// (which would allocate a fresh oxc arena and reparse dependency
+/// source). That architectural guarantee is enforced statically by
+/// the `no_text_based_macro_surface_projection_helpers` architecture
+/// guard; this test pins the behavioural half (JSDoc descriptions
+/// propagate through imported `Omit<>`).
 ///
 /// This scenario triggers the JSDoc-enrichment fallback (not the main
 /// resolver path) by extending imported types through `Omit<>`, which leaves

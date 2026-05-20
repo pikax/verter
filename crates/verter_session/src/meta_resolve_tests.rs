@@ -150,21 +150,15 @@ fn imported_registry_seed_refresh_keeps_symbolic_imported_surfaces_refreshable()
 
 #[test]
 fn append_component_meta_registry_entries_seeds_explicit_object_surface_for_imported_props() {
-    // Phase 4b §4b.3 — the prior assertion ("explicit seeded object
-    // surfaces skip the imported-registry refresh") depended on
-    // `imported_declaration_surface_is_authoritative` returning true,
-    // which itself depends on the source-text declaration body
-    // having no heritage markers (`extends`, `typeof`, etc.). Under
-    // the graph-only resolver, declaration text is always None, so
-    // that function returns false unconditionally and the
-    // refresh-skipping optimization never engages.
-    //
-    // The architecturally correct invariant that survives is the
-    // first half: the direct imported macro root seeds the initial
-    // registry with an explicit object surface (driven by the
-    // `imported_elements` graph). The optimization to skip the
-    // append-time refresh is a separate concern that is now subject
-    // to the graph-only refresh path.
+    // Discriminating invariant: the direct imported macro root must
+    // seed the initial registry with an explicit object surface
+    // (driven by the `imported_elements` graph). An optimization to
+    // skip the imported-registry refresh (gated on
+    // `imported_declaration_surface_is_authoritative`) would require
+    // the source-text declaration body to be retained without
+    // heritage markers; the graph-only resolver does not retain
+    // declaration text, so that optimization does not engage and the
+    // seeding half is the surviving discriminator.
     let project = make_project();
     project
         .upsert_base("/src/types.ts", "export interface Props { label: string }")
@@ -1735,10 +1729,11 @@ defineProps<Props>()
         props_macro.declaration.span.end > props_macro.declaration.span.start,
         "native declaration metadata should preserve a non-empty declaration span"
     );
-    // Phase 4b §4b.3 — declaration text recovery via source-reparse
-    // is retired. Native declaration metadata still preserves
-    // kind/span/declaration_id graph-natively (asserted above);
-    // declaration text is always None under the graph-only resolver.
+    // Discriminating invariant: declaration text recovery via
+    // source-reparse is not supported. Native declaration metadata
+    // still preserves kind/span/declaration_id graph-natively
+    // (asserted above); declaration text is always None under the
+    // graph-only resolver.
     assert_eq!(
         props_macro.declaration.text, None,
         "graph-only resolver: declaration text is no longer populated"
@@ -1990,8 +1985,9 @@ fn registry_decl_materialization_skips_raw_snapshot_fallback_for_snapshotless_im
         .expect("seeded dependency should expose Props through the prepared declaration cache");
 
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(&host);
-    // D-Cutover §5.8: `CMQE::solve_scoped` retired; dispatch's
-    // `project_type_surface_expr` is the sole scoped-lookup entry point.
+    // Dispatch's `project_type_surface_expr` is the sole scoped-lookup
+    // entry point; the resolver must not introduce a parallel
+    // `solve_scoped`-style surface.
     let materialized = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
         &mut query_engine,
         "/src/types.ts",
@@ -4127,10 +4123,11 @@ defineProps<Props>()
         registry_entry.declaration.kind,
         crate::meta_resolve::ResolvedDeclarationKind::Interface,
     );
-    // Phase 4b §4b.3 — declaration text recovery via source-reparse
-    // is retired. The type-registry metadata still retains
-    // kind/declaration_id graph-natively (asserted above); the
-    // declaration text field is None under the graph-only resolver.
+    // Discriminating invariant: declaration text recovery via
+    // source-reparse is not supported. The type-registry metadata
+    // still retains kind/declaration_id graph-natively (asserted
+    // above); the declaration text field is None under the graph-
+    // only resolver.
     assert_eq!(
         registry_entry.declaration.text, None,
         "graph-only resolver: declaration text is no longer populated"
@@ -4138,7 +4135,7 @@ defineProps<Props>()
 }
 
 // ===========================================================================
-// Phase 1: Architecture — Overlay safety
+// Overlay safety
 // ===========================================================================
 
 // Overlay-isolation invariant: a session view carrying an overlay-Upsert
@@ -4386,14 +4383,14 @@ fn resolve_component_meta_returns_none_for_missing_file() {
     );
 }
 
-// `resolve_component_meta_populates_compute_audit_when_enabled`
-// retired in $5.8 WIP-W (plan $5.9 Change T): the
-// `ComponentMetaComputeAudit` telemetry block was solver-owned
-// (step counters / cache-hit counters on the retired `TypeQueryEngine`);
-// dispatch publishes per-query stats through `SemanticGraphStats` and
-// the solver-specific audit block is gone. The sister test
+// `resolve_component_meta_populates_compute_audit_when_enabled` is
+// intentionally not part of this suite. The previous
+// `ComponentMetaComputeAudit` telemetry block was a solver-owned
+// surface (step counters / cache-hit counters on a solver-specific
+// engine) and is not part of the final design; dispatch publishes
+// per-query stats through `SemanticGraphStats`. The sister test
 // `resolve_component_meta_leaves_compute_audit_empty_when_disabled`
-// still runs and asserts the opt-out behaviour.
+// runs below and asserts the opt-out behaviour.
 
 #[test]
 fn resolve_component_meta_leaves_compute_audit_empty_when_disabled() {
@@ -4521,31 +4518,22 @@ defineProps<Props>()
 // B1: Declaration-aware batch scope isolation and reuse
 // ===========================================================================
 //
-// D-Cutover §5.8 WIP-W: `CMQE::solve_scoped` + `scoped_cache` retired
-// with the solver subsystem. The two cache-observing tests that used to
-// live here —
-// `component_meta_query_engine_caches_by_scope_and_name`
-// (`scoped_cache_len == 1` + `solve_count == 1` after a repeat solve) and
-// `component_meta_query_engine_different_scopes_do_not_alias`
-// (`scoped_cache_len == 2` + `solve_count == 2` across two scopes) —
-// tested the retired solver-cache identity, not observable component-
-// meta behaviour. Dispatch's `project_type_surface_expr` replaces the
-// access pattern at every production call site; cross-scope
-// non-aliasing is already covered by the dispatch memo's identity
-// contract (see `project_semantic_dispatch::tests`).
-
-// D-Cutover §5.8 WIP-W: `debug_solver_host_for_scope` retired with
-// the SessionSolverHost bridge. The scope-payload cache identity
-// contract lives on `CMQE::scope_payload_for_scope` directly (returns
-// `Option<Arc<DeclarationScopePayload>>`), and is exercised through
+// `component_meta_query_engine_caches_by_scope_and_name` /
+// `component_meta_query_engine_different_scopes_do_not_alias` are
+// intentionally not part of this suite — they pinned a solver-cache
+// identity (`scoped_cache_len` + `solve_count`) that is not part of
+// the final design. Dispatch's `project_type_surface_expr` replaces
+// the access pattern at every production call site; cross-scope
+// non-aliasing is covered by the dispatch memo's identity contract
+// (see `project_semantic_dispatch::tests`).
+//
+// `debug_solver_host_for_scope` and the
+// `HostComponentMetaResolver.shared_owner_engine` field are also not
+// part of the final design. Scope-payload cache identity lives on
+// `CMQE::scope_payload_for_scope` directly (returns
+// `Option<Arc<DeclarationScopePayload>>`) and is exercised through
 // repeated dispatch calls in the surviving component-meta tests.
-
-// D-Cutover §5.8 WIP-W: `resolve_component_meta_parts_populates_shared_owner_engine`
-// retired. The test pinned the `HostComponentMetaResolver.shared_owner_engine`
-// field (a `TypeQueryEngine` bridge) and asserted `engine.solve_count() > 0`
-// after Phase 1. §5.8 deleted both the field and the engine type; dispatch now
-// owns the solve path, so there is no observable engine state to assert against.
-// Cross-file imported type resolution is already covered by the surviving
+// Cross-file imported type resolution is covered by the surviving
 // dispatch-backed component-meta tests.
 
 // ===========================================================================
@@ -7191,11 +7179,10 @@ withDefaults(defineProps<Props>(), {
 }
 
 // `produce_one_macro_object_shape_skips_redundant_projection_for_generic_ref_solver_shapes`
-// retired in $5.8 WIP-W ($4.1 EXPLICIT_TEST_IDS Category 3): asserted
-// `solve_count == 1` on the retired `TypeQueryEngine` projection-rescue
-// path. Dispatch replaces the projection-rescue pass with a memo hit
-// in `SemanticGraphStore`, so the "skips a second solver call"
-// observable is retired with the solver. The sister test
+// is intentionally not part of this suite: it pinned `solve_count ==
+// 1` on a solver-specific projection-rescue path that is not part of
+// the final design. Dispatch replaces the projection-rescue pass
+// with a memo hit in `SemanticGraphStore`. The sister test
 // `produce_one_macro_object_shape_prefers_root_projection_for_generic_non_object_aliases`
 // still covers the projection route.
 
@@ -8256,12 +8243,11 @@ defineProps<ColorModeSelectProps>()
 
 // `produce_one_macro_object_shape_skips_projection_rescue_for_nested_indexed_property_types`
 // and `produce_one_macro_object_shape_keeps_projection_rescue_for_indexed_access_aliases`
-// retired in $5.8 WIP-W ($4.1 EXPLICIT_TEST_IDS Category 3): both
-// asserted `solve_count == 0 / 2` on the retired solver's rescue
-// pass. Without a solver the counter is always zero and the
-// predicates no longer discriminate. Projection routing is covered
-// end-to-end by `materialize_member_surface_expr_*` and the
-// generic_ref rescue preservation tests below.
+// are intentionally not part of this suite: both asserted
+// `solve_count == 0 / 2` on a solver-specific rescue pass that is not
+// part of the final design. Projection routing is covered end-to-end
+// by `materialize_member_surface_expr_*` and the generic_ref rescue
+// preservation tests below.
 
 #[test]
 fn materialize_member_surface_expr_reuses_request_local_cache() {
@@ -8658,7 +8644,7 @@ defineProps<TreeNode>()
 }
 
 // ===========================================================================
-// Step 0 spikes — Architectural Debt Closure Plan, revision 10.
+// Instrumentation spikes.
 //
 // These tests are PRE-FLIGHT instrumentation only. They land alongside
 // the test-only `crate::spike_instrumentation` module + the eleven
@@ -8831,17 +8817,15 @@ fn spike_classify_engine_cache_work_origin() {
         "owner_collection_exprs",
         "prepared_target_cache",
         "materialize_memo",
-        // `materialized_member_surfaces` removed post-Phase-9 cutover
-        // (): the engine's per-request mirror that fronted
-        // the legacy walker's `materialized_member_surface_db` is dead
-        //  — `query_engine.materialize_member_surface_expr`
-        // now delegates to the `materialize_component_meta_structure`
+        // `materialized_member_surfaces` is not part of the engine's
+        // mirror: `query_engine.materialize_member_surface_expr`
+        // delegates to the `materialize_component_meta_structure`
         // entry which publishes through `MaterializeStructureDb`. The
-        // dead cache is dual-guarded by `tests/no_legacy_walker.rs`'s
-        // static-grep tombstone (the inner walker helpers that were
-        // the cache's sole consumers) and by the engine's
-        // `materialized_member_surface_cache_len()` test helper now
-        // delegating to `MaterializeStructureDb::live_count()`.
+        // dead-cache invariant is dual-guarded by
+        // `tests/no_legacy_walker.rs`'s static-grep tombstone (the
+        // inner walker helpers that were the cache's sole consumers)
+        // and by the engine's `materialized_member_surface_cache_len()`
+        // test helper delegating to `MaterializeStructureDb::live_count()`.
         "prepared_surface_cache",
         "prepared_member_cache",
         "routed_expr_surface_cache",
@@ -10064,13 +10048,13 @@ mod node_predicates_tests {
         }
     }
 
-    /// Plan §4.4 / Codex2 P0 #3: `Pick<Foo<T>, 'a'>` — generic root
+    /// Route-extraction contract: `Pick<Foo<T>, 'a'>` — generic root
     /// is accepted; the extractor recurses into `args[0]` to find the
     /// actual root identity (`Foo`) and preserves the generic
-    /// arguments via `RouteExtraction.root_args`. This replaces the
-    /// rev-7 generic-root rejection: Codex2 P0 #3 requires the route
-    /// branch to project `Pick<Foo<T>, 'a'>` shapes through dispatch
-    /// with the original carriers.
+    /// arguments via `RouteExtraction.root_args`. The route branch
+    /// must project `Pick<Foo<T>, 'a'>` shapes through dispatch with
+    /// the original carriers (rejecting generic roots here would
+    /// break member-projection over generic helpers).
     #[test]
     fn extract_route_accepts_generic_root_pick_with_root_args() {
         let project = make_project();

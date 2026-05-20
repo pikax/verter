@@ -57,7 +57,7 @@ fn pick_callable_descent_count_for(project: &Arc<MetaProject>, canonical: &str) 
 }
 
 // ===========================================================================
-// Phase 10 — Pick callback-payload preservation (Issue #10)
+// Pick callback-payload preservation
 // ===========================================================================
 
 // ── Positive: package-backed callback parameter is preserved symbolically ──
@@ -283,7 +283,7 @@ fn pick_imported_props_actions_with_full_chatmessages_keys_returns_within_budget
 }
 
 // ===========================================================================
-// Phase 12.A13 — selective Pick + symbolic Omit on package-backed targets
+// Selective Pick + symbolic Omit on package-backed targets
 // ===========================================================================
 
 /// Counter name parametric on the declaration name. Returned by
@@ -353,12 +353,12 @@ defineProps<Pick<LargeExternalInterface_B_B5, 'm001' | 'm002'>>();
 <template><div /></template>
 "#;
 
-/// Phase 12.A13 — `Pick<package_backed, K>` where the target has 100
-/// members but `K = {'m001', 'm002'}`. The resolved prop surface MUST
-/// contain ONLY the 2 picked members (selective expansion, O(K)),
-/// NOT all 100. The counter
-/// `member_materialize_calls::LargeExternalInterface_B_B5`, when the
-/// selective-Pick path fires through the policy walker, equals K.
+/// `Pick<package_backed, K>` where the target has 100 members but
+/// `K = {'m001', 'm002'}`. The resolved prop surface MUST contain
+/// ONLY the 2 picked members (selective expansion, O(K)), NOT all
+/// 100. The counter
+/// `member_materialize_calls::LargeExternalInterface_B_B5`, when
+/// the selective-Pick path fires through the policy walker, equals K.
 #[test]
 fn pick_external_interface_only_materializes_picked_members() {
     let project = build_hermetic_project(&[
@@ -409,11 +409,11 @@ defineProps<Pick<WorkspaceLocalInterface, 'one'>>();
 <template><div /></template>
 "#;
 
-/// Phase 12.A13 counterfixture — `Pick<WorkspaceLocalInterface,
-/// 'one'>` where the target is workspace-owned. Selective expansion
-/// MUST NOT preempt the canonical materialisation path (B-Bm Phase 11
-/// owns that path); the per-decl member-materialize counter for the
-/// workspace-local target MUST be 0 (selective path declined).
+/// Counterfixture — `Pick<WorkspaceLocalInterface, 'one'>` where the
+/// target is workspace-owned. Selective expansion MUST NOT preempt
+/// the canonical materialisation path; the per-decl member-
+/// materialize counter for the workspace-local target MUST be 0
+/// (selective path declined).
 #[test]
 fn pick_workspace_local_interface_full_canonical_reuse() {
     let project = build_hermetic_project(&[("/workspace/src/PickLocal.vue", PICK_LOCAL_VUE)]);
@@ -443,8 +443,8 @@ defineProps<{
 <template><div /></template>
 "#;
 
-/// Phase 12.A13 — `Omit<package_backed, K>`. The result MUST stay
-/// symbolic — no concrete object enumeration. The counter
+/// `Omit<package_backed, K>`. The result MUST stay symbolic — no
+/// concrete object enumeration. The counter
 /// `member_materialize_calls::LargeExternalInterface_B_B5` MUST be 0.
 #[test]
 fn omit_external_interface_stays_symbolic() {
@@ -505,12 +505,11 @@ defineProps<{
 <template><div /></template>
 "#;
 
-/// Phase 12.A13 counterfixture — `Omit<WorkspaceLocalInterface,
-/// 'one'>` on a workspace-owned target. The canonical reuse path
-/// (Phase 11 / §6.5) must run; symbolic preservation MUST NOT
-/// preempt. The per-decl member-materialize counter for the
-/// workspace-local target MUST be 0 (the symbolic path doesn't fire
-/// for workspace-local targets).
+/// Counterfixture — `Omit<WorkspaceLocalInterface, 'one'>` on a
+/// workspace-owned target. The canonical reuse path must run;
+/// symbolic preservation MUST NOT preempt. The per-decl member-
+/// materialize counter for the workspace-local target MUST be 0
+/// (the symbolic path doesn't fire for workspace-local targets).
 #[test]
 fn omit_workspace_local_interface_full_canonical_reuse() {
     let project = build_hermetic_project(&[("/workspace/src/OmitLocal.vue", OMIT_LOCAL_VUE)]);
@@ -540,12 +539,11 @@ defineProps<{
 <template><div /></template>
 "#;
 
-/// Phase 12.A13 counterfixture — consumer indexes into a symbolic
-/// `Omit<..., 'm001'>['m002']`. The indexed-access predicate (Phase 6
-/// / §6.3) MUST reduce this to the concrete `m002` type without
-/// forcing concrete enumeration of the entire 100-member interface.
-/// The counter MUST be at most 1 (only `m002` is materialised, not
-/// the entire body).
+/// Counterfixture — consumer indexes into a symbolic
+/// `Omit<..., 'm001'>['m002']`. The indexed-access predicate MUST
+/// reduce this to the concrete `m002` type without forcing concrete
+/// enumeration of the entire 100-member interface. The counter MUST
+/// be at most 1 (only `m002` is materialised, not the entire body).
 #[test]
 fn consumer_indexed_access_through_symbolic_omit_works() {
     let project = build_hermetic_project(&[

@@ -1048,14 +1048,14 @@ export { RouteLocationRaw as Lt, St, vt }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// W2.5 — `expand_macro_types_impl_with_expander` reads
-// `field.type_expr` / `field.payload_expr` / `binding.binding_expr`
-// directly, never reparsing `type_annotation` text. The discriminator is
-// to populate every typed field with a structural shape that the matching
-// raw `*_annotation` text does NOT describe — pre-cutover the function
-// would have reparsed the text and produced the WRONG shape; post-cutover
-// it walks the typed form and the closure receives the producer-supplied
-// expression unchanged.
+// Discriminating invariant: `expand_macro_types_impl_with_expander`
+// reads `field.type_expr` / `field.payload_expr` / `binding.binding_expr`
+// directly, never reparsing `type_annotation` text. The probe is to
+// populate every typed field with a structural shape that the matching
+// raw `*_annotation` text does NOT describe — if expansion ever falls
+// back to reparsing the text it would produce the WRONG shape; the
+// expected behaviour is that it walks the typed form and the closure
+// receives the producer-supplied expression unchanged.
 // ───────────────────────────────────────────────────────────────────────────
 fn passthrough_expander(
 ) -> impl FnMut(FieldExpansionContext, &TypeExpr) -> ExpansionResult<ExpandedNormalizedExpr> {
@@ -1068,8 +1068,8 @@ fn make_synth_typed_prop(name: &str, typed: TypeExpr) -> AnalyzedPropField {
         is_optional: false,
         span: verter_span::Span::default(),
         // `type_annotation` text deliberately does NOT describe the typed
-        // shape: pre-cutover reparse would have produced a different
-        // structure, post-cutover the typed form survives.
+        // shape: a regression that reparses the text would produce a
+        // different structure; the typed form must survive end-to-end.
         type_annotation: Some("garbage<<<unparseable".to_string()),
         type_expr: Some(typed),
         type_expr_scope: Some(TypeExprScope::new("test:fixture")),

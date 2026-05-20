@@ -1,5 +1,5 @@
-//! §5.D.1 cache-discipline tests for the §5.B-introduced variants and
-//! dispatch helpers (Phase 5g-supplement backfill for 5b).
+//! Cache-discipline tests for the SemanticQueryKey variants and
+//! dispatch helpers.
 //!
 //! Each test asserts that re-issuing the SAME dispatch key N times
 //! triggers the cold path EXACTLY ONCE and the warm path N-1 times.
@@ -9,10 +9,8 @@
 //! These are characterization tests — they fail if the warm cache is
 //! either bypassed (cold > 1 for repeated identical keys) or
 //! over-eager (warm > 0 for the unrelated cold-path probe). They use
-//! the §5.D.0 r17 instrumentation surface (`dispatch_counter()`) which
-//! lives behind bare `#[cfg(test)]` per r17/N12.
-//!
-//! Plan: §5.D.1 (Phase 5g-supplement.1.B for 5b backfill).
+//! the test-only `dispatch_counter()` instrumentation surface which
+//! lives behind bare `#[cfg(test)]`.
 
 use std::sync::Arc;
 

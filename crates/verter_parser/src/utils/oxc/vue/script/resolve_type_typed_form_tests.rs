@@ -1,13 +1,12 @@
-//! Discriminating regression tests for the typed-form sidecar contract
-//! (plan §3.1, W0.3).
+//! Discriminating regression tests for the typed-form sidecar contract.
 //!
 //! These tests pin the contract that every `ResolvedProp` and
 //! `ResolvedEmit` whose annotation is observable via OXC has a populated
 //! `type_expr` (the lowered annotation) AND a paired `type_expr_scope`
 //! (the canonical_id of the file whose parse produced the typed
-//! expression). They are designed to FAIL on the pre-W0.3 tree (where
-//! `type_expr` defaults to `None` because no producer populates it)
-//! and PASS on the post-W0.3 tree.
+//! expression). A regression that drops `type_expr` population (so it
+//! defaults to `None` because no producer populates it) must trip
+//! `assert_typed_form_populated()` immediately.
 //!
 //! Coverage matrix:
 //! 1. Local-SFC parse path: bare alias `Ref` preserved (shallow-by-default).

@@ -1,5 +1,4 @@
-//! Shared test helpers for the IDE TSX script-generation tests
-//! (Phase 11d test cohort).
+//! Shared test helpers for the IDE TSX script-generation tests.
 //!
 //! Each cohort sibling resolves these via `use super::*;` because
 //! `tests/mod.rs` re-exports them at the parent (`tests`) module scope.

@@ -1,5 +1,5 @@
-//! §9.5 invalidation tests — additional rows beyond the
-//! per-fast-path tests authored alongside Phase 4 / 6 / 11.
+//! Component-meta invalidation tests — coverage rows beyond the
+//! per-fast-path tests authored alongside the cache pipelines.
 //!
 //! Each test resolves a component, edits the relevant file via
 //! `WorkspaceAccess::notify_upsert` (NOT `std::fs::write`), and
@@ -29,11 +29,13 @@
 //!   preserve symbolic).
 //!
 //! Rows authored elsewhere on integration:
-//! - `invalidation_owner_component_file_edit` — Phase 4 file.
+//! - `invalidation_owner_component_file_edit` — owner-component
+//!   edit invalidates dependent component-meta entries.
 //! - `invalidation_imported_prop_type_file_edit` — canonical-reuse
 //!   tests file.
-//! - `invalidation_indexed_access_root_edit` — Phase 6 file.
-//! - `invalidation_theme_config_source_edit` — Phase 7 file
+//! - `invalidation_indexed_access_root_edit` — indexed-access root
+//!   edit invalidates the projection.
+//! - `invalidation_theme_config_source_edit` — theme-config edit
 //!   (currently `#[ignore]`'d as a §17.7 deviation; see docstring
 //!   on that test).
 //!

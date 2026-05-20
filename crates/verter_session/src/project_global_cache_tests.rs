@@ -1,32 +1,31 @@
-//! Phase 0a contract tests for the project-global cache overhaul.
+//! Contract tests for the project-global cache.
 //!
-//! These tests lock in the observable contract the new architecture must
-//! satisfy. They are written against today's `VerterHost` surface plus the
-//! Phase 1 project-global store (`project_type_store` module) — no new
-//! behaviour needs to be implemented in Phase 0 itself. Later phases wire
-//! the hot path to the same `IndexedReady` publication and extend these
-//! tests rather than duplicate them.
+//! These tests lock in the observable contract the architecture must
+//! satisfy. They are written against the `VerterHost` surface plus
+//! the project-global store (`project_type_store` module). Hot-path
+//! integrations consume the same `IndexedReady` publication and
+//! extend these tests rather than duplicate them.
 //!
-//! Test matrix (plan § Phase 0a, Phase 0c):
+//! Test matrix:
 //!
 //! - A. `IndexedReady` is published once per `(canonical_id, whole_hash)`
 //!   and is shared across consumers.
-//! - B. `IndexedReady` matches `IndexedReady` in the transitional coexistence
-//!   window — same `whole_hash`, same `shallow_state`, same `import_routes`
+//! - B. `IndexedReady` matches itself across observers — same
+//!   `whole_hash`, same `shallow_state`, same `import_routes`
 //!   (identity, not deep equality).
 //! - C. Unrelated files stay warm across an edit to one file.
-//! - D. Edits replace the live entry under the new `whole_hash` but do not
-//!   mutate the previous entry in place.
+//! - D. Edits replace the live entry under the new `whole_hash` but
+//!   do not mutate the previous entry in place.
 //! - E. `ProjectTypeStore::bump_project_generation` is monotonic and
 //!   observable through the accessor.
-//! - F. `FileArtifactStore` lookups reject stale whole-hashes at the key level.
+//! - F. `FileArtifactStore` lookups reject stale whole-hashes at the
+//!   key level.
 //!
-//! Phase 0c tests that depend on the semantic query graph
-//! (`semantic_query::SemanticQueryApi::execute`) dedup rules live in the
-//! same file but are gated on the Phase 2.2 implementation — for now they
-//! assert the static invariants of the key surface (scope-awareness,
-//! generic-argument distinctness, projection-mode distinctness) that the
-//! `semantic_query::tests` module already covers.
+//! Semantic-query-graph dedup tests
+//! (`semantic_query::SemanticQueryApi::execute`) live in the same file
+//! and exercise the static invariants of the key surface
+//! (scope-awareness, generic-argument distinctness, projection-mode
+//! distinctness) that the `semantic_query::tests` module also covers.
 
 use std::sync::Arc;
 
@@ -246,12 +245,12 @@ fn repeated_indexed_lookups_return_same_arc() {
     assert!(Arc::ptr_eq(&a, &b), "warm lookups must share one Arc");
 }
 
-/// Phase 2.2: repeated `SemanticQueryApi::execute(ResolveDecl {..})` for the
-/// same scope+name key memoizes to one semantic node id and the shared
-/// memo's warm entry count stays at one. Distinct `ResolveDecl` keys
-/// populate distinct entries without aliasing.
+/// Dedup contract: repeated `SemanticQueryApi::execute(ResolveDecl {..})`
+/// for the same scope+name key memoizes to one semantic node id and
+/// the shared memo's warm entry count stays at one. Distinct
+/// `ResolveDecl` keys populate distinct entries without aliasing.
 #[test]
-fn semantic_subqueries_dedup_across_request_boundaries_phase22() {
+fn semantic_subqueries_dedup_across_request_boundaries() {
     use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
     use crate::semantic_query::{QueryResult, SemanticQueryApi, SemanticQueryKey};
 
@@ -340,13 +339,13 @@ fn component_meta_warm_rerun_hits_final_result_cache_phase3() {
     );
 }
 
-/// Phase 3 regression: a warm `get_component_meta` cache hit must
-/// invalidate when a *transitive* dependency file changes, not just
-/// the owner file. Before the dep-signature included transitive
-/// whole-hashes, editing a dep left the cached entry warm under an
-/// unchanged owner hash — the hit returned a stale payload.
+/// Transitive-dependency invalidation contract: a warm
+/// `get_component_meta` cache hit must invalidate when a *transitive*
+/// dependency file changes, not just the owner file. A dep-signature
+/// that omits transitive whole-hashes would leave the cached entry
+/// warm under an unchanged owner hash and return a stale payload.
 #[test]
-fn component_meta_cache_invalidates_on_transitive_dep_edit_phase3() {
+fn component_meta_cache_invalidates_on_transitive_dep_edit() {
     let host = host();
     upsert_ts(
         &host,
@@ -466,13 +465,14 @@ fn owner_direct_imports_resolve_once_per_owner_version_phase2() {
     );
 }
 
-/// Phase 2 regression: when a barrel file re-routes a binding to a
-/// different final file, the owner's import surface must re-resolve
-/// against the new target. The surface caches the final `(canonical,
-/// exported_name)` so a stale cached surface would return the old
-/// final even after the barrel points at a different file.
+/// Barrel-retargeting invariant: when a barrel file re-routes a
+/// binding to a different final file, the owner's import surface
+/// must re-resolve against the new target. The surface caches the
+/// final `(canonical, exported_name)` so a stale cached surface
+/// would return the old final even after the barrel points at a
+/// different file.
 #[test]
-fn owner_import_surface_picks_up_barrel_retargeting_phase2() {
+fn owner_import_surface_picks_up_barrel_retargeting() {
     let host = host();
     upsert_ts(&host, "/w/a.ts", "export type Foo = { a: number }");
     upsert_ts(&host, "/w/b.ts", "export type Foo = { b: number }");
@@ -777,16 +777,15 @@ fn owner_import_surface_rebuilds_after_owner_edit_phase2() {
         .is_none());
 }
 
-/// Final source-audit: the `RequestStoreView` type and the
-/// `host_request_view` module were retired as part of the Phase 4/5
-/// cutover. They must not resurface anywhere in the crate outside of
-/// archived historical comments. This test asserts the post-cut state.
+/// Source-audit invariant: the `RequestStoreView` type and the
+/// `host_request_view` module are not part of the final design. They
+/// must not resurface anywhere in the crate outside of comment text.
 #[test]
-fn request_view_is_retired_from_crate_sources() {
+fn request_view_is_absent_from_crate_sources() {
     // Each entry is (path, source). Every source must be free of non-comment
     // references to `RequestStoreView` / `CURRENT_REQUEST_VIEW` /
     // `host_request_view::`. Comments starting with `//` or `///` are
-    // tolerated — those are historical notes about the retirement.
+    // tolerated — those are explanatory notes about the absence.
     let sources: &[(&str, &str)] = &[
         ("host_manage.rs", include_str!("host_manage.rs")),
         (
@@ -836,8 +835,9 @@ fn request_view_is_retired_from_crate_sources() {
             "resolver_core/component_meta_query_engine/mod.rs",
             include_str!("resolver_core/component_meta_query_engine/mod.rs"),
         ),
-        // D-Cutover §5.8 WIP-W: `resolver_core/solver_host.rs` deleted —
-        // its `RequestStoreView` / `_in_view` audit entry moves with it.
+        // `resolver_core/solver_host.rs` is not part of the final
+        // module set — its `RequestStoreView` / `_in_view` audit entry
+        // therefore has no source to scan.
         (
             "resolver_core/component_meta_registry.rs",
             include_str!("resolver_core/component_meta_registry.rs"),
@@ -887,7 +887,7 @@ fn request_view_is_retired_from_crate_sources() {
 /// would have no view at all and callers would be tempted to
 /// reintroduce the thread-local globals this rule forbids.
 ///
-/// Extends `request_view_is_retired_from_crate_sources` — that test
+/// Extends `request_view_is_absent_from_crate_sources` — that test
 /// asserts the FORBIDDEN thread-local shape is absent; this test
 /// asserts the REPLACEMENT explicit-view shape is present (paired
 /// positive / negative arch-guard).
@@ -915,15 +915,14 @@ fn resolver_context_threads_session_view_via_view_accessor() {
     assert!(
         src.contains("static_assertions::assert_obj_safe!(ResolverContext)"),
         "`assert_obj_safe!(ResolverContext)` static check must remain \
-         in `resolver_context.rs` (Stage 4b — dyn-compatibility)."
+         in `resolver_context.rs` (dyn-compatibility guard)."
     );
 }
 
-/// Stage 4b arch-guard companion: assert that **no module-level
-/// thread-local `SessionView` storage has been reintroduced** under
-/// any name. The retired `_in_view` / `CURRENT_REQUEST_VIEW` shape
-/// is already guarded by
-/// [`request_view_is_retired_from_crate_sources`]; this test extends
+/// Arch-guard companion: assert that **no module-level thread-local
+/// `SessionView` storage has been reintroduced** under any name. The
+/// forbidden `_in_view` / `CURRENT_REQUEST_VIEW` shape is already
+/// guarded by [`request_view_is_absent_from_crate_sources`]; this test extends
 /// the watchlist to the new `SessionView` trait so a future
 /// contributor cannot ship a `thread_local! { static CURRENT_VIEW:
 /// ... = ... }` to "cache" the view across calls. The view is
@@ -1090,11 +1089,11 @@ fn project_type_store_counters_start_at_zero() {
 /// so downstream consumers can hold a long-lived handle on the rehomed
 /// caches.
 ///
-/// Phase 6b.F3 (Option (i)) extension: the same `Arc` instances are now
-/// SHARED with the host's `UnifiedResolverRuntime`, so `routes_handle()` /
+/// Shared-handle invariant: the same `Arc` instances are SHARED with
+/// the host's `UnifiedResolverRuntime`, so `routes_handle()` /
 /// `imported_roots_handle()` on the store and on the runtime are
-/// `Arc::ptr_eq`-equal. Resolver hot-path mutations land on the same DBs
-/// the project store exposes.
+/// `Arc::ptr_eq`-equal. Resolver hot-path mutations land on the same
+/// DBs the project store exposes.
 #[test]
 fn project_type_store_exposes_stable_route_and_imported_root_handles() {
     let host = host();

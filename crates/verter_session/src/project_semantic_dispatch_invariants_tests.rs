@@ -42,15 +42,15 @@ fn substitute_visits_repeated_type_param_reference_across_siblings() {
     );
 }
 
-/// Plan §2 guard contract row: `substitute_semantic_type_param`
-/// returns the input node unchanged on cyclic re-entry. Verified by
-/// source-content inspection: the substitute driver in
-/// `substitute.rs` carries a catch-all arm returning input unchanged.
+/// Guard invariant: `substitute_semantic_type_param` returns the
+/// input node unchanged on cyclic re-entry. Verified by source-
+/// content inspection: the substitute driver in `substitute.rs`
+/// carries a catch-all arm returning input unchanged.
 ///
-/// Phase 6 (Fix D) strengthened this guarantee: every match arm now
-/// returns the input id when no descendant changed (not just the
-/// catch-all). The catch-all itself returns `(node, false)` from the
-/// internal change-tracking helper.
+/// Strengthened guarantee: every match arm returns the input id when
+/// no descendant changed (not just the catch-all). The catch-all
+/// itself returns `(node, false)` from the internal change-tracking
+/// helper.
 #[test]
 fn substitute_returns_input_node_on_cyclic_reentry() {
     let substitute_src = include_str!("project_semantic_dispatch/substitute.rs");
@@ -63,10 +63,9 @@ fn substitute_returns_input_node_on_cyclic_reentry() {
     );
 }
 
-/// Plan §2 guard contract row: `evaluate_deferred_semantic_node`
-/// reaches a fix-point on a recursive alias via the stack-local
-/// visited set + `next == node` termination. Verified by
-/// source-content grep.
+/// Guard invariant: `evaluate_deferred_semantic_node` reaches a
+/// fix-point on a recursive alias via the stack-local visited set
+/// + `next == node` termination. Verified by source-content grep.
 #[test]
 fn evaluate_deferred_reaches_fixpoint_on_recursive_type_alias() {
     let evaluate_src = include_str!("project_semantic_dispatch/evaluate.rs");
@@ -84,10 +83,10 @@ fn evaluate_deferred_reaches_fixpoint_on_recursive_type_alias() {
     );
 }
 
-/// Plan §2 rejection of the 32-iter hard cap. The evaluate driver
-/// converges in at most graph-size steps bounded only by the
-/// visited set. Verified by grep: the retired `for _ in 0..32`
-/// loop is absent.
+/// Guard invariant: the evaluate driver has no 32-iter hard cap.
+/// It converges in at most graph-size steps bounded only by the
+/// visited set. Verified by grep: any `for _ in 0..32` loop must
+/// be absent from executable code.
 #[test]
 fn evaluate_deferred_has_no_iteration_cap_beyond_graph_size() {
     let evaluate_src = include_str!("project_semantic_dispatch/evaluate.rs");
@@ -101,7 +100,7 @@ fn evaluate_deferred_has_no_iteration_cap_beyond_graph_size() {
         }
         assert!(
             !line.contains("for _ in 0..32"),
-            "evaluate.rs line {}: retired 32-iter cap survived in executable code: `{}`",
+            "evaluate.rs line {}: 32-iter cap must not appear in executable code: `{}`",
             lineno + 1,
             line
         );
@@ -225,18 +224,16 @@ fn walk_path_terminates_on_self_referential_alias_chain() {
     }
 }
 
-/// Plan §2 guard contract row: `key_names_from_base_node` returns
-/// None (the "Unresolvable" sentinel per the new `KeyEnumeration`
-/// contract — see Change M) on a cyclic intersection.
-/// Verified by grep on the canonical source: the catch-all publishes
-/// None for shapes the enumerator cannot resolve.
+/// Guard invariant: `key_names_from_base_node` returns None
+/// (the "Unresolvable" sentinel per the `KeyEnumeration` contract)
+/// on a cyclic intersection. Verified by grep on the canonical
+/// source: the catch-all publishes None for shapes the enumerator
+/// cannot resolve.
 ///
-/// **Path C C10 fixture update** (mechanism-update exemption, plan
-/// §14.4). Pre-C10 the enumerator was recursive and the catch-all
-/// read as the literal `_ => None` tail expression; post-C10 it
-/// publishes onto a worklist results stack via `results.push(None)`.
-/// Assertion-intent — "the Unresolvable sentinel is surfaced on the
-/// catch-all" — is preserved; only the publication mechanism changed.
+/// The enumerator is iterative: the catch-all publishes onto a
+/// worklist results stack via `results.push(None)`. The
+/// discriminating intent — "the Unresolvable sentinel is surfaced
+/// on the catch-all" — is what this test pins.
 #[test]
 fn key_names_from_base_node_returns_unresolvable_on_cyclic_intersection() {
     let enumerate_src = include_str!("project_semantic_dispatch/enumerate.rs");
@@ -260,11 +257,11 @@ fn key_names_from_base_node_returns_unresolvable_on_cyclic_intersection() {
     );
 }
 
-/// Plan §2 guard contract row: `relate_nodes` returns
-/// `RelationResult::Unknown` on cyclic re-entry. The TLS in-flight
-/// set catches re-entry; the public surface returns Unknown without
-/// infinite recursion. Verified by source grep + a behavioural
-/// probe that confirms the memo round-trips Unknown.
+/// Guard invariant: `relate_nodes` returns `RelationResult::Unknown`
+/// on cyclic re-entry. The TLS in-flight set catches re-entry; the
+/// public surface returns Unknown without infinite recursion.
+/// Verified by source grep + a behavioural probe that confirms the
+/// memo round-trips Unknown.
 #[test]
 fn relation_guard_returns_unknown_on_cyclic_reentry() {
     let relation_src = include_str!("project_semantic_dispatch/relation.rs");
@@ -296,15 +293,16 @@ fn relation_guard_returns_unknown_on_cyclic_reentry() {
 }
 
 // ============================================================================
-// §6.2 Canonical deferred forms (8 tests) — un-ignored in §5.5 WIP-M
+// Canonical deferred forms
 // ============================================================================
 
-/// Plan §3 Change M: when the source is NOT an `Object` but the key
-/// space enumerates to concrete literal keys, `build_mapped_type` still
-/// produces an `Object` surface whose per-key values come from
-/// substituting `name → Literal(name)` into `mapper.value_expr`. Prior
-/// to Change M the empty-`source_members` path short-circuited to
-/// `Opaque(Miss)`, silently degrading the surface.
+/// Mapped-type non-Object source contract: when the source is NOT an
+/// `Object` but the key space enumerates to concrete literal keys,
+/// `build_mapped_type` still produces an `Object` surface whose per-key
+/// values come from substituting `name → Literal(name)` into
+/// `mapper.value_expr`. A regression that short-circuited the
+/// empty-`source_members` path to `Opaque(Miss)` would silently
+/// degrade the surface and fail this guard.
 #[test]
 fn mapped_type_value_substitutes_into_keyspace_even_when_source_is_not_object() {
     use crate::semantic_query::{
@@ -401,10 +399,10 @@ fn mapped_type_value_substitutes_into_keyspace_even_when_source_is_not_object() 
     }
 }
 
-/// Plan §3 Change M per-key value rule: when the substituted value
-/// evaluates to `Opaque(_)`, the slot carries the **un-evaluated
-/// substituted node**, not `Opaque(Miss)`. Preserves re-dispatch once
-/// the inputs become enumerable.
+/// Per-key value fallback rule: when the substituted value evaluates
+/// to `Opaque(_)`, the slot carries the **un-evaluated substituted
+/// node**, not `Opaque(Miss)`. This preserves re-dispatch once the
+/// inputs become enumerable.
 #[test]
 fn mapped_type_value_falls_back_to_substituted_shell_when_evaluation_yields_opaque() {
     use crate::semantic_query::{
@@ -428,11 +426,11 @@ fn mapped_type_value_falls_back_to_substituted_shell_when_evaluation_yields_opaq
 
     // Value expression is `source[K]`. At build time we can't project
     // into a Primitive via an indexed access, so evaluation yields
-    // `Opaque(_)`. Plan §3 Change M says the slot should carry the
+    // `Opaque(_)`. The fallback rule: the slot should carry the
     // un-evaluated substituted node — an IndexedAccess with the
     // substituted key (Literal("a")).
-    // Path C C6a: the mapper's binder K and the indexed-access
-    // index K must be the SAME SemanticNodeId so node-id-match
+    // Binder-identity rule: the mapper's binder K and the indexed-
+    // access index K must be the SAME SemanticNodeId so node-id-match
     // substitute correctly substitutes the binder reference.
     let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity::synthetic("K"),
@@ -512,11 +510,11 @@ fn mapped_type_value_falls_back_to_substituted_shell_when_evaluation_yields_opaq
     }
 }
 
-/// Plan §3 Change M: when neither the source nor the key space
-/// enumerate to concrete keys (`KeyEnumeration::Unresolvable`),
-/// `build_mapped_type` produces a canonical
-/// `SemanticNodeData::Mapped { source, mapper }` deferred shell — not
-/// the retired `Alias(KeyOf(source))` surrogate.
+/// Unresolvable-keyspace contract: when neither the source nor the
+/// key space enumerate to concrete keys
+/// (`KeyEnumeration::Unresolvable`), `build_mapped_type` produces a
+/// canonical `SemanticNodeData::Mapped { source, mapper }` deferred
+/// shell — not an `Alias(KeyOf(source))` surrogate.
 #[test]
 fn build_mapped_type_produces_canonical_mapped_shell_on_unresolvable_enumeration() {
     use crate::semantic_query::{
@@ -602,30 +600,29 @@ fn build_mapped_type_produces_canonical_mapped_shell_on_unresolvable_enumeration
 
 #[test]
 fn build_mapped_type_alias_keyof_surrogate_is_not_emitted() {
-    // Plan §3 Change M deletes the `Alias(KeyOf(source))` surrogate
-    // previously produced by `build_mapped_type`. Verify that
-    // `build.rs` no longer contains the surrogate construction
-    // pattern in executable code.
+    // `build_mapped_type` must not emit the `Alias(KeyOf(source))`
+    // surrogate. Verify that `build.rs` does not contain the
+    // surrogate construction pattern in executable code.
     let build_src = include_str!("project_semantic_dispatch/build.rs");
     for line in build_src.lines() {
         let trimmed = line.trim_start();
         if trimmed.starts_with("//") || trimmed.starts_with("/*") {
             continue;
         }
-        // The retired surrogate had the shape:
+        // The forbidden surrogate has the shape:
         // `SemanticNodeData::Alias(KeyOf { base: source })`.
         assert!(
             !line.contains("Alias(KeyOf"),
-            "build.rs executable line contains retired `Alias(KeyOf)` surrogate: `{line}`"
+            "build.rs executable line contains forbidden `Alias(KeyOf)` surrogate: `{line}`"
         );
     }
 }
 
 #[test]
 fn build_key_of_over_intersection_returns_distributed_union() {
-    // Plan §3 Change K: `KeyOf(A & B) = KeyOf(A) | KeyOf(B)` — the
-    // dispatch builder distributes keyof over an intersection base,
-    // folding to the normalised union of per-arm keysets.
+    // KeyOf distribution rule: `KeyOf(A & B) = KeyOf(A) | KeyOf(B)`
+    // — the dispatch builder distributes keyof over an intersection
+    // base, folding to the normalised union of per-arm keysets.
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
@@ -664,8 +661,8 @@ fn build_key_of_over_intersection_returns_distributed_union() {
 
 #[test]
 fn build_key_of_over_union_returns_intersection_of_keys() {
-    // Plan §3 Change K: `KeyOf(A | B) = KeyOf(A) & KeyOf(B)` — the
-    // dispatch builder distributes keyof over a union base.
+    // KeyOf distribution rule: `KeyOf(A | B) = KeyOf(A) & KeyOf(B)`
+    // — the dispatch builder distributes keyof over a union base.
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
@@ -700,9 +697,9 @@ fn build_key_of_over_union_returns_intersection_of_keys() {
 
 #[test]
 fn build_key_of_over_conditional_distributes_into_branches() {
-    // Plan §3 Change K: `KeyOf(C extends T ? X : Y) = KeyOf(X) | KeyOf(Y)`
-    // when the conditional is open (Unknown relation); the engine
-    // distributes into both branches.
+    // KeyOf distribution rule: `KeyOf(C extends T ? X : Y) =
+    // KeyOf(X) | KeyOf(Y)` when the conditional is open (Unknown
+    // relation); the engine distributes into both branches.
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
@@ -760,9 +757,9 @@ fn build_key_of_over_conditional_distributes_into_branches() {
     }
 }
 
-/// Plan §3 Change M `as`-clause remapping rule: when `name_remap`
-/// cannot resolve at build time (the remap expression references a
-/// symbolic input like a TypeParam), the whole shape defers as a
+/// `as`-clause remapping rule: when `name_remap` cannot resolve at
+/// build time (the remap expression references a symbolic input
+/// like a TypeParam), the whole shape defers as a
 /// `Mapped { source, mapper }` shell with `mapper.name_remap`
 /// preserved verbatim for later re-dispatch.
 #[test]
@@ -1228,16 +1225,14 @@ fn relation_unknown_is_cached_with_fence_not_recomputed_on_repeated_cycle() {
 }
 
 // ============================================================================
-// §6.5 Authority-cutover invariants — file-absence (5 tests)
-// un-ignored in §5.8 WIP-W (dispatch_bridge_module_deleted landed earlier)
+// Authority-cutover invariants — file-absence
 // ============================================================================
 
 #[test]
 fn solver_relate_module_deleted() {
-    // D-Cutover §5.8 WIP-W: `relate.rs` retired alongside the solver
-    // kernel tear-down ( — tri-state assignability lives in the
-    // semantic graph via ProjectSemanticDispatch). §6.5 file-absence
-    // invariant asserts the file stays gone.
+    // File-absence invariant: `relate.rs` is not part of the final
+    // module set — tri-state assignability lives in the semantic
+    // graph via ProjectSemanticDispatch.
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
@@ -1250,17 +1245,16 @@ fn solver_relate_module_deleted() {
         .join("relate.rs");
     assert!(
         !path.exists(),
-        "relate.rs must stay deleted (§6.5 file-absence)"
+        "relate.rs must not exist (file-absence invariant)"
     );
 }
 
 #[test]
 fn solver_project_module_deleted() {
-    // D-Cutover §5.8 WIP-W: `project.rs` retired alongside the solver
-    // kernel tear-down ( — member/keyspace/surface projections
-    // live in ProjectSemanticDispatch's ProjectPath/ProjectMember
-    // query surface). §6.5 file-absence invariant asserts the file
-    // stays gone.
+    // File-absence invariant: `project.rs` is not part of the final
+    // module set — member/keyspace/surface projections live in
+    // ProjectSemanticDispatch's ProjectPath/ProjectMember query
+    // surface.
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
@@ -1273,16 +1267,15 @@ fn solver_project_module_deleted() {
         .join("project.rs");
     assert!(
         !path.exists(),
-        "project.rs must stay deleted (§6.5 file-absence)"
+        "project.rs must not exist (file-absence invariant)"
     );
 }
 
 #[test]
 fn type_surface_db_module_deleted() {
-    // D-Cutover §5.8 WIP-W: `type_surface_db.rs` retired alongside
-    // `TypeSurfaceDb`/`TypeSurfaceOpKey`/`TypeSurfaceOpResult`
-    // ( row 6 — semantic-graph memo is the sole projection
-    // authority). §6.5 file-absence invariant asserts it stays gone.
+    // File-absence invariant: `type_surface_db.rs` is not part of the
+    // final module set. The semantic-graph memo is the sole
+    // projection authority.
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
@@ -1294,14 +1287,14 @@ fn type_surface_db_module_deleted() {
         .join("type_surface_db.rs");
     assert!(
         !path.exists(),
-        "type_surface_db.rs must stay deleted (§6.5 file-absence)"
+        "type_surface_db.rs must not exist (file-absence invariant)"
     );
 }
 
 #[test]
 fn dispatch_bridge_module_deleted() {
-    // `dispatch_bridge.rs` was deleted earlier in D-Cutover (pre-
-    // §5.1 WIP); §6.5 file-absence invariant asserts it stays gone.
+    // File-absence invariant: `dispatch_bridge.rs` is not part of the
+    // final module set.
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
@@ -1312,94 +1305,90 @@ fn dispatch_bridge_module_deleted() {
         .join("dispatch_bridge.rs");
     assert!(
         !path.exists(),
-        "dispatch_bridge.rs must stay deleted (§6.5 file-absence)"
+        "dispatch_bridge.rs must not exist (file-absence invariant)"
     );
 }
 
 #[test]
 fn solver_host_module_deleted() {
-    // D-Cutover §5.8 WIP-W: `solver_host.rs` retired alongside the
-    // `SessionSolverHost` bridge (session no longer routes through
-    // `TypeSolverHost`). §6.5 file-absence invariant asserts it stays
-    // gone.
+    // File-absence invariant: `solver_host.rs` is not part of the
+    // final module set. The session does not route through a
+    // `TypeSolverHost` bridge.
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("src")
         .join("resolver_core")
         .join("solver_host.rs");
     assert!(
         !path.exists(),
-        "solver_host.rs must stay deleted (§6.5 file-absence)"
+        "solver_host.rs must not exist (file-absence invariant)"
     );
 }
 
 // ============================================================================
-// §6.5 Authority-cutover invariants — identifier-absence (11 tests)
-// un-ignored in §5.8 WIP-W
+// Authority-cutover invariants — identifier-absence
 // ============================================================================
 
 #[test]
-fn type_query_engine_struct_deleted() {
-    // D-Cutover §5.8 WIP-W: `TypeQueryEngine` retired alongside the
-    // solver kernel tear-down. The symbol must not appear in production
-    // code under any form (struct decl, trait impl, function body).
-    // `ComponentMetaQueryEngine` is the sole request-scoped solve
-    // engine on the session side.
+fn type_query_engine_struct_absent() {
+    // Identifier-absence invariant: `TypeQueryEngine` must not appear
+    // in production code under any form (struct decl, trait impl,
+    // function body). `ComponentMetaQueryEngine` is the sole
+    // request-scoped solve engine on the session side.
     let hits = retired_symbol_hits_in_production(&["TypeQueryEngine"]);
     assert!(
         hits.is_empty(),
-        "retired TypeQueryEngine identifier still present in production source:\n{}",
+        "TypeQueryEngine identifier must not appear in production source:\n{}",
         hits.join("\n")
     );
 }
 
 #[test]
 fn no_session_solver_host_in_production_code() {
-    // D-Cutover §5.8 WIP-W: after the session crate drops the
-    // `SessionSolverHost` bridge (solver_host.rs deleted, all calls
-    // migrated to `ComponentMetaQueryEngine` + `bare_name_resolve`),
-    // zero non-comment references to the type may survive in
-    // production source. The grep-based helper skips `//` and `/*`
-    // lines as well as `*_tests.rs` / `tests.rs` files so historical
-    // doc pointers and characterization-test blocks stay valid.
+    // Identifier-absence invariant: zero non-comment references to
+    // `SessionSolverHost` may appear in production source. The
+    // session uses `ComponentMetaQueryEngine` + `bare_name_resolve`
+    // directly. The grep-based helper skips `//` and `/*` lines as
+    // well as `*_tests.rs` / `tests.rs` files so doc pointers and
+    // characterization-test blocks stay valid.
     let hits = retired_symbol_hits_in_production(&["SessionSolverHost"]);
     assert!(
         hits.is_empty(),
-        "retired SessionSolverHost identifier still present in production source:\n{}",
+        "SessionSolverHost identifier must not appear in production source:\n{}",
         hits.join("\n")
     );
 }
 
 #[test]
 fn no_eval_env_solver_host_in_production_code() {
-    // D-Cutover §5.8 WIP-W: `EvalEnvSolverHost` retired alongside the
-    // `TypeSolverHost` trait — the EvalEnv-based standalone solver
-    // host had no session-side users after Commit 1 of this phase
-    // (env substitution moved into `structural_substitute_typeof_refs`).
+    // Identifier-absence invariant: `EvalEnvSolverHost` must not
+    // appear in production code. Env substitution lives in
+    // `structural_substitute_typeof_refs`.
     let hits = retired_symbol_hits_in_production(&["EvalEnvSolverHost"]);
     assert!(
         hits.is_empty(),
-        "retired EvalEnvSolverHost identifier still present in production source:\n{}",
+        "EvalEnvSolverHost identifier must not appear in production source:\n{}",
         hits.join("\n")
     );
 }
 
 #[test]
 fn no_type_solver_host_trait_in_production_code() {
-    // D-Cutover §5.8 WIP-W: `TypeSolverHost` trait retired — the
-    // session no longer threads a `&dyn TypeSolverHost` through
-    // `solve_type`; every solve-like operation runs through
-    // `ProjectSemanticDispatch::execute` on the semantic graph.
+    // Identifier-absence invariant: `TypeSolverHost` trait must not
+    // appear in production code. The session does not thread a
+    // `&dyn TypeSolverHost` through `solve_type`; every solve-like
+    // operation runs through `ProjectSemanticDispatch::execute` on
+    // the semantic graph.
     let hits = retired_symbol_hits_in_production(&["TypeSolverHost"]);
     assert!(
         hits.is_empty(),
-        "retired TypeSolverHost trait identifier still present in production source:\n{}",
+        "TypeSolverHost trait identifier must not appear in production source:\n{}",
         hits.join("\n")
     );
 }
 
 #[test]
 fn no_parser_arena_adapter_in_production_code() {
-    // Plan §3 Change W: the never-landed `ParserArenaAdapter` /
+    // Identifier-absence invariant: the `ParserArenaAdapter` /
     // `ParserArenaBridgeHost` bridge names must not appear in
     // production code. `HostNamedTypeCacheAdapter` in `host_manage.rs`
     // is the only parser↔dispatch seam and does not carry these
@@ -1419,11 +1408,11 @@ fn no_parser_arena_adapter_in_production_code() {
 
 #[test]
 fn solver_no_longer_contains_distributive_union_loop() {
-    // D-Cutover §5.8 WIP-W: the solver's distributive union loop
-    // lived in `solve.rs` (the walker that iterated `Union` members
-    // calling `resolve_node` / `collect_structural_property_descriptors_inner`
-    // on each arm). With `solve.rs` deleted the loop is trivially
-    // absent. Assert by checking the file is gone.
+    // File-absence invariant: `solve.rs` is not part of the final
+    // module set. The previous distributive-union loop (a walker
+    // that iterated `Union` members calling `resolve_node` /
+    // `collect_structural_property_descriptors_inner` on each arm)
+    // is trivially absent because the file does not exist.
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
@@ -1436,34 +1425,34 @@ fn solver_no_longer_contains_distributive_union_loop() {
         .join("solve.rs");
     assert!(
         !path.exists(),
-        "solve.rs must stay deleted — the distributive union loop used to live here"
+        "solve.rs must not exist (file-absence invariant)"
     );
 }
 
 #[test]
 fn solve_rs_has_no_resolve_indexed_access_or_collect_structural_property_descriptors_inner() {
-    // D-Cutover §5.8 WIP-W: the walker methods `resolve_indexed_access`
-    // + `collect_structural_property_descriptors_inner` lived on
-    // `TypeQueryEngine` in `solve.rs`. With the file and the struct
-    // both retired, the identifiers must also be absent from every
-    // other production source.
+    // Identifier-absence invariant: the walker methods
+    // `resolve_indexed_access` +
+    // `collect_structural_property_descriptors_inner` must not appear
+    // in production source — they belong to a solver shape that is
+    // not part of the final design.
     let hits = retired_symbol_hits_in_production(&[
         "resolve_indexed_access",
         "collect_structural_property_descriptors_inner",
     ]);
     assert!(
         hits.is_empty(),
-        "retired walker method identifiers still present in production source:\n{}",
+        "walker method identifiers must not appear in production source:\n{}",
         hits.join("\n")
     );
 }
 
 #[test]
 fn resolver_runtime_no_longer_imports_type_surface_db() {
-    // D-Cutover §5.8 WIP-W: after `type_surface_db.rs` deletion,
-    // `resolver_runtime.rs` must no longer import `TypeSurfaceDb` or
-    // carry a `type_surfaces` field. Grep the source directly so the
-    // assertion fails loudly if a future patch re-introduces the dep.
+    // Dependency-absence invariant: `resolver_runtime.rs` must not
+    // import `TypeSurfaceDb` or carry a `type_surfaces` field. Grep
+    // the source directly so the assertion fails loudly if a future
+    // patch reintroduces the dep.
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
@@ -1476,19 +1465,19 @@ fn resolver_runtime_no_longer_imports_type_surface_db() {
     let src = std::fs::read_to_string(&path).expect("resolver_runtime.rs must exist");
     assert!(
         !src.contains("TypeSurfaceDb"),
-        "resolver_runtime.rs must not import TypeSurfaceDb (§6.5)"
+        "resolver_runtime.rs must not import TypeSurfaceDb"
     );
     assert!(
         !src.contains("type_surfaces:"),
-        "resolver_runtime.rs must not carry a `type_surfaces:` field (§6.5)"
+        "resolver_runtime.rs must not carry a `type_surfaces:` field"
     );
 }
 
 #[test]
 fn resolver_core_mod_no_longer_reexports_type_surface_db() {
-    // D-Cutover §5.8 WIP-W: after `type_surface_db.rs` deletion,
-    // `resolver_core/mod.rs` must drop the `mod type_surface_db` and
-    // every `pub(crate) use type_surface_db::...` re-export.
+    // Dependency-absence invariant: `resolver_core/mod.rs` must not
+    // declare `mod type_surface_db` nor carry any
+    // `pub(crate) use type_surface_db::...` re-export.
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
@@ -1501,11 +1490,11 @@ fn resolver_core_mod_no_longer_reexports_type_surface_db() {
     let src = std::fs::read_to_string(&path).expect("resolver_core/mod.rs must exist");
     assert!(
         !src.contains("type_surface_db"),
-        "resolver_core/mod.rs must not reference the retired type_surface_db module (§6.5)"
+        "resolver_core/mod.rs must not reference the type_surface_db module"
     );
     assert!(
         !src.contains("TypeSurfaceDb"),
-        "resolver_core/mod.rs must not re-export TypeSurfaceDb (§6.5)"
+        "resolver_core/mod.rs must not re-export TypeSurfaceDb"
     );
 }
 
@@ -1542,9 +1531,10 @@ fn semantic_graph_store_has_relation_memo_field() {
 
 #[test]
 fn host_named_type_cache_adapter_uses_semantic_graph_store_directly() {
-    // Plan §3 Change W: `HostNamedTypeCacheAdapter` reads/writes
-    // `SemanticGraphStore` via `get_resolved_named_type` /
-    // `insert_resolved_named_type`, no SessionSolverHost wrapper.
+    // Cache-routing invariant: `HostNamedTypeCacheAdapter` reads
+    // and writes `SemanticGraphStore` via `get_resolved_named_type`
+    // / `insert_resolved_named_type` directly — no
+    // SessionSolverHost wrapper sits in between.
     let host_manage_src = include_str!("host_manage.rs");
     // The adapter struct is present.
     assert!(
@@ -1563,13 +1553,13 @@ fn host_named_type_cache_adapter_uses_semantic_graph_store_directly() {
 }
 
 // ============================================================================
-// §6.5 Authority-cutover invariants — single-authority cardinality (5 tests)
+// Authority-cutover invariants — single-authority cardinality
 // ============================================================================
 //
 // Each test walks the workspace source and greps for exactly-one
-// occurrence of the named authority surface. Tests pass today (even
-// before §5.8) because the split already consolidates these paths
-// onto one owner per Authority-uniqueness contract.
+// occurrence of the named authority surface, enforcing the
+// authority-uniqueness contract that each owning surface has a
+// single home.
 
 /// Count occurrences of `needle` in all `.rs` files under
 /// `crates/`, excluding:
@@ -1802,13 +1792,13 @@ fn dispatch_subtree_bounded_loops_are_annotated() {
 }
 
 // ============================================================================
-// §6.5 Class / interface (3 tests) — un-ignored in §5.8 WIP-W
+// Class / interface lowering
 // ============================================================================
 
-/// Plan §3 Change L / §2 lazy block: classes lower to a canonical
-/// `SemanticNodeData::Object` surface. Heritage members merge into the
-/// object's `members` via `Instantiate` / `ProjectPath(Expanded)` so
-/// downstream consumers see a single flat surface — no `Class` or
+/// Class lowering invariant: classes lower to a canonical
+/// `SemanticNodeData::Object` surface. Heritage members merge into
+/// the object's `members` via `Instantiate` / `ProjectPath(Expanded)`
+/// so downstream consumers see a single flat surface — no `Class` or
 /// `Interface` variant. Discriminating check: `SemanticNodeData` has
 /// exactly one "object-like" structural variant (`Object`), not a
 /// parallel `Class` / `Interface` variant set.
@@ -1834,7 +1824,7 @@ fn class_lowers_to_object_with_heritage_merged_members() {
     );
 }
 
-/// Plan §3 Change L / Change B: interfaces lower to the same
+/// Interface lowering invariant: interfaces lower to the same
 /// `SemanticNodeData::Object` shape classes do. Discriminating check:
 /// the same assertion applies — no Interface variant, only Object.
 #[test]
@@ -1851,13 +1841,14 @@ fn interface_lowers_to_object_identically_to_class() {
     );
 }
 
-/// Plan §3 C3 / §2 path walker: member projection routes through the
-/// `SemanticNodeData::Object` arm of `PathWalker::advance_step`. Since
-/// classes and interfaces lower to `Object`, their member projection
-/// uses the same walker arm — no dedicated Class/Interface arm.
-/// Discriminating check: `walk.rs` has exactly one object-member arm
-/// (the `SemanticNodeData::Object` match), and it matches both class
-/// and interface surfaces via the unified lowering.
+/// Path-walker member-projection invariant: member projection routes
+/// through the `SemanticNodeData::Object` arm of
+/// `PathWalker::advance_step`. Since classes and interfaces lower to
+/// `Object`, their member projection uses the same walker arm — no
+/// dedicated Class/Interface arm. Discriminating check: `walk.rs`
+/// has exactly one object-member arm (the `SemanticNodeData::Object`
+/// match), and it matches both class and interface surfaces via the
+/// unified lowering.
 #[test]
 fn class_member_projection_uses_object_walker_arm() {
     let walk_src = include_str!("project_semantic_dispatch/walk.rs");
@@ -1972,9 +1963,9 @@ fn retired_symbol_hits_in_production(symbols: &[&str]) -> Vec<String> {
 
 #[test]
 fn subject_key_and_op_cache_types_deleted() {
-    // D-Cutover §5.8 WIP-W: `type_surface_db.rs` retired; the request-scoped
-    // query-identity subsystem (SubjectKey/OpKey and friends) is fully gone
-    // from production code.
+    // Identifier-absence invariant: the request-scoped
+    // query-identity subsystem (SubjectKey/OpKey and friends) must
+    // not appear in production code.
     let hits = retired_symbol_hits_in_production(&[
         "SubjectKey",
         "SubjectId",
@@ -2035,11 +2026,10 @@ fn projection_cache_and_active_projection_keys_deleted() {
 
 #[test]
 fn type_query_engine_has_no_shallow_caches() {
-    // D-Cutover §5.8 WIP-W: the retired shallow-cache fields on the
-    // now-deleted `TypeQueryEngine`:
-    // `shallow_field_expr_cache`, `shallow_imported_bare_ref_cache`,
-    // `shallow_transitive_ref_cache`, `instantiation_cache`.
-    // These names must not reappear in production source.
+    // Identifier-absence invariant: the shallow-cache field names
+    // (`shallow_field_expr_cache`, `shallow_imported_bare_ref_cache`,
+    // `shallow_transitive_ref_cache`, `instantiation_cache`) must
+    // not appear in production source.
     let hits = retired_symbol_hits_in_production(&[
         "shallow_field_expr_cache",
         "shallow_imported_bare_ref_cache",
@@ -2048,21 +2038,21 @@ fn type_query_engine_has_no_shallow_caches() {
     ]);
     assert!(
         hits.is_empty(),
-        "retired TypeQueryEngine shallow caches still present:\n{}",
+        "TypeQueryEngine shallow-cache field names must not appear in production source:\n{}",
         hits.join("\n")
     );
 }
 
 // ============================================================================
-// §6.5b D5 structural (2 tests) — SolverTraceSummary + relation dispatch scope
+// Structural invariants — SolverTraceSummary + relation dispatch scope
 // ============================================================================
 
 #[test]
 fn solver_trace_summary_does_not_double_count_dispatch_metrics() {
-    // D5 requirement: SolverTraceSummary must not contain counters that
-    // duplicate dispatch-owned SemanticGraphStats fields.  The D-Cutover
-    // deleted SolverTraceSummary entirely, so the structural property
-    // holds trivially — verify by grep-absence.
+    // Structural invariant: `SolverTraceSummary` must not contain
+    // counters that duplicate dispatch-owned `SemanticGraphStats`
+    // fields. With the type entirely absent, the property holds
+    // trivially — verify by grep-absence.
     let hits = retired_symbol_hits_in_production(&["SolverTraceSummary", "solver_trace_summary"]);
     assert!(
         hits.is_empty(),
@@ -2073,16 +2063,18 @@ fn solver_trace_summary_does_not_double_count_dispatch_metrics() {
 
 #[test]
 fn solver_caches_relation_rebuilt_per_dispatch_builder_invocation() {
-    // D5 requirement: relation scratch is per-dispatch-builder invocation,
-    // not retained across builders.  Post-D-Cutover the relation engine
-    // uses a thread-local RELATION_IN_FLIGHT guard (cleared per call via
-    // enter/exit_relation_guard) and the persistent SemanticGraphStore
-    // relation_memo for cross-request dedup.  ProjectSemanticDispatch is
-    // created fresh per dispatch call (borrows &VerterHost), so no
-    // per-instance relation cache can leak across invocations.
+    // Relation-scope invariant: relation scratch is per-dispatch-builder
+    // invocation, not retained across builders. The relation engine
+    // uses a thread-local RELATION_IN_FLIGHT guard (cleared per call
+    // via enter/exit_relation_guard) and the persistent
+    // SemanticGraphStore relation_memo for cross-request dedup.
+    // ProjectSemanticDispatch is created fresh per dispatch call
+    // (borrows &VerterHost), so no per-instance relation cache can
+    // leak across invocations.
     //
     // Verify structurally: ProjectSemanticDispatch has no `relation`
-    // field, and the relation module uses thread-local not instance state.
+    // field, and the relation module uses thread-local not instance
+    // state.
     let mod_src = include_str!("project_semantic_dispatch/mod.rs");
     assert!(
         !mod_src.contains("relation_cache"),
@@ -2100,41 +2092,16 @@ fn solver_caches_relation_rebuilt_per_dispatch_builder_invocation() {
 }
 
 // ============================================================================
-// §6.5 Zero-legacy (1 test)
+// Zero-legacy
 // ============================================================================
 
 #[test]
 fn no_deprecated_attributes_on_retired_symbols() {
-    // Plan §0 criterion 15: no `#[deprecated]` attribute may reference
-    // any of the D-cutover-era retired symbols. The squash commit fully
-    // removes the retired symbols rather than `#[deprecated]`-ing them.
-    //
-    // **Phase 5k §5.14.0 amendment (parent §5.14.0 r16/Claude-N1).**
-    // Three engine-resolver methods originally listed here as retired
-    // — `lower_and_project_to_expanded`, `project_expr_surface_shape`,
-    // `instantiate_local_generic_ref` — are deletion targets of
-    // **Phase 5l** (engine retirement, parent §5.14.2 / sub-).
-    // The §5.14.0 prerequisite mandates that 5k add
-    // `#[deprecated(note = "Phase 5l deletion target: ...")]` to EVERY
-    // engine resolver method 5l will delete, and 5l's pre-flight gate
-    // (§5.14.1) uses `cargo rustc -- -W deprecated` to enumerate every
-    // surviving caller. The deprecation attribute is a mechanical
-    // caller-discovery tool with a finite lifetime: it lands in 5k and
-    // disappears in 5l along with the retired methods themselves.
-    //
-    // Removing the three names from this retired-list lifts the
-    // D-cutover-era prohibition for the 5k-5l window only — every
-    // other D-cutover-retired symbol stays in the list (the
-    // engine-resolver methods are the only exception, scoped to the
-    // §8 deletion list).
-    //
-    // After 5l lands, the three methods cease to exist; the
-    // `#[deprecated]` attributes vanish with them; the characterization
-    // test no longer needs the exception. A future maintenance commit
-    // can re-add the names to the list once 5l has merged (the names
-    // would be vacuously satisfied because no `#[deprecated]` references
-    // them), but the names being absent does not weaken the test's
-    // discriminating power for the remaining 17 names.
+    // Zero-legacy invariant: no `#[deprecated]` attribute may
+    // reference any of the symbol names below. Production code
+    // either uses these symbols (in which case they cannot be
+    // deprecated) or, if they are absent from the final design,
+    // they are absent entirely — not present-but-deprecated.
     let retired = [
         "TypeSolverHost",
         "EvalEnvSolverHost",
@@ -2144,11 +2111,7 @@ fn no_deprecated_attributes_on_retired_symbols() {
         "TypeSurfaceOpResult",
         "dispatch_bridge",
         "shallow_relation_check",
-        // "lower_and_project_to_expanded" — Phase 5l deletion target
-        // (§5.14.2 / sub-); 5k §5.14.0 attaches `#[deprecated]`.
         "project_expr_surface_as_type_expr",
-        // "project_expr_surface_shape" — Phase 5l deletion target.
-        // "instantiate_local_generic_ref" — Phase 5l deletion target.
         "solver_host_for_scope",
         "owner_engine",
         "expand_macro_types",
@@ -2230,15 +2193,12 @@ fn no_deprecated_attributes_on_retired_symbols() {
 }
 
 // ============================================================================
-// §6.6 D4 behavioural (6 tests) — un-ignored in §5.9 WIP-D5
+// D4 behavioural invariants
 // ============================================================================
 
-/// Plan §3 Change D5b: the D4 symbolic-stop sites at former
-/// `type_solver::solve.rs:2177-2192` emitted an `Applied` stub when
-/// an open generic expansion hit the walker's constraint-unknown
-/// branch — short-circuiting instead of routing through the
-/// canonical deferred form. The entire `solve.rs` file is gone in
-/// §5.8 WIP-W; the short-circuit cannot exist. Assert by file
+/// Symbolic-stop absence invariant: there must be no `Applied`-stub
+/// short-circuit for open generic expansions. The entire `solve.rs`
+/// file is absent; the short-circuit cannot exist. Assert by file
 /// absence.
 #[test]
 fn open_generic_expansion_no_longer_short_circuits_to_applied_stub() {
@@ -2251,32 +2211,30 @@ fn open_generic_expansion_no_longer_short_circuits_to_applied_stub() {
         workspace_root.join("crates/verter_semantic/src/analysis/type_solver/solve.rs");
     assert!(
         !solve_path.exists(),
-        "type_solver/solve.rs must be fully retired (§5.8 WIP-W) — the D4 \
-         applied-stub short-circuit for open generic expansion used to live \
-         here; its disappearance is the discriminating check"
+        "type_solver/solve.rs must not exist — the applied-stub \
+         short-circuit for open generic expansion would have lived \
+         here; its absence is the discriminating check"
     );
-    // Additionally: the retired walker method
-    // `collect_structural_property_descriptors_inner` that drove the
-    // stub must be absent from production code. (`resolve_node` is a
-    // common method name in other subsystems — matched below by the
-    // more-specific walker identifier.)
+    // Additionally: the walker method
+    // `collect_structural_property_descriptors_inner` that would have
+    // driven the stub must be absent from production code.
+    // (`resolve_node` is a common method name in other subsystems —
+    // matched below by the more-specific walker identifier.)
     let hits =
         retired_symbol_hits_in_production(&["collect_structural_property_descriptors_inner"]);
     assert!(
         hits.is_empty(),
-        "retired walker method identifier still present in production source:\n{}",
+        "walker method identifier must not appear in production source:\n{}",
         hits.join("\n")
     );
 }
 
-/// Plan §3 Change D5b companion: the D4 symbolic-stop sites at former
-/// `solve.rs:901-927` short-circuited path projection through open
-/// applied types to a `symbolic_indexed_access` wrapper. With the
-/// solver kernel retired, path projection routes through
-/// `PathWalker::walk` ( C3 iterative worklist) which emits the
-/// canonical `SemanticNodeData::IndexedAccess` or continues into
-/// `build_indexed_access` via dispatch re-entry — not a symbolic-stop
-/// stub.
+/// Symbolic-indexed-access absence invariant: path projection
+/// through open applied types must NOT short-circuit to a
+/// `symbolic_indexed_access` wrapper. The canonical path runs through
+/// `PathWalker::walk`'s iterative worklist, which emits the canonical
+/// `SemanticNodeData::IndexedAccess` or continues into
+/// `build_indexed_access` via dispatch re-entry.
 #[test]
 fn path_projection_through_open_applied_does_not_short_circuit_to_symbolic_indexed_access() {
     let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2288,12 +2246,12 @@ fn path_projection_through_open_applied_does_not_short_circuit_to_symbolic_index
         workspace_root.join("crates/verter_semantic/src/analysis/type_solver/solve.rs");
     assert!(
         !solve_path.exists(),
-        "type_solver/solve.rs must stay deleted — the symbolic_indexed_access \
-         short-circuit used to live here"
+        "type_solver/solve.rs must not exist — the symbolic_indexed_access \
+         short-circuit would have lived here"
     );
-    // The retired symbolic-stop helpers must not re-appear in
-    // production code. `symbolic_indexed_access` was the stub name
-    // the walker used to emit instead of re-dispatching.
+    // The symbolic-stop helpers must not appear in production code.
+    // `symbolic_indexed_access` is the stub name a walker would emit
+    // instead of re-dispatching.
     let hits = retired_symbol_hits_in_production(&[
         "symbolic_indexed_access",
         "record_indexed_access_open_skip",
@@ -2301,21 +2259,19 @@ fn path_projection_through_open_applied_does_not_short_circuit_to_symbolic_index
     ]);
     assert!(
         hits.is_empty(),
-        "retired D4 symbolic-stop helpers still present in production source:\n{}",
+        "symbolic-stop helpers must not appear in production source:\n{}",
         hits.join("\n")
     );
 }
 
-/// §5.9 WIP-D5: `indexed_access_open_skips` counter + the
-/// `indexed_access_open_skip` audit hook are retired entirely. The
-/// `SemanticGraphStats` telemetry is the reusable-work authority;
+/// Counter-absence invariant: `indexed_access_open_skips` counter +
+/// the `indexed_access_open_skip` audit hook are absent entirely.
+/// The `SemanticGraphStats` telemetry is the reusable-work authority;
 /// open-skip bookkeeping has no home in the dispatch architecture.
 ///
-/// §5.8 WIP-W retired the entire `type_solver::audit` module along
-/// with the arena solver kernel. The discriminating check is now that
-/// `audit.rs` does not exist in the solver directory at all — its
-/// disappearance is the strongest possible proof the retired counter
-/// cannot be present.
+/// The entire `type_solver::audit` module is absent — `audit.rs`
+/// does not exist in the solver directory. Its absence is the
+/// strongest possible proof the counter cannot be present.
 #[test]
 fn indexed_access_open_skips_counter_retired() {
     let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2327,18 +2283,18 @@ fn indexed_access_open_skips_counter_retired() {
         workspace_root.join("crates/verter_semantic/src/analysis/type_solver/audit.rs");
     assert!(
         !audit_path.exists(),
-        "type_solver/audit.rs must be fully retired (§5.8 WIP-W); found at {}",
+        "type_solver/audit.rs must not exist; found at {}",
         audit_path.display()
     );
 }
 
-/// Plan §3 Change H: the parser's syntactic depth guard emits a
-/// structured `ResolutionBudgetExceeded { limit, actual, context }`
-/// record on cap-trip — **not** a silent `Applied` stub from the
-/// retired solver. A deeply nested `Foo<Foo<...>>` chain past the
-/// `PARSER_SYNTACTIC_DEPTH_LIMIT = 256` cap must produce a recorded
-/// `limit == 256`, a non-zero `actual`, and termination without stack
-/// overflow.
+/// Structured-budget-failure contract: the parser's syntactic depth
+/// guard must emit a structured
+/// `ResolutionBudgetExceeded { limit, actual, context }` record on
+/// cap-trip — **not** a silent `Applied`-style stub. A deeply nested
+/// `Foo<Foo<...>>` chain past the `PARSER_SYNTACTIC_DEPTH_LIMIT =
+/// 256` cap must produce a recorded `limit == 256`, a non-zero
+/// `actual`, and termination without stack overflow.
 #[test]
 fn budget_exceeded_returns_structured_failure_not_applied_stub() {
     use verter_parser::utils::oxc::vue::{
@@ -2397,10 +2353,10 @@ fn budget_exceeded_returns_structured_failure_not_applied_stub() {
     );
 }
 
-/// Plan §3 Change D5b: the former `SolveLimits::max_resolve_steps`
-/// budget domain is retired along with the arena solver. There is no
-/// successor `resolve_steps` counter in dispatch — the test asserts
-/// the subject code is gone (file absence + identifier absence).
+/// Budget-domain absence invariant: `SolveLimits::max_resolve_steps`
+/// is not part of the final design — there is no `resolve_steps`
+/// counter in dispatch. Assert by file absence + identifier
+/// absence.
 #[test]
 fn budget_domain_solver_resolve_steps_trips_cleanly() {
     let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2412,21 +2368,21 @@ fn budget_domain_solver_resolve_steps_trips_cleanly() {
         workspace_root.join("crates/verter_semantic/src/analysis/type_solver/solve.rs");
     assert!(
         !solve_path.exists(),
-        "type_solver/solve.rs must stay deleted — `SolveLimits::max_resolve_steps` \
-         lived here and has no dispatch-side successor"
+        "type_solver/solve.rs must not exist — `SolveLimits::max_resolve_steps` \
+         would have lived here and has no dispatch-side successor"
     );
     let hits = retired_symbol_hits_in_production(&["max_resolve_steps", "SolveLimits"]);
     assert!(
         hits.is_empty(),
-        "retired solver budget identifiers still present in production source:\n{}",
+        "solver budget identifiers must not appear in production source:\n{}",
         hits.join("\n")
     );
 }
 
-/// Plan §3 Change D5b companion: the former `SolveLimits::max_arena_nodes`
-/// budget domain is retired along with the arena solver. Dispatch
-/// uses the `SemanticGraphStore` interned node pool with no per-
-/// request cap. Assert by file absence + identifier absence.
+/// Budget-domain absence invariant: `SolveLimits::max_arena_nodes`
+/// is not part of the final design. Dispatch uses the
+/// `SemanticGraphStore` interned node pool with no per-request cap.
+/// Assert by file absence + identifier absence.
 #[test]
 fn budget_domain_solver_arena_nodes_trips_cleanly() {
     let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2438,30 +2394,31 @@ fn budget_domain_solver_arena_nodes_trips_cleanly() {
         workspace_root.join("crates/verter_semantic/src/analysis/type_solver/solve.rs");
     assert!(
         !solve_path.exists(),
-        "type_solver/solve.rs must stay deleted — `SolveLimits::max_arena_nodes` \
-         lived here and has no dispatch-side successor"
+        "type_solver/solve.rs must not exist — `SolveLimits::max_arena_nodes` \
+         would have lived here and has no dispatch-side successor"
     );
     let hits = retired_symbol_hits_in_production(&["max_arena_nodes"]);
     assert!(
         hits.is_empty(),
-        "retired solver arena-node budget identifier still present in production source:\n{}",
+        "solver arena-node budget identifier must not appear in production source:\n{}",
         hits.join("\n")
     );
 }
 
 // ============================================================================
-// §6.7 Substitution-environment preservation (13 tests) — un-ignored in §5.7 WIP-C
+// Substitution-environment preservation
 // ============================================================================
 //
-// Each test asserts an architectural property of the
-// dispatch path that is preserved from the retired solver / owner_engine
-// surface. Bodies discriminate: a stub that unconditionally returns
-// would fail the discriminating check (non-trivial input threading,
-// memo warm-hit observation, or specific function-presence grep).
+// Each test asserts an architectural property of the dispatch path
+// that mirrors the responsibilities once carried by the legacy
+// solver / owner_engine surface. Bodies discriminate: a stub that
+// unconditionally returns would fail the discriminating check
+// (non-trivial input threading, memo warm-hit observation, or
+// specific function-presence grep).
 
-/// Plan §9 row 1: `owner_engine.solve_scoped(host, scope, &expr)`
-/// preserved its `env` (type-parameter bindings) and
-/// `name_resolution` (import map) through the prepared-decl context.
+/// Substitution-preservation contract: scoped solves must preserve
+/// their `env` (type-parameter bindings) and `name_resolution`
+/// (import map) through the prepared-decl context.
 /// Post-migration, `ProjectSemanticDispatch::shallow_lower_type_expr`
 /// accepts both as function parameters. The discriminating assertion
 /// is that the lowering entry point signature carries both fields —
@@ -2472,18 +2429,18 @@ fn migrate_owner_engine_solve_scoped_preserves_env_and_name_resolution() {
     let lower_src = include_str!("project_semantic_dispatch/lower.rs");
     assert!(
         lower_src.contains("env: &FxHashMap<String, SemanticNodeId>"),
-        "shallow_lower_type_expr must accept the `env` map (row 1 preservation)"
+        "shallow_lower_type_expr must accept the `env` map"
     );
     assert!(
         lower_src.contains("name_resolution: &FxHashMap<String, ResolvedRootIdentity>"),
-        "shallow_lower_type_expr must accept the `name_resolution` map (row 1 preservation)"
+        "shallow_lower_type_expr must accept the `name_resolution` map"
     );
 }
 
-/// Plan §9 row 2: `owner_engine.project_expr_surface_as_type_expr`
-/// migration target. Verifies `ProjectSemanticDispatch` exposes the
-/// `ProjectPath` entry point with `ProjectionMode::Expanded` that
-/// supersedes the retired owner_engine call.
+/// Substitution-preservation contract: `ProjectSemanticDispatch`
+/// exposes the `ProjectPath` entry point with
+/// `ProjectionMode::Expanded` that supersedes any standalone
+/// `owner_engine.project_expr_surface_as_type_expr` call.
 #[test]
 fn migrate_owner_engine_project_expr_surface_as_type_expr_preserves_env() {
     // Mode enum admits `Expanded`.
@@ -2501,16 +2458,15 @@ fn migrate_owner_engine_project_expr_surface_as_type_expr_preserves_env() {
     }
 }
 
-/// Plan §9 row 3: `engine.lower_and_project_to_expanded` migration. Verifies the
-/// dispatch-first path on ComponentMetaQueryEngine routes through
-/// dispatch before falling back to the legacy solver — checked by
+/// Dispatch-first routing contract: the dispatch path on
+/// ComponentMetaQueryEngine must route through dispatch — checked by
 /// file-content grep so a regression that deletes the dispatch call
 /// surfaces immediately.
 ///
-/// scans all sibling files in the
-/// `component_meta_query_engine/` folder (mod.rs + child modules)
-/// because `materialize_member_surface_expr` and the dispatch-routed
-/// helpers may live in private child modules after the folder split.
+/// Scans all sibling files in the `component_meta_query_engine/`
+/// folder (mod.rs + child modules) because
+/// `materialize_member_surface_expr` and the dispatch-routed helpers
+/// may live in private child modules after the folder split.
 #[test]
 fn migrate_engine_lower_and_project_to_expanded_preserves_env() {
     let cmqe_files: &[&str] = &[
@@ -2541,10 +2497,9 @@ fn migrate_engine_lower_and_project_to_expanded_preserves_env() {
 // discriminate against (CLAUDE.md "Legacy Code Deletion": delete tests
 // that characterize deleted behavior).
 
-/// Plan §9 row 6: `TypeSurfaceDb::{get, publish, evict_*}` identity
-/// moved to `SemanticGraphStore::relation_memo`. Verifies the
-///  memo API exists and behaves as a write-read-warm
-/// cycle — construction of a new host must expose the
+/// Relation-memo identity contract: the dispatch memo API exists on
+/// `SemanticGraphStore::relation_memo` and behaves as a write-read-
+/// warm cycle — construction of a new host must expose the
 /// `get_relation` / `insert_relation` entry points.
 #[test]
 fn type_surface_db_identity_moved_to_semantic_graph_store_memo() {
@@ -2579,10 +2534,10 @@ fn type_surface_db_identity_moved_to_semantic_graph_store_memo() {
     assert_eq!(graph.relation_memo_count(), 1);
 }
 
-/// Plan §9 row 7: `EvalEnvSolverHost::new(env)` removal. Dispatch
-/// builders accept env through `shallow_lower_type_expr`'s function
-/// parameter instead of a wrapper host. Verifies the lowering entry
-/// point threading remains.
+/// Env-threading invariant: dispatch builders accept env through
+/// `shallow_lower_type_expr`'s function parameter rather than via
+/// any `EvalEnvSolverHost`-style wrapper host. The lowering entry
+/// point threading must remain.
 #[test]
 fn eval_env_solver_host_removal_does_not_lose_env_context() {
     let lower_src = include_str!("project_semantic_dispatch/lower.rs");
@@ -2598,9 +2553,9 @@ fn eval_env_solver_host_removal_does_not_lose_env_context() {
     );
 }
 
-/// Plan §9 row 8: `SessionSolverHost::{new, with_declaration_scope}`
-/// migration. All dispatch consumers route through
-/// `ProjectSemanticDispatch` directly; the parser-adjacent
+/// Cache-routing invariant: all dispatch consumers route through
+/// `ProjectSemanticDispatch` directly — no `SessionSolverHost`-style
+/// bridge sits between them. The parser-adjacent
 /// `HostNamedTypeCacheAdapter` reads/writes `SemanticGraphStore` via
 /// `get_resolved_named_type` / `insert_resolved_named_type`.
 #[test]
@@ -2617,9 +2572,10 @@ fn session_solver_host_removal_migrates_all_consumers_to_dispatch() {
     );
 }
 
-/// Plan §9 row 9: `TypeQueryEngine::new(host)` removal — session
-/// paths use `ProjectSemanticDispatch::new(host)` directly. Parser's
-/// Vue macro cache key routes through `HostNamedTypeCacheAdapter`.
+/// Session entry-point invariant: session paths use
+/// `ProjectSemanticDispatch::new(host)` directly (no
+/// `TypeQueryEngine`-style intermediary). Parser's Vue macro cache
+/// key routes through `HostNamedTypeCacheAdapter`.
 #[test]
 fn type_query_engine_removal_migrates_vue_macro_parsing_to_host_named_type_cache_adapter() {
     let host_manage_src = include_str!("host_manage.rs");
@@ -2637,10 +2593,10 @@ fn type_query_engine_removal_migrates_vue_macro_parsing_to_host_named_type_cache
     );
 }
 
-/// Plan §9 row 10: `type_eval::evaluate` removal. Replacement path is
-/// `dispatch.execute(ProjectPath { ..., mode: Expanded })`. Verifies
-/// the replacement path exists and runs end-to-end on a simple
-/// identity case.
+/// Evaluation-entry-point invariant: the entry point for type
+/// evaluation is
+/// `dispatch.execute(ProjectPath { ..., mode: Expanded })`. The
+/// path must exist and run end-to-end on a simple identity case.
 #[test]
 fn type_eval_evaluate_removal_preserves_semantic_output() {
     let host = host_for_relation_tests();
@@ -2665,11 +2621,10 @@ fn type_eval_evaluate_removal_preserves_semantic_output() {
     }
 }
 
-/// Plan §9 row 11: `type_eval_build::expand_macro_types(ctx)`
-/// removal. Vue macro pipeline continues through the parser's
-/// `NamedTypeCache` adapter on the dispatch side. Verifies the host
-/// adapter infrastructure exists and lookups hit the
-/// `SemanticGraphStore` cache layer.
+/// Vue-macro-pipeline routing invariant: the Vue macro pipeline
+/// runs through the parser's `NamedTypeCache` adapter on the
+/// dispatch side. The host adapter infrastructure must exist and
+/// lookups must hit the `SemanticGraphStore` cache layer.
 #[test]
 fn type_eval_build_expand_macro_types_removal_preserves_macro_pipeline_output() {
     let host = host_for_relation_tests();
@@ -2688,8 +2643,8 @@ fn type_eval_build_expand_macro_types_removal_preserves_macro_pipeline_output() 
     assert_eq!(graph.resolved_named_type_count(), 0);
 }
 
-/// Plan §9 row 12: `type_expand::expand_object_shape` removal. Object
-/// surface projection continues through
+/// Object-shape projection invariant: object surface projection
+/// runs through
 /// `ProjectSemanticDispatch::execute(ProjectPath { mode: Shallow })`.
 #[test]
 fn type_expand_expand_object_shape_removal_preserves_shape_output() {
@@ -2725,9 +2680,8 @@ fn type_expand_expand_object_shape_removal_preserves_shape_output() {
     }
 }
 
-/// Plan §9 row 13: `type_expand::expand_normalized_expr` removal.
-/// Union / intersection normalization lives on dispatch via
-/// `NormalizeUnion` / `NormalizeIntersection`.
+/// Normalization invariant: union / intersection normalization
+/// lives on dispatch via `NormalizeUnion` / `NormalizeIntersection`.
 #[test]
 fn type_expand_expand_normalized_expr_removal_preserves_normalization_output() {
     let host = host_for_relation_tests();
@@ -2771,49 +2725,32 @@ fn type_expand_expand_normalized_expr_removal_preserves_normalization_output() {
 }
 
 // ============================================================================
-// §6.7 Phase 5e — route-loop + route-target migrations
+// Route-loop + route-target dispatch routing
 //
-// Sub- commits 5+6: callers of the engine's route-loop helpers
+// Callers of the engine's route-loop helpers
 // (`lower_and_project_to_expanded`) and route-target helpers
-// (`project_route_surface_expr`, `instantiate_local_generic_ref`) inside
-// `meta_resolve.rs` and `fallthrough.rs` migrate to dispatch helpers.
-//
-// These tests are static-grep gates over the post-migration tree;
-// each is discriminating against the pre-Phase-5e tree (where the
-// engine helpers had multiple consumer callsites in the production
-// callsite files).
+// (`project_route_surface_expr`, `instantiate_local_generic_ref`)
+// inside `meta_resolve.rs` and `fallthrough.rs` route through
+// dispatch helpers. These tests are static-grep gates over the final
+// tree.
 // ============================================================================
 
-/// Phase 5e commit 5 — the callsite migration of the route-loop
-/// pattern (`engine.lower_and_project_to_expanded(scope, expr)`) inside
-/// `meta_resolve.rs` and `fallthrough.rs`. After commit 5, the
-/// route-loop pattern is funneled through the Class A dispatch helper
+/// Route-loop dispatch-routing invariant: the route-loop pattern
+/// (`engine.lower_and_project_to_expanded(scope, expr)`) inside
+/// `meta_resolve.rs` and `fallthrough.rs` must be funneled through
+/// the Class A dispatch helper
 /// (`project_expr_class_a_via_dispatch[_threaded]`) or, where the
 /// helper isn't usable, through `dispatch.execute_to_type_expr` on a
 /// `ProjectPath { mode: Expanded }` query directly.
 ///
-/// **Pre-commit-5 (Phase 5d HEAD):** `meta_resolve.rs` has 5
-/// `.lower_and_project_to_expanded(` callsites and `fallthrough.rs`
-/// has 1 — total 6 consumer callsites in the route-loop / member-route
-/// production paths.
-///
-/// **Post-commit-5 expected:** the route-loop production callsites in
-/// `meta_resolve.rs` migrate (only the engine-threaded route fast-path
-/// inside the Class A helper at line ~138 may legitimately retain the
-/// engine call so that `project_route_surface_expr` callsites continue
-/// to receive engine-local fuse / scope-payload state — the route
-/// fast-path itself migrates in commit 6 alongside
-/// `instantiate_local_generic_ref`). `fallthrough.rs:963` migrates to
-/// the Class A helper, leaving 0 callsites there.
-///
-/// Discriminating in both directions:
-/// - Pre-commit-5 fails: `meta_resolve.rs` callsite count > 1
-///   (5 callsites pre-migration).
-/// - Post-commit-5 passes: `meta_resolve.rs` callsite count <= 1
-///   (only the Class A helper's route fast-path retained until
-///   commit 6); `fallthrough.rs` callsite count == 0.
+/// Final-state expectations:
+/// - `meta_resolve.rs` retains AT MOST 1 `.lower_and_project_to_expanded(`
+///   callsite (the Class A helper's engine-threaded route fast-path).
+/// - `fallthrough.rs` retains 0 callsites — the
+///   `evaluate_value_expression_via_env_or_dispatch` fallback uses
+///   `project_expr_class_a_via_dispatch`.
 #[test]
-fn phase_05e_commit_5_route_loop_callers_migrate_to_dispatch() {
+fn route_loop_callers_route_through_dispatch() {
     let meta_src = include_str!("meta_resolve.rs");
     let fallthrough_src = include_str!("resolver_core/fallthrough.rs");
 
@@ -2822,57 +2759,48 @@ fn phase_05e_commit_5_route_loop_callers_migrate_to_dispatch() {
         .matches(".lower_and_project_to_expanded(")
         .count();
 
-    // Post-commit-5 contract:
+    // Final-state contract:
     //
     // - `meta_resolve.rs` retains AT MOST 1 callsite (the Class A
-    //   helper's engine-threaded route fast-path; migrates in
-    //   commit 6 with `instantiate_local_generic_ref` retirement).
-    // - `fallthrough.rs` retains 0 callsites (commit 5 migrates the
-    //   `evaluate_value_expression_via_env_or_dispatch` fallback).
+    //   helper's engine-threaded route fast-path).
+    // - `fallthrough.rs` retains 0 callsites; the
+    //   `evaluate_value_expression_via_env_or_dispatch` fallback
+    //   routes through the Class A helper.
     assert!(
         meta_callsites <= 1,
-        "Phase 5e commit 5: meta_resolve.rs must have <= 1 .lower_and_project_to_expanded( callsite post-migration; found {meta_callsites}",
+        "meta_resolve.rs must have <= 1 .lower_and_project_to_expanded( callsite; found {meta_callsites}",
     );
     assert_eq!(
         fallthrough_callsites, 0,
-        "Phase 5e commit 5: fallthrough.rs must have 0 .lower_and_project_to_expanded( callsites post-migration; found {fallthrough_callsites}",
+        "fallthrough.rs must have 0 .lower_and_project_to_expanded( callsites; found {fallthrough_callsites}",
     );
 
-    // Positive marker: the Class A helper (commit 5d) is the canonical
-    // dispatch entry, so its name must appear in fallthrough.rs after
-    // migration.
+    // Positive marker: the Class A helper is the canonical dispatch
+    // entry, so its name must appear in fallthrough.rs.
     assert!(
         fallthrough_src.contains("project_expr_class_a_via_dispatch"),
-        "Phase 5e commit 5: fallthrough.rs must call project_expr_class_a_via_dispatch post-migration",
+        "fallthrough.rs must call project_expr_class_a_via_dispatch",
     );
 }
 
-/// Phase 5e commit 6 — `instantiate_local_generic_ref` engine method
-/// retires in commit 6 alongside the Class D route-target callsite
-/// migrations (`project_route_surface_expr` consumers in
-/// `meta_resolve.rs`). The retirement is enforced via a static-grep
-/// gate over `meta_resolve.rs`: post-commit-6, NO callsite of
-/// `engine.instantiate_local_generic_ref(...)` may remain there.
-///
-/// Discriminating in both directions:
-/// - Pre-commit-6 (Phase 5d HEAD): 3 callsites in meta_resolve.rs.
-/// - Post-commit-6 expected: 0 callsites in meta_resolve.rs (callers
-///   migrate to `dispatch.execute(SemanticQueryKey::Instantiate { .. })`
-///   per the sub-plan §C.3 D-T recipe).
+/// Engine-method-absence invariant: `instantiate_local_generic_ref`
+/// is not a callsite of the meta-resolve family. Callers route
+/// through `dispatch.execute(SemanticQueryKey::Instantiate { .. })`.
+/// The check is a static-grep gate over the meta-resolve module
+/// family: NO `engine.instantiate_local_generic_ref(...)` callsite
+/// may appear.
 #[test]
-fn phase_05e_commit_6_instantiate_local_generic_ref_callers_migrate_to_dispatch() {
-    // Phase 11a — `meta_resolve.rs` is now the shell of a folder
-    // module; the bodies that carry the `instantiate_local_generic_ref`
-    // / `SemanticQueryKey::Instantiate` markers landed in:
-    //   - `meta_resolve/registry_materialize.rs` (commit 11) — the
-    //     registry-route fast path that dispatches Instantiate for
-    //     route-target Pick/Omit recipes.
-    //   - `meta_resolve/dispatch_helpers.rs` (commit 4) — the
+fn instantiate_local_generic_ref_callers_route_through_dispatch() {
+    // `meta_resolve.rs` is the shell of a folder module; the bodies
+    // that carry the `instantiate_local_generic_ref` /
+    // `SemanticQueryKey::Instantiate` markers live in:
+    //   - `meta_resolve/registry_materialize.rs` — the registry-route
+    //     fast path that dispatches Instantiate for route-target
+    //     Pick/Omit recipes.
+    //   - `meta_resolve/dispatch_helpers.rs` — the
     //     `instantiate_local_generic_ref_via_dispatch` bridge helper.
-    // The original test mechanism (single-file static-text grep) is
-    // preserved verbatim — we just concatenate the relevant
-    // post-split siblings before running the same predicates. §0.6.1
-    // mechanical adjustment.
+    // The test concatenates the relevant post-split siblings before
+    // running the static-text grep predicates.
     let shell_src = include_str!("meta_resolve.rs");
     let registry_materialize_src = include_str!("meta_resolve/registry_materialize.rs");
     let dispatch_helpers_src = include_str!("meta_resolve/dispatch_helpers.rs");
@@ -2881,15 +2809,14 @@ fn phase_05e_commit_6_instantiate_local_generic_ref_callers_migrate_to_dispatch(
     let meta_callsites = meta_src.matches(".instantiate_local_generic_ref(").count();
     assert_eq!(
         meta_callsites, 0,
-        "Phase 5e commit 6: meta_resolve.* must have 0 .instantiate_local_generic_ref( callsites post-migration; found {meta_callsites}",
+        "meta_resolve.* must have 0 .instantiate_local_generic_ref( callsites; found {meta_callsites}",
     );
 
     // Positive marker: callers route through dispatch's Instantiate
-    // family (the substitution-aware dispatch path that
-    // instantiate_local_generic_ref previously bridged synchronously).
+    // family (the substitution-aware dispatch path).
     let instantiate_dispatch_calls = meta_src.matches("SemanticQueryKey::Instantiate").count();
     assert!(
         instantiate_dispatch_calls >= 1,
-        "Phase 5e commit 6: meta_resolve.* must dispatch SemanticQueryKey::Instantiate post-migration; found {instantiate_dispatch_calls}",
+        "meta_resolve.* must dispatch SemanticQueryKey::Instantiate; found {instantiate_dispatch_calls}",
     );
 }

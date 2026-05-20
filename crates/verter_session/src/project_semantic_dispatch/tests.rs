@@ -1656,13 +1656,13 @@ fn open_conditional_stays_deferred_with_shell_branch_refs_not_expanded_bodies() 
     );
 }
 
-/// Phase 2 (component-meta cold-path long-tail) — Fix A
-/// regression guard. The deferred-conditional sub-dispatch in
-/// `walk.rs` must inherit the OUTER caller's mode, NOT downgrade to
-/// `ProjectionMode::Navigate`. The historical `mode_for_hop` bug
-/// would have downgraded both per-branch projections to `Navigate`,
-/// breaking outer-terminal expansion semantics for paths like
-/// `(T extends U ? A : B)["x"]` under `mode: Expanded`.
+/// Deferred-conditional outer-terminal-mode guard. The
+/// deferred-conditional sub-dispatch in `walk.rs` must inherit the
+/// OUTER caller's mode, NOT downgrade to `ProjectionMode::Navigate`.
+/// A `mode_for_hop`-style bug that downgraded both per-branch
+/// projections to `Navigate` would break outer-terminal expansion
+/// semantics for paths like `(T extends U ? A : B)["x"]` under
+/// `mode: Expanded`.
 ///
 /// **Discrimination by source grep, not runtime cache peek.** The
 /// memo's broader-satisfies-narrower backfill (Expanded → Shallow →
@@ -1676,13 +1676,14 @@ fn open_conditional_stays_deferred_with_shell_branch_refs_not_expanded_bodies() 
 /// per-branch sub-dispatch sites in the `Conditional` arm of
 /// `advance_step` must pass `mode: self.mode`.
 ///
-/// **TDD discriminating contract.** Pre-fix tree (`mode: ProjectionMode::Navigate`
-/// hardcoded, or `mode: mode_for_hop(...)` returning Navigate): test
-/// FAILS — the literal `mode: self.mode` does not appear inside the
-/// captured `Conditional` arm window. Post-fix tree (current state):
-/// test PASSES — both per-branch dispatches carry `mode: self.mode`.
+/// **Discriminating contract.** A tree that hardcoded
+/// `mode: ProjectionMode::Navigate`, or `mode: mode_for_hop(...)`
+/// returning Navigate, would fail this test — the literal
+/// `mode: self.mode` would not appear inside the captured
+/// `Conditional` arm window. The intended state passes: both
+/// per-branch dispatches carry `mode: self.mode`.
 #[test]
-fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode_phase_2_fix_a() {
+fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode() {
     let walk_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src")
         .join("project_semantic_dispatch")
@@ -1739,8 +1740,8 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode_phase_2_fix_a
         assert!(
             !window.contains(forbidden),
             "Conditional arm must not hardcode `{forbidden}` for sub-dispatch — \
-             the outer caller's `self.mode` is the load-bearing terminal mode \
-             (Phase 2 Fix A). Window:\n{window}"
+             the outer caller's `self.mode` is the load-bearing terminal mode. \
+             Window:\n{window}"
         );
     }
 
@@ -1842,28 +1843,27 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode_phase_2_fix_a
     }
 }
 
-/// Phase 6 (component-meta cold-path long-tail) — Fix D
-/// substitute change-tracking optimization. When the substituted
+/// Substitute change-tracking optimization. When the substituted
 /// parameter does NOT appear anywhere in the input tree, the
 /// recursive walk must short-circuit each rebuild instead of
 /// pushing identical-content nodes through `intern_preserving_scope`.
 ///
 /// **Discriminating contract.** The output `SemanticNodeId` is
-/// identical between the pre-Fix-D and post-Fix-D paths (the shard
-/// dedup collapses identical rebuilds back to the same id), so
-/// observation through node identity alone cannot discriminate.
-/// Phase 6 wires `SemanticGraphStore::intern_preserving_scope_call_count()`
+/// identical whether the walker short-circuits or always rebuilds
+/// (the shard dedup collapses identical rebuilds back to the same
+/// id), so observation through node identity alone cannot
+/// discriminate. `SemanticGraphStore::intern_preserving_scope_call_count()`
 /// — a cumulative counter incremented on every
-/// `intern_preserving_scope` call — so the test asserts the counter
+/// `intern_preserving_scope` call — lets the test assert the counter
 /// delta is zero across a no-op substitution.
 ///
-/// Pre-fix tree: every match arm rebuilds unconditionally; counter
-/// delta is `>= 1` even for no-op substitutions. Test FAILS.
-/// Post-fix tree: each arm short-circuits on `!any_changed`, skipping
-/// `intern_preserving_scope` entirely. Counter delta is `0`. Test
-/// PASSES.
+/// A regression that rebuilt every match arm unconditionally would
+/// drive the counter delta `>= 1` even for no-op substitutions and
+/// fail this test. The intended state: each arm short-circuits on
+/// `!any_changed`, skipping `intern_preserving_scope` entirely; the
+/// counter delta is `0`.
 #[test]
-fn substitute_no_op_short_circuits_intern_preserving_scope_phase_6_fix_d() {
+fn substitute_no_op_short_circuits_intern_preserving_scope() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -1938,25 +1938,25 @@ fn substitute_no_op_short_circuits_intern_preserving_scope_phase_6_fix_d() {
         result, union_node,
         "no-op substitution must return the input node id"
     );
-    // The discriminator: post-Fix-D the no-op path skips
-    // `intern_preserving_scope` for every arm. Pre-Fix-D it would
-    // rebuild every arm and increment this counter (one call per
-    // sub-walk visit that had a `intern_preserving_scope` arm).
+    // The discriminator: the no-op path must skip
+    // `intern_preserving_scope` for every arm. A walker that
+    // rebuilt every arm would increment this counter (one call per
+    // sub-walk visit that has a `intern_preserving_scope` arm).
     assert_eq!(
         calls_after - calls_before,
         0,
-        "Phase 6 Fix D contract: no-op substitution must not call \
-         `intern_preserving_scope`. Pre-fix tree always rebuilt \
-         (delta > 0) and relied on shard dedup to collapse the \
-         result back to the input id; post-fix the change-tracking \
-         helper short-circuits each arm."
+        "no-op substitution must not call `intern_preserving_scope`. \
+         A walker that always rebuilt (delta > 0) and relied on shard \
+         dedup to collapse the result back to the input id would fail \
+         this contract; the change-tracking helper must short-circuit \
+         each arm."
     );
 }
 
-/// Phase 6 — change-tracking does NOT regress correctness when the
-/// parameter DOES appear: substitute(T → string) produces a node
-/// whose `T` references are replaced. Standard correctness check
-/// to pair with the no-op discriminator above.
+/// Change-tracking must NOT regress correctness when the parameter
+/// DOES appear: substitute(T → string) produces a node whose `T`
+/// references are replaced. Standard correctness check to pair with
+/// the no-op discriminator above.
 #[test]
 fn substitute_change_tracking_preserves_correctness_when_parameter_appears() {
     let host = host();
@@ -2173,17 +2173,17 @@ fn distinct_projections_into_same_open_conditional_materialise_only_visited_sube
     );
 }
 
-/// Plan §3 C2 + §3 D-Cutover: when a distributive conditional sees a
-/// union `check`, `build_conditional` must distribute the conditional
-/// per-member via `SemanticQueryApi::execute` (NOT private recursion)
-/// and combine via `NormalizeUnion`. Termination relies on each
-/// per-member sub-query carrying `distributive: false` so the memo
-/// dedups and the dispatch layer's same-path sentinel catches any
-/// accidental self-recursion. The test drives a decidable per-member
-/// shape (`string`/`number` primitives vs `extends string`) so the
-/// per-member conditionals close deterministically; the top-level
-/// result is the normalised union of the two branch selections.
-/// Must NOT stack-overflow.
+/// Distributive-conditional contract: when a distributive conditional
+/// sees a union `check`, `build_conditional` must distribute the
+/// conditional per-member via `SemanticQueryApi::execute` (NOT
+/// private recursion) and combine via `NormalizeUnion`. Termination
+/// relies on each per-member sub-query carrying `distributive: false`
+/// so the memo dedups and the dispatch layer's same-path sentinel
+/// catches any accidental self-recursion. The test drives a
+/// decidable per-member shape (`string`/`number` primitives vs
+/// `extends string`) so the per-member conditionals close
+/// deterministically; the top-level result is the normalised union
+/// of the two branch selections. Must NOT stack-overflow.
 #[test]
 fn build_conditional_distributive_union_distributes_per_member_via_execute_no_stack_overflow() {
     let host = host();
@@ -2230,21 +2230,20 @@ fn build_conditional_distributive_union_distributes_per_member_via_execute_no_st
     );
 }
 
-/// Plan §3 C2 + §3 Change S: `distributive: false` on a union
+/// Distributive-flag gating: `distributive: false` on a union
 /// `check` MUST NOT distribute — the relation engine checks the
 /// union as a whole. Since `(string | number)` is NOT assignable to
 /// `string` (TS assignability rule: Union source distributes — every
 /// arm must be assignable to the target; `number` is not assignable
 /// to `string`), the conditional selects the **false branch**.
 ///
-/// Pre-cutover this test expected a deferred Conditional shell
-/// because the shallow relation check returned `Unknown` for a
-/// union vs. primitive pair. The  relation engine
-/// decides the pair correctly, so the conditional reduces to the
-/// false branch. This is the gating test that proves distribution
-/// is triggered by the `distributive` flag, not merely by union-
-/// shaped input — the conditional still does not *distribute*
-/// (produce a per-member union result), it decides as a whole.
+/// The relation engine decides the union-vs-primitive pair
+/// concretely, so the conditional reduces to the false branch (no
+/// deferred Conditional shell). This is the gating test that proves
+/// distribution is triggered by the `distributive` flag, not merely
+/// by union-shaped input — the conditional still does not
+/// *distribute* (produce a per-member union result), it decides as
+/// a whole.
 #[test]
 fn build_conditional_distributive_false_on_union_check_does_not_distribute() {
     let host = host();
@@ -2289,8 +2288,8 @@ fn build_conditional_distributive_false_on_union_check_does_not_distribute() {
     );
 }
 
-/// Plan §3 C2 + §7.7 single in-flight authority: each per-member
-/// sub-query issued by the distributive distribution MUST carry
+/// Single-in-flight-authority invariant: each per-member sub-query
+/// issued by the distributive distribution MUST carry
 /// `distributive: false`. The correctness proof is that issuing the
 /// same per-member sub-query directly — with `distributive: false` —
 /// produces the same node identity as the per-member component of the
@@ -4280,16 +4279,13 @@ fn solver_error_publishes_as_opaque_query_error() {
     }
 }
 
-// ── Path C C6a — characterization tests for binder identity ───────────
+// ── Binder-identity characterization tests ─────────────────────────────
 //
-// Tests that fail against `45ecb645` (C6 with `param_index: 0`
-// defaulted everywhere) and pass after C6a items 1-9 land.
-// Plan §14.2 specifies six tests; three are runnable with the pre-
-// C6a API (identity-tuple observation, scope preservation, unresolved
-// TypeParameter aliasing via append-only equality). The remaining
-// three (substitute/classify node-id matching, Mapped roundtrip
-// projection) require post-C6a API and are added in the same commit
-// after the signature migrations land — TDD compile-driven.
+// These tests guard the per-dispatcher / per-owning-scope binder
+// identity contract. Three exercise the identity-tuple observation,
+// scope preservation, and unresolved-TypeParameter aliasing via
+// append-only equality; three more exercise substitute/classify
+// node-id matching and Mapped roundtrip projection.
 
 /// Lowering two distinct mapped types in the same file must produce
 /// two binders with distinct `(decl, param_index)` identity tuples.
@@ -4900,7 +4896,7 @@ fn navigate_lowering_pick_omit_preserve_carrier_other_utilities_unchanged() {
     }
 }
 
-/// Phase 1B path-prefix peek + backfill (B).
+/// Path-prefix peek + backfill contract.
 ///
 /// **Discriminating contract.** A `ProjectPath { base, [variants,
 /// loadingAnimation], Navigate }` dispatch followed by a sibling
@@ -4912,16 +4908,14 @@ fn navigate_lowering_pick_omit_preserve_carrier_other_utilities_unchanged() {
 ///   constructing a fresh walker — surfaced via the `PREFIX_PEEK_HITS`
 ///   per-call counter going from 0 to 1 across the sibling replay.
 ///
-/// Pre-fix tree: `find_longest_warm_prefix` does not exist (or always
-/// returns `None`); the second dispatch starts a walker from `(base,
-/// path, mode)` exactly like the first. Counter delta = 0. **Test
-/// FAILS.**
+/// A regression that lost `find_longest_warm_prefix` (or always
+/// returned `None`) would re-start the walker from `(base, path,
+/// mode)` on the second dispatch; the counter delta would be 0 and
+/// this test would fail. The intended state: prefix peek hits the
+/// warm `(base, [variants], Navigate)` entry and starts the walker
+/// at `(prefix_node, path[1..], mode)`; counter delta = 1.
 ///
-/// Post-fix tree: prefix peek hits the warm `(base, [variants],
-/// Navigate)` entry and starts the walker at `(prefix_node, path[1..],
-/// mode)`. Counter delta = 1. **Test PASSES.**
-///
-/// Negative assertions (mandated by §1.B.2):
+/// Negative assertions:
 /// - Before any dispatch, the prefix key is NOT warm.
 /// - After the first dispatch, the prefix key IS warm.
 /// - The second dispatch increments `PREFIX_PEEK_HITS` exactly once
@@ -5024,7 +5018,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
 
     // FIRST dispatch — Navigate mode, full path. The walker descends
     // through `variants` then `loadingAnimation` and returns
-    // `string_id`. Phase 1B backfill should publish the intermediate
+    // `string_id`. Backfill should publish the intermediate
     // `(table_obj, [variants], Navigate)` prefix into the memo.
     let first = dispatch.execute(SemanticQueryKey::ProjectPath {
         base: table_obj,
@@ -5045,9 +5039,9 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
     // `variants_obj`, which must be published under
     // `(table_obj, [variants], Navigate)` so the sibling dispatch can
     // peek it.
-    let warm_prefix = graph.get_unvalidated(&prefix_key).expect(
-        "prefix key must be warm after first dispatch — Phase 1B backfill should have published it",
-    );
+    let warm_prefix = graph
+        .get_unvalidated(&prefix_key)
+        .expect("prefix key must be warm after first dispatch — backfill should have published it");
     match warm_prefix.value {
         QueryResult::Value(id) => assert_eq!(
             id, variants_obj,
@@ -5060,7 +5054,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
     // measure the per-call delta (not the global cumulative count).
     let counter_before = PREFIX_PEEK_HITS.with(|c| *c.borrow());
 
-    // SECOND dispatch — sibling path. Phase 1B prefix-peek should find
+    // SECOND dispatch — sibling path. The prefix-peek should find
     // the warm `(table_obj, [variants], Navigate)` entry and start the
     // walker at `(variants_obj, [loadingColor], Navigate)`. The peek
     // counter must increment exactly once.
@@ -5089,9 +5083,9 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Phase 5 §5.0 binding amendment — `ResolveMacroPayload` variant body
-// (sub-). Tests cover each macro-kind arm + the §5 commit 2+3
-// negative-regression + self-reference recursion-safety obligations.
+// `ResolveMacroPayload` variant body. Tests cover each macro-kind arm
+// plus negative-regression and self-reference recursion-safety
+// obligations.
 // ──────────────────────────────────────────────────────────────────────────
 
 use verter_semantic::analysis::AnalyzedMacroKind;
@@ -5271,19 +5265,19 @@ fn resolve_macro_payload_define_expose_passthrough() {
     }
 }
 
-/// **Sub- commit 2+3 negative-regression test.** The §3.2 body
-/// dispatches `DefineSlots` through `ProjectPath` over `type_args[0]`.
-/// If the dispatch arm were swapped to a degenerate `Object{}`
-/// (members empty, no projection), the resulting node would NOT
-/// preserve the `type_args[0]`'s identity. This test asserts that
-/// the result for a `DefineSlots` payload with a `Primitive(String)`
-/// type argument projects through the dispatcher and returns a
-/// non-Opaque(Miss) node — discriminating against the regression
-/// where `DefineSlots` is incorrectly handled as a no-op.
+/// **Negative-regression test.** The body dispatches `DefineSlots`
+/// through `ProjectPath` over `type_args[0]`. If the dispatch arm
+/// were swapped to a degenerate `Object{}` (members empty, no
+/// projection), the resulting node would NOT preserve the
+/// `type_args[0]`'s identity. This test asserts that the result for
+/// a `DefineSlots` payload with a `Primitive(String)` type argument
+/// projects through the dispatcher and returns a non-Opaque(Miss)
+/// node — discriminating against a regression that handles
+/// `DefineSlots` as a no-op.
 ///
-/// Pre-fix-introducing-the-regression: the body produces a real
-/// projection (here: pass-through of String, since ProjectPath{[],
-/// Expanded} on String is identity).
+/// The intended state produces a real projection (here: pass-through
+/// of String, since `ProjectPath { [], Expanded }` on String is
+/// identity).
 /// Post-regression: the body would emit Object{} and the assertion
 /// would fail.
 #[test]
@@ -5380,8 +5374,9 @@ fn resolve_macro_payload_define_model_branches_distinctly() {
     }
 }
 
-/// **Sub- commit 2+3 self-reference test.** A self-referential
-/// type used in a defineEmits payload (`type R = { next: R }; defineEmits<{ recurse: [R] }>()`)
+/// **Self-reference recursion-safety test.** A self-referential type
+/// used in a defineEmits payload
+/// (`type R = { next: R }; defineEmits<{ recurse: [R] }>()`)
 /// must not stack-overflow — the dispatch's
 /// `Instantiate`-recursion sentinel emits `Opaque(RecursiveRef)`
 /// when the same identity is seen on the active stack. This test
@@ -5421,22 +5416,18 @@ fn resolve_macro_payload_self_reference_does_not_loop() {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Phase 5 §5 commit 3.5 — Class A dispatch parity + characterizations +
-// interning + Navigate integrity. Per A9 (counter test classification c:
-// hit/miss tests MUST migrate to live_count / hit_count), and A10
-// (Navigate consumers don't query the sidecar; they use ProjectPath
-// directly).
+// Class A dispatch parity + characterizations + interning + Navigate
+// integrity. Hit/miss tests use the `live_count` / `hit_count` host-
+// owned counter accessors, and Navigate consumers route through
+// `ProjectPath` rather than the sidecar.
 // ──────────────────────────────────────────────────────────────────────────
 
-/// **Interning hit/miss test (A9 (c)).** Two `ResolveMacroPayload`
-/// queries with the SAME (owner, macro_index, macro_kind, type_args,
-/// mode) must produce the SAME `SemanticNodeId`. The semantic graph's
+/// **Interning hit/miss test.** Two `ResolveMacroPayload` queries
+/// with the SAME (owner, macro_index, macro_kind, type_args, mode)
+/// must produce the SAME `SemanticNodeId`. The semantic graph's
 /// `stats_snapshot.hits` increments by ≥1 between the two queries
-/// (the second query is a warm hit).
-///
-/// Per A9 (c) classification: this is a "cache hit/miss" test —
-/// migration to the host-owned counter accessor is MANDATORY,
-/// deletion is FORBIDDEN.
+/// (the second query is a warm hit). The cache hit/miss assertion
+/// uses the host-owned counter accessor.
 #[test]
 fn resolve_macro_payload_dedups_via_interning() {
     let host = host();
@@ -5883,9 +5874,9 @@ fn navigate_integrity_project_path_does_not_route_through_macro_payload() {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Phase 5 §3.3 + §3.4 — dispatch helpers (NON-variant). Tests cover each
-// helper's structural correctness + the §0 binding-amendment invariant
-// "no new variants introduced beyond ResolveMacroPayload".
+// Dispatch helpers (NON-variant). Tests cover each helper's
+// structural correctness plus the binding invariant "no new variants
+// introduced beyond ResolveMacroPayload".
 // ──────────────────────────────────────────────────────────────────────────
 
 use super::{
@@ -6219,8 +6210,8 @@ fn materialize_surface_mirrors_materialize_component_meta_structure() {
     );
 }
 
-/// **§0 binding-amendment invariant:** Phase 5 introduces EXACTLY
-/// ONE new `SemanticQueryKey` variant: `ResolveMacroPayload`. The
+/// **Binding-shape invariant:** the macro-payload resolver surfaces
+/// EXACTLY ONE `SemanticQueryKey` variant: `ResolveMacroPayload`. The
 /// dispatch helpers (`materialize_surface`, `execute_pick`,
 /// `execute_omit`, `execute_to_type_expr`) are NON-variant — methods
 /// on `ProjectSemanticDispatch`, not enum arms.
@@ -6228,7 +6219,7 @@ fn materialize_surface_mirrors_materialize_component_meta_structure() {
 /// This test enforces the invariant by walking the
 /// `SemanticQueryKey` enum's variant count via match-exhaustiveness.
 /// Any new variant added without updating this test breaks
-/// compilation, surfacing the §0 amendment violation immediately.
+/// compilation, surfacing the invariant violation immediately.
 #[test]
 fn no_new_semantic_query_key_variants_beyond_resolve_macro_payload() {
     use SemanticQueryKey::*;

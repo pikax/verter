@@ -1,6 +1,5 @@
-//! §5.D.2 read-once / shallow-first / lazy-expansion tests for the
-//! §5.B variants and seed closures (Phase 5g-supplement backfill for
-//! 5b/5e/5f).
+//! Read-once / shallow-first / lazy-expansion tests for the
+//! SemanticQueryKey variants and seed closures.
 //!
 //! Each test asserts:
 //! 1. Cold path: the OWNER and TRANSITIVELY-NEEDED deps are loaded;
@@ -10,10 +9,8 @@
 //! 3. Result equality: q1 == q2 byte-for-byte (the warm answer is
 //!    not a wrongly-cached one).
 //!
-//! Uses the §5.D.0 r17 instrumentation surface (`audit().*`) which
-//! lives behind bare `#[cfg(test)]` per r17/N12.
-//!
-//! Plan: §5.D.2 (Phase 5g-supplement.1.B for 5b/5e/5f backfill).
+//! Uses the test-only `audit().*` instrumentation surface which lives
+//! behind bare `#[cfg(test)]`.
 
 use std::sync::Arc;
 
@@ -640,8 +637,7 @@ fn read_once_shallow_first_lazy_for_typeof_substitution() {
 }
 
 // ===========================================================================
-// Phase 5m §5.D.2 — engine state promotion read-once / shallow-first /
-// lazy expansion (§5.13a.3)
+// Engine state promotion: read-once / shallow-first / lazy expansion
 // ===========================================================================
 
 const ENGINE_PROMOTION_OWNER_VUE: &str = r#"<script setup lang="ts">

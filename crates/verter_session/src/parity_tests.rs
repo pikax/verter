@@ -1,12 +1,11 @@
-//! Step 2 caller-class parity matrix (per `D:/tmp/architectural-debt-closure.md`
-//! revision 10, Step 2, sub-task 2.0 / D2.1).
+//! Caller-class parity matrix.
 //!
 //! Five tests, one per caller class. Each test exercises the dispatch surface
 //! end-to-end via the public `get_component_meta` API on a representative
-//! fixture for the class. After Step 1.5 closed Debt 1, dispatch produces
-//! substitution-correct surfaces for the inputs that previously routed
-//! through `materialize_*_in_scope` walkers; this matrix is the gate that
-//! proves it before sub-task 2.1 deletes the legacy walker family.
+//! fixture for the class. Discriminating invariant: dispatch must produce
+//! substitution-correct surfaces for the inputs that the matrix probes
+//! (regressing dispatch to the legacy `materialize_*_in_scope` walker
+//! family would change the observed shapes and fail the matrix).
 //!
 //! Each test:
 //!   1. Builds a fixture that targets the class's behavioural shape.
