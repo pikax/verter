@@ -10575,3 +10575,124 @@ mod content_pinned_artifact_read_guards {
         );
     }
 }
+
+// ===========================================================================
+// Block 6.d — per-member graph-native materialiser cache wire-up guard.
+//
+// `surface_member_to_expanded_field` MUST peek
+// `MemberShapeCacheDb` BEFORE calling `raise_node_to_type_expr`. The
+// guard pins the contract so a future refactor cannot accidentally
+// swap the peek-before-raise wire-up for a raise-then-reduce wrapper
+// (which would re-introduce the +52% regression Block 6.c surfaced).
+//
+// Discriminating property: the source-grep for the helper call name
+// (`member_shape_peek_or_compute`) must occur BEFORE any
+// `raise_node_to_type_expr` call inside the function body. The body
+// is extracted by literal string slicing rather than parsing — a
+// rename of the helper (or an inversion of the peek/raise order)
+// fails the guard.
+// ===========================================================================
+
+#[test]
+fn surface_member_field_consults_member_shape_cache_before_round_trip() {
+    let source = read_workspace_file("crates/verter_session/src/meta_resolve/projectors/mod.rs");
+
+    // Extract the surface_member_to_expanded_field body via brace
+    // matching from the signature marker through the function close.
+    let fn_marker = "pub(crate) fn surface_member_to_expanded_field(";
+    let fn_start = source
+        .find(fn_marker)
+        .expect("surface_member_to_expanded_field must exist in projectors/mod.rs");
+    // Find the opening brace of the function body.
+    let open_brace_offset = source[fn_start..]
+        .find(") -> ExpandedField {")
+        .expect("function signature must terminate at `) -> ExpandedField {`")
+        + fn_start;
+    let body_start = open_brace_offset + ") -> ExpandedField {".len();
+    // Brace-match to find the function's closing brace.
+    let bytes = source.as_bytes();
+    let mut depth: i32 = 1;
+    let mut idx = body_start;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    assert!(
+        depth == 0,
+        "must find the closing brace of surface_member_to_expanded_field"
+    );
+    let body = &source[body_start..idx];
+
+    // Strip line comments (`//...`) so the guard does not match
+    // example-form mentions inside docstrings. We deliberately do NOT
+    // strip block comments (`/* */`) — none exist in this file's
+    // function body — and we deliberately do NOT parse Rust tokens
+    // since a structural parse would mask the literal-call check we
+    // are trying to perform.
+    let mut stripped = String::with_capacity(body.len());
+    for line in body.lines() {
+        if let Some(comment_idx) = line.find("//") {
+            stripped.push_str(&line[..comment_idx]);
+        } else {
+            stripped.push_str(line);
+        }
+        stripped.push('\n');
+    }
+    let body = stripped.as_str();
+
+    // (1) The peek-before-raise helper must be invoked inside the body.
+    let cache_call_offset = body.find("member_shape_peek_or_compute(").unwrap_or_else(|| {
+        panic!(
+            "surface_member_to_expanded_field MUST call \
+             `member_shape_peek_or_compute(...)` for the type reduction path \
+             (Block 6.d wire-up). A future refactor that bypasses the cache \
+             will re-introduce the +52% regression Block 6.c surfaced."
+        )
+    });
+
+    // (2) Any `raise_node_to_type_expr(member.value)` call MUST occur
+    // AFTER the cache peek. The exactness path's
+    // `resolve_member_value_for_classification` call is allowed
+    // anywhere; only the literal raise-of-member.value is restricted
+    // (the exactness path does not call raise_node_to_type_expr on
+    // member.value).
+    let raise_of_member_value = body.find("raise_node_to_type_expr(member.value)");
+    if let Some(raise_offset) = raise_of_member_value {
+        assert!(
+            cache_call_offset < raise_offset,
+            "surface_member_to_expanded_field MUST peek `member_shape_peek_or_compute` \
+             BEFORE any `raise_node_to_type_expr(member.value)` call (Block 6.d \
+             contract). The current order has the raise at offset {raise_offset} \
+             and the cache peek at offset {cache_call_offset}.",
+        );
+    }
+}
+
+#[test]
+fn surface_member_arch_guard_self_test_detects_inverted_order() {
+    // Self-test: a body that calls raise BEFORE the cache helper must
+    // fail the substring-position check.
+    let bad_body = "
+        let raised = dispatch.raise_node_to_type_expr(member.value).unwrap();
+        let r#type = member_shape_peek_or_compute(...).type_expr;
+    ";
+    let cache_call_offset = bad_body
+        .find("member_shape_peek_or_compute(")
+        .expect("test must contain the helper call");
+    let raise_offset = bad_body
+        .find("raise_node_to_type_expr(member.value)")
+        .expect("test must contain the raise call");
+    assert!(
+        cache_call_offset > raise_offset,
+        "self-test: inverted-order body must have cache call AFTER raise"
+    );
+}
