@@ -857,6 +857,15 @@ pub(in crate::host_manage) struct HostFallthroughResolver<'a> {
     pub(in crate::host_manage) host: &'a VerterHost,
     pub(in crate::host_manage) parent_canonical_id: &'a str,
     pub(in crate::host_manage) parent_snapshot: &'a FileAnalysisSnapshot,
+    /// Request-scoped `HostStoreView`, built once at the fallthrough
+    /// request boundary and shared across every per-element /
+    /// per-child / per-branch cache validation. Eliminates the
+    /// per-lookup owned-view rebuild that the previous shape paid in
+    /// `intrinsic_members_for_tag`, `resolve_child_fallthrough`, and
+    /// `resolve_root_consumption` (the audit's #2 hottest bypass —
+    /// these methods fire ~per template element × per conditional
+    /// branch on nuxt-ui's Button template).
+    pub(in crate::host_manage) live_view: crate::resolver_store::HostStoreView,
 }
 
 impl FallthroughResolverHost for HostFallthroughResolver<'_> {
@@ -876,12 +885,15 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
             tag,
         );
 
-        let live_view = self.host.resolver_store_view();
+        // Use the request-scoped view from the resolver struct (built
+        // once at the fallthrough request boundary) instead of
+        // rebuilding a full owned `HostStoreView` per intrinsic-tag
+        // lookup — these fire ~per template element on nuxt-ui's Button.
         if let Some(node) = self
             .host
             .resolver_runtime()
             .fallthrough
-            .get_cached_node(&cache_key, &live_view)
+            .get_cached_node(&cache_key, &self.live_view)
         {
             if let Some(members) = self.host.runtime_intrinsic_node_to_members(node) {
                 return members;
@@ -985,12 +997,14 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
                 .unwrap_or_default(),
         );
 
-        let live_view = self.host.resolver_store_view();
+        // Use the request-scoped view from the resolver struct (see
+        // `intrinsic_members_for_tag` note) — eliminates the per-child
+        // owned-view rebuild on every fallthrough lookup.
         if let Some(node) = self
             .host
             .resolver_runtime()
             .fallthrough
-            .get_cached_node(&cache_key, &live_view)
+            .get_cached_node(&cache_key, &self.live_view)
         {
             if let Some(resolution) = self.host.runtime_child_node_to_resolution(node) {
                 return Some(resolution);
@@ -1035,12 +1049,14 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
             branch_key,
         );
 
-        let live_view = self.host.resolver_store_view();
+        // Use the request-scoped view from the resolver struct (see
+        // `intrinsic_members_for_tag` note) — eliminates the per-root-
+        // binding owned-view rebuild on every consumed-bindings lookup.
         if let Some(node) = self
             .host
             .resolver_runtime()
             .fallthrough
-            .get_cached_node(&cache_key, &live_view)
+            .get_cached_node(&cache_key, &self.live_view)
         {
             if let Some(resolved) = self.host.runtime_consumed_bindings_to_resolution(node) {
                 return resolved;

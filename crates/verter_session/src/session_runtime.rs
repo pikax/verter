@@ -70,12 +70,29 @@ impl SessionRuntime {
     /// substrate is consulted. Where the multi-candidate substrate is
     /// not yet in the read path, overlay sessions transparently read
     /// base-state results.
+    #[allow(dead_code)]
     pub fn try_get_cached_resolved_meta(
         &self,
         canonical: &str,
         mode: ProjectionMode,
     ) -> Option<ResolvedComponentMetaState> {
         self.host().try_get_cached_resolved_meta(canonical, mode)
+    }
+
+    /// View-aware variant of [`Self::try_get_cached_resolved_meta`]
+    /// that threads a borrowed `&HostStoreView` so the host-side warm
+    /// validation avoids rebuilding a full workspace snapshot. Used by
+    /// `SessionRequestHost::try_get_cached_component_meta` on the
+    /// session-bearing hot path (Block 6.c iter3 — bypass audit).
+    #[inline]
+    pub(crate) fn try_get_cached_resolved_meta_with_store_view(
+        &self,
+        view: &crate::resolver_store::HostStoreView,
+        canonical: &str,
+        mode: ProjectionMode,
+    ) -> Option<ResolvedComponentMetaState> {
+        self.host()
+            .try_get_cached_resolved_meta_with_store_view(view, canonical, mode)
     }
 
     /// Store resolved-meta in the host's shared cache.

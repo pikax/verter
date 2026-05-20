@@ -2883,6 +2883,10 @@ impl VerterHost {
         Some(snapshot)
     }
 
+    /// Convenience wrapper that builds an owned `HostStoreView` once.
+    /// Hot-path callers thread their view through
+    /// [`Self::try_get_cached_resolved_meta_with_store_view`] directly.
+    #[allow(dead_code)]
     pub(crate) fn try_get_cached_resolved_meta(
         &self,
         canonical: &str,
@@ -2891,14 +2895,59 @@ impl VerterHost {
         self.try_get_cached_resolved_meta_for_view_fingerprint(canonical, mode, 0)
     }
 
+    /// View-aware variant of [`Self::try_get_cached_resolved_meta`].
+    ///
+    /// The hot-path trait callers in `component_meta_request_impl.rs`
+    /// route here with the request-bound `&HostStoreView` they already
+    /// hold, avoiding the full-workspace snapshot rebuild on each first
+    /// warm read.
+    #[inline]
+    pub(crate) fn try_get_cached_resolved_meta_with_store_view(
+        &self,
+        view: &crate::resolver_store::HostStoreView,
+        canonical: &str,
+        mode: ProjectionMode,
+    ) -> Option<ResolvedComponentMetaState> {
+        self.try_get_cached_resolved_meta_for_view_fingerprint_with_store_view(
+            view, canonical, mode, 0,
+        )
+    }
+
     /// View-fingerprint-aware variant of [`Self::try_get_cached_resolved_meta`].
     ///
     /// Overlay-bearing callers thread their view's fingerprint here so
     /// the singleflight cache lookup hits the per-view slot rather
     /// than the base host's slot. Base-only callers pass `0` and the
     /// behaviour matches the historical entry point.
+    ///
+    /// Convenience wrapper that builds an owned `HostStoreView` once and
+    /// delegates to
+    /// [`Self::try_get_cached_resolved_meta_for_view_fingerprint_with_store_view`].
+    /// Hot-path trait callers in `component_meta_request_impl.rs`
+    /// already hold a borrowed `&HostStoreView` and route directly
+    /// through the `_with_store_view` variant so the per-warm-hit
+    /// rebuild is eliminated on the component-meta hot path.
+    #[allow(dead_code)]
     pub(crate) fn try_get_cached_resolved_meta_for_view_fingerprint(
         &self,
+        canonical: &str,
+        mode: ProjectionMode,
+        view_fingerprint: u64,
+    ) -> Option<ResolvedComponentMetaState> {
+        let view = self.resolver_store_view();
+        self.try_get_cached_resolved_meta_for_view_fingerprint_with_store_view(
+            &view,
+            canonical,
+            mode,
+            view_fingerprint,
+        )
+    }
+
+    /// View-aware implementation behind
+    /// [`Self::try_get_cached_resolved_meta_for_view_fingerprint`].
+    pub(crate) fn try_get_cached_resolved_meta_for_view_fingerprint_with_store_view(
+        &self,
+        view: &crate::resolver_store::HostStoreView,
         canonical: &str,
         mode: ProjectionMode,
         view_fingerprint: u64,
@@ -2908,11 +2957,10 @@ impl VerterHost {
             mode,
             view_fingerprint,
         );
-        let view_for_get = self.resolver_store_view();
         if let Some(cached) = self
             .resolver_runtime()
             .component_meta
-            .get_if_valid(&cache_key, &view_for_get)
+            .get_if_valid(&cache_key, view)
         {
             self.mirror_cached_resolved_meta_arc(canonical, mode, view_fingerprint, cached.clone());
             return Some(cached.as_ref().clone());
@@ -2927,7 +2975,6 @@ impl VerterHost {
         use crate::resolver_core::StoreView;
         let entry = self.derived_raw_cache().get(canonical)?;
         let cached = entry.cached_resolved_meta.get(&(mode, view_fingerprint))?;
-        let view = self.resolver_store_view();
         // R3/R26/R28: dispatch through
         // `StoreView::validates_fact_signature` as a per-domain
         // override hook. The default impl in `resolver_core/mod.rs`
@@ -3103,12 +3150,29 @@ impl VerterHost {
     /// Try to return a cached encoded payload for the canonical
     /// component-meta query. Validates fact versions against the live host
     /// state.
+    ///
+    /// Convenience wrapper that builds an owned `HostStoreView` once and
+    /// delegates to [`Self::try_get_cached_meta_payload_with_store_view`].
+    /// Hot-path callers in `meta.rs` (`get_component_meta_payload_batch`
+    /// and `get_component_meta_payload`) already hold a session view
+    /// borrow and route through the `_with_store_view` variant so the
+    /// per-warm-hit rebuild is eliminated on the NAPI/WASM mirror hot
+    /// path.
     pub(crate) fn try_get_cached_meta_payload(&self, canonical: &str) -> Option<Vec<u8>> {
+        let view = self.resolver_store_view();
+        self.try_get_cached_meta_payload_with_store_view(&view, canonical)
+    }
+
+    /// View-aware implementation behind [`Self::try_get_cached_meta_payload`].
+    pub(crate) fn try_get_cached_meta_payload_with_store_view(
+        &self,
+        view: &crate::resolver_store::HostStoreView,
+        canonical: &str,
+    ) -> Option<Vec<u8>> {
         use crate::resolver_core::StoreView;
         // cached_meta_payload lives on DerivedRawState (D48 split).
         let entry = self.derived_raw_cache().get(canonical)?;
         let cached = entry.cached_meta_payload.as_ref()?;
-        let view = self.resolver_store_view();
         // R3/R26/R28 fast-path: dispatch through
         // `StoreView::validates_fact_signature` so per-domain validators
         // can short-circuit on the first mismatch. Empty signatures

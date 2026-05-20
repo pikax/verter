@@ -249,6 +249,11 @@ impl VerterHost {
             host: self,
             parent_canonical_id: canonical_id,
             parent_snapshot: &resolved.snapshot,
+            // Build the request-scoped view ONCE — every per-element /
+            // per-child / per-branch lookup inside the recursive
+            // fallthrough surface walk reuses this view (Block 6.c
+            // iter3 — bypass audit #2 hottest fix).
+            live_view: self.resolver_store_view(),
         };
         // Build a lightweight fallthrough eval env: base owner env + runtime
         // values + prop overrides.

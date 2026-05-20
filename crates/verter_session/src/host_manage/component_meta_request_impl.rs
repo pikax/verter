@@ -217,13 +217,17 @@ impl ComponentMetaRequestHost for VerterHost {
         &self,
         canonical: &str,
         mode: Self::Mode,
-        _store_view: &Self::View,
+        store_view: &Self::View,
     ) -> Option<Self::Resolution> {
         component_meta_trace_custom!(
             "try_get_cached_component_meta",
             format!("owner={} mode={mode:?}", canonical),
         );
-        let result = self.try_get_cached_resolved_meta(canonical, mode);
+        // Thread the request-bound view through the warm-hit accessor
+        // so the per-warm-hit `HostStoreView` rebuild is eliminated on
+        // the bare-host hot path (Block 6.c iter3 — bypass audit
+        // top-leverage fix).
+        let result = self.try_get_cached_resolved_meta_with_store_view(store_view, canonical, mode);
         component_meta_trace_custom!(
             "try_get_cached_component_meta_result",
             format!("owner={} mode={mode:?} hit={}", canonical, result.is_some()),
@@ -307,13 +311,18 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
         &self,
         canonical: &str,
         mode: Self::Mode,
-        _store_view: &Self::View,
+        store_view: &Self::View,
     ) -> Option<Self::Resolution> {
-        self.host.try_get_cached_resolved_meta_for_view_fingerprint(
-            canonical,
-            mode,
-            self.view.fingerprint(),
-        )
+        // View-aware variant: thread the request-bound view through so
+        // the per-warm-hit rebuild is eliminated on the view-bound hot
+        // path (Block 6.c iter3 — bypass audit top-leverage fix).
+        self.host
+            .try_get_cached_resolved_meta_for_view_fingerprint_with_store_view(
+                store_view,
+                canonical,
+                mode,
+                self.view.fingerprint(),
+            )
     }
 
     fn compute_component_meta(
@@ -477,9 +486,13 @@ impl<'a> ComponentMetaRequestHost for SessionRequestHost<'a> {
         &self,
         canonical: &str,
         mode: Self::Mode,
-        _store_view: &Self::View,
+        store_view: &Self::View,
     ) -> Option<Self::Resolution> {
-        self.runtime.try_get_cached_resolved_meta(canonical, mode)
+        // Session-bearing hot path: thread the request-bound view
+        // through so the per-warm-hit rebuild is eliminated (Block 6.c
+        // iter3 — bypass audit top-leverage fix).
+        self.runtime
+            .try_get_cached_resolved_meta_with_store_view(store_view, canonical, mode)
     }
 
     fn compute_component_meta(
