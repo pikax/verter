@@ -1445,16 +1445,17 @@ impl SemanticGraphStore {
     /// `(source, target)`.
     ///
     /// Returns the tri-state
-    /// [`RelationResult`](crate::semantic_query::RelationResult) plus the
-    /// recorded legacy `DepSignature` **only when** the stored entry's
-    /// self-version-rooted carrier validates against the live store view
-    /// — every self-root canonical's `FileWholeHash` is validated
-    /// strictly. A stale entry (a same-canonical content edit to the
-    /// source's or the target's originating file, or a self-root the
-    /// live store view no longer tracks) returns `None`, so the caller
-    /// recomputes the relation judgement instead of serving it stale.
-    /// Validation failure does NOT bubble the carrier — a stale entry
-    /// must not pollute an outer tracer.
+    /// [`RelationResult`](crate::semantic_query::RelationResult) plus
+    /// a dispatch-plumbing [`empty_signature`] (the relation carrier
+    /// is the sole fact rail; the tuple shape is preserved for
+    /// `relate_nodes` call-site compatibility) **only when** the
+    /// stored entry's self-version-rooted carrier validates against
+    /// the live store view — every self-root canonical's
+    /// `FileWholeHash` is validated strictly AND the entry's
+    /// `validated_at_generation` still equals the live project
+    /// generation. A stale entry (same-canonical content edit,
+    /// untracked self-root, or `ProjectGeneration` bump) returns
+    /// `None`. Validation failure does NOT bubble the carrier.
     #[must_use]
     pub(crate) fn get_relation(
         &self,
@@ -1478,11 +1479,9 @@ impl SemanticGraphStore {
             return None;
         }
         entry.carrier.bubble(ctx);
-        // The returned `DepSignature` is dispatch-plumbing only — every
-        // `relate_nodes` caller discards it. The relation carrier is
-        // fact-only; a warm relation hit carries no separate dispatch
-        // signature, so an empty signature is the truthful answer. The
-        // carrier's facts already bubbled above.
+        // Dispatch-plumbing payload; every `relate_nodes` caller
+        // discards it. The carrier is the cache-validity oracle
+        // (validated above); there is no second rail to return.
         Some((empty_signature(), entry.result))
     }
 
@@ -3050,17 +3049,15 @@ impl SemanticGraphStore {
         if family_was_new && !populated_slots.is_empty() {
             self.record_family_admission_locked(&mut entries, &family);
         }
-        // Γ.B reverse-index registration. Carrier-aware: register
-        // each populated slot under EVERY canonical the entry's
-        // carrier references — the union of the legacy `dep_signature`
-        // rail AND the path-precise `facts` rail (`Parse(...)`,
-        // `ResolveImports(...)`, `RouteSurface(...)`, etc.). Runs UNDER
-        // the held `entries` lock: the `entries → canonical_to_entries
-        // shards` lock order permits taking a shard mutex while `entries`
-        // is held, and registering here — rather than after the lock
-        // drop — keeps the live memo slot and its reverse-index
-        // registration atomic against a concurrent `invalidate_all`. See
-        // `register_reverse_index`'s docstring for the carrier contract.
+        // Γ.B reverse-index registration. Register each populated slot
+        // under EVERY canonical the entry depends on — the UNION of
+        // the carrier's path-precise `facts` rail (`canonical_ids()`
+        // — `Parse(...)`, `ResolveImports(...)`, `RouteSurface(...)`,
+        // `FileWholeHash`, etc.) AND the dispatch-fence canonicals
+        // named in `dispatch_dep_signature`. Runs UNDER the held
+        // `entries` lock, keeping the live memo slot and its
+        // reverse-index registration atomic against a concurrent
+        // `invalidate_all`. See `register_reverse_index`'s docstring.
         Self::register_reverse_index(
             &self.canonical_to_entries,
             &family,
@@ -3247,15 +3244,15 @@ impl SemanticGraphStore {
     ) {
         let timing_on = verter_scheduler::request_context::current_timing_enabled();
         let registered_facts = Arc::clone(&read_set_signature.facts);
-        // Iteration set: every canonical the entry depends on — the
-        // carrier's fact rail (`canonical_ids()`) PLUS the dispatch
-        // fence (the build's `QueryBuildOutput.dep_signature`). The
-        // dispatch-fence iteration covers entries whose cold build
-        // emitted a dep signature without populating the fact tracer
-        // (synthetic / test publishes); production cold builds wrap
-        // with `install_fact_tracer`, so the carrier's `facts`
-        // canonical set covers the same files the dispatch fence
-        // names.
+        // Iteration set: UNION of the carrier's `canonical_ids()` and
+        // the dispatch fence canonicals. Production cold builds fold
+        // `dep_signature` into the carrier during
+        // `finalise_traced_build_output`, so the two sets overlap and
+        // the `seen` dedup collapses them; the dispatch-fence pass
+        // still covers synthetic / test publishes whose carrier was
+        // seeded without folding the fence. The FIFO-eviction prune in
+        // `record_family_admission_locked` walks the SAME union so
+        // register and cleanup stay symmetric.
         let mut seen: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
         for populated in populated_slots {
             seen.clear();
@@ -3402,18 +3399,26 @@ impl SemanticGraphStore {
         #[cfg(any(test, debug_assertions))]
         let mut pruned_any = false;
         for (_victim_seq, victim) in victims {
-            // Remove the victim family from the held `entries` map (so
-            // map and budget stay in lockstep), then immediately prune
-            // each populated slot's `canonical_to_entries` reverse-index
-            // registration under this same `entries`-lock hold so the
-            // three cluster members stay consistent.
+            // Remove the victim from `entries` (keeping map and budget
+            // in lockstep), then prune its reverse-index registrations
+            // under the same lock. The prune walks the SAME union
+            // `register_reverse_index` iterates — carrier
+            // `canonical_ids()` PLUS `dispatch_dep_signature` — so a
+            // dispatch-only registration (notably `<project>` from
+            // `project_generation_signature()`) cannot survive FIFO
+            // eviction. `prune_reverse_index_registration` is
+            // idempotent, so a canonical in both rails is pruned twice
+            // harmlessly.
             if let Some(slots) = entries.remove(&victim) {
                 for slot in ALL_SLOTS {
                     if let Some(entry) = slots.slot(slot) {
-                        for canonical in entry.read_set_signature.canonical_ids() {
+                        let carrier_canonicals = entry.read_set_signature.canonical_ids();
+                        let dispatch_canonicals =
+                            entry.dispatch_dep_signature.iter().map(|(c, _)| c);
+                        for canonical in carrier_canonicals.iter().chain(dispatch_canonicals) {
                             Self::prune_reverse_index_registration(
                                 &self.canonical_to_entries,
-                                &canonical,
+                                canonical,
                                 &(victim.clone(), slot),
                             );
                             #[cfg(any(test, debug_assertions))]
@@ -3493,18 +3498,10 @@ impl SemanticGraphStore {
         canonical_to_entries.remove_if(canonical, |_, mutex| mutex.lock().is_empty());
     }
 
-    /// Test-only accessor: read the entry's full
-    /// [`ReadSetSignature`] (both rails) for `key`. Returns `None`
-    /// when no entry is present.
-    ///
-    /// Unlike [`Self::get`] (which projects only the legacy
-    /// `dep_signature` into the returned `CacheRead`), this accessor
-    /// surfaces the path-precise `facts` rail so integration tests
-    /// can assert what facts the entry's carrier actually holds.
-    /// Used by the `prefix_backfill_carries_traced_facts` discriminator
-    /// to assert that a backfilled prefix entry's `facts` rail contains
-    /// the parent's traced `Parse(...)` fact rather than a fence-only
-    /// reconstruction.
+    /// Test-only accessor: read the entry's [`ReadSetSignature`]
+    /// carrier for `key`. Returns `None` when no entry is present.
+    /// Surfaces the carrier's path-precise `facts` rail so integration
+    /// tests can assert what facts the entry actually holds.
     #[doc(hidden)]
     #[must_use]
     pub fn entry_read_set_signature_for_tests(
@@ -3519,24 +3516,9 @@ impl SemanticGraphStore {
             .map(|entry| entry.read_set_signature)
     }
 
-    /// Test-only direct publish path. Constructs a `MemoEntry` from the
-    /// caller-supplied `(result, read_set_signature, self_root_canonicals)`
-    /// tuple and routes it through the unified reverse-index
-    /// registration. Mirrors the production publish path but accepts an
-    /// explicit carrier + self-root canonical set so integration tests
-    /// can seed entries whose `legacy` rail excludes canonicals that the
-    /// `facts` rail names (the fact-only invalidation discriminator) and
-    /// drive the strict self-root warm-read validator.
-    ///
-    /// A newly-keyed family records an admission against the
-    /// `memo_budget` while holding the `entries` lock (matching
-    /// `warm_publish_one`'s `record_family_admission_locked` call) so a
-    /// test publishing many distinct families drives the same FIFO
-    /// budget eviction — under the same map/budget lifecycle fence — as
-    /// the production path does.
-    ///
-    /// Returns the number of populated slots after publish (always
-    /// ≥1 for a `Value` result on a previously-empty slot).
+    /// Test-only direct publish. Mirrors `warm_publish_one`'s
+    /// admission shape so a test driving many families exercises the
+    /// same FIFO budget eviction as production.
     #[doc(hidden)]
     pub fn publish_with_carrier_for_tests(
         &self,
@@ -3544,6 +3526,28 @@ impl SemanticGraphStore {
         result: QueryResult<SemanticNodeId>,
         read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
+    ) -> usize {
+        self.publish_with_carrier_and_dispatch_for_tests(
+            key,
+            result,
+            read_set_signature,
+            self_root_canonicals,
+            empty_signature(),
+        )
+    }
+
+    /// Variant of [`Self::publish_with_carrier_for_tests`] taking an
+    /// explicit `dispatch_dep_signature` — seeds an entry whose
+    /// dispatch-fence canonicals diverge from the carrier rail
+    /// (FIFO reverse-index symmetry discriminator).
+    #[doc(hidden)]
+    pub fn publish_with_carrier_and_dispatch_for_tests(
+        &self,
+        key: SemanticQueryKey,
+        result: QueryResult<SemanticNodeId>,
+        read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
+        dispatch_dep_signature: DepSignature,
     ) -> usize {
         if !matches!(result, QueryResult::Value(_)) {
             return 0;
@@ -3555,7 +3559,7 @@ impl SemanticGraphStore {
         let entry = MemoEntry {
             result,
             read_set_signature: read_set_signature.clone(),
-            dispatch_dep_signature: empty_signature(),
+            dispatch_dep_signature: Arc::clone(&dispatch_dep_signature),
             self_root_canonicals,
             walker_diagnostics: Arc::from([]),
         };
@@ -3565,10 +3569,6 @@ impl SemanticGraphStore {
             .entry(family.clone())
             .or_default()
             .publish(slot, entry);
-        // Family-memo consistency-cluster fence — record the
-        // `memo_budget` admission and register the `canonical_to_entries`
-        // reverse index UNDER the held `entries` lock; see
-        // `warm_publish_one`.
         if family_was_new && !populated_slots.is_empty() {
             self.record_family_admission_locked(&mut entries, &family);
         }
@@ -3577,7 +3577,7 @@ impl SemanticGraphStore {
             &family,
             &populated_slots,
             &read_set_signature,
-            &empty_signature(),
+            &dispatch_dep_signature,
         );
         drop(entries);
         populated_slots.len()

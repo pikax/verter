@@ -76,10 +76,15 @@ pub struct ComponentMetaResultKey {
 /// SDK / workspace-folder change) bumps no file content, so without
 /// this stamp a stale-by-project-generation entry that raced a
 /// `bump_project_generation_and_evict` cold-publish window would
-/// validate forever on file-content terms. Every read-side gate
-/// ([`ComponentMetaResultDb::get`] / [`ComponentMetaResultDb::get_with_view`])
-/// rejects the entry when `validated_at_generation` differs from the
-/// live [`crate::project_type_store::ProjectTypeStore::current_project_generation`].
+/// validate forever on file-content terms.
+/// [`ComponentMetaResultDb::get_with_view`] is the view-aware
+/// production read path — it rejects the entry when
+/// `validated_at_generation` differs from the live
+/// [`crate::project_type_store::ProjectTypeStore::current_project_generation`]
+/// before consulting the carrier rail. [`ComponentMetaResultDb::get`]
+/// is the candidate-version-only lookup (no view, no generation gate)
+/// reached only by test fixtures and synthetic publishes; production
+/// readers MUST go through `get_with_view`.
 pub struct ComponentMetaResultEntry<P> {
     pub payload: Arc<P>,
     pub read_set_signature: crate::fact_signature_helpers::ReadSetSignature,

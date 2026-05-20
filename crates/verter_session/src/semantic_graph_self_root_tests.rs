@@ -642,6 +642,132 @@ fn relation_memo_warm_read_serves_validated_entry() {
     );
 }
 
+/// Family memo `MemoEntry::validate` MUST reject a stale-generation
+/// entry after a bare `ProjectTypeStore::bump_project_generation()`.
+///
+/// Discrimination model:
+///
+/// 1. A `KeyOf` over a `Global`-scoped primitive admits a family memo
+///    entry whose carrier carries NO file self-root (the structural
+///    base has no `NodeScopeId::File`) — every cross-file dependency
+///    fact rail is empty and the entry's `self_root_canonicals` is
+///    empty. The cold-build's `dep_signature` fence is
+///    `project_generation_signature()` — a single `<project>`
+///    `DepVersion::ProjectGeneration { generation: g0 }`.
+/// 2. The host bumps the project generation via the bare
+///    `bump_project_generation()` (NOT `_and_evict()`). The bare bump
+///    increments the counter; it does NOT clear the family memo, the
+///    in-flight table, or any cache layer, so the published entry
+///    physically survives.
+/// 3. Without folding the dispatch's `ProjectGeneration` fence into the
+///    published `ReadSetSignature.facts`, the entry's
+///    `read_set_signature` carries no `FactVersionRef::ProjectGeneration`
+///    and no `FactVersionRef::FileWholeHash` — `validate_with_self_roots`
+///    iterates an empty fact rail and accepts vacuously. Stale-by-
+///    generation entry warm-hits.
+///
+/// DISCRIMINATES: pre-fix, `graph.get_validated(&key, &host)` returns
+/// `Some(...)` because the bare bump leaves the entry physically
+/// resident and `validate_with_self_roots` accepts an empty fact rail.
+/// Post-fix, `dep_signature_to_fact_signature(&output.dep_signature)`
+/// folds the `<project>` `ProjectGeneration { generation: g0 }` into
+/// the carrier's `facts`; `validate_with_self_roots` routes that
+/// `FactVersionRef::ProjectGeneration` through `view.validates` which
+/// compares to the live `project_generation` (now `g0 + 1`), returning
+/// `false`. `get_validated` then returns `None` and the cold build is
+/// allowed to recompute under the new generation.
+#[test]
+fn family_memo_validate_rejects_stale_project_generation() {
+    use crate::semantic_query::{PrimitiveKind, QueryError, SemanticNodeData};
+
+    let host = host();
+    let ctx: &dyn ResolverContext = &host;
+    let dispatch = host.semantic_dispatch();
+    let graph = host.project_type_store().semantic_graph();
+
+    let prim = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let key = SemanticQueryKey::KeyOf { base: prim };
+    let _ = dispatch.execute(key.clone());
+
+    // Fixture invariants — the published entry has empty
+    // self-root-canonicals and carries no FileWholeHash on its facts
+    // rail. This is the precondition the discrimination relies on:
+    // a strict `validate_with_self_roots` on an empty rail accepts
+    // vacuously unless a `ProjectGeneration` fact has been folded
+    // into the carrier.
+    let carrier = graph
+        .entry_read_set_signature_for_tests(&key)
+        .expect("KeyOf over a Global-scoped primitive must admit a memo entry");
+    assert!(
+        !carrier
+            .facts
+            .iter()
+            .any(|f| matches!(f, FactVersionRef::FileWholeHash { .. })),
+        "fixture invariant: the published KeyOf entry's carrier holds NO \
+         FileWholeHash — the base is Global-scoped, so no file self-root \
+         contributes",
+    );
+
+    let g0 = host.project_type_store().current_project_generation();
+
+    // Bare project-generation bump. NOT `_and_evict` — that path
+    // would clear the memo and trivially make the warm read miss.
+    // We need the entry to physically survive so the test discriminates
+    // the VALIDATION gate, not a clear.
+    let g1 = host.project_type_store().bump_project_generation();
+    assert!(
+        g1 > g0,
+        "the bare bump_project_generation() must increment the counter",
+    );
+
+    // The entry physically survives the bare bump — `get_unvalidated`
+    // still finds it.
+    assert!(
+        graph.get_unvalidated(&key).is_some(),
+        "fixture invariant: bare bump_project_generation() must NOT clear \
+         the family memo — the entry physically survives so the test \
+         discriminates the VALIDATION gate, not a clear",
+    );
+
+    // The discriminating assertion. Pre-fix: carrier.facts is empty
+    // (the dispatch's `ProjectGeneration` fence is NOT folded into
+    // facts), so `validate_with_self_roots` accepts vacuously and
+    // `get_validated` returns Some — the stale entry warm-hits.
+    // Post-fix: `ProjectGeneration { generation: g0 }` rides in
+    // carrier.facts, `view.validates` rejects it against the live
+    // generation g1, and `get_validated` returns None.
+    assert!(
+        graph.get_validated(&key, ctx).is_none(),
+        "FAMILY MEMO STALE-GENERATION WARM HIT: a bare \
+         bump_project_generation() (no clear) MUST reject the stale \
+         family memo entry. Without folding the dispatch's \
+         `ProjectGeneration` fence into the carrier's facts rail, an \
+         entry whose self-root canonicals and file-content facts are \
+         empty validates vacuously even after a project-shape change \
+         that the generation counter recorded. The fix folds \
+         `dep_signature_to_fact_signature(&output.dep_signature)` into \
+         the published `ReadSetSignature.facts` so \
+         `FactVersionRef::ProjectGeneration` is present on the carrier \
+         and `view.validates` rejects the entry naturally.",
+    );
+
+    // Ensure we do not coincidentally observe a `KeyOf` of a
+    // primitive that builds to a non-Value (the build closure's `_ =>
+    // self.opaque(QueryError::Miss)` arm interns a Miss node and the
+    // wrapper still wraps that as `QueryResult::Value(node)`). If the
+    // entry were unpublishable, `entry_read_set_signature_for_tests`
+    // above would have returned `None` and the fixture would have
+    // panicked. Sanity-check the surface: the build produced an
+    // Opaque(Miss) interned id, not a recursive sentinel.
+    if let Some(node_data) = graph.node_data(prim) {
+        assert!(
+            matches!(&*node_data, SemanticNodeData::Primitive(_)),
+            "sanity: the base under test is the interned primitive id",
+        );
+    }
+    let _ = QueryError::Miss; // keep the import live without an unused warning.
+}
+
 /// Helper-shape check: a structural `SemanticNodeId` (a `Global`-scoped
 /// primitive) contributes no self-root — `observed_self_roots_from_nodes`
 /// over structural inputs yields an empty set, so a node kind keyed on

@@ -92,11 +92,10 @@ pub type AppConfigNoOverrideProofKey = (Arc<str>, Arc<str>);
 /// Cache entry: the path-precise fact signature. The presence of an
 /// entry IS the proof — we do not need a separate value.
 ///
-/// **Block 1.H change:** the legacy `dep_signature: DepSignature`
-/// field was replaced with `fact_dep_signature` per codex's
-/// architectural decision. The cache was never wired to a production
-/// producer at HEAD, so no legacy callers existed; the API moved
-/// directly to the path-precise fact-signature substrate.
+/// The entry carries `fact_dep_signature: Arc<[FactVersionRef]>`
+/// directly: the path-precise fact-signature substrate
+/// ([`crate::resolver_core::StoreView::validates`]) is the sole
+/// cache-validity oracle.
 #[derive(Clone)]
 pub struct AppConfigNoOverrideProofEntry {
     /// R3/R26/R28 path-precise dep signature. Captured by the

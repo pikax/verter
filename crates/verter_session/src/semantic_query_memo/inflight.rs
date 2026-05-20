@@ -31,7 +31,11 @@ pub(super) struct InflightEntry {
 pub(super) struct InflightState {
     /// `None` while building; `Some` after the winner publishes.
     pub(super) completed: Option<QueryResult<SemanticNodeId>>,
-    /// Dep signature the winner observed (legacy `DepSignature` path).
+    /// Dispatch-fence dep signature the winner's cold build produced
+    /// — the `QueryBuildOutput.dep_signature` value. Used by joiners
+    /// purely as the transitive-dependency payload they return on
+    /// `CacheRead.dep_signature`; cache validity is decided exclusively
+    /// by the published carrier (`graph_carrier`), never by this rail.
     pub(super) dep_signature: Option<DepSignature>,
     /// The self-version-rooted carrier the winner's cold build produced.
     /// Set by the winner alongside `completed`; joiners that observe

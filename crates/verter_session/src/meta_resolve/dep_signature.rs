@@ -173,7 +173,8 @@ pub(crate) fn emit_dispatch_dep_signature_facts(
     // become `FactVersionRef::ProjectGeneration` (so an outer entry
     // observing this sub-result through the tracer roots the project
     // generation too). `RouteGeneration` has no `FactVersionRef`
-    // equivalent — entry producers refuse it via the legacy rail.
+    // equivalent — the bridge drops it; no production path emits
+    // `DepVersion::RouteGeneration` on a memoised dispatch signature.
     let bridged = crate::fact_signature_helpers::dep_signature_to_fact_signature(sig);
     crate::fact_signature_helpers::observe_fact_signature(&bridged);
     if let Some(prov) = ctx.project_type_store().semantic_graph().provenance() {

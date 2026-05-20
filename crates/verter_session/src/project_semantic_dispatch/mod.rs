@@ -741,9 +741,42 @@ fn finalise_traced_build_output(
                     self_root_canonicals.push(Arc::clone(canonical));
                 }
             }
+            // Fold the build's `dep_signature` fence into the traced
+            // fact set BEFORE building the carrier. The published
+            // `ReadSetSignature` is the SOLE cache-validity rail
+            // (`MemoEntry::validate` checks the carrier's facts
+            // alone); folding `dep_signature` here ensures explicit
+            // dispatch-time assertions — most commonly the
+            // `project_generation_signature()` a `KeyOf` /
+            // `ProjectPath` / normalization / `Relate` builder records
+            // — land on the carrier. Without this fold a bare
+            // `bump_project_generation()` with file self-roots
+            // unchanged would warm-hit a stale entry.
+            // `semantic_graph_read_set_signature` already dedups
+            // self-root `FileWholeHash` facts and rejects on a
+            // same-canonical hash conflict, so a builder naming its
+            // own self-root canonical in `dep_signature` is rejected
+            // naturally if it disagrees with the observed self-root.
+            let fence_facts = crate::fact_signature_helpers::dep_signature_to_fact_signature(
+                &output.dep_signature,
+            );
+            let merged_facts: Vec<crate::resolver_core::FactVersionRef> = if fence_facts.is_empty()
+            {
+                traced_facts.iter().cloned().collect()
+            } else {
+                let mut merged: Vec<crate::resolver_core::FactVersionRef> =
+                    Vec::with_capacity(traced_facts.len() + fence_facts.len());
+                merged.extend(traced_facts.iter().cloned());
+                for fact in fence_facts {
+                    if !merged.iter().any(|existing| existing == &fact) {
+                        merged.push(fact);
+                    }
+                }
+                merged
+            };
             match crate::semantic_query_memo::semantic_graph_read_set_signature(
                 &output.observed_self_roots,
-                &traced_facts,
+                &merged_facts,
             ) {
                 Some(carrier) => {
                     output.graph_carrier = Some(Box::new(carrier));
@@ -765,10 +798,15 @@ fn finalise_traced_build_output(
                     // dependency facts exactly as a joiner of a
                     // cacheable child would. Memo admission stays
                     // gated by `cache_suppress` — this carrier is
-                    // broadcast, never published.
+                    // broadcast, never published. The merged
+                    // dispatch-fence facts ride on the broadcast
+                    // carrier too so joiners observe the same
+                    // project-generation gate.
                     output.cache_suppress = true;
                     output.graph_carrier = Some(Box::new(
-                        crate::fact_signature_helpers::ReadSetSignature::new(traced_facts),
+                        crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(
+                            merged_facts.into_boxed_slice(),
+                        )),
                     ));
                 }
             }

@@ -2626,6 +2626,197 @@ fn budget_eviction_prunes_reverse_index_under_entries_lock() {
     );
 }
 
+/// FINDING 2 — register/cleanup symmetry. `register_reverse_index`
+/// walks the UNION of the carrier's `canonical_ids()` and the
+/// `dispatch_dep_signature`'s canonicals — a published entry whose
+/// `dispatch_dep_signature` names a canonical the carrier rail does
+/// NOT (notably the common `<project>` from
+/// `project_generation_signature()`) registers a reverse-index entry
+/// under that dispatch-only canonical too. The FIFO-eviction prune in
+/// `record_family_admission_locked` MUST walk the SAME union; pruning
+/// only the carrier's `canonical_ids()` strands the dispatch-only
+/// registration after the family is FIFO-evicted.
+///
+/// Fixture:
+///
+/// - `memo_budget` cap pinned to 2.
+/// - Family A's carrier names canonical `/w/a.ts` AND its
+///   `dispatch_dep_signature` names canonical `<project>` (the
+///   production `KeyOf`/`ProjectPath`/normalization-builder pattern
+///   where the dispatch fence is a `project_generation_signature()`
+///   — a single `(<project>, ProjectGeneration { g })` entry).
+/// - Family B's carrier names `/w/b.ts`; dispatch is empty.
+///
+/// After A and B both published, `canonical_to_entries` holds shards
+/// for `/w/a.ts`, `<project>`, and `/w/b.ts`. Publishing family C
+/// FIFO-evicts A (the oldest).
+///
+/// Pre-fix prune iterates only `entry.read_set_signature.canonical_ids()`,
+/// which yields `/w/a.ts` alone — `<project>`'s reverse-index shard
+/// survives.
+/// Post-fix prune walks `canonical_ids()` UNION
+/// `entry.dispatch_dep_signature` canonicals — `<project>` is pruned
+/// alongside `/w/a.ts`.
+///
+/// DISCRIMINATES: the assertion `canonical_to_entries_count("<project>")
+/// == 0` after FIFO eviction FAILS pre-fix (registration survives) and
+/// PASSES post-fix (registration pruned). The same shape Block 2.M
+/// fix-19 enforced for the cooperative-admission caches' register /
+/// cleanup symmetry rule.
+#[test]
+fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
+    use crate::resolver_core::FactVersionRef;
+    use crate::semantic_query::DepVersion;
+
+    // Cap of 2: the third distinct family evicts the first (FIFO).
+    let store = Arc::new(SemanticGraphStore::new_with_memo_budget_for_test(2));
+
+    // Family A: carrier rail names `/w/a.ts`; dispatch fence names
+    // `<project>` (production `KeyOf` / `ProjectPath` /
+    // normalization-builder dispatch shape — every such builder emits
+    // a `project_generation_signature()` fence on top of whatever the
+    // carrier's traced cross-file facts capture).
+    let dispatch_fence_a: DepSignature = Arc::from(
+        vec![(
+            Arc::<str>::from("<project>"),
+            DepVersion::ProjectGeneration(0),
+        )]
+        .into_boxed_slice(),
+    );
+    let node_a = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let key_a = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope("/w/a.ts"),
+        name: Arc::from("A"),
+    });
+    let carrier_a = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
+        FactVersionRef::FileWholeHash {
+            canonical_id: "/w/a.ts".to_string(),
+            hash: [1u8; 16],
+        },
+    ]));
+    store.publish_with_carrier_and_dispatch_for_tests(
+        key_a,
+        QueryResult::Value(node_a),
+        carrier_a,
+        Arc::from([]),
+        dispatch_fence_a,
+    );
+
+    // Family B: carrier rail names `/w/b.ts`; dispatch is empty (a
+    // builder whose fence is `empty_signature()`, contrast with A).
+    let node_b = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let key_b = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope("/w/b.ts"),
+        name: Arc::from("B"),
+    });
+    let carrier_b = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
+        FactVersionRef::FileWholeHash {
+            canonical_id: "/w/b.ts".to_string(),
+            hash: [2u8; 16],
+        },
+    ]));
+    store.publish_with_carrier_for_tests(
+        key_b,
+        QueryResult::Value(node_b),
+        carrier_b,
+        Arc::from([]),
+    );
+
+    // Fixture invariants — A registered under `/w/a.ts` AND
+    // `<project>`; B registered under `/w/b.ts`.
+    assert_eq!(
+        store.memo_family_count_for_test(),
+        2,
+        "fixture invariant: A and B are both warm",
+    );
+    assert_eq!(
+        store.canonical_to_entries_count("/w/a.ts"),
+        1,
+        "fixture invariant: A's carrier registered a reverse-index entry \
+         under /w/a.ts",
+    );
+    assert_eq!(
+        store.canonical_to_entries_count("<project>"),
+        1,
+        "fixture invariant: A's dispatch_dep_signature registered a \
+         reverse-index entry under <project> via register_reverse_index's \
+         dispatch-fence union step",
+    );
+    assert_eq!(
+        store.canonical_to_entries_count("/w/b.ts"),
+        1,
+        "fixture invariant: B's carrier registered a reverse-index entry \
+         under /w/b.ts",
+    );
+
+    // Family C: a third distinct family. Publishing it FIFO-evicts
+    // the oldest admission — family A.
+    let node_c = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let key_c = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope("/w/c.ts"),
+        name: Arc::from("C"),
+    });
+    let carrier_c = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
+        FactVersionRef::FileWholeHash {
+            canonical_id: "/w/c.ts".to_string(),
+            hash: [3u8; 16],
+        },
+    ]));
+    let populated = store.publish_with_carrier_for_tests(
+        key_c,
+        QueryResult::Value(node_c),
+        carrier_c,
+        Arc::from([]),
+    );
+    assert_eq!(
+        populated, 1,
+        "C's publish landed one slot, triggering FIFO eviction of A",
+    );
+
+    // End-state — A's CARRIER reverse-index entry (`/w/a.ts`) is
+    // pruned (the pre-existing FIFO prune path covers this), and A's
+    // DISPATCH-ONLY reverse-index entry (`<project>`) is also pruned
+    // post-fix. B and C survive intact (within the budget cap).
+    assert_eq!(
+        store.canonical_to_entries_count("/w/a.ts"),
+        0,
+        "the FIFO-evicted victim A's carrier-rail reverse-index entry \
+         is pruned (existing behavior)",
+    );
+    assert_eq!(
+        store.canonical_to_entries_count("<project>"),
+        0,
+        "REVERSE-INDEX DESYNC: the FIFO eviction's prune loop iterates \
+         only the carrier's `read_set_signature.canonical_ids()` — it \
+         SKIPS canonicals named exclusively in the victim's \
+         `dispatch_dep_signature`. A's `<project>` reverse-index \
+         registration (created via `register_reverse_index`'s \
+         dispatch-fence union step) survives FIFO eviction, leaving a \
+         stale `(family, slot)` pair under `<project>` in \
+         `canonical_to_entries`. Across many bare \
+         `bump_project_generation()` cycles every family memoising a \
+         builder that emits `project_generation_signature()` (the \
+         common `KeyOf` / `ProjectPath` / normalization-builder shape) \
+         leaks a `<project>` reverse-index registration past its own \
+         FIFO eviction, growing `canonical_to_entries` beyond the memo \
+         budget. The prune path must walk the SAME union as \
+         `register_reverse_index` — `canonical_ids()` PLUS \
+         dispatch-fence canonicals — so register/cleanup are symmetric \
+         on every path (the rule Block 2.M fix-19 enforces for the \
+         cooperative-admission caches).",
+    );
+    assert_eq!(
+        store.canonical_to_entries_count("/w/b.ts"),
+        1,
+        "surviving family B's reverse-index entry is intact",
+    );
+    assert_eq!(
+        store.canonical_to_entries_count("/w/c.ts"),
+        1,
+        "freshly-published family C's reverse-index entry is intact",
+    );
+}
+
 #[test]
 fn recursive_sentinel_does_not_promote_to_warm_memo() {
     let host = ctx_host();

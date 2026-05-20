@@ -4371,9 +4371,9 @@ fn ref_cycle_read_set(
 /// edit to the file invalidates the proof, and (b) any transitive
 /// observations the call-chain made through the resolver substrate.
 ///
-/// **Codex Option B contract:** `publish()` accepts
-/// `Arc<[FactVersionRef]>` directly; the legacy `DepSignature`
-/// derivation has been retired (see `app_config_proof_db.rs`).
+/// `publish()` accepts `Arc<[FactVersionRef]>` directly — the
+/// path-precise fact-signature substrate (`HostStoreView::validates`)
+/// is the sole cache-validity oracle.
 ///
 /// **Cold-build outcome semantics:**
 /// - `Some(entry)` published — proof is valid. The fast-path

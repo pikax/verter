@@ -330,7 +330,8 @@ pub mod for_tests {
         crate::fact_signature_helpers::install_fact_tracer(host, f)
     }
 
-    /// Convert a legacy `DepSignature` into a `Vec<FactVersionRef>`.
+    /// Convert a dispatch-fence `DepSignature` into a
+    /// `Vec<FactVersionRef>`.
     ///
     /// Re-export for integration tests verifying the bridge conversion.
     pub fn dep_signature_to_fact_signature_for_tests(

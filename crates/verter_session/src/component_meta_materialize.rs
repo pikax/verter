@@ -1566,7 +1566,7 @@ fn materialize_child_at_nested(
         local_fence,
         &sub_read.dep_signature,
     );
-    // Sub-task E: mirror the sub-query's legacy dep_signature onto the
+    // Mirror the sub-query's dispatch-fence `DepSignature` onto the
     // active fact-read tracer so the parent cold compute accumulates
     // the same fact observations the child saw. R24 — silent on the
     // no-tracer fast path.
