@@ -173,8 +173,24 @@ impl Default for HostStoreView {
     }
 }
 
+/// Test-only thread-local counter incremented every time
+/// [`HostStoreView::from_host`] is called. The discriminating tests for
+/// Block 6.c's per-request hoist read this counter to assert that a
+/// single component-meta request builds the view exactly once instead
+/// of 8-12+ times. Thread-local so parallel `cargo test` execution
+/// does not cross-pollute counts. Production builds do not pay for
+/// the increment (gated under `#[cfg(test)]`).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static HOST_STORE_VIEW_FROM_HOST_BUILDS: std::cell::Cell<u64> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
 impl HostStoreView {
     pub(crate) fn from_host(host: &VerterHost) -> Self {
+        #[cfg(test)]
+        HOST_STORE_VIEW_FROM_HOST_BUILDS.with(|c| c.set(c.get().saturating_add(1)));
         for _ in 0..STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS {
             let snapshot_epoch = host.current_store_view_epoch();
             let view = Self::build(host, snapshot_epoch, None);

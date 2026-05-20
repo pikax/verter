@@ -259,6 +259,15 @@ impl CanonicalCompletionOverlay {
             .copied()
     }
 
+    /// Test-only: peek the overlay's `whole_hashes` entry for a
+    /// canonical id. The discriminating tests for the epoch guard
+    /// inspect this to assert that `complete_canonical` is a no-op
+    /// when `host.current_store_view_epoch() != base.mutation_epoch()`.
+    #[cfg(test)]
+    pub(crate) fn peek_whole_hash_for_tests(&self, canonical_id: &str) -> Option<Hash16> {
+        self.whole_hashes.read().get(canonical_id).copied()
+    }
+
     /// Whether the overlay tracks `canonical_id` (any per-canonical
     /// entry).
     fn tracks_file(&self, canonical_id: &str) -> bool {
@@ -309,6 +318,15 @@ impl<'a> RequestStoreView<'a> {
     /// Borrow the base [`HostStoreView`].
     pub(crate) fn base(&self) -> &HostStoreView {
         self.base
+    }
+
+    /// Test-only: peek the overlay's `whole_hashes` entry for a
+    /// canonical id. The discriminating tests for the epoch guard
+    /// inspect this to assert that `complete_canonical` is a no-op
+    /// when `host.current_store_view_epoch() != base.mutation_epoch()`.
+    #[cfg(test)]
+    pub(crate) fn peek_whole_hash_for_tests(&self, canonical_id: &str) -> Option<Hash16> {
+        self.overlay.peek_whole_hash_for_tests(canonical_id)
     }
 }
 

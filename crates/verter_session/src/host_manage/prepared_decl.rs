@@ -176,7 +176,11 @@ impl VerterHost {
                 return self.materialize_prepared_decl_bundle_via_ctx(ctx, &identity);
             }
         }
-        self.prepared_decl_bundle(canonical_id)
+        // Block 6.c per-request hoist: route the non-overlay fall-through
+        // through the view-bound helper, threading `ctx.store_view()`
+        // (the request-bound borrow) instead of building a fresh owned
+        // snapshot via `self.prepared_decl_bundle(canonical_id)`.
+        self.prepared_decl_bundle_with_store_view(ctx.store_view(), canonical_id)
     }
 
     /// Materialise a fresh prepared-decl bundle rooted at the overlay's

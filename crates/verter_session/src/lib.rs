@@ -55,6 +55,8 @@ mod audit_warm_cache_tests;
 pub mod audited_request;
 #[cfg(test)]
 mod audited_request_tests;
+#[cfg(test)]
+mod block_6c_view_hoist_tests;
 mod cache;
 pub mod cache_schema;
 mod compile;
