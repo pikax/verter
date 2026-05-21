@@ -22,10 +22,12 @@
 //! - `resolve_named_type_export_target`
 //! - `resolve_named_type_export_target_shallow`
 //! - `resolve_owner_direct_import`
+//! - `resolve_type_declaration_for_dep` (added in C7 / P1-1)
 //!
-//! Each method MUST contain BOTH a `#[cfg(test)]` arm AND a
-//! `#[cfg(not(test))] { panic!(...) }` arm. The guard greps for both
-//! the method signature and the panic body in the same file
+//! Each method MUST contain BOTH a `#[cfg(any(test, debug_assertions))]`
+//! arm AND a `#[cfg(not(any(test, debug_assertions)))] { panic!(...) }`
+//! arm. The guard greps for both the method signature and the panic
+//! body in the same file
 //! (`crates/verter_session/src/resolver_core/resolver_context.rs`) —
 //! a future commit that deletes the panic body fails this gate.
 
@@ -64,6 +66,10 @@ const EXPECTED_PANIC_METHODS: &[(&str, &str)] = &[
     (
         "resolve_owner_direct_import",
         "bare-host resolve_owner_direct_import called from",
+    ),
+    (
+        "resolve_type_declaration_for_dep",
+        "bare-host resolve_type_declaration_for_dep called",
     ),
 ];
 
