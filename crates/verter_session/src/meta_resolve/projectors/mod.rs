@@ -346,12 +346,11 @@ pub(crate) fn peek_member_shape_known(
     );
 
     match expr {
-        TypeExpr::Primitive(_) | TypeExpr::Literal(_) => {
-            Some(PeekedShape::Leaf(expr.clone()))
-        }
-        TypeExpr::Ref { type_arguments, name } if type_arguments.is_empty() => {
-            Some(PeekedShape::BareCarrier { name: name.clone() })
-        }
+        TypeExpr::Primitive(_) | TypeExpr::Literal(_) => Some(PeekedShape::Leaf(expr.clone())),
+        TypeExpr::Ref {
+            type_arguments,
+            name,
+        } if type_arguments.is_empty() => Some(PeekedShape::BareCarrier { name: name.clone() }),
         _ => {
             // Operator-shape (Pick/Omit/IndexedAccess/Conditional/Mapped)
             // or generic instantiation: consult `MaterializeMemoDb` only.
@@ -821,6 +820,39 @@ pub(crate) fn reduce_field_type_expr(
     scope_canonical_id: &str,
     expr: TypeExpr,
 ) -> TypeExpr {
+    // Block 6.h Commit B — peek-before-reduce. Short-circuit when the
+    // expression's shape is already known cheaply:
+    //
+    //   * `Leaf(_)`: a primitive / literal — publish the leaf
+    //     verbatim. Equivalent to the legacy "needs_reduction == false"
+    //     fall-through which returned `expr` unchanged.
+    //   * `BareCarrier { name }`: a plain `Ref { type_arguments: [] }`.
+    //     Per the shallow-by-default rule the projector publishes the
+    //     Ref shallow; consumers re-resolve through the registry on
+    //     demand. Equivalent to the legacy "not generic, not operator"
+    //     fall-through.
+    //   * `Cached(materialized)`: `MaterializeMemoDb` carries a warm
+    //     `(scope, expr, mode)` entry — return the cached reduction
+    //     verbatim. The peek's `MaterializeMemoDb::peek` re-emits the
+    //     entry's `fact_dep_signature` via `bubble_fact_signature`
+    //     (component_meta_caches.rs:1346) so the cm-result cache
+    //     validation invariants are preserved.
+    //
+    // `None` ⇒ cold path; fall through to the existing
+    // package-backed gate + cycle guard + reducer.
+    if let Some(peeked) = peek_member_shape_known(
+        query_engine,
+        scope_canonical_id,
+        &expr,
+        ProjectionMode::Expanded,
+    ) {
+        match peeked {
+            PeekedShape::Leaf(leaf) => return leaf,
+            PeekedShape::BareCarrier { .. } => return expr,
+            PeekedShape::Cached(materialized) => return materialized.type_expr,
+        }
+    }
+
     let route_is_package_backed = super::materialize::type_expr_has_package_backed_object_like_root(
         &expr,
         scope_canonical_id,

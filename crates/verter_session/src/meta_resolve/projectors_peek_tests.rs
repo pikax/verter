@@ -227,7 +227,9 @@ fn peek_operator_shape_cold_memo_returns_none() {
                 name: Arc::from("Foo"),
                 type_arguments: Arc::from(Vec::<TypeExpr>::new().into_boxed_slice()),
             }),
-            index: Arc::new(TypeExpr::Literal(LiteralValue::String("nested".to_string()))),
+            index: Arc::new(TypeExpr::Literal(LiteralValue::String(
+                "nested".to_string(),
+            ))),
         };
         let peeked = peek_member_shape_known(
             &mut query_engine,
@@ -267,7 +269,9 @@ fn peek_operator_shape_warm_memo_returns_cached() {
             name: Arc::from("Foo"),
             type_arguments: Arc::from(Vec::<TypeExpr>::new().into_boxed_slice()),
         }),
-        index: Arc::new(TypeExpr::Literal(LiteralValue::String("nested".to_string()))),
+        index: Arc::new(TypeExpr::Literal(LiteralValue::String(
+            "nested".to_string(),
+        ))),
     };
     let key: MaterializeMemoKey = (
         scope.clone(),
@@ -284,9 +288,7 @@ fn peek_operator_shape_warm_memo_returns_cached() {
         let seeded = MaterializedTypeExpr {
             node_id: None,
             type_expr: TypeExpr::Primitive(PrimitiveName::Number),
-            dep_signature: Arc::from(
-                Vec::<(Arc<str>, crate::semantic_query::DepVersion)>::new(),
-            ),
+            dep_signature: Arc::from(Vec::<(Arc<str>, crate::semantic_query::DepVersion)>::new()),
         };
         let admitted = memo_db.get_or_compute(&key, ctx, || {
             Some((
@@ -307,8 +309,7 @@ fn peek_operator_shape_warm_memo_returns_cached() {
                  rejected the empty fact-signature. Falling back to \
                  None-discriminator assertion only.",
             );
-            let mut query_engine =
-                crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
+            let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
             let peeked = peek_member_shape_known(
                 &mut query_engine,
                 scope.as_ref(),
