@@ -55,7 +55,9 @@ fn family_a_entries_carry_fact_dep_signature() {
         "ResolvabilityEntry",
         "OwnerCollectionEntry",
         "PreparedTargetEntry",
-        "MaterializeMemoEntry",
+        // Block 6.i — `MaterializeMemoEntry` + `MemberShapeCacheEntry`
+        // unified into `ShapeCacheEntry` under the new `ShapeCacheDb`.
+        "ShapeCacheEntry",
         "PreparedSurfaceEntry",
         "PreparedMemberEntry",
         "RoutedExprSurfaceEntry",

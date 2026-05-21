@@ -1264,11 +1264,37 @@ impl crate::cache_schema::CacheSchemaVersioned for PreparedTargetDb {
 }
 
 // ===========================================================================
-// 6. MaterializeMemoDb — `(Arc<str>, Arc<TypeExpr>, ProjectionMode) → MaterializedTypeExpr`
+// 6. ShapeCacheDb — `ShapeCacheKey → MaterializedTypeExpr`
+//
+// Block 6.i universal shape cache. Replaces the previously-split
+// `MaterializeMemoDb` (TypeExpr-keyed) and `MemberShapeCacheDb`
+// (SemanticNode-keyed) by lifting the discriminant into a
+// `ShapeSubject` variant. ONE cache, not two. Every shape lookup at
+// every projection boundary goes through this cache.
+//
+// The key shape:
+//
+//   ShapeCacheKey {
+//       subject: ShapeSubject {
+//           TypeExpr { scope, expr } | SemanticNode { scope, node }
+//       },
+//       demand: ShapeDemand {
+//           path: Arc<[PathSegment]>,
+//           terminal_mode: ProjectionMode,
+//           key_filter: KeyFilter,
+//           surface: PublishedSurfaceKind,
+//       },
+//   }
+//
+// The empty-path All-filter Registry-surface variant collapses to the
+// pre-6.i unkeyed-path cache identity, so existing callers preserve
+// behaviour. Path-precise narrowing emerges in Commits C–F when
+// projectors / fallthrough / operator reducers thread narrowed
+// `SurfaceProjection` cursors and consult `ShapeCacheDb` per-hop.
 // ===========================================================================
 
 #[derive(Clone)]
-pub struct MaterializeMemoEntry {
+pub struct ShapeCacheEntry {
     pub value: MaterializedTypeExpr,
     /// R3/R26/R28 fact-precise dependency signature. See
     /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
@@ -1276,21 +1302,143 @@ pub struct MaterializeMemoEntry {
     /// Project generation this entry was computed under. See
     /// [`ImportedRegistryEntry::validated_at_generation`] for the
     /// project-generation staleness contract.
+    ///
+    /// Overlay/base isolation for `SemanticNode`-subject entries does
+    /// NOT rely on `SemanticNodeId` being generation-tagged (the arena
+    /// is append-only across generations and IDs are raw `u64`).
+    /// Isolation comes from three mechanisms working together:
+    ///   1. `observe_materialize_scope` is overlay-aware and pins the
+    ///      overlay `IndexedReady` when an overlay covers the scope.
+    ///   2. The fact signature self-roots on that observation's
+    ///      `whole_hash`. A base-mode peek against an overlay-rooted
+    ///      entry fails `validate_fact_signature_with_self_roots`.
+    ///   3. This field plus `bump_project_generation_and_evict`
+    ///      detect cross-generation drift on overlay open/close.
     pub validated_at_generation: u64,
 }
 
-pub type MaterializeMemoKey = (Arc<str>, Arc<TypeExpr>, ProjectionMode);
+/// Subject of a [`ShapeCacheKey`] — the *what* whose shape is cached.
+///
+/// `TypeExpr` covers callers whose start point is a parser-produced
+/// `TypeExpr` annotation (the legacy `MaterializeMemoDb` shape).
+/// `SemanticNode` covers callers whose start point is a settled
+/// `SemanticNodeId` (the legacy `MemberShapeCacheDb` shape). Both
+/// subjects share the same cache substrate — they differ only in the
+/// identity used to key entries.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ShapeSubject {
+    /// TypeExpr-keyed subject. Sibling members of the same
+    /// `Pick<Foo, 'a' | 'b'>` raise hash to distinct entries because
+    /// the raised `TypeExpr` is structurally distinct per member —
+    /// callers seeking per-member dedup should prefer the
+    /// `SemanticNode` subject.
+    TypeExpr {
+        scope: Arc<str>,
+        expr: Arc<TypeExpr>,
+    },
+    /// SemanticNode-keyed subject. Sibling members whose
+    /// `SurfaceMember.value` is the same settled graph node collapse
+    /// onto each other's warm hits.
+    SemanticNode {
+        scope: Arc<str>,
+        node: crate::semantic_query::SemanticNodeId,
+    },
+}
 
-pub struct MaterializeMemoDb {
-    entries: DashMap<MaterializeMemoKey, Arc<MaterializeMemoEntry>>,
-    inflight: InflightTable<MaterializeMemoKey>,
+impl ShapeSubject {
+    /// Canonical scope id this subject is rooted in. Used for
+    /// strict self-root warm-read validation and per-canonical
+    /// invalidation.
+    pub(crate) fn scope_canonical(&self) -> &Arc<str> {
+        match self {
+            ShapeSubject::TypeExpr { scope, .. } | ShapeSubject::SemanticNode { scope, .. } => {
+                scope
+            }
+        }
+    }
+}
+
+/// Per-call demand a [`ShapeCacheKey`] addresses — the *how* the shape
+/// will be consumed. Distinct demands for the same subject keep
+/// disjoint entries (e.g. Shallow vs Expanded over the same TypeExpr).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ShapeDemand {
+    /// Path segments narrowing the requested shape. Empty path =
+    /// whole subject. Non-empty path = path-precise demand (Block
+    /// 6.i Commits C–F narrow this at the publication boundary).
+    pub(crate) path: Arc<[crate::semantic_query::PathSegment]>,
+    /// Terminal-hop projection mode.
+    pub(crate) terminal_mode: ProjectionMode,
+    /// Key filter at the terminal hop (Pick/Omit narrowing, etc.).
+    pub(crate) key_filter: crate::meta_resolve::projection_demand::KeyFilter,
+    /// Which published surface this demand serves. Used by the
+    /// registry walker to discriminate caller intent + by the cache
+    /// key to keep slot identity disjoint across surfaces.
+    pub(crate) surface: crate::meta_resolve::projection_demand::PublishedSurfaceKind,
+}
+
+impl ShapeDemand {
+    /// Demand encoding "whole subject, no path narrowing,
+    /// Internal-surface caller". Used by call sites that have not
+    /// yet adopted path-precision — preserves the pre-6.i behaviour
+    /// of `MaterializeMemoDb`/`MemberShapeCacheDb`.
+    pub(crate) fn whole_subject(mode: ProjectionMode) -> Self {
+        Self {
+            path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+            terminal_mode: mode,
+            key_filter: crate::meta_resolve::projection_demand::KeyFilter::All,
+            surface: crate::meta_resolve::projection_demand::PublishedSurfaceKind::Internal {
+                caller: "ShapeCacheDb::whole_subject",
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ShapeCacheKey {
+    pub(crate) subject: ShapeSubject,
+    pub(crate) demand: ShapeDemand,
+}
+
+impl ShapeCacheKey {
+    /// Construct a key for the legacy `MaterializeMemoDb` shape
+    /// (TypeExpr-subject, whole-subject demand). The default for
+    /// callers that have not yet adopted path-precise demand.
+    pub(crate) fn type_expr_whole(
+        scope: Arc<str>,
+        expr: Arc<TypeExpr>,
+        mode: ProjectionMode,
+    ) -> Self {
+        Self {
+            subject: ShapeSubject::TypeExpr { scope, expr },
+            demand: ShapeDemand::whole_subject(mode),
+        }
+    }
+
+    /// Construct a key for the legacy `MemberShapeCacheDb` shape
+    /// (SemanticNode-subject, whole-subject demand).
+    pub(crate) fn semantic_node_whole(
+        scope: Arc<str>,
+        node: crate::semantic_query::SemanticNodeId,
+        mode: ProjectionMode,
+    ) -> Self {
+        Self {
+            subject: ShapeSubject::SemanticNode { scope, node },
+            demand: ShapeDemand::whole_subject(mode),
+        }
+    }
+}
+
+pub struct ShapeCacheDb {
+    entries: DashMap<ShapeCacheKey, Arc<ShapeCacheEntry>>,
+    inflight: InflightTable<ShapeCacheKey>,
     live_counter: Arc<AtomicU64>,
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`crate::cache_schema`] for the contract.
     schema_version: u32,
 }
 
-impl MaterializeMemoDb {
+impl ShapeCacheDb {
     pub fn new() -> Self {
         Self::with_counter(Arc::new(AtomicU64::new(0)))
     }
@@ -1322,15 +1470,17 @@ impl MaterializeMemoDb {
     /// fact_dep_signature is still valid against `ctx`.
     pub(crate) fn peek(
         &self,
-        key: &MaterializeMemoKey,
+        key: &ShapeCacheKey,
         ctx: &dyn ResolverContext,
     ) -> Option<MaterializedTypeExpr> {
         if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
-        // The keyed scope canonical is the entry's self-root — strict
-        // warm-read validation rejects a same-scope content edit.
-        let self_roots: [&str; 1] = [key.0.as_ref()];
+        // The subject's scope canonical is the entry's self-root —
+        // strict warm-read validation rejects a same-scope content
+        // edit.
+        let scope = key.subject.scope_canonical().clone();
+        let self_roots: [&str; 1] = [scope.as_ref()];
         let result = (|| -> Option<MaterializedTypeExpr> {
             let entry_arc = self.entries.get(key).map(|e| e.clone())?;
             // The carrier validates only file-content whole-hashes; the
@@ -1350,16 +1500,14 @@ impl MaterializeMemoDb {
             }
         })();
         if let Some(rctx) = crate::request_context::current_request_context() {
+            let counter = match &key.subject {
+                ShapeSubject::TypeExpr { .. } => &rctx.cache_counters.materialize_memo,
+                ShapeSubject::SemanticNode { .. } => &rctx.cache_counters.member_shape_cache,
+            };
             if result.is_some() {
-                rctx.cache_counters
-                    .materialize_memo
-                    .hits
-                    .fetch_add(1, Ordering::Relaxed);
+                counter.hits.fetch_add(1, Ordering::Relaxed);
             } else {
-                rctx.cache_counters
-                    .materialize_memo
-                    .misses
-                    .fetch_add(1, Ordering::Relaxed);
+                counter.misses.fetch_add(1, Ordering::Relaxed);
             }
         }
         result
@@ -1367,7 +1515,7 @@ impl MaterializeMemoDb {
 
     pub(crate) fn get_or_compute<F>(
         &self,
-        key: &MaterializeMemoKey,
+        key: &ShapeCacheKey,
         ctx: &dyn ResolverContext,
         compute: F,
     ) -> Option<MaterializedTypeExpr>
@@ -1382,18 +1530,21 @@ impl MaterializeMemoDb {
         // decrements when the substrate removes an already-published
         // entry so the live counter tracks live entries.
         let live_counter_for_removal = Arc::clone(&self.live_counter);
-        // The keyed scope canonical is the entry's self-root — strict
-        // warm-read validation.
-        let self_roots: [&str; 1] = [key.0.as_ref()];
+        // The subject's scope canonical is the entry's self-root —
+        // strict warm-read validation.
+        let scope = key.subject.scope_canonical().clone();
         // Snapshot the project generation BEFORE the cold compute
         // dispatches any work — see `DeclarationLookupDb::get_or_compute`
         // for the project-generation staleness rationale.
         let generation_snapshot = ctx.project_type_store().current_project_generation();
+        let scope_for_validate = Arc::clone(&scope);
+        let scope_for_revalidate = Arc::clone(&scope);
         cooperative_get_or_insert_with_post_publish(
             &self.entries,
             &self.inflight,
             key.clone(),
-            |entry: &MaterializeMemoEntry| {
+            move |entry: &ShapeCacheEntry| {
+                let self_roots: [&str; 1] = [scope_for_validate.as_ref()];
                 if entry.validated_at_generation
                     == ctx.project_type_store().current_project_generation()
                     && validate_fact_signature_with_self_roots(
@@ -1409,17 +1560,18 @@ impl MaterializeMemoDb {
                 }
             },
             move || {
-                compute().map(|(value, fact_dep_signature)| MaterializeMemoEntry {
+                compute().map(|(value, fact_dep_signature)| ShapeCacheEntry {
                     value,
                     fact_dep_signature,
                     validated_at_generation: generation_snapshot,
                 })
             },
-            |entry: &MaterializeMemoEntry| {
+            |entry: &ShapeCacheEntry| {
                 bubble_fact_signature(ctx, &entry.fact_dep_signature);
                 entry.value.clone()
             },
-            |entry: &MaterializeMemoEntry| {
+            move |entry: &ShapeCacheEntry| {
+                let self_roots: [&str; 1] = [scope_for_revalidate.as_ref()];
                 entry.validated_at_generation
                     == ctx.project_type_store().current_project_generation()
                     && validate_fact_signature_with_self_roots(
@@ -1428,14 +1580,14 @@ impl MaterializeMemoDb {
                         &self_roots,
                     )
             },
-            move |_key: &MaterializeMemoKey, _entry: &Arc<MaterializeMemoEntry>| {
+            move |_key: &ShapeCacheKey, _entry: &Arc<ShapeCacheEntry>| {
                 live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
             },
             // post_publish — fires once on the cold winner's thread,
             // AFTER `entries.insert` AND a successful
             // `revalidate_after_compute`. The live-counter bump rides
             // here so it is paired with the published map entry.
-            move |_entry_arc: &Arc<MaterializeMemoEntry>, _key: &MaterializeMemoKey| {
+            move |_entry_arc: &Arc<ShapeCacheEntry>, _key: &ShapeCacheKey| {
                 live_counter_for_publish.fetch_add(1, Ordering::Relaxed);
             },
             // No retention budget on this cache shape — no publish fence.
@@ -1443,13 +1595,37 @@ impl MaterializeMemoDb {
         )
     }
 
+    /// Universal-caching admission helper. Admits an already-computed
+    /// `(value, fact_dep_signature)` pair into the cache when the
+    /// signature is valid. Used by the projector pipeline's `Leaf` /
+    /// `BareCarrier` arms to ensure every successful shape compute
+    /// admits to the cache (universal-caching invariant — Block 6.i
+    /// STOP trigger #3).
+    ///
+    /// Returns the admitted value (verbatim if admission was refused
+    /// — e.g. on signature-build failure — the caller still receives
+    /// the same value it computed).
+    #[allow(dead_code)]
+    pub(crate) fn admit_computed(
+        &self,
+        key: &ShapeCacheKey,
+        ctx: &dyn ResolverContext,
+        value: MaterializedTypeExpr,
+        fact_dep_signature: Arc<[FactVersionRef]>,
+    ) -> MaterializedTypeExpr {
+        let value_for_closure = value.clone();
+        let admitted = self.get_or_compute(key, ctx, move || {
+            Some((value_for_closure, fact_dep_signature))
+        });
+        admitted.unwrap_or(value)
+    }
+
     pub fn invalidate_canonical(&self, canonical_id: &str) {
-        let keys: Vec<MaterializeMemoKey> = self
+        let keys: Vec<ShapeCacheKey> = self
             .entries
             .iter()
             .filter_map(|entry| {
-                let (scope, _, _) = entry.key();
-                if scope.as_ref() == canonical_id {
+                if entry.key().subject.scope_canonical().as_ref() == canonical_id {
                     Some(entry.key().clone())
                 } else {
                     None
@@ -1482,12 +1658,12 @@ impl MaterializeMemoDb {
     #[cfg(any(test, debug_assertions))]
     pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
         use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
-        let key: MaterializeMemoKey = (
+        let key = ShapeCacheKey::type_expr_whole(
             Arc::from(marker),
             Arc::new(TypeExpr::Unknown { raw: String::new() }),
             ProjectionMode::Shallow,
         );
-        let entry = Arc::new(MaterializeMemoEntry {
+        let entry = Arc::new(ShapeCacheEntry {
             value: MaterializedTypeExpr {
                 node_id: None,
                 type_expr: TypeExpr::Unknown { raw: String::new() },
@@ -1501,305 +1677,13 @@ impl MaterializeMemoDb {
     }
 }
 
-impl Default for MaterializeMemoDb {
+impl Default for ShapeCacheDb {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl crate::cache_schema::CacheSchemaVersioned for MaterializeMemoDb {
-    fn schema_version(&self) -> u32 {
-        self.schema_version
-    }
-
-    fn evict_if_schema_mismatch(&self, current: u32) -> usize {
-        if self.schema_version == current {
-            return 0;
-        }
-        let count = self.entries.len();
-        self.entries.clear();
-        if count > 0 {
-            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
-        }
-        count
-    }
-}
-
-// ===========================================================================
-// 6b. MemberShapeCacheDb —
-//     `(Arc<str>, SemanticNodeId, ProjectionMode) → MaterializedTypeExpr`
-//
-// Block 6.d per-member graph-native materialiser cache. Keyed on graph
-// identity (`SurfaceMember.value: SemanticNodeId`), NOT on raised
-// `TypeExpr` artifact — the latter shape was the bad abstraction the
-// retired `MemberRouteResultDb` carried.
-//
-// Sibling of `MaterializeMemoDb` in cache shape: same cooperative
-// admission, same R3/R26/R28 fact-precise signature, same
-// project-generation fencing, same per-canonical invalidation cascade.
-// The TWO caches coexist:
-//
-//   - `MaterializeMemoDb` is the whole-expression cache for
-//     `materialize_component_meta_type_expr_until_stable_full`'s
-//     TypeExpr-start callers (parser-produced annotations).
-//   - `MemberShapeCacheDb` is the per-member cache for
-//     `surface_member_to_expanded_field`'s graph-native start point
-//     (a settled `SurfaceMember.value: SemanticNodeId`).
-//
-// Why split: the whole-expression key on `(scope, Arc<TypeExpr>, mode)`
-// hashes a structurally distinct value per per-member raise — sibling
-// members of `Pick<Foo, 'a' | 'b' | ...>` never collapse onto each
-// other's warm hits. The per-member key on
-// `(scope, SemanticNodeId, mode)` collapses sibling members whose
-// underlying `SurfaceMember.value` is the same settled graph node and
-// surfaces semantic-graph identity directly to the cache layer.
-// ===========================================================================
-
-#[derive(Clone)]
-pub struct MemberShapeCacheEntry {
-    pub value: MaterializedTypeExpr,
-    /// R3/R26/R28 fact-precise dependency signature. See
-    /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
-    pub fact_dep_signature: Arc<[FactVersionRef]>,
-    /// Project generation this entry was computed under. See
-    /// [`ImportedRegistryEntry::validated_at_generation`] for the
-    /// project-generation staleness contract.
-    ///
-    /// Overlay/base isolation does NOT rely on `SemanticNodeId` being
-    /// generation-tagged (the arena is append-only across generations
-    /// and IDs are raw `u64`). Isolation comes from three mechanisms
-    /// working together:
-    ///   1. `observe_materialize_scope` is overlay-aware and pins the
-    ///      overlay `IndexedReady` when an overlay covers the scope,
-    ///      so the scope observation captures the overlay's identity.
-    ///   2. The fact signature self-roots on that observation's
-    ///      `whole_hash`. A base-mode peek against an overlay-rooted
-    ///      entry fails `validate_fact_signature_with_self_roots`.
-    ///   3. This field plus `bump_project_generation_and_evict`
-    ///      detect cross-generation drift on overlay open/close.
-    pub validated_at_generation: u64,
-}
-
-pub type MemberShapeCacheKey = (
-    Arc<str>,
-    crate::semantic_query::SemanticNodeId,
-    ProjectionMode,
-);
-
-pub struct MemberShapeCacheDb {
-    entries: DashMap<MemberShapeCacheKey, Arc<MemberShapeCacheEntry>>,
-    inflight: InflightTable<MemberShapeCacheKey>,
-    live_counter: Arc<AtomicU64>,
-    /// Cache-cluster schema version this Db was constructed under. See
-    /// [`crate::cache_schema`] for the contract.
-    schema_version: u32,
-}
-
-impl MemberShapeCacheDb {
-    pub fn new() -> Self {
-        Self::with_counter(Arc::new(AtomicU64::new(0)))
-    }
-
-    pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
-        Self::with_counter_and_schema_version(
-            live_counter,
-            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
-        )
-    }
-
-    /// Test-only constructor that pins a specific schema version on the Db.
-    /// Used by `cache_invariant_migration` fixtures.
-    #[cfg(any(test, debug_assertions))]
-    pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
-        Self::with_counter_and_schema_version(Arc::new(AtomicU64::new(0)), schema_version)
-    }
-
-    fn with_counter_and_schema_version(live_counter: Arc<AtomicU64>, schema_version: u32) -> Self {
-        Self {
-            entries: DashMap::new(),
-            inflight: InflightTable::new(),
-            live_counter,
-            schema_version,
-        }
-    }
-
-    /// Peek-only lookup: returns the cached value only if its
-    /// fact_dep_signature is still valid against `ctx`.
-    pub(crate) fn peek(
-        &self,
-        key: &MemberShapeCacheKey,
-        ctx: &dyn ResolverContext,
-    ) -> Option<MaterializedTypeExpr> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
-            return None;
-        }
-        // The keyed scope canonical is the entry's self-root — strict
-        // warm-read validation rejects a same-scope content edit.
-        let self_roots: [&str; 1] = [key.0.as_ref()];
-        let result = (|| -> Option<MaterializedTypeExpr> {
-            let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-            if entry_arc.validated_at_generation
-                == ctx.project_type_store().current_project_generation()
-                && validate_fact_signature_with_self_roots(
-                    ctx,
-                    &entry_arc.fact_dep_signature,
-                    &self_roots,
-                )
-            {
-                bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
-                Some(entry_arc.value.clone())
-            } else {
-                None
-            }
-        })();
-        if let Some(rctx) = crate::request_context::current_request_context() {
-            if result.is_some() {
-                rctx.cache_counters
-                    .member_shape_cache
-                    .hits
-                    .fetch_add(1, Ordering::Relaxed);
-            } else {
-                rctx.cache_counters
-                    .member_shape_cache
-                    .misses
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        result
-    }
-
-    pub(crate) fn get_or_compute<F>(
-        &self,
-        key: &MemberShapeCacheKey,
-        ctx: &dyn ResolverContext,
-        compute: F,
-    ) -> Option<MaterializedTypeExpr>
-    where
-        F: FnOnce() -> Option<(MaterializedTypeExpr, Arc<[FactVersionRef]>)>,
-    {
-        let live_counter_for_publish = Arc::clone(&self.live_counter);
-        let live_counter_for_removal = Arc::clone(&self.live_counter);
-        let self_roots: [&str; 1] = [key.0.as_ref()];
-        let generation_snapshot = ctx.project_type_store().current_project_generation();
-        cooperative_get_or_insert_with_post_publish(
-            &self.entries,
-            &self.inflight,
-            key.clone(),
-            |entry: &MemberShapeCacheEntry| {
-                if entry.validated_at_generation
-                    == ctx.project_type_store().current_project_generation()
-                    && validate_fact_signature_with_self_roots(
-                        ctx,
-                        &entry.fact_dep_signature,
-                        &self_roots,
-                    )
-                {
-                    bubble_fact_signature(ctx, &entry.fact_dep_signature);
-                    Some(entry.value.clone())
-                } else {
-                    None
-                }
-            },
-            move || {
-                compute().map(|(value, fact_dep_signature)| MemberShapeCacheEntry {
-                    value,
-                    fact_dep_signature,
-                    validated_at_generation: generation_snapshot,
-                })
-            },
-            |entry: &MemberShapeCacheEntry| {
-                bubble_fact_signature(ctx, &entry.fact_dep_signature);
-                entry.value.clone()
-            },
-            |entry: &MemberShapeCacheEntry| {
-                entry.validated_at_generation
-                    == ctx.project_type_store().current_project_generation()
-                    && validate_fact_signature_with_self_roots(
-                        ctx,
-                        &entry.fact_dep_signature,
-                        &self_roots,
-                    )
-            },
-            move |_key: &MemberShapeCacheKey, _entry: &Arc<MemberShapeCacheEntry>| {
-                live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
-            },
-            // post_publish — fires once on the cold winner's thread,
-            // AFTER `entries.insert` AND a successful
-            // `revalidate_after_compute`. The live-counter bump rides
-            // here so it is paired with the published map entry.
-            move |_entry_arc: &Arc<MemberShapeCacheEntry>, _key: &MemberShapeCacheKey| {
-                live_counter_for_publish.fetch_add(1, Ordering::Relaxed);
-            },
-            // No retention budget on this cache shape — no publish fence.
-            None,
-        )
-    }
-
-    pub fn invalidate_canonical(&self, canonical_id: &str) {
-        let keys: Vec<MemberShapeCacheKey> = self
-            .entries
-            .iter()
-            .filter_map(|entry| {
-                let (scope, _, _) = entry.key();
-                if scope.as_ref() == canonical_id {
-                    Some(entry.key().clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for key in keys {
-            if self.entries.remove(&key).is_some() {
-                self.live_counter.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
-    }
-
-    pub fn invalidate_all(&self) {
-        let n = self.entries.len() as u64;
-        self.entries.clear();
-        self.live_counter.fetch_sub(
-            n.min(self.live_counter.load(Ordering::Relaxed)),
-            Ordering::Relaxed,
-        );
-    }
-
-    pub fn live_count(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Test-only synthetic-entry inserter used exclusively by
-    /// `cache_invariant_migration` fixtures to verify the cache-cluster
-    /// schema-version eviction invariant.
-    #[cfg(any(test, debug_assertions))]
-    pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
-        use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
-        let key: MemberShapeCacheKey = (
-            Arc::from(marker),
-            crate::semantic_query::SemanticNodeId(0),
-            ProjectionMode::Shallow,
-        );
-        let entry = Arc::new(MemberShapeCacheEntry {
-            value: MaterializedTypeExpr {
-                node_id: None,
-                type_expr: TypeExpr::Unknown { raw: String::new() },
-                dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
-            },
-            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
-            validated_at_generation: 0,
-        });
-        self.entries.insert(key, entry);
-        self.live_counter.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-impl Default for MemberShapeCacheDb {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl crate::cache_schema::CacheSchemaVersioned for MemberShapeCacheDb {
+impl crate::cache_schema::CacheSchemaVersioned for ShapeCacheDb {
     fn schema_version(&self) -> u32 {
         self.schema_version
     }
@@ -4157,7 +4041,7 @@ impl crate::invalidation_domain::InvalidationByCanonical for PreparedTargetDb {
     }
 }
 
-impl crate::invalidation_domain::ParticipatesInInvalidation for MaterializeMemoDb {
+impl crate::invalidation_domain::ParticipatesInInvalidation for ShapeCacheDb {
     fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
         use crate::invalidation_domain::InvalidationDomain::*;
         &[FileContent, ResolverState, ProjectGeneration]
@@ -4170,29 +4054,7 @@ impl crate::invalidation_domain::ParticipatesInInvalidation for MaterializeMemoD
     }
 }
 
-impl crate::invalidation_domain::InvalidationByCanonical for MaterializeMemoDb {
-    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
-        let before = self.live_count();
-        self.invalidate_canonical(canonical_id);
-        let after = self.live_count();
-        before.saturating_sub(after)
-    }
-}
-
-impl crate::invalidation_domain::ParticipatesInInvalidation for MemberShapeCacheDb {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
-        &[FileContent, ResolverState, ProjectGeneration]
-    }
-    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
-        use crate::invalidation_domain::InvalidationDomain::*;
-        if matches!(domain, ProjectGeneration) {
-            self.invalidate_all();
-        }
-    }
-}
-
-impl crate::invalidation_domain::InvalidationByCanonical for MemberShapeCacheDb {
+impl crate::invalidation_domain::InvalidationByCanonical for ShapeCacheDb {
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
         let before = self.live_count();
         self.invalidate_canonical(canonical_id);

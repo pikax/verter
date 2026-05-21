@@ -299,7 +299,7 @@ fn step3_db_accessors_are_distinct_instances() {
     let res_addr = store.resolvable_db() as *const _ as usize;
     let own_addr = store.owner_collection_db() as *const _ as usize;
     let prt_addr = store.prepared_target_db() as *const _ as usize;
-    let mat_addr = store.materialize_memo_db() as *const _ as usize;
+    let mat_addr = store.shape_cache_db() as *const _ as usize;
     let psr_addr = store.prepared_surface_db() as *const _ as usize;
     let pmr_addr = store.prepared_member_db() as *const _ as usize;
     let res2_addr = store.routed_expr_surface_db() as *const _ as usize;

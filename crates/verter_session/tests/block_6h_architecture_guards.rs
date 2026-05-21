@@ -218,8 +218,9 @@ fn peek_does_not_consult_route_db_or_owner_import_surface_db() {
          `OwnerImportSurfaceDb` for the same workspace-rebuild reason.",
     );
     assert!(
-        body.contains("materialize_memo_db("),
-        "guard: `peek_member_shape_known` MUST consult `MaterializeMemoDb` \
+        body.contains("shape_cache_db("),
+        "guard: `peek_member_shape_known` MUST consult `ShapeCacheDb` \
+         (Block 6.i universal cache, replaces `MaterializeMemoDb`) \
          as the operator-shape lookup substrate.",
     );
 }

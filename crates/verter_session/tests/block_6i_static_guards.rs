@@ -100,3 +100,94 @@ fn projection_demand_substrate_present() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Guard B.1 — `ShapeCacheDb` is the unified shape cache.
+//
+// Block 6.i Commit B replaces the previously-split `MaterializeMemoDb`
+// (TypeExpr-keyed) and `MemberShapeCacheDb` (SemanticNode-keyed)
+// with a single `ShapeCacheDb` whose key carries a `ShapeSubject`
+// discriminant + a `ShapeDemand` (path + mode + filter + surface).
+// One cache, not two. Source-text guard asserts the structural shape
+// landed.
+// ---------------------------------------------------------------------------
+#[test]
+fn shape_cache_db_replaces_split_caches() {
+    let src = read_workspace_file("crates/verter_session/src/component_meta_caches.rs");
+
+    for symbol in [
+        "pub struct ShapeCacheDb",
+        "pub struct ShapeCacheEntry",
+        "pub enum ShapeSubject",
+        "pub struct ShapeDemand",
+        "pub struct ShapeCacheKey",
+    ] {
+        assert!(
+            src.contains(symbol),
+            "guard B.1: `component_meta_caches.rs` MUST declare `{symbol}` — Block 6.i \
+             Commit B universal-cache architectural contract.",
+        );
+    }
+
+    // The legacy split caches MUST be retired (no public surface).
+    for retired in [
+        "pub struct MaterializeMemoDb",
+        "pub struct MemberShapeCacheDb",
+    ] {
+        assert!(
+            !src.contains(retired),
+            "guard B.1: legacy split-cache type `{retired}` MUST be retired in Block \
+             6.i Commit B — replaced by `ShapeCacheDb`.",
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Guard B.2 — peek primitive's `Leaf` / `BareCarrier` arms admit to
+//             the universal cache.
+//
+// Block 6.i universal-caching invariant (codex STOP trigger #3):
+// every successful shape compute admits, regardless of how cheap the
+// compute was. The peek primitive's `Leaf` and `BareCarrier` arms in
+// `reduce_field_type_expr` and the gate-short-circuit arms in
+// `member_shape_peek_or_compute` MUST route through
+// `admit_type_expr_shape_if_possible` / `admit_member_shape_if_possible`.
+// ---------------------------------------------------------------------------
+#[test]
+fn peek_primitive_arms_admit_to_cache() {
+    let src = read_workspace_file("crates/verter_session/src/meta_resolve/projectors/mod.rs");
+
+    // The admission helpers must exist.
+    assert!(
+        src.contains("fn admit_type_expr_shape_if_possible"),
+        "guard B.2: `meta_resolve::projectors::mod` MUST define \
+         `admit_type_expr_shape_if_possible` — the Block 6.i universal-caching admission \
+         helper for the `reduce_field_type_expr` peek's `Leaf` / `BareCarrier` arms.",
+    );
+    assert!(
+        src.contains("fn admit_member_shape_if_possible"),
+        "guard B.2: `meta_resolve::projectors::mod` MUST define \
+         `admit_member_shape_if_possible` — the Block 6.i universal-caching admission \
+         helper for `member_shape_peek_or_compute`'s gate-short-circuit + `Leaf` / \
+         `BareCarrier` arms.",
+    );
+
+    // Every successful shape outcome must be wrapped in an admission
+    // helper, not returned bare. Source-text grep on the call count
+    // gives a coarse but discriminating signal.
+    let admit_type_calls = src.matches("admit_type_expr_shape_if_possible(").count();
+    assert!(
+        admit_type_calls >= 2,
+        "guard B.2: `admit_type_expr_shape_if_possible` MUST be called at least twice \
+         (one for the `Leaf` arm, one for the `BareCarrier` arm of `reduce_field_type_expr`'s \
+         peek). Observed call count: {admit_type_calls}.",
+    );
+    let admit_member_calls = src.matches("admit_member_shape_if_possible(").count();
+    assert!(
+        admit_member_calls >= 4,
+        "guard B.2: `admit_member_shape_if_possible` MUST be called at least four times \
+         (package-backed gate, cycle gate, non-reducible shape arm, peek `Leaf` arm, peek \
+         `BareCarrier` arm) inside `member_shape_peek_or_compute`. Observed call count: \
+         {admit_member_calls}.",
+    );
+}

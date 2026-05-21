@@ -259,7 +259,7 @@ fn peek_operator_shape_cold_memo_returns_none() {
 // ---------------------------------------------------------------------------
 #[test]
 fn peek_operator_shape_warm_memo_returns_cached() {
-    use crate::component_meta_caches::MaterializeMemoKey;
+    use crate::component_meta_caches::ShapeCacheKey;
     use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
 
     let host = build_minimal_host();
@@ -273,7 +273,7 @@ fn peek_operator_shape_warm_memo_returns_cached() {
             "nested".to_string(),
         ))),
     };
-    let key: MaterializeMemoKey = (
+    let key = ShapeCacheKey::type_expr_whole(
         scope.clone(),
         Arc::new(expr.clone()),
         ProjectionMode::Expanded,
@@ -284,7 +284,7 @@ fn peek_operator_shape_warm_memo_returns_cached() {
         // may or may not succeed depending on the underlying gate; the
         // closure runs at least once and the `entries` substrate is
         // populated when the gate accepts.
-        let memo_db = ctx.project_type_store().materialize_memo_db();
+        let memo_db = ctx.project_type_store().shape_cache_db();
         let seeded = MaterializedTypeExpr {
             node_id: None,
             type_expr: TypeExpr::Primitive(PrimitiveName::Number),

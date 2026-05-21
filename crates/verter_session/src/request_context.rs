@@ -220,9 +220,13 @@ pub struct PerRequestCacheCounters {
     pub semantic_graph: HitMiss,
     /// `MaterializeStructureDb` — structural materialisation cache.
     pub materialize_structure: HitMiss,
-    /// `MaterializeMemoDb` — materialiser memo cache.
+    /// `ShapeCacheDb` (Block 6.i) — universal shape cache, TypeExpr
+    /// subject. Counter retained under the legacy name to preserve
+    /// audit-harness JSON schema compatibility.
     pub materialize_memo: HitMiss,
-    /// `MemberShapeCacheDb` — per-member graph-native materialiser cache.
+    /// `ShapeCacheDb` (Block 6.i) — universal shape cache,
+    /// SemanticNode subject. Counter retained under the legacy name
+    /// to preserve audit-harness JSON schema compatibility.
     pub member_shape_cache: HitMiss,
     /// `PreparedSurfaceDb` — prepared-surface cache.
     pub prepared_surface: HitMiss,

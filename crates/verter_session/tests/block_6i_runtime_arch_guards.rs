@@ -25,11 +25,6 @@
 //! regression that re-introduces a full-graph walker would fail one
 //! of these guards.
 //!
-//! Un-ignore order:
-//! - 1 / 2 / 3 (path-precise projection): un-ignore in Commit A.
-//! - 4 / 5 (route + prepared-bundle bounded builds): un-ignore in Commit B.
-//! - 6 (one host call per `getComponentMeta`): un-ignore in Commit F.
-//!
 //! Each test body branches on inputs and uses non-trivial assertions
 //! — no stub bodies, no always-true predicates (CLAUDE.md Stub
 //! Prevention).
@@ -184,7 +179,6 @@ fn reachable_refs_in_registry(registry: &[ResolvedTypeAnalysis]) -> Vec<String> 
 // appear in any reachable ref name set.
 // =====================================================================
 #[test]
-#[ignore = "Block 6.i C0: discriminating guard; passes after Commit A"]
 fn pick_with_unused_members_not_projected() {
     let project = make_project();
     // Mirrors ChatMessages's Rule 5 leak: a `Pick<T, "k">` over a
@@ -255,7 +249,6 @@ defineProps<{
 // unselected false-branch.
 // =====================================================================
 #[test]
-#[ignore = "Block 6.i C0: discriminating guard; passes after Commit A"]
 fn conditional_unselected_branch_not_projected() {
     let project = make_project();
     upsert(
@@ -298,7 +291,6 @@ defineProps<{
 // `{ wrapped: A }` — `b`, `c` etc. should NOT enter the surface.
 // =====================================================================
 #[test]
-#[ignore = "Block 6.i C0: discriminating guard; passes after Commit A"]
 fn mapped_type_skips_unprojected_keys() {
     let project = make_project();
     upsert(
@@ -359,7 +351,6 @@ defineProps<{
 // upgraded then to use the counter directly.
 // =====================================================================
 #[test]
-#[ignore = "Block 6.i C0: discriminating guard; passes after Commit B"]
 fn per_key_route_builds_bounded() {
     let db = RouteDb::new();
     let view = PermissiveStoreView;
@@ -414,7 +405,6 @@ fn per_key_route_builds_bounded() {
 // computed AT MOST ONCE — the second call hits the warm bundle cache.
 // =====================================================================
 #[test]
-#[ignore = "Block 6.i C0: discriminating guard; passes after Commit B"]
 fn per_canonical_prepared_bundle_builds_bounded() {
     let project = make_project();
     upsert(

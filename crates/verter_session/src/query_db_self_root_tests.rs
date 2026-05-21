@@ -859,12 +859,12 @@ fn materialize_memo_db_untracked_self_root_rejects_warm_entry() {
     let c = "/self_root_qdb/memo_never_loaded.ts";
     assert_untracked(&host, c);
     let ctx: &dyn ResolverContext = &host;
-    let db = host.project_type_store().materialize_memo_db();
+    let db = host.project_type_store().shape_cache_db();
     let probe_expr = Arc::new(TypeExpr::Ref {
         name: Arc::from("Probe"),
         type_arguments: Arc::from(Vec::<TypeExpr>::new()),
     });
-    let key = (
+    let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
         Arc::<str>::from(c),
         Arc::clone(&probe_expr),
         ProjectionMode::Expanded,
@@ -890,8 +890,8 @@ fn materialize_memo_db_untracked_self_root_rejects_warm_entry() {
 
     assert!(
         cold_ran,
-        "MaterializeMemoDb MUST NOT serve a warm entry whose self-root names an \
-         untracked keyed canonical",
+        "ShapeCacheDb (TypeExpr subject) MUST NOT serve a warm entry whose self-root \
+         names an untracked keyed canonical",
     );
     assert!(
         matches!(&warm.type_expr, TypeExpr::Unknown { raw } if raw == "recomputed"),
@@ -899,8 +899,8 @@ fn materialize_memo_db_untracked_self_root_rejects_warm_entry() {
     );
 }
 
-/// Block 6.d / `MemberShapeCacheDb` validates the keyed scope
-/// canonical's self-root strictly.
+/// Block 6.d / Block 6.i universal `ShapeCacheDb` (SemanticNode
+/// subject) validates the keyed scope canonical's self-root strictly.
 ///
 /// Discriminating property: the prime attempt's materialized
 /// expression carries the marker `"stale"`; the recompute carries
@@ -909,7 +909,7 @@ fn materialize_memo_db_untracked_self_root_rejects_warm_entry() {
 /// rejects admission for an untracked keyed canonical.
 ///
 /// Mirrors `materialize_memo_db_untracked_self_root_rejects_warm_entry`
-/// exactly — both caches share the
+/// exactly — both subjects share the
 /// `cooperative_get_or_insert_with_post_publish` + fact-signature
 /// self-root contract.
 #[test]
@@ -920,10 +920,10 @@ fn member_shape_cache_db_untracked_self_root_rejects_warm_entry() {
     let c = "/self_root_qdb/member_shape_never_loaded.ts";
     assert_untracked(&host, c);
     let ctx: &dyn ResolverContext = &host;
-    let db = host.project_type_store().member_shape_cache_db();
+    let db = host.project_type_store().shape_cache_db();
     // Use a synthetic SemanticNodeId — the test exercises the cache's
     // self-root validation contract, not the production graph.
-    let key = (
+    let key = crate::component_meta_caches::ShapeCacheKey::semantic_node_whole(
         Arc::<str>::from(c),
         SemanticNodeId(7),
         ProjectionMode::Expanded,
@@ -949,8 +949,8 @@ fn member_shape_cache_db_untracked_self_root_rejects_warm_entry() {
 
     assert!(
         cold_ran,
-        "MemberShapeCacheDb MUST NOT serve a warm entry whose self-root names an \
-         untracked keyed canonical",
+        "ShapeCacheDb (SemanticNode subject) MUST NOT serve a warm entry whose \
+         self-root names an untracked keyed canonical",
     );
     assert!(
         matches!(&warm.type_expr, TypeExpr::Unknown { raw } if raw == "recomputed"),
@@ -1000,12 +1000,12 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
     );
 
     let ctx: &dyn ResolverContext = &host;
-    let db = host.project_type_store().materialize_memo_db();
+    let db = host.project_type_store().shape_cache_db();
     let probe_expr = Arc::new(TypeExpr::Ref {
         name: Arc::from("Probe"),
         type_arguments: Arc::from(Vec::<TypeExpr>::new()),
     });
-    let key = (
+    let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
         Arc::<str>::from(scope),
         Arc::clone(&probe_expr),
         ProjectionMode::Expanded,
@@ -2056,12 +2056,12 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
     // The single tear-free scope observation taken at
     // materialisation/cold-publish time — `observe_materialize_scope`
     // pins the scope's current `IndexedReady`.
-    let db = host.project_type_store().materialize_memo_db();
+    let db = host.project_type_store().shape_cache_db();
     let probe_expr = Arc::new(TypeExpr::Ref {
         name: Arc::from("Probe"),
         type_arguments: Arc::from(Vec::<TypeExpr>::new()),
     });
-    let key = (
+    let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
         Arc::<str>::from(c),
         Arc::clone(&probe_expr),
         ProjectionMode::Expanded,
@@ -2272,12 +2272,12 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
     );
 
     let ctx: &dyn ResolverContext = &host;
-    let db = host.project_type_store().materialize_memo_db();
+    let db = host.project_type_store().shape_cache_db();
     let probe_expr = Arc::new(TypeExpr::Ref {
         name: Arc::from("Probe"),
         type_arguments: Arc::from(Vec::<TypeExpr>::new()),
     });
-    let key = (
+    let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
         Arc::<str>::from(scope),
         Arc::clone(&probe_expr),
         ProjectionMode::Expanded,
@@ -2422,12 +2422,12 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
     );
 
     let ctx: &dyn ResolverContext = &host;
-    let db = host.project_type_store().materialize_memo_db();
+    let db = host.project_type_store().shape_cache_db();
     let probe_expr = Arc::new(TypeExpr::Ref {
         name: Arc::from("Probe"),
         type_arguments: Arc::from(Vec::<TypeExpr>::new()),
     });
-    let key = (
+    let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
         Arc::<str>::from(scope),
         Arc::clone(&probe_expr),
         ProjectionMode::Expanded,
@@ -2821,12 +2821,12 @@ fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end(
         .whole_hash;
 
     let ctx: &dyn ResolverContext = &host;
-    let db = host.project_type_store().materialize_memo_db();
+    let db = host.project_type_store().shape_cache_db();
     let probe_expr = Arc::new(TypeExpr::Ref {
         name: Arc::from("Probe"),
         type_arguments: Arc::from(Vec::<TypeExpr>::new()),
     });
-    let key = (
+    let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
         Arc::<str>::from(scope),
         Arc::clone(&probe_expr),
         ProjectionMode::Expanded,
@@ -4266,12 +4266,12 @@ fn observe_materialize_scope_refuses_evicted_stale_artifact() {
 
     // The publish closure threads the `None` observation through `?`,
     // so `get_or_compute` admits nothing and a follow-up cold-recomputes.
-    let db = host.project_type_store().materialize_memo_db();
+    let db = host.project_type_store().shape_cache_db();
     let probe_expr = Arc::new(TypeExpr::Ref {
         name: Arc::from("Probe"),
         type_arguments: Arc::from(Vec::<TypeExpr>::new()),
     });
-    let key = (
+    let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
         Arc::<str>::from(scope),
         Arc::clone(&probe_expr),
         ProjectionMode::Expanded,
@@ -4535,7 +4535,7 @@ fn materialize_memo_publish_site_degrades_on_none_scope_observation() {
         "fixture invariant: observe_materialize_scope returns None for an evicted scope",
     );
 
-    let db = host.project_type_store().materialize_memo_db();
+    let db = host.project_type_store().shape_cache_db();
     let entries_before = db.live_count();
 
     // Drive the production publish path. Pre-fix the `.expect()` inside
@@ -6157,12 +6157,17 @@ const IN_SCOPE_QUERY_IDENTITY_SELF_ROOT_COVERAGE: &[(&str, &str)] = &[
         "routed_expr_surface_db",
         "routed_expr_surface_db_untracked_self_root_rejects_warm_entry",
     ),
+    // Block 6.i universal `ShapeCacheDb` — replaces the previously-
+    // split `materialize_memo_db` (TypeExpr subject) +
+    // `member_shape_cache_db` (SemanticNode subject). Both subjects
+    // share the same cache substrate; each retains its own
+    // self-root discriminator test under the unified DB name.
     (
-        "materialize_memo_db",
+        "shape_cache_db",
         "materialize_memo_db_untracked_self_root_rejects_warm_entry",
     ),
     (
-        "member_shape_cache_db",
+        "shape_cache_db",
         "member_shape_cache_db_untracked_self_root_rejects_warm_entry",
     ),
     (
@@ -7016,8 +7021,8 @@ fn materialize_memo_failed_revalidation_does_not_leak_live_counter() {
     let host = host_with_unrelated_file();
     let c = "/live_counter_qdb/materialize_memo.ts";
     let ctx: &dyn ResolverContext = &host;
-    let db = host.project_type_store().materialize_memo_db();
-    let key = (
+    let db = host.project_type_store().shape_cache_db();
+    let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
         Arc::<str>::from(c),
         Arc::new(TypeExpr::Unknown { raw: String::new() }),
         ProjectionMode::Shallow,
@@ -7050,7 +7055,7 @@ fn materialize_memo_failed_revalidation_does_not_leak_live_counter() {
     assert_eq!(
         component_meta_cache_live(&host),
         counter_before,
-        "LIVE-COUNTER LEAK: `MaterializeMemoDb`'s cold `cooperative_get_or_insert` \
+        "LIVE-COUNTER LEAK: `ShapeCacheDb`'s cold `cooperative_get_or_insert` \
          compute leaked the shared `component_meta_cache_live` counter on a \
          `revalidate_after_compute` rejection. The bump must ride `post_publish`.",
     );
@@ -7209,7 +7214,7 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
             + store.resolvable_db().live_count()
             + store.owner_collection_db().live_count()
             + store.prepared_target_db().live_count()
-            + store.materialize_memo_db().live_count()
+            + store.shape_cache_db().live_count()
             + store.prepared_surface_db().live_count()
             + store.prepared_member_db().live_count()
             + store.routed_expr_surface_db().live_count()
@@ -7266,8 +7271,8 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
             Some((None, empty_fact_signature(), empty_self_root_canonicals()))
         },
     );
-    let _ = store.materialize_memo_db().get_or_compute(
-        &(
+    let _ = store.shape_cache_db().get_or_compute(
+        &crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
             Arc::<str>::from("/lc_total/memo.ts"),
             Arc::new(TypeExpr::Unknown { raw: String::new() }),
             ProjectionMode::Shallow,

@@ -95,7 +95,10 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         return cached;
     }
 
-    // Step 3 closure: peek ctx-owned MaterializeMemoDb.
+    // Block 6.i — peek the universal ShapeCacheDb (TypeExpr subject,
+    // whole-subject demand). Path-precise demand narrowing emerges
+    // in Commits C–F when projectors thread `SurfaceProjection`
+    // cursors and consult `ShapeCacheDb` per-hop.
     {
         // Loop-5 instrumentation — bump peek for every host-memo
         // read attempt; bump hit only on the cached return path.
@@ -103,13 +106,13 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let ctx = query_engine.ctx();
-        let arc_key = (
+        let cache_key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
             std::sync::Arc::<str>::from(scope_canonical_id),
             std::sync::Arc::new(expr.clone()),
             mode,
         );
-        let host_db = ctx.project_type_store().materialize_memo_db();
-        if let Some(cached) = host_db.peek(&arc_key, ctx) {
+        let host_db = ctx.project_type_store().shape_cache_db();
+        if let Some(cached) = host_db.peek(&cache_key, ctx) {
             crate::loop5_instrumentation::MATERIALIZE_MEMO_HITS
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             query_engine
@@ -262,12 +265,12 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         crate::loop5_instrumentation::MATERIALIZE_MEMO_PUBLISHES
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        let arc_key = (
+        let cache_key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
             std::sync::Arc::<str>::from(scope_canonical_id),
             std::sync::Arc::new(expr.clone()),
             mode,
         );
-        let host_db = ctx.project_type_store().materialize_memo_db();
+        let host_db = ctx.project_type_store().shape_cache_db();
         let captured_value = materialized.clone();
         // The SINGLE tear-free scope observation taken above is threaded
         // into the write-through. The signature builder is
@@ -277,7 +280,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         // was built from the SAME observation's `whole_hash`, so the
         // memo value and its fact signature root on one identical scope
         // hash — no torn read.
-        let _ = host_db.get_or_compute(&arc_key, ctx, move || {
+        let _ = host_db.get_or_compute(&cache_key, ctx, move || {
             // The keyed scope canonical is the entry's self-root, rooted
             // on the observed materialisation-time content version;
             // every canonical the materialisation walk observed (carried

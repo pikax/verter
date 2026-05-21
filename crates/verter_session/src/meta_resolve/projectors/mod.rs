@@ -354,18 +354,18 @@ pub(crate) fn peek_member_shape_known(
         } if type_arguments.is_empty() => Some(PeekedShape::BareCarrier { name: name.clone() }),
         _ => {
             // Operator-shape (Pick/Omit/IndexedAccess/Conditional/Mapped)
-            // or generic instantiation: consult `MaterializeMemoDb` only.
-            // Does NOT consult RouteDb/OwnerImportSurfaceDb (those would
-            // rebuild HostStoreView and force the very cost driver Block
-            // 6.g closed).
+            // or generic instantiation: consult `ShapeCacheDb` only
+            // (Block 6.i universal cache). Does NOT consult RouteDb/
+            // OwnerImportSurfaceDb (those would rebuild HostStoreView
+            // and force the very cost driver Block 6.g closed).
             let ctx: &dyn ResolverContext = query_engine.ctx;
-            let key: crate::component_meta_caches::MaterializeMemoKey = (
+            let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
                 Arc::<str>::from(scope_canonical_id),
                 Arc::new(expr.clone()),
                 mode,
             );
             ctx.project_type_store()
-                .materialize_memo_db()
+                .shape_cache_db()
                 .peek(&key, ctx)
                 .map(PeekedShape::Cached)
         }
@@ -615,14 +615,18 @@ fn member_shape_peek_or_compute(
     use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
 
     let ctx: &dyn ResolverContext = query_engine.ctx;
-    let key: crate::component_meta_caches::MemberShapeCacheKey =
-        (Arc::<str>::from(scope_canonical_id), member_value, mode);
+    let key = crate::component_meta_caches::ShapeCacheKey::semantic_node_whole(
+        Arc::<str>::from(scope_canonical_id),
+        member_value,
+        mode,
+    );
 
     // (1) Peek FIRST — warm path pays zero raise/gate cost. The cached
     // entry's dep_signature must be re-emitted into the active fact
     // tracer + dispatch dep-signature accumulator so the request's
     // dep set sees the same facts the cold compute emitted.
-    let cache = ctx.project_type_store().member_shape_cache_db();
+    // Block 6.i universal cache (replaces `MemberShapeCacheDb`).
+    let cache = ctx.project_type_store().shape_cache_db();
     if let Some(cached) = cache.peek(&key, ctx) {
         emit_dispatch_dep_signature_facts(ctx, &cached.dep_signature);
         return cached;
@@ -652,56 +656,81 @@ fn member_shape_peek_or_compute(
         query_engine,
     );
     if route_is_package_backed {
-        // Gate short-circuit: return raised verbatim. Do NOT admit —
-        // the cached value would equal the raised input verbatim.
-        return MaterializedTypeExpr {
+        // Gate short-circuit: the published shape stays as the
+        // raised carrier (package-backed roots are shallow). Block
+        // 6.i universal caching: admit so sibling members of the
+        // same package-backed parent (e.g. siblings of `Foo['a']`
+        // when `Foo` is from a package) reuse this verdict at peek
+        // time rather than re-running the package-backed predicate.
+        let value = MaterializedTypeExpr {
             node_id: Some(member_value),
             type_expr: raised,
             dep_signature: Arc::from(Vec::new()),
         };
+        return admit_member_shape_if_possible(ctx, &key, value);
     }
     let is_generic_instantiation =
         matches!(&raised, TypeExpr::Ref { type_arguments, .. } if !type_arguments.is_empty());
     if is_generic_instantiation
         && super::lowered_root_reaches_transitive_cycle(query_engine, scope_canonical_id, &raised)
     {
-        return MaterializedTypeExpr {
+        // Recursive parameterised helper: the published shape stays
+        // as the raised carrier (the cycle prevents finite reduction).
+        // Block 6.i universal caching: admit so subsequent peeks
+        // skip the cycle BFS.
+        let value = MaterializedTypeExpr {
             node_id: Some(member_value),
             type_expr: raised,
             dep_signature: Arc::from(Vec::new()),
         };
+        return admit_member_shape_if_possible(ctx, &key, value);
     }
     let needs_reduction =
         type_expr_contains_reducible_operator(&raised) || is_generic_instantiation;
     if !needs_reduction {
-        return MaterializedTypeExpr {
+        // Block 6.i universal-caching invariant: a shape that
+        // resolves to a non-reducible TypeExpr (primitive / literal /
+        // bare alias / closed object / function / union / intersection
+        // without operator nodes) is a STABLE shape — admit it so
+        // sibling members hitting the same `SurfaceMember.value` (or
+        // the same `(scope, node, mode)` triple from a downstream
+        // call) short-circuit at peek time.
+        let value = MaterializedTypeExpr {
             node_id: Some(member_value),
             type_expr: raised,
             dep_signature: Arc::from(Vec::new()),
         };
+        return admit_member_shape_if_possible(ctx, &key, value);
     }
 
     // Gates have cleared: consult the operator-shape peek. A warm
-    // `MaterializeMemoDb` hit on `(scope, raised, mode)` now SAFELY
+    // `ShapeCacheDb` hit on `(scope, raised, mode)` now SAFELY
     // short-circuits the cold reducer dispatch — the entry's
     // semantics are compatible with the projector's published shape
     // because the package-backed and cycle paths already returned
     // above.
+    //
+    // Block 6.i universal-caching invariant: when the peek returns
+    // `Leaf` / `BareCarrier` we still admit a SemanticNode-subject
+    // entry to the cache via `admit_computed` so subsequent member
+    // peeks short-circuit at peek time.
     if let Some(peeked) = peek_member_shape_known(query_engine, scope_canonical_id, &raised, mode) {
         match peeked {
             PeekedShape::Leaf(leaf) => {
-                return MaterializedTypeExpr {
+                let value = MaterializedTypeExpr {
                     node_id: Some(member_value),
                     type_expr: leaf,
                     dep_signature: Arc::from(Vec::new()),
                 };
+                return admit_member_shape_if_possible(ctx, &key, value);
             }
             PeekedShape::BareCarrier { .. } => {
-                return MaterializedTypeExpr {
+                let value = MaterializedTypeExpr {
                     node_id: Some(member_value),
                     type_expr: raised,
                     dep_signature: Arc::from(Vec::new()),
                 };
+                return admit_member_shape_if_possible(ctx, &key, value);
             }
             PeekedShape::Cached(materialized) => {
                 // Warm operator-shape hit AFTER gate validation. The
@@ -739,6 +768,70 @@ fn member_shape_peek_or_compute(
         Some((materialized_for_closure, fact_sig))
     });
     admitted.unwrap_or(materialized)
+}
+
+/// Admit a freshly-computed SemanticNode-subject shape into the
+/// universal [`crate::component_meta_caches::ShapeCacheDb`] when the
+/// scope has a tear-free `observe_materialize_scope` observation.
+/// Block 6.i universal-caching invariant — every successful
+/// `(node, scope, mode)` shape compute admits so sibling members and
+/// future peeks return the cached value rather than re-paying the
+/// raise + gate cost.
+///
+/// Falls through to returning the value verbatim when the
+/// observation is unavailable (session tombstone / evicted scope /
+/// no recoverable `IndexedReady`) — without a view-correct scope
+/// identity to self-root, admitting would mis-root the entry. This
+/// is the documented degradation path; the caller still receives
+/// the same value the cold compute produced.
+/// Admit a TypeExpr-subject shape into the universal
+/// [`crate::component_meta_caches::ShapeCacheDb`] when the scope has
+/// a tear-free observation. Used by the `reduce_field_type_expr`
+/// peek primitive's `Leaf` / `BareCarrier` arms to enforce the
+/// Block 6.i universal-caching invariant: every successful shape
+/// compute admits, regardless of how cheap the compute was.
+fn admit_type_expr_shape_if_possible(
+    ctx: &dyn ResolverContext,
+    scope_canonical_id: &str,
+    expr: &TypeExpr,
+    mode: ProjectionMode,
+    materialized_type_expr: TypeExpr,
+) {
+    use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
+    let value = MaterializedTypeExpr {
+        node_id: None,
+        type_expr: materialized_type_expr,
+        dep_signature: Arc::from(Vec::new()),
+    };
+    let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
+        Arc::<str>::from(scope_canonical_id),
+        Arc::new(expr.clone()),
+        mode,
+    );
+    let _ = admit_member_shape_if_possible(ctx, &key, value);
+}
+
+fn admit_member_shape_if_possible(
+    ctx: &dyn ResolverContext,
+    key: &crate::component_meta_caches::ShapeCacheKey,
+    value: crate::project_semantic_dispatch::raise::MaterializedTypeExpr,
+) -> crate::project_semantic_dispatch::raise::MaterializedTypeExpr {
+    let scope = key.subject.scope_canonical().clone();
+    let observed_scope = ctx.observe_materialize_scope(scope.as_ref());
+    let value_for_closure = value.clone();
+    let cache = ctx.project_type_store().shape_cache_db();
+    let admitted = cache.get_or_compute(key, ctx, move || {
+        let scope_obs = observed_scope?;
+        let parse_fact = scope_obs.syntactic_export_set.clone()?;
+        let fact_sig =
+            crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
+                &scope_obs,
+                parse_fact,
+                &value_for_closure.dep_signature,
+            )?;
+        Some((value_for_closure, fact_sig))
+    });
+    admitted.unwrap_or(value)
 }
 
 /// Build an [`ExpandedField`] for a single surface member.
@@ -880,6 +973,14 @@ pub(crate) fn reduce_field_type_expr(
     // encode the shallow-by-default invariant structurally (primitive
     // / literal / bare alias name) and are independent of the route's
     // package-backing.
+    //
+    // Block 6.i universal-caching invariant: when the peek returns
+    // `Leaf` / `BareCarrier`, ADMIT a TypeExpr-subject entry into
+    // `ShapeCacheDb` so subsequent TypeExpr-start callers (e.g.
+    // `materialize_component_meta_type_expr_until_stable_full` peek
+    // path) hit at peek time. Peek-time admission is cheap (no raise
+    // / no reducer dispatch); the cache write is the universal-
+    // caching contract.
     if let Some(peeked) = peek_member_shape_known(
         query_engine,
         scope_canonical_id,
@@ -887,8 +988,26 @@ pub(crate) fn reduce_field_type_expr(
         ProjectionMode::Expanded,
     ) {
         match peeked {
-            PeekedShape::Leaf(leaf) => return leaf,
-            PeekedShape::BareCarrier { .. } => return expr,
+            PeekedShape::Leaf(leaf) => {
+                admit_type_expr_shape_if_possible(
+                    query_engine.ctx,
+                    scope_canonical_id,
+                    &expr,
+                    ProjectionMode::Expanded,
+                    leaf.clone(),
+                );
+                return leaf;
+            }
+            PeekedShape::BareCarrier { .. } => {
+                admit_type_expr_shape_if_possible(
+                    query_engine.ctx,
+                    scope_canonical_id,
+                    &expr,
+                    ProjectionMode::Expanded,
+                    expr.clone(),
+                );
+                return expr;
+            }
             PeekedShape::Cached(_) => {
                 // Fall through to the package-backed gate; we re-peek
                 // below once the gate has cleared.

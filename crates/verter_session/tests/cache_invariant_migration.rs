@@ -734,33 +734,18 @@ fn schema_bump_evicts_routed_expr_surface_db_stale_entries() {
 }
 
 #[test]
-fn schema_bump_evicts_materialize_memo_db_stale_entries() {
-    use verter_session::component_meta_caches::MaterializeMemoDb;
+fn schema_bump_evicts_shape_cache_db_stale_entries() {
+    use verter_session::component_meta_caches::ShapeCacheDb;
 
-    let db = MaterializeMemoDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
-    db.insert_synthetic_for_schema_test("/workspace/synthetic-materialize-memo.ts");
+    let db = ShapeCacheDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
+    db.insert_synthetic_for_schema_test("/workspace/synthetic-shape-cache.ts");
 
-    assert_eq!(db.live_count(), 1, "MaterializeMemoDb pre-evict count");
+    assert_eq!(db.live_count(), 1, "ShapeCacheDb pre-evict count");
     assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
 
     let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
-    assert_eq!(evicted, 1, "MaterializeMemoDb: must drain stale");
-    assert_eq!(db.live_count(), 0, "MaterializeMemoDb: empty after evict");
-}
-
-#[test]
-fn schema_bump_evicts_member_shape_cache_db_stale_entries() {
-    use verter_session::component_meta_caches::MemberShapeCacheDb;
-
-    let db = MemberShapeCacheDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
-    db.insert_synthetic_for_schema_test("/workspace/synthetic-member-shape.ts");
-
-    assert_eq!(db.live_count(), 1, "MemberShapeCacheDb pre-evict count");
-    assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
-
-    let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
-    assert_eq!(evicted, 1, "MemberShapeCacheDb: must drain stale");
-    assert_eq!(db.live_count(), 0, "MemberShapeCacheDb: empty after evict");
+    assert_eq!(evicted, 1, "ShapeCacheDb: must drain stale");
+    assert_eq!(db.live_count(), 0, "ShapeCacheDb: empty after evict");
 }
 
 #[test]

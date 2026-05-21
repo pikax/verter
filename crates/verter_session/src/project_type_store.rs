@@ -28,8 +28,8 @@ use rustc_hash::FxHashMap;
 use verter_semantic::analysis::{AnalysisScope, Hash16};
 
 use crate::component_meta_caches::{
-    DeclarationLookupDb, ImportedRegistryDb, MaterializeMemoDb, OwnerCollectionDb,
-    PreparedMemberDb, PreparedSurfaceDb, PreparedTargetDb, ResolvabilityDb, RoutedExprSurfaceDb,
+    DeclarationLookupDb, ImportedRegistryDb, OwnerCollectionDb, PreparedMemberDb,
+    PreparedSurfaceDb, PreparedTargetDb, ResolvabilityDb, RoutedExprSurfaceDb, ShapeCacheDb,
 };
 use crate::component_meta_result_db::ComponentMetaResultDb;
 use crate::file_artifact_store::FileArtifactStore;
@@ -1687,20 +1687,17 @@ pub struct ProjectTypeStore {
     resolvability_db: ResolvabilityDb,
     owner_collection_db: OwnerCollectionDb,
     prepared_target_db: PreparedTargetDb,
-    materialize_memo_db: MaterializeMemoDb,
-    /// Block 6.d — per-member graph-native materialiser cache. Sibling
-    /// of `materialize_memo_db` keyed on `(scope, SemanticNodeId, mode)`
-    /// for the graph-native start point inside
-    /// `surface_member_to_expanded_field` (a settled
-    /// `SurfaceMember.value`). Eliminates the OXC `shallow_lower_type_expr`
-    /// round-trip per member and amortises sibling reuse — sibling
-    /// members of `Pick<Foo, 'a' | 'b' | ...>` whose underlying
-    /// `member.value` is the same settled node collapse onto each
-    /// other's warm hits, which the whole-expression
-    /// `materialize_memo_db` cannot (its key hashes a structurally
-    /// distinct raised `TypeExpr` per member). See
-    /// [`crate::component_meta_caches::MemberShapeCacheDb`].
-    member_shape_cache_db: crate::component_meta_caches::MemberShapeCacheDb,
+    /// Block 6.i universal shape cache. Replaces the previously-split
+    /// `MaterializeMemoDb` (TypeExpr-keyed) and `MemberShapeCacheDb`
+    /// (SemanticNode-keyed) with a single store keyed on
+    /// `ShapeCacheKey { subject, demand }`. The `ShapeSubject` enum
+    /// discriminates TypeExpr-start callers (parser-produced
+    /// annotations) from SemanticNode-start callers (settled
+    /// `SurfaceMember.value`); the `ShapeDemand` carries a path
+    /// segments slice + terminal mode + key filter + surface kind so
+    /// per-hop path-precise demands narrow naturally.
+    /// See [`crate::component_meta_caches::ShapeCacheDb`].
+    shape_cache_db: ShapeCacheDb,
     /// Cache for the structural
     /// materialiser. Sole authoritative host-owned materialiser cache.
     /// The canonical removed-symbol list lives in
@@ -1851,11 +1848,8 @@ impl ProjectTypeStore {
             OwnerCollectionDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
         let prepared_target_db =
             PreparedTargetDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
-        let materialize_memo_db =
-            MaterializeMemoDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
-        let member_shape_cache_db = crate::component_meta_caches::MemberShapeCacheDb::with_counter(
-            Arc::clone(&counters.component_meta_cache_live),
-        );
+        let shape_cache_db =
+            ShapeCacheDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
         let materialize_structure_db =
             crate::component_meta_caches::MaterializeStructureDb::with_counter(Arc::clone(
                 &counters.component_meta_cache_live,
@@ -1892,8 +1886,7 @@ impl ProjectTypeStore {
             resolvability_db,
             owner_collection_db,
             prepared_target_db,
-            materialize_memo_db,
-            member_shape_cache_db,
+            shape_cache_db,
             materialize_structure_db,
             ref_cycle_db,
             prepared_surface_db,
@@ -2103,14 +2096,13 @@ impl ProjectTypeStore {
         &self.prepared_target_db
     }
 
-    pub fn materialize_memo_db(&self) -> &MaterializeMemoDb {
-        &self.materialize_memo_db
-    }
-
-    /// Block 6.d — per-member graph-native materialiser cache.
-    /// See [`crate::component_meta_caches::MemberShapeCacheDb`].
-    pub fn member_shape_cache_db(&self) -> &crate::component_meta_caches::MemberShapeCacheDb {
-        &self.member_shape_cache_db
+    /// Block 6.i universal shape cache. Replaces
+    /// `MaterializeMemoDb` + `MemberShapeCacheDb`. The `ShapeSubject`
+    /// enum on the key discriminates TypeExpr-start vs
+    /// SemanticNode-start callers.
+    /// See [`crate::component_meta_caches::ShapeCacheDb`].
+    pub fn shape_cache_db(&self) -> &ShapeCacheDb {
+        &self.shape_cache_db
     }
 
     /// For the structural-materialiser
@@ -2242,12 +2234,10 @@ impl ProjectTypeStore {
         self.resolvability_db.invalidate_canonical(canonical_id);
         self.owner_collection_db.invalidate_canonical(canonical_id);
         self.prepared_target_db.invalidate_canonical(canonical_id);
-        self.materialize_memo_db.invalidate_canonical(canonical_id);
-        // Block 6.d — per-member graph-native materialiser cache joins
-        // the per-canonical eviction cascade. Sibling of
-        // `materialize_memo_db`; same invalidation contract.
-        self.member_shape_cache_db
-            .invalidate_canonical(canonical_id);
+        // Block 6.i universal shape cache joins the per-canonical
+        // eviction cascade. Replaces the previously-split
+        // `materialize_memo_db` + `member_shape_cache_db`.
+        self.shape_cache_db.invalidate_canonical(canonical_id);
         // Reverse-index drain on the
         // structural-materialiser cache (sole materialiser cache).
         self.materialize_structure_db
@@ -2448,11 +2438,10 @@ impl ProjectTypeStore {
         self.resolvability_db.invalidate_all();
         self.owner_collection_db.invalidate_all();
         self.prepared_target_db.invalidate_all();
-        self.materialize_memo_db.invalidate_all();
-        // Block 6.d — per-member graph-native materialiser cache joins
-        // the project-generation invalidation cascade. Same shape as
-        // `materialize_memo_db`.
-        self.member_shape_cache_db.invalidate_all();
+        // Block 6.i universal shape cache joins the project-generation
+        // invalidation cascade. Replaces `materialize_memo_db` +
+        // `member_shape_cache_db`.
+        self.shape_cache_db.invalidate_all();
         self.materialize_structure_db.invalidate_all();
         // R — project-shape change invalidates the
         // BFS cycle-result cache (entries depend on the same routes /
@@ -2526,8 +2515,7 @@ pub const PROJECT_TYPE_STORE_DB_INVENTORY: &[&str] = &[
     "resolvability_db",
     "owner_collection_db",
     "prepared_target_db",
-    "materialize_memo_db",
-    "member_shape_cache_db",
+    "shape_cache_db",
     "materialize_structure_db",
     "ref_cycle_db",
     "prepared_surface_db",
@@ -2572,8 +2560,7 @@ impl ProjectTypeStore {
             &self.resolvability_db,
             &self.owner_collection_db,
             &self.prepared_target_db,
-            &self.materialize_memo_db,
-            &self.member_shape_cache_db,
+            &self.shape_cache_db,
             &self.materialize_structure_db,
             &self.ref_cycle_db,
             &self.prepared_surface_db,
@@ -2656,14 +2643,7 @@ impl ProjectTypeStore {
             self.prepared_target_db
                 .invalidate_canonical_for(canonical_id),
         );
-        total = total.saturating_add(
-            self.materialize_memo_db
-                .invalidate_canonical_for(canonical_id),
-        );
-        total = total.saturating_add(
-            self.member_shape_cache_db
-                .invalidate_canonical_for(canonical_id),
-        );
+        total = total.saturating_add(self.shape_cache_db.invalidate_canonical_for(canonical_id));
         total = total.saturating_add(
             self.materialize_structure_db
                 .invalidate_canonical_for(canonical_id),
