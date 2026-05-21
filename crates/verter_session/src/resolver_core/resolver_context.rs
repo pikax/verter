@@ -632,7 +632,23 @@ impl ResolverContext for crate::VerterHost {
 
     #[inline]
     fn prepared_decl_bundle(&self, canonical_id: &str) -> Option<Arc<PreparedDeclBundle>> {
-        crate::VerterHost::prepared_decl_bundle(self, canonical_id)
+        // Bare-host arm — same pattern as the resolver methods below.
+        // In production, reaching this means a request-bound caller
+        // missed plumbing. Tests route through the `#[cfg(test)]` arm
+        // via a one-shot owned-view rebuild.
+        #[cfg(any(test, debug_assertions))]
+        {
+            let view = crate::VerterHost::resolver_store_view(self);
+            crate::VerterHost::prepared_decl_bundle_with_store_view(self, &view, canonical_id)
+        }
+        #[cfg(not(any(test, debug_assertions)))]
+        {
+            let _ = canonical_id;
+            panic!(
+                "Architectural violation: bare-host prepared_decl_bundle called from \
+                 production; construct HostResolverContext at the request entry"
+            );
+        }
     }
 
     #[inline]
@@ -641,7 +657,24 @@ impl ResolverContext for crate::VerterHost {
         canonical_id: &str,
         symbol_name: &str,
     ) -> Option<Arc<PreparedTypeDecl>> {
-        crate::VerterHost::prepared_type_decl(self, canonical_id, symbol_name)
+        #[cfg(any(test, debug_assertions))]
+        {
+            let view = crate::VerterHost::resolver_store_view(self);
+            crate::VerterHost::prepared_type_decl_with_store_view(
+                self,
+                &view,
+                canonical_id,
+                symbol_name,
+            )
+        }
+        #[cfg(not(any(test, debug_assertions)))]
+        {
+            let _ = (canonical_id, symbol_name);
+            panic!(
+                "Architectural violation: bare-host prepared_type_decl called from \
+                 production; construct HostResolverContext at the request entry"
+            );
+        }
     }
 
     #[inline]
@@ -650,7 +683,24 @@ impl ResolverContext for crate::VerterHost {
         canonical_id: &str,
         symbol_name: &str,
     ) -> Option<Arc<PreparedValueDecl>> {
-        crate::VerterHost::prepared_value_decl(self, canonical_id, symbol_name)
+        #[cfg(any(test, debug_assertions))]
+        {
+            let view = crate::VerterHost::resolver_store_view(self);
+            crate::VerterHost::prepared_value_decl_with_store_view(
+                self,
+                &view,
+                canonical_id,
+                symbol_name,
+            )
+        }
+        #[cfg(not(any(test, debug_assertions)))]
+        {
+            let _ = (canonical_id, symbol_name);
+            panic!(
+                "Architectural violation: bare-host prepared_value_decl called from \
+                 production; construct HostResolverContext at the request entry"
+            );
+        }
     }
 
     #[inline]
@@ -732,13 +782,13 @@ impl ResolverContext for crate::VerterHost {
         // at most across the entire test suite, ~1KB per view), which
         // is fully acceptable for `cfg(test)`-only paths. Production
         // builds reach the `cfg(not(test))` panic arm below.
-        #[cfg(test)]
+        #[cfg(any(test, debug_assertions))]
         {
             let view = crate::VerterHost::resolver_store_view(self);
             let leaked: &'static HostStoreView = Box::leak(Box::new(view));
             leaked as &dyn crate::resolver_core::StoreView
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, debug_assertions)))]
         {
             panic!(
                 "ResolverContext::store_view() called on bare &VerterHost — \
@@ -765,7 +815,30 @@ impl ResolverContext for crate::VerterHost {
         dep_canonical: &str,
         imported_name: &str,
     ) -> (String, String) {
-        crate::VerterHost::resolve_imported_type_root(self, dep_canonical, imported_name)
+        // Bare-host arm: in production, reaching this means a
+        // request-bound caller missed plumbing. Tests still route
+        // through the `#[cfg(test)]` arm via the one-shot owned-view
+        // rebuild — exactly the same dispatch the bare wrapper used
+        // to perform inline.
+        #[cfg(any(test, debug_assertions))]
+        {
+            let view = crate::VerterHost::resolver_store_view(self);
+            crate::VerterHost::resolve_imported_type_root_with_store_view(
+                self,
+                &view,
+                dep_canonical,
+                imported_name,
+            )
+        }
+        #[cfg(not(any(test, debug_assertions)))]
+        {
+            let _ = (dep_canonical, imported_name);
+            panic!(
+                "Architectural violation: bare-host resolve_imported_type_root called from \
+                 production; construct HostResolverContext::new(host, &view, overlay) at the \
+                 request entry and route through `ctx.resolve_imported_type_root`"
+            );
+        }
     }
 
     #[inline]
@@ -774,7 +847,24 @@ impl ResolverContext for crate::VerterHost {
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {
-        crate::VerterHost::resolve_named_type_export_target(self, dep_canonical, requested_name)
+        #[cfg(any(test, debug_assertions))]
+        {
+            let view = crate::VerterHost::resolver_store_view(self);
+            crate::VerterHost::resolve_named_type_export_target_with_store_view(
+                self,
+                &view,
+                dep_canonical,
+                requested_name,
+            )
+        }
+        #[cfg(not(any(test, debug_assertions)))]
+        {
+            let _ = (dep_canonical, requested_name);
+            panic!(
+                "Architectural violation: bare-host resolve_named_type_export_target called \
+                 from production; construct HostResolverContext at the request entry"
+            );
+        }
     }
 
     #[inline]
@@ -783,11 +873,24 @@ impl ResolverContext for crate::VerterHost {
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {
-        crate::VerterHost::resolve_named_type_export_target_shallow(
-            self,
-            dep_canonical,
-            requested_name,
-        )
+        #[cfg(any(test, debug_assertions))]
+        {
+            let view = crate::VerterHost::resolver_store_view(self);
+            crate::VerterHost::resolve_named_type_export_target_shallow_with_store_view(
+                self,
+                &view,
+                dep_canonical,
+                requested_name,
+            )
+        }
+        #[cfg(not(any(test, debug_assertions)))]
+        {
+            let _ = (dep_canonical, requested_name);
+            panic!(
+                "Architectural violation: bare-host resolve_named_type_export_target_shallow \
+                 called from production; construct HostResolverContext at the request entry"
+            );
+        }
     }
 
     #[inline]
@@ -796,7 +899,24 @@ impl ResolverContext for crate::VerterHost {
         owner_canonical: &str,
         local_name: &str,
     ) -> Option<(String, String)> {
-        crate::VerterHost::resolve_owner_direct_import(self, owner_canonical, local_name)
+        #[cfg(any(test, debug_assertions))]
+        {
+            let view = crate::VerterHost::resolver_store_view(self);
+            crate::VerterHost::resolve_owner_direct_import_with_store_view(
+                self,
+                &view,
+                owner_canonical,
+                local_name,
+            )
+        }
+        #[cfg(not(any(test, debug_assertions)))]
+        {
+            let _ = (owner_canonical, local_name);
+            panic!(
+                "Architectural violation: bare-host resolve_owner_direct_import called from \
+                 production; construct HostResolverContext at the request entry"
+            );
+        }
     }
 
     #[inline]
@@ -831,11 +951,33 @@ impl ResolverContext for crate::VerterHost {
         dep_canonical: &str,
         requested_name: &str,
     ) -> crate::resolver_core::ResolvedTypeDeclaration {
-        crate::host_manage::jsdoc_resolve::resolve_type_declaration(
-            self,
-            dep_canonical,
-            requested_name,
-        )
+        // Bare-host arm. The internal walker constructs a
+        // `HostComponentMetaResolver` over a `ctx` reference; passing
+        // `self` (bare host) would route the walker's
+        // `ctx.resolve_named_type_export_target(...)` etc. through the
+        // panic-shimmed bare-host trait impl. Tests perform the
+        // one-shot owned-view rebuild via `_with_context(host, self)`;
+        // production callers go through
+        // `HostResolverContext::resolve_type_declaration_for_dep` or
+        // `SessionResolverContext::resolve_type_declaration_for_dep`
+        // (both route through `_with_context(host, ctx)`).
+        #[cfg(any(test, debug_assertions))]
+        {
+            crate::host_manage::jsdoc_resolve::resolve_type_declaration_with_context(
+                self,
+                self,
+                dep_canonical,
+                requested_name,
+            )
+        }
+        #[cfg(not(any(test, debug_assertions)))]
+        {
+            let _ = (dep_canonical, requested_name);
+            panic!(
+                "Architectural violation: bare-host resolve_type_declaration_for_dep called \
+                 from production; construct HostResolverContext at the request entry"
+            );
+        }
     }
 
     #[inline]

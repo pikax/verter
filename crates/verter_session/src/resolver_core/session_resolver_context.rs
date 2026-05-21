@@ -549,7 +549,17 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         dep_canonical: &str,
         requested_name: &str,
     ) -> crate::resolver_core::ResolvedTypeDeclaration {
-        ResolverContext::resolve_type_declaration_for_dep(self.inner, dep_canonical, requested_name)
+        // Route through the context-aware variant so the
+        // `HostComponentMetaResolver` walker constructed inside binds
+        // to the session-bound view (this `SessionResolverContext`)
+        // rather than the bare-host context that delegating to
+        // `self.inner` would synthesize.
+        crate::host_manage::jsdoc_resolve::resolve_type_declaration_with_context(
+            self.inner,
+            self,
+            dep_canonical,
+            requested_name,
+        )
     }
 
     #[inline]

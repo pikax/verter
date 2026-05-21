@@ -227,7 +227,14 @@ fn resolve_named_symbol_inner(
     type_args: &[Arc<TypeExpr>],
     requested_mode: ResolveMode,
 ) -> (Option<SemanticNodeId>, ProjectionMode) {
-    let dispatch = ProjectSemanticDispatch::new(host);
+    // Build a request-bound `HostResolverContext` for the dispatch so
+    // resolver-tier reads bind to a real overlay-aware view rather
+    // than the panic-shimmed bare-host `impl ResolverContext for
+    // VerterHost`.
+    let store_view = host.resolver_store_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let scope_arc: Arc<str> = Arc::from(canonical_id);
 
     // Determine whether the decl carries declaration-site type

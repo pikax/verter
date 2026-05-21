@@ -17,6 +17,13 @@ use crate::instant::Instant;
 use crate::VerterHost;
 
 impl VerterHost {
+    /// Test-only bare wrapper. Production callers go through
+    /// `ctx.resolve_imported_type_root` (which routes through the
+    /// request-bound `_with_store_view`); the test-only arm on
+    /// `impl ResolverContext for VerterHost` reaches this wrapper on
+    /// test fixtures that call `host.<method>` directly.
+    #[cfg(any(test, debug_assertions))]
+    #[allow(dead_code)]
     pub(crate) fn resolve_imported_type_root(
         &self,
         dep_canonical: &str,
@@ -56,6 +63,13 @@ impl VerterHost {
     /// consume this variant so the dependent cache observes every
     /// barrel/reexport participant — not only the final target's
     /// `FileWholeHash`.
+    ///
+    /// Test-only bare wrapper. Production callers compose the request
+    /// boundary explicitly (build a view + call
+    /// `_with_facts_with_store_view`). The test-only wrapper above
+    /// (`resolve_imported_type_root`) reaches this helper transitively.
+    #[cfg(any(test, debug_assertions))]
+    #[allow(dead_code)]
     pub(crate) fn resolve_imported_type_root_with_facts(
         &self,
         dep_canonical: &str,

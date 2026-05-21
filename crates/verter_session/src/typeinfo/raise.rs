@@ -32,7 +32,14 @@ impl VerterHost {
     /// generation flip).
     #[must_use]
     pub fn project_node_to_type_expr(&self, node: SemanticNodeId) -> Option<TypeExpr> {
-        let dispatch = ProjectSemanticDispatch::new(self);
+        // Build a request-bound `HostResolverContext` for the dispatch
+        // so resolver-tier reads bind to a real overlay-aware view
+        // rather than the panic-shimmed bare-host
+        // `impl ResolverContext for VerterHost`.
+        let store_view = self.resolver_store_view();
+        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&host_ctx);
         dispatch.raise_node_to_type_expr(node)
     }
 }

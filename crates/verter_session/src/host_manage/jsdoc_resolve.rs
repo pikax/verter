@@ -457,6 +457,14 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
     }
 }
 
+/// Test-only bare wrapper. Production callers go through
+/// [`resolve_type_declaration_with_context`] with a request-bound
+/// `HostResolverContext` / `SessionResolverContext` so the
+/// `HostComponentMetaResolver`'s `ctx.resolve_named_type_export_target`
+/// reads route through the overlay-aware view rather than the
+/// panic-shimmed bare-host trait impl.
+#[cfg(any(test, debug_assertions))]
+#[allow(dead_code)]
 pub(crate) fn resolve_type_declaration(
     host: &VerterHost,
     dep_canonical: &str,

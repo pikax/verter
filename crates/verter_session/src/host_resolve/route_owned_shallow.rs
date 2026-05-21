@@ -488,6 +488,13 @@ impl VerterHost {
         })
     }
 
+    /// Test-only bare wrapper around the view-bound variant. Production
+    /// callers go through `ctx.resolve_named_type_export_target` (which
+    /// routes through the request-bound `_with_store_view`); the
+    /// test-only arm on `impl ResolverContext for VerterHost` reaches
+    /// this wrapper on test fixtures that call `host.<method>` directly.
+    #[cfg(any(test, debug_assertions))]
+    #[allow(dead_code)]
     pub(crate) fn resolve_named_type_export_target(
         &self,
         dep_canonical: &str,
@@ -501,11 +508,8 @@ impl VerterHost {
         )
     }
 
-    /// View-bound variant of [`Self::resolve_named_type_export_target`].
-    ///
-    /// Request-bound callers (`HostResolverContext`,
-    /// `SessionResolverContext`) route through this variant; the bare
-    /// wrapper above builds an owned snapshot once and delegates here.
+    /// View-bound variant — production-reachable through ctx-bound
+    /// `HostResolverContext` / `SessionResolverContext` callers.
     pub(crate) fn resolve_named_type_export_target_with_store_view(
         &self,
         view: &dyn crate::resolver_core::StoreView,

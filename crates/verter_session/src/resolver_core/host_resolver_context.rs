@@ -370,8 +370,14 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         dep_canonical: &str,
         requested_name: &str,
     ) -> crate::resolver_core::ResolvedTypeDeclaration {
-        crate::host_manage::jsdoc_resolve::resolve_type_declaration(
+        // Route through the context-aware variant so the
+        // `HostComponentMetaResolver` walker constructed inside binds
+        // to the request-bound view (this `HostResolverContext`)
+        // rather than the bare-host context that the no-context entry
+        // would synthesize.
+        crate::host_manage::jsdoc_resolve::resolve_type_declaration_with_context(
             self.inner,
+            self,
             dep_canonical,
             requested_name,
         )

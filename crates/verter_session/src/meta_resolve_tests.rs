@@ -5743,7 +5743,7 @@ defineSlots<Slots<T>>()
         .compute_component_meta_state("/src/App.vue", super::ProjectionMode::Expanded, whole_hash)
         .expect("full expanded state should resolve");
     let fallthrough = host
-        .compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash)
+        .compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash, None)
         .expect("fallthrough-expanded state should resolve");
 
     assert!(
@@ -5818,7 +5818,7 @@ defineExpose({ exposed })
         .compute_component_meta_state("/src/App.vue", super::ProjectionMode::Expanded, whole_hash)
         .expect("full expanded state should resolve");
     let fallthrough = host
-        .compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash)
+        .compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash, None)
         .expect("fallthrough-expanded state should resolve");
 
     assert!(
@@ -5946,7 +5946,7 @@ defineEmits<Emits>()
         .compute_component_meta_state("/src/App.vue", super::ProjectionMode::Expanded, whole_hash)
         .expect("full expanded state should resolve");
     let fallthrough = host
-        .compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash)
+        .compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash, None)
         .expect("fallthrough-expanded state should resolve");
 
     let full_props = full
@@ -6031,7 +6031,7 @@ defineEmits<Emits>()
     host.provenance().reset();
 
     let fallthrough = host
-        .compute_component_meta_state_for_fallthrough("/src/Child.vue", whole_hash)
+        .compute_component_meta_state_for_fallthrough("/src/Child.vue", whole_hash, None)
         .expect("fallthrough-expanded state should resolve");
 
     let provenance = host.provenance().snapshot();
@@ -6125,7 +6125,7 @@ defineEmits<Emits>()
     host.provenance().reset();
 
     let fallthrough = host
-        .compute_component_meta_state_for_fallthrough("/src/Child.vue", whole_hash)
+        .compute_component_meta_state_for_fallthrough("/src/Child.vue", whole_hash, None)
         .expect("fallthrough-expanded state should resolve");
 
     let provenance = host.provenance().snapshot();

@@ -252,7 +252,15 @@ fn evaluate_inner(
     // no declaration-site type parameters so `args = []` is
     // correct; the dispatch lifts the `DeclPlaceholder` into a
     // concrete body in the requested mode.
-    let dispatch = ProjectSemanticDispatch::new(host);
+    //
+    // Build a request-bound `HostResolverContext` for the dispatch so
+    // resolver-tier reads (prepared_decl_bundle, prepared_type_decl,
+    // etc.) bind to a real overlay-aware view rather than the
+    // panic-shimmed bare-host `impl ResolverContext for VerterHost`.
+    let store_view = host.resolver_store_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let scratch_canonical: Arc<str> = Arc::from(scratch_uri);
     let Some(shallow) = host.shallow_file_state(scratch_uri) else {
         cleanup_scratch(host, scratch_uri, req.cacheable);

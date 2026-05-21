@@ -739,6 +739,7 @@ impl VerterHost {
         &self,
         canonical: &str,
         whole_hash: Hash16,
+        ctx_override: Option<&dyn crate::resolver_core::resolver_context::ResolverContext>,
     ) -> Option<ResolvedComponentMetaState> {
         self.compute_component_meta_state_inner(
             canonical,
@@ -747,7 +748,7 @@ impl VerterHost {
             None,
             crate::resolver_core::ComponentMetaResolutionPurpose::Fallthrough,
             RegistryMaterialization::SkipAppend,
-            None,
+            ctx_override,
         )
     }
 
@@ -2155,7 +2156,7 @@ impl VerterHost {
         if let Some(evaluated_types) = evaluated_types {
             for field in &evaluated_types.props {
                 collect_component_meta_registry_public_field_refs(
-                    self,
+                    query_engine.ctx,
                     owner_canonical,
                     snapshot,
                     field,
@@ -2167,7 +2168,7 @@ impl VerterHost {
             }
             for field in &evaluated_types.emits {
                 collect_component_meta_registry_public_field_refs(
-                    self,
+                    query_engine.ctx,
                     owner_canonical,
                     snapshot,
                     field,
@@ -2189,7 +2190,7 @@ impl VerterHost {
                     continue;
                 }
                 collect_component_meta_registry_public_field_refs(
-                    self,
+                    query_engine.ctx,
                     owner_canonical,
                     snapshot,
                     field,
@@ -2210,7 +2211,7 @@ impl VerterHost {
             };
             let source_hint = Some(meta.declaration.canonical_source.as_str());
             let entry_import_root = owner_component_meta_registry_import_root(
-                self,
+                query_engine.ctx,
                 owner_canonical,
                 snapshot,
                 entry.name.as_str(),
@@ -2300,7 +2301,7 @@ impl VerterHost {
                 route: pending_route,
             } = pending;
             let imported_owner_route = owner_component_meta_registry_import_root(
-                self,
+                query_engine.ctx,
                 owner_canonical,
                 snapshot,
                 type_name.as_str(),

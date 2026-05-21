@@ -35,8 +35,12 @@ impl VerterHost {
     /// [`Self::prepared_decl_bundle_with_store_view`] instead so the view
     /// is built ONCE at the request boundary and threaded down (per the
     /// Block 6.c per-request hoist). This entry point survives for
-    /// integration tests, harness helpers, and ambient-tier callers that
-    /// have no request-bound view available.
+    /// integration tests + the test-only arm on `impl ResolverContext
+    /// for VerterHost::prepared_decl_bundle` — production callers go
+    /// through `ctx.prepared_decl_bundle` (which routes through
+    /// `_with_store_view`).
+    #[cfg(any(test, debug_assertions))]
+    #[allow(dead_code)]
     pub(crate) fn prepared_decl_bundle(
         &self,
         canonical_id: &str,
@@ -501,6 +505,10 @@ impl VerterHost {
         Some(bundle)
     }
 
+    /// Test-only bare wrapper. Production callers go through
+    /// `ctx.prepared_type_decl` (which routes through `_with_store_view`).
+    #[cfg(any(test, debug_assertions))]
+    #[allow(dead_code)]
     pub(crate) fn prepared_type_decl(
         &self,
         canonical_id: &str,
@@ -2088,6 +2096,14 @@ impl VerterHost {
     /// so direct owner imports resolve exactly once per owner version. The
     /// `resolve_imported_type_root` helper remains the authority for
     /// transitive chain walks inside route/barrel code.
+    ///
+    /// Test-only bare wrapper. Production callers go through
+    /// `ctx.resolve_owner_direct_import` (which routes through the
+    /// request-bound `_with_store_view`); the test-only arm on
+    /// `impl ResolverContext for VerterHost` reaches this wrapper on
+    /// test fixtures that call `host.<method>` directly.
+    #[cfg(any(test, debug_assertions))]
+    #[allow(dead_code)]
     pub(crate) fn resolve_owner_direct_import(
         &self,
         owner_canonical: &str,
