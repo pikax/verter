@@ -106,7 +106,15 @@ impl VerterHost {
         )
         .or_else(|| {
             let expr = verter_type_expr::TypeExpr::named(type_name);
-            crate::meta_resolve::project_expr_class_a_via_dispatch(self, canonical_id, &expr)
+            // Block 6.g C8: route the dispatch helper through the
+            // request-bound `ctx` rather than `self: &VerterHost`.
+            // Passing `self` here coerced into the bare-host
+            // `<&VerterHost as ResolverContext>` impl, which panics
+            // under `cfg(not(any(test, debug_assertions)))` (release)
+            // once `project_expr_class_a_via_dispatch` reaches
+            // `ctx.prepared_decl_bundle(...)` deeper in the call
+            // graph.
+            crate::meta_resolve::project_expr_class_a_via_dispatch(ctx, canonical_id, &expr)
         })?;
         let mut shape =
             verter_semantic::analysis::type_expand::type_expr_to_object_shape(&expanded);
@@ -141,8 +149,14 @@ impl VerterHost {
         // the shared dispatch helper. The intrinsic-member
         // materialiser still uses the engine for its own bundle-level
         // scope cache.
+        //
+        // Block 6.g C8: route through the request-bound `ctx` rather
+        // than `self: &VerterHost`. Same rationale as line 109 above:
+        // the bare-host coercion panics under
+        // `cfg(not(any(test, debug_assertions)))` deeper in the
+        // dispatch.
         let expanded =
-            crate::meta_resolve::project_expr_class_a_via_dispatch(self, scope, &tag_type)
+            crate::meta_resolve::project_expr_class_a_via_dispatch(ctx, scope, &tag_type)
                 .unwrap_or_else(|| tag_type.clone());
         // The engine binds to the supplied request-bound `ctx`.
         let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);

@@ -685,5 +685,13 @@ pub(crate) fn resolve_jsdoc_tag_type(
     // dispatch ProjectPath helper. Falls back to the raw parsed
     // annotation when projection misses so the caller still receives
     // the unresolved TypeExpr rather than `None`.
-    Some(project_expr_class_a_via_dispatch(host, canonical_source, &parsed).unwrap_or(parsed))
+    //
+    // Block 6.g C8: route the dispatch helper through the
+    // request-bound `ctx` rather than `host: &VerterHost`. Passing
+    // `host` here coerced into the bare-host
+    // `<&VerterHost as ResolverContext>` impl, which panics under
+    // `cfg(not(any(test, debug_assertions)))` (release) once
+    // `project_expr_class_a_via_dispatch` reaches
+    // `ctx.prepared_decl_bundle(...)` deeper in the call graph.
+    Some(project_expr_class_a_via_dispatch(ctx, canonical_source, &parsed).unwrap_or(parsed))
 }
