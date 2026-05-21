@@ -183,18 +183,27 @@ pub(crate) fn validate_fact_signature(
     if signature.is_empty() {
         return true;
     }
-    // The owned-view rail survives in this helper transitionally. The
-    // codex consult #3 diagnosis identified that `ctx.store_view()` is
-    // the architecturally correct choice (overlay-aware borrow) but
-    // the iter3 bench surfaced production bare-host call sites
-    // (`ComponentMetaQueryEngine::new(self)` reachable from
-    // `extract_component_meta_from_resolved` → fallthrough /
-    // intrinsic_projection / jsdoc / eval-env) that hit the bare-host
-    // `store_view()` panic guard. Until those construction sites
-    // migrate to `HostResolverContext`, this helper must use the
-    // owned-view rail.
-    let view = ctx.resolver_store_view();
-    signature.iter().all(|fact| view.validates(fact))
+    // Context-aware dispatch (Block 6.g Bug 2 fix).
+    //
+    // Request-bound contexts (`HostResolverContext`,
+    // `SessionResolverContext`) expose the request-entry-snapshotted
+    // overlay-aware view through `store_view()` (borrowed; layered
+    // overlay+base). Bare-host contexts (`impl ResolverContext for
+    // VerterHost`) cannot return a borrowed view (the host owns no
+    // long-lived snapshot) so they must rebuild an owned
+    // `HostStoreView` through `resolver_store_view()`.
+    //
+    // Two branches that perform validation INSIDE the matched arm —
+    // returning a `&dyn StoreView` from a single `let view = ...`
+    // call would borrow a temporary in the bare-host arm and drop
+    // before validation runs.
+    if ctx.is_request_bound() {
+        let view = ctx.store_view();
+        signature.iter().all(|fact| view.validates(fact))
+    } else {
+        let view = ctx.resolver_store_view();
+        signature.iter().all(|fact| view.validates(fact))
+    }
 }
 
 /// Walk `signature` against the current resolver-store view, but
@@ -237,19 +246,36 @@ pub(crate) fn validate_fact_signature_with_self_roots(
     if signature.is_empty() {
         return true;
     }
-    // Same shape as [`validate_fact_signature`] above; the owned-view
-    // rail survives transitionally for the same reason — production
-    // bare-host call sites (`ComponentMetaQueryEngine::new(self)`)
-    // remain reachable from `extract_component_meta_from_resolved`.
-    let view = ctx.resolver_store_view();
-    signature.iter().all(|fact| match fact {
-        FactVersionRef::FileWholeHash { canonical_id, hash }
-            if self_root_canonicals.contains(&canonical_id.as_str()) =>
-        {
-            view.validates_self_root_whole_hash(canonical_id, hash)
-        }
-        other => view.validates(other),
-    })
+    // Context-aware dispatch (Block 6.g Bug 2 fix).
+    //
+    // Same dispatch rationale as [`validate_fact_signature`] above —
+    // request-bound contexts validate against the borrowed
+    // overlay-aware view; bare-host contexts rebuild an owned view.
+    // Both arms apply the strict `validates_self_root_whole_hash`
+    // rule for canonicals listed in `self_root_canonicals` (a keyed
+    // canonical that became untracked fails the warm-read validation
+    // strictly).
+    if ctx.is_request_bound() {
+        let view = ctx.store_view();
+        signature.iter().all(|fact| match fact {
+            FactVersionRef::FileWholeHash { canonical_id, hash }
+                if self_root_canonicals.contains(&canonical_id.as_str()) =>
+            {
+                view.validates_self_root_whole_hash(canonical_id, hash)
+            }
+            other => view.validates(other),
+        })
+    } else {
+        let view = ctx.resolver_store_view();
+        signature.iter().all(|fact| match fact {
+            FactVersionRef::FileWholeHash { canonical_id, hash }
+                if self_root_canonicals.contains(&canonical_id.as_str()) =>
+            {
+                view.validates_self_root_whole_hash(canonical_id, hash)
+            }
+            other => view.validates(other),
+        })
+    }
 }
 
 /// Bubble `signature` into **all** active fact tracers on the current
