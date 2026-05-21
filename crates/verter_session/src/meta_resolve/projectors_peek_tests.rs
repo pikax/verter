@@ -378,3 +378,120 @@ fn peek_bare_host_invocation_triggers_debug_assert() {
         ProjectionMode::Expanded,
     );
 }
+
+// ---------------------------------------------------------------------------
+// 8. Block 6.i H1 — `reduce_field_type_expr` MUST NOT admit a
+//    `BareCarrier` shape into `ShapeCacheDb` under
+//    `ShapeCacheKey::type_expr_whole(scope, Foo_expr, Expanded)`.
+//
+//    Rationale: the materializer
+//    `materialize_component_meta_type_expr_until_stable_full` probes
+//    the SAME cache key BEFORE dispatching its expansion pipeline.
+//    A projector-side shallow admit of a bare alias `Foo` poisons
+//    that slot — a subsequent materializer call asking for
+//    `Foo`'s EXPANDED body would receive the cached shallow `Ref`
+//    and short-circuit without expanding the alias body.
+//
+//    DISCRIMINATION property:
+//      * Pre-H1: the projector's BareCarrier arm calls
+//        `admit_type_expr_shape_if_possible` → after `getComponentMeta`
+//        finishes, peeking `ShapeCacheKey::type_expr_whole(scope,
+//        Ref{Foo}, Expanded)` returns `Some(_)` whose cached
+//        `type_expr` is the bare `Ref{Foo}` (shallow), NOT the
+//        expanded body.
+//      * Post-H1: the BareCarrier arm skips the admit → the slot
+//        stays cold → peek returns `None`. The materializer's
+//        later cold compute runs the full expansion pipeline.
+//
+//    Setup: use a properly-analyzed scope (ComponentMetaHost +
+//    upsert + getComponentMeta) so the admit gate (which requires
+//    `observe_materialize_scope` + `syntactic_export_set`) DOES
+//    succeed. Otherwise the admit is rejected at the gate, masking
+//    the bug.
+// ---------------------------------------------------------------------------
+#[test]
+fn h1_reduce_bare_alias_does_not_poison_expanded_typeexpr_cache_slot() {
+    use crate::component_meta_caches::ShapeCacheKey;
+    use crate::component_meta_host::ComponentMetaHost;
+    use crate::types::{CompileErrorPolicy, HostConfig};
+
+    let mh = ComponentMetaHost::new_standalone(HostConfig {
+        dev_mode: false,
+        compile_error_policy: CompileErrorPolicy::StrictError,
+        ..HostConfig::default()
+    });
+
+    // Two files: helper defines bare interface `Foo`; owner
+    // references it via `defineProps<{ field: Foo }>` so the
+    // projector publishes the `field` member as a bare `Ref{Foo}`.
+    // This is the exact shape that hits the BareCarrier arm of
+    // `reduce_field_type_expr`.
+    mh.upsert_base(
+        "/src/helper.ts",
+        "export interface Foo {\n\
+         \ta: number;\n\
+         \tb: string;\n\
+         }\n",
+    )
+    .expect("helper.ts upsert");
+
+    mh.upsert_base(
+        "/src/Owner.vue",
+        "<script setup lang=\"ts\">\n\
+         import type { Foo } from './helper';\n\
+         defineProps<{ field: Foo }>();\n\
+         </script>\n",
+    )
+    .expect("Owner.vue upsert");
+
+    // Prime — the projector publishes the surface. Pre-H1 this
+    // BareCarrier-admits `(scope, Ref{Foo}, Expanded)` to the
+    // ShapeCacheDb during `reduce_field_type_expr` for the `field`
+    // member.
+    let prime = mh.host().get_component_meta("/src/Owner.vue");
+    assert!(prime.is_some(), "prime call must resolve");
+
+    let scope: Arc<str> = Arc::from("/src/Owner.vue");
+    let bare_alias = TypeExpr::Ref {
+        name: Arc::from("Foo"),
+        type_arguments: Arc::from(Vec::<TypeExpr>::new().into_boxed_slice()),
+    };
+    let cache_key = ShapeCacheKey::type_expr_whole(
+        scope.clone(),
+        Arc::new(bare_alias.clone()),
+        ProjectionMode::Expanded,
+    );
+
+    // Build a request-bound resolver context against the host so
+    // `peek`'s fact-validation operates against a live observation.
+    // Mirrors `artifact_reads_pinned_tests.rs` but uses
+    // `HostViewRef` so we can borrow `mh.host()` without taking an
+    // Arc ownership of the host (which `ComponentMetaHost` owns).
+    let session_view = crate::session_view::HostViewRef::new(mh.host());
+    let base = mh
+        .host()
+        .resolver_store_view()
+        .with_session_overlay(mh.host(), &session_view);
+    let ctx = crate::resolver_core::SessionResolverContext::new(
+        mh.host(),
+        &session_view,
+        &base,
+        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
+
+    let post = mh
+        .host()
+        .project_type_store()
+        .shape_cache_db()
+        .peek(&cache_key, &ctx);
+    assert!(
+        post.is_none(),
+        "H1: projector's BareCarrier arm MUST NOT admit a shallow Ref \
+         into ShapeCacheKey::type_expr_whole(scope, Foo_expr, Expanded). \
+         That slot is reserved for the materializer's expanded body \
+         cache. A shallow admit there causes the materializer's \
+         later probe to short-circuit on the bare `Ref` and skip \
+         alias-body expansion. Got cached type_expr: {:?}",
+        post.map(|m| m.type_expr),
+    );
+}

@@ -1118,19 +1118,29 @@ pub(crate) fn reduce_field_type_expr(
                 return leaf;
             }
             PeekedShape::BareCarrier { .. } => {
-                // F1: BareCarrier admission is structural — a `Ref`
-                // with empty `type_arguments`. The shape is the
-                // carrier name itself; no cross-file work was done.
-                // Empty dep_signature is correct; scope-self-rooting
-                // is sufficient.
-                admit_type_expr_shape_if_possible(
-                    query_engine.ctx,
-                    scope_canonical_id,
-                    &expr,
-                    ProjectionMode::Expanded,
-                    expr.clone(),
-                    Arc::from(Vec::new()),
-                );
+                // H1: skip the universal-cache admit for bare alias
+                // `Ref { type_arguments: [] }` carriers.
+                //
+                // The TypeExpr cache slot
+                // `ShapeCacheKey::type_expr_whole(scope, expr,
+                // Expanded)` is ALSO the slot
+                // `materialize_component_meta_type_expr_until_stable_full`
+                // probes BEFORE dispatching its expansion pipeline.
+                // Admitting the projector's shallow `Ref` here would
+                // poison that slot: a subsequent materializer call
+                // asking for the bare alias's EXPANDED body would
+                // short-circuit on the cached `Ref` and skip
+                // alias-body expansion.
+                //
+                // Bare alias re-resolution is cheap (a `Ref` lookup
+                // is structural — `peek_member_shape_known` classifies
+                // it in one match arm without any cross-file or
+                // reducer work). The cost of NOT admitting a shallow
+                // alias here is small; the cost of admit-collision
+                // is correctness-breaking. The `Leaf` admit above
+                // stays — `Primitive`/`Literal` are terminal shapes
+                // that the materializer cannot expand further, so
+                // the cache slot's shallow/expanded forms agree.
                 return expr;
             }
             PeekedShape::Cached(_) => {
