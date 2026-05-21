@@ -1378,16 +1378,19 @@ pub(crate) fn component_meta_registry_indexed_ref_penalty(
 /// Walk `expr` and enqueue every nominal `Ref` reachable through the
 /// supplied [`ProjectionCursor`].
 ///
-/// **Cursor contract** (Block 6.i Commit A + G1): when the cursor is
-/// at a whole-surface node (`is_whole_surface()`), descent is
-/// unbounded — preserves pre-Block-6.i behaviour. When the cursor
+/// **Cursor contract** (Block 6.i Commit A + G1 + G2): when the
+/// cursor is at a whole-surface node (`is_whole_surface()`), descent
+/// is unbounded — preserves pre-Block-6.i behaviour. When the cursor
 /// carries a narrowed filter (Pick → `Include`, Omit → `Exclude`,
 /// or an explicit `ProjectionNode::children` map):
 ///
-/// - **Object arm**: the `Property` arm gates per-member descent
-///   on `cursor.admits_key(prop.name)`. (Non-Property members —
-///   Method, IndexSignature, CallSignature — are gated by G2 in
-///   the follow-up commit.)
+/// - **Object arm** (G2): `Property` and `Method` (named members)
+///   gate per-member descent on `cursor.admits_key(name)`. Anonymous
+///   structural members — `IndexSignature`, `CallSignature`,
+///   `ConstructSignature` — are skipped entirely under a narrowed
+///   cursor because named-key narrowing (Pick/Omit) produces a
+///   property-only surface that does not carry index/callable
+///   shapes.
 ///
 /// - **Conditional arm** (G1): the predicate sides (`check`,
 ///   `extends`) are type-level operands, NOT part of the published
@@ -1535,6 +1538,20 @@ pub(crate) fn collect_component_meta_registry_refs(
                         );
                     }
                     ObjectMember::IndexSignature(sig) => {
+                        // Block 6.i G2 — path-precision gate for
+                        // non-Property members. `IndexSignature`
+                        // (`[key: K]: V`) is anonymous; it
+                        // applies structurally to every key
+                        // matching `K`. Under a narrowed cursor
+                        // (Pick/Omit/explicit-children) the
+                        // published surface enumerates named keys
+                        // only — the index signature's `V` is NOT
+                        // in the narrowed value surface. Skip its
+                        // nested refs unless the cursor is
+                        // genuinely whole-surface.
+                        if !cursor.is_whole_surface() {
+                            continue;
+                        }
                         collect_component_meta_registry_member_surface_refs(
                             &sig.key_type,
                             published_names,
@@ -1553,6 +1570,16 @@ pub(crate) fn collect_component_meta_registry_refs(
                         );
                     }
                     ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+                        // Block 6.i G2 — path-precision gate.
+                        // `CallSignature` / `ConstructSignature`
+                        // are anonymous callable shapes; named-
+                        // key narrowing (`Pick<Foo, "k">`)
+                        // produces a property-only surface that
+                        // does NOT carry the callable shape.
+                        // Skip nested refs unless whole-surface.
+                        if !cursor.is_whole_surface() {
+                            continue;
+                        }
                         collect_component_meta_registry_function_surface_refs(
                             func,
                             published_names,
@@ -1562,6 +1589,15 @@ pub(crate) fn collect_component_meta_registry_refs(
                         );
                     }
                     ObjectMember::Method(method) => {
+                        // Block 6.i G2 — path-precision gate.
+                        // Methods are named members; apply the
+                        // same `admits_key` gate as the Property
+                        // arm so a `Pick<Foo, "methodA">`-style
+                        // narrowing prunes `methodB`'s nested
+                        // refs.
+                        if !cursor.admits_key(method.name.as_str()) {
+                            continue;
+                        }
                         collect_component_meta_registry_function_surface_refs(
                             &method.function,
                             published_names,
@@ -3114,4 +3150,200 @@ export interface AvatarProps {
         }
     }
 
+    // -----------------------------------------------------------------
+    // Block 6.i G2 — non-Property ObjectMember arms (Method,
+    // IndexSignature, CallSignature, ConstructSignature) apply the
+    // path-precision gate.
+    // -----------------------------------------------------------------
+
+    fn object_with_member(member: ObjectMember) -> TypeExpr {
+        TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![member],
+        }))
+    }
+
+    fn fn_returning(name: &str) -> FunctionExpr {
+        // Wrap the named ref in an IndexedAccess so the registry's
+        // routed-helper path enqueues the root name. A bare `Ref`
+        // would be filtered by `allow_plain_refs=false` in
+        // `collect_component_meta_registry_function_surface_refs`.
+        FunctionExpr {
+            parameters: Vec::new(),
+            return_type: Some(Arc::new(TypeExpr::IndexedAccess {
+                object: Arc::new(ref_named(name)),
+                index: Arc::new(TypeExpr::Literal(LiteralValue::String("x".to_string()))),
+            })),
+            type_parameters: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn g2_method_under_narrowed_cursor_gates_on_admits_key() {
+        // Pick<Foo, "methodA"> equivalent — Include("methodA"). The
+        // Method arm must skip `methodB` and walk `methodA`'s nested
+        // refs.
+        let method_a = ObjectMember::Method(MethodSignature {
+            name: "methodA".to_string(),
+            function: fn_returning("MethodAReturnRef"),
+            optional: false,
+        });
+        let method_b = ObjectMember::Method(MethodSignature {
+            name: "methodB".to_string(),
+            function: fn_returning("MethodBReturnRef"),
+            optional: false,
+        });
+        let expr = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![method_a, method_b],
+        }));
+        let published_names = rustc_hash::FxHashSet::default();
+        let mut queued_names = rustc_hash::FxHashSet::default();
+        let mut output = VecDeque::new();
+        let proj = narrowed_include_projection(&["methodA"]);
+
+        collect_component_meta_registry_refs(
+            &expr,
+            &published_names,
+            &mut queued_names,
+            &mut output,
+            None,
+            true,
+            proj.cursor(),
+        );
+
+        let names = drain_names(&output);
+        assert!(
+            names.iter().any(|n| n == "MethodAReturnRef"),
+            "G2: narrowed cursor MUST walk admitted Method's nested refs (was: {names:?})"
+        );
+        assert!(
+            !names.iter().any(|n| n == "MethodBReturnRef"),
+            "G2: narrowed cursor MUST NOT walk rejected Method's nested refs (was: {names:?})"
+        );
+    }
+
+    #[test]
+    fn g2_index_signature_skipped_under_narrowed_cursor() {
+        let sig = ObjectMember::IndexSignature(verter_type_expr::IndexSignature {
+            key_name: "key".to_string(),
+            key_type: ref_named("IndexKeyRef"),
+            value_type: ref_named("IndexValueRef"),
+            readonly: false,
+        });
+        let expr = object_with_member(sig);
+        let published_names = rustc_hash::FxHashSet::default();
+        let mut queued_names = rustc_hash::FxHashSet::default();
+        let mut output = VecDeque::new();
+        let proj = narrowed_include_projection(&["a"]);
+
+        collect_component_meta_registry_refs(
+            &expr,
+            &published_names,
+            &mut queued_names,
+            &mut output,
+            None,
+            true,
+            proj.cursor(),
+        );
+
+        let names = drain_names(&output);
+        assert!(
+            !names.iter().any(|n| n == "IndexKeyRef"),
+            "G2: narrowed cursor must NOT walk IndexSignature.key_type (was: {names:?})"
+        );
+        assert!(
+            !names.iter().any(|n| n == "IndexValueRef"),
+            "G2: narrowed cursor must NOT walk IndexSignature.value_type (was: {names:?})"
+        );
+    }
+
+    #[test]
+    fn g2_index_signature_walked_under_whole_surface() {
+        let sig = ObjectMember::IndexSignature(verter_type_expr::IndexSignature {
+            key_name: "key".to_string(),
+            key_type: ref_named("IndexKeyRef"),
+            value_type: ref_named("IndexValueRef"),
+            readonly: false,
+        });
+        let expr = object_with_member(sig);
+        let published_names = rustc_hash::FxHashSet::default();
+        let mut queued_names = rustc_hash::FxHashSet::default();
+        let mut output = VecDeque::new();
+        let proj = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
+            crate::meta_resolve::projection_demand::PublishedSurfaceKind::Registry,
+        );
+
+        collect_component_meta_registry_refs(
+            &expr,
+            &published_names,
+            &mut queued_names,
+            &mut output,
+            None,
+            true,
+            proj.cursor(),
+        );
+
+        let names = drain_names(&output);
+        assert!(
+            names.iter().any(|n| n == "IndexKeyRef"),
+            "G2: whole-surface MUST walk IndexSignature.key_type (was: {names:?})"
+        );
+        assert!(
+            names.iter().any(|n| n == "IndexValueRef"),
+            "G2: whole-surface MUST walk IndexSignature.value_type (was: {names:?})"
+        );
+    }
+
+    #[test]
+    fn g2_call_signature_skipped_under_narrowed_cursor() {
+        let call = ObjectMember::CallSignature(fn_returning("CallReturnRef"));
+        let expr = object_with_member(call);
+        let published_names = rustc_hash::FxHashSet::default();
+        let mut queued_names = rustc_hash::FxHashSet::default();
+        let mut output = VecDeque::new();
+        let proj = narrowed_include_projection(&["a"]);
+
+        collect_component_meta_registry_refs(
+            &expr,
+            &published_names,
+            &mut queued_names,
+            &mut output,
+            None,
+            true,
+            proj.cursor(),
+        );
+
+        let names = drain_names(&output);
+        assert!(
+            !names.iter().any(|n| n == "CallReturnRef"),
+            "G2: narrowed cursor must NOT walk CallSignature's nested refs (was: {names:?})"
+        );
+    }
+
+    #[test]
+    fn g2_call_signature_walked_under_whole_surface() {
+        let call = ObjectMember::CallSignature(fn_returning("CallReturnRef"));
+        let expr = object_with_member(call);
+        let published_names = rustc_hash::FxHashSet::default();
+        let mut queued_names = rustc_hash::FxHashSet::default();
+        let mut output = VecDeque::new();
+        let proj = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
+            crate::meta_resolve::projection_demand::PublishedSurfaceKind::Registry,
+        );
+
+        collect_component_meta_registry_refs(
+            &expr,
+            &published_names,
+            &mut queued_names,
+            &mut output,
+            None,
+            true,
+            proj.cursor(),
+        );
+
+        let names = drain_names(&output);
+        assert!(
+            names.iter().any(|n| n == "CallReturnRef"),
+            "G2: whole-surface MUST walk CallSignature's nested refs (was: {names:?})"
+        );
+    }
 }
