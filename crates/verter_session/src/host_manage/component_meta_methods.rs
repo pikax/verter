@@ -374,6 +374,19 @@ impl VerterHost {
         result.value
     }
 
+    /// Test-only bare-host cold-compute entry. Production callers must
+    /// thread a request-bound `&dyn ResolverContext` through one of the
+    /// `*_with_view` / `*_with_session_view` / `*_with_overlay` /
+    /// `*_for_fallthrough` variants — those supply the overlay-aware
+    /// ctx that `compute_component_meta_state_inner` now requires
+    /// unconditionally (Block 6.g C6 / P1-3).
+    ///
+    /// This wrapper exists for test fixtures that drive cold-compute
+    /// directly from a bare `&VerterHost`. It builds the request-bound
+    /// ctx via [`crate::resolver_core::with_bare_host_ctx_for_test`]
+    /// (itself `#[cfg(any(test, debug_assertions))]`-gated), so the
+    /// release-build crate drops the helper + this wrapper entirely.
+    #[cfg(any(test, debug_assertions))]
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn compute_component_meta_state(
         &self,
@@ -381,15 +394,17 @@ impl VerterHost {
         mode: ProjectionMode,
         whole_hash: Hash16,
     ) -> Option<ResolvedComponentMetaState> {
-        self.compute_component_meta_state_inner(
-            canonical,
-            mode,
-            whole_hash,
-            None,
-            crate::resolver_core::ComponentMetaResolutionPurpose::Full,
-            RegistryMaterialization::Full,
-            None,
-        )
+        crate::resolver_core::with_bare_host_ctx_for_test(self, |ctx| {
+            self.compute_component_meta_state_inner(
+                canonical,
+                mode,
+                whole_hash,
+                None,
+                crate::resolver_core::ComponentMetaResolutionPurpose::Full,
+                RegistryMaterialization::Full,
+                ctx,
+            )
+        })
     }
 
     /// View-aware cold compute entry. Routes resolver-tier reads (and
@@ -461,7 +476,7 @@ impl VerterHost {
             None,
             crate::resolver_core::ComponentMetaResolutionPurpose::Full,
             RegistryMaterialization::Full,
-            Some(ctx),
+            ctx,
         )
     }
 
@@ -529,7 +544,7 @@ impl VerterHost {
             Some(captured),
             crate::resolver_core::ComponentMetaResolutionPurpose::Full,
             RegistryMaterialization::Full,
-            Some(ctx),
+            ctx,
         )
     }
 
@@ -591,7 +606,7 @@ impl VerterHost {
             None,
             crate::resolver_core::ComponentMetaResolutionPurpose::Full,
             RegistryMaterialization::Full,
-            Some(ctx),
+            ctx,
         )
     }
 
@@ -639,7 +654,7 @@ impl VerterHost {
             Some(captured),
             crate::resolver_core::ComponentMetaResolutionPurpose::Full,
             RegistryMaterialization::Full,
-            Some(ctx),
+            ctx,
         )
     }
 
@@ -739,7 +754,7 @@ impl VerterHost {
         &self,
         canonical: &str,
         whole_hash: Hash16,
-        ctx_override: Option<&dyn crate::resolver_core::resolver_context::ResolverContext>,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
     ) -> Option<ResolvedComponentMetaState> {
         self.compute_component_meta_state_inner(
             canonical,
@@ -748,7 +763,7 @@ impl VerterHost {
             None,
             crate::resolver_core::ComponentMetaResolutionPurpose::Fallthrough,
             RegistryMaterialization::SkipAppend,
-            ctx_override,
+            ctx,
         )
     }
 
@@ -761,16 +776,20 @@ impl VerterHost {
         captured: Option<&CapturedComponentMetaInputs>,
         purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
         registry_materialization: RegistryMaterialization,
-        ctx_override: Option<&dyn crate::resolver_core::resolver_context::ResolverContext>,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
     ) -> Option<ResolvedComponentMetaState> {
-        // Resolve the active resolver context: session-bearing entries
-        // pass a `SessionResolverContext` that surfaces overlay-aware
-        // reads to the query engine + bridges; the base path falls
-        // back to `&self as &dyn ResolverContext` so warm hits keep
-        // their existing semantics.
-        let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = self;
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext =
-            ctx_override.unwrap_or(base_ctx);
+        // Block 6.g C6 (P1-3): the `ctx` parameter is required (no
+        // `Option`) — the previous shape carried
+        // `ctx_override: Option<&dyn ResolverContext>` with a
+        // `unwrap_or(&self as &dyn ResolverContext)` bare-host
+        // fallback, which the Block 6.g Claude review flagged as a
+        // production exfiltration path that could panic any caller
+        // reaching the inner via a bare-host ctx. Production callers
+        // (session-bearing + view-bearing + overlay-bearing) all
+        // supply a real request-bound ctx; the sole test-only wrapper
+        // `compute_component_meta_state` constructs a bare-host ctx
+        // via `with_bare_host_ctx_for_test` and is itself
+        // `#[cfg(any(test, debug_assertions))]`-gated.
         // Step 6.6.A: reset the per-request dep-signature accumulator
         // so each compute call starts fresh. Inner materialize_until_stable
         // calls accumulate dispatch-side facts; we drain + merge them

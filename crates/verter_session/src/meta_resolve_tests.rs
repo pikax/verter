@@ -5742,9 +5742,10 @@ defineSlots<Slots<T>>()
     let full = host
         .compute_component_meta_state("/src/App.vue", super::ProjectionMode::Expanded, whole_hash)
         .expect("full expanded state should resolve");
-    let fallthrough = host
-        .compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash, None)
-        .expect("fallthrough-expanded state should resolve");
+    let fallthrough = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        host.compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash, ctx)
+    })
+    .expect("fallthrough-expanded state should resolve");
 
     assert!(
         full.resolved_type_registry
@@ -5817,9 +5818,10 @@ defineExpose({ exposed })
     let full = host
         .compute_component_meta_state("/src/App.vue", super::ProjectionMode::Expanded, whole_hash)
         .expect("full expanded state should resolve");
-    let fallthrough = host
-        .compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash, None)
-        .expect("fallthrough-expanded state should resolve");
+    let fallthrough = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        host.compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash, ctx)
+    })
+    .expect("fallthrough-expanded state should resolve");
 
     assert!(
         full.resolved_macros
@@ -5945,9 +5947,10 @@ defineEmits<Emits>()
     let full = host
         .compute_component_meta_state("/src/App.vue", super::ProjectionMode::Expanded, whole_hash)
         .expect("full expanded state should resolve");
-    let fallthrough = host
-        .compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash, None)
-        .expect("fallthrough-expanded state should resolve");
+    let fallthrough = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        host.compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash, ctx)
+    })
+    .expect("fallthrough-expanded state should resolve");
 
     let full_props = full
         .resolved_macros
@@ -6030,9 +6033,10 @@ defineEmits<Emits>()
 
     host.provenance().reset();
 
-    let fallthrough = host
-        .compute_component_meta_state_for_fallthrough("/src/Child.vue", whole_hash, None)
-        .expect("fallthrough-expanded state should resolve");
+    let fallthrough = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        host.compute_component_meta_state_for_fallthrough("/src/Child.vue", whole_hash, ctx)
+    })
+    .expect("fallthrough-expanded state should resolve");
 
     let provenance = host.provenance().snapshot();
     assert_eq!(
@@ -6124,9 +6128,10 @@ defineEmits<Emits>()
 
     host.provenance().reset();
 
-    let fallthrough = host
-        .compute_component_meta_state_for_fallthrough("/src/Child.vue", whole_hash, None)
-        .expect("fallthrough-expanded state should resolve");
+    let fallthrough = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        host.compute_component_meta_state_for_fallthrough("/src/Child.vue", whole_hash, ctx)
+    })
+    .expect("fallthrough-expanded state should resolve");
 
     let provenance = host.provenance().snapshot();
     assert_eq!(

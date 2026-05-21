@@ -201,7 +201,7 @@ impl VerterHost {
             let whole_hash = self
                 .current_or_read_whole_hash(canonical_id)
                 .unwrap_or_default();
-            self.compute_component_meta_state_for_fallthrough(canonical_id, whole_hash, Some(ctx))?
+            self.compute_component_meta_state_for_fallthrough(canonical_id, whole_hash, ctx)?
         };
         self.compute_fallthrough_surface_from_resolved_state(
             canonical_id,
