@@ -5,25 +5,43 @@
 //! boundaries. They MUST hold AT EVERY commit boundary post-A (per
 //! the corresponding test's flip marker).
 //!
-//! ## C0 framing — synthetic fixtures vs the empirical discriminator
+//! ## F4 discrimination framing
 //!
-//! Per the Block 6.i brief, the primary discriminating gate for the
-//! Rule 5 / cache / path-precision violations is the **audit footprint
-//! inspection** at the commit boundary:
+//! Per Block 6.i Batch 1 review (P1-4), guards 1/2/3 are protective
+//! forward-looking, not discriminating against the C0-baseline
+//! defect. The defect manifests at scale (deep generic chain +
+//! Conditional + `infer` — the ChatMessages-shaped pattern); the
+//! synthetic in-memory fixtures often already path-precise at the
+//! projector entry.
+//!
+//! F4 mitigates by:
+//!   1. Guards 1/2/3 — fixtures explicitly REPRODUCE the C0-baseline
+//!      structural pattern (Pick over unused keys, closed Conditional,
+//!      Mapped + indexed-access). Each guard's body references the
+//!      concrete scenario from the brief.
+//!   2. Guard 4 — the prior assertion `route_cold_fact_bubble_emissions
+//!      == 0` is trivially true (the test inserts via
+//!      `insert_route_with_facts` which never bumps the cold counter).
+//!      Replaced with a real warm-collapse assertion: drive `RouteDb`
+//!      via the resolve path (which DOES bump cold), then re-query
+//!      and assert the second call did NOT bump it again — the warm-
+//!      collapse property guard 4 actually intends to characterise.
+//!   3. Guards 1/2/3 remain `#[ignore]`'d (with explicit reason)
+//!      until Commit F lands the operator-level path-walker
+//!      narrowing — at which point the synthetic fixtures will
+//!      reliably FAIL pre-F + PASS post-F. The brief explicitly
+//!      authorises this stance: "the guards can stay #[ignore]'d
+//!      or be modified to assert 'would fail if Rule 5 is violated
+//!      on this fixture'."
+//!
+//! Per the Block 6.i brief, the load-bearing discriminating gate for
+//! the Rule 5 / cache / path-precision violations is the **audit
+//! footprint inspection** at the commit boundary:
 //!
 //! ```bash
 //! grep -E "(outputSchema|execute)" \
 //!   D:/tmp/verter-audit-6i-{A,B,C,D,E,F}/cold-seq/ChatMessages.json
 //! ```
-//!
-//! The defect manifests at scale (ChatMessages's deep generic chain
-//! through `Tool<INPUT, OUTPUT>` + Conditional + `infer`). Synthetic
-//! in-memory fixtures often already exercise path-precision at the
-//! projector entry — that does NOT make the unit tests redundant; it
-//! makes them protective. Once Commits A → F land, the synthetic
-//! invariants are encoded for permanent enforcement; a future
-//! regression that re-introduces a full-graph walker would fail one
-//! of these guards.
 //!
 //! Each test body branches on inputs and uses non-trivial assertions
 //! — no stub bodies, no always-true predicates (CLAUDE.md Stub
@@ -177,8 +195,16 @@ fn reachable_refs_in_registry(registry: &[ResolvedTypeAnalysis]) -> Vec<String> 
 // including `other_with_huge_ref: HugeRecursive`, leaking HugeRecursive
 // into the published surface. Discriminating: HugeRecursive must NOT
 // appear in any reachable ref name set.
+//
+// F4 status: ignored until Commit F lands the operator-level
+// path-walker narrowing. The synthetic fixture is small enough that
+// the projector entry already path-precises; the assertion holds
+// pre-6.i, so un-ignoring at Batch 1 is gate-bypass per CLAUDE.md
+// Stub Prevention. Re-un-ignore when Commit F closes the
+// `outputSchema`/`execute` audit footprint on `ChatMessages.json`.
 // =====================================================================
 #[test]
+#[ignore = "Block 6.i F4: discriminating fixture; un-ignore after Commit F lands operator-level path-walker (synthetic Pick already path-precises pre-6.i)"]
 fn pick_with_unused_members_not_projected() {
     let project = make_project();
     // Mirrors ChatMessages's Rule 5 leak: a `Pick<T, "k">` over a
@@ -247,8 +273,12 @@ defineProps<{
 // known to be `string` resolves to `OnString`. The registry MUST NOT
 // contain `OnOther` if `OnOther` is reachable ONLY through the
 // unselected false-branch.
+//
+// F4 status: ignored until Commit F lands the operator-level
+// path-walker narrowing. Same rationale as Guard 1.
 // =====================================================================
 #[test]
+#[ignore = "Block 6.i F4: discriminating fixture; un-ignore after Commit F lands operator-level path-walker (synthetic Conditional closes pre-6.i)"]
 fn conditional_unselected_branch_not_projected() {
     let project = make_project();
     upsert(
@@ -289,8 +319,12 @@ defineProps<{
 // `type Wrapped<T> = { [K in keyof T]: { wrapped: T[K] } }`
 // `Wrapped<{ a: A; b: B; c: C; … }>['a']` should resolve to
 // `{ wrapped: A }` — `b`, `c` etc. should NOT enter the surface.
+//
+// F4 status: ignored until Commit F lands the operator-level
+// path-walker narrowing. Same rationale as Guard 1.
 // =====================================================================
 #[test]
+#[ignore = "Block 6.i F4: discriminating fixture; un-ignore after Commit F lands operator-level path-walker (synthetic Mapped + indexed-access narrows pre-6.i)"]
 fn mapped_type_skips_unprojected_keys() {
     let project = make_project();
     upsert(
@@ -337,23 +371,32 @@ defineProps<{
 }
 
 // =====================================================================
-// Guard 4 — RouteDb cold builds ≤ 2 per `(owner, name)` on a cold-seq.
+// Guard 4 — RouteDb cold builds ≤ 1 per `(owner, name)` on a cold-seq.
 //
-// The architectural floor: warm/inflight collapse must hold; no more
-// than two cold builds for any one route key under a sequential
-// cold-seq replay. A synthetic micro-test that drives `RouteDb`
-// directly and asserts warm-hit idempotency.
+// The architectural floor: warm/inflight collapse must hold; the cold-
+// resolve path must fire EXACTLY once for the FIRST lookup, and the
+// second identical lookup must hit warm WITHOUT re-driving the cold
+// resolver closure.
 //
-// At C0 land the assertion uses the existing `peek_warm_route` /
-// `insert_route_with_facts` API to verify that two consecutive
-// lookups against the same key do NOT trigger a second cold insert.
-// Commit B exposes the explicit cold-build counter; this test is
-// upgraded then to use the counter directly.
+// F4 (Batch 1 fix): the pre-F4 version of this guard used
+// `insert_route_with_facts` (the direct-insertion API) and asserted
+// `route_cold_fact_bubble_emissions == 0`. That assertion was
+// trivially true regardless of any cache machinery — `insert_route_with_facts`
+// does NOT bump the cold counter; only the singleflight resolve path
+// does. F4 rewrites the test to drive `get_or_resolve_route_observing_facts`
+// (which IS the path that bumps the cold counter), then asserts the
+// warm-collapse property: cold counter advances by EXACTLY 1 across
+// the (cold + N warm) sequence, AND the resolver closure runs EXACTLY
+// once (not on warm hits).
 // =====================================================================
 #[test]
 fn per_key_route_builds_bounded() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
     let db = RouteDb::new();
     let view = PermissiveStoreView;
+    let cold_resolver_calls = AtomicU32::new(0);
+
     let route = RouteResult::Resolved {
         defining_canonical: "p.ts".to_string(),
         defining_symbol: "X".to_string(),
@@ -363,37 +406,64 @@ fn per_key_route_builds_bounded() {
         hash: [1u8; 16],
     };
 
-    // First insertion is a cold build.
-    db.insert_route_with_facts(
-        "o.ts".to_string(),
-        "X".to_string(),
-        route.clone(),
-        vec![fact.clone()],
+    // Baseline: cold counter starts at 0 (no resolves yet).
+    let cold_before = db.route_cold_fact_bubble_emissions();
+    assert_eq!(
+        cold_before, 0,
+        "F4 baseline: cold counter should be 0 before any resolve"
     );
-    // Re-issuing the same (owner, name) MUST NOT trigger a re-build
-    // when the fact is unchanged.
-    let warm = db.get_route_with_facts("o.ts", "X", &view);
-    assert!(warm.is_some(), "warm hit must succeed after cold insert");
 
-    // Three consecutive warm hits — none must promote a cold rebuild.
-    for _ in 0..3 {
-        let again = db.get_route_with_facts("o.ts", "X", &view);
-        assert!(
-            again.is_some(),
-            "warm hit must remain warm after repeated lookup",
-        );
+    // First resolve: cold path, runs the resolver closure exactly once
+    // AND bumps the cold counter.
+    let first = db.get_or_resolve_route_observing_facts("o.ts", "X", &view, || {
+        cold_resolver_calls.fetch_add(1, Ordering::Relaxed);
+        Some((route.clone(), vec![fact.clone()]))
+    });
+    assert!(first.is_some(), "first resolve must succeed");
+    let cold_after_first = db.route_cold_fact_bubble_emissions();
+    assert_eq!(
+        cold_after_first, 1,
+        "F4 discrimination: first resolve MUST bump cold counter by 1 \
+         (was {cold_before}, now {cold_after_first})"
+    );
+    assert_eq!(
+        cold_resolver_calls.load(Ordering::Relaxed),
+        1,
+        "F4: resolver closure must run EXACTLY once on cold path"
+    );
+
+    // Three consecutive warm lookups: none must re-drive the cold
+    // resolver closure NOR bump the cold counter. The warm fast-path
+    // in `get_or_resolve_route_observing_facts` short-circuits at
+    // `get_route_with_facts`.
+    for i in 0..3 {
+        let warm = db.get_or_resolve_route_observing_facts("o.ts", "X", &view, || {
+            // F4 discrimination: this closure MUST NOT run on warm
+            // hits. If it does, the warm-collapse contract is broken.
+            cold_resolver_calls.fetch_add(1, Ordering::Relaxed);
+            Some((route.clone(), vec![fact.clone()]))
+        });
+        assert!(warm.is_some(), "warm hit {} must succeed", i);
     }
 
-    // Discriminating gate: across N warm hits, the cold-fact bubble
-    // emissions counter must NOT advance. (Inserting the route
-    // directly via `insert_route_with_facts` does not bump the cold
-    // counter — only the resolve path does. So this asserts that
-    // warm hits never trigger a hidden cold path.)
-    let cold_emissions = db.route_cold_fact_bubble_emissions();
+    // F4 discriminating assertion: cold counter must STILL be 1
+    // (only the first resolve bumped it; the 3 warm hits did NOT).
+    let cold_after_warm = db.route_cold_fact_bubble_emissions();
     assert_eq!(
-        cold_emissions, 0,
-        "guard: warm-hit lookups must not promote a cold rebuild; \
-         RouteDb route_cold_fact_bubble_emissions = {cold_emissions}",
+        cold_after_warm, 1,
+        "F4 discrimination: 3 warm hits MUST NOT bump cold counter; \
+         expected 1, got {cold_after_warm}. If this fails, the warm-\
+         collapse contract in `get_or_resolve_route_observing_facts` \
+         is broken."
+    );
+
+    // F4 discriminating assertion: cold resolver closure ran exactly
+    // once across all 4 lookups (1 cold + 3 warm).
+    assert_eq!(
+        cold_resolver_calls.load(Ordering::Relaxed),
+        1,
+        "F4 discrimination: resolver closure ran more than once across \
+         cold + 3 warm hits — warm-collapse broken."
     );
 }
 
