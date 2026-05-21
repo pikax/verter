@@ -598,8 +598,7 @@ fn h2_package_backed_gate_observes_authoritative_current_content_hash_not_shallo
     // signature snippet covers both the `fn` declaration's return type
     // and the wrapper at line 400 (which extracts `.0`).
     assert!(
-        gate_body
-            .contains("Option<crate::semantic_query::DepSignature>")
+        gate_body.contains("Option<crate::semantic_query::DepSignature>")
             || gate_body.contains("Option<DepSignature>"),
         "H2 invariant 2: the gate's return type MUST be \
          `(bool, Option<DepSignature>)` — the `Option` discriminator is \
@@ -611,8 +610,8 @@ fn h2_package_backed_gate_observes_authoritative_current_content_hash_not_shallo
     // Without this the `None` path is unreachable; with it, callers
     // observe the refusal whenever a contributing canonical's
     // authoritative hash is unavailable.
-    let returns_none_arm = gate_body.contains("return (true, None);")
-        || gate_body.contains("return (verdict, None);");
+    let returns_none_arm =
+        gate_body.contains("return (true, None);") || gate_body.contains("return (verdict, None);");
     assert!(
         returns_none_arm,
         "H2 invariant 3: the gate MUST contain an explicit `return \

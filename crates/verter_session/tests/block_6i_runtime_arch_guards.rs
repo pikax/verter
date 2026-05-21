@@ -203,8 +203,14 @@ fn reachable_refs_in_registry(registry: &[ResolvedTypeAnalysis]) -> Vec<String> 
 // Stub Prevention. Re-un-ignore when Commit F closes the
 // `outputSchema`/`execute` audit footprint on `ChatMessages.json`.
 // =====================================================================
+// Block 6.i Commit F — un-ignored: `Pick<Foo, 'bar'>` becomes a
+// key-filter producer at the operator level (build.rs `Pick` arm
+// already produces a filtered `Object`; the registry walker's
+// `cursor.admits_key` gate at component_meta_registry.rs:1528 emits
+// entries only for refs that the published surface reaches). The
+// projector pipeline therefore stops eagerly materialising the
+// non-picked members of `Foo`.
 #[test]
-#[ignore = "Block 6.i F4: discriminating fixture; un-ignore after Commit F lands operator-level path-walker (synthetic Pick already path-precises pre-6.i)"]
 fn pick_with_unused_members_not_projected() {
     let project = make_project();
     // Mirrors ChatMessages's Rule 5 leak: a `Pick<T, "k">` over a
@@ -277,8 +283,14 @@ defineProps<{
 // F4 status: ignored until Commit F lands the operator-level
 // path-walker narrowing. Same rationale as Guard 1.
 // =====================================================================
+// Block 6.i Commit F — un-ignored: closed conditional checks
+// (`T extends X ? A : B` where X is decidable) select one branch in
+// `build_conditional`'s relation evaluator and do NOT walk the
+// unselected branch's reachable refs. The registry walker's
+// Conditional arm gates on `is_whole_surface()` (Block 6.i G1) so
+// narrowed cursors only walk the result-side branches, never the
+// predicate operands.
 #[test]
-#[ignore = "Block 6.i F4: discriminating fixture; un-ignore after Commit F lands operator-level path-walker (synthetic Conditional closes pre-6.i)"]
 fn conditional_unselected_branch_not_projected() {
     let project = make_project();
     upsert(
@@ -323,8 +335,15 @@ defineProps<{
 // F4 status: ignored until Commit F lands the operator-level
 // path-walker narrowing. Same rationale as Guard 1.
 // =====================================================================
+// Block 6.i Commit F — un-ignored: the per-key Mapped narrowing in
+// `PathWalker` (walk.rs ~691) substitutes K=path[index] and projects
+// only the requested value when the walker hits a deferred
+// `SemanticNodeData::Mapped` shell with a literal-keyed path. The
+// synthetic fixture (`Wrapped<Bag>['a']`) reaches this arm when the
+// `Wrapped` mapped surface is not enumerated up-front; the narrowed
+// projection emits only the per-key value subgraph so siblings stay
+// off the published surface.
 #[test]
-#[ignore = "Block 6.i F4: discriminating fixture; un-ignore after Commit F lands operator-level path-walker (synthetic Mapped + indexed-access narrows pre-6.i)"]
 fn mapped_type_skips_unprojected_keys() {
     let project = make_project();
     upsert(
@@ -534,8 +553,11 @@ defineProps<DepUser>()
 // invocation must NOT trigger a second native enter via the
 // `get_component_meta_calls` provenance counter.
 // =====================================================================
+// Block 6.i Commit F — un-ignored. The compat boundary makes
+// exactly one native call per `getComponentMeta` invocation; the
+// provenance counter tracks that invariant. Block 6.i closes the
+// JS=1 NAPI call contract per the brief's universal invariant #3.
 #[test]
-#[ignore = "Block 6.i C0: discriminating guard; passes after Commit F"]
 fn compat_one_napi_call_audit() {
     let project = make_project();
     upsert(

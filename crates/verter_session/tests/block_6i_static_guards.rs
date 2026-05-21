@@ -191,3 +191,92 @@ fn peek_primitive_arms_admit_to_cache() {
          {admit_member_calls}.",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Guard F.1 — `PathWalker` does not resolve `Mapped` through
+//             `build_mapped_type` when a literal-keyed path is
+//             available (operator-level Mapped narrowing).
+//
+// Block 6.i Commit F's path-walker narrowing closes the
+// `Tool<INPUT, OUTPUT>['outputSchema']` leak by substituting K = path
+// segment directly into `mapper.value_expr` and evaluating, rather
+// than dispatching `SemanticQueryKey::MappedType` (which would
+// enumerate every key in the source surface and emit per-key
+// `ProjectMember` edges into the audit footprint regardless of
+// consumer demand).
+//
+// The guard scans the `PathWalker` Mapped arm (`walk.rs`'s
+// `SemanticNodeData::Mapped` match) and asserts:
+// 1. A per-key substitute path exists (calls
+//    `substitute_semantic_type_param` + `evaluate_deferred_semantic_node`
+//    on the mapper's `value_expr` BEFORE the fall-through
+//    `MappedType` dispatch).
+// 2. The fall-through `MappedType` dispatch is gated on the absence
+//    of a narrowable literal segment (a `can_narrow`-style predicate
+//    or equivalent control-flow guard).
+// ---------------------------------------------------------------------------
+#[test]
+fn pathwalker_does_not_resolve_mapped_through_build_mapped_type() {
+    let src = read_workspace_file("crates/verter_session/src/project_semantic_dispatch/walk.rs");
+
+    // Locate the `SemanticNodeData::Mapped` arm inside `PathWalker::advance_step`.
+    let mapped_arm_idx = src
+        .find("SemanticNodeData::Mapped { source, mapper }")
+        .expect("guard F.1: `PathWalker`'s `SemanticNodeData::Mapped` arm must exist in walk.rs");
+
+    // Bound the search to the arm body (until the next outer
+    // `SemanticNodeData::` match arm at the same indentation level).
+    // The Mapped arm ends before the next `SemanticNodeData::` arm,
+    // which in this file is `SemanticNodeData::TypeOf`.
+    let arm_end_idx = src[mapped_arm_idx..]
+        .find("SemanticNodeData::TypeOf")
+        .map(|i| mapped_arm_idx + i)
+        .expect("guard F.1: TypeOf arm must follow the Mapped arm in walk.rs");
+    let arm_body = &src[mapped_arm_idx..arm_end_idx];
+
+    // (1) The narrowing path must substitute + evaluate
+    // mapper.value_expr per the brief's Commit F contract.
+    assert!(
+        arm_body.contains("substitute_semantic_type_param"),
+        "guard F.1: `PathWalker`'s Mapped arm MUST substitute the mapper's parameter via \
+         `substitute_semantic_type_param` for per-key path-precision (Block 6.i Commit F \
+         operator-level narrowing). The MappedType dispatch alone enumerates every key and \
+         leaks `Tool<INPUT, OUTPUT>['outputSchema']`-shaped queries into the audit \
+         footprint.",
+    );
+    assert!(
+        arm_body.contains("evaluate_deferred_semantic_node"),
+        "guard F.1: `PathWalker`'s Mapped arm MUST evaluate the substituted node via \
+         `evaluate_deferred_semantic_node` so the per-key value resolves without \
+         enumerating the whole mapped surface.",
+    );
+
+    // (2) The narrowing must inspect a remaining path segment + the
+    // mapper's `name_remap` field. Without these, the per-key
+    // substitution is unsound (a post-remap surface name does not
+    // index directly back to the iteration key).
+    assert!(
+        arm_body.contains("name_remap.is_none()"),
+        "guard F.1: `PathWalker`'s Mapped narrowing MUST gate on \
+         `mapper.name_remap.is_none()`: when the mapper carries an `as <expr>` clause, the \
+         iteration key is NOT the post-remap surface name and per-key substitution would \
+         project the wrong value. The whole-surface MappedType fallback is correct in that \
+         case.",
+    );
+    assert!(
+        arm_body.contains("PathSegment::Member") && arm_body.contains("PathSegment::Index"),
+        "guard F.1: `PathWalker`'s Mapped narrowing MUST handle both `PathSegment::Member` \
+         and `PathSegment::Index` literal keys.",
+    );
+
+    // (3) The walker MUST still record a `ProjectMember` or
+    // `ProjectIndex` edge for the narrowed step so downstream origin
+    // graph consumers see the per-key contribution.
+    assert!(
+        arm_body.contains("OriginEdgeKind::ProjectMember")
+            || arm_body.contains("OriginEdgeKind::ProjectIndex"),
+        "guard F.1: `PathWalker`'s Mapped narrowing MUST emit a `ProjectMember` (or \
+         `ProjectIndex`) edge on the per-key step so the origin graph mirrors the \
+         pre-Commit-F path-walker behaviour for the narrowed key.",
+    );
+}

@@ -689,6 +689,110 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     current = resolved;
                 }
                 SemanticNodeData::Mapped { source, mapper } => {
+                    // Block 6.i Commit F — operator-level Mapped path
+                    // precision. When the walker has a remaining path
+                    // and the next segment is a concrete literal key
+                    // (`Member(name)` or `Index(String|Number)`), we
+                    // substitute K → Literal(name) into
+                    // `mapper.value_expr` and evaluate it directly
+                    // rather than dispatching `MappedType` (which
+                    // would enumerate every key in the source surface
+                    // and substitute the value_expr per-key — the
+                    // architectural defect that leaks helpers like
+                    // Tool<INPUT, OUTPUT>['outputSchema'] into
+                    // ChatMessages' footprint by walking every key in
+                    // the mapped source).
+                    //
+                    // The narrowing requires:
+                    // 1. A remaining segment we can convert to a
+                    //    literal name (Member, Index::String,
+                    //    Index::Number, or Index::TypeNode that
+                    //    normalises to a literal).
+                    // 2. `mapper.name_remap.is_none()` — when the
+                    //    mapper has `as <expr>`, the iteration key
+                    //    is NOT the post-remap surface name; mapping
+                    //    back requires the whole-surface enumeration.
+                    let next_index = index;
+                    let next_segment = path.get(next_index);
+                    let literal_name: Option<Arc<str>> = match next_segment {
+                        Some(PathSegment::Member(name)) => Some(Arc::clone(name)),
+                        Some(PathSegment::Index(IndexKey::String(s))) => Some(Arc::clone(s)),
+                        Some(PathSegment::Index(IndexKey::Number(n))) => {
+                            Some(Arc::<str>::from(n.to_string()))
+                        }
+                        Some(PathSegment::Index(IndexKey::TypeNode(node))) => {
+                            match self.dispatch.normalized_index_key_node(*node) {
+                                IndexKey::String(text) => Some(Arc::clone(&text)),
+                                IndexKey::Number(number) => {
+                                    Some(Arc::<str>::from(number.to_string()))
+                                }
+                                IndexKey::TypeNode(_) => None,
+                            }
+                        }
+                        None => None,
+                    };
+                    let can_narrow = literal_name.is_some() && mapper.name_remap.is_none();
+                    if can_narrow {
+                        let name = literal_name.expect("literal_name is_some checked above");
+                        let key_arg = self.graph().intern_node(SemanticNodeData::Literal(
+                            crate::semantic_query::LiteralValue::String(name.as_ref().to_string()),
+                        ));
+                        let substituted = self.dispatch.substitute_semantic_type_param(
+                            mapper.value_expr,
+                            mapper.parameter_node,
+                            key_arg,
+                        );
+                        let evaluated = self.dispatch.evaluate_deferred_semantic_node(substituted);
+                        // Preserve `build_mapped_type`'s contract:
+                        // when evaluation yields Opaque, publish the
+                        // un-evaluated substituted node so re-dispatch
+                        // can pick up the lazy form once inputs become
+                        // enumerable.
+                        let value = if matches!(
+                            self.graph().node_data(evaluated).as_deref(),
+                            Some(SemanticNodeData::Opaque(_))
+                        ) {
+                            substituted
+                        } else {
+                            evaluated
+                        };
+                        // Emit the per-key edge mirroring
+                        // `build_mapped_type`'s ProjectMember edge so
+                        // downstream origin-graph consumers see the
+                        // same per-key contribution.
+                        let edge_kind = match next_segment.expect("checked above") {
+                            PathSegment::Member(_) => OriginEdgeKind::ProjectMember,
+                            PathSegment::Index(_) => OriginEdgeKind::ProjectIndex,
+                        };
+                        let meta = match next_segment.expect("checked above") {
+                            PathSegment::Member(member_name) => {
+                                OriginMeta::MemberName(Arc::clone(member_name))
+                            }
+                            PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
+                        };
+                        self.graph().record_origin_edge(
+                            value,
+                            edge_kind,
+                            Arc::from(vec![current, *source, mapper.key_space].into_boxed_slice()),
+                            meta,
+                            Arc::clone(self.fence),
+                        );
+                        current = value;
+                        index += 1;
+                        // Record the per-segment intermediate node —
+                        // the linear member-step backfill contract.
+                        self.intermediate_nodes.push(Some(current));
+                        continue;
+                    }
+                    // Fallback: whole-surface MappedType resolution
+                    // (the pre-F path). Reached when:
+                    // - The walker is at the terminal hop with no
+                    //   remaining segment (caller requested the whole
+                    //   mapped surface).
+                    // - `mapper.name_remap` is set (post-remap surface
+                    //   name lookup is not 1:1 to iteration key).
+                    // - The next path segment is an unresolvable
+                    //   TypeNode index.
                     let resolved = match self.dispatch.execute(SemanticQueryKey::MappedType {
                         source: *source,
                         mapper: mapper.clone(),
