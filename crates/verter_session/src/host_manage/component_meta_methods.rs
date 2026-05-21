@@ -374,6 +374,7 @@ impl VerterHost {
         result.value
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn compute_component_meta_state(
         &self,
         canonical: &str,
@@ -421,10 +422,30 @@ impl VerterHost {
         // shadowing write cost without cross-call accumulation
         // (codex consult #3 diagnosis).
         let store_view = self.resolver_store_view().with_session_overlay(self, view);
+        self.compute_component_meta_state_with_session_view_and_base(
+            canonical, mode, whole_hash, view, &store_view, overlay,
+        )
+    }
+
+    /// Variant of [`Self::compute_component_meta_state_with_view`]
+    /// that reuses a caller-supplied `&HostStoreView` instead of
+    /// rebuilding it. Used by the singleflight executor path so the
+    /// view-snapshot the executor takes flows into the cold-compute
+    /// resolver context.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn compute_component_meta_state_with_session_view_and_base(
+        &self,
+        canonical: &str,
+        mode: ProjectionMode,
+        whole_hash: Hash16,
+        view: &dyn crate::session_view::SessionView,
+        store_view: &crate::resolver_store::HostStoreView,
+        overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
+    ) -> Option<ResolvedComponentMetaState> {
         let session_ctx = crate::resolver_core::SessionResolverContext::new(
             self,
             view,
-            &store_view,
+            store_view,
             std::sync::Arc::clone(overlay),
         );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
@@ -440,9 +461,9 @@ impl VerterHost {
     }
 
     /// View-aware variant of
-    /// [`Self::compute_component_meta_state_from_captured`]. See
-    /// [`Self::compute_component_meta_state_with_view`] for the
-    /// routing rationale.
+    /// Captured-inputs variant of
+    /// [`Self::compute_component_meta_state_with_view`]. See that
+    /// method for the routing rationale.
     pub(crate) fn compute_component_meta_state_from_captured_with_view(
         &self,
         canonical: &str,
@@ -466,10 +487,28 @@ impl VerterHost {
         // [`Self::compute_component_meta_state_with_view`] for the
         // rationale.
         let store_view = self.resolver_store_view().with_session_overlay(self, view);
+        self.compute_component_meta_state_from_captured_with_session_view_and_base(
+            canonical, mode, captured, view, &store_view, overlay,
+        )
+    }
+
+    /// Variant of [`Self::compute_component_meta_state_from_captured_with_view`]
+    /// that reuses a caller-supplied `&HostStoreView` instead of
+    /// rebuilding it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn compute_component_meta_state_from_captured_with_session_view_and_base(
+        &self,
+        canonical: &str,
+        mode: ProjectionMode,
+        captured: &CapturedComponentMetaInputs,
+        view: &dyn crate::session_view::SessionView,
+        store_view: &crate::resolver_store::HostStoreView,
+        overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
+    ) -> Option<ResolvedComponentMetaState> {
         let session_ctx = crate::resolver_core::SessionResolverContext::new(
             self,
             view,
-            &store_view,
+            store_view,
             std::sync::Arc::clone(overlay),
         );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
@@ -508,9 +547,26 @@ impl VerterHost {
         overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
     ) -> Option<ResolvedComponentMetaState> {
         let store_view = self.resolver_store_view();
+        self.compute_component_meta_state_with_view_arg(
+            canonical, mode, whole_hash, &store_view, overlay,
+        )
+    }
+
+    /// Compute cold-compute body with a caller-supplied view. The
+    /// view is the authority for the resolver-tier ctx, so the
+    /// trait-impl boundary in `ComponentMetaRequestHost` reuses the
+    /// executor-snapshotted view instead of rebuilding one inside.
+    pub(crate) fn compute_component_meta_state_with_view_arg(
+        &self,
+        canonical: &str,
+        mode: ProjectionMode,
+        whole_hash: Hash16,
+        store_view: &crate::resolver_store::HostStoreView,
+        overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
+    ) -> Option<ResolvedComponentMetaState> {
         let host_ctx = crate::resolver_core::HostResolverContext::new(
             self,
-            &store_view,
+            store_view,
             std::sync::Arc::clone(overlay),
         );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
@@ -525,10 +581,9 @@ impl VerterHost {
         )
     }
 
-    /// Overlay-aware variant of
-    /// [`Self::compute_component_meta_state_from_captured`] (Block 6.c
-    /// Shape 1). See [`Self::compute_component_meta_state_with_overlay`]
-    /// for the rationale.
+    /// Captured-inputs variant of
+    /// [`Self::compute_component_meta_state_with_overlay`]. See that
+    /// method for the routing rationale.
     pub(crate) fn compute_component_meta_state_from_captured_with_overlay(
         &self,
         canonical: &str,
@@ -537,9 +592,25 @@ impl VerterHost {
         overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
     ) -> Option<ResolvedComponentMetaState> {
         let store_view = self.resolver_store_view();
+        self.compute_component_meta_state_from_captured_with_view_arg(
+            canonical, mode, captured, &store_view, overlay,
+        )
+    }
+
+    /// View-bearing variant of
+    /// [`Self::compute_component_meta_state_from_captured_with_overlay`].
+    /// Reuses an executor-snapshotted view rather than rebuilding one.
+    pub(crate) fn compute_component_meta_state_from_captured_with_view_arg(
+        &self,
+        canonical: &str,
+        mode: ProjectionMode,
+        captured: &CapturedComponentMetaInputs,
+        store_view: &crate::resolver_store::HostStoreView,
+        overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
+    ) -> Option<ResolvedComponentMetaState> {
         let host_ctx = crate::resolver_core::HostResolverContext::new(
             self,
-            &store_view,
+            store_view,
             std::sync::Arc::clone(overlay),
         );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
@@ -643,23 +714,6 @@ impl VerterHost {
             self,
             canonical,
             &self.resolver_store_view(),
-        )
-    }
-
-    pub(crate) fn compute_component_meta_state_from_captured(
-        &self,
-        canonical: &str,
-        mode: ProjectionMode,
-        captured: &CapturedComponentMetaInputs,
-    ) -> Option<ResolvedComponentMetaState> {
-        self.compute_component_meta_state_inner(
-            canonical,
-            mode,
-            captured.whole_hash,
-            Some(captured),
-            crate::resolver_core::ComponentMetaResolutionPurpose::Full,
-            RegistryMaterialization::Full,
-            None,
         )
     }
 

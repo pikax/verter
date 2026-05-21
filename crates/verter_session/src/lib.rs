@@ -479,16 +479,21 @@ pub mod for_tests {
     ) -> Option<crate::resolver_core::FactReadSetFinalise> {
         let canonical = host.resolve_alias_or_canonical(owner_canonical);
         let (resolved_opt, read_set) = host.with_fact_tracer(|| {
-            host.resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)
+            crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+                host.resolve_component_meta(
+                    canonical.as_str(),
+                    crate::types::ProjectionMode::Expanded,
+                )
                 .map(|resolved| {
                     let _ = crate::host_manage::extract_component_meta_from_resolved(
                         host,
                         canonical.as_str(),
                         &resolved,
                         true,
-                        None,
+                        ctx,
                     );
                 })
+            })
         });
         resolved_opt?;
         Some(read_set.finalise())

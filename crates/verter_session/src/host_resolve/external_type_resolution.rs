@@ -59,21 +59,26 @@ impl VerterHost {
         Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
         crate::types::ExternalTypeResolveError,
     > {
-        self.resolve_external_type_from_loaded_files_with_view(
-            owner_canonical,
-            import_source,
-            type_name,
-            tracked_deps,
-            resolution_deps,
-            cache,
-            visiting,
-            required_root_dep,
-            kind,
-            use_host_cache,
-            profile_hash,
-            depth,
-            None,
-        )
+        // Test-only wrapper: construct a bare-host ctx so tightened tests
+        // do not need to assemble the request boundary inline.
+        crate::resolver_core::with_bare_host_ctx_for_test(self, |ctx| {
+            self.resolve_external_type_from_loaded_files_with_view(
+                ctx,
+                owner_canonical,
+                import_source,
+                type_name,
+                tracked_deps,
+                resolution_deps,
+                cache,
+                visiting,
+                required_root_dep,
+                kind,
+                use_host_cache,
+                profile_hash,
+                depth,
+                None,
+            )
+        })
     }
 
     /// View-aware variant of [`Self::resolve_external_type_from_loaded_files`].
@@ -86,6 +91,7 @@ impl VerterHost {
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(crate) fn resolve_external_type_from_loaded_files_with_view(
         &self,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         owner_canonical: &str,
         import_source: &str,
         type_name: &str,
@@ -202,6 +208,7 @@ impl VerterHost {
         let mut companion_plans = FrontierCompanionPlans::default();
         let (frontier, target, had_route_cycle) = match self
             .run_external_type_frontier_closure_with_view(
+                ctx,
                 dep_canonical.as_str(),
                 type_name,
                 &mut requested_routes,
@@ -342,6 +349,7 @@ impl VerterHost {
 
         let resolved = self
             .materialize_frontier_resolved_type_with_view(
+                ctx,
                 &frontier,
                 &requested_routes,
                 &mut companion_plans,
@@ -397,6 +405,7 @@ impl VerterHost {
     #[allow(clippy::too_many_arguments)]
     fn resolve_component_meta_macro_elements_target_with_view(
         &self,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         owner_canonical: &str,
         import_source: &str,
         type_name: &str,
@@ -425,16 +434,17 @@ impl VerterHost {
             // Re-query the project-global `ImportedRootDb` for the target
             // identity. It collapses concurrent cold requests internally, so
             // repeated calls are cheap warm hits — there is no need for a
-            // second per-request memo layer above it.
+            // second per-request memo layer above it. Route through `ctx`
+            // so request-bound callers exercise the overlay-aware view.
             let (target_canonical, target_name) =
-                self.resolve_imported_type_root(dep_canonical.as_str(), type_name);
+                ctx.resolve_imported_type_root(dep_canonical.as_str(), type_name);
             tracked_deps.insert(target_canonical.clone());
             resolution_deps.insert(target_canonical.clone());
             return Some((dep_canonical, target_canonical, target_name, elements));
         }
 
         let (seed_canonical, seed_type_name) =
-            self.resolve_imported_type_root(dep_canonical.as_str(), type_name);
+            ctx.resolve_imported_type_root(dep_canonical.as_str(), type_name);
         tracked_deps.insert(seed_canonical.clone());
         resolution_deps.insert(seed_canonical.clone());
 
@@ -454,6 +464,7 @@ impl VerterHost {
         let mut companion_plans = FrontierCompanionPlans::default();
         let (frontier, target, had_route_cycle) = self
             .run_external_type_frontier_closure_with_view(
+                ctx,
                 seed_canonical.as_str(),
                 seed_type_name.as_str(),
                 &mut requested_routes,
@@ -494,6 +505,7 @@ impl VerterHost {
 
         let resolved = self
             .materialize_frontier_resolved_type_with_view(
+                ctx,
                 &frontier,
                 &requested_routes,
                 &mut companion_plans,
@@ -526,6 +538,7 @@ impl VerterHost {
 
     fn build_imported_macro_declaration_from_target(
         &self,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         dep_canonical: &str,
         requested_name: &str,
         target_canonical: &str,
@@ -541,7 +554,12 @@ impl VerterHost {
             target_name,
         )
         .unwrap_or_else(|| {
-            crate::meta_resolve::resolve_type_declaration(self, dep_canonical, requested_name)
+            crate::meta_resolve::resolve_type_declaration_with_context(
+                self,
+                ctx,
+                dep_canonical,
+                requested_name,
+            )
         });
         declaration.requested_name = requested_name.to_string();
         if declaration.resolved_name.is_empty() {
@@ -564,15 +582,18 @@ impl VerterHost {
         resolution_deps: &mut std::collections::BTreeSet<String>,
         cache: &mut ExternalTypeCache,
     ) -> Option<crate::resolver_core::ResolvedImportedMacroSurface> {
-        self.resolve_component_meta_macro_surface_with_view(
-            owner_canonical,
-            import_source,
-            type_name,
-            tracked_deps,
-            resolution_deps,
-            cache,
-            None,
-        )
+        crate::resolver_core::with_bare_host_ctx_for_test(self, |ctx| {
+            self.resolve_component_meta_macro_surface_with_view(
+                ctx,
+                owner_canonical,
+                import_source,
+                type_name,
+                tracked_deps,
+                resolution_deps,
+                cache,
+                None,
+            )
+        })
     }
 
     /// View-aware variant of [`Self::resolve_component_meta_macro_surface`].
@@ -582,6 +603,7 @@ impl VerterHost {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolve_component_meta_macro_surface_with_view(
         &self,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         owner_canonical: &str,
         import_source: &str,
         type_name: &str,
@@ -604,6 +626,7 @@ impl VerterHost {
 
         let (dep_canonical, effective_dep_canonical, effective_type_name, elements) = self
             .resolve_component_meta_macro_elements_target_with_view(
+                ctx,
                 owner_canonical,
                 import_source,
                 type_name,
@@ -614,6 +637,7 @@ impl VerterHost {
             )?;
         Some(crate::resolver_core::ResolvedImportedMacroSurface {
             declaration: self.build_imported_macro_declaration_from_target(
+                ctx,
                 dep_canonical.as_str(),
                 type_name,
                 effective_dep_canonical.as_str(),
@@ -634,15 +658,18 @@ impl VerterHost {
         resolution_deps: &mut std::collections::BTreeSet<String>,
         cache: &mut ExternalTypeCache,
     ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
-        self.resolve_component_meta_macro_elements_with_view(
-            owner_canonical,
-            import_source,
-            type_name,
-            tracked_deps,
-            resolution_deps,
-            cache,
-            None,
-        )
+        crate::resolver_core::with_bare_host_ctx_for_test(self, |ctx| {
+            self.resolve_component_meta_macro_elements_with_view(
+                ctx,
+                owner_canonical,
+                import_source,
+                type_name,
+                tracked_deps,
+                resolution_deps,
+                cache,
+                None,
+            )
+        })
     }
 
     /// View-aware variant of [`Self::resolve_component_meta_macro_elements`].
@@ -652,6 +679,7 @@ impl VerterHost {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolve_component_meta_macro_elements_with_view(
         &self,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         owner_canonical: &str,
         import_source: &str,
         type_name: &str,
@@ -661,6 +689,7 @@ impl VerterHost {
         view: Option<&dyn crate::session_view::SessionView>,
     ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
         self.resolve_component_meta_macro_elements_target_with_view(
+            ctx,
             owner_canonical,
             import_source,
             type_name,

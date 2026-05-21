@@ -101,7 +101,10 @@ pub(crate) use graph_predicates::{
 // `host_manage/jsdoc_resolve.rs` (host-impl tier; the
 // `HostComponentMetaResolver` adapter and `read_full_source` helper
 // belong with the host).
-pub(crate) use crate::host_manage::jsdoc_resolve::resolve_type_declaration;
+#[allow(unused_imports)]
+pub(crate) use crate::host_manage::jsdoc_resolve::{
+    resolve_type_declaration, resolve_type_declaration_with_context,
+};
 // Test-only re-exports — `meta_resolve_tests.rs` references
 // `super::HostComponentMetaResolver` and bare `resolve_jsdoc_tag_type`
 // via `super::*` glob.

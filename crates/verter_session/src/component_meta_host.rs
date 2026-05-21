@@ -638,6 +638,7 @@ fn extract_sfc_structure(source: &str) -> SfcStructure {
 #[cfg(test)]
 fn extract_component_meta_from_resolved_with_evaluated(
     host: &VerterHost,
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
     canonical_id: &str,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     evaluated_types: Option<&ExpandedComponentTypes>,
@@ -677,7 +678,7 @@ fn extract_component_meta_from_resolved_with_evaluated(
             resolved,
             None,
             &mut visiting,
-            None,
+            ctx,
         ) {
             meta.accepted_props = resolution.accepted_props;
             meta.accepted_events = resolution.accepted_events;
@@ -1283,13 +1284,16 @@ import Link from './Link.vue'
         host.upsert_base("/src/Link.vue", "<script setup lang=\"ts\"></script>")
             .unwrap();
 
-        let meta = extract_component_meta_from_resolved_with_evaluated(
-            host.host(),
-            "/src/Button.vue",
-            &resolved,
-            resolved.evaluated_types.as_ref(),
-            true,
-        );
+        let meta = crate::resolver_core::with_bare_host_ctx_for_test(host.host(), |ctx| {
+            extract_component_meta_from_resolved_with_evaluated(
+                host.host(),
+                ctx,
+                "/src/Button.vue",
+                &resolved,
+                resolved.evaluated_types.as_ref(),
+                true,
+            )
+        });
 
         assert!(
             matches!(

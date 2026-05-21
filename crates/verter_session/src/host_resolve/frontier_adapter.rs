@@ -34,6 +34,12 @@ pub(crate) struct HostFrontierAdapter<'a> {
     /// session-bearing path). `None` for base-only callers — the adapter
     /// then reads through the bare host as before.
     pub view: Option<&'a dyn SessionView>,
+    /// Request-bound resolver context plumbed from the cold-compute
+    /// entry. Carrier sites under `planned_frontier_companions` route
+    /// through `ctx.resolve_imported_type_root` so the import-root
+    /// resolution observes the request-bound overlay-aware view
+    /// rather than rebuild a workspace snapshot per call.
+    pub ctx: &'a dyn crate::resolver_core::resolver_context::ResolverContext,
     /// Request-scoped memoisation of route-only [`ShallowFileState`] entries
     /// for the duration of a single frontier traversal. **NOT a host-side
     /// mirror** of the host's `route_owned_shallow` cache (the

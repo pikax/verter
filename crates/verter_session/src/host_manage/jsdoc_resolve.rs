@@ -374,6 +374,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         // (non-session) compute paths surface `view = None` and the
         // helper collapses to the historical behaviour.
         self.host.resolve_component_meta_macro_elements_with_view(
+            self.ctx,
             owner_canonical,
             import_source,
             exported_name,
@@ -396,6 +397,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
     ) -> Option<crate::resolver_core::ResolvedImportedMacroSurface> {
         let _ = visiting;
         self.host.resolve_component_meta_macro_surface_with_view(
+            self.ctx,
             owner_canonical,
             import_source,
             exported_name,
@@ -417,6 +419,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
     ) -> Option<ResolvedJsdocBlock> {
         resolve_jsdoc_block(
             self.host,
+            self.ctx,
             canonical_source,
             span,
             if expanded {
@@ -521,6 +524,7 @@ pub(crate) fn read_full_source(host: &VerterHost, canonical_source: &str) -> Opt
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_jsdoc_block(
     host: &VerterHost,
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
     canonical_source: &str,
     span: verter_span::Span,
     mode: ProjectionMode,
@@ -547,6 +551,7 @@ pub(crate) fn resolve_jsdoc_block(
             .map(|tag| {
                 map_jsdoc_tag(
                     host,
+                    ctx,
                     canonical_source,
                     mode,
                     tracked_deps,
@@ -563,6 +568,7 @@ pub(crate) fn resolve_jsdoc_block(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn map_jsdoc_tag(
     host: &VerterHost,
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
     canonical_source: &str,
     mode: ProjectionMode,
     tracked_deps: &mut std::collections::BTreeSet<String>,
@@ -574,7 +580,7 @@ pub(crate) fn map_jsdoc_tag(
     let (text, raw_type, subject_name) = parse_jsdoc_tag_payload(tag.name.as_str(), tag.text);
     let resolved_type = if mode == ProjectionMode::Expanded {
         raw_type.as_deref().and_then(|raw_type| {
-            resolve_jsdoc_tag_type(host, canonical_source, raw_type, tracked_deps)
+            resolve_jsdoc_tag_type(host, ctx, canonical_source, raw_type, tracked_deps)
         })
     } else {
         None
@@ -645,6 +651,7 @@ pub(crate) fn parse_jsdoc_tag_payload(
 
 pub(crate) fn resolve_jsdoc_tag_type(
     host: &VerterHost,
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
     canonical_source: &str,
     raw_type: &str,
     tracked_deps: &mut std::collections::BTreeSet<String>,
@@ -662,7 +669,7 @@ pub(crate) fn resolve_jsdoc_tag_type(
     // resolve imports through host-owned caches.
     let _facts = host.ensure_indexed_ready(canonical_source)?;
     tracked_deps.extend(
-        host.imported_symbol_dependencies_for_expr(canonical_source, &parsed)
+        host.imported_symbol_dependencies_for_expr(ctx, canonical_source, &parsed)
             .into_iter()
             .map(|dependency| dependency.canonical_id),
     );

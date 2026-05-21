@@ -65,13 +65,16 @@ impl VerterHost {
         ),
         crate::types::ExternalTypeResolveError,
     > {
-        self.run_external_type_frontier_closure_with_view(
-            dep_canonical,
-            type_name,
-            requested_routes,
-            companion_plans,
-            None,
-        )
+        crate::resolver_core::with_bare_host_ctx_for_test(self, |ctx| {
+            self.run_external_type_frontier_closure_with_view(
+                ctx,
+                dep_canonical,
+                type_name,
+                requested_routes,
+                companion_plans,
+                None,
+            )
+        })
     }
 
     /// View-aware variant of run_external_type_frontier_closure.
@@ -82,6 +85,7 @@ impl VerterHost {
     #[allow(clippy::type_complexity)]
     pub(super) fn run_external_type_frontier_closure_with_view(
         &self,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         dep_canonical: &str,
         type_name: &str,
         requested_routes: &mut FrontierRequestedRoutes,
@@ -103,6 +107,7 @@ impl VerterHost {
             // the demanded companion targets after the route is known.
             route_exports_only: true,
             view,
+            ctx,
             route_shallow_cache: RefCell::new(RouteShallowStateCache::default()),
         };
         let mut frontier = crate::resolver_core::ExternalTypeFrontier::new();
@@ -237,6 +242,7 @@ impl VerterHost {
             }
 
             let planned_companions = self.planned_frontier_companions(
+                adapter.ctx,
                 &canonical_id,
                 &exported_name,
                 &requested_route,
@@ -273,6 +279,7 @@ impl VerterHost {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn materialize_frontier_resolved_type_with_view(
         &self,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         frontier: &crate::resolver_core::ExternalTypeFrontier,
         requested_routes: &FrontierRequestedRoutes,
         companion_plans: &mut FrontierCompanionPlans,
@@ -291,6 +298,7 @@ impl VerterHost {
             materialize_symbols: false,
             route_exports_only: true,
             view,
+            ctx,
             route_shallow_cache: RefCell::new(RouteShallowStateCache::default()),
         };
         let mut memo = rustc_hash::FxHashMap::default();
@@ -348,6 +356,7 @@ impl VerterHost {
                 .cloned()
                 .unwrap_or_default();
             let planned_companions = self.planned_frontier_companions(
+                adapter.ctx,
                 canonical_id,
                 exported_name,
                 &route,
@@ -419,6 +428,7 @@ impl VerterHost {
 
     fn planned_frontier_companions(
         &self,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         canonical_id: &str,
         exported_name: &str,
         route: &crate::resolver_core::RouteDemand,
@@ -465,7 +475,7 @@ impl VerterHost {
                     else {
                         continue;
                     };
-                    let (resolved_canonical, resolved_name) = self
+                    let (resolved_canonical, resolved_name) = ctx
                         .resolve_imported_type_root(dep_canonical.as_str(), imported_name.as_str());
                     planned.push(PlannedFrontierCompanion {
                         alias: required_alias.clone(),

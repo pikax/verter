@@ -833,14 +833,50 @@ impl FallthroughRequestHost for VerterHost {
         canonical_id: &str,
         prop_type_overrides: Option<&rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>>,
         visiting: &mut rustc_hash::FxHashSet<String>,
-        _store_view: Option<&Self::View>,
+        store_view: Option<&Self::View>,
     ) -> Option<Self::Resolution> {
-        VerterHost::compute_fallthrough_surface_uncached(
-            self,
-            canonical_id,
-            prop_type_overrides,
-            visiting,
-        )
+        // Consume the request-bound `store_view` to construct a
+        // `HostResolverContext` so the engine reads underneath the
+        // fallthrough closure observe the overlay-aware view. The
+        // singleflight executor passes the view it built in
+        // `snapshot_view`; when none is supplied we fall back to a
+        // freshly-snapshot view at this boundary (the `with_fixed_view`
+        // path always carries one in production).
+        match store_view {
+            Some(view) => {
+                let overlay = std::sync::Arc::new(
+                    crate::resolver_core::CanonicalCompletionOverlay::new(),
+                );
+                let host_ctx =
+                    crate::resolver_core::HostResolverContext::new(self, view, overlay);
+                let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext =
+                    &host_ctx;
+                VerterHost::compute_fallthrough_surface_uncached(
+                    self,
+                    canonical_id,
+                    prop_type_overrides,
+                    visiting,
+                    ctx,
+                )
+            }
+            None => {
+                let view = self.resolver_store_view();
+                let overlay = std::sync::Arc::new(
+                    crate::resolver_core::CanonicalCompletionOverlay::new(),
+                );
+                let host_ctx =
+                    crate::resolver_core::HostResolverContext::new(self, &view, overlay);
+                let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext =
+                    &host_ctx;
+                VerterHost::compute_fallthrough_surface_uncached(
+                    self,
+                    canonical_id,
+                    prop_type_overrides,
+                    visiting,
+                    ctx,
+                )
+            }
+        }
     }
 
     fn store_fallthrough_result(
@@ -871,14 +907,15 @@ pub(in crate::host_manage) struct HostFallthroughResolver<'a> {
     /// `..._with_resolution`). The per-element fallthrough engine
     /// constructions in `build_generic_child_prop_overrides`,
     /// `resolve_root_consumption`, and `resolve_dynamic_root_candidates`
-    /// bind to this ctx (when present) so cache validators inside the
-    /// engine read through the overlay-aware
+    /// bind to this ctx so cache validators inside the engine read
+    /// through the overlay-aware
     /// [`crate::resolver_core::HostResolverContext`] instead of paying
-    /// a fresh workspace-sweep cost per call. Tests / off-path callers
-    /// may pass `None`; the engine falls back to a bare-host ctx.
-    /// Block 7.5 Class B audit-v2 fix (sites: `fallthrough.rs:437/532/621`).
+    /// a fresh workspace-sweep cost per call. Production callers
+    /// (`get_component_meta` / `..._via_view` / `..._with_resolution`)
+    /// supply a real ctx; tests / off-path callers go through
+    /// `with_bare_host_ctx_for_test` to construct one.
     pub(in crate::host_manage) ctx:
-        Option<&'a dyn crate::resolver_core::resolver_context::ResolverContext>,
+        &'a dyn crate::resolver_core::resolver_context::ResolverContext,
 }
 
 impl FallthroughResolverHost for HostFallthroughResolver<'_> {

@@ -188,7 +188,7 @@ impl VerterHost {
                 canonical.as_str(),
                 &resolved,
                 true, // include_fallthrough
-                Some(ctx),
+                ctx,
             );
             (Some(resolved), Some(meta))
         });
@@ -326,7 +326,7 @@ impl VerterHost {
                 canonical.as_str(),
                 &resolved,
                 true, // include_fallthrough
-                Some(ctx),
+                ctx,
             );
             (Some(resolved), Some(meta))
         });
@@ -778,7 +778,7 @@ impl VerterHost {
                 canonical.as_str(),
                 &resolved,
                 true, // include_fallthrough
-                Some(host_ctx_ref),
+                host_ctx_ref,
             );
             Some((analysis, resolved))
         });
@@ -869,7 +869,7 @@ impl VerterHost {
             canonical.as_str(),
             &resolved,
             true,
-            Some(host_ctx_ref),
+            host_ctx_ref,
         );
         Some((analysis, resolved))
     }

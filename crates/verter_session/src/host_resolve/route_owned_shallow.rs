@@ -559,6 +559,7 @@ impl VerterHost {
 
     pub(super) fn collect_external_types_from_loaded_files(
         &self,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         owner_canonical: &str,
         macro_type_deps: &[verter_semantic::analysis::MacroTypeDep],
         script_imports: &[verter_semantic::analysis::AnalyzedImport],
@@ -569,6 +570,7 @@ impl VerterHost {
         std::collections::BTreeSet<String>,
     ) {
         self.collect_external_types_from_loaded_files_with_view(
+            ctx,
             owner_canonical,
             macro_type_deps,
             script_imports,
@@ -584,6 +586,7 @@ impl VerterHost {
     /// path. Base callers (`view = None`) get the historical behaviour.
     pub(super) fn collect_external_types_from_loaded_files_with_view(
         &self,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         owner_canonical: &str,
         macro_type_deps: &[verter_semantic::analysis::MacroTypeDep],
         script_imports: &[verter_semantic::analysis::AnalyzedImport],
@@ -595,7 +598,7 @@ impl VerterHost {
         std::collections::BTreeSet<String>,
     ) {
         let collected = crate::resolver_core::collect_external_macro_types(
-            &HostExternalMacroTypeCollector { host: self, view },
+            &HostExternalMacroTypeCollector { host: self, view, ctx },
             owner_canonical,
             macro_type_deps,
             script_imports,

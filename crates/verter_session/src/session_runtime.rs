@@ -212,7 +212,7 @@ impl SessionRuntime {
                 host,
                 canonical.as_str(),
                 &resolved,
-                Some(host_ctx_ref),
+                host_ctx_ref,
             );
         Some((analysis, resolved, fallthrough_fact_versions))
     }

@@ -2033,9 +2033,10 @@ export interface Props { a: string }
     let mut tracked_deps = std::collections::BTreeSet::new();
     let _store_view = project.host().resolver_store_view();
 
-    let resolved =
-        resolve_jsdoc_tag_type(project.host(), "/types.ts", "DocType", &mut tracked_deps)
-            .expect("typed JSDoc payload should resolve through cached imported lookup");
+    let resolved = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+        resolve_jsdoc_tag_type(project.host(), ctx, "/types.ts", "DocType", &mut tracked_deps)
+    })
+    .expect("typed JSDoc payload should resolve through cached imported lookup");
 
     assert!(
         matches!(resolved, verter_type_expr::TypeExpr::Object(_)),

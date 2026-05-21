@@ -845,6 +845,7 @@ fn collect_imported_macro_participating_refs(
 
 fn fill_missing_component_meta_prop_descriptions_from_imported_roots(
     host: &VerterHost,
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
     owner_canonical: &str,
     meta: &mut verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
@@ -913,7 +914,7 @@ fn fill_missing_component_meta_prop_descriptions_from_imported_roots(
                 .clone()
                 .expect("ResolvedLocalType.type_expr populated by analyzer (W0.2 invariant)");
             for dependency in
-                host.imported_symbol_dependencies_for_expr(owner_canonical, &local_expr)
+                host.imported_symbol_dependencies_for_expr(ctx, owner_canonical, &local_expr)
             {
                 if !imported_roots.insert((
                     dependency.canonical_id.clone(),
@@ -1439,7 +1440,7 @@ pub(crate) fn extract_component_meta_from_resolved(
     canonical_or_alias: &str,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     include_fallthrough: bool,
-    ctx: Option<&dyn crate::resolver_core::resolver_context::ResolverContext>,
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
 ) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
     let resolved_macros = resolver_component_meta_resolved_macros(
@@ -1465,6 +1466,7 @@ pub(crate) fn extract_component_meta_from_resolved(
     );
     if fill_missing_component_meta_prop_descriptions_from_imported_roots(
         host,
+        ctx,
         canonical.as_str(),
         &mut meta,
         resolved,
@@ -1515,7 +1517,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
     host: &VerterHost,
     canonical_or_alias: &str,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
-    ctx: Option<&dyn crate::resolver_core::resolver_context::ResolverContext>,
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
 ) -> (
     verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
     Option<Vec<crate::resolver_core::FactVersionRef>>,

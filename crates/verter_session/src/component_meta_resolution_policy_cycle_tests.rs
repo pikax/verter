@@ -155,15 +155,17 @@ fn run_policy_with_overflow_check(
 ) -> Result<ComponentMetaAnalysis, crate::capture_token::StackOverflow> {
     assert_no_stack_overflow(move || {
         let host = empty_host();
-        apply_component_meta_resolution_policy(
-            &mut meta,
-            &registry,
-            &registry_meta,
-            &host,
-            "/owner.vue",
-            None,
-            None,
-        );
+        crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+            apply_component_meta_resolution_policy(
+                &mut meta,
+                &registry,
+                &registry_meta,
+                &host,
+                "/owner.vue",
+                None,
+                ctx,
+            );
+        });
         meta
     })
 }

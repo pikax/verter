@@ -798,6 +798,7 @@ impl VerterHost {
 
     fn imported_symbol_dependencies(
         &self,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         canonical_id: &str,
         exported_name: &str,
         decl_body: &verter_type_expr::TypeExpr,
@@ -825,8 +826,10 @@ impl VerterHost {
                 let (resolved_canonical, resolved_name) = if root_name == referenced_name {
                     // Direct owner import — resolve via the project-global
                     // owner surface so every stage reads the same cached
-                    // answer for this `(owner, local_name)` pair.
-                    match self.resolve_owner_direct_import(canonical_id, root_name) {
+                    // answer for this `(owner, local_name)` pair. Route
+                    // through `ctx` so request-bound callers exercise the
+                    // overlay-aware view rather than rebuild one per call.
+                    match ctx.resolve_owner_direct_import(canonical_id, root_name) {
                         Some(resolved) => resolved,
                         None => continue,
                     }
@@ -841,7 +844,7 @@ impl VerterHost {
                     else {
                         continue;
                     };
-                    self.resolve_imported_type_root(
+                    ctx.resolve_imported_type_root(
                         dep_canonical.as_str(),
                         imported_member.as_str(),
                     )
@@ -885,18 +888,20 @@ impl VerterHost {
 
     pub(crate) fn imported_symbol_dependencies_for_expr(
         &self,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         canonical_id: &str,
         expr: &verter_type_expr::TypeExpr,
     ) -> Vec<ImportedSymbolDependency> {
-        self.cache_only_lookup_symbol_dependencies_for_expr(canonical_id, expr)
+        self.cache_only_lookup_symbol_dependencies_for_expr(ctx, canonical_id, expr)
     }
 
     fn cache_only_lookup_symbol_dependencies_for_expr(
         &self,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         canonical_id: &str,
         expr: &verter_type_expr::TypeExpr,
     ) -> Vec<ImportedSymbolDependency> {
-        let mut dependencies = self.imported_symbol_dependencies(canonical_id, "", expr);
+        let mut dependencies = self.imported_symbol_dependencies(ctx, canonical_id, "", expr);
         dependencies.sort_by(|left, right| {
             left.local_name
                 .cmp(&right.local_name)

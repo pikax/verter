@@ -448,3 +448,26 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         self.inner
     }
 }
+
+/// Test-only convenience: build a request-bound [`HostResolverContext`]
+/// over a bare host and invoke `f` with it.
+///
+/// Production code paths construct the wrapper inline at the request
+/// entry boundary (see e.g. `component_meta_entry.rs`); this helper
+/// exists so unit + integration test fixtures that exercise APIs
+/// tightened to require `&dyn ResolverContext` (extract / policy /
+/// fallthrough / intrinsic-projection) can keep their bodies concise
+/// without inlining the 3-line construction dance.
+///
+/// `#[cfg(any(test, debug_assertions))]`-gated so release builds drop
+/// the helper entirely.
+#[cfg(any(test, debug_assertions))]
+pub(crate) fn with_bare_host_ctx_for_test<R>(
+    host: &crate::VerterHost,
+    f: impl FnOnce(&dyn ResolverContext) -> R,
+) -> R {
+    let view = crate::VerterHost::resolver_store_view(host);
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    let host_ctx = HostResolverContext::new(host, &view, overlay);
+    f(&host_ctx)
+}

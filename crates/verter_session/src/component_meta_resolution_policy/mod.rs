@@ -98,7 +98,7 @@ pub(crate) fn apply_component_meta_resolution_policy(
     host: &VerterHost,
     owner_canonical: &str,
     snapshot: Option<&FileAnalysisSnapshot>,
-    ctx: Option<&dyn crate::resolver_core::resolver_context::ResolverContext>,
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
 ) {
     let macro_participating_idents: FxHashSet<ResolvedRootIdentity> = match snapshot {
         Some(snap) => {
@@ -132,18 +132,12 @@ pub(crate) fn apply_component_meta_resolution_policy_with_participation(
     host: &VerterHost,
     owner_canonical: &str,
     macro_participating_idents: &FxHashSet<ResolvedRootIdentity>,
-    ctx: Option<&dyn crate::resolver_core::resolver_context::ResolverContext>,
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
 ) {
     let registry = PolicyRegistry::build(type_registry, type_registry_meta);
-    // Block 7.5 Class B fix (audit-v2 §"Recommended priority order" #1):
-    // bind the engine to the supplied request-bound `ctx` when one is
-    // available so every nested dispatch / validator inherits the
-    // overlay-aware view. Bare-host fallback retained for the test
-    // entry points (`run_policy`, `run_policy_with_macro_participation`)
-    // that exercise this pass directly without a request boundary.
-    let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = host;
-    let engine_ctx = ctx.unwrap_or(base_ctx);
-    let mut engine = ComponentMetaQueryEngine::new(engine_ctx);
+    // Bind the engine to the supplied request-bound `ctx` so every
+    // nested dispatch / validator inherits the overlay-aware view.
+    let mut engine = ComponentMetaQueryEngine::new(ctx);
     let mut ctx = PolicyCtx {
         registry: &registry,
         engine: &mut engine,

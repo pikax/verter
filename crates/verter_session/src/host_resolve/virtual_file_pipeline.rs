@@ -1001,8 +1001,15 @@ impl VerterHost {
             .unwrap_or(&canonical)
             .trim_end_matches(".vue")
             .to_string();
+        let store_view = self.resolver_store_view();
+        let overlay =
+            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx =
+            crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
+        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
         let (external_types, _, transitive_macro_type_deps) = self
             .collect_external_types_from_loaded_files(
+                ctx,
                 &canonical,
                 &macro_type_deps,
                 &script_imports,
@@ -1173,8 +1180,15 @@ impl VerterHost {
         let mut unresolved_macro_type_diags = Vec::new();
         let profile_hash = compile_profile_hash(profile);
 
+        let store_view = self.resolver_store_view();
+        let overlay =
+            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx =
+            crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
+        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
         let (external_types, missing_macro_type_diags, transitive_macro_type_deps) = self
             .collect_external_types_from_loaded_files(
+                ctx,
                 &snapshot.canonical_id,
                 &snapshot.macro_type_deps,
                 &snapshot.script_imports,

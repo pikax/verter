@@ -758,7 +758,7 @@ impl MetaSession {
                         host,
                         canonical.as_str(),
                         &resolved,
-                        Some(host_ctx_ref),
+                        host_ctx_ref,
                     );
                 if component_meta_resolution_budget_error(
                     canonical.as_str(),
@@ -868,7 +868,7 @@ impl MetaSession {
                     host,
                     canonical.as_str(),
                     &resolved,
-                    Some(host_ctx_ref),
+                    host_ctx_ref,
                 );
 
             if let Some(err) = component_meta_resolution_budget_error(

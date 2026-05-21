@@ -14,6 +14,10 @@ pub(super) struct HostExternalMacroTypeCollector<'a> {
     /// session-bearing cold-compute path). `None` for base callers — the
     /// underlying type resolution then routes through the base-only path.
     pub view: Option<&'a dyn SessionView>,
+    /// Request-bound resolver context plumbed from the cold-compute
+    /// entry-point. Routes carrier reads through the overlay-aware
+    /// view rather than rebuild a workspace snapshot per call.
+    pub ctx: &'a dyn crate::resolver_core::resolver_context::ResolverContext,
 }
 
 impl crate::resolver_core::ExternalMacroTypeCollectorHost for HostExternalMacroTypeCollector<'_> {
@@ -31,6 +35,7 @@ impl crate::resolver_core::ExternalMacroTypeCollectorHost for HostExternalMacroT
     ) -> Result<Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>, Self::Error>
     {
         self.host.resolve_external_type_from_loaded_files_with_view(
+            self.ctx,
             owner_canonical,
             &dep.import_source,
             &dep.type_name,

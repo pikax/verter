@@ -27,15 +27,17 @@ fn run_policy(
     registry_meta: &[ResolvedTypeRegistryMeta],
 ) {
     let host = empty_host();
-    apply_component_meta_resolution_policy(
-        meta,
-        registry,
-        registry_meta,
-        &host,
-        "/owner.vue",
-        None,
-        None,
-    );
+    crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+        apply_component_meta_resolution_policy(
+            meta,
+            registry,
+            registry_meta,
+            &host,
+            "/owner.vue",
+            None,
+            ctx,
+        );
+    });
 }
 
 /// Run the policy with a pre-built macro-participation set whose
@@ -83,15 +85,17 @@ fn run_policy_with_macro_participation(
             participating.insert(ResolvedRootIdentity::new("/owner.vue", *name));
         }
     }
-    crate::component_meta_resolution_policy::apply_component_meta_resolution_policy_with_participation(
-        meta,
-        registry,
-        registry_meta,
-        &host,
-        "/owner.vue",
-        &participating,
-        None,
-    );
+    crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+        crate::component_meta_resolution_policy::apply_component_meta_resolution_policy_with_participation(
+            meta,
+            registry,
+            registry_meta,
+            &host,
+            "/owner.vue",
+            &participating,
+            ctx,
+        );
+    });
 }
 
 fn empty_meta() -> ComponentMetaAnalysis {

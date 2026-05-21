@@ -2410,15 +2410,16 @@ import Child from './Child.vue'
                 .expect("whole hash should exist for App.vue"),
         )
         .expect("resolved meta should exist");
-    let resolution = host
-        .compute_fallthrough_surface_from_resolved_state(
+    let resolution = crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+        host.compute_fallthrough_surface_from_resolved_state(
             "/src/App.vue",
             &resolved,
             None,
             &mut visiting,
-            None,
+            ctx,
         )
-        .expect("fallthrough should resolve");
+    })
+    .expect("fallthrough should resolve");
     assert!(
         matches!(
             resolution.fallthrough_surface,
@@ -2509,8 +2510,9 @@ import { shared } from './shared'
         .resolve_component_meta("/src/Button.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved meta should be computed from the captured view");
 
-    let meta =
-        extract_component_meta_from_resolved(&host, "/src/Button.vue", &resolved, true, None);
+    let meta = crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+        extract_component_meta_from_resolved(&host, "/src/Button.vue", &resolved, true, ctx)
+    });
 
     assert!(
         matches!(

@@ -1673,11 +1673,17 @@ defineProps<Props>()
     let _ = resolve_type(&host, "/src/Consumer.vue", "./barrel", "Props");
 
     // Now use the frontier adapter
+    let view_for_ctx = host.resolver_store_view();
+    let overlay_for_ctx =
+        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx_for_adapter =
+        crate::resolver_core::HostResolverContext::new(&host, &view_for_ctx, overlay_for_ctx);
     let adapter = crate::host_resolve::HostFrontierAdapter {
         host: &host,
         materialize_symbols: true,
         route_exports_only: false,
         view: None,
+        ctx: &host_ctx_for_adapter,
         route_shallow_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
     };
 
@@ -1735,11 +1741,17 @@ defineProps<Props>()
     // Populate caches
     let _ = resolve_type(&host, "/src/Consumer.vue", "./barrel", "Props");
 
+    let view_for_ctx = host.resolver_store_view();
+    let overlay_for_ctx =
+        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx_for_adapter =
+        crate::resolver_core::HostResolverContext::new(&host, &view_for_ctx, overlay_for_ctx);
     let adapter = crate::host_resolve::HostFrontierAdapter {
         host: &host,
         materialize_symbols: true,
         route_exports_only: false,
         view: None,
+        ctx: &host_ctx_for_adapter,
         route_shallow_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
     };
 

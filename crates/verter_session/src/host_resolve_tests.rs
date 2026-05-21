@@ -1953,11 +1953,17 @@ export interface Props {
         "the active member route should be transferred onto the defining target",
     );
 
+    let view_for_ctx = host.resolver_store_view();
+    let overlay_for_ctx =
+        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx_for_adapter =
+        crate::resolver_core::HostResolverContext::new(&host, &view_for_ctx, overlay_for_ctx);
     let adapter = super::HostFrontierAdapter {
         host: &host,
         materialize_symbols: false,
         route_exports_only: true,
         view: None,
+        ctx: &host_ctx_for_adapter,
         route_shallow_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
     };
     let mut inspected_symbols = rustc_hash::FxHashSet::default();

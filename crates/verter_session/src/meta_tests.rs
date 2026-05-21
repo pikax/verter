@@ -10053,13 +10053,15 @@ defineEmits<Emits>()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
-    let meta = crate::host_manage::extract_component_meta_from_resolved(
-        project.host(),
-        "/src/App.vue",
-        &resolved,
-        true,
-        None,
-    );
+    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+        crate::host_manage::extract_component_meta_from_resolved(
+            project.host(),
+            "/src/App.vue",
+            &resolved,
+            true,
+            ctx,
+        )
+    });
     let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
 
     assert!(
@@ -10300,13 +10302,15 @@ defineSlots<TabsSlots<T>>()
         .host()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
-    let meta = crate::host_manage::extract_component_meta_from_resolved(
-        project.host(),
-        "/src/App.vue",
-        &resolved,
-        true,
-        None,
-    );
+    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+        crate::host_manage::extract_component_meta_from_resolved(
+            project.host(),
+            "/src/App.vue",
+            &resolved,
+            true,
+            ctx,
+        )
+    });
     let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
 
     assert!(
@@ -10579,13 +10583,15 @@ defineSlots<TabsSlots<T>>()
         .host()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
-    let meta = crate::host_manage::extract_component_meta_from_resolved(
-        project.host(),
-        "/src/App.vue",
-        &resolved,
-        true,
-        None,
-    );
+    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+        crate::host_manage::extract_component_meta_from_resolved(
+            project.host(),
+            "/src/App.vue",
+            &resolved,
+            true,
+            ctx,
+        )
+    });
 
     let color = meta
         .props
@@ -10788,13 +10794,15 @@ defineSlots<TabsSlots<T>>()
         .host()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
-    let meta = crate::host_manage::extract_component_meta_from_resolved(
-        project.host(),
-        "/src/App.vue",
-        &resolved,
-        true,
-        None,
-    );
+    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+        crate::host_manage::extract_component_meta_from_resolved(
+            project.host(),
+            "/src/App.vue",
+            &resolved,
+            true,
+            ctx,
+        )
+    });
     let content_slot = meta
         .slots
         .iter()
@@ -11034,13 +11042,15 @@ defineSlots<TabsSlots<T>>()
         .host()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
-    let meta = crate::host_manage::extract_component_meta_from_resolved(
-        project.host(),
-        "/src/App.vue",
-        &resolved,
-        true,
-        None,
-    );
+    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+        crate::host_manage::extract_component_meta_from_resolved(
+            project.host(),
+            "/src/App.vue",
+            &resolved,
+            true,
+            ctx,
+        )
+    });
     let content_slot = meta
         .slots
         .iter()
@@ -11143,13 +11153,15 @@ defineProps<{
         elapsed.as_secs_f64()
     );
 
-    let meta = crate::host_manage::extract_component_meta_from_resolved(
-        project.host(),
-        "/src/App.vue",
-        &resolved,
-        true,
-        None,
-    );
+    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+        crate::host_manage::extract_component_meta_from_resolved(
+            project.host(),
+            "/src/App.vue",
+            &resolved,
+            true,
+            ctx,
+        )
+    });
     assert!(
         meta.props.iter().any(|prop| prop.name == "valueKey"),
         "valueKey prop should still be produced, got props {:?}",
@@ -11223,13 +11235,15 @@ defineProps<{
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let started = std::time::Instant::now();
-    let meta = crate::host_manage::extract_component_meta_from_resolved(
-        project.host(),
-        "/src/App.vue",
-        &resolved,
-        false,
-        None,
-    );
+    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+        crate::host_manage::extract_component_meta_from_resolved(
+            project.host(),
+            "/src/App.vue",
+            &resolved,
+            false,
+            ctx,
+        )
+    });
     let elapsed = started.elapsed();
 
     assert!(
@@ -11322,13 +11336,15 @@ defineSlots<Slots<M>>()
         .host()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
-    let meta = crate::host_manage::extract_component_meta_from_resolved(
-        project.host(),
-        "/src/App.vue",
-        &resolved,
-        false,
-        None,
-    );
+    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+        crate::host_manage::extract_component_meta_from_resolved(
+            project.host(),
+            "/src/App.vue",
+            &resolved,
+            false,
+            ctx,
+        )
+    });
     let elapsed = started.elapsed();
 
     assert!(

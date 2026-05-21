@@ -240,16 +240,46 @@ impl ComponentMetaRequestHost for VerterHost {
         canonical: &str,
         mode: Self::Mode,
         captured: Option<&Self::CapturedInputs>,
-        _store_view: Option<&Self::View>,
+        store_view: Option<&Self::View>,
     ) -> Option<Self::Resolution> {
-        if let Some(captured) = captured {
-            return self.compute_component_meta_state_from_captured(canonical, mode, captured);
+        // Consume the request-bound `store_view` to construct a
+        // `HostResolverContext` so the cold-compute pipeline binds
+        // overlay-aware reads to the same view the executor already
+        // snapshotted. The singleflight executor always supplies a
+        // view in production (`snapshot_view` builds one above);
+        // the `None` branch falls back to building a view here for
+        // robustness.
+        let overlay =
+            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        match store_view {
+            Some(view) => {
+                if let Some(captured) = captured {
+                    return self.compute_component_meta_state_from_captured_with_view_arg(
+                        canonical, mode, captured, view, &overlay,
+                    );
+                }
+                let whole_hash = self
+                    .current_or_read_whole_hash(canonical)
+                    .unwrap_or_default();
+                self.compute_component_meta_state_with_view_arg(
+                    canonical, mode, whole_hash, view, &overlay,
+                )
+            }
+            None => {
+                let view = self.resolver_store_view();
+                if let Some(captured) = captured {
+                    return self.compute_component_meta_state_from_captured_with_view_arg(
+                        canonical, mode, captured, &view, &overlay,
+                    );
+                }
+                let whole_hash = self
+                    .current_or_read_whole_hash(canonical)
+                    .unwrap_or_default();
+                self.compute_component_meta_state_with_view_arg(
+                    canonical, mode, whole_hash, &view, &overlay,
+                )
+            }
         }
-
-        let whole_hash = self
-            .current_or_read_whole_hash(canonical)
-            .unwrap_or_default();
-        self.compute_component_meta_state(canonical, mode, whole_hash)
     }
 
     fn store_component_meta_result(
@@ -338,13 +368,12 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
         // shapes) observe overlay candidates published by the
         // prewarm pass.
         //
-        // Block 6.c Shape 1: pass the request-scoped overlay
-        // (`self.overlay`) into the `_with_view` helpers so the
-        // SessionResolverContext built inside them shares the SAME
-        // overlay across capture / try-get-cached / compute boundaries.
-        // Pre-Shape-1 each helper invocation called `Arc::new(...)`
-        // and produced a fresh empty overlay per call (codex consult
-        // #3 diagnosis).
+        // The executor-snapshotted `_store_view` is the BASE view (no
+        // session overlay applied); the session-bound cold compute
+        // needs the overlay-rooted form via `with_session_overlay`, so
+        // we delegate to `_with_view` here. `self.overlay` is the
+        // request-scoped completion overlay shared across capture /
+        // try-get-cached / compute boundaries.
         if let Some(captured) = captured {
             return self
                 .host
@@ -500,29 +529,58 @@ impl<'a> ComponentMetaRequestHost for SessionRequestHost<'a> {
         canonical: &str,
         mode: Self::Mode,
         captured: Option<&Self::CapturedInputs>,
-        _store_view: Option<&Self::View>,
+        store_view: Option<&Self::View>,
     ) -> Option<Self::Resolution> {
-        // Block 6.c Shape 1: route through the overlay-bearing
-        // bare-host helpers so the resolver-tier reads inside cold
-        // compute observe canonicals promoted by mid-request
-        // `ensure_loaded` / `ensure_indexed_ready`. The overlay
-        // (`self.overlay`) is shared across capture / try-get-cached
-        // / compute boundaries; before Shape 1 the bare-host path
-        // had no overlay at all, so every `ensure_indexed_ready`
-        // result was visible only locally to the call site.
+        // Consume the executor-snapshotted `store_view` to build the
+        // request-bound `HostResolverContext` so the cold-compute pipeline
+        // reuses it rather than rebuilding a fresh workspace snapshot.
+        // The shared overlay (`self.overlay`) lives across capture /
+        // try-get-cached / compute boundaries so canonicals promoted
+        // mid-request by `ensure_loaded` / `ensure_indexed_ready` stay
+        // visible.
         let host = self.runtime.host();
-        if let Some(captured) = captured {
-            return host.compute_component_meta_state_from_captured_with_overlay(
-                canonical,
-                mode,
-                captured,
-                &self.overlay,
-            );
+        match store_view {
+            Some(view) => {
+                if let Some(captured) = captured {
+                    return host.compute_component_meta_state_from_captured_with_view_arg(
+                        canonical,
+                        mode,
+                        captured,
+                        view,
+                        &self.overlay,
+                    );
+                }
+                let whole_hash = host
+                    .current_or_read_whole_hash(canonical)
+                    .unwrap_or_default();
+                host.compute_component_meta_state_with_view_arg(
+                    canonical,
+                    mode,
+                    whole_hash,
+                    view,
+                    &self.overlay,
+                )
+            }
+            None => {
+                if let Some(captured) = captured {
+                    return host.compute_component_meta_state_from_captured_with_overlay(
+                        canonical,
+                        mode,
+                        captured,
+                        &self.overlay,
+                    );
+                }
+                let whole_hash = host
+                    .current_or_read_whole_hash(canonical)
+                    .unwrap_or_default();
+                host.compute_component_meta_state_with_overlay(
+                    canonical,
+                    mode,
+                    whole_hash,
+                    &self.overlay,
+                )
+            }
         }
-        let whole_hash = host
-            .current_or_read_whole_hash(canonical)
-            .unwrap_or_default();
-        host.compute_component_meta_state_with_overlay(canonical, mode, whole_hash, &self.overlay)
     }
 
     fn store_component_meta_result(
