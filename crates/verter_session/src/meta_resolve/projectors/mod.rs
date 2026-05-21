@@ -635,6 +635,46 @@ fn member_shape_peek_or_compute(
             .unwrap_or(TypeExpr::Unknown { raw: String::new() })
     };
 
+    // Block 6.h Commit C — peek-before-gates. Once the member is
+    // raised, consult `MaterializeMemoDb` for the `(scope, raised, mode)`
+    // triple. A warm hit here SKIPS the three shallow gates below
+    // (`type_expr_has_package_backed_object_like_root`,
+    // `lowered_root_reaches_transitive_cycle`,
+    // `type_expr_contains_reducible_operator`) AND the cold reducer
+    // dispatch — the cached `MaterializedTypeExpr` already reflects
+    // the same gate semantics from its original compute. The peek's
+    // `MaterializeMemoDb::peek` protocol re-emits the cached entry's
+    // `fact_dep_signature` via `bubble_fact_signature`.
+    //
+    // For `Leaf` / `BareCarrier` shapes the peek answers immediately
+    // and avoids the `type_expr_has_package_backed_object_like_root`
+    // route lookup, which was Investigator-1's biggest residual
+    // gate-cost source on warm same-file member-shape paths.
+    if let Some(peeked) = peek_member_shape_known(query_engine, scope_canonical_id, &raised, mode) {
+        match peeked {
+            PeekedShape::Leaf(leaf) => {
+                return MaterializedTypeExpr {
+                    node_id: Some(member_value),
+                    type_expr: leaf,
+                    dep_signature: Arc::from(Vec::new()),
+                };
+            }
+            PeekedShape::BareCarrier { .. } => {
+                return MaterializedTypeExpr {
+                    node_id: Some(member_value),
+                    type_expr: raised,
+                    dep_signature: Arc::from(Vec::new()),
+                };
+            }
+            PeekedShape::Cached(materialized) => {
+                // Warm operator-shape hit. The cached entry already
+                // observed `dep_signature`; the peek bubbled it. Return
+                // verbatim — no gate / reducer dispatch.
+                return materialized;
+            }
+        }
+    }
+
     // (3) Shallow gates on the raised TypeExpr — same predicates
     // `reduce_field_type_expr` runs today. The codex caveat in the
     // design doc forbids migrating gates to graph-native predicates
