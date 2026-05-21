@@ -100,10 +100,13 @@ fn reduce_field_type_expr_peeks_before_route_gate() {
 
 // ---------------------------------------------------------------------------
 // Guard 3: `member_shape_peek_or_compute` adopts `peek_member_shape_known`
-//          AFTER the raise but BEFORE the shallow gates.
+//          AFTER the raise. The package-backed gate runs BEFORE the
+//          cached-peek short-circuit so the cache (shared with the
+//          non-projector materialiser callers) cannot publish a reduced
+//          shape past the shallow gate.
 // ---------------------------------------------------------------------------
 #[test]
-fn member_shape_peek_or_compute_peeks_between_raise_and_gates() {
+fn member_shape_peek_or_compute_runs_gates_before_cached_peek() {
     let content = read_projectors_mod();
     let fn_start = content
         .find("fn member_shape_peek_or_compute(")
@@ -119,25 +122,29 @@ fn member_shape_peek_or_compute_peeks_between_raise_and_gates() {
     let raise_idx = body
         .find("raise_node_to_type_expr(member_value)")
         .expect("Block 6.h guard: raise call must remain in member_shape_peek_or_compute");
-    let peek_idx = body.find("peek_member_shape_known(").expect(
-        "Block 6.h Commit C guard: `member_shape_peek_or_compute` MUST \
-                 invoke `peek_member_shape_known` between the raise and the gates.",
-    );
     let gate_idx = body
         .find("type_expr_has_package_backed_object_like_root(")
         .expect("Block 6.h guard: package-backed gate must remain as cold fallback");
+    let peek_idx = body.find("peek_member_shape_known(").expect(
+        "Block 6.h Commit C guard: `member_shape_peek_or_compute` MUST \
+                 invoke `peek_member_shape_known` after the raise.",
+    );
 
     assert!(
-        raise_idx < peek_idx,
-        "Block 6.h Commit C guard: `peek_member_shape_known` MUST be \
-         invoked AFTER `raise_node_to_type_expr(member_value)` — the \
-         peek needs the raised TypeExpr as its key.",
+        raise_idx < gate_idx,
+        "guard: package-backed gate must follow the raise so the gate \
+         operates on the raised TypeExpr.",
     );
     assert!(
-        peek_idx < gate_idx,
-        "Block 6.h Commit C guard: `peek_member_shape_known` MUST be \
-         invoked BEFORE `type_expr_has_package_backed_object_like_root` \
-         — warm-hit short-circuit SKIPS the route lookup gates.",
+        gate_idx < peek_idx,
+        "Block 6.h fix-cycle guard: the package-backed gate \
+         (`type_expr_has_package_backed_object_like_root`) MUST run \
+         BEFORE the `peek_member_shape_known` cached-shape short-circuit. \
+         `MaterializeMemoDb` is shared across the typed-IR materialiser \
+         callers (model / registry paths) that do not apply this \
+         shallow gate; consulting the cache first would publish the \
+         reduced body for a package-backed root, violating the \
+         shallow-by-default invariant.",
     );
 }
 

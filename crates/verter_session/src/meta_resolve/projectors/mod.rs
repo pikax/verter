@@ -650,35 +650,16 @@ fn member_shape_peek_or_compute(
     // and avoids the `type_expr_has_package_backed_object_like_root`
     // route lookup, which was Investigator-1's biggest residual
     // gate-cost source on warm same-file member-shape paths.
-    if let Some(peeked) = peek_member_shape_known(query_engine, scope_canonical_id, &raised, mode) {
-        match peeked {
-            PeekedShape::Leaf(leaf) => {
-                return MaterializedTypeExpr {
-                    node_id: Some(member_value),
-                    type_expr: leaf,
-                    dep_signature: Arc::from(Vec::new()),
-                };
-            }
-            PeekedShape::BareCarrier { .. } => {
-                return MaterializedTypeExpr {
-                    node_id: Some(member_value),
-                    type_expr: raised,
-                    dep_signature: Arc::from(Vec::new()),
-                };
-            }
-            PeekedShape::Cached(materialized) => {
-                // Warm operator-shape hit. The cached entry already
-                // observed `dep_signature`; the peek bubbled it. Return
-                // verbatim — no gate / reducer dispatch.
-                return materialized;
-            }
-        }
-    }
-
-    // (3) Shallow gates on the raised TypeExpr — same predicates
-    // `reduce_field_type_expr` runs today. The codex caveat in the
-    // design doc forbids migrating gates to graph-native predicates
-    // in this block; keep the TypeExpr gates.
+    // Run the TypeExpr shallow gates BEFORE consulting any cached
+    // operator-shape entry. `MaterializeMemoDb` is shared across the
+    // typed-IR materialiser and the projector pipeline; entries
+    // warmed by a non-projector caller (model resolution, registry
+    // candidate materialisation) do NOT carry the projector's
+    // package-backed / cycle gate semantics. Honouring the gates
+    // first ensures a warm cache hit on `External['x']` (or any
+    // package-backed root) publishes as the shallow carrier the
+    // shallow-by-default rule requires, rather than as the reduced
+    // body the cache happens to hold.
     let route_is_package_backed = super::materialize::type_expr_has_package_backed_object_like_root(
         &raised,
         scope_canonical_id,
@@ -712,6 +693,37 @@ fn member_shape_peek_or_compute(
             type_expr: raised,
             dep_signature: Arc::from(Vec::new()),
         };
+    }
+
+    // Gates have cleared: consult the operator-shape peek. A warm
+    // `MaterializeMemoDb` hit on `(scope, raised, mode)` now SAFELY
+    // short-circuits the cold reducer dispatch — the entry's
+    // semantics are compatible with the projector's published shape
+    // because the package-backed and cycle paths already returned
+    // above.
+    if let Some(peeked) = peek_member_shape_known(query_engine, scope_canonical_id, &raised, mode) {
+        match peeked {
+            PeekedShape::Leaf(leaf) => {
+                return MaterializedTypeExpr {
+                    node_id: Some(member_value),
+                    type_expr: leaf,
+                    dep_signature: Arc::from(Vec::new()),
+                };
+            }
+            PeekedShape::BareCarrier { .. } => {
+                return MaterializedTypeExpr {
+                    node_id: Some(member_value),
+                    type_expr: raised,
+                    dep_signature: Arc::from(Vec::new()),
+                };
+            }
+            PeekedShape::Cached(materialized) => {
+                // Warm operator-shape hit AFTER gate validation. The
+                // cached entry already observed `dep_signature`; the
+                // peek bubbled it. Return verbatim.
+                return materialized;
+            }
+        }
     }
 
     // (4) Cold compute via the graph-native reducer. Single-shot —
@@ -880,6 +892,18 @@ pub(crate) fn reduce_field_type_expr(
     //
     // `None` ⇒ cold path; fall through to the existing
     // package-backed gate + cycle guard + reducer.
+    //
+    // For `Leaf` and `BareCarrier` peek answers we short-circuit
+    // immediately — they encode the shallow-by-default invariant
+    // structurally (primitive / literal / bare alias name) and are
+    // independent of the route's package-backing.
+    //
+    // For `Cached` we defer until AFTER the package-backed gate
+    // runs: `MaterializeMemoDb` is shared with non-projector
+    // callers (model / registry materialiser paths) that do not
+    // apply this shallow gate, so honouring the gate first ensures
+    // a package-backed root publishes as the shallow carrier even
+    // when the cache happens to hold the reduced body.
     if let Some(peeked) = peek_member_shape_known(
         query_engine,
         scope_canonical_id,
@@ -889,7 +913,10 @@ pub(crate) fn reduce_field_type_expr(
         match peeked {
             PeekedShape::Leaf(leaf) => return leaf,
             PeekedShape::BareCarrier { .. } => return expr,
-            PeekedShape::Cached(materialized) => return materialized.type_expr,
+            PeekedShape::Cached(_) => {
+                // Fall through to the package-backed gate; we re-peek
+                // below once the gate has cleared.
+            }
         }
     }
 
@@ -936,6 +963,21 @@ pub(crate) fn reduce_field_type_expr(
 
     if !needs_reduction {
         return expr;
+    }
+
+    // Gates have cleared: re-peek the operator-shape cache. A warm
+    // `MaterializeMemoDb` hit on `(scope, expr, mode)` now safely
+    // short-circuits the bounded reducer dispatch — package-backed
+    // and cycle paths already returned above, so the cached entry's
+    // reduced shape is compatible with the projector's published
+    // surface.
+    if let Some(PeekedShape::Cached(materialized)) = peek_member_shape_known(
+        query_engine,
+        scope_canonical_id,
+        &expr,
+        ProjectionMode::Expanded,
+    ) {
+        return materialized.type_expr;
     }
 
     // Run the bounded fixed-point reducer from the consumer's scope.
