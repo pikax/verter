@@ -1290,3 +1290,106 @@ defineProps<{
         prop.type_expr,
     );
 }
+
+// =====================================================================
+// G4.5 — Mapped narrowing recovers NON-INTEGER numeric path segments
+// via `IndexKey::TypeNode` literal inspection.
+//
+// G4.4 unified `IndexKey::Number` on the integer-i64 convention with a
+// `fract() == 0.0 && i64-range` admission guard. Producers (source
+// lowering, `normalized_index_key_node`, generic substitution) emit
+// `IndexKey::TypeNode` for non-integer numeric literals (e.g. `1.5`)
+// because they cannot round-trip through `i64`.
+//
+// The G4.4 cutover left a soundness gap: the Mapped narrowing path in
+// `walk.rs` only constructs a numeric `LiteralKey` from
+// `IndexKey::Number`. For `{ [K in number]: K }[1.5]`, the producer
+// emits `IndexKey::TypeNode(node)` where `node` resolves to a concrete
+// `Literal(Number(1.5))`. Pre-G4.5, the walker's TypeNode arm received
+// `IndexKey::TypeNode(_)` back from `normalized_index_key_node` and
+// dropped to `(None, false)` — Mapped narrowing fell back to a
+// deferred shell instead of substituting `K = 1.5`.
+//
+// G4.5 closes the gap: the walker's `IndexKey::TypeNode(resolved)` arm
+// now inspects the resolved node's `SemanticNodeData::Literal` directly
+// and recovers an f64 `LiteralKey::Number` for any numeric literal
+// (integer OR non-integer), enabling the primitive-domain admission
+// tier and the `K = Literal(Number(f))` substitution.
+//
+// Discriminating property: pre-G4.5 the published surface for
+// `{ [K in number]: K }[1.5]` is a deferred Mapped shell with NO
+// `1.5` numeric literal anywhere in the published surface (the
+// `K = 1.5` substitution never runs). Post-G4.5, `1.5` appears as a
+// numeric literal in the published surface.
+// =====================================================================
+#[test]
+fn mapped_narrowing_preserves_non_integer_numeric_literal() {
+    let project = make_project();
+    upsert(
+        &project,
+        "/types.ts",
+        r#"// Mapped over the primitive `number` keyspace — the
+// narrowing path must substitute K with whatever numeric
+// literal the indexed access carries, including non-integer
+// literals that cannot round-trip through `i64`.
+export type NumberIdentity = { [K in number]: K }
+"#,
+    );
+    upsert(
+        &project,
+        "/Comp.vue",
+        r#"<script setup lang="ts">
+import type { NumberIdentity } from './types'
+
+defineProps<{
+  // Non-integer numeric literal index (1.5). The producer emits
+  // `IndexKey::TypeNode(node)` because 1.5 fails the
+  // `fract() == 0.0` admission. Pre-G4.5, Mapped narrowing
+  // dropped this case to a deferred shell. Post-G4.5, the
+  // walker recovers the f64 literal from the resolved
+  // `Literal(Number(1.5))` and substitutes K = 1.5.
+  oneAndAHalf: NumberIdentity[1.5]
+}>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let meta = meta_for(&project, "/Comp.vue");
+
+    let prop = meta
+        .props
+        .iter()
+        .find(|p| p.name == "oneAndAHalf")
+        .expect("oneAndAHalf prop must be present");
+
+    let mut number_lits: Vec<f64> = Vec::new();
+    collect_numeric_literals(&prop.type_expr, &mut number_lits);
+
+    // Discriminating positive: 1.5 appears as a numeric literal in
+    // the published surface. Pre-G4.5 the Mapped narrowing fell
+    // back to a deferred shell and the surface contained no
+    // numeric literal at all (only the unresolved `K` reference or
+    // a missing/deferred IndexedAccess).
+    assert!(
+        number_lits.iter().any(|n| (*n - 1.5).abs() < f64::EPSILON),
+        "guard G4.5: NumberIdentity[1.5] MUST publish the numeric literal 1.5. \
+         Absence indicates the Mapped narrowing fell back to a deferred shell \
+         for the non-integer numeric path segment — the producer emitted \
+         `IndexKey::TypeNode(node)` (because 1.5 fails the `fract() == 0.0` \
+         admission), and the walker's `IndexKey::TypeNode(_)` arm dropped \
+         the literal recovery. type_expr: {:#?}",
+        prop.type_expr,
+    );
+    // Negative: no integer truncation (1.0) leaked through. A 1.0
+    // here would indicate a regression where the walker recovered
+    // through the integer-cast path instead of preserving the
+    // f64 literal directly.
+    assert!(
+        !number_lits.iter().any(|n| (*n - 1.0).abs() < f64::EPSILON),
+        "guard G4.5: the published numeric surface MUST NOT contain `1.0` \
+         (an integer truncation of 1.5). A 1.0 here would indicate the \
+         f64 literal recovery path was bypassed in favour of an i64-cast \
+         path that loses the fractional component. type_expr: {:#?}",
+        prop.type_expr,
+    );
+}

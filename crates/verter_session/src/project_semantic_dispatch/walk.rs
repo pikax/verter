@@ -336,6 +336,14 @@ enum WalkFrame {
 /// numeric indices (`Foo[1.5]`) cannot round-trip exactly through
 /// `i64` and remain as `IndexKey::TypeNode` references rather than
 /// entering this fast path.
+///
+/// G4.5 completion: the `IndexKey::TypeNode(_)` consumer arm in the
+/// Mapped narrowing path inspects the resolved node's data and
+/// recovers an f64 `LiteralKey::Number` directly when the node is a
+/// `SemanticNodeData::Literal(LiteralValue::Number(f))`. This closes
+/// the soundness gap where `{ [K in number]: K }[1.5]` would have
+/// fallen back to a deferred Mapped shell instead of substituting
+/// `K = 1.5`.
 enum LiteralKey {
     String(Arc<str>),
     Number(f64),
@@ -818,7 +826,44 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                         // by direct integer→float cast.
                                         (Some(LiteralKey::Number(number as f64)), false)
                                     }
-                                    IndexKey::TypeNode(_) => (None, false),
+                                    IndexKey::TypeNode(resolved) => {
+                                        // G4.5: `normalized_index_key_node`
+                                        // returns `IndexKey::Number(i64)`
+                                        // ONLY when the resolved node is a
+                                        // numeric literal whose `fract()`
+                                        // is 0 AND it round-trips through
+                                        // `i64`. Non-integer literals
+                                        // (`Foo[1.5]`) and out-of-i64-range
+                                        // numeric literals fall through to
+                                        // this `TypeNode(_)` arm, even
+                                        // though they ARE concrete numeric
+                                        // literals at the graph level.
+                                        //
+                                        // Recover the f64 literal directly
+                                        // from the resolved node's data so
+                                        // the Mapped narrowing can perform
+                                        // the `K = Literal(Number(f))`
+                                        // substitution for primitive
+                                        // `number`-domain key spaces
+                                        // (`{ [K in number]: K }[1.5]`).
+                                        // Mirrors the `LiteralValue::String`
+                                        // recovery path implicit in the
+                                        // `IndexKey::String` arm above.
+                                        match self.graph().node_data(resolved).as_deref() {
+                                            Some(SemanticNodeData::Literal(
+                                                crate::semantic_query::LiteralValue::Number(n),
+                                            )) => (Some(LiteralKey::Number(*n)), false),
+                                            Some(SemanticNodeData::Literal(
+                                                crate::semantic_query::LiteralValue::String(s),
+                                            )) => (
+                                                Some(LiteralKey::String(Arc::<str>::from(
+                                                    s.as_str(),
+                                                ))),
+                                                true,
+                                            ),
+                                            _ => (None, false),
+                                        }
+                                    }
                                 }
                             }
                             None => (None, false),
