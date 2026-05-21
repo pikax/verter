@@ -227,6 +227,55 @@ fn collect_string_literals(expr: &TypeExpr, out: &mut Vec<String>) {
     }
 }
 
+/// Collect every numeric-literal payload reachable within a
+/// `TypeExpr`. Mirror of `collect_string_literals` but for the
+/// `LiteralValue::Number` variant. Used by the literal-kind-
+/// preservation guard to detect a numeric literal substituted into
+/// an identity-mapped `K`.
+fn collect_numeric_literals(expr: &TypeExpr, out: &mut Vec<f64>) {
+    match expr {
+        TypeExpr::Literal(verter_type_expr::LiteralValue::Number(n)) => out.push(*n),
+        TypeExpr::Object(obj) => {
+            for member in obj.properties.iter() {
+                if let ObjectMember::Property(prop) = member {
+                    collect_numeric_literals(&prop.ty, out);
+                }
+            }
+        }
+        TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
+            for m in members.iter() {
+                collect_numeric_literals(m, out);
+            }
+        }
+        TypeExpr::Array { element, .. } => collect_numeric_literals(element, out),
+        TypeExpr::Tuple { elements, .. } => {
+            for e in elements.iter() {
+                if let Some(ty) = tuple_element_ty(e) {
+                    collect_numeric_literals(ty, out);
+                }
+            }
+        }
+        TypeExpr::IndexedAccess { object, index, .. } => {
+            collect_numeric_literals(object, out);
+            collect_numeric_literals(index, out);
+        }
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+            ..
+        } => {
+            collect_numeric_literals(check, out);
+            collect_numeric_literals(extends, out);
+            collect_numeric_literals(true_type, out);
+            collect_numeric_literals(false_type, out);
+        }
+        TypeExpr::Parenthesized(inner) => collect_numeric_literals(inner, out),
+        _ => {}
+    }
+}
+
 fn reachable_refs_in_registry(registry: &[ResolvedTypeAnalysis]) -> Vec<String> {
     let mut all = Vec::new();
     for entry in registry {
@@ -932,5 +981,106 @@ defineProps<{
          (number key domain rejects string-literal segments). \
          type_expr: {:#?}",
         mismatched_prop.type_expr,
+    );
+}
+
+// =====================================================================
+// Guard 11 — Mapped narrowing preserves literal kind (string vs number)
+// through substitution (G4.3 soundness fix).
+//
+// `{ [K in number]: K }` is an identity mapping over numeric keys —
+// the iteration variable `K` IS the value expression. When the
+// walker narrows a path segment like `M[1]` (numeric Index) into
+// this Mapped, the substitution `K = Literal(...)` must use the
+// numeric LiteralValue variant. Pre-G4.3, the narrowing path
+// rendered every literal as `Arc::<str>::from(n.to_string())` and
+// interned `LiteralValue::String("1")` regardless of segment kind —
+// any value expression that depends on `K` (here, the identity
+// position; in conditional positions `K extends ...`; in template
+// literals `` `${K}` ``) would materialise the WRONG TS literal
+// type. `M[1]` would publish a string literal `"1"`, not the
+// numeric literal `1`.
+//
+// Discriminating property:
+//   - With G4.3: the prop's `type_expr` contains the numeric
+//     literal `1.0` (Literal::Number), and DOES NOT contain the
+//     string literal `"1"`.
+//   - Without G4.3 (the G4.2 baseline): the prop's `type_expr`
+//     contains the string literal `"1"` (Literal::String), and
+//     DOES NOT contain the numeric literal `1.0`.
+//
+// Mental trace (pre-fix): segment `Index(IndexKey::Number(1))` →
+// `Arc::<str>::from("1")` → `LiteralValue::String("1")` → identity
+// substitute K → `TypeExpr::Literal(String("1"))` on the prop's
+// surface.
+//
+// Mental trace (post-fix): segment `Index(IndexKey::Number(1))` →
+// `LiteralKey::Number(1)` → `LiteralValue::Number(1.0)` → identity
+// substitute K → `TypeExpr::Literal(Number(1.0))` on the prop's
+// surface.
+// =====================================================================
+#[test]
+fn mapped_narrowing_preserves_numeric_literal_kind_through_substitution() {
+    let project = make_project();
+    upsert(
+        &project,
+        "/types.ts",
+        r#"// Identity mapping over numeric keys: the iteration
+// variable K is the value expression. Substituting K = 1
+// at numeric segment 1 must intern LiteralValue::Number(1.0),
+// not LiteralValue::String("1") — TypeScript indexed access
+// `M[1]` (number literal) and `M['1']` (string literal) are
+// semantically distinct keys at the type level even when they
+// happen to resolve to the same runtime property.
+export type NumberIdentity = { [K in number]: K }
+"#,
+    );
+    upsert(
+        &project,
+        "/Comp.vue",
+        r#"<script setup lang="ts">
+import type { NumberIdentity } from './types'
+
+defineProps<{
+  // M[1] with M = { [K in number]: K } — the substitution
+  // K = 1 must yield the numeric literal type `1`, not the
+  // string literal type `"1"`.
+  numericIdentity: NumberIdentity[1]
+}>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let meta = meta_for(&project, "/Comp.vue");
+
+    let prop = meta
+        .props
+        .iter()
+        .find(|p| p.name == "numericIdentity")
+        .expect("numericIdentity prop must be present");
+
+    let mut string_lits: Vec<String> = Vec::new();
+    collect_string_literals(&prop.type_expr, &mut string_lits);
+    let mut number_lits: Vec<f64> = Vec::new();
+    collect_numeric_literals(&prop.type_expr, &mut number_lits);
+
+    // Pre-G4.3 discrimination: the string-rendered "1" appears as
+    // a `LiteralValue::String("1")` because the narrowing forced
+    // every literal through `Arc::<str>::from(n.to_string())`.
+    // Post-G4.3: the numeric kind is preserved through the
+    // substitution and the literal is `LiteralValue::Number(1.0)`.
+    assert!(
+        number_lits.iter().any(|n| (*n - 1.0).abs() < f64::EPSILON),
+        "guard: {{ [K in number]: K }}[1] MUST publish a numeric literal 1 (LiteralValue::Number), \
+         not a string literal \"1\" (LiteralValue::String). \
+         type_expr: {:#?}",
+        prop.type_expr,
+    );
+    assert!(
+        !string_lits.iter().any(|s| s == "1"),
+        "guard: {{ [K in number]: K }}[1] MUST NOT publish the string literal \"1\" — \
+         the numeric segment kind must be preserved through Mapped narrowing. \
+         type_expr: {:#?}",
+        prop.type_expr,
     );
 }

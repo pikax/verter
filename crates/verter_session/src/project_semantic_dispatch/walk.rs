@@ -306,6 +306,34 @@ enum WalkFrame {
     },
 }
 
+/// Literal key used by the Mapped operator-level narrowing path.
+///
+/// Carries both the literal value and its key-domain kind so the
+/// substitution `K = Literal(...)` chooses the correct `LiteralValue`
+/// variant (`String` vs `Number`). TypeScript's indexed access
+/// `M['1']` (string literal) and `M[1]` (number literal) are
+/// semantically distinct keys; reducing both to `String("1")` would
+/// silently rewrite any value expression that depends on `K`
+/// (identity mapping `K`, `K extends ...`, template literals, …).
+///
+/// String/number kind also drives the Tier 3 primitive-domain
+/// admission check via the segment's `is_string_domain` flag — a
+/// numeric segment is admitted only by a `number`-domain key_space
+/// and vice versa.
+///
+/// The `Number` variant stores the literal as `f64` directly so it
+/// can be interned into `LiteralValue::Number(f64)` without any
+/// further conversion. The `IndexKey::Number` representation in the
+/// path uses two different conventions depending on its origin
+/// (source-lowered indices use the `to_bits()` form; node-
+/// normalised indices use the truncated integer form). Construction
+/// sites perform the convention-specific recovery up front so
+/// downstream substitution / admission reasoning is uniform.
+enum LiteralKey {
+    String(Arc<str>),
+    Number(f64),
+}
+
 /// Path-walking helper for [`ProjectSemanticDispatch::build_project_path`]
 /// One walker per `build_project_path` invocation — carries
 /// the caller's requested `mode`, per-hop fence, and the alias-cycle
@@ -723,24 +751,52 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     //    bounded enumerated surface.
                     let next_index = index;
                     let next_segment = path.get(next_index);
-                    // Carry the segment's key-domain (string vs number)
-                    // alongside the literal text so the non-enumerable
-                    // primitive admission tier can decide soundness on
-                    // domain compatibility rather than text content.
-                    let (literal_name, segment_is_string_domain): (Option<Arc<str>>, bool) =
+                    // Carry both the literal *value* (string text or
+                    // numeric value) AND its key-domain kind through
+                    // narrowing. At substitution time we intern
+                    // `LiteralValue::String(...)` vs `LiteralValue::Number(...)`
+                    // based on the kind — TypeScript indexed access
+                    // `M['1']` (string literal) and `M[1]` (number
+                    // literal) are semantically distinct keys, and any
+                    // value expression that depends on `K` (identity
+                    // mapping `K`, conditional `K extends ...`, etc.)
+                    // must substitute the correctly-typed literal.
+                    //
+                    // The admission tier (Tier 3 primitive-domain
+                    // check) reads the same kind discriminator so a
+                    // numeric segment is admitted only by a number-
+                    // domain key_space and vice versa.
+                    let (literal_key, segment_is_string_domain): (Option<LiteralKey>, bool) =
                         match next_segment {
-                            Some(PathSegment::Member(name)) => (Some(Arc::clone(name)), true),
+                            Some(PathSegment::Member(name)) => {
+                                (Some(LiteralKey::String(Arc::clone(name))), true)
+                            }
                             Some(PathSegment::Index(IndexKey::String(s))) => {
-                                (Some(Arc::clone(s)), true)
+                                (Some(LiteralKey::String(Arc::clone(s))), true)
                             }
                             Some(PathSegment::Index(IndexKey::Number(n))) => {
-                                (Some(Arc::<str>::from(n.to_string())), false)
+                                // Source-lowered numeric indices store
+                                // `f64::to_bits() as i64` in
+                                // `IndexKey::Number` (see `lower.rs`)
+                                // to round-trip the literal exactly.
+                                // Recover the f64 via the symmetric
+                                // bits→f64 conversion.
+                                (Some(LiteralKey::Number(f64::from_bits(*n as u64))), false)
                             }
                             Some(PathSegment::Index(IndexKey::TypeNode(node))) => {
                                 match self.dispatch.normalized_index_key_node(*node) {
-                                    IndexKey::String(text) => (Some(Arc::clone(&text)), true),
+                                    IndexKey::String(text) => {
+                                        (Some(LiteralKey::String(Arc::clone(&text))), true)
+                                    }
                                     IndexKey::Number(number) => {
-                                        (Some(Arc::<str>::from(number.to_string())), false)
+                                        // `normalized_index_key_node`
+                                        // stores the truncated integer
+                                        // value (`*number as i64` of a
+                                        // `LiteralValue::Number` whose
+                                        // `fract()` is 0), not the
+                                        // bit-pattern. Recover the f64
+                                        // by direct integer→float cast.
+                                        (Some(LiteralKey::Number(number as f64)), false)
                                     }
                                     IndexKey::TypeNode(_) => (None, false),
                                 }
@@ -774,8 +830,34 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // bound) — fall back to the coarse path which
                     // produces a deferred shell re-dispatched once the
                     // domain becomes enumerable.
-                    let key_admitted: Option<bool> = literal_name.as_ref().map(|name| {
-                        let needle: &str = name.as_ref();
+                    let key_admitted: Option<bool> = literal_key.as_ref().map(|key| {
+                        // For Tier 1/2 enumerable lookups, both string
+                        // and numeric segments compare against textual
+                        // member names — TypeScript Object members are
+                        // string-keyed at the type level (numeric
+                        // indices coerce to their string form, so
+                        // `{ '1': X }[1]` matches member `"1"`).
+                        //
+                        // Numeric-to-string rendering for the integer
+                        // fast path (`n.fract() == 0.0`) avoids the
+                        // f64 default `Display` impl emitting `"1"` as
+                        // `"1"` vs `"1.0"` ambiguity by formatting via
+                        // i64 truncation; non-integer numerics fall
+                        // back to the default `Display`.
+                        let needle_text: String = match key {
+                            LiteralKey::String(s) => s.as_ref().to_string(),
+                            LiteralKey::Number(n) => {
+                                if n.fract() == 0.0
+                                    && *n >= i64::MIN as f64
+                                    && *n <= i64::MAX as f64
+                                {
+                                    (*n as i64).to_string()
+                                } else {
+                                    n.to_string()
+                                }
+                            }
+                        };
+                        let needle: &str = needle_text.as_str();
                         // Tier 1: source surface is an enumerable Object.
                         if let Some(SemanticNodeData::Object(view)) =
                             self.graph().node_data(*source).as_deref()
@@ -795,14 +877,37 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             segment_is_string_domain,
                         )
                     });
-                    let can_narrow = literal_name.is_some()
+                    let can_narrow = literal_key.is_some()
                         && mapper.name_remap.is_none()
                         && matches!(key_admitted, Some(true));
                     if can_narrow {
-                        let name = literal_name.expect("literal_name is_some checked above");
-                        let key_arg = self.graph().intern_node(SemanticNodeData::Literal(
-                            crate::semantic_query::LiteralValue::String(name.as_ref().to_string()),
-                        ));
+                        let key = literal_key.expect("literal_key is_some checked above");
+                        // Preserve string-vs-number literal kind through
+                        // substitution. `M['1']` and `M[1]` are
+                        // semantically distinct keys; the substituted
+                        // K must carry the originating segment's kind
+                        // so any value expression that depends on K
+                        // (identity mapping, `K extends ...`, template
+                        // literal positions, …) instantiates with the
+                        // correct LiteralValue variant.
+                        let key_literal_value = match &key {
+                            LiteralKey::String(s) => {
+                                crate::semantic_query::LiteralValue::String(s.as_ref().to_string())
+                            }
+                            // `LiteralKey::Number` already carries the
+                            // recovered f64 (construction sites pick
+                            // the convention-specific bits→f64 vs
+                            // int→f64 conversion). Intern the matching
+                            // `LiteralValue::Number` variant — `M[1]`
+                            // substitutes K = `Literal::Number(1)`,
+                            // NOT `Literal::String("1")`.
+                            LiteralKey::Number(n) => {
+                                crate::semantic_query::LiteralValue::Number(*n)
+                            }
+                        };
+                        let key_arg = self
+                            .graph()
+                            .intern_node(SemanticNodeData::Literal(key_literal_value));
                         let substituted = self.dispatch.substitute_semantic_type_param(
                             mapper.value_expr,
                             mapper.parameter_node,
