@@ -38,6 +38,7 @@ mod graph_predicates;
 mod macro_member_walk;
 pub(crate) mod materialize;
 mod origin_graph;
+pub(crate) mod projection_demand;
 pub(crate) mod projectors;
 #[cfg(test)]
 #[path = "meta_resolve/projectors_peek_tests.rs"]

@@ -1163,6 +1163,18 @@ impl VerterHost {
             &crate::loop5_instrumentation::APPEND_REGISTRY_ENTRIES_CALLS,
             &crate::loop5_instrumentation::APPEND_REGISTRY_ENTRIES_NS,
         );
+        // Block 6.i Commit A: top-level whole-surface registry
+        // projection. Subsequent commits narrow this to the actual
+        // consumer demand (Pick → Include filter, Conditional → branch
+        // selection); the threading through helpers + recursive call
+        // sites is the load-bearing change here. Behaviour is
+        // preserved at the top entry because the whole-surface cursor
+        // admits every key + descend.
+        let registry_projection =
+            crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
+                crate::meta_resolve::projection_demand::PublishedSurfaceKind::Registry,
+            );
+        let registry_cursor = registry_projection.cursor();
         fn track_component_meta_dependency(
             tracked_dependencies: &mut BTreeSet<String>,
             owner_canonical: &str,
@@ -1974,6 +1986,7 @@ impl VerterHost {
             queued_names: &mut rustc_hash::FxHashSet<String>,
             output: &mut std::collections::VecDeque<PendingComponentMetaRegistryRef>,
             source_hint: Option<&str>,
+            cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
         ) {
             use verter_type_expr::{ObjectMember, TypeExpr};
 
@@ -2008,6 +2021,7 @@ impl VerterHost {
                 queued_names: &mut rustc_hash::FxHashSet<String>,
                 output: &mut std::collections::VecDeque<PendingComponentMetaRegistryRef>,
                 source_hint: Option<&str>,
+                cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
             ) {
                 let mut local_queue = std::collections::VecDeque::new();
                 let mut local_names = rustc_hash::FxHashSet::default();
@@ -2018,6 +2032,7 @@ impl VerterHost {
                     &mut local_queue,
                     source_hint,
                     false,
+                    cursor,
                 );
                 drain_filtered_pending(published_names, queued_names, output, local_queue);
             }
@@ -2032,6 +2047,7 @@ impl VerterHost {
                                 queued_names,
                                 output,
                                 source_hint,
+                                cursor,
                             ),
                             ObjectMember::IndexSignature(sig) => {
                                 collect_one_filtered_expr(
@@ -2040,6 +2056,7 @@ impl VerterHost {
                                     queued_names,
                                     output,
                                     source_hint,
+                                    cursor,
                                 );
                                 collect_one_filtered_expr(
                                     &sig.value_type,
@@ -2047,6 +2064,7 @@ impl VerterHost {
                                     queued_names,
                                     output,
                                     source_hint,
+                                    cursor,
                                 );
                             }
                             ObjectMember::CallSignature(func)
@@ -2056,6 +2074,7 @@ impl VerterHost {
                                 queued_names,
                                 output,
                                 source_hint,
+                                cursor,
                             ),
                             ObjectMember::Method(method) => collect_one_filtered_expr(
                                 &TypeExpr::Function(method.function.clone().into()),
@@ -2063,6 +2082,7 @@ impl VerterHost {
                                 queued_names,
                                 output,
                                 source_hint,
+                                cursor,
                             ),
                         }
                     }
@@ -2073,6 +2093,7 @@ impl VerterHost {
                     queued_names,
                     output,
                     source_hint,
+                    cursor,
                 ),
                 _ => collect_one_filtered_expr(
                     expr,
@@ -2080,6 +2101,7 @@ impl VerterHost {
                     queued_names,
                     output,
                     source_hint,
+                    cursor,
                 ),
             }
         }
@@ -2258,6 +2280,7 @@ impl VerterHost {
                     &mut queued_names,
                     &mut referenced_names,
                     source_hint,
+                    registry_cursor,
                 );
             } else {
                 collect_component_meta_registry_refs(
@@ -2267,6 +2290,7 @@ impl VerterHost {
                     &mut referenced_names,
                     source_hint,
                     false,
+                    registry_cursor,
                 );
             }
         }
@@ -2482,6 +2506,7 @@ impl VerterHost {
                                 verter_type_expr::TypeExpr::named(type_name.clone()),
                                 declaration,
                                 None,
+                                registry_cursor,
                             );
                         }
                         continue;
@@ -2525,6 +2550,7 @@ impl VerterHost {
                         type_expr,
                         declaration,
                         None,
+                        registry_cursor,
                     );
                     if let Some(started) = _pending_started {
                         let total_elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -2691,6 +2717,7 @@ impl VerterHost {
                 materialized,
                 declaration,
                 collection_expr.as_ref(),
+                registry_cursor,
             );
             if let Some(started) = _pending_started {
                 let total_elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;

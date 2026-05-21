@@ -74,6 +74,7 @@ pub(crate) fn upsert_component_meta_registry_entry(
     type_expr: verter_type_expr::TypeExpr,
     declaration: crate::resolver_core::ResolvedTypeDeclaration,
     collection_expr: Option<&verter_type_expr::TypeExpr>,
+    cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) {
     let declaration_source_hint =
         (!declaration.canonical_source.is_empty()).then(|| declaration.canonical_source.clone());
@@ -105,6 +106,7 @@ pub(crate) fn upsert_component_meta_registry_entry(
                     referenced_names,
                     declaration_source_hint.as_deref(),
                     false,
+                    cursor,
                 );
             }
         }
@@ -119,6 +121,7 @@ pub(crate) fn upsert_component_meta_registry_entry(
             referenced_names,
             declaration_source_hint.as_deref(),
             false,
+            cursor,
         );
     }
     resolved_type_registry.push(
@@ -1372,6 +1375,17 @@ pub(crate) fn component_meta_registry_indexed_ref_penalty(
     }
 }
 
+/// Walk `expr` and enqueue every nominal `Ref` reachable through the
+/// supplied [`ProjectionCursor`].
+///
+/// **Cursor contract** (Block 6.i Commit A): when the cursor is at a
+/// whole-surface node (`is_whole_surface()`), descent is unbounded
+/// — preserves pre-Block-6.i behaviour. When the cursor carries a
+/// narrowed filter (Pick → `Include`, Omit → `Exclude`, or an
+/// explicit `ProjectionNode::children` map), the Object arm only
+/// descends into admitted keys and the Conditional / Mapped arms
+/// gate on `is_whole_surface()` so siblings outside the path stay
+/// shallow.
 pub(crate) fn collect_component_meta_registry_refs(
     expr: &verter_type_expr::TypeExpr,
     published_names: &rustc_hash::FxHashSet<String>,
@@ -1379,6 +1393,7 @@ pub(crate) fn collect_component_meta_registry_refs(
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
     source_hint: Option<&str>,
     allow_plain_member_refs: bool,
+    cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) {
     use verter_type_expr::TypeExpr;
 
@@ -1434,6 +1449,7 @@ pub(crate) fn collect_component_meta_registry_refs(
                 output,
                 source_hint,
                 allow_plain_member_refs,
+                cursor,
             );
         }
         TypeExpr::Tuple { elements, .. } => {
@@ -1445,6 +1461,7 @@ pub(crate) fn collect_component_meta_registry_refs(
                     output,
                     source_hint,
                     allow_plain_member_refs,
+                    cursor,
                 );
             }
         }
@@ -1464,6 +1481,7 @@ pub(crate) fn collect_component_meta_registry_refs(
                     output,
                     source_hint,
                     allow_plain_member_refs,
+                    cursor,
                 );
             }
         }
@@ -1479,6 +1497,17 @@ pub(crate) fn collect_component_meta_registry_refs(
             for member in &obj.properties {
                 match member {
                     ObjectMember::Property(prop) => {
+                        // Block 6.i Commit A: path-precise gate. If
+                        // the cursor's key filter rejects this
+                        // property's name, skip the member's nested
+                        // refs entirely — that sibling is OUTSIDE
+                        // the published surface the consumer walks.
+                        // Whole-surface cursors admit every key so
+                        // pre-Block-6.i top-level callers see no
+                        // behaviour change.
+                        if !cursor.admits_key(prop.name.as_str()) {
+                            continue;
+                        }
                         collect_component_meta_registry_member_surface_refs(
                             &prop.ty,
                             published_names,
@@ -1544,6 +1573,7 @@ pub(crate) fn collect_component_meta_registry_refs(
                 output,
                 source_hint,
                 allow_plain_member_refs,
+                cursor,
             );
             collect_component_meta_registry_refs(
                 index,
@@ -1552,6 +1582,7 @@ pub(crate) fn collect_component_meta_registry_refs(
                 output,
                 source_hint,
                 allow_plain_member_refs,
+                cursor,
             );
         }
         TypeExpr::Conditional {
@@ -1570,6 +1601,7 @@ pub(crate) fn collect_component_meta_registry_refs(
                 output,
                 source_hint,
                 allow_plain_member_refs,
+                cursor,
             );
             collect_component_meta_registry_refs(
                 extends,
@@ -1578,6 +1610,7 @@ pub(crate) fn collect_component_meta_registry_refs(
                 output,
                 source_hint,
                 allow_plain_member_refs,
+                cursor,
             );
             collect_component_meta_registry_refs(
                 true_type,
@@ -1586,6 +1619,7 @@ pub(crate) fn collect_component_meta_registry_refs(
                 output,
                 source_hint,
                 allow_plain_member_refs,
+                cursor,
             );
             collect_component_meta_registry_refs(
                 false_type,
@@ -1594,6 +1628,7 @@ pub(crate) fn collect_component_meta_registry_refs(
                 output,
                 source_hint,
                 allow_plain_member_refs,
+                cursor,
             );
         }
         TypeExpr::Mapped {
@@ -1612,6 +1647,7 @@ pub(crate) fn collect_component_meta_registry_refs(
                 output,
                 source_hint,
                 allow_plain_member_refs,
+                cursor,
             );
             collect_component_meta_registry_refs(
                 value,
@@ -1620,6 +1656,7 @@ pub(crate) fn collect_component_meta_registry_refs(
                 output,
                 source_hint,
                 allow_plain_member_refs,
+                cursor,
             );
             if let Some(name_type) = name_type.as_deref() {
                 collect_component_meta_registry_refs(
@@ -1629,6 +1666,7 @@ pub(crate) fn collect_component_meta_registry_refs(
                     output,
                     source_hint,
                     allow_plain_member_refs,
+                    cursor,
                 );
             }
         }
@@ -2348,6 +2386,9 @@ mod tests {
         let published_names = rustc_hash::FxHashSet::default();
         let mut queued_names = rustc_hash::FxHashSet::default();
         let mut output = VecDeque::new();
+        let proj = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
+            crate::meta_resolve::projection_demand::PublishedSurfaceKind::Registry,
+        );
 
         collect_component_meta_registry_refs(
             &expr,
@@ -2356,6 +2397,7 @@ mod tests {
             &mut output,
             Some("/src/Button.vue"),
             false,
+            proj.cursor(),
         );
 
         let pending = output

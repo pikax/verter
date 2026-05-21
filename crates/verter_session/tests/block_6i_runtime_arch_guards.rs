@@ -84,7 +84,10 @@ fn meta_for(
 /// appears (transitively, including inside Object/Union/etc.).
 fn collect_ref_names(expr: &TypeExpr, out: &mut Vec<String>) {
     match expr {
-        TypeExpr::Ref { name, type_arguments } => {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
             out.push(name.to_string());
             for arg in type_arguments.iter() {
                 collect_ref_names(arg, out);
@@ -127,7 +130,12 @@ fn collect_ref_names(expr: &TypeExpr, out: &mut Vec<String>) {
             collect_ref_names(true_type, out);
             collect_ref_names(false_type, out);
         }
-        TypeExpr::Mapped { source, value, name_type, .. } => {
+        TypeExpr::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
             collect_ref_names(source, out);
             collect_ref_names(value, out);
             if let Some(nt) = name_type.as_deref() {
@@ -137,7 +145,11 @@ fn collect_ref_names(expr: &TypeExpr, out: &mut Vec<String>) {
         TypeExpr::KeyOf(inner) => collect_ref_names(inner, out),
         TypeExpr::Parenthesized(inner) => collect_ref_names(inner, out),
         TypeExpr::Rest(inner) => collect_ref_names(inner, out),
-        TypeExpr::RecursiveRef { name, type_arguments, .. } => {
+        TypeExpr::RecursiveRef {
+            name,
+            type_arguments,
+            ..
+        } => {
             out.push(name.to_string());
             for arg in type_arguments.iter() {
                 collect_ref_names(arg, out);
@@ -477,9 +489,17 @@ defineProps<{ msg: string }>()
 
     // Snapshot the host's per-native-call counter before, fetch
     // metadata once, snapshot after. Delta must be exactly 1.
-    let before = project.host().provenance().snapshot().get_component_meta_calls;
+    let before = project
+        .host()
+        .provenance()
+        .snapshot()
+        .get_component_meta_calls;
     let _ = meta_for(&project, "/Comp.vue");
-    let after = project.host().provenance().snapshot().get_component_meta_calls;
+    let after = project
+        .host()
+        .provenance()
+        .snapshot()
+        .get_component_meta_calls;
     let delta = after - before;
     assert_eq!(
         delta, 1,
