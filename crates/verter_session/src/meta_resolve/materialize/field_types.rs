@@ -410,11 +410,33 @@ pub(crate) fn type_expr_has_package_backed_object_like_root(
 /// `declaration_scope` (and, when distinct, the prepared
 /// `target_scope`) so a content edit to the declaring file
 /// invalidates the cached gate-shortcut entry.
+///
+/// Block 6.i H2 — the second tuple element is `Option<DepSignature>`:
+///
+///   * `Some(fence)` — the fence is rooted on `authoritative_current_content_hash`
+///     observations for every contributing canonical (consistent with
+///     `resolve_type_declaration` / `named_decl_body`'s own internal
+///     hash observation). Callers may admit a cache entry rooted on
+///     this fence.
+///   * `None` — the gate observed an unavailable
+///     `authoritative_current_content_hash` for at least one
+///     contributing canonical (e.g. evicted / tombstoned mid-gate).
+///     Callers MUST refuse shared admission of any cache entry whose
+///     validity depends on this gate verdict: rooting an admit on a
+///     stand-in hash (the pre-H2 `shallow_file_state.whole_hash`
+///     `unwrap_or_default()` was a `WholeHash(0)` sentinel that does
+///     not validate the actual file state — see codex P1) would
+///     produce a future warm hit that returns the gate's stale verdict
+///     against a fresh whole-hash with no invalidation rail.
+///
+/// The verdict `bool` is the gate's predicate answer; it is returned
+/// regardless of whether the fence is available — non-admitting
+/// callers still steer their control flow on it.
 pub(crate) fn type_expr_has_package_backed_object_like_root_with_fence(
     expr: &verter_type_expr::TypeExpr,
     scope_canonical_id: &str,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-) -> (bool, crate::semantic_query::DepSignature) {
+) -> (bool, Option<crate::semantic_query::DepSignature>) {
     use std::sync::Arc;
 
     fn root_name(expr: &verter_type_expr::TypeExpr) -> Option<String> {
@@ -437,10 +459,14 @@ pub(crate) fn type_expr_has_package_backed_object_like_root_with_fence(
         }
     }
 
+    // Empty fence carries no cross-file deps but is still safe to
+    // admit on: the caller's `engine_fact_signature_for_materialize_memo`
+    // self-roots on `scope_canonical_id` alone, and there are no
+    // additional canonicals to root.
     let empty_fence: crate::semantic_query::DepSignature = Arc::from(Vec::new());
 
     let Some(root_name) = root_name(expr) else {
-        return (false, empty_fence);
+        return (false, Some(empty_fence));
     };
 
     let declaration = query_engine.resolve_type_declaration(scope_canonical_id, root_name.as_str());
@@ -458,43 +484,68 @@ pub(crate) fn type_expr_has_package_backed_object_like_root_with_fence(
         .ctx
         .workspace_is_package_backed(declaration_scope.as_str())
     {
-        return (false, empty_fence);
+        return (false, Some(empty_fence));
     }
 
-    // F1 fence collection: record the declaration scope's whole_hash so
-    // a content edit to the package-backing file invalidates the cached
-    // gate verdict (e.g., flipping `interface External` to
-    // `type External = ...` would change the kind-based shortcut return
-    // below).
+    // H2 fence collection: record each contributing canonical via
+    // `authoritative_current_content_hash` — the SAME oracle
+    // `resolve_type_declaration`'s `get_or_compute` observes
+    // (registry_decl.rs `observed_keyed_hash`) and `named_decl_body`
+    // routes through. Using a different oracle (the pre-H2
+    // `shallow_file_state(canonical).whole_hash` read) opened a race
+    // window: a dependency edit between the gate verdict and the
+    // fence read could admit the stale verdict against a fresh
+    // whole-hash; immediate revalidation then succeeded and future
+    // reads reused stale shape data.
+    //
+    // If any contributing canonical's authoritative current-content
+    // hash is UNAVAILABLE (`None` — canonical was evicted /
+    // tombstoned / cannot be authoritatively resolved without
+    // permissive fallback), refuse the fence by returning `None`.
+    // The caller MUST then refuse cache admission for the verdict;
+    // rooting on a stand-in hash (`WholeHash(0)` sentinel) does NOT
+    // validate the actual file state.
     let mut fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
-    let push_scope_fence =
-        |fence: &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
-         canonical: &str,
-         ctx: &dyn crate::resolver_core::ResolverContext| {
+    let mut refused = false;
+    {
+        let mut push_scope_fence = |canonical: &str| {
+            if refused {
+                return;
+            }
             // Skip the keyed scope itself — the cache entry already self-roots
             // on it via `engine_fact_signature_for_materialize_memo`'s
             // `FileWholeHash` for `scope_canonical_id`.
             if canonical == scope_canonical_id || canonical.is_empty() {
                 return;
             }
-            let whole_hash = ctx
-                .shallow_file_state(canonical)
-                .map(|state| state.whole_hash)
-                .unwrap_or_default();
-            fence.push((
-                Arc::<str>::from(canonical),
-                crate::semantic_query::DepVersion::WholeHash(whole_hash),
-            ));
+            match query_engine
+                .ctx
+                .authoritative_current_content_hash(canonical)
+            {
+                Some(whole_hash) => {
+                    fence.push((
+                        Arc::<str>::from(canonical),
+                        crate::semantic_query::DepVersion::WholeHash(whole_hash),
+                    ));
+                }
+                None => {
+                    refused = true;
+                }
+            }
         };
-    push_scope_fence(&mut fence, declaration_scope.as_str(), query_engine.ctx);
+        push_scope_fence(declaration_scope.as_str());
+    }
 
     if matches!(
         declaration.kind,
         crate::resolver_core::ResolvedDeclarationKind::Interface
             | crate::resolver_core::ResolvedDeclarationKind::Class,
     ) {
+        if refused {
+            return (true, None);
+        }
         let fence_sig: crate::semantic_query::DepSignature = Arc::from(fence.into_boxed_slice());
-        return (true, fence_sig);
+        return (true, Some(fence_sig));
     }
 
     let declaration_name = if declaration.resolved_name.is_empty() {
@@ -508,14 +559,41 @@ pub(crate) fn type_expr_has_package_backed_object_like_root_with_fence(
     // declaration scope (e.g. cross-file `export type X = Y` re-export
     // chain). The prepared resolver may walk arbitrarily far; the
     // terminal scope is the one whose `named_decl_body` we read below.
-    push_scope_fence(&mut fence, target_scope.as_str(), query_engine.ctx);
+    {
+        let mut push_scope_fence = |canonical: &str| {
+            if refused {
+                return;
+            }
+            if canonical == scope_canonical_id || canonical.is_empty() {
+                return;
+            }
+            match query_engine
+                .ctx
+                .authoritative_current_content_hash(canonical)
+            {
+                Some(whole_hash) => {
+                    fence.push((
+                        Arc::<str>::from(canonical),
+                        crate::semantic_query::DepVersion::WholeHash(whole_hash),
+                    ));
+                }
+                None => {
+                    refused = true;
+                }
+            }
+        };
+        push_scope_fence(target_scope.as_str());
+    }
     let verdict = query_engine
         .named_decl_body(target_scope.as_str(), target_name.as_str())
         .is_some_and(|body| {
             crate::resolver_core::component_meta_registry::component_meta_registry_has_explicit_object_surface(&body)
         });
+    if refused {
+        return (verdict, None);
+    }
     let fence_sig: crate::semantic_query::DepSignature = Arc::from(fence.into_boxed_slice());
-    (verdict, fence_sig)
+    (verdict, Some(fence_sig))
 }
 
 /// Migration helper. Lowers `materialized` and `raw`

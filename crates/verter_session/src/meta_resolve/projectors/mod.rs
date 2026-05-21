@@ -656,7 +656,14 @@ fn member_shape_peek_or_compute(
     // Without this, gate-shortcut entries would self-root only on the
     // scope file's whole_hash — stale on cross-file edits to the
     // declaring helper / package-backing file / cycle BFS roots.
-    let (route_is_package_backed, package_backed_fence) =
+    //
+    // H2: the gate's fence is now `Option<DepSignature>`. `None`
+    // means "refuse shared admission" — the gate observed an
+    // unavailable `authoritative_current_content_hash` for a
+    // contributing canonical and cannot root the verdict on the
+    // file state it was actually decided against. Callers MUST
+    // skip the admit and return the value verbatim.
+    let (route_is_package_backed, package_backed_fence_opt) =
         super::materialize::type_expr_has_package_backed_object_like_root_with_fence(
             &raised,
             scope_canonical_id,
@@ -671,6 +678,18 @@ fn member_shape_peek_or_compute(
         // time rather than re-running the package-backed predicate.
         // F1: thread the gate's cross-file fence into the admit so
         // edits to the package-backing declaration file invalidate.
+        // H2: refuse admission if the gate refused.
+        let Some(package_backed_fence) = package_backed_fence_opt.clone() else {
+            // Refused fence — return the verdict verbatim without
+            // admitting to the shared cache. A subsequent call
+            // recomputes the verdict against the then-current
+            // file state.
+            return MaterializedTypeExpr {
+                node_id: Some(member_value),
+                type_expr: raised,
+                dep_signature: Arc::from(Vec::new()),
+            };
+        };
         let value = MaterializedTypeExpr {
             node_id: Some(member_value),
             type_expr: raised,
@@ -678,6 +697,22 @@ fn member_shape_peek_or_compute(
         };
         return admit_member_shape_if_possible(ctx, &key, value);
     }
+    // Non-package-backed path: unwrap the gate's fence Option. The
+    // gate refuses (`None`) only when a contributing canonical's
+    // authoritative hash is unavailable; for non-package-backed
+    // verdicts the gate returns `Some(empty_fence)` because there
+    // ARE no contributing cross-file canonicals to root.
+    let Some(package_backed_fence) = package_backed_fence_opt else {
+        // The gate refused for some reason that surfaced even on
+        // the non-package-backed return path (a pre-emption between
+        // the workspace check and the fence push). Refuse admission
+        // for any downstream cache path that depends on this gate.
+        return MaterializedTypeExpr {
+            node_id: Some(member_value),
+            type_expr: raised,
+            dep_signature: Arc::from(Vec::new()),
+        };
+    };
     // F1: cycle-gate fence — computed lazily because the cycle gate
     // only fires on generic instantiations. For non-generic raised
     // shapes the cycle fence stays empty.

@@ -495,3 +495,182 @@ fn h1_reduce_bare_alias_does_not_poison_expanded_typeexpr_cache_slot() {
         post.map(|m| m.type_expr),
     );
 }
+
+// ---------------------------------------------------------------------------
+// 9. Block 6.i H2 — the package-backed gate's fence MUST refuse
+//    shared admission when a contributing canonical's
+//    `authoritative_current_content_hash` is unavailable.
+//
+//    Pre-H2 the gate built its fence via
+//    `shallow_file_state(canonical).whole_hash.unwrap_or_default()`
+//    — i.e. a `WholeHash(0)` sentinel for an unavailable file. A
+//    `WholeHash(0)` fence entry validates against any subsequent
+//    file state that ALSO returns 0 (the no-content path), but it
+//    does NOT validate against the actual file state — opening a
+//    race window where a dependency edit between the gate verdict
+//    and the fence read admits a stale verdict against a fresh
+//    whole-hash.
+//
+//    Post-H2 the gate uses `authoritative_current_content_hash`
+//    (the same oracle `resolve_type_declaration` /
+//    `named_decl_body` observe internally) and refuses the fence
+//    (`None`) when the contributing canonical's hash is
+//    unavailable.
+//
+//    DISCRIMINATION strategy: this is a race condition; standard
+//    unit-test setups cannot easily reproduce the actual time-of-
+//    check/time-of-use window. Per the codex review's verification
+//    options, this characterisation test asserts the gate's
+//    SOURCE-LEVEL structural invariants:
+//
+//      1. The fence-collection arm of
+//         `type_expr_has_package_backed_object_like_root_with_fence`
+//         MUST observe `authoritative_current_content_hash` (the
+//         view-aware oracle consistent with the declaration
+//         lookup's internal observation), NOT
+//         `shallow_file_state(...).whole_hash` (the pre-H2
+//         oracle that opened the race window).
+//
+//      2. The function's return type MUST be
+//         `(bool, Option<DepSignature>)` — the `Option` discriminator
+//         is the structural signal callers use to refuse admission
+//         when the gate refuses the fence.
+//
+//    Pre-H2 (1) and (2) both fail. Post-H2 both pass. A future
+//    regression that reverts the fence collection to the
+//    `shallow_file_state` oracle (re-opening the race) trips (1);
+//    a regression that returns a bare `DepSignature` (preventing
+//    callers from honouring refusal) trips (2).
+// ---------------------------------------------------------------------------
+#[test]
+fn h2_package_backed_gate_observes_authoritative_current_content_hash_not_shallow_file_state() {
+    // Read the gate source verbatim from the workspace.
+    let gate_src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/meta_resolve/materialize/field_types.rs",
+    ))
+    .expect("read field_types.rs");
+
+    let gate_fn_marker = "pub(crate) fn type_expr_has_package_backed_object_like_root_with_fence(";
+    let gate_fn_idx = gate_src
+        .find(gate_fn_marker)
+        .expect("guard: gate function must remain in field_types.rs");
+    // Bound the slice at the next top-level `pub(crate) fn` / `fn `
+    // so the substring search below does not pick up unrelated calls
+    // in other functions of the same module.
+    let after_marker = &gate_src[gate_fn_idx..];
+    let end_idx = after_marker
+        .find("\npub(crate) fn ")
+        .or_else(|| after_marker.find("\nfn "))
+        .unwrap_or(after_marker.len());
+    let gate_body = &after_marker[..end_idx];
+
+    // Invariant 1: the fence-collection arm consults
+    // `authoritative_current_content_hash`.
+    assert!(
+        gate_body.contains("authoritative_current_content_hash"),
+        "H2 invariant 1: the gate's fence-collection arm MUST consult \
+         `authoritative_current_content_hash` (the view-aware oracle the \
+         declaration lookup observes internally). Without this, the gate \
+         and the declaration lookup observe different oracles → race \
+         window where a dependency edit between the gate verdict and the \
+         fence read admits a stale verdict against a fresh whole-hash.",
+    );
+
+    // Invariant 1b: the pre-H2 `.shallow_file_state(canonical)` CALL
+    // pattern MUST be absent from the gate's fence-collection arm.
+    // Detection uses the `.shallow_file_state(canonical)` method-call
+    // form so docstring mentions of the oracle name (e.g.
+    // `pre-H2 shallow_file_state.whole_hash read`) do not trip the
+    // guard. A future refactor that ADDED
+    // `authoritative_current_content_hash` but left a method call to
+    // `.shallow_file_state(canonical)` in the fence-collection arm
+    // would re-open the race.
+    assert!(
+        !gate_body.contains(".shallow_file_state(canonical)"),
+        "H2 invariant 1b: the gate's fence-collection arm MUST NOT \
+         call `.shallow_file_state(canonical)` — that oracle opened \
+         the H2 race window because it observes a different content view \
+         than the declaration lookup's internal `authoritative_current_content_hash`.",
+    );
+
+    // Invariant 2: the function returns `Option<DepSignature>`. The
+    // signature snippet covers both the `fn` declaration's return type
+    // and the wrapper at line 400 (which extracts `.0`).
+    assert!(
+        gate_body
+            .contains("Option<crate::semantic_query::DepSignature>")
+            || gate_body.contains("Option<DepSignature>"),
+        "H2 invariant 2: the gate's return type MUST be \
+         `(bool, Option<DepSignature>)` — the `Option` discriminator is \
+         the structural signal callers use to refuse admission when the \
+         gate refuses the fence.",
+    );
+
+    // Invariant 3: the gate returns a `(verdict, None)` refusal arm.
+    // Without this the `None` path is unreachable; with it, callers
+    // observe the refusal whenever a contributing canonical's
+    // authoritative hash is unavailable.
+    let returns_none_arm = gate_body.contains("return (true, None);")
+        || gate_body.contains("return (verdict, None);");
+    assert!(
+        returns_none_arm,
+        "H2 invariant 3: the gate MUST contain an explicit `return \
+         (verdict, None)` (or `(true, None)`) refusal arm so the \
+         `None` return is reachable when a contributing canonical's \
+         `authoritative_current_content_hash` is unavailable.",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 10. Block 6.i H2 — the projector caller MUST honour the gate's
+//     fence refusal. When the gate returns `(verdict, None)`, the
+//     caller MUST NOT admit a cache entry rooted on a stand-in
+//     fence; it must return the raised value verbatim.
+//
+//     SOURCE-LEVEL invariant: `member_shape_peek_or_compute` must
+//     destructure the gate's return tuple as
+//     `(route_is_package_backed, package_backed_fence_opt)` and
+//     branch on `package_backed_fence_opt.is_none()` (or pattern-
+//     match `Some(_)` / `None`) BEFORE invoking
+//     `admit_member_shape_if_possible`.
+// ---------------------------------------------------------------------------
+#[test]
+fn h2_projector_caller_honours_gate_fence_refusal() {
+    let proj_src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/meta_resolve/projectors/mod.rs",
+    ))
+    .expect("read projectors/mod.rs");
+
+    let fn_marker = "fn member_shape_peek_or_compute(";
+    let fn_idx = proj_src
+        .find(fn_marker)
+        .expect("guard: member_shape_peek_or_compute must remain");
+    let after_marker = &proj_src[fn_idx..];
+    let end_idx = after_marker
+        .find("\nfn ")
+        .or_else(|| after_marker.find("\npub(crate) fn "))
+        .unwrap_or(after_marker.len());
+    let fn_body = &after_marker[..end_idx];
+
+    // Invariant: the caller binds the gate's fence as an Option-
+    // bearing local AND has a refusal arm.
+    assert!(
+        fn_body.contains("package_backed_fence_opt"),
+        "H2 caller invariant: `member_shape_peek_or_compute` MUST \
+         destructure the gate as `package_backed_fence_opt: Option<_>`. \
+         Pre-H2 the destructure was a bare `DepSignature` → no refusal arm.",
+    );
+
+    // Invariant: at least one `let Some(... ) = package_backed_fence_opt`
+    // refusal arm exists, ensuring the caller skips the admit when the
+    // gate refuses.
+    assert!(
+        fn_body.contains("let Some(package_backed_fence) = package_backed_fence_opt"),
+        "H2 caller invariant: the caller MUST honour the gate's `None` \
+         refusal by branching on `let Some(... ) = package_backed_fence_opt` \
+         before admitting to the cache. Without this branch, a stand-in \
+         fence would be used (the pre-H2 bug).",
+    );
+}
