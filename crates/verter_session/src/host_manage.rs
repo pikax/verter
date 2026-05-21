@@ -833,44 +833,28 @@ impl FallthroughRequestHost for VerterHost {
         canonical_id: &str,
         prop_type_overrides: Option<&rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>>,
         visiting: &mut rustc_hash::FxHashSet<String>,
-        store_view: Option<&Self::View>,
+        store_view: &Self::View,
     ) -> Option<Self::Resolution> {
-        // Consume the request-bound `store_view` to construct a
-        // `HostResolverContext` so the engine reads underneath the
-        // fallthrough closure observe the overlay-aware view. The
-        // singleflight executor passes the view it built in
-        // `snapshot_view`; when none is supplied we fall back to a
-        // freshly-snapshot view at this boundary (the `with_fixed_view`
-        // path always carries one in production).
-        match store_view {
-            Some(view) => {
-                let overlay =
-                    std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-                let host_ctx = crate::resolver_core::HostResolverContext::new(self, view, overlay);
-                let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
-                VerterHost::compute_fallthrough_surface_uncached(
-                    self,
-                    canonical_id,
-                    prop_type_overrides,
-                    visiting,
-                    ctx,
-                )
-            }
-            None => {
-                let view = self.resolver_store_view();
-                let overlay =
-                    std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-                let host_ctx = crate::resolver_core::HostResolverContext::new(self, &view, overlay);
-                let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
-                VerterHost::compute_fallthrough_surface_uncached(
-                    self,
-                    canonical_id,
-                    prop_type_overrides,
-                    visiting,
-                    ctx,
-                )
-            }
-        }
+        // Block 6.g C5: the trait-method signature is tightened to
+        // require a request-bound `store_view` (no `Option`) — the
+        // singleflight executor in `resolver_core::fallthrough_request`
+        // always passes the view it built in `snapshot_view`. The
+        // defensive `None` arm that previously rebuilt an owned view
+        // + synthesised overlay (a bare-host fallback) is eliminated:
+        // production callers always arrive via `run_fallthrough_request`
+        // → executor → `compute(view)` with a request-bound view. There
+        // is no production caller that arrives without a view; any
+        // future caller must thread one through.
+        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx = crate::resolver_core::HostResolverContext::new(self, store_view, overlay);
+        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
+        VerterHost::compute_fallthrough_surface_uncached(
+            self,
+            canonical_id,
+            prop_type_overrides,
+            visiting,
+            ctx,
+        )
     }
 
     fn store_fallthrough_result(

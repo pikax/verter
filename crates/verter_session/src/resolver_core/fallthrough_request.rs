@@ -25,7 +25,7 @@ pub trait FallthroughRequestHost {
         canonical_id: &str,
         prop_type_overrides: Option<&FxHashMap<String, TypeExpr>>,
         visiting: &mut FxHashSet<String>,
-        store_view: Option<&Self::View>,
+        store_view: &Self::View,
     ) -> Option<Self::Resolution>;
     fn store_fallthrough_result(
         &self,
@@ -107,7 +107,7 @@ where
             &self.canonical_id,
             self.prop_type_overrides,
             self.visiting,
-            Some(view),
+            view,
         ))
     }
 
