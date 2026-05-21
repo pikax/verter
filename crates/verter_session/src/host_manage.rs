@@ -844,13 +844,10 @@ impl FallthroughRequestHost for VerterHost {
         // path always carries one in production).
         match store_view {
             Some(view) => {
-                let overlay = std::sync::Arc::new(
-                    crate::resolver_core::CanonicalCompletionOverlay::new(),
-                );
-                let host_ctx =
-                    crate::resolver_core::HostResolverContext::new(self, view, overlay);
-                let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext =
-                    &host_ctx;
+                let overlay =
+                    std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+                let host_ctx = crate::resolver_core::HostResolverContext::new(self, view, overlay);
+                let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
                 VerterHost::compute_fallthrough_surface_uncached(
                     self,
                     canonical_id,
@@ -861,13 +858,10 @@ impl FallthroughRequestHost for VerterHost {
             }
             None => {
                 let view = self.resolver_store_view();
-                let overlay = std::sync::Arc::new(
-                    crate::resolver_core::CanonicalCompletionOverlay::new(),
-                );
-                let host_ctx =
-                    crate::resolver_core::HostResolverContext::new(self, &view, overlay);
-                let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext =
-                    &host_ctx;
+                let overlay =
+                    std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+                let host_ctx = crate::resolver_core::HostResolverContext::new(self, &view, overlay);
+                let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
                 VerterHost::compute_fallthrough_surface_uncached(
                     self,
                     canonical_id,
@@ -914,8 +908,7 @@ pub(in crate::host_manage) struct HostFallthroughResolver<'a> {
     /// (`get_component_meta` / `..._via_view` / `..._with_resolution`)
     /// supply a real ctx; tests / off-path callers go through
     /// `with_bare_host_ctx_for_test` to construct one.
-    pub(in crate::host_manage) ctx:
-        &'a dyn crate::resolver_core::resolver_context::ResolverContext,
+    pub(in crate::host_manage) ctx: &'a dyn crate::resolver_core::resolver_context::ResolverContext,
 }
 
 impl FallthroughResolverHost for HostFallthroughResolver<'_> {

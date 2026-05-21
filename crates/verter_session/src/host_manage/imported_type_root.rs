@@ -26,6 +26,29 @@ impl VerterHost {
             .0
     }
 
+    /// View-bound variant of [`Self::resolve_imported_type_root`].
+    ///
+    /// Request-bound callers (`HostResolverContext`,
+    /// `SessionResolverContext`) route through this variant so the
+    /// cached imported-root entry validates against the supplied view
+    /// rather than rebuilding a fresh owned workspace snapshot.
+    /// Delegates to
+    /// [`Self::resolve_imported_type_root_with_facts_with_store_view`]
+    /// and discards the route-chain fact tuple.
+    pub(crate) fn resolve_imported_type_root_with_store_view(
+        &self,
+        view: &dyn crate::resolver_core::StoreView,
+        dep_canonical: &str,
+        imported_name: &str,
+    ) -> (String, String) {
+        self.resolve_imported_type_root_with_facts_with_store_view(
+            view,
+            dep_canonical,
+            imported_name,
+        )
+        .0
+    }
+
     /// Like [`Self::resolve_imported_type_root`] but ALSO returns
     /// the full route-chain fact list the resolution observed.
     /// Producers that thread the recorded facts into a downstream

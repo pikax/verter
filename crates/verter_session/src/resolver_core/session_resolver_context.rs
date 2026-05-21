@@ -462,7 +462,15 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         dep_canonical: &str,
         imported_name: &str,
     ) -> (String, String) {
-        ResolverContext::resolve_imported_type_root(self.inner, dep_canonical, imported_name)
+        // Route through the view-bound shim so the cached imported-root
+        // entry validates against the session-bound overlay-aware view
+        // (`self.request_view` — overlay + session reads layered over
+        // base). Avoids the carrier-site bare-host rebuild.
+        self.inner.resolve_imported_type_root_with_store_view(
+            &self.request_view,
+            dep_canonical,
+            imported_name,
+        )
     }
 
     #[inline]
@@ -471,7 +479,11 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {
-        ResolverContext::resolve_named_type_export_target(self.inner, dep_canonical, requested_name)
+        self.inner.resolve_named_type_export_target_with_store_view(
+            &self.request_view,
+            dep_canonical,
+            requested_name,
+        )
     }
 
     #[inline]
@@ -480,11 +492,12 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {
-        ResolverContext::resolve_named_type_export_target_shallow(
-            self.inner,
-            dep_canonical,
-            requested_name,
-        )
+        self.inner
+            .resolve_named_type_export_target_shallow_with_store_view(
+                &self.request_view,
+                dep_canonical,
+                requested_name,
+            )
     }
 
     #[inline]
@@ -493,7 +506,14 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         owner_canonical: &str,
         local_name: &str,
     ) -> Option<(String, String)> {
-        ResolverContext::resolve_owner_direct_import(self.inner, owner_canonical, local_name)
+        // Carrier site closure: route through the view-bound variant so
+        // the cached owner-import surface validates against the
+        // session-bound view rather than rebuilding a fresh snapshot.
+        self.inner.resolve_owner_direct_import_with_store_view(
+            &self.request_view,
+            owner_canonical,
+            local_name,
+        )
     }
 
     #[inline]

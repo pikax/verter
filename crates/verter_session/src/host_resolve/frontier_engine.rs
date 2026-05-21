@@ -849,15 +849,23 @@ impl VerterHost {
         Some((route_result, facts))
     }
 
-    pub(super) fn resolve_named_type_export_target_uncached(
+    /// View-bound resolver for the cached route entry. Validates the
+    /// cached `RouteDb` entry against the supplied request-bound view
+    /// rather than rebuilding a per-call owned workspace snapshot.
+    /// Request-bound callers (`HostResolverContext`,
+    /// `SessionResolverContext`) route through this variant; off-path
+    /// callers either compose a one-shot owned snapshot at the request
+    /// entry boundary or go through the `#[cfg(test)]`-only one-shot
+    /// rebuild on `impl ResolverContext for VerterHost`.
+    pub(super) fn resolve_named_type_export_target_uncached_with_store_view(
         &self,
+        view: &dyn crate::resolver_core::StoreView,
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {
         let normalized_canonical = self
             .resolve_eval_dependency_canonical(dep_canonical)
             .unwrap_or_else(|| dep_canonical.to_string());
-        let live_view = self.resolver_store_view();
 
         // Consume the route through the fact-observing entry-point so
         // the route's `fact_dep_signature` bubbles into any active
@@ -870,7 +878,7 @@ impl VerterHost {
             .get_or_resolve_route_observing_facts(
                 normalized_canonical.as_str(),
                 requested_name,
-                &live_view,
+                view,
                 || {
                     self.build_named_type_export_route_entry(
                         normalized_canonical.as_str(),
@@ -890,8 +898,26 @@ impl VerterHost {
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {
-        let result =
-            self.resolve_named_type_export_target_uncached(dep_canonical, requested_name)?;
+        let live_view = self.resolver_store_view();
+        self.resolve_named_type_export_target_shallow_with_store_view(
+            &live_view,
+            dep_canonical,
+            requested_name,
+        )
+    }
+
+    /// View-bound variant of [`Self::resolve_named_type_export_target_shallow`].
+    pub(crate) fn resolve_named_type_export_target_shallow_with_store_view(
+        &self,
+        view: &dyn crate::resolver_core::StoreView,
+        dep_canonical: &str,
+        requested_name: &str,
+    ) -> Option<(String, String)> {
+        let result = self.resolve_named_type_export_target_uncached_with_store_view(
+            view,
+            dep_canonical,
+            requested_name,
+        )?;
         component_meta_trace_custom!(
             "resolve_named_type_export_target_result",
             format!(

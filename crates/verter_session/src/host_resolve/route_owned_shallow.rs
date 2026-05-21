@@ -493,8 +493,30 @@ impl VerterHost {
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {
-        let result =
-            self.resolve_named_type_export_target_uncached(dep_canonical, requested_name)?;
+        let live_view = self.resolver_store_view();
+        self.resolve_named_type_export_target_with_store_view(
+            &live_view,
+            dep_canonical,
+            requested_name,
+        )
+    }
+
+    /// View-bound variant of [`Self::resolve_named_type_export_target`].
+    ///
+    /// Request-bound callers (`HostResolverContext`,
+    /// `SessionResolverContext`) route through this variant; the bare
+    /// wrapper above builds an owned snapshot once and delegates here.
+    pub(crate) fn resolve_named_type_export_target_with_store_view(
+        &self,
+        view: &dyn crate::resolver_core::StoreView,
+        dep_canonical: &str,
+        requested_name: &str,
+    ) -> Option<(String, String)> {
+        let result = self.resolve_named_type_export_target_uncached_with_store_view(
+            view,
+            dep_canonical,
+            requested_name,
+        )?;
         let _ = self.ensure_indexed_ready(result.0.as_str());
         component_meta_trace_custom!(
             "resolve_named_type_export_target_result",
@@ -598,7 +620,11 @@ impl VerterHost {
         std::collections::BTreeSet<String>,
     ) {
         let collected = crate::resolver_core::collect_external_macro_types(
-            &HostExternalMacroTypeCollector { host: self, view, ctx },
+            &HostExternalMacroTypeCollector {
+                host: self,
+                view,
+                ctx,
+            },
             owner_canonical,
             macro_type_deps,
             script_imports,

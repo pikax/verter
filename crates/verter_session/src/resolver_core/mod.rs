@@ -50,10 +50,10 @@ pub use fact_read_set::{FactReadSet, FactReadSetCell, FactReadSetFinalise};
 // Block 6.c substrate re-export. Hot-path callers construct the
 // request-bound wrapper at entry points; the wiring lands in the
 // hot-path conversion commit (C).
-#[allow(unused_imports)]
-pub(crate) use host_resolver_context::HostResolverContext;
 #[cfg(any(test, debug_assertions))]
 pub(crate) use host_resolver_context::with_bare_host_ctx_for_test;
+#[allow(unused_imports)]
+pub(crate) use host_resolver_context::HostResolverContext;
 #[allow(unused_imports)]
 pub(crate) use request_store_view::{CanonicalCompletionOverlay, RequestStoreView};
 pub(crate) use resolver_context::{MaterializeScopeObservation, ResolverContext};

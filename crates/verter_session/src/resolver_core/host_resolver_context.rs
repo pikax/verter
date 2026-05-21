@@ -279,7 +279,15 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         dep_canonical: &str,
         imported_name: &str,
     ) -> (String, String) {
-        crate::VerterHost::resolve_imported_type_root(self.inner, dep_canonical, imported_name)
+        // Route through the view-bound shim so the cached imported-root
+        // entry validates against the request-bound overlay-aware view
+        // rather than rebuilding a fresh owned workspace snapshot per
+        // call (the carrier site identified by 6.e attribution).
+        self.inner.resolve_imported_type_root_with_store_view(
+            &self.view,
+            dep_canonical,
+            imported_name,
+        )
     }
 
     #[inline]
@@ -288,8 +296,11 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {
-        crate::VerterHost::resolve_named_type_export_target(
-            self.inner,
+        // Route through the view-bound variant so the cached route
+        // validates against the request-bound view (the carrier site
+        // at `route_owned_shallow.rs:496`).
+        self.inner.resolve_named_type_export_target_with_store_view(
+            &self.view,
             dep_canonical,
             requested_name,
         )
@@ -301,11 +312,14 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {
-        crate::VerterHost::resolve_named_type_export_target_shallow(
-            self.inner,
-            dep_canonical,
-            requested_name,
-        )
+        // Route through the view-bound variant (carrier site at
+        // `frontier_engine.rs:903`).
+        self.inner
+            .resolve_named_type_export_target_shallow_with_store_view(
+                &self.view,
+                dep_canonical,
+                requested_name,
+            )
     }
 
     #[inline]

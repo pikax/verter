@@ -293,7 +293,7 @@ impl RouteDb {
         resolve: F,
     ) -> Option<Arc<RouteResult>>
     where
-        V: StoreView,
+        V: StoreView + ?Sized,
         F: FnOnce() -> Option<RouteResult>,
     {
         self.get_or_resolve_route_with_facts(provider_canonical, exported_name, view, || {
@@ -310,7 +310,7 @@ impl RouteDb {
         resolve: F,
     ) -> Option<Arc<RouteResult>>
     where
-        V: StoreView,
+        V: StoreView + ?Sized,
         F: FnOnce() -> Option<(RouteResult, Vec<FactVersionRef>)>,
     {
         let key = (provider_canonical.to_owned(), exported_name.to_owned());
@@ -349,7 +349,7 @@ impl RouteDb {
         resolve: F,
     ) -> Option<SingleflightRunResult<Arc<RouteResult>>>
     where
-        V: StoreView,
+        V: StoreView + ?Sized,
         F: FnOnce() -> Option<(RouteResult, Vec<FactVersionRef>)>,
     {
         self.route_singleflight
@@ -406,7 +406,7 @@ impl RouteDb {
     /// active outer tracer scope (R28 fact-bubble-up) use this variant
     /// instead of [`Self::get_route`] so the facts are visible without a
     /// second round-trip through the cache.
-    pub fn get_route_with_facts<V: StoreView>(
+    pub fn get_route_with_facts<V: StoreView + ?Sized>(
         &self,
         provider_canonical: &str,
         exported_name: &str,
@@ -442,7 +442,7 @@ impl RouteDb {
         resolve: F,
     ) -> Option<Arc<RouteResult>>
     where
-        V: StoreView,
+        V: StoreView + ?Sized,
         F: FnOnce() -> Option<(RouteResult, Vec<FactVersionRef>)>,
     {
         // Warm-hit fast path: validated cache lookup with fact bubbling.

@@ -844,10 +844,7 @@ impl VerterHost {
                     else {
                         continue;
                     };
-                    ctx.resolve_imported_type_root(
-                        dep_canonical.as_str(),
-                        imported_member.as_str(),
-                    )
+                    ctx.resolve_imported_type_root(dep_canonical.as_str(), imported_member.as_str())
                 };
                 if seen.insert((
                     referenced_name.clone(),

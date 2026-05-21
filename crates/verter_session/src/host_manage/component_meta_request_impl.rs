@@ -249,8 +249,7 @@ impl ComponentMetaRequestHost for VerterHost {
         // view in production (`snapshot_view` builds one above);
         // the `None` branch falls back to building a view here for
         // robustness.
-        let overlay =
-            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         match store_view {
             Some(view) => {
                 if let Some(captured) = captured {

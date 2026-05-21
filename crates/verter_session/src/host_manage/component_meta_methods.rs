@@ -423,7 +423,12 @@ impl VerterHost {
         // (codex consult #3 diagnosis).
         let store_view = self.resolver_store_view().with_session_overlay(self, view);
         self.compute_component_meta_state_with_session_view_and_base(
-            canonical, mode, whole_hash, view, &store_view, overlay,
+            canonical,
+            mode,
+            whole_hash,
+            view,
+            &store_view,
+            overlay,
         )
     }
 
@@ -488,7 +493,12 @@ impl VerterHost {
         // rationale.
         let store_view = self.resolver_store_view().with_session_overlay(self, view);
         self.compute_component_meta_state_from_captured_with_session_view_and_base(
-            canonical, mode, captured, view, &store_view, overlay,
+            canonical,
+            mode,
+            captured,
+            view,
+            &store_view,
+            overlay,
         )
     }
 
@@ -548,7 +558,11 @@ impl VerterHost {
     ) -> Option<ResolvedComponentMetaState> {
         let store_view = self.resolver_store_view();
         self.compute_component_meta_state_with_view_arg(
-            canonical, mode, whole_hash, &store_view, overlay,
+            canonical,
+            mode,
+            whole_hash,
+            &store_view,
+            overlay,
         )
     }
 
@@ -593,7 +607,11 @@ impl VerterHost {
     ) -> Option<ResolvedComponentMetaState> {
         let store_view = self.resolver_store_view();
         self.compute_component_meta_state_from_captured_with_view_arg(
-            canonical, mode, captured, &store_view, overlay,
+            canonical,
+            mode,
+            captured,
+            &store_view,
+            overlay,
         )
     }
 
