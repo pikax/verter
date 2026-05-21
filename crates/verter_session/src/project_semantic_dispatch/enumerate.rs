@@ -234,4 +234,62 @@ impl<'a> ProjectSemanticDispatch<'a> {
             _ => self.key_names_from_base_node(resolved),
         }
     }
+
+    /// Path-precise admission for Mapped narrowing when the mapper's
+    /// `key_space` is a *non-enumerable* primitive (e.g. `string`,
+    /// `number`) — the case `key_names_from_keyspace_node` returns
+    /// `None` for.
+    ///
+    /// `Record<string, V>['foo']` and `{ [K in string]: V }['foo']`
+    /// have `key_space = Primitive(String)`: the key domain is the
+    /// entire `string` universe, but the enumerator cannot list its
+    /// inhabitants. Narrowing here is sound because *every* string
+    /// literal is admitted by the `string` key domain — substituting
+    /// `K = "foo"` into the value expression evaluates to the same
+    /// type the coarse Mapped path would assign to that key.
+    ///
+    /// Returns `true` when the (key_space, segment-domain) pair admits
+    /// the literal:
+    ///   - `Primitive(String)` admits a string-domain segment
+    ///     (`Member`, `Index::String`, or a `TypeNode` normalised to a
+    ///     string literal).
+    ///   - `Primitive(Number)` admits a number-domain segment
+    ///     (`Index::Number`, or a `TypeNode` normalised to a number
+    ///     literal).
+    ///   - `Primitive(Any)` / `Primitive(Unknown)` admit any literal —
+    ///     fully permissive key domain.
+    ///
+    /// Returns `false` for any other key_space shape (the caller falls
+    /// back to the coarse whole-surface Mapped path).
+    ///
+    /// `segment_is_string_domain` is `true` when the segment originated
+    /// from a `Member(name)` / `Index::String` / `Index::TypeNode`
+    /// normalised to a string literal; `false` when it originated from
+    /// `Index::Number` / a `TypeNode` normalised to a number literal.
+    /// (Pure ambiguity — the `TypeNode` still unresolved — is filtered
+    /// upstream: `literal_name` would be `None` and the caller never
+    /// invokes this helper.)
+    pub(super) fn primitive_keyspace_admits_segment(
+        &self,
+        key_space: SemanticNodeId,
+        segment_is_string_domain: bool,
+    ) -> bool {
+        let resolved = self.evaluate_deferred_semantic_node(key_space);
+        let Some(data) = self.graph().node_data(resolved) else {
+            return false;
+        };
+        match data.as_ref() {
+            SemanticNodeData::Primitive(PrimitiveKind::String) => segment_is_string_domain,
+            SemanticNodeData::Primitive(PrimitiveKind::Number) => !segment_is_string_domain,
+            SemanticNodeData::Primitive(PrimitiveKind::Any | PrimitiveKind::Unknown) => true,
+            // Union of primitives (e.g. `string | number`) admits if any
+            // arm admits the segment domain. Reuses the same recursive
+            // check, mirroring `key_names_from_keyspace_node`'s union
+            // handling but for primitive admission.
+            SemanticNodeData::Union(members) => members.iter().any(|member| {
+                self.primitive_keyspace_admits_segment(*member, segment_is_string_domain)
+            }),
+            _ => false,
+        }
+    }
 }

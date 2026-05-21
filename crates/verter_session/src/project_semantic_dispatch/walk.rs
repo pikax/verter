@@ -723,53 +723,78 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     //    bounded enumerated surface.
                     let next_index = index;
                     let next_segment = path.get(next_index);
-                    let literal_name: Option<Arc<str>> = match next_segment {
-                        Some(PathSegment::Member(name)) => Some(Arc::clone(name)),
-                        Some(PathSegment::Index(IndexKey::String(s))) => Some(Arc::clone(s)),
-                        Some(PathSegment::Index(IndexKey::Number(n))) => {
-                            Some(Arc::<str>::from(n.to_string()))
-                        }
-                        Some(PathSegment::Index(IndexKey::TypeNode(node))) => {
-                            match self.dispatch.normalized_index_key_node(*node) {
-                                IndexKey::String(text) => Some(Arc::clone(&text)),
-                                IndexKey::Number(number) => {
-                                    Some(Arc::<str>::from(number.to_string()))
-                                }
-                                IndexKey::TypeNode(_) => None,
+                    // Carry the segment's key-domain (string vs number)
+                    // alongside the literal text so the non-enumerable
+                    // primitive admission tier can decide soundness on
+                    // domain compatibility rather than text content.
+                    let (literal_name, segment_is_string_domain): (Option<Arc<str>>, bool) =
+                        match next_segment {
+                            Some(PathSegment::Member(name)) => (Some(Arc::clone(name)), true),
+                            Some(PathSegment::Index(IndexKey::String(s))) => {
+                                (Some(Arc::clone(s)), true)
                             }
-                        }
-                        None => None,
-                    };
-                    // Path-precise key-domain admission. Check the
-                    // source surface first (if enumerable as an Object,
-                    // its member names are the iteration keys); fall
-                    // back to the key_space enumeration when source is
-                    // not an enumerable Object. Returns:
-                    //   - `Some(true)`  — admitted (narrow is sound)
-                    //   - `Some(false)` — NOT admitted (must fall back)
-                    //   - `None`        — undecidable (key domain is
-                    //                     non-enumerable, e.g. the
-                    //                     `string` / `number` primitive
-                    //                     or an unresolved generic).
-                    //                     Fall back to the coarse path
-                    //                     which produces a deferred
-                    //                     shell re-dispatched once the
-                    //                     domain becomes enumerable.
-                    let key_admitted: Option<bool> = literal_name
-                        .as_ref()
-                        .map(|name| {
-                            let needle: &str = name.as_ref();
-                            match self.graph().node_data(*source).as_deref() {
-                                Some(SemanticNodeData::Object(view)) => {
-                                    Some(view.members.iter().any(|m| m.name.as_ref() == needle))
-                                }
-                                _ => self
-                                    .dispatch
-                                    .key_names_from_keyspace_node(mapper.key_space)
-                                    .map(|names| names.iter().any(|n| n.as_ref() == needle)),
+                            Some(PathSegment::Index(IndexKey::Number(n))) => {
+                                (Some(Arc::<str>::from(n.to_string())), false)
                             }
-                        })
-                        .unwrap_or(None);
+                            Some(PathSegment::Index(IndexKey::TypeNode(node))) => {
+                                match self.dispatch.normalized_index_key_node(*node) {
+                                    IndexKey::String(text) => (Some(Arc::clone(&text)), true),
+                                    IndexKey::Number(number) => {
+                                        (Some(Arc::<str>::from(number.to_string())), false)
+                                    }
+                                    IndexKey::TypeNode(_) => (None, false),
+                                }
+                            }
+                            None => (None, false),
+                        };
+                    // Path-precise key-domain admission. Three-tier
+                    // check, applied only when we have a literal_name
+                    // (without a literal we cannot perform the K =
+                    // Literal(name) substitution at all):
+                    //
+                    //   1. If the source surface is an enumerable
+                    //      Object, its member names ARE the iteration
+                    //      keys — admit iff the literal is present.
+                    //   2. Otherwise, if `key_space` enumerates (string
+                    //      literal union, keyof of an Object, …), admit
+                    //      iff the literal is in the enumerated set.
+                    //   3. Otherwise, if `key_space` is a non-enumerable
+                    //      primitive (`string`, `number`, `any`,
+                    //      `unknown`, or a union of these), admit iff
+                    //      the primitive's domain accepts the segment's
+                    //      domain — `Record<string, V>['foo']`,
+                    //      `Record<number, V>[1]`, etc. Without this
+                    //      tier, the coarse Mapped path re-interns the
+                    //      same shell and the walker fails to consume
+                    //      the segment, breaking idiomatic indexed
+                    //      access into primitive-keyed maps.
+                    //
+                    // `None` from the chain means the key domain is
+                    // genuinely undecidable (e.g. an unresolved generic
+                    // bound) — fall back to the coarse path which
+                    // produces a deferred shell re-dispatched once the
+                    // domain becomes enumerable.
+                    let key_admitted: Option<bool> = literal_name.as_ref().map(|name| {
+                        let needle: &str = name.as_ref();
+                        // Tier 1: source surface is an enumerable Object.
+                        if let Some(SemanticNodeData::Object(view)) =
+                            self.graph().node_data(*source).as_deref()
+                        {
+                            return view.members.iter().any(|m| m.name.as_ref() == needle);
+                        }
+                        // Tier 2: key_space enumerates.
+                        if let Some(names) =
+                            self.dispatch.key_names_from_keyspace_node(mapper.key_space)
+                        {
+                            return names.iter().any(|n| n.as_ref() == needle);
+                        }
+                        // Tier 3: key_space is a non-enumerable
+                        // primitive whose domain admits the segment.
+                        self.dispatch.primitive_keyspace_admits_segment(
+                            mapper.key_space,
+                            segment_is_string_domain,
+                        )
+                    });
                     let can_narrow = literal_name.is_some()
                         && mapper.name_remap.is_none()
                         && matches!(key_admitted, Some(true));

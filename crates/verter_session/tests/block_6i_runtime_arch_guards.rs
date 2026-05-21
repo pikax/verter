@@ -179,6 +179,54 @@ fn tuple_element_ty(e: &verter_type_expr::TupleElement) -> Option<&TypeExpr> {
 
 /// Names in the registry's `name` set, plus every `Ref` reached
 /// through any registry entry's `type_expr`.
+/// Collect every string-literal payload reachable within a
+/// `TypeExpr`. Used by the primitive-keyspace admission guards
+/// to detect that a discriminator literal (the marker carried by
+/// the mapper's value type) reaches the published prop surface.
+fn collect_string_literals(expr: &TypeExpr, out: &mut Vec<String>) {
+    match expr {
+        TypeExpr::Literal(verter_type_expr::LiteralValue::String(s)) => out.push(s.to_string()),
+        TypeExpr::Object(obj) => {
+            for member in obj.properties.iter() {
+                if let ObjectMember::Property(prop) = member {
+                    collect_string_literals(&prop.ty, out);
+                }
+            }
+        }
+        TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
+            for m in members.iter() {
+                collect_string_literals(m, out);
+            }
+        }
+        TypeExpr::Array { element, .. } => collect_string_literals(element, out),
+        TypeExpr::Tuple { elements, .. } => {
+            for e in elements.iter() {
+                if let Some(ty) = tuple_element_ty(e) {
+                    collect_string_literals(ty, out);
+                }
+            }
+        }
+        TypeExpr::IndexedAccess { object, index, .. } => {
+            collect_string_literals(object, out);
+            collect_string_literals(index, out);
+        }
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+            ..
+        } => {
+            collect_string_literals(check, out);
+            collect_string_literals(extends, out);
+            collect_string_literals(true_type, out);
+            collect_string_literals(false_type, out);
+        }
+        TypeExpr::Parenthesized(inner) => collect_string_literals(inner, out),
+        _ => {}
+    }
+}
+
 fn reachable_refs_in_registry(registry: &[ResolvedTypeAnalysis]) -> Vec<String> {
     let mut all = Vec::new();
     for entry in registry {
@@ -738,5 +786,151 @@ defineProps<{
         !refs.iter().any(|n| n == "KeyC"),
         "guard: admitted-key narrowing must NOT regress to whole-surface \
          enumeration; sibling KeyC must stay unprojected. Refs: {refs:?}",
+    );
+}
+
+// =====================================================================
+// Guard 9 — Mapped narrowing admits primitive-keyed maps.
+//
+// `{ [K in string]: V }['foo']` has `key_space = Primitive(String)`:
+// the iteration key domain is the entire `string` universe, but the
+// enumerator cannot list its inhabitants. The earlier tri-state
+// admission gate (Tier 1 source Object check + Tier 2 enumerable
+// key_space) treated this case as `None` (undecidable) and fell back
+// to the coarse Mapped path — which re-interns the same shell
+// without consuming the segment, leaving the access unresolved.
+//
+// Discriminating property: with the primitive-admission tier in
+// place, the walker substitutes K = "foo" into the value expression,
+// evaluates `Wrapped`, and publishes it as the prop's type. Without
+// the tier, the published prop type is opaque / un-resolved and the
+// `Wrapped` ref never reaches the registry.
+// =====================================================================
+#[test]
+fn mapped_narrowing_admits_primitive_string_key_space() {
+    let project = make_project();
+    upsert(
+        &project,
+        "/types.ts",
+        r#"export interface Wrapped { tag: 'primitive-string-key-admitted' }
+// `{ [K in string]: V }` lowers to a Mapped node with
+// `key_space = Primitive(String)` (non-enumerable). The
+// narrowing path must admit any string-domain segment —
+// substituting K = "foo" into the value expression evaluates
+// to `Wrapped`, which is the same type the coarse Mapped path
+// would assign to every key in the `string` domain.
+export type StringKeyed = { [K in string]: Wrapped }
+"#,
+    );
+    upsert(
+        &project,
+        "/Comp.vue",
+        r#"<script setup lang="ts">
+import type { StringKeyed } from './types'
+
+defineProps<{
+  // `foo` is a string literal — admitted by the `string` primitive
+  // key domain. Narrowing must fire and publish `Wrapped` onto the
+  // prop's surface.
+  resolved: StringKeyed['foo']
+}>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let meta = meta_for(&project, "/Comp.vue");
+
+    // The narrowed result is `Wrapped`, whose shape is
+    // `{ tag: 'primitive-string-key-admitted' }`. With the primitive-
+    // admission tier in place, the walker substitutes K = "foo" into
+    // the mapper's value expression and evaluates `Wrapped`'s body —
+    // the prop's published `type_expr` must reach the discriminator
+    // literal. Without the tier (G4.1's tri-state gate), the walker
+    // falls back to the coarse Mapped path which re-interns the
+    // unresolved shell; the prop type stays an opaque
+    // `IndexedAccess` or a Primitive(Unknown), and the discriminator
+    // never reaches the surface.
+    let resolved_prop = meta
+        .props
+        .iter()
+        .find(|p| p.name == "resolved")
+        .expect("resolved prop must be present");
+    let mut tags: Vec<String> = Vec::new();
+    collect_string_literals(&resolved_prop.type_expr, &mut tags);
+    assert!(
+        tags.iter().any(|t| t == "primitive-string-key-admitted"),
+        "guard: {{ [K in string]: Wrapped }}['foo'] MUST resolve to Wrapped (string \
+         primitive key domain admits any string-literal segment). \
+         type_expr: {:#?}",
+        resolved_prop.type_expr,
+    );
+}
+
+// =====================================================================
+// Guard 10 — Mapped narrowing does NOT over-admit on primitive key
+// space mismatch.
+//
+// Complement of Guard 9: a `{ [K in number]: V }['foo']` access has
+// a number-keyed map (key_space = Primitive(Number)) indexed by a
+// string literal. The number primitive's domain does NOT admit a
+// string segment, so the primitive-admission tier must reject and
+// fall back to the coarse Mapped path. The coarse path then produces
+// the correct domain-mismatch miss — `Wrapped` MUST NOT leak onto
+// the surface for the string segment.
+// =====================================================================
+#[test]
+fn mapped_narrowing_rejects_primitive_key_space_domain_mismatch() {
+    let project = make_project();
+    upsert(
+        &project,
+        "/types.ts",
+        r#"export interface Wrapped { tag: 'must-not-leak-on-domain-mismatch' }
+// `{ [K in number]: V }` lowers to a Mapped node with
+// `key_space = Primitive(Number)`. A string-literal segment is
+// NOT in the number key domain — the admission tier must
+// reject and fall back to coarse Mapped resolution rather than
+// forging `Wrapped` for a domain-incompatible key.
+export type NumberKeyed = { [K in number]: Wrapped }
+"#,
+    );
+    upsert(
+        &project,
+        "/Comp.vue",
+        r#"<script setup lang="ts">
+import type { NumberKeyed } from './types'
+
+defineProps<{
+  // `foo` is a string literal — NOT admitted by the `number`
+  // primitive key domain. Narrowing MUST be rejected; the coarse
+  // path then produces a miss and `Wrapped` must not appear.
+  mismatched: NumberKeyed['foo']
+}>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let meta = meta_for(&project, "/Comp.vue");
+
+    // Discriminating: if the primitive-admission tier over-admitted
+    // (returned true regardless of segment domain), the walker would
+    // substitute K = "foo" and forge `Wrapped` for a key whose domain
+    // does NOT include it — the prop's published type_expr would
+    // reach the discriminator literal. With domain-aware admission,
+    // the narrow rejects and the coarse path produces the correct
+    // miss (an unresolved IndexedAccess shell or Primitive(Unknown)),
+    // and the discriminator NEVER reaches the surface.
+    let mismatched_prop = meta
+        .props
+        .iter()
+        .find(|p| p.name == "mismatched")
+        .expect("mismatched prop must be present");
+    let mut tags: Vec<String> = Vec::new();
+    collect_string_literals(&mismatched_prop.type_expr, &mut tags);
+    assert!(
+        !tags.iter().any(|t| t == "must-not-leak-on-domain-mismatch"),
+        "guard: {{ [K in number]: Wrapped }}['foo'] MUST NOT publish Wrapped \
+         (number key domain rejects string-literal segments). \
+         type_expr: {:#?}",
+        mismatched_prop.type_expr,
     );
 }
