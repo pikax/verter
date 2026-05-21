@@ -1,7 +1,7 @@
 # Stage 7 cutover state. Owned by the cutover-state xtask.
 # This file is deleted at Block 10 completion.
 
-active_block = ""
+active_block = "6.i"
 landed_blocks = [
     "0",
     "1.6",
