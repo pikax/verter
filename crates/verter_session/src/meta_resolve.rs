@@ -40,6 +40,9 @@ pub(crate) mod materialize;
 mod origin_graph;
 pub(crate) mod projectors;
 #[cfg(test)]
+#[path = "meta_resolve/projectors_peek_tests.rs"]
+mod projectors_peek_tests;
+#[cfg(test)]
 #[path = "meta_resolve/projectors_silent_miss_tests.rs"]
 mod projectors_silent_miss_tests;
 mod registry_materialize;

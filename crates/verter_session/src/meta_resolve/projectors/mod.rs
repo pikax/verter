@@ -271,6 +271,107 @@ pub(crate) fn empty_path() -> Arc<[PathSegment]> {
     Arc::from(Vec::<PathSegment>::new().into_boxed_slice())
 }
 
+// =============================================================================
+// Block 6.h Commit A — `peek_member_shape_known` graph-native type-peek
+// primitive.
+//
+// The peek is a Rule-6 enforcement substrate for the projector pipeline:
+// the caller asks "do you already know the shape of this type expression
+// at this scope / mode?" and the implementation answers WITHOUT triggering
+// any reducer / resolver / route rebuild.
+//
+//  - `PeekedShape::Leaf` — the expression is a leaf primitive or literal;
+//    publishing it is a clone.
+//  - `PeekedShape::BareCarrier` — the expression is an unparameterised
+//    `Ref` (a plain alias name). Per the shallow-by-default rule, the
+//    projector publishes the Ref shallow; consumers re-resolve through
+//    the registry on demand. No reduction needed.
+//  - `PeekedShape::Cached` — the expression already has an entry in
+//    `MaterializeMemoDb` keyed on `(scope, expr, mode)`. The peek
+//    re-emits the cached entry's `fact_dep_signature` into the active
+//    fact tracer (mirroring the `MemberShapeCacheDb::peek` protocol) so
+//    the cm-result cache validation invariants are preserved.
+//  - `None` — the cache is cold for this triple; the caller must decide
+//    whether to reduce (operator-shape / generic instantiation cases) or
+//    publish shallow (bare alias case already covered above).
+//
+// Strictly request-bound: the `debug_assert!` enforces that the caller's
+// `ResolverContext` is request-bound. Bare-host invocation would force a
+// workspace snapshot rebuild — the cost driver Block 6.g closed and
+// 6.h must not reopen.
+// =============================================================================
+
+/// Result of peeking whether a type's shape is known cheaply.
+///
+/// `Some(_)` ⇒ the caller may publish or short-circuit WITHOUT
+/// triggering reduction. `None` ⇒ the cache is cold; the caller must
+/// reduce (or publish the Ref shallow per the shallow-by-default rule).
+#[allow(dead_code)] // Block 6.h Commit A — call sites wired in Commits B + C.
+pub(crate) enum PeekedShape {
+    /// The expression is a bare alias carrier; publish the Ref
+    /// shallow. No reduction needed.
+    BareCarrier { name: Arc<str> },
+    /// The expression is a leaf primitive / literal — publish as-is.
+    Leaf(verter_type_expr::TypeExpr),
+    /// The expression has already been reduced; return the cached
+    /// `MaterializedTypeExpr` verbatim. The peek implementation
+    /// re-emits the cached entry's `fact_dep_signature` into the
+    /// active fact tracer + dispatch dep-signature accumulator via the
+    /// `MaterializeMemoDb::peek` protocol (`bubble_fact_signature` in
+    /// `component_meta_caches.rs:1346`).
+    Cached(crate::project_semantic_dispatch::raise::MaterializedTypeExpr),
+}
+
+/// Peek without expansion.
+///
+/// Does NOT consult `RouteDb`, `OwnerImportSurfaceDb`, or rebuild any
+/// workspace view — observes ONLY the request-bound store_view via
+/// `ctx.store_view()` (through the cooperative `MaterializeMemoDb::peek`).
+///
+/// MUST be invoked from a request-bound context; the
+/// `debug_assert!(query_engine.ctx.is_request_bound())` enforces this.
+/// Reaching this from a bare-host context would force a workspace
+/// snapshot rebuild — the very cost we are eliminating in Block 6.g/6.h.
+#[allow(dead_code)] // Block 6.h Commit A — call sites wired in Commits B + C.
+pub(crate) fn peek_member_shape_known(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    scope_canonical_id: &str,
+    expr: &TypeExpr,
+    mode: ProjectionMode,
+) -> Option<PeekedShape> {
+    debug_assert!(
+        query_engine.ctx.is_request_bound(),
+        "peek_member_shape_known invoked from bare-host context — \
+         would force a workspace snapshot rebuild"
+    );
+
+    match expr {
+        TypeExpr::Primitive(_) | TypeExpr::Literal(_) => {
+            Some(PeekedShape::Leaf(expr.clone()))
+        }
+        TypeExpr::Ref { type_arguments, name } if type_arguments.is_empty() => {
+            Some(PeekedShape::BareCarrier { name: name.clone() })
+        }
+        _ => {
+            // Operator-shape (Pick/Omit/IndexedAccess/Conditional/Mapped)
+            // or generic instantiation: consult `MaterializeMemoDb` only.
+            // Does NOT consult RouteDb/OwnerImportSurfaceDb (those would
+            // rebuild HostStoreView and force the very cost driver Block
+            // 6.g closed).
+            let ctx: &dyn ResolverContext = query_engine.ctx;
+            let key: crate::component_meta_caches::MaterializeMemoKey = (
+                Arc::<str>::from(scope_canonical_id),
+                Arc::new(expr.clone()),
+                mode,
+            );
+            ctx.project_type_store()
+                .materialize_memo_db()
+                .peek(&key, ctx)
+                .map(PeekedShape::Cached)
+        }
+    }
+}
+
 /// Read the [`SurfaceView`] members backing `node`, if `node` resolves
 /// to a `SemanticNodeData::Object` shell. Empty for any other variant
 /// — callers treat the empty surface as "no enumerable members".
