@@ -205,7 +205,7 @@ fn peek_generic_instantiation_does_not_short_circuit_as_bare_carrier() {
             peek_shape_dbg(&peeked),
         );
         assert!(
-            matches!(peeked, None),
+            peeked.is_none(),
             "cold MaterializeMemoDb lookup for generic instantiation must return None, got: {}",
             peek_shape_dbg(&peeked),
         );
@@ -243,7 +243,7 @@ fn peek_operator_shape_cold_memo_returns_none() {
         // would not produce a cached entry — so any `Some(_)` here is
         // a regression.
         assert!(
-            matches!(peeked, None),
+            peeked.is_none(),
             "cold MaterializeMemoDb lookup for operator-shape (IndexedAccess) \
              must return None, got: {}",
             peek_shape_dbg(&peeked),

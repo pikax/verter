@@ -272,13 +272,12 @@ pub(crate) fn empty_path() -> Arc<[PathSegment]> {
 }
 
 // =============================================================================
-// Block 6.h Commit A — `peek_member_shape_known` graph-native type-peek
-// primitive.
+// `peek_member_shape_known` — graph-native type-peek primitive.
 //
-// The peek is a Rule-6 enforcement substrate for the projector pipeline:
-// the caller asks "do you already know the shape of this type expression
-// at this scope / mode?" and the implementation answers WITHOUT triggering
-// any reducer / resolver / route rebuild.
+// The peek is the projector pipeline's shallow-by-default enforcement
+// substrate: the caller asks "do you already know the shape of this type
+// expression at this scope / mode?" and the implementation answers
+// WITHOUT triggering any reducer / resolver / route rebuild.
 //
 //  - `PeekedShape::Leaf` — the expression is a leaf primitive or literal;
 //    publishing it is a clone.
@@ -297,8 +296,7 @@ pub(crate) fn empty_path() -> Arc<[PathSegment]> {
 //
 // Strictly request-bound: the `debug_assert!` enforces that the caller's
 // `ResolverContext` is request-bound. Bare-host invocation would force a
-// workspace snapshot rebuild — the cost driver Block 6.g closed and
-// 6.h must not reopen.
+// workspace snapshot rebuild.
 // =============================================================================
 
 /// Result of peeking whether a type's shape is known cheaply.
@@ -306,11 +304,15 @@ pub(crate) fn empty_path() -> Arc<[PathSegment]> {
 /// `Some(_)` ⇒ the caller may publish or short-circuit WITHOUT
 /// triggering reduction. `None` ⇒ the cache is cold; the caller must
 /// reduce (or publish the Ref shallow per the shallow-by-default rule).
-#[allow(dead_code)] // Block 6.h Commit A — call sites wired in Commits B + C.
 pub(crate) enum PeekedShape {
     /// The expression is a bare alias carrier; publish the Ref
-    /// shallow. No reduction needed.
-    BareCarrier { name: Arc<str> },
+    /// shallow. No reduction needed. `name` is exposed for
+    /// `projectors_peek_tests` behavioural-discrimination assertions;
+    /// production match arms use `_`.
+    BareCarrier {
+        #[allow(dead_code)]
+        name: Arc<str>,
+    },
     /// The expression is a leaf primitive / literal — publish as-is.
     Leaf(verter_type_expr::TypeExpr),
     /// The expression has already been reduced; return the cached
@@ -331,8 +333,7 @@ pub(crate) enum PeekedShape {
 /// MUST be invoked from a request-bound context; the
 /// `debug_assert!(query_engine.ctx.is_request_bound())` enforces this.
 /// Reaching this from a bare-host context would force a workspace
-/// snapshot rebuild — the very cost we are eliminating in Block 6.g/6.h.
-#[allow(dead_code)] // Block 6.h Commit A — call sites wired in Commits B + C.
+/// snapshot rebuild.
 pub(crate) fn peek_member_shape_known(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     scope_canonical_id: &str,
@@ -571,7 +572,7 @@ pub(crate) fn resolve_payload_surface(
     }
 }
 
-/// Block 6.d — peek-before-raise per-member helper.
+/// Peek-before-raise per-member helper.
 ///
 /// Wraps the cold compute path for one `(scope, member_value, mode)`
 /// triple around the host-owned
@@ -635,31 +636,16 @@ fn member_shape_peek_or_compute(
             .unwrap_or(TypeExpr::Unknown { raw: String::new() })
     };
 
-    // Block 6.h Commit C — peek-before-gates. Once the member is
-    // raised, consult `MaterializeMemoDb` for the `(scope, raised, mode)`
-    // triple. A warm hit here SKIPS the three shallow gates below
-    // (`type_expr_has_package_backed_object_like_root`,
-    // `lowered_root_reaches_transitive_cycle`,
-    // `type_expr_contains_reducible_operator`) AND the cold reducer
-    // dispatch — the cached `MaterializedTypeExpr` already reflects
-    // the same gate semantics from its original compute. The peek's
-    // `MaterializeMemoDb::peek` protocol re-emits the cached entry's
-    // `fact_dep_signature` via `bubble_fact_signature`.
-    //
-    // For `Leaf` / `BareCarrier` shapes the peek answers immediately
-    // and avoids the `type_expr_has_package_backed_object_like_root`
-    // route lookup, which was Investigator-1's biggest residual
-    // gate-cost source on warm same-file member-shape paths.
-    // Run the TypeExpr shallow gates BEFORE consulting any cached
-    // operator-shape entry. `MaterializeMemoDb` is shared across the
-    // typed-IR materialiser and the projector pipeline; entries
-    // warmed by a non-projector caller (model resolution, registry
-    // candidate materialisation) do NOT carry the projector's
-    // package-backed / cycle gate semantics. Honouring the gates
-    // first ensures a warm cache hit on `External['x']` (or any
-    // package-backed root) publishes as the shallow carrier the
-    // shallow-by-default rule requires, rather than as the reduced
-    // body the cache happens to hold.
+    // (3) Shallow gates on the raised TypeExpr — same predicates
+    // `reduce_field_type_expr` runs today. Gates run BEFORE the
+    // operator-shape peek consultation: `MaterializeMemoDb` is shared
+    // across the typed-IR materialiser callers (model resolution /
+    // registry candidate materialisation) which do not apply these
+    // projector shallow gates. Honouring the gates first ensures a
+    // warm cache hit on `External['x']` (or any package-backed root)
+    // publishes as the shallow carrier the shallow-by-default rule
+    // requires, rather than as the reduced body the cache happens to
+    // hold.
     let route_is_package_backed = super::materialize::type_expr_has_package_backed_object_like_root(
         &raised,
         scope_canonical_id,
@@ -794,21 +780,21 @@ pub(crate) fn surface_member_to_expanded_field(
     shallow_type_expr_scope: Option<verter_type_expr::TypeExprScope>,
 ) -> ExpandedField {
     let ctx: &dyn ResolverContext = query_engine.ctx;
-    // Block 6.d — exactness classification is independent of the
-    // member's reduced TypeExpr; it walks the member's resolved-value
-    // graph. Keep it isolated in its own dispatch scope so the
-    // peek-before-raise contract for the type reduction is not coupled
-    // to a TypeExpr raise that exactness does not need.
+    // Exactness classification is independent of the member's reduced
+    // TypeExpr; it walks the member's resolved-value graph. Keep it
+    // isolated in its own dispatch scope so the peek-before-raise
+    // contract for the type reduction is not coupled to a TypeExpr
+    // raise that exactness does not need.
     let exactness = {
         let dispatch = ProjectSemanticDispatch::new(ctx);
         let resolved_value = resolve_member_value_for_classification(&dispatch, member.value);
         classify_node(&dispatch, resolved_value)
     };
-    // Block 6.d — peek the per-member graph-native materialiser cache
-    // BEFORE any `raise_node_to_type_expr(member.value)` call. Warm
-    // hits return the cached `MaterializedTypeExpr` without paying the
-    // raise cost or the shallow-gate cost; cold misses raise once,
-    // run the gates, then dispatch the graph-native reducer + admit.
+    // Peek the per-member graph-native materialiser cache BEFORE any
+    // `raise_node_to_type_expr(member.value)` call. Warm hits return
+    // the cached `MaterializedTypeExpr` without paying the raise cost
+    // or the shallow-gate cost; cold misses raise once, run the
+    // gates, then dispatch the graph-native reducer + admit.
     let materialized = member_shape_peek_or_compute(
         query_engine,
         scope_canonical_id,
@@ -872,38 +858,28 @@ pub(crate) fn reduce_field_type_expr(
     scope_canonical_id: &str,
     expr: TypeExpr,
 ) -> TypeExpr {
-    // Block 6.h Commit B — peek-before-reduce. Short-circuit when the
-    // expression's shape is already known cheaply:
+    // Peek-before-reduce. Short-circuit when the expression's shape
+    // is already known cheaply:
     //
     //   * `Leaf(_)`: a primitive / literal — publish the leaf
-    //     verbatim. Equivalent to the legacy "needs_reduction == false"
-    //     fall-through which returned `expr` unchanged.
+    //     verbatim.
     //   * `BareCarrier { name }`: a plain `Ref { type_arguments: [] }`.
     //     Per the shallow-by-default rule the projector publishes the
     //     Ref shallow; consumers re-resolve through the registry on
-    //     demand. Equivalent to the legacy "not generic, not operator"
-    //     fall-through.
+    //     demand.
     //   * `Cached(materialized)`: `MaterializeMemoDb` carries a warm
-    //     `(scope, expr, mode)` entry — return the cached reduction
-    //     verbatim. The peek's `MaterializeMemoDb::peek` re-emits the
-    //     entry's `fact_dep_signature` via `bubble_fact_signature`
-    //     (component_meta_caches.rs:1346) so the cm-result cache
-    //     validation invariants are preserved.
+    //     `(scope, expr, mode)` entry. The cached value is published
+    //     AFTER the package-backed gate (see below) because
+    //     `MaterializeMemoDb` is shared with non-projector callers
+    //     (model / registry materialiser paths) that do not apply
+    //     the projector's shallow gate.
+    //   * `None`: cold path; fall through to the package-backed gate
+    //     + cycle guard + reducer.
     //
-    // `None` ⇒ cold path; fall through to the existing
-    // package-backed gate + cycle guard + reducer.
-    //
-    // For `Leaf` and `BareCarrier` peek answers we short-circuit
-    // immediately — they encode the shallow-by-default invariant
-    // structurally (primitive / literal / bare alias name) and are
-    // independent of the route's package-backing.
-    //
-    // For `Cached` we defer until AFTER the package-backed gate
-    // runs: `MaterializeMemoDb` is shared with non-projector
-    // callers (model / registry materialiser paths) that do not
-    // apply this shallow gate, so honouring the gate first ensures
-    // a package-backed root publishes as the shallow carrier even
-    // when the cache happens to hold the reduced body.
+    // For `Leaf` and `BareCarrier` we short-circuit immediately — they
+    // encode the shallow-by-default invariant structurally (primitive
+    // / literal / bare alias name) and are independent of the route's
+    // package-backing.
     if let Some(peeked) = peek_member_shape_known(
         query_engine,
         scope_canonical_id,
