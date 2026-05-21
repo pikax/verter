@@ -1641,15 +1641,15 @@ impl ShapeCacheDb {
 
     /// Universal-caching admission helper. Admits an already-computed
     /// `(value, fact_dep_signature)` pair into the cache when the
-    /// signature is valid. Used by the projector pipeline's `Leaf` /
-    /// `BareCarrier` arms to ensure every successful shape compute
-    /// admits to the cache (universal-caching invariant — Block 6.i
-    /// STOP trigger #3).
+    /// signature is valid. The single centralised admission point —
+    /// `admit_member_shape_if_possible` in the projector pipeline
+    /// computes the `fact_dep_signature` upfront and delegates here
+    /// rather than duplicating the `get_or_compute` plumbing.
     ///
     /// Returns the admitted value (verbatim if admission was refused
-    /// — e.g. on signature-build failure — the caller still receives
-    /// the same value it computed).
-    #[allow(dead_code)]
+    /// — e.g. when the cache's signature check on the live `StoreView`
+    /// rejects the entry — the caller still receives the same value
+    /// it computed).
     pub(crate) fn admit_computed(
         &self,
         key: &ShapeCacheKey,

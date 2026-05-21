@@ -905,27 +905,45 @@ fn admit_type_expr_shape_if_possible(
     let _ = admit_member_shape_if_possible(ctx, &key, value);
 }
 
+/// Block 6.i G3 — universal-caching admission for the projector
+/// pipeline. Computes the `fact_dep_signature` from the value's
+/// `dep_signature` + scope observation, then delegates to
+/// [`ShapeCacheDb::admit_computed`] — the single centralised
+/// admission point that handles the `get_or_compute` invocation and
+/// the verbatim fallback when admission is refused.
+///
+/// Returns the input `value` verbatim when:
+/// - the scope observation cannot be obtained (no scope view);
+/// - the scope has no `syntactic_export_set` parse fact;
+/// - the engine fact-signature builder refuses (overflow / missing
+///   provenance).
+///
+/// In all refusal cases the caller receives the same
+/// `MaterializedTypeExpr` it computed — admission is best-effort.
 fn admit_member_shape_if_possible(
     ctx: &dyn ResolverContext,
     key: &crate::component_meta_caches::ShapeCacheKey,
     value: crate::project_semantic_dispatch::raise::MaterializedTypeExpr,
 ) -> crate::project_semantic_dispatch::raise::MaterializedTypeExpr {
     let scope = key.subject.scope_canonical().clone();
-    let observed_scope = ctx.observe_materialize_scope(scope.as_ref());
-    let value_for_closure = value.clone();
-    let cache = ctx.project_type_store().shape_cache_db();
-    let admitted = cache.get_or_compute(key, ctx, move || {
-        let scope_obs = observed_scope?;
-        let parse_fact = scope_obs.syntactic_export_set.clone()?;
-        let fact_sig =
-            crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
-                &scope_obs,
-                parse_fact,
-                &value_for_closure.dep_signature,
-            )?;
-        Some((value_for_closure, fact_sig))
-    });
-    admitted.unwrap_or(value)
+    let Some(observed_scope) = ctx.observe_materialize_scope(scope.as_ref()) else {
+        return value;
+    };
+    let Some(parse_fact) = observed_scope.syntactic_export_set.clone() else {
+        return value;
+    };
+    let Some(fact_sig) =
+        crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
+            &observed_scope,
+            parse_fact,
+            &value.dep_signature,
+        )
+    else {
+        return value;
+    };
+    ctx.project_type_store()
+        .shape_cache_db()
+        .admit_computed(key, ctx, value, fact_sig)
 }
 
 /// Build an [`ExpandedField`] for a single surface member.
