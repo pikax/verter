@@ -981,6 +981,30 @@ pub(crate) fn reduce_published_field_types(
     use crate::meta_resolve::compare_type_expr_improvement;
     use rustc_hash::FxHashMap;
 
+    // Block 6.h Commit E — the per-macro projectors (`project_props`,
+    // `project_emits`, `project_slots`) feed
+    // `surface_member_to_expanded_field` which runs
+    // `member_shape_peek_or_compute` on every produced field. With the
+    // Block 6.h peek wiring, projector-published fields are ALREADY
+    // in their reduced shape when they reach this point — re-running
+    // the reducer on `evaluated_types.emits` (and the second-sweep
+    // semantics it carried for props) is redundant and only paid a
+    // warm-cache cost.
+    //
+    // The props loop still runs to preserve the shallow-typed-form
+    // authoritative-fallback contract: when the reduced TypeExpr is
+    // an unresolved Mapped / Conditional shell (a `Partial<X>` /
+    // `Required<X>` expansion where the semantic graph could not lift
+    // the operator), the analyzer-populated `shallow_type_expr` is
+    // the authoritative typed form. The fallback only fires when the
+    // peek-warm-cached reduction left an unresolved shell behind, so
+    // its cost is bounded.
+    //
+    // Slot-binding and parser-side bindings synthesis sites do NOT
+    // route through `surface_member_to_expanded_field`; their fields
+    // are raised but not reduced. They MUST run through
+    // `reduce_field_type_expr` here.
+
     let mut finalized_prop_types: FxHashMap<String, TypeExpr> = FxHashMap::default();
     for field in evaluated_types.props.iter_mut() {
         // Typed-IR-Only Resolver Rule: when the raised value-node form
@@ -1009,7 +1033,8 @@ pub(crate) fn reduce_published_field_types(
         finalized_prop_types.insert(field.name.clone(), reduced.clone());
         field.r#type = reduced;
     }
-    // Back-sync the finalised prop type into the macro-shape mirror
+
+    // Back-sync the finalised prop type into the macro-shape sidecar
     // on `evaluated_types.define_props`. Producers
     // (`produce_one_macro_object_shape`) populate define_props with
     // the pre-reduction shape; consumers reading the macro shapes
@@ -1023,10 +1048,16 @@ pub(crate) fn reduce_published_field_types(
             }
         }
     }
-    for field in evaluated_types.emits.iter_mut() {
-        let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
-        field.r#type = reduce_field_type_expr(query_engine, scope_canonical_id, raised);
-    }
+
+    // Block 6.h Commit E — emits are already reduced by the projector
+    // pipeline (`project_emits` → `surface_member_to_expanded_field`
+    // → `member_shape_peek_or_compute`). The legacy second-sweep
+    // emits loop is the structurally-unnecessary work this commit
+    // deletes. Slot-binding and parser-side bindings synthesis sites
+    // do NOT route through the projector pipeline; reduce them
+    // inline here through the shared primitive, which now consults
+    // `peek_member_shape_known` first so warm operator-shape hits
+    // short-circuit the reducer.
     for field in evaluated_types.slot_bindings.iter_mut() {
         let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
         field.r#type = reduce_field_type_expr(query_engine, scope_canonical_id, raised);
