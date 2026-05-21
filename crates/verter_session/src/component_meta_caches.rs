@@ -1291,6 +1291,50 @@ impl crate::cache_schema::CacheSchemaVersioned for PreparedTargetDb {
 // behaviour. Path-precise narrowing emerges in Commits C–F when
 // projectors / fallthrough / operator reducers thread narrowed
 // `SurfaceProjection` cursors and consult `ShapeCacheDb` per-hop.
+//
+// ## F5 deferral — `try_satisfy_via_superset` lands in Commit C
+//
+// The original Block 6.i Commit B brief specified a
+// `try_satisfy_via_superset` method on `ShapeCacheDb` with the
+// contract "broader cached result may satisfy narrower demand —
+// validates by checking that the broader entry's fact dep set is a
+// SUPERSET of the narrower demand's reachable facts". The Batch 1
+// review (P2-2) confirms it was not landed in Commit B.
+//
+// F5 deliberately DEFERS this implementation to **Block 6.i Commit C**
+// rather than landing a non-functional stub. Rationale:
+//
+//   1. **No production callers produce narrower demands yet.** Commit A
+//      added the `ProjectionCursor` substrate, but all production
+//      caller sites pass `SurfaceProjection::whole_surface(Registry)`
+//      which constructs a `ShapeDemand::whole_subject(mode)` key. The
+//      cache never sees a narrowed key, so a `try_satisfy_via_superset`
+//      method has zero callers today and would be untested.
+//   2. **Implementation is non-trivial.** A correct broader-to-narrower
+//      satisfaction requires: (a) identifying which cached entries are
+//      "broader" (same subject, demand SUPERSET of narrower demand —
+//      empty path + All filter superset is the trivial case; nested
+//      children + Include sets need real subset checks), (b) extracting
+//      the narrower subset from the broader payload (path projection
+//      through the cached `MaterializedTypeExpr`), and (c) computing
+//      the `fact_dep_signature` subset that applies to the narrower
+//      demand (the broader's deps may include facts only relevant
+//      under broader's KeyFilter — those must be filtered out for
+//      the narrower demand's signature).
+//   3. **Commit C is the right landing point.** Commit C threads
+//      narrowed cursors through `produce_one_macro_object_shape`,
+//      registry helpers, and per-member projectors. That commit will
+//      ALSO produce the narrower keys that `try_satisfy_via_superset`
+//      addresses; landing both atomically lets the implementation be
+//      driven by real callers + tested by real fixtures (the
+//      `path_precise_superset_cache_hit` runtime guard from the brief
+//      §"Additional runtime guard").
+//
+// Landing a stub-returns-None implementation now would mask Commit C's
+// readiness check (review would see the method exists and might
+// assume superset matching is wired). The cleaner state is: explicit
+// deferral here, with Commit C delivering the implementation + the
+// `path_precise_superset_cache_hit` runtime guard atomically.
 // ===========================================================================
 
 #[derive(Clone)]
