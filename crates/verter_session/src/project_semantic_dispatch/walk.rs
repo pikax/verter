@@ -689,19 +689,15 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     current = resolved;
                 }
                 SemanticNodeData::Mapped { source, mapper } => {
-                    // Block 6.i Commit F — operator-level Mapped path
-                    // precision. When the walker has a remaining path
-                    // and the next segment is a concrete literal key
-                    // (`Member(name)` or `Index(String|Number)`), we
-                    // substitute K → Literal(name) into
-                    // `mapper.value_expr` and evaluate it directly
-                    // rather than dispatching `MappedType` (which
-                    // would enumerate every key in the source surface
-                    // and substitute the value_expr per-key — the
-                    // architectural defect that leaks helpers like
-                    // Tool<INPUT, OUTPUT>['outputSchema'] into
-                    // ChatMessages' footprint by walking every key in
-                    // the mapped source).
+                    // Operator-level Mapped narrowing: when the walker
+                    // has a literal key segment and the mapper has no
+                    // name remap, substitute K = Literal(name) into
+                    // `mapper.value_expr` and evaluate it directly,
+                    // rather than dispatching whole-surface MappedType
+                    // resolution (which would enumerate every key in
+                    // the source surface and substitute value_expr
+                    // per-key — path-imprecise: produces sibling key
+                    // contributions the caller never requested).
                     //
                     // The narrowing requires:
                     // 1. A remaining segment we can convert to a
@@ -712,6 +708,19 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     //    mapper has `as <expr>`, the iteration key
                     //    is NOT the post-remap surface name; mapping
                     //    back requires the whole-surface enumeration.
+                    // 3. Soundness: the literal name MUST be admitted
+                    //    by the mapper's key domain. If the source
+                    //    surface enumerates and the literal is NOT in
+                    //    its member set, OR the key space enumerates
+                    //    and the literal is NOT in its enumerated key
+                    //    set, the narrowing is unsound — substituting
+                    //    a non-admissible key into a non-`T[K]` value
+                    //    expression would synthesise a value type
+                    //    (e.g. `string`) for a key that the mapped
+                    //    surface does NOT contain. Such cases fall
+                    //    through to the whole-surface fallback, which
+                    //    produces the correct Object miss via the
+                    //    bounded enumerated surface.
                     let next_index = index;
                     let next_segment = path.get(next_index);
                     let literal_name: Option<Arc<str>> = match next_segment {
@@ -731,7 +740,39 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         }
                         None => None,
                     };
-                    let can_narrow = literal_name.is_some() && mapper.name_remap.is_none();
+                    // Path-precise key-domain admission. Check the
+                    // source surface first (if enumerable as an Object,
+                    // its member names are the iteration keys); fall
+                    // back to the key_space enumeration when source is
+                    // not an enumerable Object. Returns:
+                    //   - `Some(true)`  — admitted (narrow is sound)
+                    //   - `Some(false)` — NOT admitted (must fall back)
+                    //   - `None`        — undecidable (key domain is
+                    //                     non-enumerable, e.g. the
+                    //                     `string` / `number` primitive
+                    //                     or an unresolved generic).
+                    //                     Fall back to the coarse path
+                    //                     which produces a deferred
+                    //                     shell re-dispatched once the
+                    //                     domain becomes enumerable.
+                    let key_admitted: Option<bool> = literal_name
+                        .as_ref()
+                        .map(|name| {
+                            let needle: &str = name.as_ref();
+                            match self.graph().node_data(*source).as_deref() {
+                                Some(SemanticNodeData::Object(view)) => {
+                                    Some(view.members.iter().any(|m| m.name.as_ref() == needle))
+                                }
+                                _ => self
+                                    .dispatch
+                                    .key_names_from_keyspace_node(mapper.key_space)
+                                    .map(|names| names.iter().any(|n| n.as_ref() == needle)),
+                            }
+                        })
+                        .unwrap_or(None);
+                    let can_narrow = literal_name.is_some()
+                        && mapper.name_remap.is_none()
+                        && matches!(key_admitted, Some(true));
                     if can_narrow {
                         let name = literal_name.expect("literal_name is_some checked above");
                         let key_arg = self.graph().intern_node(SemanticNodeData::Literal(
@@ -784,15 +825,19 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         self.intermediate_nodes.push(Some(current));
                         continue;
                     }
-                    // Fallback: whole-surface MappedType resolution
-                    // (the pre-F path). Reached when:
-                    // - The walker is at the terminal hop with no
-                    //   remaining segment (caller requested the whole
-                    //   mapped surface).
+                    // Fallback: whole-surface MappedType resolution.
+                    // Used when narrowing is unsafe or not applicable:
+                    // - terminal hop with no remaining segment (caller
+                    //   requested the whole mapped surface),
                     // - `mapper.name_remap` is set (post-remap surface
-                    //   name lookup is not 1:1 to iteration key).
-                    // - The next path segment is an unresolvable
-                    //   TypeNode index.
+                    //   name lookup is not 1:1 to iteration key),
+                    // - the next path segment is an unresolvable
+                    //   TypeNode index, or
+                    // - the literal key is not admitted by the mapper's
+                    //   key domain (substituting a non-admissible key
+                    //   would forge a value type for a non-existent
+                    //   member; the coarse path produces the correct
+                    //   Object miss instead).
                     let resolved = match self.dispatch.execute(SemanticQueryKey::MappedType {
                         source: *source,
                         mapper: mapper.clone(),

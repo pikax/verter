@@ -588,3 +588,155 @@ defineProps<{ msg: string }>()
         "guard: a single `getComponentMeta` must issue exactly 1 native call; saw {delta}",
     );
 }
+
+// =====================================================================
+// Guard 7 — Mapped narrowing key-domain admission (G4.1 soundness fix).
+//
+// The PathWalker's Mapped arm narrows `Mapped<S, mapper>[K]` by
+// substituting K = Literal(name) into `mapper.value_expr` and
+// evaluating directly. This is only sound when `name` is admitted by
+// the mapper's key domain — when the source surface enumerates its
+// member names OR the key_space enumerates concrete literal names.
+//
+// Fixture: a mapped helper with a non-identity value expression
+// (`Marker` literal) keyed by `keyof Source`, projected through an
+// alias that THEN indexes by a key NOT present in `Source`. Without
+// the admission gate, the walker substitutes K = "nonexistent" and
+// evaluates `Marker` regardless — leaking `Marker` onto the
+// published surface for a key that the mapped surface does NOT
+// contain.
+//
+// Discriminating property: with the admission gate in place, the
+// `nonexistent` access falls through to whole-surface MappedType
+// resolution, which builds an Object with ONLY the admissible keys
+// (a, b). The walker then misses on the `nonexistent` member and
+// the prop's published type is opaque — `Marker` MUST NOT appear
+// in the prop's reachable refs.
+// =====================================================================
+#[test]
+fn mapped_narrowing_respects_key_domain_admission() {
+    let project = make_project();
+    upsert(
+        &project,
+        "/types.ts",
+        r#"export interface Marker { kind: 'admission-leak-canary' }
+export interface Source { a: number; b: string }
+// Non-identity value expression: every key maps to `Marker`,
+// independent of `T[K]`. This is the shape that, without
+// admission gating, lets the walker forge `Marker` for any
+// literal key passed to `Mapped<Source>[K]`.
+export type Mapped<T> = { [K in keyof T]: Marker }
+"#,
+    );
+    upsert(
+        &project,
+        "/Comp.vue",
+        r#"<script setup lang="ts">
+import type { Mapped, Source } from './types'
+
+defineProps<{
+  // `nonexistent` is NOT a key of `Source`, so `Mapped<Source>`'s
+  // member set does NOT contain it. The narrowing path must reject
+  // and fall through to the whole-surface fallback (which produces
+  // a miss). Without the fix, the walker substitutes K = "nonexistent"
+  // into the value_expr `Marker` and publishes `Marker` here.
+  leaked: Mapped<Source>['nonexistent']
+}>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let meta = meta_for(&project, "/Comp.vue");
+    let refs = reachable_refs_in_registry(&meta.type_registry);
+
+    // Discriminating: pre-fix the walker substituted K = "nonexistent"
+    // into `mapper.value_expr = Marker`, evaluating to `Marker` and
+    // publishing it as the `leaked` prop's type. Post-fix the admission
+    // gate rejects the non-admissible key, falls through to the coarse
+    // path, which builds `Mapped<Source>` as an Object with members
+    // {a, b} only — the `['nonexistent']` walk then misses cleanly.
+    assert!(
+        !refs.iter().any(|n| n == "Marker"),
+        "guard: Mapped<Source>['nonexistent'] MUST NOT forge Marker onto the surface \
+         for a key that is not in Source's member set. Refs: {refs:?}",
+    );
+}
+
+// =====================================================================
+// Guard 8 — Mapped narrowing admits known source keys (regression
+// guard for guard 7's complement).
+//
+// The admission gate must NOT over-reject. When the literal key IS in
+// the source surface's member set, the narrowing must still fire and
+// project ONLY the per-key value. Without this assertion, a too-strict
+// admission check would silently fall through to the whole-surface
+// coarse path, regressing G4's path-precision goal (sibling keys
+// re-enter the published surface).
+//
+// Fixture: `Mapped<Source>['a']` where `Source` has members `a`, `b`.
+// `Marker` must appear EXACTLY for the projected prop (key `a` is
+// admitted), AND the unprojected `Sibling` ref-type used elsewhere
+// must NOT appear (admission gate did not fall back to the coarse
+// path that would walk every key).
+// =====================================================================
+#[test]
+fn mapped_narrowing_admits_present_source_keys() {
+    // Complement of guard 7: when the literal key IS admitted by the
+    // mapper's key domain (a member of the source surface), the
+    // narrowing must still fire — siblings must NOT be projected.
+    // This guards against the admission check over-rejecting (e.g. a
+    // mis-coded enumeration helper that returns Some([]) for an
+    // enumerable Object), which would silently fall back to the
+    // whole-surface coarse path and regress G4's path-precision goal.
+    let project = make_project();
+    upsert(
+        &project,
+        "/types.ts",
+        r#"export interface KeyA { kind: 'projected-a' }
+export interface KeyB { kind: 'sibling-must-stay-unprojected' }
+export interface KeyC { kind: 'sibling-must-stay-unprojected' }
+export interface Bag { a: KeyA; b: KeyB; c: KeyC }
+// Non-identity value-expression mapper: only the narrowing path
+// (substitute K = "a" into `{ wrapped: T[K] }`) projects the value
+// per-key. A fallback to the coarse path would enumerate ALL of
+// Bag's keys and inject KeyB / KeyC into the surface.
+export type Mapped<T> = { [K in keyof T]: { wrapped: T[K] } }
+"#,
+    );
+    upsert(
+        &project,
+        "/Comp.vue",
+        r#"<script setup lang="ts">
+import type { Mapped, Bag } from './types'
+
+defineProps<{
+  // `a` IS in Bag. The narrowing must fire on the admitted key and
+  // ONLY contribute KeyA's branch — KeyB / KeyC siblings must NOT
+  // be projected even though the mapper visits each key in its
+  // coarse-path mode.
+  projected: Mapped<Bag>['a']
+}>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let meta = meta_for(&project, "/Comp.vue");
+    let refs = reachable_refs_in_registry(&meta.type_registry);
+
+    // Discriminating: if the admission check over-rejected the
+    // admitted key `a`, the walker would fall back to the coarse
+    // MappedType dispatch which enumerates every key in `Bag` and
+    // emits ProjectMember edges for {a, b, c}. KeyB / KeyC would
+    // then be reachable in the registry. With correct admission,
+    // only the per-key value subgraph for `a` contributes.
+    assert!(
+        !refs.iter().any(|n| n == "KeyB"),
+        "guard: admitted-key narrowing must NOT regress to whole-surface \
+         enumeration; sibling KeyB must stay unprojected. Refs: {refs:?}",
+    );
+    assert!(
+        !refs.iter().any(|n| n == "KeyC"),
+        "guard: admitted-key narrowing must NOT regress to whole-surface \
+         enumeration; sibling KeyC must stay unprojected. Refs: {refs:?}",
+    );
+}
