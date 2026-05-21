@@ -85,7 +85,15 @@ pub(crate) enum PublishedSurfaceKind {
 /// - `UnknownDeferred`: the demand is not resolved at this hop; the
 ///   caller MUST resolve before walking. Reaching `UnknownDeferred`
 ///   at the publication boundary is a Rule-5 violation site and
-///   triggers a `debug_assert!` panic in the threaded helpers.
+///   triggers a `debug_assert!` panic in both
+///   [`KeyFilter::admits`] and [`ProjectionCursor::descend`] (Block
+///   6.i F6 — the impls panic in debug builds and conservative-
+///   reject in release builds so a stale filter cannot silently
+///   admit every key).
+///
+/// `UnknownDeferred` is reserved for a deferred-projection
+/// resolution pattern in a follow-up commit; production publication
+/// code must NEVER reach this variant at a hop it intends to walk.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum KeyFilter {
     All,
@@ -96,17 +104,33 @@ pub(crate) enum KeyFilter {
 
 impl KeyFilter {
     /// Whether a candidate key passes this filter.
+    ///
+    /// Block 6.i F6 — `UnknownDeferred` at the publication boundary
+    /// is a Rule-5 violation site. The threaded helpers MUST resolve
+    /// the filter to `All`/`Include`/`Exclude` before walking. This
+    /// method panics via `debug_assert!` when `UnknownDeferred` is
+    /// reached (the doc-comment on the variant promises this); in
+    /// production builds the variant is conservative-rejected
+    /// (returns `false`) so a stale filter does NOT silently admit
+    /// every key — the prior behaviour traded a debug panic for
+    /// over-admission, which is the worse default.
     pub(crate) fn admits(&self, key: &str) -> bool {
         match self {
             KeyFilter::All => true,
             KeyFilter::Include(set) => set.iter().any(|k| k.as_ref() == key),
             KeyFilter::Exclude(set) => set.iter().all(|k| k.as_ref() != key),
-            // UnknownDeferred — at the publication boundary the
-            // caller MUST resolve the filter before walking. The
-            // threaded code paths assert this; treat as
-            // conservative-admit here so a stale filter does not
-            // cause silent member drops.
-            KeyFilter::UnknownDeferred => true,
+            KeyFilter::UnknownDeferred => {
+                debug_assert!(
+                    false,
+                    "KeyFilter::UnknownDeferred reached at publication \
+                     boundary in KeyFilter::admits — Rule-5 violation \
+                     site. The caller MUST resolve the filter to \
+                     All/Include/Exclude BEFORE walking. See \
+                     projection_demand.rs doc-comment for the STOP \
+                     contract."
+                );
+                false
+            }
         }
     }
 }
@@ -220,14 +244,44 @@ pub(crate) struct ProjectionCursor<'a> {
     pub(crate) remaining: &'a [PathSegment],
 }
 
+/// Lazy-initialised whole-surface sentinel node returned by
+/// [`ProjectionCursor::descend`] when an Include/Exclude key passes
+/// the filter but has no explicit child entry in the projection trie.
+///
+/// The narrowing at the parent hop has ALREADY done its work; the
+/// descended cursor must NOT keep applying the parent filter at the
+/// child hop (that would block legitimate sibling keys at the child
+/// level). Returning a borrow into this static `KeyFilter::All` /
+/// no-children node gives the descending caller a fresh whole-surface
+/// cursor at the child level — equivalent to "the filter applied at
+/// this hop only; deeper structure is unrestricted".
+fn whole_surface_descend_node() -> &'static ProjectionNode {
+    static NODE: std::sync::OnceLock<ProjectionNode> = std::sync::OnceLock::new();
+    NODE.get_or_init(ProjectionNode::whole_surface_expanded)
+}
+
 impl<'a> ProjectionCursor<'a> {
     /// Descend into a child by segment. Returns `None` when the
-    /// segment is NOT in the cursor's allowed children. When
-    /// `key_filter` is `All` and `children` is empty, descent
-    /// continues with the same node (every key admitted) — this is
-    /// the "whole surface" backward-compat mode used by all
-    /// pre-Block-6.i callers.
+    /// segment is NOT in the cursor's allowed children.
+    ///
+    /// Block 6.i F2+F3 — narrowing-aware contract:
+    ///
+    /// 1. If `children[segment]` is explicit → descend into that
+    ///    refined child node (true trie navigation; supports deep
+    ///    path-precision such as `Foo['a']['b']`).
+    /// 2. Else if the parent cursor is GENUINELY whole-surface
+    ///    (empty `children` + `KeyFilter::All`) → self-pin (the
+    ///    pre-Block-6.i backward-compat mode for callers that have
+    ///    not yet adopted narrowed projections).
+    /// 3. Else if the parent's key filter ADMITS the segment but
+    ///    has no explicit child entry → descend into a fresh
+    ///    whole-surface child cursor (the parent's narrowing
+    ///    applied at THIS hop only; deeper structure is
+    ///    unrestricted).
+    /// 4. Else (filter rejects the segment, or explicit children
+    ///    exist but this one isn't enumerated) → return `None`.
     pub(crate) fn descend(&self, segment: &PathSegment) -> Option<ProjectionCursor<'a>> {
+        // (1) Explicit child wins.
         if let Some(child) = self.node.children.get(segment) {
             return Some(ProjectionCursor {
                 node: child,
@@ -235,33 +289,78 @@ impl<'a> ProjectionCursor<'a> {
                 remaining: &[],
             });
         }
-        // Default whole-surface mode: no explicit children but
-        // KeyFilter::All admits all descents. Self-pin so the
-        // descending caller can keep walking.
-        match &self.node.key_filter {
-            KeyFilter::All => Some(*self),
-            KeyFilter::Include(set) => match segment {
-                PathSegment::Member(name) => {
-                    if set.iter().any(|k| k.as_ref() == name.as_ref()) {
-                        Some(*self)
-                    } else {
-                        None
-                    }
-                }
-                _ => Some(*self),
-            },
-            KeyFilter::Exclude(set) => match segment {
-                PathSegment::Member(name) => {
-                    if set.iter().all(|k| k.as_ref() != name.as_ref()) {
-                        Some(*self)
-                    } else {
-                        None
-                    }
-                }
-                _ => Some(*self),
-            },
-            KeyFilter::UnknownDeferred => Some(*self),
+
+        // F2: When `children` is non-empty AND `key_filter` is `All`,
+        // the projection explicitly enumerated children — an
+        // un-enumerated segment is OUT OF SCOPE. Return `None` so
+        // downstream walkers do not traverse unrequested siblings.
+        let children_empty = self.node.children.is_empty();
+        if !children_empty && matches!(self.node.key_filter, KeyFilter::All) {
+            return None;
         }
+
+        // F6: UnknownDeferred at the publication boundary is a
+        // Rule-5 violation site. The threaded helpers must resolve
+        // the filter BEFORE walking; reaching this arm means the
+        // resolution was skipped. Panic in debug builds so the
+        // missing pre-resolution surfaces loudly; in production
+        // return `None` (conservative-reject) so we don't admit
+        // a stale filter's silent member drops.
+        if matches!(self.node.key_filter, KeyFilter::UnknownDeferred) {
+            debug_assert!(
+                false,
+                "KeyFilter::UnknownDeferred reached at publication \
+                 boundary in ProjectionCursor::descend — Rule-5 \
+                 violation site. The caller MUST resolve the filter \
+                 to All/Include/Exclude BEFORE walking. See \
+                 projection_demand.rs doc-comment for the STOP \
+                 contract."
+            );
+            return None;
+        }
+
+        // (2)/(3) Apply the filter at THIS hop, then descend into the
+        // whole-surface child sentinel for Include/Exclude-admitted
+        // keys (F3: deeper structure is unrestricted; parent filter
+        // does not re-apply at the child level).
+        let admits = match (&self.node.key_filter, segment) {
+            (KeyFilter::All, _) => true,
+            (KeyFilter::Include(set), PathSegment::Member(name)) => {
+                set.iter().any(|k| k.as_ref() == name.as_ref())
+            }
+            (KeyFilter::Exclude(set), PathSegment::Member(name)) => {
+                set.iter().all(|k| k.as_ref() != name.as_ref())
+            }
+            // Non-Member segments (Index): filter applies only to
+            // member names; pass through so IndexedAccess descent
+            // works.
+            (KeyFilter::Include(_) | KeyFilter::Exclude(_), _) => true,
+            (KeyFilter::UnknownDeferred, _) => unreachable!(
+                "UnknownDeferred handled in earlier arm before \
+                 segment-admits computation"
+            ),
+        };
+
+        if !admits {
+            return None;
+        }
+
+        // (2) Genuine whole-surface backward-compat mode: empty
+        // children + KeyFilter::All ⇒ self-pin so the descending
+        // caller keeps the whole-surface filter on subsequent hops.
+        if children_empty && matches!(self.node.key_filter, KeyFilter::All) {
+            return Some(*self);
+        }
+
+        // (3) Include/Exclude-narrowed parent with no explicit
+        // child for `segment`: descend into the whole-surface
+        // sentinel so deeper structure is unrestricted. The
+        // narrowing at the parent hop has already done its work.
+        Some(ProjectionCursor {
+            node: whole_surface_descend_node(),
+            surface: self.surface,
+            remaining: &[],
+        })
     }
 
     /// `true` when the cursor is at its terminal hop (no further
@@ -383,5 +482,159 @@ mod tests {
             .expect("explicit bar child must descend");
         assert!(bar_cursor.is_terminal());
         assert_eq!(bar_cursor.terminal_mode(), Some(ProjectionMode::Expanded));
+    }
+
+    // -----------------------------------------------------------------
+    // Block 6.i F2 — cursor with explicit children + KeyFilter::All
+    // rejects unspecified segments. Whole-surface self-pin applies ONLY
+    // when `children` is empty.
+    // -----------------------------------------------------------------
+    #[test]
+    fn cursor_explicit_children_reject_unspecified_segments_f2() {
+        // Build { foo → terminal }. Root has explicit children +
+        // KeyFilter::All. Descending into a non-enumerated key MUST
+        // return None — the projection explicitly enumerated children
+        // so unspecified ones are out of scope.
+        let foo_node = ProjectionNode::whole_surface_expanded();
+        let mut root = ProjectionNode::whole_surface_expanded();
+        root.children
+            .insert(PathSegment::Member(Arc::from("foo")), foo_node);
+        let proj = SurfaceProjection {
+            surface: PublishedSurfaceKind::Props,
+            root,
+        };
+        let cursor = proj.cursor();
+
+        // The enumerated child still descends.
+        assert!(cursor
+            .descend(&PathSegment::Member(Arc::from("foo")))
+            .is_some());
+        // An un-enumerated sibling MUST return None — this is the
+        // F2 contract.
+        assert!(
+            cursor
+                .descend(&PathSegment::Member(Arc::from("bar")))
+                .is_none(),
+            "F2: explicit children + KeyFilter::All must reject \
+             unspecified siblings (was: self-pinning on Some(*self))"
+        );
+
+        // Whole-surface (empty children) still self-pins for backward
+        // compat.
+        let whole = SurfaceProjection::whole_surface(PublishedSurfaceKind::Props);
+        let whole_cursor = whole.cursor();
+        assert!(whole_cursor
+            .descend(&PathSegment::Member(Arc::from("anything")))
+            .is_some());
+    }
+
+    // -----------------------------------------------------------------
+    // Block 6.i F3 — descend() is a TRUE trie cursor; descending an
+    // Include/Exclude-admitted key yields a fresh whole-surface child
+    // cursor (deeper structure is unrestricted; parent filter does not
+    // re-apply).
+    // -----------------------------------------------------------------
+    #[test]
+    fn cursor_descend_walks_deep_path_explicit_children_f3() {
+        // Shape({a: Shape({b: Shallow})}) — descend `a` then `b` must
+        // return the Shallow terminal. Descending `a` then `c` must
+        // return None (c is not enumerated under a).
+        let mut b_node = ProjectionNode::whole_surface_shallow();
+        b_node.terminal_mode = Some(ProjectionMode::Shallow);
+        let mut a_node = ProjectionNode::whole_surface_expanded();
+        a_node
+            .children
+            .insert(PathSegment::Member(Arc::from("b")), b_node);
+        let mut root = ProjectionNode::whole_surface_expanded();
+        root.children
+            .insert(PathSegment::Member(Arc::from("a")), a_node);
+        let proj = SurfaceProjection {
+            surface: PublishedSurfaceKind::Props,
+            root,
+        };
+        let cursor = proj.cursor();
+
+        // a → b returns the Shallow terminal.
+        let a_cursor = cursor
+            .descend(&PathSegment::Member(Arc::from("a")))
+            .expect("explicit a child descends");
+        let b_cursor = a_cursor
+            .descend(&PathSegment::Member(Arc::from("b")))
+            .expect("explicit b child under a descends");
+        assert!(b_cursor.is_terminal());
+        assert_eq!(b_cursor.terminal_mode(), Some(ProjectionMode::Shallow));
+
+        // a → c is not enumerated under a; descend MUST return None
+        // (F3: deeper structure is path-precise too).
+        assert!(
+            a_cursor
+                .descend(&PathSegment::Member(Arc::from("c")))
+                .is_none(),
+            "F3: deep path-precision must reject unspecified child \
+             of an enumerated parent"
+        );
+    }
+
+    #[test]
+    fn cursor_include_filter_descend_unrestricts_child_f3() {
+        // Include('a') filter at root, no explicit children. Descending
+        // 'a' MUST return a cursor whose filter is `All` at the child
+        // level — the parent narrowing applied at THIS hop only.
+        let mut root = ProjectionNode::whole_surface_expanded();
+        root.key_filter = KeyFilter::Include(Arc::from([Arc::from("a")]));
+        let proj = SurfaceProjection {
+            surface: PublishedSurfaceKind::Props,
+            root,
+        };
+        let cursor = proj.cursor();
+
+        // 'a' admits at this hop.
+        let a_cursor = cursor
+            .descend(&PathSegment::Member(Arc::from("a")))
+            .expect("Include-admitted key must descend");
+
+        // F3: the child cursor's filter is `All` (the parent narrowing
+        // does not re-apply at child level). The child admits any
+        // sibling at the next level.
+        assert!(
+            a_cursor.admits_key("anything"),
+            "F3: descended cursor under Include('a') must be \
+             whole-surface at the next level (parent filter \
+             applied at one hop only)"
+        );
+
+        // 'b' is rejected at the parent — descend returns None.
+        assert!(cursor
+            .descend(&PathSegment::Member(Arc::from("b")))
+            .is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // Block 6.i F6 — `KeyFilter::UnknownDeferred` doc/impl mismatch.
+    // The variant's doc claims a debug_assert! panic on the publication
+    // boundary. The pre-F6 impl returned `true` (conservative-admit)
+    // and never panicked. F6 makes the impl panic in debug builds and
+    // return `false` in release.
+    // -----------------------------------------------------------------
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "Rule-5 violation site")]
+    fn key_filter_admits_panics_on_unknown_deferred_f6() {
+        let filter = KeyFilter::UnknownDeferred;
+        let _ = filter.admits("anything");
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "Rule-5 violation site")]
+    fn cursor_descend_panics_on_unknown_deferred_f6() {
+        let mut node = ProjectionNode::whole_surface_expanded();
+        node.key_filter = KeyFilter::UnknownDeferred;
+        let proj = SurfaceProjection {
+            surface: PublishedSurfaceKind::Props,
+            root: node,
+        };
+        let cursor = proj.cursor();
+        let _ = cursor.descend(&PathSegment::Member(Arc::from("any")));
     }
 }
