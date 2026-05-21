@@ -23,6 +23,7 @@ pub(crate) use field_types::{
     lowered_preserve_package_backed_symbolic_refs,
     materialize_component_meta_type_expr_until_stable, reduce_member_value_graph_native,
     type_expr_has_package_backed_object_like_root,
+    type_expr_has_package_backed_object_like_root_with_fence,
 };
 
 // Test-only re-export — `query_db_self_root_tests.rs` drives the

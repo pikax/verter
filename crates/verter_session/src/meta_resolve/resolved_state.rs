@@ -338,6 +338,28 @@ pub(crate) fn lowered_root_reaches_transitive_cycle(
     scope_canonical_id: &str,
     expr: &verter_type_expr::TypeExpr,
 ) -> bool {
+    lowered_root_reaches_transitive_cycle_with_fence(query_engine, scope_canonical_id, expr).0
+}
+
+/// Variant of [`lowered_root_reaches_transitive_cycle`] that also returns
+/// the BFS-observed dependency fence (per-canonical
+/// `(Arc<str>, DepVersion)` pairs).
+///
+/// Block 6.i F1 — used by the projector's gate-short-circuit admit
+/// paths to thread the cycle gate's cross-file deps into the cache
+/// entry's `fact_dep_signature`. The bare bool variant remains for
+/// callers that only need the predicate verdict.
+///
+/// The fence is ALSO emitted via `emit_dispatch_dep_signature_facts`
+/// here (matching the legacy bool-only variant's behaviour) so the
+/// outer `state.fact_versions` accumulator + active `with_fact_tracer`
+/// scope still observe the cycle dep graph regardless of whether the
+/// caller threads the returned fence into a cache admit.
+pub(crate) fn lowered_root_reaches_transitive_cycle_with_fence(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    scope_canonical_id: &str,
+    expr: &verter_type_expr::TypeExpr,
+) -> (bool, crate::semantic_query::DepSignature) {
     use verter_type_expr::TypeExpr;
 
     // Extract the root identity carried by the TypeExpr structure
@@ -393,11 +415,26 @@ pub(crate) fn lowered_root_reaches_transitive_cycle(
     }
 
     let Some(identity) = root_decl_identity(expr, scope_canonical_id, query_engine) else {
-        return false;
+        return (false, Arc::from(Vec::new()));
     };
     crate::loop5_instrumentation::LOWERED_ROOT_CYCLE_FAST_PATH_HITS
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
+    // F1: record the root declaration identity itself in the fence —
+    // the BFS only records `roots` it visits inside `bfs_compute_inner`
+    // (and merges any cache-hit dep_signature); the root identity is
+    // not appended on the fast path, so we add it explicitly so the
+    // admit's `fact_dep_signature` invalidates on root-declaration-file
+    // edits.
+    if !identity.canonical_id.as_ref().is_empty()
+        && identity.canonical_id.as_ref() != "__builtin__"
+        && identity.canonical_id.as_ref() != scope_canonical_id
+    {
+        fence.push((
+            Arc::clone(&identity.canonical_id),
+            crate::semantic_query::DepVersion::WholeHash(identity.whole_hash),
+        ));
+    }
     let result =
         super::ref_root_reaches_transitive_cycle_node(&identity, query_engine.ctx, &mut fence);
     // Dual-emit the BFS fence into both downstream channels so the
@@ -405,5 +442,5 @@ pub(crate) fn lowered_root_reaches_transitive_cycle(
     // `with_fact_tracer` scope both observe the cycle dep graph.
     let fence_signature: crate::semantic_query::DepSignature = Arc::from(fence.into_boxed_slice());
     emit_dispatch_dep_signature_facts(query_engine.ctx, &fence_signature);
-    result
+    (result, fence_signature)
 }

@@ -397,6 +397,26 @@ pub(crate) fn type_expr_has_package_backed_object_like_root(
     scope_canonical_id: &str,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) -> bool {
+    type_expr_has_package_backed_object_like_root_with_fence(expr, scope_canonical_id, query_engine)
+        .0
+}
+
+/// Variant of [`type_expr_has_package_backed_object_like_root`] that
+/// also returns the observed declaration-scope dependency fence.
+///
+/// Block 6.i F1 — used by the projector's gate-short-circuit admit
+/// paths to thread the package-backed gate's cross-file deps into the
+/// cache entry's `fact_dep_signature`. Records the
+/// `declaration_scope` (and, when distinct, the prepared
+/// `target_scope`) so a content edit to the declaring file
+/// invalidates the cached gate-shortcut entry.
+pub(crate) fn type_expr_has_package_backed_object_like_root_with_fence(
+    expr: &verter_type_expr::TypeExpr,
+    scope_canonical_id: &str,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> (bool, crate::semantic_query::DepSignature) {
+    use std::sync::Arc;
+
     fn root_name(expr: &verter_type_expr::TypeExpr) -> Option<String> {
         use verter_type_expr::TypeExpr;
 
@@ -417,8 +437,10 @@ pub(crate) fn type_expr_has_package_backed_object_like_root(
         }
     }
 
+    let empty_fence: crate::semantic_query::DepSignature = Arc::from(Vec::new());
+
     let Some(root_name) = root_name(expr) else {
-        return false;
+        return (false, empty_fence);
     };
 
     let declaration = query_engine.resolve_type_declaration(scope_canonical_id, root_name.as_str());
@@ -436,15 +458,43 @@ pub(crate) fn type_expr_has_package_backed_object_like_root(
         .ctx
         .workspace_is_package_backed(declaration_scope.as_str())
     {
-        return false;
+        return (false, empty_fence);
     }
+
+    // F1 fence collection: record the declaration scope's whole_hash so
+    // a content edit to the package-backing file invalidates the cached
+    // gate verdict (e.g., flipping `interface External` to
+    // `type External = ...` would change the kind-based shortcut return
+    // below).
+    let mut fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
+    let push_scope_fence =
+        |fence: &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
+         canonical: &str,
+         ctx: &dyn crate::resolver_core::ResolverContext| {
+            // Skip the keyed scope itself — the cache entry already self-roots
+            // on it via `engine_fact_signature_for_materialize_memo`'s
+            // `FileWholeHash` for `scope_canonical_id`.
+            if canonical == scope_canonical_id || canonical.is_empty() {
+                return;
+            }
+            let whole_hash = ctx
+                .shallow_file_state(canonical)
+                .map(|state| state.whole_hash)
+                .unwrap_or_default();
+            fence.push((
+                Arc::<str>::from(canonical),
+                crate::semantic_query::DepVersion::WholeHash(whole_hash),
+            ));
+        };
+    push_scope_fence(&mut fence, declaration_scope.as_str(), query_engine.ctx);
 
     if matches!(
         declaration.kind,
         crate::resolver_core::ResolvedDeclarationKind::Interface
             | crate::resolver_core::ResolvedDeclarationKind::Class,
     ) {
-        return true;
+        let fence_sig: crate::semantic_query::DepSignature = Arc::from(fence.into_boxed_slice());
+        return (true, fence_sig);
     }
 
     let declaration_name = if declaration.resolved_name.is_empty() {
@@ -454,11 +504,18 @@ pub(crate) fn type_expr_has_package_backed_object_like_root(
     };
     let (target_scope, target_name) = query_engine
         .resolve_final_prepared_type_target(declaration_scope.as_str(), declaration_name.as_str());
-    query_engine
+    // Record the prepared-target scope too when it diverges from the
+    // declaration scope (e.g. cross-file `export type X = Y` re-export
+    // chain). The prepared resolver may walk arbitrarily far; the
+    // terminal scope is the one whose `named_decl_body` we read below.
+    push_scope_fence(&mut fence, target_scope.as_str(), query_engine.ctx);
+    let verdict = query_engine
         .named_decl_body(target_scope.as_str(), target_name.as_str())
         .is_some_and(|body| {
             crate::resolver_core::component_meta_registry::component_meta_registry_has_explicit_object_surface(&body)
-        })
+        });
+    let fence_sig: crate::semantic_query::DepSignature = Arc::from(fence.into_boxed_slice());
+    (verdict, fence_sig)
 }
 
 /// Migration helper. Lowers `materialized` and `raw`

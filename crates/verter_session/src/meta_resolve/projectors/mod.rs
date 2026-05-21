@@ -650,11 +650,18 @@ fn member_shape_peek_or_compute(
     // publishes as the shallow carrier the shallow-by-default rule
     // requires, rather than as the reduced body the cache happens to
     // hold.
-    let route_is_package_backed = super::materialize::type_expr_has_package_backed_object_like_root(
-        &raised,
-        scope_canonical_id,
-        query_engine,
-    );
+    //
+    // F1: capture the gate-observed dep fences so the admit paths
+    // below thread them into the cache entry's `fact_dep_signature`.
+    // Without this, gate-shortcut entries would self-root only on the
+    // scope file's whole_hash — stale on cross-file edits to the
+    // declaring helper / package-backing file / cycle BFS roots.
+    let (route_is_package_backed, package_backed_fence) =
+        super::materialize::type_expr_has_package_backed_object_like_root_with_fence(
+            &raised,
+            scope_canonical_id,
+            query_engine,
+        );
     if route_is_package_backed {
         // Gate short-circuit: the published shape stays as the
         // raised carrier (package-backed roots are shallow). Block
@@ -662,31 +669,54 @@ fn member_shape_peek_or_compute(
         // same package-backed parent (e.g. siblings of `Foo['a']`
         // when `Foo` is from a package) reuse this verdict at peek
         // time rather than re-running the package-backed predicate.
+        // F1: thread the gate's cross-file fence into the admit so
+        // edits to the package-backing declaration file invalidate.
         let value = MaterializedTypeExpr {
             node_id: Some(member_value),
             type_expr: raised,
-            dep_signature: Arc::from(Vec::new()),
+            dep_signature: package_backed_fence,
         };
         return admit_member_shape_if_possible(ctx, &key, value);
     }
+    // F1: cycle-gate fence — computed lazily because the cycle gate
+    // only fires on generic instantiations. For non-generic raised
+    // shapes the cycle fence stays empty.
     let is_generic_instantiation =
         matches!(&raised, TypeExpr::Ref { type_arguments, .. } if !type_arguments.is_empty());
-    if is_generic_instantiation
-        && super::lowered_root_reaches_transitive_cycle(query_engine, scope_canonical_id, &raised)
-    {
-        // Recursive parameterised helper: the published shape stays
-        // as the raised carrier (the cycle prevents finite reduction).
-        // Block 6.i universal caching: admit so subsequent peeks
-        // skip the cycle BFS.
-        let value = MaterializedTypeExpr {
-            node_id: Some(member_value),
-            type_expr: raised,
-            dep_signature: Arc::from(Vec::new()),
-        };
-        return admit_member_shape_if_possible(ctx, &key, value);
-    }
+    let cycle_fence: crate::semantic_query::DepSignature = if is_generic_instantiation {
+        let (reaches_cycle, fence) = super::lowered_root_reaches_transitive_cycle_with_fence(
+            query_engine,
+            scope_canonical_id,
+            &raised,
+        );
+        if reaches_cycle {
+            // Recursive parameterised helper: the published shape stays
+            // as the raised carrier (the cycle prevents finite reduction).
+            // Block 6.i universal caching: admit so subsequent peeks
+            // skip the cycle BFS.
+            // F1: combine both gate fences (package-backed + cycle BFS)
+            // so the admit's `fact_dep_signature` invalidates on edits
+            // to any visited declaration file.
+            let combined_fence =
+                combine_dep_signatures(&package_backed_fence, &fence, scope_canonical_id);
+            let value = MaterializedTypeExpr {
+                node_id: Some(member_value),
+                type_expr: raised,
+                dep_signature: combined_fence,
+            };
+            return admit_member_shape_if_possible(ctx, &key, value);
+        }
+        fence
+    } else {
+        Arc::from(Vec::new())
+    };
     let needs_reduction =
         type_expr_contains_reducible_operator(&raised) || is_generic_instantiation;
+    // F1: combined gate fence threaded through every remaining admit
+    // path so the cache entries do not self-root on the scope file
+    // only.
+    let gate_fence =
+        combine_dep_signatures(&package_backed_fence, &cycle_fence, scope_canonical_id);
     if !needs_reduction {
         // Block 6.i universal-caching invariant: a shape that
         // resolves to a non-reducible TypeExpr (primitive / literal /
@@ -698,7 +728,7 @@ fn member_shape_peek_or_compute(
         let value = MaterializedTypeExpr {
             node_id: Some(member_value),
             type_expr: raised,
-            dep_signature: Arc::from(Vec::new()),
+            dep_signature: gate_fence,
         };
         return admit_member_shape_if_possible(ctx, &key, value);
     }
@@ -720,7 +750,7 @@ fn member_shape_peek_or_compute(
                 let value = MaterializedTypeExpr {
                     node_id: Some(member_value),
                     type_expr: leaf,
-                    dep_signature: Arc::from(Vec::new()),
+                    dep_signature: gate_fence,
                 };
                 return admit_member_shape_if_possible(ctx, &key, value);
             }
@@ -728,7 +758,7 @@ fn member_shape_peek_or_compute(
                 let value = MaterializedTypeExpr {
                     node_id: Some(member_value),
                     type_expr: raised,
-                    dep_signature: Arc::from(Vec::new()),
+                    dep_signature: gate_fence,
                 };
                 return admit_member_shape_if_possible(ctx, &key, value);
             }
@@ -755,7 +785,15 @@ fn member_shape_peek_or_compute(
         mode,
     );
     let observed_scope = ctx.observe_materialize_scope(scope_canonical_id);
-    let materialized_for_closure = materialized.clone();
+    // F1: merge the gate fence into the materialised entry's dep
+    // signature so the cold-path admit's `fact_dep_signature` also
+    // captures the gates' cross-file observations. Without this, the
+    // cold-path admit would self-root only on `scope` + the reducer's
+    // observed deps, missing gate-only deps (e.g., package-backed
+    // declaration scope) that should invalidate.
+    let materialized_with_gate_fence =
+        merge_gate_fence_into_materialized(materialized.clone(), &gate_fence, scope_canonical_id);
+    let materialized_for_closure = materialized_with_gate_fence.clone();
     let admitted = cache.get_or_compute(&key, ctx, move || {
         let scope_obs = observed_scope?;
         let parse_fact = scope_obs.syntactic_export_set.clone()?;
@@ -767,7 +805,53 @@ fn member_shape_peek_or_compute(
             )?;
         Some((materialized_for_closure, fact_sig))
     });
-    admitted.unwrap_or(materialized)
+    admitted.unwrap_or(materialized_with_gate_fence)
+}
+
+/// F1 helper: combine two `DepSignature` slices, dropping duplicate
+/// `(canonical, DepVersion)` entries and the scope's self-entry (the
+/// scope is self-rooted by `engine_fact_signature_for_materialize_memo`).
+///
+/// Order is preserved (first occurrence wins) so the resulting
+/// signature is deterministic given deterministic inputs.
+fn combine_dep_signatures(
+    a: &crate::semantic_query::DepSignature,
+    b: &crate::semantic_query::DepSignature,
+    scope_canonical_id: &str,
+) -> crate::semantic_query::DepSignature {
+    let mut out: Vec<(Arc<str>, crate::semantic_query::DepVersion)> =
+        Vec::with_capacity(a.len() + b.len());
+    let mut seen: rustc_hash::FxHashSet<(Arc<str>, crate::semantic_query::DepVersion)> =
+        rustc_hash::FxHashSet::default();
+    for entry in a.iter().chain(b.iter()) {
+        if entry.0.as_ref() == scope_canonical_id || entry.0.as_ref().is_empty() {
+            continue;
+        }
+        let pair = (Arc::clone(&entry.0), entry.1.clone());
+        if seen.insert(pair.clone()) {
+            out.push(pair);
+        }
+    }
+    Arc::from(out.into_boxed_slice())
+}
+
+/// F1 helper: append the gate fence's dep entries to the materialised
+/// `MaterializedTypeExpr.dep_signature`, deduplicating against the
+/// already-observed entries. Used on the cold-compute admit path so
+/// the entry's fact signature captures BOTH the reducer's observed
+/// deps AND the gate-observed deps.
+fn merge_gate_fence_into_materialized(
+    mut materialized: crate::project_semantic_dispatch::raise::MaterializedTypeExpr,
+    gate_fence: &crate::semantic_query::DepSignature,
+    scope_canonical_id: &str,
+) -> crate::project_semantic_dispatch::raise::MaterializedTypeExpr {
+    if gate_fence.is_empty() {
+        return materialized;
+    }
+    let combined =
+        combine_dep_signatures(&materialized.dep_signature, gate_fence, scope_canonical_id);
+    materialized.dep_signature = combined;
+    materialized
 }
 
 /// Admit a freshly-computed SemanticNode-subject shape into the
@@ -790,18 +874,28 @@ fn member_shape_peek_or_compute(
 /// peek primitive's `Leaf` / `BareCarrier` arms to enforce the
 /// Block 6.i universal-caching invariant: every successful shape
 /// compute admits, regardless of how cheap the compute was.
+///
+/// F1 — callers MUST pass the `dep_signature` capturing any cross-file
+/// dependencies observed during the path that produced
+/// `materialized_type_expr`. Passing an empty signature means the
+/// admitted entry self-roots ONLY on the scope file's whole_hash, so
+/// edits to other files the gate/compute touched would not invalidate
+/// the cached verdict. For Leaf/BareCarrier admits in
+/// `reduce_field_type_expr`, the caller threads the gate fence (cycle
+/// + package-backed) collected upstream.
 fn admit_type_expr_shape_if_possible(
     ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
     expr: &TypeExpr,
     mode: ProjectionMode,
     materialized_type_expr: TypeExpr,
+    dep_signature: crate::semantic_query::DepSignature,
 ) {
     use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
     let value = MaterializedTypeExpr {
         node_id: None,
         type_expr: materialized_type_expr,
-        dep_signature: Arc::from(Vec::new()),
+        dep_signature,
     };
     let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
         Arc::<str>::from(scope_canonical_id),
@@ -989,22 +1083,35 @@ pub(crate) fn reduce_field_type_expr(
     ) {
         match peeked {
             PeekedShape::Leaf(leaf) => {
+                // F1: Leaf admission is a STRUCTURAL classification of
+                // `expr` (Primitive / Literal). It does not depend on
+                // any other file — `peek_member_shape_known` does not
+                // touch cross-file state for these arms. Empty
+                // dep_signature is correct here; the cache entry
+                // self-roots on the scope file only.
                 admit_type_expr_shape_if_possible(
                     query_engine.ctx,
                     scope_canonical_id,
                     &expr,
                     ProjectionMode::Expanded,
                     leaf.clone(),
+                    Arc::from(Vec::new()),
                 );
                 return leaf;
             }
             PeekedShape::BareCarrier { .. } => {
+                // F1: BareCarrier admission is structural — a `Ref`
+                // with empty `type_arguments`. The shape is the
+                // carrier name itself; no cross-file work was done.
+                // Empty dep_signature is correct; scope-self-rooting
+                // is sufficient.
                 admit_type_expr_shape_if_possible(
                     query_engine.ctx,
                     scope_canonical_id,
                     &expr,
                     ProjectionMode::Expanded,
                     expr.clone(),
+                    Arc::from(Vec::new()),
                 );
                 return expr;
             }

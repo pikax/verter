@@ -144,8 +144,15 @@ fn member_shape_peek_or_compute_runs_gates_before_cached_peek() {
     let raise_idx = body
         .find("raise_node_to_type_expr(member_value)")
         .expect("guard: raise call must remain in `member_shape_peek_or_compute`.");
+    // Block 6.i F1: the gate is invoked via the `_with_fence` variant
+    // so the gate's cross-file dep facts thread into the admit's
+    // `fact_dep_signature`. Match either the bare or the `_with_fence`
+    // form so the guard survives the F1 refactor and a hypothetical
+    // future rename back. Document the intent: do NOT remove the gate
+    // entirely; rename only to a fence-bearing successor.
     let gate_idx = body
-        .find("type_expr_has_package_backed_object_like_root(")
+        .find("type_expr_has_package_backed_object_like_root_with_fence(")
+        .or_else(|| body.find("type_expr_has_package_backed_object_like_root("))
         .expect("guard: package-backed gate must remain as cold fallback.");
     let peek_idx = body
         .find("peek_member_shape_known(")
