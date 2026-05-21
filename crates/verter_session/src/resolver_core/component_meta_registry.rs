@@ -1378,14 +1378,31 @@ pub(crate) fn component_meta_registry_indexed_ref_penalty(
 /// Walk `expr` and enqueue every nominal `Ref` reachable through the
 /// supplied [`ProjectionCursor`].
 ///
-/// **Cursor contract** (Block 6.i Commit A): when the cursor is at a
-/// whole-surface node (`is_whole_surface()`), descent is unbounded
-/// — preserves pre-Block-6.i behaviour. When the cursor carries a
-/// narrowed filter (Pick → `Include`, Omit → `Exclude`, or an
-/// explicit `ProjectionNode::children` map), the Object arm only
-/// descends into admitted keys and the Conditional / Mapped arms
-/// gate on `is_whole_surface()` so siblings outside the path stay
-/// shallow.
+/// **Cursor contract** (Block 6.i Commit A + G1): when the cursor is
+/// at a whole-surface node (`is_whole_surface()`), descent is
+/// unbounded — preserves pre-Block-6.i behaviour. When the cursor
+/// carries a narrowed filter (Pick → `Include`, Omit → `Exclude`,
+/// or an explicit `ProjectionNode::children` map):
+///
+/// - **Object arm**: the `Property` arm gates per-member descent
+///   on `cursor.admits_key(prop.name)`. (Non-Property members —
+///   Method, IndexSignature, CallSignature — are gated by G2 in
+///   the follow-up commit.)
+///
+/// - **Conditional arm** (G1): the predicate sides (`check`,
+///   `extends`) are type-level operands, NOT part of the published
+///   value surface. Under a narrowed cursor we walk only the
+///   result-side branches (`true_type`, `false_type`) — both,
+///   because openness is not tracked here (treat as open: distribute
+///   the remaining demand into both branches). Whole-surface walks
+///   all four.
+///
+/// - **Mapped arm** (G1): the `source` (the mapped-source key
+///   domain `T` in `{ [K in keyof T]: V }`) and the `name_type`
+///   (the `as` remapping) are type-level metadata. Under a narrowed
+///   cursor we walk only `value` (the produced value type for the
+///   requested keys). Whole-surface walks `source` + `value` +
+///   `name_type`.
 pub(crate) fn collect_component_meta_registry_refs(
     expr: &verter_type_expr::TypeExpr,
     published_names: &rustc_hash::FxHashSet<String>,
@@ -1594,24 +1611,47 @@ pub(crate) fn collect_component_meta_registry_refs(
             if !allow_plain_member_refs {
                 return;
             }
-            collect_component_meta_registry_refs(
-                check,
-                published_names,
-                queued_names,
-                output,
-                source_hint,
-                allow_plain_member_refs,
-                cursor,
-            );
-            collect_component_meta_registry_refs(
-                extends,
-                published_names,
-                queued_names,
-                output,
-                source_hint,
-                allow_plain_member_refs,
-                cursor,
-            );
+            // Block 6.i G1 — path-precision gate. The doc-comment on
+            // this fn promises the Conditional arm gates on
+            // `is_whole_surface()`; the pre-G1 impl unconditionally
+            // recursed into all four branches, leaking unselected
+            // type-level predicate sides into a narrowed surface.
+            //
+            // - Whole-surface (no narrowing): walk all four (check +
+            //   extends + true_type + false_type). Preserves
+            //   pre-Block-6.i top-level callers' refs and audit
+            //   behaviour.
+            // - Narrowed (Include/Exclude/explicit-children at this
+            //   hop): the cursor enumerates a value-surface; the
+            //   conditional's `check`/`extends` are type-level
+            //   predicate operands, NOT part of the published-value
+            //   surface. We only enqueue refs reachable through the
+            //   result-side branches (`true_type` + `false_type`)
+            //   because we can't statically tell which branch a path
+            //   resolves to (treat as open: distribute remaining
+            //   demand into both). Cf. CLAUDE.md "Macro Type
+            //   Traversal Rule": open conditionals distribute the
+            //   remaining path into both branches.
+            if cursor.is_whole_surface() {
+                collect_component_meta_registry_refs(
+                    check,
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                    allow_plain_member_refs,
+                    cursor,
+                );
+                collect_component_meta_registry_refs(
+                    extends,
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                    allow_plain_member_refs,
+                    cursor,
+                );
+            }
             collect_component_meta_registry_refs(
                 true_type,
                 published_names,
@@ -1640,15 +1680,31 @@ pub(crate) fn collect_component_meta_registry_refs(
             if !allow_plain_member_refs {
                 return;
             }
-            collect_component_meta_registry_refs(
-                source,
-                published_names,
-                queued_names,
-                output,
-                source_hint,
-                allow_plain_member_refs,
-                cursor,
-            );
+            // Block 6.i G1 — path-precision gate. The doc-comment on
+            // this fn promises the Mapped arm gates on
+            // `is_whole_surface()`; the pre-G1 impl unconditionally
+            // recursed into source + value + name_type, leaking the
+            // mapped-source key-domain into a narrowed surface even
+            // when only specific keys are requested.
+            //
+            // - Whole-surface: walk source + value (+ name_type).
+            //   Preserves pre-Block-6.i refs.
+            // - Narrowed: walk only `value` — the published-value
+            //   surface produced by `{ [K in keyof T]: V }` for the
+            //   requested keys is `V`; the mapped-source `T` itself
+            //   (and the `as` name_type remapping) is type-level
+            //   metadata outside the value surface.
+            if cursor.is_whole_surface() {
+                collect_component_meta_registry_refs(
+                    source,
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                    allow_plain_member_refs,
+                    cursor,
+                );
+            }
             collect_component_meta_registry_refs(
                 value,
                 published_names,
@@ -1658,16 +1714,18 @@ pub(crate) fn collect_component_meta_registry_refs(
                 allow_plain_member_refs,
                 cursor,
             );
-            if let Some(name_type) = name_type.as_deref() {
-                collect_component_meta_registry_refs(
-                    name_type,
-                    published_names,
-                    queued_names,
-                    output,
-                    source_hint,
-                    allow_plain_member_refs,
-                    cursor,
-                );
+            if cursor.is_whole_surface() {
+                if let Some(name_type) = name_type.as_deref() {
+                    collect_component_meta_registry_refs(
+                        name_type,
+                        published_names,
+                        queued_names,
+                        output,
+                        source_hint,
+                        allow_plain_member_refs,
+                        cursor,
+                    );
+                }
             }
         }
         TypeExpr::TypeParameter(_) => {}
@@ -2858,4 +2916,202 @@ export interface AvatarProps {
             "raw member path projection should stay on the requested member instead of widening to siblings"
         );
     }
+
+    // -----------------------------------------------------------------
+    // Block 6.i G1 — Conditional / Mapped walker gates on
+    // `cursor.is_whole_surface()`. Under a narrowed cursor the
+    // type-level predicate sides (Conditional.check/extends,
+    // Mapped.source/name_type) must NOT contribute refs.
+    // -----------------------------------------------------------------
+
+    /// Helper: build an explicit `Include` cursor at the root, with
+    /// `Registry` surface kind. The cursor is narrowed → not
+    /// whole-surface.
+    fn narrowed_include_projection(
+        keys: &[&str],
+    ) -> crate::meta_resolve::projection_demand::SurfaceProjection {
+        let mut node =
+            crate::meta_resolve::projection_demand::ProjectionNode::whole_surface_expanded();
+        node.key_filter = crate::meta_resolve::projection_demand::KeyFilter::Include(
+            keys.iter()
+                .map(|k| Arc::<str>::from(*k))
+                .collect::<Vec<_>>()
+                .into(),
+        );
+        crate::meta_resolve::projection_demand::SurfaceProjection {
+            surface: crate::meta_resolve::projection_demand::PublishedSurfaceKind::Registry,
+            root: node,
+        }
+    }
+
+    fn ref_named(name: &str) -> TypeExpr {
+        TypeExpr::Ref {
+            name: name.to_string().into(),
+            type_arguments: Arc::from([]),
+        }
+    }
+
+    fn drain_names(output: &VecDeque<super::PendingComponentMetaRegistryRef>) -> Vec<String> {
+        output.iter().map(|p| p.name.clone()).collect()
+    }
+
+    #[test]
+    fn g1_conditional_under_narrowed_cursor_skips_check_extends() {
+        // Conditional { check: CheckRef, extends: ExtendsRef,
+        //              true_type: TrueRef, false_type: FalseRef }
+        // Narrowed cursor (Include("a")) — predicate sides MUST NOT
+        // be walked; result branches MUST be walked.
+        let expr = TypeExpr::Conditional {
+            check: Arc::new(ref_named("CheckRef")),
+            extends: Arc::new(ref_named("ExtendsRef")),
+            true_type: Arc::new(ref_named("TrueRef")),
+            false_type: Arc::new(ref_named("FalseRef")),
+        };
+        let published_names = rustc_hash::FxHashSet::default();
+        let mut queued_names = rustc_hash::FxHashSet::default();
+        let mut output = VecDeque::new();
+        let proj = narrowed_include_projection(&["a"]);
+
+        collect_component_meta_registry_refs(
+            &expr,
+            &published_names,
+            &mut queued_names,
+            &mut output,
+            None,
+            true, // allow_plain_member_refs — Conditional gate runs after this
+            proj.cursor(),
+        );
+
+        let names = drain_names(&output);
+        assert!(
+            !names.iter().any(|n| n == "CheckRef"),
+            "G1: narrowed cursor must NOT walk Conditional.check (was: {names:?})"
+        );
+        assert!(
+            !names.iter().any(|n| n == "ExtendsRef"),
+            "G1: narrowed cursor must NOT walk Conditional.extends (was: {names:?})"
+        );
+        assert!(
+            names.iter().any(|n| n == "TrueRef"),
+            "G1: narrowed cursor MUST walk Conditional.true_type (open: distribute remaining demand) (was: {names:?})"
+        );
+        assert!(
+            names.iter().any(|n| n == "FalseRef"),
+            "G1: narrowed cursor MUST walk Conditional.false_type (open: distribute remaining demand) (was: {names:?})"
+        );
+    }
+
+    #[test]
+    fn g1_conditional_under_whole_surface_walks_all_four() {
+        let expr = TypeExpr::Conditional {
+            check: Arc::new(ref_named("CheckRef")),
+            extends: Arc::new(ref_named("ExtendsRef")),
+            true_type: Arc::new(ref_named("TrueRef")),
+            false_type: Arc::new(ref_named("FalseRef")),
+        };
+        let published_names = rustc_hash::FxHashSet::default();
+        let mut queued_names = rustc_hash::FxHashSet::default();
+        let mut output = VecDeque::new();
+        let proj = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
+            crate::meta_resolve::projection_demand::PublishedSurfaceKind::Registry,
+        );
+
+        collect_component_meta_registry_refs(
+            &expr,
+            &published_names,
+            &mut queued_names,
+            &mut output,
+            None,
+            true,
+            proj.cursor(),
+        );
+
+        let names = drain_names(&output);
+        for n in ["CheckRef", "ExtendsRef", "TrueRef", "FalseRef"] {
+            assert!(
+                names.iter().any(|name| name == n),
+                "G1: whole-surface MUST walk every Conditional branch including {n} (was: {names:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn g1_mapped_under_narrowed_cursor_skips_source_and_name_type() {
+        // Mapped { source: SourceRef, value: ValueRef, name_type: Some(NameTypeRef) }
+        // Narrowed cursor — source/name_type are type-level, must
+        // not be walked. Value MUST be walked.
+        let expr = TypeExpr::Mapped {
+            parameter: "K".to_string(),
+            source: Arc::new(ref_named("SourceRef")),
+            value: Arc::new(ref_named("ValueRef")),
+            name_type: Some(Arc::new(ref_named("NameTypeRef"))),
+            optional: verter_type_expr::MappedModifier::None,
+            readonly: verter_type_expr::MappedModifier::None,
+        };
+        let published_names = rustc_hash::FxHashSet::default();
+        let mut queued_names = rustc_hash::FxHashSet::default();
+        let mut output = VecDeque::new();
+        let proj = narrowed_include_projection(&["a"]);
+
+        collect_component_meta_registry_refs(
+            &expr,
+            &published_names,
+            &mut queued_names,
+            &mut output,
+            None,
+            true,
+            proj.cursor(),
+        );
+
+        let names = drain_names(&output);
+        assert!(
+            !names.iter().any(|n| n == "SourceRef"),
+            "G1: narrowed cursor must NOT walk Mapped.source (was: {names:?})"
+        );
+        assert!(
+            !names.iter().any(|n| n == "NameTypeRef"),
+            "G1: narrowed cursor must NOT walk Mapped.name_type (was: {names:?})"
+        );
+        assert!(
+            names.iter().any(|n| n == "ValueRef"),
+            "G1: narrowed cursor MUST walk Mapped.value (the produced value type) (was: {names:?})"
+        );
+    }
+
+    #[test]
+    fn g1_mapped_under_whole_surface_walks_source_value_name_type() {
+        let expr = TypeExpr::Mapped {
+            parameter: "K".to_string(),
+            source: Arc::new(ref_named("SourceRef")),
+            value: Arc::new(ref_named("ValueRef")),
+            name_type: Some(Arc::new(ref_named("NameTypeRef"))),
+            optional: verter_type_expr::MappedModifier::None,
+            readonly: verter_type_expr::MappedModifier::None,
+        };
+        let published_names = rustc_hash::FxHashSet::default();
+        let mut queued_names = rustc_hash::FxHashSet::default();
+        let mut output = VecDeque::new();
+        let proj = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
+            crate::meta_resolve::projection_demand::PublishedSurfaceKind::Registry,
+        );
+
+        collect_component_meta_registry_refs(
+            &expr,
+            &published_names,
+            &mut queued_names,
+            &mut output,
+            None,
+            true,
+            proj.cursor(),
+        );
+
+        let names = drain_names(&output);
+        for n in ["SourceRef", "ValueRef", "NameTypeRef"] {
+            assert!(
+                names.iter().any(|name| name == n),
+                "G1: whole-surface MUST walk every Mapped branch including {n} (was: {names:?})"
+            );
+        }
+    }
+
 }
