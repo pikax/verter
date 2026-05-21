@@ -280,3 +280,99 @@ fn pathwalker_does_not_resolve_mapped_through_build_mapped_type() {
          pre-Commit-F path-walker behaviour for the narrowed key.",
     );
 }
+
+/// G4.4 static guard — `IndexKey::Number` convention must remain
+/// unified across producers and consumers.
+///
+/// Pre-G4.4, `lower::shallow_lower_type_expr` stored numeric
+/// literals in `IndexKey::Number(i64)` using the bit-pattern
+/// convention (`n.to_bits() as i64`), while every other producer
+/// (`evaluate::normalized_index_key_node`,
+/// `substitute::substitute_index_key_with_change_tracking`) used
+/// the integer convention (`*number as i64`). The asymmetry was a
+/// latent soundness gap — a substitution-produced
+/// `IndexKey::Number(1)` would be mis-decoded by the walker's
+/// bit-pattern recovery (`f64::from_bits(1u64)` = 5e-324) instead
+/// of 1.0.
+///
+/// G4.4 unifies on the integer convention. This guard pins the
+/// invariant by:
+///   1. Verifying `lower.rs` does NOT use `n.to_bits()` in its
+///      `IndexKey::Number` construction.
+///   2. Verifying `walk.rs`'s `Index(Number)` arm does NOT use
+///      `f64::from_bits` to decode.
+///
+/// Any reversion to the bit-pattern convention at either site
+/// would trip this guard.
+#[test]
+fn index_key_number_convention_is_unified_integer() {
+    let lower_src =
+        read_workspace_file("crates/verter_session/src/project_semantic_dispatch/lower.rs");
+    let walk_src =
+        read_workspace_file("crates/verter_session/src/project_semantic_dispatch/walk.rs");
+
+    // Producer side — lower.rs MUST NOT call `to_bits()` adjacent
+    // to any `IndexKey::Number(...)` constructor. We scan the
+    // entire file for the pattern; the file owns one
+    // `IndexKey::Number` constructor (in the indexed-access
+    // lowering arm) and any future call site must follow the
+    // unified integer convention.
+    //
+    // The check is structural: assert that no `IndexKey::Number(`
+    // call site contains a `.to_bits()` invocation within its
+    // immediate expression context. We approximate "immediate
+    // expression context" with a 80-char window around the
+    // constructor (the constructor body is a single expression).
+    let mut search_start = 0usize;
+    let needle = "IndexKey::Number(";
+    let mut found_any = false;
+    while let Some(idx) = lower_src[search_start..].find(needle) {
+        let abs = search_start + idx;
+        let hi = (abs + needle.len() + 80).min(lower_src.len());
+        let local = &lower_src[abs..hi];
+        assert!(
+            !local.contains("to_bits()"),
+            "G4.4 guard: lower.rs MUST NOT store `n.to_bits() as i64` in \
+             `IndexKey::Number` — that is the pre-G4.4 bit-pattern convention. \
+             Use the integer convention (`*n as i64`) gated by \
+             `n.fract() == 0.0 && i64 range` so the convention matches \
+             `evaluate::normalized_index_key_node`, \
+             `substitute::substitute_index_key_with_change_tracking`, and \
+             `raise::raise_index_key_to_type_expr`. (offset {abs}, snippet: {local})"
+        );
+        found_any = true;
+        search_start = abs + needle.len();
+    }
+    assert!(
+        found_any,
+        "G4.4 guard anchor: lower.rs must contain at least one `IndexKey::Number(` \
+         constructor (the indexed-access literal-number lowering arm)"
+    );
+
+    // Consumer side — walk.rs `Index(Number)` arm that produces a
+    // `LiteralKey::Number`. There are multiple `IndexKey::Number(n)`
+    // patterns in walk.rs (e.g. the needle-text rendering arm uses
+    // `n.to_string()`); the discriminating one for G4.4 is the
+    // Mapped-narrowing literal-key arm that produces
+    // `LiteralKey::Number`. Anchor on `LiteralKey::Number(` to land
+    // in the right region.
+    let walk_anchor = "LiteralKey::Number(";
+    let walk_window_start = walk_src.find(walk_anchor).expect(
+        "G4.4 guard anchor: walk.rs must construct a `LiteralKey::Number(...)` in the \
+         Mapped-narrowing literal-key arm",
+    );
+    // 200 chars is enough to capture the constructor call's payload
+    // expression. Backtrack 100 chars so the assertion also catches
+    // a regression that fences `LiteralKey::Number(` from a
+    // `from_bits` line above it.
+    let window_lo = walk_window_start.saturating_sub(100);
+    let window_hi = walk_window_start.saturating_add(200).min(walk_src.len());
+    let walk_window = &walk_src[window_lo..window_hi];
+    assert!(
+        !walk_window.contains("f64::from_bits"),
+        "G4.4 guard: walk.rs's `LiteralKey::Number(...)` constructor MUST NOT decode via \
+         `f64::from_bits` — that is the pre-G4.4 bit-pattern consumer. Use the integer-\
+         convention recovery (`*n as f64`) to match the unified producer convention. \
+         (window: {walk_window})"
+    );
+}

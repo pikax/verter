@@ -1084,3 +1084,209 @@ defineProps<{
         prop.type_expr,
     );
 }
+
+// =====================================================================
+// G4.4 — `IndexKey::Number` convention is unified across producers.
+//
+// G4.3 fixed the Mapped narrowing path to preserve literal kind
+// through substitution; G4.4 closes the latent soundness gap by
+// unifying the `IndexKey::Number` storage convention across every
+// producer + consumer in the pipeline.
+//
+// Pre-G4.4 producers stored two different things in
+// `IndexKey::Number(i64)`:
+//
+//   - `lower::shallow_lower_type_expr` stored the BIT-PATTERN
+//     (`n.to_bits() as i64`). `f64::from_bits(...)` recovered the
+//     value.
+//   - `evaluate::normalized_index_key_node` and
+//     `substitute::substitute_index_key_with_change_tracking`
+//     stored the truncated INTEGER value (`*number as i64`).
+//     `*number as f64` recovered the value.
+//
+// `walk::PathWalker`'s `Index(Number)` arm used the bit-pattern
+// recovery, so any path that fed a substitution-produced
+// integer-convention `IndexKey::Number(1)` into the walker would
+// decode it as `f64::from_bits(1u64)` = 5e-324 instead of `1.0`.
+//
+// Empirically the codex example (`Lookup<NumberIdentity, 1>`)
+// does not reach the walker's `Index(Number)` arm in the current
+// dispatch topology — `Lookup`'s instantiation result is reduced
+// upstream and the numeric literal is interned via
+// `raise::raise_index_key_to_type_expr`'s integer-convention
+// recovery. The convention inconsistency was therefore a latent
+// soundness gap rather than an observable defect.
+//
+// G4.4 unifies the convention: every producer now stores the
+// integer value and every consumer recovers via `*n as f64`.
+// Non-integer literals (`Foo[1.5]`) and out-of-i64 literals
+// remain as `IndexKey::TypeNode` references rather than entering
+// the `IndexKey::Number` fast path — matching the existing
+// `evaluate::normalized_index_key_node` admission guard.
+//
+// Characterising property (positive regression guard):
+//   - `Lookup<NumberIdentity, 1>` publishes the numeric literal
+//     `1.0` regardless of which substitution / dispatch / raise
+//     path produces it.
+//   - `M[1]` for a Mapped source publishes the numeric literal
+//     `1.0` via the walker's `Index(Number)` arm — verified by
+//     `mapped_narrowing_preserves_numeric_literal_kind_through_substitution`
+//     (G4.3 guard).
+//
+// Together, the two tests pin BOTH the substitution-via-helper
+// path AND the direct-source-lowered path to the same observable
+// behavior — any future refactor that brings the substitution
+// path through the walker's `Index(Number)` arm would observe
+// the unified convention.
+// =====================================================================
+#[test]
+fn indexed_access_substituted_through_generic_helper_publishes_numeric_literal() {
+    let project = make_project();
+    upsert(
+        &project,
+        "/types.ts",
+        r#"// Generic indexed-access helper. `I` is a type parameter
+// — at lowering time `NumberIdentity[I]` becomes
+// `IndexedAccess { ..., index: TypeNode(I_ref) }`. Only on
+// instantiation (`Lookup<_, 1>`) does the substituter rewrite
+// the TypeNode index to `IndexKey::Number(1)` via
+// `normalized_index_key_node`. Pre-G4.4 this was the integer-
+// convention path; lower-sited literals took the bit-pattern
+// path. Post-G4.4 both producers store integer convention.
+export type NumberIdentity = { [K in number]: K }
+export type Lookup<M, I extends number> = M[I]
+"#,
+    );
+    upsert(
+        &project,
+        "/Comp.vue",
+        r#"<script setup lang="ts">
+import type { NumberIdentity, Lookup } from './types'
+
+defineProps<{
+  // Lookup<NumberIdentity, 1> — the generic helper's body is
+  // `M[I]`; instantiation substitutes `I = 1`. The substituted
+  // `IndexKey::Number(1)` (integer convention) must surface as
+  // the numeric literal 1.0 — never as the bit-pattern denormal
+  // 5e-324 that pre-G4.4 mis-decoding would have produced.
+  numericIdentityViaHelper: Lookup<NumberIdentity, 1>
+}>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let meta = meta_for(&project, "/Comp.vue");
+
+    let prop = meta
+        .props
+        .iter()
+        .find(|p| p.name == "numericIdentityViaHelper")
+        .expect("numericIdentityViaHelper prop must be present");
+
+    let mut number_lits: Vec<f64> = Vec::new();
+    collect_numeric_literals(&prop.type_expr, &mut number_lits);
+
+    // Characterisation: published numeric literal is exactly 1.0
+    // (within f64::EPSILON). Any future refactor that funnels
+    // the substitution-produced `IndexKey::Number(1)` through a
+    // bit-pattern-decoding consumer would surface 5e-324 instead
+    // (`f64::from_bits(1u64)`), tripping the assertion below.
+    assert!(
+        number_lits.iter().any(|n| (*n - 1.0).abs() < f64::EPSILON),
+        "guard G4.4: Lookup<NumberIdentity, 1> MUST publish the numeric literal 1.0. \
+         Convention unification — every `IndexKey::Number` producer stores integer \
+         convention; every consumer recovers via `*n as f64`. A 5e-324 here would \
+         indicate a regression to the pre-G4.4 mixed-convention pipeline. \
+         type_expr: {:#?}",
+        prop.type_expr,
+    );
+    // Negative: no denormal numeric literal appears anywhere in
+    // the published surface. `f64::from_bits(1u64)` ≈ 5e-324 is
+    // the canonical "mis-decoded integer-convention 1" signature.
+    assert!(
+        !number_lits.iter().any(|n| *n != 0.0 && n.abs() < 1e-300),
+        "guard G4.4: the published numeric surface MUST NOT contain a denormal \
+         (e.g. 5e-324 from `f64::from_bits(1u64)`) — that would indicate a \
+         consumer is decoding an integer-convention `IndexKey::Number` as a \
+         bit-pattern. type_expr: {:#?}",
+        prop.type_expr,
+    );
+}
+
+// =====================================================================
+// G4.4 — additional convention-unification guard (Mapped + direct
+// numeric literal source). This is the path the G4.3 fixture
+// already exercises (`NumberIdentity[1]` where `1` is a source-
+// literal numeric index) — pre-G4.4 used the bit-pattern producer
+// at `lower::shallow_lower_type_expr` + bit-pattern consumer at
+// `walk::PathWalker`'s `Index(Number)` arm (correct by symmetric
+// matching); post-G4.4 both use the integer convention. The
+// observable behavior is identical because the convention pair
+// matches end-to-end in either case — but G4.4 eliminates the
+// asymmetry latent in the codebase.
+//
+// This guard re-asserts the G4.3 invariant in a path-precise
+// form: `M[7]` (a non-trivial integer literal, not 1 — to catch
+// any reversion that special-cases 0/1) publishes the numeric
+// literal `7.0`, exercising the walker's `Index(Number)` arm.
+// =====================================================================
+#[test]
+fn mapped_narrowing_preserves_nontrivial_numeric_literal() {
+    let project = make_project();
+    upsert(
+        &project,
+        "/types.ts",
+        r#"// Non-trivial integer (7) — chosen because 0 and 1 are
+// fixed points of many would-be mis-decodings. Pre-G4.4, the
+// bit-pattern producer stored 7.0.to_bits() = 4619004367821864960
+// in IndexKey::Number; the consumer's f64::from_bits(...) decoded
+// back to 7.0 (correct). Post-G4.4, the producer stores 7 and the
+// consumer does `7 as f64 = 7.0` — same observable, unified
+// convention.
+export type NumberIdentity = { [K in number]: K }
+"#,
+    );
+    upsert(
+        &project,
+        "/Comp.vue",
+        r#"<script setup lang="ts">
+import type { NumberIdentity } from './types'
+
+defineProps<{
+  // M[7] with M = { [K in number]: K } — the substitution
+  // K = 7 must yield the numeric literal type `7`.
+  seven: NumberIdentity[7]
+}>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let meta = meta_for(&project, "/Comp.vue");
+
+    let prop = meta
+        .props
+        .iter()
+        .find(|p| p.name == "seven")
+        .expect("seven prop must be present");
+
+    let mut number_lits: Vec<f64> = Vec::new();
+    collect_numeric_literals(&prop.type_expr, &mut number_lits);
+
+    assert!(
+        number_lits.iter().any(|n| (*n - 7.0).abs() < f64::EPSILON),
+        "guard G4.4: NumberIdentity[7] MUST publish the numeric literal 7.0. \
+         Any non-7.0 value indicates the producer/consumer conventions \
+         disagree on `IndexKey::Number`. type_expr: {:#?}",
+        prop.type_expr,
+    );
+    // Pre-G4.4 bit-pattern decoder of the integer-convention 7
+    // would yield `f64::from_bits(7u64)` ≈ 3.5e-323. Negative
+    // assertion: no denormal appears.
+    assert!(
+        !number_lits.iter().any(|n| *n != 0.0 && n.abs() < 1e-300),
+        "guard G4.4: the published numeric surface MUST NOT contain a denormal. \
+         A non-zero sub-1e-300 value here would indicate a producer/consumer \
+         convention mismatch (e.g. `f64::from_bits(7u64)`). type_expr: {:#?}",
+        prop.type_expr,
+    );
+}

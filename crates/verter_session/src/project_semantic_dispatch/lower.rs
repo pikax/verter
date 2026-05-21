@@ -1067,8 +1067,44 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         verter_type_expr::LiteralValue::String(s) => {
                             IndexKey::String(Arc::<str>::from(s.as_str()))
                         }
-                        verter_type_expr::LiteralValue::Number(n) => {
-                            IndexKey::Number(n.to_bits() as i64)
+                        verter_type_expr::LiteralValue::Number(n)
+                            if n.fract() == 0.0
+                                && *n >= i64::MIN as f64
+                                && *n <= i64::MAX as f64 =>
+                        {
+                            // G4.4: integer-convention `IndexKey::Number`.
+                            //
+                            // `IndexKey::Number` carries the truncated
+                            // integer value of the numeric literal as
+                            // `i64`. This is the single shared convention
+                            // across every producer:
+                            //
+                            //   - `lower::shallow_lower_type_expr` (this arm)
+                            //   - `evaluate::normalized_index_key_node`
+                            //     (graph node → IndexKey)
+                            //   - `substitute::substitute_index_key_with_change_tracking`
+                            //     (generic substitution rewrites the TypeNode
+                            //     form to integer-convention Number when the
+                            //     substituted node is an integer literal)
+                            //
+                            // Recovery is symmetric:
+                            //
+                            //   - `raise::raise_index_key_to_type_expr`
+                            //     (`*number as f64`)
+                            //   - `walk::PathWalker` `Index(Number)` arm
+                            //     (`*n as f64`)
+                            //
+                            // Non-integer literals (`Foo[1.5]`) and
+                            // out-of-i64 literals cannot round-trip
+                            // exactly through `i64` — they fall through
+                            // to the `TypeNode` arm below and remain as
+                            // a `SemanticNodeId` reference. Both
+                            // `evaluate::normalized_index_key_node` and
+                            // this arm share the same admission guard
+                            // (`fract() == 0.0` + i64 range), so the
+                            // convention is consistent regardless of
+                            // producer.
+                            IndexKey::Number(*n as i64)
                         }
                         _ => {
                             let idx_id = self.shallow_lower_type_expr(

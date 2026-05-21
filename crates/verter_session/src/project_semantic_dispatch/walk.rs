@@ -323,12 +323,19 @@ enum WalkFrame {
 ///
 /// The `Number` variant stores the literal as `f64` directly so it
 /// can be interned into `LiteralValue::Number(f64)` without any
-/// further conversion. The `IndexKey::Number` representation in the
-/// path uses two different conventions depending on its origin
-/// (source-lowered indices use the `to_bits()` form; node-
-/// normalised indices use the truncated integer form). Construction
-/// sites perform the convention-specific recovery up front so
-/// downstream substitution / admission reasoning is uniform.
+/// further conversion.
+///
+/// G4.4 convention: every `IndexKey::Number` producer (source
+/// lowering at `lower::shallow_lower_type_expr`, node normalisation
+/// at `evaluate::normalized_index_key_node`, generic substitution
+/// at `substitute::substitute_index_key_with_change_tracking`)
+/// stores the truncated integer value of the numeric literal as
+/// `i64`. This is the single shared convention across the pipeline
+/// — recovery here is a direct `i64 → f64` cast, symmetric with
+/// the raise at `raise::raise_index_key_to_type_expr`. Non-integer
+/// numeric indices (`Foo[1.5]`) cannot round-trip exactly through
+/// `i64` and remain as `IndexKey::TypeNode` references rather than
+/// entering this fast path.
 enum LiteralKey {
     String(Arc<str>),
     Number(f64),
@@ -775,13 +782,26 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                 (Some(LiteralKey::String(Arc::clone(s))), true)
                             }
                             Some(PathSegment::Index(IndexKey::Number(n))) => {
-                                // Source-lowered numeric indices store
-                                // `f64::to_bits() as i64` in
-                                // `IndexKey::Number` (see `lower.rs`)
-                                // to round-trip the literal exactly.
-                                // Recover the f64 via the symmetric
-                                // bits→f64 conversion.
-                                (Some(LiteralKey::Number(f64::from_bits(*n as u64))), false)
+                                // G4.4: integer-convention recovery.
+                                //
+                                // Every `IndexKey::Number` producer
+                                // (`lower::shallow_lower_type_expr`,
+                                // `evaluate::normalized_index_key_node`,
+                                // `substitute::substitute_index_key_with_change_tracking`)
+                                // stores the truncated integer value of
+                                // the numeric literal as `i64`. Recover
+                                // the f64 via a direct integer→float
+                                // cast — symmetric with
+                                // `raise::raise_index_key_to_type_expr`'s
+                                // `*number as f64` raise.
+                                //
+                                // Non-integer numeric indices (`Foo[1.5]`)
+                                // never reach this arm — the producer-side
+                                // `fract() == 0.0` admission guards
+                                // route them through `IndexKey::TypeNode`
+                                // instead, preserving full f64 precision
+                                // via the SemanticNodeId reference.
+                                (Some(LiteralKey::Number(*n as f64)), false)
                             }
                             Some(PathSegment::Index(IndexKey::TypeNode(node))) => {
                                 match self.dispatch.normalized_index_key_node(*node) {
