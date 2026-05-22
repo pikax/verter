@@ -72,7 +72,9 @@ fn type_resolution_audit_intermediate_hops_navigate_terminal_uses_caller_mode() 
             ]
             .into_boxed_slice(),
         ),
-        mode: ProjectionMode::Expanded,
+        context: verter_session::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
     let (resolved, record) = host.resolve_type_with_audit(project, "/types.ts");
     let resolved = resolved.expect("path projection must resolve");

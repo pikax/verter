@@ -87,7 +87,9 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_route_target_pick_omit(
             ]
             .into_boxed_slice(),
         ),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
 
     // Drive the dispatch — this populates the warm cache (terminal
@@ -137,7 +139,9 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_fallthrough_inheritance
             ]
             .into_boxed_slice(),
         ),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
 
     let _ = host.semantic_dispatch().execute(key.clone());
@@ -194,7 +198,9 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_userland_shadowing_pick
             ]
             .into_boxed_slice(),
         ),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
 
     let _ = host.semantic_dispatch().execute(key.clone());
@@ -253,7 +259,9 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_exclude_extract_reducti
             ]
             .into_boxed_slice(),
         ),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
 
     let _ = host.semantic_dispatch().execute(key.clone());
@@ -313,7 +321,9 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_slot_binding_lowering()
             ]
             .into_boxed_slice(),
         ),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
 
     let _ = host.semantic_dispatch().execute(key.clone());
@@ -373,7 +383,9 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_typeof_substitution() {
             ]
             .into_boxed_slice(),
         ),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
 
     let _ = host.semantic_dispatch().execute(key.clone());
@@ -430,7 +442,9 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_engine_state_promotion(
             ]
             .into_boxed_slice(),
         ),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
 
     let _ = host.semantic_dispatch().execute(key.clone());

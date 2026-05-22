@@ -773,7 +773,9 @@ pub(crate) fn compute_bindings_via_graph(
     let slot_surface_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: macro_payload_node,
         path: empty_path.clone(),
-        mode: ProjectionMode::Shallow,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Shallow,
+        ),
     });
     // Dual-emit: legacy accumulator + fact-tracer fan-out.
     emit_slot_binding_graph_dispatch_facts(ctx, &slot_surface_read.dep_signature);
@@ -862,7 +864,9 @@ pub(crate) fn compute_bindings_via_graph(
         let param_surface_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
             base: param0_ty,
             path: empty_path.clone(),
-            mode: ProjectionMode::Shallow,
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Shallow,
+            ),
         });
         // Dual-emit: legacy accumulator + fact-tracer fan-out.
         emit_slot_binding_graph_dispatch_facts(ctx, &param_surface_read.dep_signature);

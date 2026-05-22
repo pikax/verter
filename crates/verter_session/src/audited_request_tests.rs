@@ -212,7 +212,9 @@ fn raw_dispatch_execute_emits_no_audit_records() {
         let path_key = SemanticQueryKey::ProjectPath {
             base: primitive_base,
             path: Arc::from(vec![PathSegment::Member(Arc::from("nonexistent"))].into_boxed_slice()),
-            mode: ProjectionMode::Identity,
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Identity,
+            ),
         };
         let path_read = dispatch.execute_read(path_key);
         // Discriminating side-check (same rationale as above): the

@@ -687,6 +687,7 @@ fn ax_hybrid_three_keys_carry_reduction_context() {
         "Instantiate {\n        base: DeclIdentity,",
         "KeyOf {\n        base: SemanticNodeId,",
         "MappedType {\n        source: SemanticNodeId,",
+        "ProjectPath {\n        base: SemanticNodeId,",
     ] {
         let pos = src.find(variant_anchor).unwrap_or_else(|| {
             panic!("AX-hybrid Q6.1: variant anchor not found: {variant_anchor}")

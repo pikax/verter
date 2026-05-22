@@ -119,12 +119,12 @@ fn canonicalise_for_digest(
         SemanticQueryKey::ProjectMember { base, member, mode } => SemanticQueryKey::ProjectPath {
             base: *base,
             path: Arc::from(vec![PathSegment::Member(Arc::clone(member))].into_boxed_slice()),
-            mode: *mode,
+            context: crate::semantic_query::ProjectionReductionContext::published(*mode),
         },
         SemanticQueryKey::IndexedAccess { base, index, mode } => SemanticQueryKey::ProjectPath {
             base: *base,
             path: Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice()),
-            mode: *mode,
+            context: crate::semantic_query::ProjectionReductionContext::published(*mode),
         },
         SemanticQueryKey::NormalizeUnion { members } => SemanticQueryKey::NormalizeUnion {
             members: super::canonicalize_node_list(members),

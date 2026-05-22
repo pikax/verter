@@ -1058,7 +1058,9 @@ fn invalidate_canonical_evicts_project_path_entries_through_touched_subtree() {
     let key = SemanticQueryKey::ProjectPath {
         base,
         path: Arc::clone(&path),
-        mode: ProjectionMode::Shallow,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Shallow,
+        ),
     };
 
     let value_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
@@ -1090,7 +1092,9 @@ fn invalidate_canonical_evicts_project_path_entries_through_touched_subtree() {
     let narrower_key = SemanticQueryKey::ProjectPath {
         base,
         path,
-        mode: ProjectionMode::Identity,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Identity,
+        ),
     };
     assert!(
         store.get_unvalidated(&narrower_key).is_none(),
@@ -1117,12 +1121,16 @@ fn invalidate_canonical_evicts_in_flight_entries_per_mode_slot_and_joiners_retry
     let key_identity = SemanticQueryKey::ProjectPath {
         base,
         path: Arc::clone(&path),
-        mode: ProjectionMode::Identity,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Identity,
+        ),
     };
     let key_expanded = SemanticQueryKey::ProjectPath {
         base,
         path: Arc::clone(&path),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
 
     // Identity build FIRST so the narrower slot is populated before
@@ -1218,7 +1226,9 @@ fn backfilled_slot_with_wider_dep_sig_over_invalidates_conservatively_not_incorr
     let key_expanded = SemanticQueryKey::ProjectPath {
         base,
         path: Arc::clone(&path),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
     let exp_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let _ = store.execute_cooperative(
@@ -1252,7 +1262,7 @@ fn backfilled_slot_with_wider_dep_sig_over_invalidates_conservatively_not_incorr
         let key = SemanticQueryKey::ProjectPath {
             base,
             path: Arc::clone(&path),
-            mode,
+            context: crate::semantic_query::ProjectionReductionContext::published(mode),
         };
         assert!(
             store.get_unvalidated(&key).is_none(),
@@ -1266,7 +1276,9 @@ fn backfilled_slot_with_wider_dep_sig_over_invalidates_conservatively_not_incorr
     let key_navigate = SemanticQueryKey::ProjectPath {
         base,
         path: Arc::clone(&path),
-        mode: ProjectionMode::Navigate,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Navigate,
+        ),
     };
     let narrow_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let _ = store.execute_cooperative(
@@ -1338,12 +1350,16 @@ fn winner_skips_warm_publish_when_aborted_by_invalidation_during_build() {
     let key_identity = SemanticQueryKey::ProjectPath {
         base,
         path: Arc::clone(&path),
-        mode: ProjectionMode::Identity,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Identity,
+        ),
     };
     let key_expanded = SemanticQueryKey::ProjectPath {
         base,
         path: Arc::clone(&path),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
 
     // Barrier 1: A signals it has entered the build closure; main
@@ -1772,12 +1788,16 @@ fn invalidate_canonical_inflight_abort_loop_releases_table_lock_before_state() {
     let key_identity = SemanticQueryKey::ProjectPath {
         base,
         path: Arc::clone(&path),
-        mode: ProjectionMode::Identity,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Identity,
+        ),
     };
     let key_expanded = SemanticQueryKey::ProjectPath {
         base,
         path: Arc::clone(&path),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
 
     // Park a cold winner mid-build for `(F, Identity)` so exactly one
@@ -3055,7 +3075,7 @@ fn family_test_key(base: SemanticNodeId, mode: ProjectionMode) -> SemanticQueryK
     SemanticQueryKey::ProjectPath {
         base,
         path: family_test_path(),
-        mode,
+        context: crate::semantic_query::ProjectionReductionContext::published(mode),
     }
 }
 
@@ -5061,7 +5081,9 @@ fn prefix_backfill_carries_traced_facts() {
     let parent_key = SemanticQueryKey::ProjectPath {
         base,
         path: Arc::clone(&path),
-        mode: ProjectionMode::Navigate,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Navigate,
+        ),
     };
 
     // The PREFIX key the backfill will publish — `path[..1]` =
@@ -5072,7 +5094,9 @@ fn prefix_backfill_carries_traced_facts() {
     let prefix_key = SemanticQueryKey::ProjectPath {
         base,
         path: prefix_path,
-        mode: ProjectionMode::Navigate,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Navigate,
+        ),
     };
 
     let parent_value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));

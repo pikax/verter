@@ -456,7 +456,9 @@ fn project_path_of_length_one_dedups_with_project_member_at_memo() {
     let via_canonical = dispatch.execute(SemanticQueryKey::ProjectPath {
         base: obj,
         path: Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice()),
-        mode: ProjectionMode::Identity,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Identity,
+        ),
     });
     let (sugar_id, canonical_id) = match (via_sugar, via_canonical) {
         (QueryResult::Value(a), QueryResult::Value(b)) => (a, b),
@@ -471,7 +473,9 @@ fn project_path_of_length_one_dedups_with_project_member_at_memo() {
     let canonical_key = SemanticQueryKey::ProjectPath {
         base: obj,
         path: Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice()),
-        mode: ProjectionMode::Identity,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Identity,
+        ),
     };
     let warm = graph
         .get_unvalidated(&canonical_key)
@@ -531,7 +535,9 @@ fn indexed_access_canonicalises_to_project_path_before_admission() {
         path: Arc::from(
             vec![PathSegment::Index(IndexKey::String(Arc::from("k")))].into_boxed_slice(),
         ),
-        mode: ProjectionMode::Identity,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Identity,
+        ),
     });
     let (sugar_id, canonical_id) = match (via_sugar, via_canonical) {
         (QueryResult::Value(a), QueryResult::Value(b)) => (a, b),
@@ -901,7 +907,9 @@ fn concurrent_sugar_and_canonical_requests_share_in_flight_entry() {
             dispatch.execute(SemanticQueryKey::ProjectPath {
                 base: obj,
                 path: Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice()),
-                mode: ProjectionMode::Identity,
+                context: crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Identity,
+                ),
             })
         });
         (t1.join().unwrap(), t2.join().unwrap())
@@ -920,7 +928,9 @@ fn concurrent_sugar_and_canonical_requests_share_in_flight_entry() {
     let canonical_key = SemanticQueryKey::ProjectPath {
         base: obj,
         path: Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice()),
-        mode: ProjectionMode::Identity,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Identity,
+        ),
     };
     let warm = graph
         .get_unvalidated(&canonical_key)
@@ -1167,12 +1177,16 @@ fn instantiate_is_mode_free_one_entry_across_depth_requests() {
     let _ = dispatch.execute(SemanticQueryKey::ProjectPath {
         base: result,
         path: empty_path.clone(),
-        mode: ProjectionMode::Identity,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Identity,
+        ),
     });
     let _ = dispatch.execute(SemanticQueryKey::ProjectPath {
         base: result,
         path: empty_path,
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     });
 
     // The `Instantiate` family has exactly one warm entry regardless
@@ -1421,7 +1435,9 @@ fn expanded_instantiate_materialises_through_dispatcher_not_private_walker() {
     let _ = dispatch.execute(SemanticQueryKey::ProjectPath {
         base: result,
         path: empty_path,
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     });
 
     // Each deeply-materialised member body must have been reached
@@ -1495,13 +1511,17 @@ fn distinct_instantiations_share_visited_subpath_lowering_not_full_body() {
     let _ = dispatch.execute(SemanticQueryKey::ProjectPath {
         base: inst_s,
         path: a_path.clone(),
-        mode: ProjectionMode::Identity,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Identity,
+        ),
     });
     let before = graph.stats_snapshot().memo_entry_count;
     let _ = dispatch.execute(SemanticQueryKey::ProjectPath {
         base: inst_n,
         path: a_path,
-        mode: ProjectionMode::Identity,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Identity,
+        ),
     });
     let after = graph.stats_snapshot().memo_entry_count;
     // Structurally-identical sub-queries across distinct
@@ -1745,25 +1765,32 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode() {
     // Both per-branch `ProjectPath` sub-dispatches must carry the
     // OUTER caller's mode. The conditional handler distributes the
     // remaining path into both branches; the per-branch dispatches
-    // must read `mode: self.mode` so the outer-terminal contract is
-    // preserved.
-    let mode_self_count = window.matches("mode: self.mode").count();
+    // must thread `self.mode` (wrapped as
+    // `ProjectionReductionContext::published(self.mode)` after Block
+    // 6.i's `ProjectPath` substrate extension) so the outer-terminal
+    // contract is preserved.
+    let context_self_count = window
+        .matches("ProjectionReductionContext::published(self.mode)")
+        .count();
     assert!(
-        mode_self_count >= 2,
-        "Conditional arm in walk.rs must contain at least two `mode: self.mode` \
-         sub-dispatches (one per branch). Found {mode_self_count}. Window:\n{window}"
+        context_self_count >= 2,
+        "Conditional arm in walk.rs must contain at least two \
+         `ProjectionReductionContext::published(self.mode)` sub-dispatches \
+         (one per branch). Found {context_self_count}. Window:\n{window}"
     );
 
     // No per-branch dispatch may hardcode a different mode. The
     // historical bug threaded `mode_for_hop(...)` (returning Navigate)
-    // — both that helper and any literal `mode: ProjectionMode::Navigate`
-    // / `mode: ProjectionMode::Identity` / `mode: ProjectionMode::Shallow`
-    // would defeat the outer-terminal contract.
+    // — both that helper and any literal `published(ProjectionMode::Navigate)`
+    // / `published(ProjectionMode::Identity)` /
+    // `published(ProjectionMode::Shallow)` would defeat the outer-terminal
+    // contract.
     for forbidden in [
         "mode: mode_for_hop",
-        "mode: ProjectionMode::Navigate",
-        "mode: ProjectionMode::Identity",
-        "mode: ProjectionMode::Shallow",
+        "published(ProjectionMode::Navigate)",
+        "published(ProjectionMode::Identity)",
+        "published(ProjectionMode::Shallow)",
+        "published(mode_for_hop",
     ] {
         assert!(
             !window.contains(forbidden),
@@ -1849,7 +1876,7 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode() {
     let result_id = match dispatch.execute(SemanticQueryKey::ProjectPath {
         base: conditional_node,
         path: Arc::clone(&path),
-        mode: outer_mode,
+        context: crate::semantic_query::ProjectionReductionContext::published(outer_mode),
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected ProjectPath Value, got {other:?}"),
@@ -2188,7 +2215,9 @@ fn distinct_projections_into_same_open_conditional_materialise_only_visited_sube
     let result = match dispatch.execute(SemanticQueryKey::ProjectPath {
         base: cond,
         path: empty_path,
-        mode: ProjectionMode::Navigate,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Navigate,
+        ),
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -2451,7 +2480,9 @@ fn narrow_path_does_not_materialize_siblings() {
     let result = match dispatch.execute(SemanticQueryKey::ProjectPath {
         base: outer,
         path,
-        mode: ProjectionMode::Identity,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Identity,
+        ),
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -2485,7 +2516,9 @@ fn intersection_arm_without_path_segment_is_ignored() {
     let result = match dispatch.execute(SemanticQueryKey::ProjectPath {
         base: intersection,
         path,
-        mode: ProjectionMode::Identity,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Identity,
+        ),
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -2518,7 +2551,9 @@ fn union_miss_propagates() {
     let result = match dispatch.execute(SemanticQueryKey::ProjectPath {
         base: union,
         path,
-        mode: ProjectionMode::Identity,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Identity,
+        ),
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -2586,7 +2621,9 @@ fn open_conditional_distributes_path_into_both_branches_via_execute_not_private_
     let projected = match dispatch.execute(SemanticQueryKey::ProjectPath {
         base: cond,
         path,
-        mode: ProjectionMode::Identity,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Identity,
+        ),
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -2643,7 +2680,9 @@ fn closed_conditional_projects_into_selected_branch_only() {
     let projected = match dispatch.execute(SemanticQueryKey::ProjectPath {
         base: cond,
         path,
-        mode: ProjectionMode::Identity,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Identity,
+        ),
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -2669,7 +2708,9 @@ fn alias_unwrap_during_path_walk_emits_alias_resolve() {
     let _ = dispatch.execute(SemanticQueryKey::ProjectPath {
         base: alias,
         path,
-        mode: ProjectionMode::Identity,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Identity,
+        ),
     });
 
     // The alias unwrap emits AliasResolve on the unwrapped target.
@@ -2713,7 +2754,9 @@ fn alias_cycle_returns_opaque_cyclic_not_stack_overflow() {
     let result = match dispatch.execute(SemanticQueryKey::ProjectPath {
         base: outer_alias,
         path: Arc::clone(&path),
-        mode: ProjectionMode::Identity,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Identity,
+        ),
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value (opaque), got {other:?}"),
@@ -2759,7 +2802,9 @@ fn mutual_alias_cycle_x_y_x_returns_opaque_with_chain_of_length_2() {
     let result = match dispatch.execute(SemanticQueryKey::ProjectPath {
         base: y_to_x,
         path,
-        mode: ProjectionMode::Identity,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Identity,
+        ),
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value (opaque), got {other:?}"),
@@ -3175,7 +3220,9 @@ fn alias_identity_extraction_uses_target_not_current() {
     let _ = dispatch.execute(SemanticQueryKey::ProjectPath {
         base: alias_b,
         path,
-        mode: ProjectionMode::Identity,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Identity,
+        ),
     });
     // Each alias unwrap emitted an AliasResolve edge on its target.
     // alias_a's target is x_anchor; alias_b's target is alias_a.
@@ -5126,7 +5173,9 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
     let prefix_key = SemanticQueryKey::ProjectPath {
         base: table_obj,
         path: Arc::clone(&prefix_path),
-        mode: ProjectionMode::Navigate,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Navigate,
+        ),
     };
 
     // BEFORE any dispatch: prefix key is NOT warm.
@@ -5146,7 +5195,9 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
     let first = dispatch.execute(SemanticQueryKey::ProjectPath {
         base: table_obj,
         path: Arc::clone(&full_path_anim),
-        mode: ProjectionMode::Navigate,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Navigate,
+        ),
     });
     let first_id = match first {
         QueryResult::Value(id) => id,
@@ -5184,7 +5235,9 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
     let second = dispatch.execute(SemanticQueryKey::ProjectPath {
         base: table_obj,
         path: Arc::clone(&full_path_color),
-        mode: ProjectionMode::Navigate,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Navigate,
+        ),
     });
     let second_id = match second {
         QueryResult::Value(id) => id,
@@ -5957,7 +6010,9 @@ fn navigate_integrity_project_path_does_not_route_through_macro_payload() {
     let _navigate_result = dispatch.execute(SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        mode: ProjectionMode::Navigate,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Navigate,
+        ),
     });
     let stats_after_navigate = graph.stats_snapshot();
 
@@ -6393,7 +6448,9 @@ fn no_new_semantic_query_key_variants_beyond_resolve_macro_payload() {
     let project_path_key = SemanticQueryKey::ProjectPath {
         base: n,
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
     assert_eq!(variant_label(&project_path_key), "ProjectPath");
     // The compile-time exhaustiveness check above is the load-bearing
@@ -6432,7 +6489,9 @@ fn empty_path_shallow_key(base: SemanticNodeId) -> SemanticQueryKey {
     SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        mode: ProjectionMode::Shallow,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Shallow,
+        ),
     }
 }
 

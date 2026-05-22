@@ -310,9 +310,12 @@ impl KeyFamily {
             }
             (
                 KeyFamily::NavigateForAlias(_root_name, hops),
-                SemanticQueryKey::ProjectPath { path, mode, .. },
+                SemanticQueryKey::ProjectPath { path, context, .. },
             ) => {
-                if !matches!(mode, crate::semantic_query::ProjectionMode::Navigate) {
+                if !matches!(
+                    context.mode,
+                    crate::semantic_query::ProjectionMode::Navigate
+                ) {
                     return false;
                 }
                 if hops.is_empty() {

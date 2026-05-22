@@ -2589,7 +2589,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let read = self.execute_read(SemanticQueryKey::ProjectPath {
                         base: type_args[0],
                         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-                        mode,
+                        context: crate::semantic_query::ProjectionReductionContext::published(mode),
                     });
                     local_fence.extend(read.dep_signature.iter().cloned());
                     read.value
@@ -2690,7 +2690,9 @@ fn find_longest_warm_prefix(
         let prefix_key = SemanticQueryKey::ProjectPath {
             base,
             path: prefix_path,
-            mode: ProjectionMode::Navigate,
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Navigate,
+            ),
         };
         // Validate-before-bubble: a stale prefix entry must neither
         // surface as a hit nor pollute the active fact tracer.
@@ -2756,7 +2758,9 @@ fn collect_prefix_backfills(
         let prefix_key = SemanticQueryKey::ProjectPath {
             base,
             path: prefix_path,
-            mode: ProjectionMode::Navigate,
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Navigate,
+            ),
         };
         out.push(crate::project_semantic_dispatch::walk::PrefixBackfill {
             key: prefix_key,

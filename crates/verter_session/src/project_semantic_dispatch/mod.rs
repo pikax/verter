@@ -529,14 +529,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticQueryKey::ProjectPath {
                     base,
                     path: Arc::from(vec![PathSegment::Member(member)].into_boxed_slice()),
-                    mode,
+                    context: crate::semantic_query::ProjectionReductionContext::published(mode),
                 }
             }
             SemanticQueryKey::IndexedAccess { base, index, mode } => {
                 SemanticQueryKey::ProjectPath {
                     base,
                     path: Arc::from(vec![PathSegment::Index(index)].into_boxed_slice()),
-                    mode,
+                    context: crate::semantic_query::ProjectionReductionContext::published(mode),
                 }
             }
             SemanticQueryKey::NormalizeUnion { members } => SemanticQueryKey::NormalizeUnion {
@@ -595,9 +595,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice());
                     self.build_project_path(*base, &path, *mode)
                 }
-                SemanticQueryKey::ProjectPath { base, path, mode } => {
-                    self.build_project_path(*base, path, *mode)
-                }
+                SemanticQueryKey::ProjectPath {
+                    base,
+                    path,
+                    context,
+                } => self.build_project_path(*base, path, context.mode),
                 SemanticQueryKey::KeyOf { base, context } => self.build_key_of(*base, *context),
                 SemanticQueryKey::MappedType {
                     source,
@@ -831,8 +833,11 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
             let depth = self.instantiate_active.borrow().len();
             ctx.observe_type_resolution_depth(u16::try_from(depth).unwrap_or(u16::MAX));
             match &key {
-                SemanticQueryKey::ProjectPath { mode, .. }
-                | SemanticQueryKey::ProjectMember { mode, .. }
+                SemanticQueryKey::ProjectPath { context, .. } => {
+                    ctx.bump_type_resolution_hop(context.mode);
+                    ctx.bump_type_resolution_projection_op();
+                }
+                SemanticQueryKey::ProjectMember { mode, .. }
                 | SemanticQueryKey::IndexedAccess { mode, .. } => {
                     ctx.bump_type_resolution_hop(*mode);
                     ctx.bump_type_resolution_projection_op();
@@ -1114,7 +1119,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let slot_read = self.execute_read(SemanticQueryKey::ProjectPath {
             base,
             path: slot_path,
-            mode: ProjectionMode::Navigate,
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Navigate,
+            ),
         });
         let slot_node = match slot_read.value {
             QueryResult::Value(id) => id,
@@ -1165,7 +1172,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let binding_read = self.execute_read(SemanticQueryKey::ProjectPath {
             base: param0_ty,
             path: binding_path,
-            mode,
+            context: crate::semantic_query::ProjectionReductionContext::published(mode),
         });
         let merged: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = slot_read
             .dep_signature

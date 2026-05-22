@@ -94,7 +94,9 @@ fn no_cache_promotion_for_budget_exceeded_resolve_macro_payload() {
             ]
             .into_boxed_slice(),
         ),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
 
     // First query — should report a budget-exceeded sentinel.
@@ -145,7 +147,9 @@ fn no_cache_promotion_for_budget_exceeded_route_target_pick_omit() {
             ]
             .into_boxed_slice(),
         ),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
 
     let dispatch = host.semantic_dispatch();
@@ -190,7 +194,9 @@ fn no_cache_promotion_for_budget_exceeded_fallthrough_inheritance() {
             ]
             .into_boxed_slice(),
         ),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
 
     let dispatch = host.semantic_dispatch();
@@ -244,7 +250,9 @@ fn no_cache_promotion_for_budget_exceeded_userland_shadowing_pick() {
             ]
             .into_boxed_slice(),
         ),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
 
     let dispatch = host.semantic_dispatch();
@@ -302,7 +310,9 @@ fn no_cache_promotion_for_budget_exceeded_exclude_extract_reduction() {
             ]
             .into_boxed_slice(),
         ),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
 
     let dispatch = host.semantic_dispatch();
@@ -360,7 +370,9 @@ fn no_cache_promotion_for_budget_exceeded_slot_binding_lowering() {
             ]
             .into_boxed_slice(),
         ),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
 
     let dispatch = host.semantic_dispatch();
@@ -418,7 +430,9 @@ fn no_cache_promotion_for_budget_exceeded_typeof_substitution() {
             ]
             .into_boxed_slice(),
         ),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
 
     let dispatch = host.semantic_dispatch();
@@ -481,7 +495,9 @@ fn no_cache_promotion_for_budget_exceeded_engine_state_promotion() {
             ]
             .into_boxed_slice(),
         ),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
 
     let dispatch = host.semantic_dispatch();

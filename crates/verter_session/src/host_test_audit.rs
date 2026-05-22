@@ -128,21 +128,28 @@ impl DispatchTrace {
         key: &crate::semantic_query::SemanticQueryKey,
     ) -> Self {
         let sub_keys = match key {
-            crate::semantic_query::SemanticQueryKey::ProjectPath { base, path, mode } => {
+            crate::semantic_query::SemanticQueryKey::ProjectPath {
+                base,
+                path,
+                context,
+            } => {
                 let mut out = Vec::with_capacity(path.len());
+                let caller_mode = context.mode;
                 for k in 1..=path.len() {
                     let prefix: std::sync::Arc<[crate::semantic_query::PathSegment]> =
                         std::sync::Arc::from(path[..k].to_vec().into_boxed_slice());
                     let is_terminal = k == path.len();
                     let prefix_mode = if is_terminal {
-                        *mode
+                        caller_mode
                     } else {
                         crate::semantic_query::ProjectionMode::Navigate
                     };
                     let prefix_key = crate::semantic_query::SemanticQueryKey::ProjectPath {
                         base: *base,
                         path: prefix,
-                        mode: prefix_mode,
+                        context: crate::semantic_query::ProjectionReductionContext::published(
+                            prefix_mode,
+                        ),
                     };
                     // Peek the cache for the actual mode populated.
                     // Intermediate hops are published as Navigate by
@@ -158,10 +165,12 @@ impl DispatchTrace {
                         let alt_key = crate::semantic_query::SemanticQueryKey::ProjectPath {
                             base: *base,
                             path: std::sync::Arc::from(path[..k].to_vec().into_boxed_slice()),
-                            mode: *mode,
+                            context: crate::semantic_query::ProjectionReductionContext::published(
+                                caller_mode,
+                            ),
                         };
                         if graph.get_unvalidated(&alt_key).is_some() {
-                            *mode
+                            caller_mode
                         } else {
                             // Prefix not in cache at all —
                             // arm-split swallowed it. Default to

@@ -946,7 +946,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 match dispatch.execute(SemanticQueryKey::ProjectPath {
                     base: root,
                     path: query_path,
-                    mode: ProjectionMode::Expanded,
+                    context: crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Expanded,
+                    ),
                 }) {
                     QueryResult::Value(node) => dispatch
                         .raise_node_to_type_expr(node)

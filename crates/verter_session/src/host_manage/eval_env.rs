@@ -1037,7 +1037,7 @@ impl VerterHost {
                                             dispatch.execute(SemanticQueryKey::ProjectPath {
                                                 base: base_id,
                                                 path: dispatch_path,
-                                                mode: ProjectionMode::Expanded,
+                                                context: crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
                                             });
                                         match projected {
                                             QueryResult::Value(node_id) => {

@@ -657,12 +657,16 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     let true_projection = self.dispatch.execute(SemanticQueryKey::ProjectPath {
                         base: true_branch,
                         path: Arc::clone(&rest_path),
-                        mode: self.mode,
+                        context: crate::semantic_query::ProjectionReductionContext::published(
+                            self.mode,
+                        ),
                     });
                     let false_projection = self.dispatch.execute(SemanticQueryKey::ProjectPath {
                         base: false_branch,
                         path: rest_path,
-                        mode: self.mode,
+                        context: crate::semantic_query::ProjectionReductionContext::published(
+                            self.mode,
+                        ),
                     });
                     let true_id = match true_projection {
                         QueryResult::Value(id) => id,
@@ -1090,7 +1094,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         resolved = match self.dispatch.execute(SemanticQueryKey::ProjectPath {
                             base: resolved,
                             path: projection_path,
-                            mode: self.mode,
+                            context: crate::semantic_query::ProjectionReductionContext::published(
+                                self.mode,
+                            ),
                         }) {
                             QueryResult::Value(id) => id,
                             _ => {

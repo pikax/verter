@@ -947,7 +947,9 @@ fn project_path_same_canonical_edit_rejects_warm_entry() {
         path: Arc::from(
             vec![crate::semantic_query::PathSegment::Member(Arc::from("a"))].into_boxed_slice(),
         ),
-        mode: crate::semantic_query::ProjectionMode::Navigate,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Navigate,
+        ),
     };
     let primed = dispatch.execute(key.clone());
     assert!(

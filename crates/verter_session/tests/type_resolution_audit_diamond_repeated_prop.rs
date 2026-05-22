@@ -64,7 +64,9 @@ fn type_resolution_audit_diamond_intra_request_interning() {
             ]
             .into_boxed_slice(),
         ),
-        mode: ProjectionMode::Expanded,
+        context: verter_session::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
     let (left_node, record_a) = host.resolve_type_with_audit(path_a, "/diamond.ts");
     let left_node = left_node.expect("AB.a.left must resolve to Shared");
@@ -86,7 +88,9 @@ fn type_resolution_audit_diamond_intra_request_interning() {
             ]
             .into_boxed_slice(),
         ),
-        mode: ProjectionMode::Expanded,
+        context: verter_session::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
     let (right_node, record_b) = host.resolve_type_with_audit(path_b, "/diamond.ts");
     let right_node = right_node.expect("AB.b.right must resolve to Shared");
@@ -151,7 +155,9 @@ fn type_resolution_audit_diamond_intra_request_interning() {
             ]
             .into_boxed_slice(),
         ),
-        mode: ProjectionMode::Expanded,
+        context: verter_session::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     };
     let (third_node, third_record) = host.resolve_type_with_audit(third, "/diamond.ts");
     let third_node = third_node.expect("third visit must resolve");

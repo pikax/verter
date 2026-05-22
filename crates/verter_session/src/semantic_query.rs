@@ -1164,10 +1164,21 @@ pub enum SemanticQueryKey {
     /// `Expand` variant collapses into this. Single-hop `ProjectMember` /
     /// `IndexedAccess` variants are admission-canonicalised to the equivalent
     /// length-1 `ProjectPath` so sugar and canonical hit the same memo entry.
+    ///
+    /// `context` carries the reduction context: `mode` controls the
+    /// terminal projection mode (Navigate/Shallow/Expanded/Identity/
+    /// Skeleton); `demand` distinguishes publication callers
+    /// (`Published`) from internal transit callers
+    /// (`StructuralTransit`). The memo splits per context so a
+    /// `StructuralTransit/Shallow` projection does not collide with a
+    /// `Published/Shallow` projection on the same `(base, path)` — they
+    /// are distinct evaluations. Parity with `Instantiate` / `KeyOf` /
+    /// `MappedType` so a future transit caller dispatching `ProjectPath`
+    /// does not poison the publication slot.
     ProjectPath {
         base: SemanticNodeId,
         path: Arc<[PathSegment]>,
-        mode: ProjectionMode,
+        context: ProjectionReductionContext,
     },
     /// Identity for a Vue macro resolution artifact cached in the shared
     /// semantic graph under a [`HostResolvedNamedTypeKey`].
@@ -1930,7 +1941,11 @@ pub trait SemanticQueryApi {
         path: Arc<[PathSegment]>,
         mode: ProjectionMode,
     ) -> QueryResult<SemanticNodeId> {
-        self.execute(SemanticQueryKey::ProjectPath { base, path, mode })
+        self.execute(SemanticQueryKey::ProjectPath {
+            base,
+            path,
+            context: ProjectionReductionContext::published(mode),
+        })
     }
 }
 

@@ -14,7 +14,7 @@
 //! 2. `dispatch.execute_read(SemanticQueryKey::ResolveMacroPayload { .. })`
 //!    yields the macro payload's semantic node (the resolved type that
 //!    backs the macro instance).
-//! 3. `dispatch.execute_read(SemanticQueryKey::ProjectPath { base, path: [], mode: Shallow })`
+//! 3. `dispatch.execute_read(SemanticQueryKey::ProjectPath { base, path: [], context: crate::semantic_query::ProjectionReductionContext::published(Shallow)})`
 //!    enumerates the payload's surface members.
 //! 4. For each surface member, the projector raises the member's value
 //!    node back to `TypeExpr` and classifies its exactness via
@@ -564,7 +564,9 @@ pub(crate) fn resolve_payload_surface(
     let surface_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: payload_node,
         path: empty_path(),
-        mode: ProjectionMode::Shallow,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Shallow,
+        ),
     });
     emit_dispatch_dep_signature_facts(dispatch.ctx, &surface_read.dep_signature);
     if !surface_read.walker_diagnostics.is_empty() {
@@ -1417,7 +1419,9 @@ fn resolve_member_value_for_classification(
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: value,
         path: empty_path(),
-        mode: ProjectionMode::Shallow,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Shallow,
+        ),
     });
     emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
     match read.value {

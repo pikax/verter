@@ -964,7 +964,9 @@ mod tests {
         let project_path = SemanticQueryKey::ProjectPath {
             base: dummy_node,
             path: Arc::from(Vec::new().into_boxed_slice()),
-            mode: ProjectionMode::Navigate,
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Navigate,
+            ),
         };
         let relate = SemanticQueryKey::Relate {
             source: dummy_node,

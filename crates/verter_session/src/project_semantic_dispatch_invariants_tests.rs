@@ -149,7 +149,9 @@ fn walk_path_terminates_on_deeply_nested_acyclic_union() {
     let result = dispatch.execute(crate::semantic_query::SemanticQueryKey::ProjectPath {
         base: current,
         path: empty_path,
-        mode: crate::semantic_query::ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
     });
     match result {
         crate::semantic_query::QueryResult::Value(_) => {}
@@ -213,7 +215,9 @@ fn walk_path_terminates_on_self_referential_alias_chain() {
     let result = dispatch.execute(crate::semantic_query::SemanticQueryKey::ProjectPath {
         base: current,
         path,
-        mode: crate::semantic_query::ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
     });
     // Terminates with some value (either the projected member or a
     // sentinel) — never stack-overflows.
@@ -2493,7 +2497,7 @@ fn migrate_owner_engine_project_expr_surface_as_type_expr_preserves_env() {
     let key = crate::semantic_query::SemanticQueryKey::ProjectPath {
         base: crate::semantic_query::SemanticNodeId(0),
         path: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-        mode,
+        context: crate::semantic_query::ProjectionReductionContext::published(mode),
     };
     match key {
         crate::semantic_query::SemanticQueryKey::ProjectPath { .. } => {}
@@ -2651,7 +2655,9 @@ fn type_eval_evaluate_removal_preserves_semantic_output() {
     let result = dispatch.execute(crate::semantic_query::SemanticQueryKey::ProjectPath {
         base: string,
         path: empty_path,
-        mode: crate::semantic_query::ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
     });
     match result {
         crate::semantic_query::QueryResult::Value(id) => {
@@ -2703,7 +2709,9 @@ fn type_expand_expand_object_shape_removal_preserves_shape_output() {
     let result = dispatch.execute(crate::semantic_query::SemanticQueryKey::ProjectPath {
         base: object,
         path: empty_path,
-        mode: crate::semantic_query::ProjectionMode::Shallow,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Shallow,
+        ),
     });
     match result {
         crate::semantic_query::QueryResult::Value(id) => {

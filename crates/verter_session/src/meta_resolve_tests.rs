@@ -8767,7 +8767,9 @@ defineProps<Props<T>>()
     let projected = dispatch.execute(SemanticQueryKey::ProjectPath {
         base: lowered,
         path: StdArc::from(vec![PathSegment::Member(StdArc::from("items"))]),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     });
 
     let raised = match projected {
@@ -9556,7 +9558,9 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
     let projected = dispatch.execute(SemanticQueryKey::ProjectPath {
         base: lowered,
         path: badge_path,
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     });
 
     let badge_node = match projected {

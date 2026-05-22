@@ -479,12 +479,16 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             },
             ModeSlot::Single,
         ),
-        SemanticQueryKey::ProjectPath { base, path, mode } => (
+        SemanticQueryKey::ProjectPath {
+            base,
+            path,
+            context,
+        } => (
             FamilyKey::ProjectPath {
                 base: *base,
                 path: Arc::clone(path),
             },
-            mode_to_slot(*mode),
+            context_to_slot(*context),
         ),
         SemanticQueryKey::ResolvedNamedType { key } => (
             FamilyKey::ResolvedNamedType {

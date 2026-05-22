@@ -1192,7 +1192,7 @@ pub(crate) fn materialize_component_meta_structure(
                 let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
                     base: key_for_compute.base,
                     path,
-                    mode: key_for_compute.mode,
+                    context: crate::semantic_query::ProjectionReductionContext::published(key_for_compute.mode),
                 });
                 crate::component_meta_audit::merge_dep_signature_into_local_fence(
                     &mut local_fence,

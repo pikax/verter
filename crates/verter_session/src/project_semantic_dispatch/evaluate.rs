@@ -130,7 +130,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         match self.execute(SemanticQueryKey::ProjectPath {
                             base: root,
                             path: projection_path,
-                            mode: ProjectionMode::Navigate,
+                            context: crate::semantic_query::ProjectionReductionContext::published(
+                                ProjectionMode::Navigate,
+                            ),
                         }) {
                             QueryResult::Value(id) => id,
                             _ => return self.opaque(QueryError::Miss),

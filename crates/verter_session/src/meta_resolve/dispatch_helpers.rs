@@ -197,7 +197,9 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
     let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
         base,
         path: project_path,
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     });
     let projected = match read.value {
         QueryResult::Value(expr) => expr,
@@ -502,7 +504,9 @@ pub(crate) fn project_expr_surface_shape_via_host_threaded<'ctx>(
     let QueryResult::Value(node) = dispatch.execute(SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        mode: ProjectionMode::Shallow,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Shallow,
+        ),
     }) else {
         return None;
     };
@@ -552,7 +556,9 @@ pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'ctx>(
     let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     });
     let reduced = match read.value {
         QueryResult::Value(expr) => expr,
@@ -620,7 +626,9 @@ pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
     let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     });
     let projected = match read.value {
         QueryResult::Value(expr) => expr,
@@ -655,7 +663,9 @@ pub(crate) fn project_expr_surface_expr_with_compound_objects_via_host_threaded<
     let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     });
     let projected = match read.value {
         QueryResult::Value(expr) => expr,
