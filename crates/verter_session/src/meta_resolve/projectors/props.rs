@@ -43,7 +43,16 @@ pub(crate) fn project_props(
     mac: &AnalyzedMacro,
     _snapshot: &FileAnalysisSnapshot,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
+    cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) -> Vec<ExpandedField> {
+    // Block 6.i Commit AX — `cursor` carries the publication-boundary
+    // demand. Each surface member is descended via
+    // `cursor.descend_published_member(name)`: the macro publishes
+    // every member NAME, and each member's type body is published as
+    // a CARRIER (`Navigate` mode) unless the consumer explicitly
+    // walked a deep path. This closes the Rule-5 depth leak where a
+    // `Tool<INPUT, OUTPUT>`-typed prop would breadth-enumerate
+    // `Tool`'s `outputSchema` / `execute` members into the surface.
     if !mac.is_type_based {
         return Vec::new();
     }
@@ -93,16 +102,23 @@ pub(crate) fn project_props(
     };
     members_with_raw
         .into_iter()
-        .map(
+        .filter_map(
             |(member, raw_type, shallow_type_expr, shallow_type_expr_scope)| {
-                surface_member_to_expanded_field(
+                // Descend into the published member: the macro
+                // publishes every member NAME; the descended cursor
+                // carries the per-member publication mode. A member
+                // the cursor does not admit (a narrowed projection)
+                // is dropped from the published surface.
+                let member_cursor = cursor.descend_published_member(member.name.as_ref())?;
+                Some(surface_member_to_expanded_field(
                     query_engine,
                     file,
                     &member,
                     raw_type,
                     shallow_type_expr,
                     shallow_type_expr_scope,
-                )
+                    member_cursor,
+                ))
             },
         )
         .collect()

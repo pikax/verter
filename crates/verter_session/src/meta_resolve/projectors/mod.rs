@@ -65,6 +65,7 @@ pub(crate) mod exposed;
 pub(crate) mod model;
 pub(crate) mod options;
 pub(crate) mod props;
+pub(crate) mod published_reducer;
 pub(crate) mod slots;
 
 pub(crate) use emits::project_emits;
@@ -72,6 +73,9 @@ pub(crate) use exposed::project_exposed;
 pub(crate) use model::project_model;
 pub(crate) use options::project_options;
 pub(crate) use props::project_props;
+pub(crate) use published_reducer::{
+    reduce_published_field_types, type_expr_contains_reducible_operator,
+};
 pub(crate) use slots::project_slots;
 
 /// Merge a projector's `Vec<ExpandedField>` output into the target
@@ -150,9 +154,16 @@ pub(crate) fn project_evaluated_types(
 ) {
     let owner = build_owner_decl_identity(query_engine.ctx, file);
 
+    // Block 6.i Commit AX — construct a `SurfaceProjection` per
+    // macro kind so each projector entry receives a path-precise
+    // cursor. `whole_surface(kind)` preserves pre-AX behaviour;
+    // future commits narrow this when consumer demand is known.
+    use crate::meta_resolve::projection_demand::{PublishedSurfaceKind, SurfaceProjection};
+
     for (macro_index, mac) in snapshot.macros.iter().enumerate() {
         match mac.kind {
             AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
+                let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Props);
                 let fields = project_props(
                     query_engine,
                     &owner,
@@ -161,10 +172,12 @@ pub(crate) fn project_evaluated_types(
                     mac,
                     snapshot,
                     diag_sink,
+                    projection.cursor(),
                 );
                 merge_projected_fields_by_name(&mut evaluated_types.props, fields);
             }
             AnalyzedMacroKind::DefineEmits => {
+                let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Emits);
                 let fields = project_emits(
                     query_engine,
                     &owner,
@@ -173,6 +186,7 @@ pub(crate) fn project_evaluated_types(
                     mac,
                     snapshot,
                     diag_sink,
+                    projection.cursor(),
                 );
                 merge_projected_fields_by_name(&mut evaluated_types.emits, fields);
             }
@@ -182,6 +196,7 @@ pub(crate) fn project_evaluated_types(
                 // shares the same dispatch primitives; running the
                 // projector here populates the diagnostic stream and
                 // primes the dispatch family memo.
+                let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Slots);
                 let _ = project_slots(
                     query_engine,
                     &owner,
@@ -190,6 +205,7 @@ pub(crate) fn project_evaluated_types(
                     mac,
                     snapshot,
                     diag_sink,
+                    projection.cursor(),
                 );
             }
             AnalyzedMacroKind::DefineModel => {
@@ -200,6 +216,7 @@ pub(crate) fn project_evaluated_types(
                 // dispatch family memo so the parser-side merge can
                 // observe the resolved type without a second
                 // resolution pass.
+                let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Model);
                 let _ = project_model(
                     query_engine,
                     &owner,
@@ -208,9 +225,11 @@ pub(crate) fn project_evaluated_types(
                     mac,
                     snapshot,
                     diag_sink,
+                    projection.cursor(),
                 );
             }
             AnalyzedMacroKind::DefineExpose => {
+                let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Exposed);
                 let _ = project_exposed(
                     query_engine,
                     &owner,
@@ -219,9 +238,13 @@ pub(crate) fn project_evaluated_types(
                     mac,
                     snapshot,
                     diag_sink,
+                    projection.cursor(),
                 );
             }
             AnalyzedMacroKind::DefineOptions => {
+                let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Internal {
+                    caller: "project_evaluated_types::define_options",
+                });
                 let _ = project_options(
                     query_engine,
                     &owner,
@@ -230,6 +253,7 @@ pub(crate) fn project_evaluated_types(
                     mac,
                     snapshot,
                     diag_sink,
+                    projection.cursor(),
                 );
             }
         }
@@ -745,6 +769,14 @@ fn member_shape_peek_or_compute(
     } else {
         Arc::from(Vec::new())
     };
+    // Block 6.i Commit AX (codex-hybrid): the carrier-stop decision
+    // is now the dispatch-layer reduction-demand context, NOT a
+    // projector-side name predicate. The demand axis lives on every
+    // `Instantiate` / `KeyOf` / `MappedType` key, so a userland
+    // `MyPick<T,K>` and the builtin `Pick<T,K>` follow the same
+    // path. Generic instantiations enter the reducer; the dispatch
+    // carrier-stops downstream operators when the context does not
+    // admit reduction.
     let needs_reduction =
         type_expr_contains_reducible_operator(&raised) || is_generic_instantiation;
     // F1: combined gate fence threaded through every remaining admit
@@ -813,11 +845,29 @@ fn member_shape_peek_or_compute(
     // or returns `None` (signature-refusal) — in either case the
     // pre-computed value is the correct answer; no second reducer
     // call.
-    let materialized = super::materialize::reduce_member_value_graph_native(
+    //
+    // Block 6.i Commit AX (codex-hybrid binding spec). The reducer
+    // runs under the CALLER's publication mode wrapped in a
+    // `Published(mode)` reduction context — the top-down demand-
+    // driven reducer treats `Published` as "this exact node is the
+    // demanded terminal of the current step." A per-prop publication
+    // with `Navigate` no longer breadth-enumerates composite members
+    // / inactive conditional branches / mapped value bodies; the
+    // reducer's child selection (`push_demand_children`) only
+    // descends into composite children under whole-surface
+    // `Published(Expanded)`. Explicit narrowing operators
+    // (`IndexedAccess`, finite `Pick`/`Omit`, closed/open
+    // conditionals) STILL reduce path-precisely because their
+    // operands are pushed onto the worklist with the appropriate
+    // context. The cache `key` continues to use the caller's `mode`
+    // so a carrier-mode publication does not collide with an
+    // `Expanded` consumer slot.
+    let reduction_context = crate::semantic_query::ProjectionReductionContext::published(mode);
+    let materialized = super::materialize::reduce_member_value_graph_native_with_context(
         ctx,
         scope_canonical_id,
         member_value,
-        mode,
+        reduction_context,
     );
     let observed_scope = ctx.observe_materialize_scope(scope_canonical_id);
     // F1: merge the gate fence into the materialised entry's dep
@@ -1018,16 +1068,25 @@ pub(crate) fn surface_member_to_expanded_field(
     raw_type: Option<String>,
     shallow_type_expr: Option<TypeExpr>,
     shallow_type_expr_scope: Option<verter_type_expr::TypeExprScope>,
+    member_cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) -> ExpandedField {
     let ctx: &dyn ResolverContext = query_engine.ctx;
+    // Block 6.i Commit AX — the publication mode comes from the
+    // `member_cursor`. `Navigate` (carrier) mode means the member's
+    // type body is published as a carrier `Ref`, not breadth-expanded.
+    let publish_mode = member_cursor.terminal_publication_mode();
+    let carrier_mode = matches!(publish_mode, ProjectionMode::Navigate);
     // Exactness classification is independent of the member's reduced
     // TypeExpr; it walks the member's resolved-value graph. Keep it
     // isolated in its own dispatch scope so the peek-before-raise
     // contract for the type reduction is not coupled to a TypeExpr
-    // raise that exactness does not need.
+    // raise that exactness does not need. In carrier mode the
+    // classification does NOT expand a generic instantiation to its
+    // object surface — that would re-open the breadth leak.
     let exactness = {
         let dispatch = ProjectSemanticDispatch::new(ctx);
-        let resolved_value = resolve_member_value_for_classification(&dispatch, member.value);
+        let resolved_value =
+            resolve_member_value_for_classification(&dispatch, member.value, carrier_mode);
         classify_node(&dispatch, resolved_value)
     };
     // Peek the per-member graph-native materialiser cache BEFORE any
@@ -1035,12 +1094,15 @@ pub(crate) fn surface_member_to_expanded_field(
     // the cached `MaterializedTypeExpr` without paying the raise cost
     // or the shallow-gate cost; cold misses raise once, run the
     // gates, then dispatch the graph-native reducer + admit.
-    let materialized = member_shape_peek_or_compute(
-        query_engine,
-        scope_canonical_id,
-        member.value,
-        ProjectionMode::Expanded,
-    );
+    //
+    // Block 6.i Commit AX — `publish_mode` (from the `member_cursor`,
+    // computed above) drives the per-member materialise. `Navigate`
+    // keeps a generic instantiation `Tool<INPUT, OUTPUT>` as a `Ref`
+    // carrier instead of breadth-enumerating `Tool`'s own members
+    // (`outputSchema` / `execute`) into the published surface — the
+    // Rule-5 depth-leak fix.
+    let materialized =
+        member_shape_peek_or_compute(query_engine, scope_canonical_id, member.value, publish_mode);
     let r#type = materialized.type_expr;
     debug_assert_eq!(
         shallow_type_expr.is_some(),
@@ -1098,6 +1160,42 @@ pub(crate) fn reduce_field_type_expr(
     scope_canonical_id: &str,
     expr: TypeExpr,
 ) -> TypeExpr {
+    // Backward-compatible entry point — defaults to `Expanded`
+    // publication mode (no carrier narrowing). Callers that publish
+    // a macro surface shallow-by-default route through
+    // `reduce_field_type_expr_with_mode` with `Navigate`.
+    reduce_field_type_expr_with_mode(
+        query_engine,
+        scope_canonical_id,
+        expr,
+        ProjectionMode::Expanded,
+    )
+}
+
+/// Carrier-aware variant of [`reduce_field_type_expr`].
+///
+/// Block 6.i Commit AX — when `publish_mode` is `Navigate` (the
+/// shallow-by-default macro publication boundary), arbitrary
+/// userland generic instantiations (`Tool<INPUT, OUTPUT>`) are
+/// returned AS CARRIERS — the second-pass reducer does NOT re-expand
+/// what the projector pipeline deliberately kept shallow. Explicit
+/// narrowing operators (`IndexedAccess`, finite `Pick`/`Omit`/other
+/// built-in utilities) STILL reduce path-precisely: those are
+/// explicit consumer demand inside the type expression.
+pub(crate) fn reduce_field_type_expr_with_mode(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    scope_canonical_id: &str,
+    expr: TypeExpr,
+    publish_mode: ProjectionMode,
+) -> TypeExpr {
+    // Block 6.i Commit AX (codex Q5): `publish_mode` drives both the
+    // peek key and the cold-path materialiser dispatch so a per-prop
+    // `Navigate` publication does not collide with an `Expanded`
+    // consumer slot. The dispatch's reduction-demand context
+    // (`Published` vs `StructuralTransit`) remains the sole carrier-
+    // stop gate at the operator level; `publish_mode` carries the
+    // caller's mode through the cache slot and into the iterative
+    // reducer.
     // Peek-before-reduce. Short-circuit when the expression's shape
     // is already known cheaply:
     //
@@ -1128,12 +1226,9 @@ pub(crate) fn reduce_field_type_expr(
     // path) hit at peek time. Peek-time admission is cheap (no raise
     // / no reducer dispatch); the cache write is the universal-
     // caching contract.
-    if let Some(peeked) = peek_member_shape_known(
-        query_engine,
-        scope_canonical_id,
-        &expr,
-        ProjectionMode::Expanded,
-    ) {
+    if let Some(peeked) =
+        peek_member_shape_known(query_engine, scope_canonical_id, &expr, publish_mode)
+    {
         match peeked {
             PeekedShape::Leaf(leaf) => {
                 // F1: Leaf admission is a STRUCTURAL classification of
@@ -1146,7 +1241,7 @@ pub(crate) fn reduce_field_type_expr(
                     query_engine.ctx,
                     scope_canonical_id,
                     &expr,
-                    ProjectionMode::Expanded,
+                    publish_mode,
                     leaf.clone(),
                     Arc::from(Vec::new()),
                 );
@@ -1215,6 +1310,14 @@ pub(crate) fn reduce_field_type_expr(
     // because the cycle is broken mid-traversal.
     let is_generic_instantiation =
         matches!(&expr, TypeExpr::Ref { type_arguments, .. } if !type_arguments.is_empty());
+
+    // Block 6.i Commit AX (codex-hybrid): the carrier-stop decision
+    // is dispatch-layer (demand context), not a projector-side name
+    // predicate. The dispatch's `may_reduce_operator(ctx)` predicate
+    // is structural and uniform: a userland `MyPick<T,K>` follows
+    // the same path as the builtin `Pick<T,K>`, and `Tool<INPUT,
+    // OUTPUT>` only carrier-stops when the inner `keyof T` /
+    // `Mapped` dispatches enter a non-publication context.
     if is_generic_instantiation
         && crate::meta_resolve::lowered_root_reaches_transitive_cycle(
             query_engine,
@@ -1236,191 +1339,36 @@ pub(crate) fn reduce_field_type_expr(
     // and cycle paths already returned above, so the cached entry's
     // reduced shape is compatible with the projector's published
     // surface.
-    if let Some(PeekedShape::Cached(materialized)) = peek_member_shape_known(
-        query_engine,
-        scope_canonical_id,
-        &expr,
-        ProjectionMode::Expanded,
-    ) {
+    if let Some(PeekedShape::Cached(materialized)) =
+        peek_member_shape_known(query_engine, scope_canonical_id, &expr, publish_mode)
+    {
         return materialized.type_expr;
     }
 
-    // Run the bounded fixed-point reducer from the consumer's scope.
-    // The dispatch's lower → raise_and_reduce pipeline carries
-    // imported declarations through their prepared bodies via the
-    // shared resolver caches, so the consumer scope is sufficient
-    // for cross-file alias resolution within the explicitly-walked
-    // path. Cross-scope re-resolution must come from the consumer's
-    // own walk, not from a projector retry that would cross the
-    // shallow boundary on alias bodies the consumer never asked
-    // about.
+    // Block 6.i Commit AX (codex Q5): the materializer runs at
+    // `Expanded` regardless of `publish_mode`. `publish_mode` was
+    // used for the peek-cache slot above (so a `Navigate` caller does
+    // not collide with an `Expanded` caller's entry) — but the
+    // materializer's INTERNAL reduction runs at `Published(Expanded)`.
+    // The top-down demand-driven reducer (Block 6.i Commit AX) still
+    // fixes the inactive-conditional-branch leak under any root
+    // context: inactive branches are never visited regardless of
+    // whether the root demand is `Navigate` or `Expanded`. Per-prop
+    // shallow-by-default behaviour at the PROJECTOR layer is enforced
+    // upstream by `member_shape_peek_or_compute` (Q1), which threads
+    // `Published(publish_mode)` directly through the per-member
+    // reducer entry. `reduce_field_type_expr_with_mode` is the
+    // TypeExpr-start fallback for callers that genuinely start from
+    // a `TypeExpr` (slot bindings, model bindings, the
+    // `Pick`/`Omit`/`IndexedAccess`/`keyof` paths the existing tests
+    // exercise) — those expect deep materialisation through this
+    // entry point.
     super::materialize::materialize_component_meta_type_expr_until_stable(
         &expr,
         scope_canonical_id,
         ProjectionMode::Expanded,
         query_engine,
     )
-}
-
-/// Run the shared field-type reducer over every published surface in
-/// `evaluated_types` so consumers see the same finalised shapes the
-/// per-macro projectors already publish for `props` / `emits`.
-///
-/// The slot-binding graph and the parser-side `bindings` synthesis
-/// publish `ExpandedField`s whose `r#type` is the raised raw surface —
-/// they do not run reduction inline because the slot binding graph's
-/// dispatch only enumerates surface members. This pipeline step
-/// finalises those rows by routing each through
-/// [`reduce_field_type_expr`], which is the same primitive
-/// [`surface_member_to_expanded_field`] uses inside the projectors.
-///
-/// This is the single post-projection authority for finalising
-/// `evaluated_types` field shapes; there is no second resolver, no
-/// member-route surface synthesis, and no separate cache. All
-/// reduction work flows through
-/// `materialize_component_meta_type_expr_until_stable` and the
-/// dispatch-owned semantic memos it consults.
-pub(crate) fn reduce_published_field_types(
-    scope_canonical_id: &str,
-    evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-) {
-    use crate::meta_resolve::compare_type_expr_improvement;
-    use rustc_hash::FxHashMap;
-
-    let mut finalized_prop_types: FxHashMap<String, TypeExpr> = FxHashMap::default();
-    for field in evaluated_types.props.iter_mut() {
-        // Typed-IR-Only Resolver Rule: when the raised value-node form
-        // reduces to an unresolved shape (e.g. `Mapped { source: Unknown }`
-        // from a `Partial<X>` / `Required<X>` expansion where the
-        // semantic graph could not lift the mapped operator), prefer
-        // the analyzer-populated `shallow_type_expr` — the bare per-prop
-        // typed form lowered at OXC visit time. The typed sidecar
-        // replaces the legacy raw-annotation reparse fallback; no
-        // source-text reparse runs at this site.
-        let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
-        let mut reduced = reduce_field_type_expr(query_engine, scope_canonical_id, raised);
-
-        if let Some(shallow) = field.shallow_type_expr.as_ref() {
-            if !matches!(shallow, TypeExpr::Unknown { .. })
-                && compare_type_expr_improvement(shallow, &reduced)
-            {
-                let shallow_reduced =
-                    reduce_field_type_expr(query_engine, scope_canonical_id, shallow.clone());
-                if compare_type_expr_improvement(&shallow_reduced, &reduced) {
-                    reduced = shallow_reduced;
-                }
-            }
-        }
-
-        finalized_prop_types.insert(field.name.clone(), reduced.clone());
-        field.r#type = reduced;
-    }
-    // Back-sync the finalised prop type into the macro-shape mirror
-    // on `evaluated_types.define_props`. Producers
-    // (`produce_one_macro_object_shape`) populate define_props with
-    // the pre-reduction shape; consumers reading the macro shapes
-    // (e.g. `evaluated.define_props[..].result.value.properties[..]`)
-    // expect the same finalised type the published `props` field
-    // carries.
-    for define_props in evaluated_types.define_props.iter_mut() {
-        for property in define_props.result.value.properties.iter_mut() {
-            if let Some(finalised) = finalized_prop_types.get(property.name.as_str()) {
-                property.ty = finalised.clone();
-            }
-        }
-    }
-    for field in evaluated_types.emits.iter_mut() {
-        let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
-        field.r#type = reduce_field_type_expr(query_engine, scope_canonical_id, raised);
-    }
-    for field in evaluated_types.slot_bindings.iter_mut() {
-        let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
-        field.r#type = reduce_field_type_expr(query_engine, scope_canonical_id, raised);
-    }
-    for field in evaluated_types.bindings.iter_mut() {
-        let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
-        field.r#type = reduce_field_type_expr(query_engine, scope_canonical_id, raised);
-    }
-}
-
-/// Does `expr` contain any operator-shape node that the bounded
-/// fixed-point reducer should resolve?
-///
-/// Returns `true` when the expression carries an `IndexedAccess`,
-/// `KeyOf`, `TypeOf`, `Conditional`, `Mapped`, or `Infer` anywhere
-/// in its tree. For shells that only contain primitives, literals,
-/// `Ref`s (to parameterised aliases), `Object`s, `Function`s,
-/// `Array`s, `Tuple`s, `Union`s, `Intersection`s, `TypeParameter`s,
-/// `RecursiveRef`s, or `Unknown`s, the predicate returns `false` so
-/// the symbolic-route preservation contract holds.
-pub(crate) fn type_expr_contains_reducible_operator(expr: &TypeExpr) -> bool {
-    use verter_type_expr::ObjectMember;
-
-    match expr {
-        TypeExpr::IndexedAccess { .. }
-        | TypeExpr::KeyOf(_)
-        | TypeExpr::TypeOf(_)
-        | TypeExpr::Conditional { .. }
-        | TypeExpr::Mapped { .. }
-        | TypeExpr::Infer { .. } => true,
-        TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) => {
-            type_expr_contains_reducible_operator(inner)
-        }
-        TypeExpr::Array { element, .. } => type_expr_contains_reducible_operator(element),
-        TypeExpr::Tuple { elements, .. } => elements
-            .iter()
-            .any(|el| type_expr_contains_reducible_operator(&el.ty)),
-        TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
-            members.iter().any(type_expr_contains_reducible_operator)
-        }
-        TypeExpr::Object(object) => object.properties.iter().any(|m| match m {
-            ObjectMember::Property(p) => type_expr_contains_reducible_operator(&p.ty),
-            ObjectMember::Method(method) => {
-                method
-                    .function
-                    .parameters
-                    .iter()
-                    .any(|param| type_expr_contains_reducible_operator(&param.ty))
-                    || method
-                        .function
-                        .return_type
-                        .as_deref()
-                        .is_some_and(type_expr_contains_reducible_operator)
-            }
-            ObjectMember::IndexSignature(sig) => {
-                type_expr_contains_reducible_operator(&sig.key_type)
-                    || type_expr_contains_reducible_operator(&sig.value_type)
-            }
-            ObjectMember::CallSignature(f) | ObjectMember::ConstructSignature(f) => {
-                f.parameters
-                    .iter()
-                    .any(|p| type_expr_contains_reducible_operator(&p.ty))
-                    || f.return_type
-                        .as_deref()
-                        .is_some_and(type_expr_contains_reducible_operator)
-            }
-        }),
-        TypeExpr::Function(f) => {
-            f.parameters
-                .iter()
-                .any(|p| type_expr_contains_reducible_operator(&p.ty))
-                || f.return_type
-                    .as_deref()
-                    .is_some_and(type_expr_contains_reducible_operator)
-        }
-        TypeExpr::Ref { type_arguments, .. } => type_arguments
-            .iter()
-            .any(type_expr_contains_reducible_operator),
-        TypeExpr::TemplateLiteral { expressions, .. } => expressions
-            .iter()
-            .any(type_expr_contains_reducible_operator),
-        TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::TypeParameter(_)
-        | TypeExpr::RecursiveRef { .. }
-        | TypeExpr::Unknown { .. } => false,
-    }
 }
 
 /// Resolve a surface member's value to its underlying body for
@@ -1431,27 +1379,49 @@ pub(crate) fn type_expr_contains_reducible_operator(expr: &TypeExpr) -> bool {
 /// other variants the value is returned unchanged — `classify_node`
 /// already alias-unwraps a single `Alias` hop.
 ///
+/// Block 6.i Commit AX — when `carrier_mode` is set (the member is
+/// published as a `Navigate` carrier), an `InstantiationRef`
+/// (a generic instantiation such as `Tool<INPUT, OUTPUT>`) is NOT
+/// expanded to its `Shallow` object surface. `Shallow` synthesises
+/// the one-level object surface — for an interface-bodied generic
+/// that breadth-enumerates `outputSchema` / `execute` into the
+/// audit footprint, the exact Rule-5 depth leak. A carrier member's
+/// exactness IS `ExactSymbolic` (the un-expanded `InstantiationRef`
+/// node classifies as symbolic), so skipping the expansion produces
+/// the correct exactness without the leak. `DeclRef` (an
+/// unparameterised alias such as `type MyStr = string`) is still
+/// expanded — that is a single-hop alias unwrap, not an object
+/// breadth-enumeration.
+///
 /// Dep-signature is fanned into every active fact tracer
 /// unconditionally so the final-result cache observes the same
 /// revalidation surface as the projector's other dispatches.
 fn resolve_member_value_for_classification(
     dispatch: &ProjectSemanticDispatch<'_>,
     value: SemanticNodeId,
+    carrier_mode: bool,
 ) -> SemanticNodeId {
-    match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, value).as_deref() {
-        Some(SemanticNodeData::DeclRef { .. })
-        | Some(SemanticNodeData::InstantiationRef { .. }) => {
-            let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
-                base: value,
-                path: empty_path(),
-                mode: ProjectionMode::Shallow,
-            });
-            emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
-            match read.value {
-                QueryResult::Value(id) => id,
-                _ => value,
-            }
-        }
+    let should_expand =
+        match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, value).as_deref() {
+            Some(SemanticNodeData::DeclRef { .. }) => true,
+            // Carrier-mode: do NOT expand a generic instantiation to its
+            // shallow object surface — that is the `outputSchema` /
+            // `execute` breadth leak. The un-expanded node classifies as
+            // `ExactSymbolic`, the correct exactness for a carrier.
+            Some(SemanticNodeData::InstantiationRef { .. }) => !carrier_mode,
+            _ => false,
+        };
+    if !should_expand {
+        return value;
+    }
+    let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+        base: value,
+        path: empty_path(),
+        mode: ProjectionMode::Shallow,
+    });
+    emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
+    match read.value {
+        QueryResult::Value(id) => id,
         _ => value,
     }
 }

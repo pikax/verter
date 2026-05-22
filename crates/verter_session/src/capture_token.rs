@@ -283,30 +283,30 @@ impl KeyFamily {
             ) => base.decl_name.as_ref() == *name,
             (
                 KeyFamily::ShallowForResolvedName(name),
-                SemanticQueryKey::Instantiate {
-                    base, body_mode, ..
-                },
+                SemanticQueryKey::Instantiate { base, context, .. },
             ) => {
                 base.decl_name.as_ref() == *name
-                    && matches!(body_mode, crate::semantic_query::ProjectionMode::Shallow)
+                    && matches!(context.mode, crate::semantic_query::ProjectionMode::Shallow)
             }
             (
                 KeyFamily::SkeletonForResolvedName(name),
-                SemanticQueryKey::Instantiate {
-                    base, body_mode, ..
-                },
+                SemanticQueryKey::Instantiate { base, context, .. },
             ) => {
                 base.decl_name.as_ref() == *name
-                    && matches!(body_mode, crate::semantic_query::ProjectionMode::Skeleton)
+                    && matches!(
+                        context.mode,
+                        crate::semantic_query::ProjectionMode::Skeleton
+                    )
             }
             (
                 KeyFamily::InstantiateExpandedForResolvedName(name),
-                SemanticQueryKey::Instantiate {
-                    base, body_mode, ..
-                },
+                SemanticQueryKey::Instantiate { base, context, .. },
             ) => {
                 base.decl_name.as_ref() == *name
-                    && matches!(body_mode, crate::semantic_query::ProjectionMode::Expanded)
+                    && matches!(
+                        context.mode,
+                        crate::semantic_query::ProjectionMode::Expanded
+                    )
             }
             (
                 KeyFamily::NavigateForAlias(_root_name, hops),

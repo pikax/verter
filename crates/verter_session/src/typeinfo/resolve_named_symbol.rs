@@ -333,7 +333,7 @@ fn resolve_named_symbol_inner(
     let instantiate_key = SemanticQueryKey::Instantiate {
         base: identity,
         args: Arc::from(lowered_args.into_boxed_slice()),
-        body_mode: effective_mode,
+        context: crate::semantic_query::ProjectionReductionContext::published(effective_mode),
     };
     match dispatch.execute(instantiate_key) {
         QueryResult::Value(node) | QueryResult::Recursive(node) => {
@@ -397,7 +397,7 @@ fn materialize_through_aliases(
                 let key = SemanticQueryKey::Instantiate {
                     base: identity,
                     args: Arc::from(Vec::new().into_boxed_slice()),
-                    body_mode: mode,
+                    context: crate::semantic_query::ProjectionReductionContext::published(mode),
                 };
                 match dispatch.execute(key) {
                     QueryResult::Value(next) | QueryResult::Recursive(next) => {

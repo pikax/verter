@@ -376,3 +376,621 @@ fn index_key_number_convention_is_unified_integer() {
          (window: {walk_window})"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Block 6.i Commit AX — carrier-preserving per-member publication.
+//
+// Commit AX closes the Rule-5 depth leak: a macro publishes every
+// top-level member NAME, but each member's type body is published as
+// a CARRIER (`Navigate` mode) — NOT breadth-enumerated. The cursor
+// threaded through the projector pipeline + macro-shape helpers must
+// be LOAD-BEARING: an inert `let _ = cursor;` parameter leaves the
+// leak open.
+//
+// These guards are DISCRIMINATING — they FAIL against the
+// threaded-but-unused WIP (`let _ = cursor;` in every body) and PASS
+// against the carrier-preserving narrowing.
+// ---------------------------------------------------------------------------
+
+/// Extract a function body (the brace-balanced span from the `{`
+/// after the signature to its matching `}`). `anchor` is the
+/// signature prefix (e.g. `"pub(crate) fn project_props("`).
+///
+/// Tracks `"..."` string literals (with `\` escapes) so braces
+/// inside `format!` strings do not unbalance the count. Rust
+/// lifetimes (`'_`, `'a`) make `'`-based char-literal tracking
+/// unreliable, so `'` is ignored — function bodies in this codebase
+/// do not contain unbalanced braces inside char literals.
+fn extract_fn_body(src: &str, anchor: &str) -> String {
+    let fn_idx = src
+        .find(anchor)
+        .unwrap_or_else(|| panic!("AX guard: anchor `{anchor}` must exist"));
+    let open_rel = src[fn_idx..]
+        .find('{')
+        .unwrap_or_else(|| panic!("AX guard: `{anchor}` body must have an opening brace"));
+    let body_start = fn_idx + open_rel;
+    let bytes = src.as_bytes();
+    let mut depth = 0usize;
+    let mut end = body_start;
+    let mut in_str = false;
+    let mut prev = 0u8;
+    for (i, &b) in bytes.iter().enumerate().skip(body_start) {
+        let escaped = prev == b'\\';
+        match b {
+            b'"' if !escaped => in_str = !in_str,
+            b'{' if !in_str => depth += 1,
+            b'}' if !in_str => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+        prev = if escaped { 0 } else { b };
+    }
+    assert!(
+        end > body_start,
+        "AX guard: `{anchor}` body brace-match failed"
+    );
+    src[body_start..end].to_string()
+}
+
+/// The cursor-threaded production functions Commit AX must make
+/// load-bearing. `(label, rel_path, signature_anchor)`.
+fn ax_cursor_target_set() -> Vec<(&'static str, &'static str, &'static str)> {
+    vec![
+        (
+            "produce_one_macro_object_shape",
+            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
+            "pub(crate) fn produce_one_macro_object_shape(",
+        ),
+        (
+            "project_named_ref_prepared_surface_shape",
+            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
+            "pub(crate) fn project_named_ref_prepared_surface_shape(",
+        ),
+        (
+            "project_named_ref_surface_shape",
+            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
+            "pub(crate) fn project_named_ref_surface_shape(",
+        ),
+        (
+            "project_named_ref_imported_scope_shape",
+            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
+            "pub(crate) fn project_named_ref_imported_scope_shape(",
+        ),
+        (
+            "project_props",
+            "crates/verter_session/src/meta_resolve/projectors/props.rs",
+            "pub(crate) fn project_props(",
+        ),
+        (
+            "project_emits",
+            "crates/verter_session/src/meta_resolve/projectors/emits.rs",
+            "pub(crate) fn project_emits(",
+        ),
+        (
+            "project_slots",
+            "crates/verter_session/src/meta_resolve/projectors/slots.rs",
+            "pub(crate) fn project_slots(",
+        ),
+        (
+            "project_exposed",
+            "crates/verter_session/src/meta_resolve/projectors/exposed.rs",
+            "pub(crate) fn project_exposed(",
+        ),
+        (
+            "project_options",
+            "crates/verter_session/src/meta_resolve/projectors/options.rs",
+            "pub(crate) fn project_options(",
+        ),
+        (
+            "project_model",
+            "crates/verter_session/src/meta_resolve/projectors/model.rs",
+            "pub(crate) fn project_model(",
+        ),
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Guard AX.1 — the cursor is CONSUMED, not `let _ = cursor;`-discarded.
+//
+// Discriminating: the WIP threaded the cursor but discarded it with
+// `let _ = cursor;` in every body. This guard FAILS on that WIP.
+// ---------------------------------------------------------------------------
+#[test]
+fn ax_cursor_is_consumed_not_discarded() {
+    for (label, rel, anchor) in ax_cursor_target_set() {
+        let src = read_workspace_file(rel);
+        let body = extract_fn_body(&src, anchor);
+
+        assert!(
+            !body.contains("let _ = cursor;"),
+            "AX.1 guard ({label}): `cursor` MUST NOT be discarded with \
+             `let _ = cursor;`. Block 6.i Commit AX requires the \
+             cursor to gate per-member publication — an inert cursor \
+             leaves the Rule-5 `outputSchema`/`execute` depth leak open."
+        );
+
+        // The cursor must be consumed in a load-bearing position:
+        // either descended (`descend_published_member` /
+        // `descend`), queried, or forwarded to a callee.
+        let used = body.contains("cursor.descend_published_member(")
+            || body.contains("cursor.descend(")
+            || body.contains("cursor.admits_key(")
+            || body.contains("cursor.terminal_publication_mode(")
+            || body.contains("cursor.terminal_mode(")
+            || body.contains("cursor.is_terminal(")
+            || body.contains(", cursor)")
+            || body.contains(", cursor,")
+            || body.contains("(cursor)")
+            || body.contains("(cursor,");
+        assert!(
+            used,
+            "AX.1 guard ({label}): `cursor` MUST be consumed — \
+             descended via `descend_published_member`, queried, or \
+             forwarded to a callee. Observed an unused parameter."
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Guard AX.2 — `macro_shapes.rs` gates published members through
+// `descend_published_member`.
+//
+// The macro-shape producer and the projector pipeline must agree on
+// the published-surface membership: every projected macro shape is
+// finalised through `cursor.descend_published_member` so a member
+// the cursor does not admit is dropped identically on both paths.
+// ---------------------------------------------------------------------------
+#[test]
+fn ax_macro_shapes_descends_published_member() {
+    let src =
+        read_workspace_file("crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs");
+    assert!(
+        src.contains("descend_published_member("),
+        "AX.2 guard: `macro_shapes.rs` MUST call \
+         `descend_published_member(` — the macro-shape producer's \
+         per-member breadth gate must match the projector pipeline's \
+         per-member descent."
+    );
+    // The finalizer must descend each property through the cursor.
+    let finalizer_body = extract_fn_body(&src, "fn finalize_macro_shape_through_cursor(");
+    assert!(
+        finalizer_body.contains("descend_published_member("),
+        "AX.2 guard: `finalize_macro_shape_through_cursor` MUST gate \
+         each published property through \
+         `cursor.descend_published_member` so a narrowed projection \
+         drops siblings identically to `project_props`."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Guard AX.3 — the projector pipeline publishes members at the
+// cursor's `terminal_publication_mode()`, NOT a hard-coded
+// `ProjectionMode::Expanded`.
+//
+// `surface_member_to_expanded_field` is the per-member publication
+// site. Block 6.i Commit AX replaced the hard-coded `Expanded` mode
+// with the cursor-derived publication mode (`Navigate` carrier by
+// default). A hard-coded `Expanded` is the depth-leak signature.
+// ---------------------------------------------------------------------------
+#[test]
+fn ax_projector_uses_terminal_publication_mode() {
+    let src = read_workspace_file("crates/verter_session/src/meta_resolve/projectors/mod.rs");
+    let body = extract_fn_body(&src, "pub(crate) fn surface_member_to_expanded_field(");
+    assert!(
+        body.contains("member_cursor.terminal_publication_mode()"),
+        "AX.3 guard: `surface_member_to_expanded_field` MUST derive \
+         the per-member publication mode from \
+         `member_cursor.terminal_publication_mode()` — publishing a \
+         macro member at a carrier (`Navigate`) mode is the Rule-5 \
+         depth-leak fix."
+    );
+    assert!(
+        !body.contains("ProjectionMode::Expanded"),
+        "AX.3 guard: `surface_member_to_expanded_field` MUST NOT \
+         hard-code `ProjectionMode::Expanded` for the per-member \
+         materialise — that re-opens the `outputSchema`/`execute` \
+         depth leak. Use the cursor's publication mode."
+    );
+
+    // The carrier-aware reducer must exist and the published-field
+    // second pass must reduce props/emits in `Navigate` carrier mode.
+    assert!(
+        src.contains("pub(crate) fn reduce_field_type_expr_with_mode("),
+        "AX.3 guard: `reduce_field_type_expr_with_mode` (the \
+         carrier-aware field reducer) MUST exist."
+    );
+    // Block 6.i Commit AX (codex-hybrid): `reduce_published_field_types`
+    // and `type_expr_contains_reducible_operator` now live in the
+    // `published_reducer.rs` sibling module (split out from the
+    // retired `field_reduce.rs` so `projectors/mod.rs` stays under
+    // the no-oversize-files guard). The demand context owns
+    // carrier-stop; the second pass MUST still reduce props/emits in
+    // `Navigate` carrier mode.
+    let reducer_src = read_workspace_file(
+        "crates/verter_session/src/meta_resolve/projectors/published_reducer.rs",
+    );
+    let second_pass = extract_fn_body(&reducer_src, "pub(crate) fn reduce_published_field_types(");
+    assert!(
+        second_pass.contains("ProjectionMode::Navigate"),
+        "AX.3 guard: `reduce_published_field_types` MUST reduce \
+         published macro props/emits in `ProjectionMode::Navigate` \
+         (carrier) mode so the second pass does not re-expand \
+         generic instantiations the projector kept shallow."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Guard AX.4 — the cursor-threaded production functions still carry
+// the `ProjectionCursor` parameter (threading must not regress).
+// ---------------------------------------------------------------------------
+#[test]
+fn ax_cursor_threaded_functions_keep_parameter() {
+    for (label, rel, anchor) in ax_cursor_target_set() {
+        let src = read_workspace_file(rel);
+        let header_start = src
+            .find(anchor)
+            .unwrap_or_else(|| panic!("AX.4 guard ({label}): anchor `{anchor}` must exist"));
+        // Bound the header by the body's opening brace — the
+        // signature `) ->` can appear inside an `impl Fn(..) -> ..`
+        // parameter type, so a `find(") ->")` is unsafe. Everything
+        // between the anchor and the first `{` is the signature.
+        let body_open = src[header_start..]
+            .find('{')
+            .map(|n| header_start + n)
+            .unwrap_or_else(|| panic!("AX.4 guard ({label}): function body brace not found"));
+        let header = &src[header_start..body_open];
+        assert!(
+            header.contains("ProjectionCursor"),
+            "AX.4 guard ({label}): the production function MUST keep \
+             its `ProjectionCursor` parameter (Block 6.i Commit AX). \
+             Header observed:\n{header}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Block 6.i Commit AX (codex-hybrid) — demand-bounded generic reduction.
+//
+// These guards lock the carrier-stop authority on the dispatch demand
+// context (no projector-layer name predicates). If a future revert
+// reintroduces nominal carrier checks, the guards fail loudly.
+// ---------------------------------------------------------------------------
+
+/// AX-hybrid Q6.1 — the three operator keys carry a
+/// `ProjectionReductionContext`.
+///
+/// `Instantiate`, `KeyOf`, `MappedType` keys MUST embed the
+/// reduction-demand context so a `StructuralTransit/Shallow` query
+/// does not poison a `Published/Shallow` cache slot.
+#[test]
+fn ax_hybrid_three_keys_carry_reduction_context() {
+    let src = read_workspace_file("crates/verter_session/src/semantic_query.rs");
+
+    for symbol in [
+        "pub enum ReductionDemand",
+        "pub struct ProjectionReductionContext",
+        "pub const fn may_reduce_operator",
+    ] {
+        assert!(
+            src.contains(symbol),
+            "AX-hybrid Q6.1: `semantic_query.rs` MUST declare `{symbol}` \
+             — the codex-hybrid reduction-demand substrate."
+        );
+    }
+
+    for variant_anchor in [
+        "Instantiate {\n        base: DeclIdentity,",
+        "KeyOf {\n        base: SemanticNodeId,",
+        "MappedType {\n        source: SemanticNodeId,",
+    ] {
+        let pos = src.find(variant_anchor).unwrap_or_else(|| {
+            panic!("AX-hybrid Q6.1: variant anchor not found: {variant_anchor}")
+        });
+        let close = src[pos..]
+            .find("    },")
+            .map(|n| pos + n)
+            .unwrap_or(src.len());
+        let body = &src[pos..close];
+        assert!(
+            body.contains("context: ProjectionReductionContext"),
+            "AX-hybrid Q6.1: variant at `{variant_anchor}` MUST embed \
+             `context: ProjectionReductionContext`. Body:\n{body}"
+        );
+    }
+}
+
+/// AX-hybrid Q6.2 — the relation engine unwraps under `StructuralTransit`.
+#[test]
+fn ax_hybrid_relation_engine_uses_structural_transit() {
+    let src =
+        read_workspace_file("crates/verter_session/src/project_semantic_dispatch/relation.rs");
+
+    let count = src
+        .matches("ProjectionReductionContext::structural_transit()")
+        .count();
+    assert!(
+        count >= 2,
+        "AX-hybrid Q6.2: `relation.rs` MUST call \
+         `ProjectionReductionContext::structural_transit()` at least \
+         twice. Observed: {count}."
+    );
+
+    assert!(
+        !src.contains("body_mode: ProjectionMode::Expanded")
+            && !src.contains("body_mode: crate::semantic_query::ProjectionMode::Expanded"),
+        "AX-hybrid Q6.2: `relation.rs` MUST NOT hard-code \
+         `body_mode: ProjectionMode::Expanded`."
+    );
+
+    assert!(
+        src.contains("evaluate_deferred_semantic_node_with_context"),
+        "AX-hybrid Q6.2: `relation.rs` MUST consult \
+         `evaluate_deferred_semantic_node_with_context`."
+    );
+}
+
+/// AX-hybrid Q6.3 — `build_key_of` / `build_mapped_type` carrier-stop
+/// via the demand context.
+#[test]
+fn ax_hybrid_carrier_stop_uses_demand_context_not_name_predicate() {
+    let src = read_workspace_file("crates/verter_session/src/project_semantic_dispatch/build.rs");
+
+    let key_of_body = extract_fn_body(&src, "pub(super) fn build_key_of(");
+    assert!(
+        key_of_body.contains("may_reduce_operator(context)"),
+        "AX-hybrid Q6.3: `build_key_of` MUST gate keyspace reification \
+         on `may_reduce_operator(context)`."
+    );
+    assert!(
+        key_of_body.contains("SemanticNodeData::KeyOf { base }"),
+        "AX-hybrid Q6.3: `build_key_of` MUST return a deferred \
+         `SemanticNodeData::KeyOf` carrier on carrier-stop."
+    );
+
+    let mapped_body = extract_fn_body(&src, "pub(super) fn build_mapped_type(");
+    assert!(
+        mapped_body.contains("may_reduce_operator(context)"),
+        "AX-hybrid Q6.3: `build_mapped_type` MUST gate member \
+         materialisation on `may_reduce_operator(context)`."
+    );
+    assert!(
+        mapped_body.contains("SemanticNodeData::Mapped"),
+        "AX-hybrid Q6.3: `build_mapped_type` MUST return a \
+         `SemanticNodeData::Mapped` carrier on carrier-stop."
+    );
+
+    for forbidden in [
+        "BuiltinUtility::from_name",
+        "is_builtin_utility_instantiation",
+        "generic_instantiation_body_is_object",
+    ] {
+        assert!(
+            !src.contains(forbidden),
+            "AX-hybrid Q6.3: `build.rs` MUST NOT use the nominal \
+             carrier predicate `{forbidden}`."
+        );
+    }
+}
+
+/// AX-hybrid Q6.4 — projector-layer name predicates retired.
+#[test]
+fn ax_hybrid_projector_layer_name_predicates_retired() {
+    let field_reduce_path =
+        workspace_root().join("crates/verter_session/src/meta_resolve/projectors/field_reduce.rs");
+    assert!(
+        !field_reduce_path.exists(),
+        "AX-hybrid Q6.4: `field_reduce.rs` MUST be deleted (codex-hybrid \
+         retires projector-layer carrier check)."
+    );
+
+    let mod_src = read_workspace_file("crates/verter_session/src/meta_resolve/projectors/mod.rs");
+    for forbidden in [
+        "is_builtin_utility_instantiation",
+        "generic_instantiation_body_is_object",
+    ] {
+        assert!(
+            !mod_src.contains(forbidden),
+            "AX-hybrid Q6.4: `projectors/mod.rs` MUST NOT reference \
+             `{forbidden}`."
+        );
+    }
+
+    // The migrated helpers live in the sibling `published_reducer`
+    // module — splitting them out keeps `projectors/mod.rs` under the
+    // workspace-wide `no_oversize_files` guard.
+    let reducer_src = read_workspace_file(
+        "crates/verter_session/src/meta_resolve/projectors/published_reducer.rs",
+    );
+    assert!(
+        reducer_src.contains("pub(crate) fn reduce_published_field_types("),
+        "AX-hybrid Q6.4: `projectors/published_reducer.rs` MUST host \
+         `reduce_published_field_types`."
+    );
+    assert!(
+        reducer_src.contains("pub(crate) fn type_expr_contains_reducible_operator("),
+        "AX-hybrid Q6.4: `projectors/published_reducer.rs` MUST host \
+         `type_expr_contains_reducible_operator`."
+    );
+
+    // The mod.rs MUST re-export both helpers so existing callers
+    // (`projectors/model.rs`, the post-projection driver) reach them
+    // through `super::*`.
+    assert!(
+        mod_src.contains("pub(crate) use published_reducer::"),
+        "AX-hybrid Q6.4: `projectors/mod.rs` MUST re-export the \
+         migrated helpers from the `published_reducer` sibling module."
+    );
+}
+
+/// AX-hybrid Q6.5 — `evaluate_deferred_semantic_node` is context-explicit.
+#[test]
+fn ax_hybrid_evaluate_is_context_explicit() {
+    let src =
+        read_workspace_file("crates/verter_session/src/project_semantic_dispatch/evaluate.rs");
+
+    assert!(
+        src.contains("pub(super) fn evaluate_deferred_semantic_node_with_context("),
+        "AX-hybrid Q6.5: `evaluate.rs` MUST define \
+         `evaluate_deferred_semantic_node_with_context`."
+    );
+
+    assert!(
+        !src.contains("body_mode: crate::semantic_query::ProjectionMode::Expanded")
+            && !src.contains("body_mode: ProjectionMode::Expanded"),
+        "AX-hybrid Q6.5: `evaluate.rs` MUST NOT hard-code \
+         `body_mode: Expanded` on DeclPlaceholder unwrap."
+    );
+
+    let implicit_body = extract_fn_body(&src, "pub(super) fn evaluate_deferred_semantic_node(");
+    // The legacy implicit overload routes through the context-explicit
+    // overload with an EXPLICIT publication context — no more
+    // implicit `body_mode: Expanded` hand-rolled at the DeclPlaceholder
+    // unwrap. Structural-transit callers must opt in via
+    // `evaluate_deferred_semantic_node_with_context` (relation.rs's
+    // Cluster A/B/C arms do this).
+    assert!(
+        implicit_body.contains("ProjectionReductionContext::published(ProjectionMode::Expanded)"),
+        "AX-hybrid Q6.5: `evaluate_deferred_semantic_node` MUST route \
+         through `_with_context` with an EXPLICIT \
+         `ProjectionReductionContext::published(ProjectionMode::Expanded)` \
+         context — the codex-hybrid retires the implicit Expanded \
+         unwrap (now context-explicit)."
+    );
+    assert!(
+        implicit_body.contains("evaluate_deferred_semantic_node_with_context"),
+        "AX-hybrid Q6.5: legacy `evaluate_deferred_semantic_node` MUST \
+         delegate to `_with_context` (context-explicit dispatch)."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Block 6.i Commit AX (codex-binding) — implicit `lower_type_expr_in_scope`
+// wrapper retired. Every caller of dispatch lowering MUST go through
+// `lower_type_expr_in_scope_with_mode` and state mode explicitly.
+//
+// Why this guard: the implicit default was `ProjectionMode::Expanded`,
+// which silently eagerly-reduced `keyof T` / `MappedType<T>` operators
+// at every intermediate-base lowering site (the codex root cause of
+// the ChatMessages cold-seq `outputSchema|execute = 62` audit leak).
+// A regression that brings back the wrapper would reintroduce the
+// leak silently — this guard fails the build.
+// ---------------------------------------------------------------------------
+#[test]
+fn block_6i_commit_ax_no_implicit_lower_type_expr_in_scope_wrapper() {
+    let dispatch_mod =
+        read_workspace_file("crates/verter_session/src/project_semantic_dispatch/mod.rs");
+
+    // The wrapper signature must NOT exist (the codex-binding fix
+    // deletes it; every caller passes mode explicitly).
+    assert!(
+        !dispatch_mod.contains("pub fn lower_type_expr_in_scope(\n")
+            && !dispatch_mod.contains("pub fn lower_type_expr_in_scope("),
+        "Block 6.i Commit AX: the implicit `lower_type_expr_in_scope` \
+         wrapper at `project_semantic_dispatch/mod.rs:274-284` MUST \
+         remain deleted. Reintroducing it brings back the implicit \
+         `ProjectionMode::Expanded` default that the codex-binding \
+         fix retired (root cause of the ChatMessages outputSchema/ \
+         execute audit leak)."
+    );
+
+    // The mode-aware sibling MUST exist (it's the sole entry point).
+    assert!(
+        dispatch_mod.contains("pub fn lower_type_expr_in_scope_with_mode("),
+        "Block 6.i Commit AX: `lower_type_expr_in_scope_with_mode` is \
+         the sole lowering entry point and MUST remain present on \
+         `ProjectSemanticDispatch`."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Block 6.i Commit AX (codex-binding) — audit is a PASSIVE OBSERVER.
+//
+// Production semantic work (lowering, projection, dispatch) must run
+// REGARDLESS of `audit_enabled`. The audit captures node ids that
+// production already produced; it does not re-derive them via a
+// side-channel dispatch round-trip. The retired sidecar at
+// `eval_env.rs:1058-1080` is the canonical example — it called
+// `dispatch.lower_type_expr_in_scope(canonical, &expansion.value.expr)`
+// only when `audit_enabled`, causing audit-on/off to diverge.
+//
+// This guard scans `compute_evaluated_types_via_dispatch` for the
+// pattern that would reintroduce the sidecar: an `if audit_enabled`
+// branch followed (in the same enclosing function) by a
+// `dispatch.lower_type_expr_in_scope_with_mode` or
+// `dispatch.execute(SemanticQueryKey::` call inside that branch.
+// ---------------------------------------------------------------------------
+#[test]
+fn block_6i_commit_ax_audit_is_passive_observer() {
+    let eval_env = read_workspace_file("crates/verter_session/src/host_manage/eval_env.rs");
+
+    // The retired sidecar at `eval_env.rs:1058-1080` is gone — its
+    // hallmark was `dispatch.lower_type_expr_in_scope(canonical, &expansion.value.expr)`
+    // inside an `if audit_enabled` block.
+    assert!(
+        !eval_env.contains("dispatch.lower_type_expr_in_scope(canonical, &expansion.value.expr)"),
+        "Block 6.i Commit AX: the audit-only re-lowering sidecar at \
+         `eval_env.rs:1058-1080` MUST remain retired. Audit must \
+         capture production-path SemanticNodeId values (set in each \
+         dispatch branch above as `produced_node_id = Some(...)`), \
+         NOT re-lower via a side-channel call that makes audit-on \
+         do extra semantic work."
+    );
+
+    // The replacement marker — production capture variable — MUST
+    // exist.
+    assert!(
+        eval_env.contains("produced_node_id: Option<crate::semantic_query::SemanticNodeId>"),
+        "Block 6.i Commit AX: `compute_evaluated_types_via_dispatch` \
+         MUST declare a `produced_node_id` capture variable so each \
+         production dispatch branch records its terminal node id. \
+         Without this variable, the audit sidecar regression is \
+         impossible to fix without re-lowering."
+    );
+
+    // Slot-binding terminal-id variant — production identity exposed
+    // before raise.
+    let dispatch_mod =
+        read_workspace_file("crates/verter_session/src/project_semantic_dispatch/mod.rs");
+    assert!(
+        dispatch_mod.contains("project_slot_binding_member_with_terminal_id"),
+        "Block 6.i Commit AX: `project_slot_binding_member_with_terminal_id` \
+         MUST remain present so the audit record captures the \
+         slot-binding terminal `SemanticNodeId` from the production \
+         dispatch path (no audit-only re-derive)."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Block 6.i Commit AX (codex-binding, PARTIAL) — the cursor-aware
+// shallow macro-surface helper that would replace
+// `project_expr_class_a_via_dispatch[_threaded]` at
+// `macro_shapes.rs:1729/2172/2192` did NOT land in Commit AX.
+//
+// Empirical finding: a `Shallow` terminal projection drops imported-
+// mapped slot enumerations (`defineSlots<PricingPlansSlots<{...}>>()`
+// with `{ [K in keyof PricingPlanSlots]?: ... } & { default: ... }`).
+// Two regression tests (`imported_mapped_slots_reach_*`) fail when
+// the carrier publishes at `Shallow` because the Shallow synthesiser
+// bails on `Mapped { source: Opaque(DeclPlaceholder) }`. A walker-
+// side patch to route `synthesise_mapped_surface` through the shared
+// `key_names_from_base_node` (the same enumerator
+// `build_mapped_type` already uses) did NOT close the failure either
+// — the deferred carrier surfaces upstream of synthesis.
+//
+// The other rails of Commit AX DID land:
+//   - implicit `lower_type_expr_in_scope` wrapper retired
+//     (`block_6i_commit_ax_no_implicit_lower_type_expr_in_scope_wrapper`).
+//   - eval_env.rs audit sidecar replaced by production-id capture
+//     (`block_6i_commit_ax_audit_is_passive_observer`).
+//   - dispatch_helpers callsites all state mode explicitly.
+//
+// The deferred macro_shapes rewire is documented in the
+// `D:/tmp/AX-binding-fix-report.md` STOP report; a follow-up commit
+// after Shallow-walker support for `Mapped { source: deferred }` is
+// the path forward.
+// ---------------------------------------------------------------------------

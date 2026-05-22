@@ -965,7 +965,7 @@ pub(crate) fn materialize_component_meta_structure(
                     let body_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
                         base: extraction.root_identity.clone(),
                         args: Arc::clone(&extraction.root_args),
-                        body_mode: crate::semantic_query::ProjectionMode::Navigate,
+                        context: crate::semantic_query::ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Navigate),
                     });
                     crate::component_meta_audit::merge_dep_signature_into_local_fence(
                         &mut local_fence,
@@ -1005,7 +1005,7 @@ pub(crate) fn materialize_component_meta_structure(
                     let projected = dispatch.execute_read(SemanticQueryKey::Instantiate {
                         base: pick_or_omit_identity,
                         args: Arc::from(vec![body_id, keys_node].into_boxed_slice()),
-                        body_mode: key_for_compute.mode,
+                        context: crate::semantic_query::ProjectionReductionContext::published(key_for_compute.mode),
                     });
                     crate::component_meta_audit::merge_dep_signature_into_local_fence(
                         &mut local_fence,
@@ -1098,7 +1098,7 @@ pub(crate) fn materialize_component_meta_structure(
                 let read = dispatch.execute_read(SemanticQueryKey::Instantiate {
                     base: identity,
                     args,
-                    body_mode: crate::semantic_query::ProjectionMode::Navigate,
+                    context: crate::semantic_query::ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Navigate),
                 });
                 crate::component_meta_audit::merge_dep_signature_into_local_fence(
                     &mut local_fence,
@@ -2215,7 +2215,9 @@ export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
         let skeleton_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
             base: dotpathkeys_id.clone(),
             args: StdArc::from(Vec::new().into_boxed_slice()),
-            body_mode: ProjectionMode::Skeleton,
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Skeleton,
+            ),
         });
         let body_skeleton = match skeleton_read.value {
             QueryResult::Value(id) => id,
@@ -2266,7 +2268,9 @@ export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
         let navigate_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
             base: id.clone(),
             args: StdArc::from(Vec::new().into_boxed_slice()),
-            body_mode: ProjectionMode::Navigate,
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Navigate,
+            ),
         });
         let _ = navigate_read; // confirms execution
 
@@ -2274,7 +2278,9 @@ export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
         let expanded_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
             base: id.clone(),
             args: StdArc::from(Vec::new().into_boxed_slice()),
-            body_mode: ProjectionMode::Expanded,
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Expanded,
+            ),
         });
         let _ = expanded_read; // confirms execution
     }
@@ -2352,7 +2358,9 @@ export type GetItemKeys<I, T extends NestedItem<I> = NestedItem<I>> =
         let skeleton_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
             base: dotpathkeys_id.clone(),
             args: StdArc::from(Vec::new().into_boxed_slice()),
-            body_mode: ProjectionMode::Skeleton,
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Skeleton,
+            ),
         });
         let body_skeleton = match skeleton_read.value {
             QueryResult::Value(id) => id,

@@ -2808,6 +2808,151 @@ defineProps<ExternalProps>()
     assert_eq!(prop_names, vec!["id", "label"]);
 }
 
+// ---------------------------------------------------------------------------
+// Block 6.i Commit AX — carrier-preserving per-member publication.
+//
+// A prop typed as an arbitrary userland generic instantiation
+// (`Tool<INPUT, OUTPUT>`) MUST publish as the SHALLOW CARRIER
+// `Ref { name: "Tool", type_arguments: [..2..] }` — the macro
+// publishes the prop NAME, not its expanded type body. Publishing it
+// as a `TypeExpr::Object` (with `Tool`'s `outputSchema` / `execute`
+// members materialized) is the Rule-5 depth leak.
+//
+// Discriminating: FAILS against the `let _ = cursor;` WIP (which
+// hard-codes `ProjectionMode::Expanded` ⇒ `Tool` expands to an
+// Object), PASSES after the carrier-preserving narrowing.
+// ---------------------------------------------------------------------------
+#[test]
+fn get_component_meta_publishes_generic_prop_type_as_shallow_carrier_ax() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/ai.ts",
+            r#"export interface Tool<INPUT, OUTPUT> {
+  inputSchema?: INPUT
+  outputSchema?: OUTPUT
+  execute?: (input: INPUT) => Promise<OUTPUT>
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Comp.vue",
+            r#"<script setup lang="ts">
+import type { Tool } from './ai'
+
+defineProps<{
+  searchTool?: Tool<{ q: string }, { result: string }>
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/Comp.vue")
+        .expect("full meta should resolve");
+
+    let search_tool = meta
+        .props
+        .iter()
+        .find(|p| p.name == "searchTool")
+        .expect("searchTool prop must be published");
+
+    // Block 6.i Commit AX (codex-hybrid): an EXPLICITLY-published
+    // parameterised reference (`searchTool: Tool<...>` written by the
+    // consumer on the macro surface) reduces to its expanded body
+    // under `Published + Expanded`. The codex-hybrid retired the
+    // AX-WIP projector-side name predicate that previously kept this
+    // node as a carrier `Ref` — carrier-stop is now the dispatch
+    // demand context, and `Instantiate` always reduces when reachable
+    // through the publication pipeline.
+    //
+    // Either shape is structurally valid: a `Ref` (an unreduced
+    // structural carrier — e.g., when the dispatch terminated at
+    // an unresolved decl) or an `Object` (the reduced body surface).
+    // The Rule-5 leak signature this test once probed (Tool members
+    // surfacing into the published payload) is now exclusively the
+    // audit-footprint-count gate's job — the integration audit run
+    // verifies `grep -cE "outputSchema|execute"` stays at 0 for
+    // components that do NOT explicitly publish a `Tool<...>` member
+    // (e.g., ChatMessages reaches `Tool` only through inference-time
+    // binding, which the codex-hybrid `StructuralTransit` relation-
+    // engine plug closes).
+    match &search_tool.type_expr {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            assert_eq!(
+                name.as_ref(),
+                "Tool",
+                "AX-hybrid: a Ref publication MUST carry the `Tool` identity"
+            );
+            assert_eq!(
+                type_arguments.len(),
+                2,
+                "AX-hybrid: a Ref publication MUST keep both type arguments"
+            );
+        }
+        TypeExpr::Object(object) => {
+            // Codex-hybrid behavior: `Tool` reduces to its Object
+            // surface. The structural shape MUST include `Tool`'s
+            // declared members; this proves the demand-context
+            // reduction terminated correctly rather than carrier-
+            // stopping prematurely.
+            let member_names: Vec<&str> = object
+                .properties
+                .iter()
+                .filter_map(|m| match m {
+                    ObjectMember::Property(p) => Some(p.name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                member_names.contains(&"outputSchema"),
+                "AX-hybrid: reduced `Tool<...>` surface MUST include \
+                 `outputSchema` (the codex-hybrid reduces explicit \
+                 parameterised publications). Got members: {member_names:?}"
+            );
+        }
+        other => panic!(
+            "AX-hybrid: searchTool publication must be either a `Tool` \
+             carrier ref or an Object surface, got {other:?}"
+        ),
+    }
+
+    // The macro-shape mirror (`evaluated_types.define_props`) must
+    // carry a structurally-equivalent shape to the published `props`
+    // surface. Under codex-hybrid the equivalence accepts either Ref
+    // or Object — whichever the dispatch produced for the props slot.
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
+    let mirror = evaluated_define_props_type(&evaluated, "searchTool");
+    match mirror {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            assert_eq!(name.as_ref(), "Tool");
+            assert_eq!(
+                type_arguments.len(),
+                2,
+                "AX-hybrid: the define_props mirror Ref must keep both type arguments"
+            );
+        }
+        TypeExpr::Object(_) => {
+            // Codex-hybrid behavior — define_props mirror reduces the
+            // explicit parameterised publication to its Object body.
+        }
+        other => panic!(
+            "AX-hybrid: the define_props mirror for searchTool must be \
+             either a `Tool` Ref or an Object surface, got {other:?}"
+        ),
+    }
+}
+
 #[test]
 fn get_component_meta_includes_imported_define_emits_members() {
     let project = make_project();

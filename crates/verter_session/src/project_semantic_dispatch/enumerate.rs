@@ -186,7 +186,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // shape (Object members, Union arms, etc.) — Expanded
                     // is required so the next Expand frame can read keys
                     // off the unwrapped surface, not a lazy Ref shell.
-                    body_mode: crate::semantic_query::ProjectionMode::Expanded,
+                    // Block 6.i Commit AX (codex-hybrid): key
+                    // enumeration is a legitimate publication-grade
+                    // demand (the keyspace is the explicit consumer
+                    // surface), so the context stays `Published +
+                    // Expanded`.
+                    context: crate::semantic_query::ProjectionReductionContext::published(
+                        crate::semantic_query::ProjectionMode::Expanded,
+                    ),
                 }) {
                     crate::semantic_query::QueryResult::Value(instantiated)
                         if instantiated != resolved =>

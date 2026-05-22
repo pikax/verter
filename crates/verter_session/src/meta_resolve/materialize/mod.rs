@@ -21,8 +21,8 @@ pub(crate) mod utility_types;
 
 pub(crate) use field_types::{
     lowered_preserve_package_backed_symbolic_refs,
-    materialize_component_meta_type_expr_until_stable, reduce_member_value_graph_native,
-    type_expr_has_package_backed_object_like_root,
+    materialize_component_meta_type_expr_until_stable,
+    reduce_member_value_graph_native_with_context, type_expr_has_package_backed_object_like_root,
     type_expr_has_package_backed_object_like_root_with_fence,
 };
 

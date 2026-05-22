@@ -189,8 +189,8 @@ impl DispatchTrace {
                     crate::semantic_query::SemanticQueryKey::ResolveMacroPayload {
                         mode, ..
                     } => *mode,
-                    crate::semantic_query::SemanticQueryKey::Instantiate { body_mode, .. } => {
-                        *body_mode
+                    crate::semantic_query::SemanticQueryKey::Instantiate { context, .. } => {
+                        context.mode
                     }
                     _ => crate::semantic_query::ProjectionMode::Expanded,
                 };

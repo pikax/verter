@@ -34,7 +34,12 @@ pub(crate) fn project_emits(
     mac: &AnalyzedMacro,
     _snapshot: &FileAnalysisSnapshot,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
+    cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) -> Vec<ExpandedField> {
+    // Block 6.i Commit AX — each surface member descends via
+    // `cursor.descend_published_member(name)`; the per-member type
+    // body publishes as a carrier (`Navigate`) unless the consumer
+    // walked a deep path.
     if !mac.is_type_based {
         return Vec::new();
     }
@@ -84,16 +89,18 @@ pub(crate) fn project_emits(
     };
     members_with_raw
         .into_iter()
-        .map(
+        .filter_map(
             |(member, raw_type, shallow_type_expr, shallow_type_expr_scope)| {
-                surface_member_to_expanded_field(
+                let member_cursor = cursor.descend_published_member(member.name.as_ref())?;
+                Some(surface_member_to_expanded_field(
                     query_engine,
                     file,
                     &member,
                     raw_type,
                     shallow_type_expr,
                     shallow_type_expr_scope,
-                )
+                    member_cursor,
+                ))
             },
         )
         .collect()

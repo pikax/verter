@@ -83,21 +83,26 @@ fn peek_member_shape_known_exists_with_request_bound_assert() {
 #[test]
 fn reduce_field_type_expr_peeks_before_route_gate() {
     let content = read_projectors_mod();
-    let body = fn_body_slice(&content, "pub(crate) fn reduce_field_type_expr(");
+    // Block 6.i Commit AX — the reduction body lives in the
+    // carrier-aware `reduce_field_type_expr_with_mode`; the bare
+    // `reduce_field_type_expr` is a thin `Expanded`-defaulting
+    // wrapper. The peek-before-gate ordering invariant moved with
+    // the body.
+    let body = fn_body_slice(&content, "pub(crate) fn reduce_field_type_expr_with_mode(");
 
     let peek_idx = body
         .find("peek_member_shape_known(")
-        .expect("guard: `reduce_field_type_expr` MUST invoke `peek_member_shape_known`.");
+        .expect("guard: `reduce_field_type_expr_with_mode` MUST invoke `peek_member_shape_known`.");
     let route_gate_idx = body
         .find("type_expr_has_package_backed_object_like_root(")
-        .expect("guard: route gate must remain present in `reduce_field_type_expr`.");
+        .expect("guard: route gate must remain present in `reduce_field_type_expr_with_mode`.");
     assert!(
         peek_idx < route_gate_idx,
         "guard: `peek_member_shape_known` MUST be invoked BEFORE \
          `type_expr_has_package_backed_object_like_root` in \
-         `reduce_field_type_expr` so primitive / bare-alias inputs \
-         (`PeekedShape::Leaf` / `PeekedShape::BareCarrier`) short-circuit \
-         without the workspace-rebuilding route lookup.",
+         `reduce_field_type_expr_with_mode` so primitive / bare-alias \
+         inputs (`PeekedShape::Leaf` / `PeekedShape::BareCarrier`) \
+         short-circuit without the workspace-rebuilding route lookup.",
     );
 }
 
@@ -111,7 +116,8 @@ fn reduce_field_type_expr_peeks_before_route_gate() {
 #[test]
 fn reduce_field_type_expr_consults_cached_peek_after_gate() {
     let content = read_projectors_mod();
-    let body = fn_body_slice(&content, "pub(crate) fn reduce_field_type_expr(");
+    // Block 6.i Commit AX — body lives in `reduce_field_type_expr_with_mode`.
+    let body = fn_body_slice(&content, "pub(crate) fn reduce_field_type_expr_with_mode(");
 
     let route_gate_idx = body
         .find("type_expr_has_package_backed_object_like_root(")
@@ -119,8 +125,8 @@ fn reduce_field_type_expr_consults_cached_peek_after_gate() {
     let after_gate = &body[route_gate_idx..];
     assert!(
         after_gate.contains("PeekedShape::Cached(materialized)"),
-        "guard: `reduce_field_type_expr` MUST re-consult the cached \
-         operator-shape peek AFTER the package-backed gate clears. \
+        "guard: `reduce_field_type_expr_with_mode` MUST re-consult the \
+         cached operator-shape peek AFTER the package-backed gate clears. \
          A warm `MaterializeMemoDb` entry can otherwise leak a reduced \
          shape past the shallow-by-default gate for shared cache entries.",
     );

@@ -221,7 +221,9 @@ fn instantiate_same_canonical_edit_rejects_warm_entry() {
             decl_name: Arc::from("Box"),
         },
         args: Arc::from(vec![string_arg].into_boxed_slice()),
-        body_mode: crate::semantic_query::ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
     };
 
     let primed = dispatch.execute(key.clone());
@@ -686,7 +688,12 @@ fn family_memo_validate_rejects_stale_project_generation() {
     let graph = host.project_type_store().semantic_graph();
 
     let prim = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let key = SemanticQueryKey::KeyOf { base: prim };
+    let key = SemanticQueryKey::KeyOf {
+        base: prim,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
+    };
     let _ = dispatch.execute(key.clone());
 
     // Fixture invariants — the published entry has empty
@@ -785,7 +792,12 @@ fn structural_node_kind_publishes_no_file_self_root() {
     let prim = graph.intern_node(SemanticNodeData::Primitive(
         crate::semantic_query::PrimitiveKind::String,
     ));
-    let key = SemanticQueryKey::KeyOf { base: prim };
+    let key = SemanticQueryKey::KeyOf {
+        base: prim,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
+    };
     let _ = dispatch.execute(key.clone());
 
     if let Some(carrier) = graph.entry_read_set_signature_for_tests(&key) {
@@ -836,7 +848,9 @@ fn file_derived_object_node(host: &VerterHost, canonical: &str) -> SemanticNodeI
             decl_name: Arc::from("Foo"),
         },
         args: Arc::from(Vec::new().into_boxed_slice()),
-        body_mode: crate::semantic_query::ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
     };
     match dispatch.execute(key) {
         crate::semantic_query::QueryResult::Value(node) => node,
@@ -866,7 +880,12 @@ fn key_of_same_canonical_edit_rejects_warm_entry() {
     let dispatch = host.semantic_dispatch();
     let graph = host.project_type_store().semantic_graph();
 
-    let key = SemanticQueryKey::KeyOf { base };
+    let key = SemanticQueryKey::KeyOf {
+        base,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
+    };
     let primed = dispatch.execute(key.clone());
     assert!(
         matches!(primed, crate::semantic_query::QueryResult::Value(_)),
@@ -1105,7 +1124,9 @@ fn builtin_utility_instantiation_roots_on_argument_file() {
     let key = SemanticQueryKey::Instantiate {
         base: crate::project_semantic_dispatch::pick_builtin_decl_identity(),
         args: Arc::from(vec![source, key_set].into_boxed_slice()),
-        body_mode: crate::semantic_query::ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
     };
 
     let primed = dispatch.execute(key.clone());
@@ -1216,7 +1237,9 @@ fn non_builtin_instantiation_roots_on_type_argument_file() {
             decl_name: Arc::from("Box"),
         },
         args: Arc::from(vec![arg_node].into_boxed_slice()),
-        body_mode: crate::semantic_query::ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
     };
 
     let primed = dispatch.execute(key.clone());

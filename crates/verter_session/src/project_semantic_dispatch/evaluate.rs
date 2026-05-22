@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    DeclIdentity, IndexKey, LiteralValue, PathSegment, ProjectionMode, QueryError, QueryResult,
-    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
+    DeclIdentity, IndexKey, LiteralValue, PathSegment, ProjectionMode, ProjectionReductionContext,
+    QueryError, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
 };
 
 impl<'a> ProjectSemanticDispatch<'a> {
@@ -36,14 +36,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    pub(super) fn evaluate_deferred_semantic_node(
+    pub(super) fn evaluate_deferred_semantic_node(&self, node: SemanticNodeId) -> SemanticNodeId {
+        // Default to a `Published + Expanded` context. Publication
+        // callers (the bounded reducer, mapper value substitution,
+        // conditional check evaluation, builtin-utility argument
+        // resolution) all need operator dispatches to terminate at
+        // their fully-reduced surface. The codex-hybrid retires the
+        // *implicit* Expanded unwrap by exposing
+        // [`Self::evaluate_deferred_semantic_node_with_context`] so
+        // structural-transit callers (relation engine identity-
+        // carrier unwrap and object-vs-record arms) can opt out of
+        // publication reduction explicitly.
+        self.evaluate_deferred_semantic_node_with_context(
+            node,
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+        )
+    }
+
+    /// Context-explicit variant of
+    /// [`Self::evaluate_deferred_semantic_node`] (Block 6.i Commit AX,
+    /// codex-hybrid). The caller supplies the
+    /// [`ProjectionReductionContext`] that flows into every operator
+    /// re-dispatch (`KeyOf`, `MappedType`, decl-placeholder
+    /// `Instantiate`) so a `StructuralTransit` walk does not reify
+    /// per-member edges along its evaluation path.
+    pub(super) fn evaluate_deferred_semantic_node_with_context(
         &self,
         mut node: SemanticNodeId,
+        reduction_context: ProjectionReductionContext,
     ) -> SemanticNodeId {
-        // Phase D §5.3 WIP-R: the former `for _ in 0..32` hard cap is retired.
-        // Cycle detection uses a stack-local visited set (per guard
-        // contract); the loop converges on graph fix-points in at most
-        // graph-size steps.
         let mut visited = rustc_hash::FxHashSet::default();
         visited.insert(node);
         loop {
@@ -53,14 +74,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let next = match data.as_ref() {
                 SemanticNodeData::Alias(target) => *target,
                 SemanticNodeData::KeyOf { base } => {
-                    let base = self.evaluate_deferred_semantic_node(*base);
-                    match self.execute(SemanticQueryKey::KeyOf { base }) {
+                    let base =
+                        self.evaluate_deferred_semantic_node_with_context(*base, reduction_context);
+                    match self.execute(SemanticQueryKey::KeyOf {
+                        base,
+                        context: reduction_context,
+                    }) {
                         QueryResult::Value(id) => id,
                         _ => return self.opaque(QueryError::Miss),
                     }
                 }
                 SemanticNodeData::IndexedAccess { object, index } => {
-                    let object = self.evaluate_deferred_semantic_node(*object);
+                    let object = self
+                        .evaluate_deferred_semantic_node_with_context(*object, reduction_context);
                     let index = match index {
                         IndexKey::String(text) => IndexKey::String(Arc::clone(text)),
                         IndexKey::Number(number) => IndexKey::Number(*number),
@@ -79,6 +105,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     match self.execute(SemanticQueryKey::MappedType {
                         source: *source,
                         mapper: mapper.clone(),
+                        context: reduction_context,
                     }) {
                         QueryResult::Value(id) => id,
                         _ => return self.opaque(QueryError::Miss),
@@ -149,7 +176,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let mut literals: Vec<Arc<str>> = Vec::with_capacity(expressions.len());
                     let mut all_literal = true;
                     for expr in expressions.iter() {
-                        let resolved = self.evaluate_deferred_semantic_node(*expr);
+                        let resolved = self
+                            .evaluate_deferred_semantic_node_with_context(*expr, reduction_context);
                         match self.graph().node_data(resolved).as_deref() {
                             Some(SemanticNodeData::Literal(LiteralValue::String(s))) => {
                                 literals.push(Arc::from(s.as_str()));
@@ -184,21 +212,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         decl_name: Arc::clone(name),
                     };
                     drop(data);
+                    // Block 6.i Commit AX (codex-hybrid): the
+                    // declaration-placeholder unwrap inherits the
+                    // caller's reduction context. The implicit
+                    // `Published + Expanded` unwrap was the path that
+                    // re-opened nested `keyof` / `Mapped` reification
+                    // during relation-engine binding; the caller's
+                    // `StructuralTransit` context now carries through.
                     match self.execute(SemanticQueryKey::Instantiate {
                         base: identity,
                         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                        // Typeof unwraps a deferred declaration body so
-                        // the fix-point loop can keep walking into it
-                        // (mapper applications, conditionals, object
-                        // surfaces). Expanded is required: with Navigate,
-                        // the next iteration would observe the lazy Ref
-                        // shell and stop short of the value's real type.
-                        body_mode: crate::semantic_query::ProjectionMode::Expanded,
+                        context: reduction_context,
                     }) {
                         QueryResult::Value(id) => id,
                         _ => return self.opaque(QueryError::Miss),
                     }
                 }
+                // Block 6.i Commit AX — `DeclRef`/`InstantiationRef`
+                // arms are deliberately NOT added to the deferred-
+                // shell evaluator. The path-walker (walk.rs) and the
+                // keyspace enumerator (enumerate.rs) handle these
+                // carriers under explicit demand contexts, but the
+                // deferred-shell evaluator is called from intermediate
+                // IndexedAccess hops where eagerly resolving a
+                // `DeclRef` would over-evaluate symbolic forms that
+                // the slot-binding indexed-access preservation policy
+                // expects to stay carrier-shaped (e.g.
+                // `AppProps['avatar']` must stay
+                // `IndexedAccess { object: DeclRef(AppProps), index }`).
+                // The brief's conditional "if they are on the
+                // macro-shape enumeration path" scopes this symmetry
+                // to the enumeration path only.
                 _ => return node,
             };
             if next == node {

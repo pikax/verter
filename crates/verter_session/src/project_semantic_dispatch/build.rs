@@ -369,8 +369,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         identity: &DeclIdentity,
         args: &Arc<[SemanticNodeId]>,
-        body_mode: crate::semantic_query::ProjectionMode,
+        context: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        // Block 6.i Commit AX (codex-hybrid): the call-site provides
+        // the publication / structural-transit context. `body_mode` is
+        // shorthand for `context.mode` everywhere the existing lowering
+        // pipeline consults it; the demand axis flows through to
+        // builtin-utility dispatch and nested operator builders so a
+        // `StructuralTransit` instantiation never reifies `keyof` /
+        // `Mapped` operators along its decl body.
+        let body_mode = context.mode;
         // Count Instantiate dispatches that ask for the Expanded body
         // mode. Used by the slot-binding regression `enrich_does_not_eagerly_instantiate_carrier`
         // to enforce that synthesis stays in Navigate mode and never
@@ -438,7 +446,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // primitives, literal-union key sets) contribute nothing.
             let observed_self_roots = self.observed_self_roots_from_nodes(args.iter().copied());
             let output: crate::project_semantic_dispatch::walk::QueryBuildOutput = self
-                .build_builtin_utility(base, decl_name.as_ref(), args)
+                .build_builtin_utility(base, decl_name.as_ref(), args, context)
                 .into();
             return output.with_observed_self_roots(observed_self_roots);
         }
@@ -492,7 +500,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let arg_id = if let Some(explicit) = args.get(index).copied() {
                 explicit
             } else if let Some(default) = param.default.as_deref() {
-                self.shallow_lower_type_expr(
+                // Block 6.i Commit AX — propagate the full
+                // `ProjectionReductionContext` through default-param
+                // lowering so a `StructuralTransit` instantiation
+                // survives. The legacy `body_mode`-only wrapper at
+                // [`Self::shallow_lower_type_expr`] rebuilds
+                // `Published(mode)` and would clobber the demand axis.
+                self.shallow_lower_type_expr_with_context(
                     default,
                     &env,
                     &scope,
@@ -500,7 +514,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope_payload.as_ref(),
                     &shadowing,
                     &mut substitutions,
-                    body_mode,
+                    context,
                 )
             } else if body_mode == crate::semantic_query::ProjectionMode::Skeleton {
                 // Skeleton mode preserves open generics.
@@ -566,7 +580,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             )
                 .into();
         }
-        let mut result = self.shallow_lower_type_expr(
+        // Block 6.i Commit AX — propagate the full
+        // `ProjectionReductionContext` through body lowering so a
+        // `StructuralTransit` instantiation lowers its body in transit
+        // demand. The legacy `body_mode`-only wrapper at
+        // [`Self::shallow_lower_type_expr`] rebuilds `Published(mode)`
+        // at lower.rs:80 and would clobber the demand axis —
+        // intermediate-hop `keyof T` / `{ [K in S]: V }` operators
+        // along the decl body would then reach the publication-edge
+        // loops and emit the spurious member edges that the
+        // ChatMessages `outputSchema|execute` leak captured.
+        let mut result = self.shallow_lower_type_expr_with_context(
             &prepared.body,
             &env,
             &scope,
@@ -574,7 +598,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             scope_payload.as_ref(),
             &shadowing,
             &mut substitutions,
-            body_mode,
+            context,
         );
         result = self.backfill_member_index_surface(
             result,
@@ -584,6 +608,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             scope_payload.as_ref(),
             &shadowing,
             &mut substitutions,
+            context,
         );
         self.pop_instantiate_active();
 
@@ -655,6 +680,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         scope_payload: Option<&crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
         shadowing: &crate::resolver_core::scope_shadowing::ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
         let Some(data) = self.graph().node_data(result) else {
             return result;
@@ -676,7 +702,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .iter()
             .filter(|(name, _)| !existing.contains(name.as_str()))
             .map(|(name, member)| {
-                let value = self.shallow_lower_type_expr(
+                // Block 6.i Commit AX — honour the caller's
+                // `ProjectionReductionContext`. The previous
+                // hardcoded `Published(Expanded)` would reify nested
+                // operators along the appended members even when the
+                // instantiation arrived under `StructuralTransit`,
+                // re-introducing the publication-edge emissions the
+                // walk.rs intermediate-hop demotion is meant to
+                // prevent.
+                let value = self.shallow_lower_type_expr_with_context(
                     &member.ty,
                     env,
                     scope,
@@ -684,7 +718,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope_payload,
                     shadowing,
                     substitutions,
-                    crate::semantic_query::ProjectionMode::Expanded,
+                    context,
                 );
                 SurfaceMember {
                     name: Arc::from(name.as_str()),
@@ -767,6 +801,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         base: SemanticNodeId,
         name: &str,
         args: &Arc<[SemanticNodeId]>,
+        context: crate::semantic_query::ProjectionReductionContext,
     ) -> (QueryResult<SemanticNodeId>, DepSignature) {
         use crate::semantic_query::{MapperKey, OptionalityMod, ReadonlyMod};
 
@@ -820,7 +855,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // matches the userland mapped type's shell, which is what
         // equivalence tests assert.
         let mapper_for = |opt: OptionalityMod, ro: ReadonlyMod, source: SemanticNodeId| {
-            let key_space = match self.execute(SemanticQueryKey::KeyOf { base: source }) {
+            // Thread the outer instantiation's context so a builtin
+            // utility called under `StructuralTransit` (e.g.
+            // `Partial<Record<keyof T, undefined>>` reached through a
+            // relation-engine `infer`-binding pass) does NOT reify
+            // `keyof source` into a literal-anchor union.
+            let key_space = match self.execute(SemanticQueryKey::KeyOf {
+                base: source,
+                context,
+            }) {
                 QueryResult::Value(id) => id,
                 _ => self.opaque(QueryError::Miss),
             };
@@ -871,7 +914,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             "Partial" if args.len() == 1 => {
                 let source = args[0];
                 let mapper = mapper_for(OptionalityMod::Add, ReadonlyMod::Keep, source);
-                let result = match self.execute(SemanticQueryKey::MappedType { source, mapper }) {
+                let result = match self.execute(SemanticQueryKey::MappedType {
+                    source,
+                    mapper,
+                    context,
+                }) {
                     QueryResult::Value(id) => id,
                     _ => self.opaque(QueryError::Miss),
                 };
@@ -881,7 +928,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             "Required" if args.len() == 1 => {
                 let source = args[0];
                 let mapper = mapper_for(OptionalityMod::Remove, ReadonlyMod::Keep, source);
-                let result = match self.execute(SemanticQueryKey::MappedType { source, mapper }) {
+                let result = match self.execute(SemanticQueryKey::MappedType {
+                    source,
+                    mapper,
+                    context,
+                }) {
                     QueryResult::Value(id) => id,
                     _ => self.opaque(QueryError::Miss),
                 };
@@ -891,7 +942,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             "Readonly" if args.len() == 1 => {
                 let source = args[0];
                 let mapper = mapper_for(OptionalityMod::Keep, ReadonlyMod::Add, source);
-                let result = match self.execute(SemanticQueryKey::MappedType { source, mapper }) {
+                let result = match self.execute(SemanticQueryKey::MappedType {
+                    source,
+                    mapper,
+                    context,
+                }) {
                     QueryResult::Value(id) => id,
                     _ => self.opaque(QueryError::Miss),
                 };
@@ -937,6 +992,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let result = match self.execute(SemanticQueryKey::MappedType {
                     source: key_arg,
                     mapper,
+                    context,
                 }) {
                     QueryResult::Value(id) => id,
                     _ => self.opaque(QueryError::Miss),
@@ -1469,9 +1525,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn build_key_of(
         &self,
         base: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         let data = self.graph().node_data(base);
         let fence = self.project_generation_signature();
+        // Block 6.i Commit AX (codex-hybrid) carrier-stop: when the
+        // caller's context is not a publication-mode-Expanded demand,
+        // return a deferred `KeyOf { base }` carrier instead of
+        // reifying the keyspace as a literal-anchor union with one
+        // `ProjectMember` edge per literal. Member-anchor reification
+        // is publication-only work — relation-engine binding, generic
+        // substitution, and other structural-transit callers consume
+        // the carrier without paying for it. The check is purely on
+        // `context`; no operand-name inspection.
+        if !crate::semantic_query::may_reduce_operator(context) {
+            let node = self.graph().intern_node(SemanticNodeData::KeyOf { base });
+            let observed_self_roots = self.observed_self_roots_from_nodes([base]);
+            return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                QueryResult::Value(node),
+                fence,
+            ))
+            .with_observed_self_roots(observed_self_roots);
+        }
         let node = match data.as_deref() {
             Some(SemanticNodeData::Object(surface)) => self.intern_keyspace_names(
                 base,
@@ -1599,6 +1674,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         source: SemanticNodeId,
         mapper: &crate::semantic_query::MapperKey,
+        context: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         let graph = self.graph();
         let fence = self.project_generation_signature();
@@ -1608,6 +1684,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // content version each file-derived input was lowered from.
         let observed_self_roots =
             self.observed_self_roots_from_nodes([source, mapper.key_space, mapper.value_expr]);
+
+        // Block 6.i Commit AX (codex-hybrid) carrier-stop: outside a
+        // publication-mode-Expanded demand the build returns a
+        // deferred `Mapped { source, mapper }` carrier without
+        // enumerating the source's key space or emitting per-member
+        // `ProjectMember` edges. Member materialisation is publication
+        // work; structural-transit callers (relation engine, deferred-
+        // shell evaluation, generic substitution) inspect the carrier
+        // directly. The decision is purely on `context` — no
+        // operand-name inspection.
+        if !crate::semantic_query::may_reduce_operator(context) {
+            let node = graph.intern_node(SemanticNodeData::Mapped {
+                source,
+                mapper: mapper.clone(),
+            });
+            // Capture the contribution set on a single `Normalize`
+            // edge so origin-graph consumers still see the structural
+            // dependency; per-member edges only emit on the
+            // publication path below.
+            graph.record_origin_edge(
+                node,
+                OriginEdgeKind::Normalize,
+                Arc::from(vec![source, mapper.key_space, mapper.value_expr].into_boxed_slice()),
+                OriginMeta::None,
+                Arc::clone(&fence),
+            );
+            return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                QueryResult::Value(node),
+                fence,
+            ))
+            .with_observed_self_roots(observed_self_roots);
+        }
 
         // 1. Resolve the key space.
         //
@@ -1732,7 +1840,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     mapper.parameter_node,
                     key_arg,
                 );
-                let evaluated = self.evaluate_deferred_semantic_node(substituted);
+                // Block 6.i Commit AX (codex Q5): context-explicit
+                // evaluation INHERITS the build_mapped_type caller's
+                // `context`. The pre-AX implicit `Published(Expanded)`
+                // forced mapped-value substitution to reify nested
+                // operators (`keyof`, `Mapped`, `Conditional`) even
+                // when the dispatch was running under a
+                // `StructuralTransit` walk — that was the silent
+                // re-publication of operator surfaces no caller asked
+                // for. Inheriting `context` keeps publication callers
+                // (Pub(Expanded)/Pub(Navigate)) reifying as before
+                // while StructuralTransit callers carrier-stop
+                // through `may_reduce_operator`.
+                let evaluated =
+                    self.evaluate_deferred_semantic_node_with_context(substituted, context);
                 if matches!(
                     self.graph().node_data(evaluated).as_deref(),
                     Some(SemanticNodeData::Opaque(_))
@@ -1767,7 +1888,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         mapper.parameter_node,
                         key_literal,
                     );
-                    let evaluated_remap = self.evaluate_deferred_semantic_node(substituted_remap);
+                    // Block 6.i Commit AX (codex Q5): context-explicit
+                    // evaluation inherits the build_mapped_type
+                    // caller's `context` for the `as <expr>`
+                    // name-remap. Mirrors the value_expr evaluation
+                    // above — publication callers reify; transit
+                    // callers carrier-stop.
+                    let evaluated_remap = self
+                        .evaluate_deferred_semantic_node_with_context(substituted_remap, context);
                     match graph.node_data(evaluated_remap).as_deref() {
                         Some(SemanticNodeData::Literal(LiteralValue::String(text))) => {
                             Arc::from(text.as_str())

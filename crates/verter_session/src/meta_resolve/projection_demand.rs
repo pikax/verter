@@ -385,6 +385,122 @@ impl<'a> ProjectionCursor<'a> {
     pub(crate) fn is_whole_surface(&self) -> bool {
         matches!(self.node.key_filter, KeyFilter::All) && self.node.children.is_empty()
     }
+
+    /// Descend into a published macro member by name.
+    ///
+    /// Block 6.i Commit AX — the per-member publication primitive. A
+    /// macro projector publishes EVERY top-level member name
+    /// (`whole_surface` selects the member NAMES). For each admitted
+    /// member it then calls this method to obtain the cursor to
+    /// publish that member's type body AT.
+    ///
+    /// Returns:
+    ///
+    /// 1. `None` when the member key is NOT admitted by this hop's
+    ///    `KeyFilter` — the caller skips the member entirely (it is
+    ///    out of the published surface).
+    /// 2. `Some(explicit_child)` when the projection trie carries an
+    ///    explicit child node for the member — the consumer walks a
+    ///    path INTO this member (`Foo['a']['b']`), so the child
+    ///    cursor carries that deep demand.
+    /// 3. `Some(terminal_carrier)` when the member is admitted but
+    ///    has NO explicit child — the shallow-by-default case. The
+    ///    returned cursor is a TERMINAL CARRIER node (NOT `self`):
+    ///    its `terminal_mode` is `ProjectionMode::Navigate` so the
+    ///    projector publishes the member's type as a carrier
+    ///    (`Ref { name, type_arguments }`) without expanding its
+    ///    body.
+    ///
+    /// The carrier-cursor distinction (vs `descend`'s self-pin) is
+    /// the Rule-5 fix: `descend` self-pins a whole-surface cursor so
+    /// the next hop keeps walking; `descend_published_member` stops
+    /// at a `Navigate`-mode terminal so a macro member's type body is
+    /// NOT breadth-enumerated.
+    pub(crate) fn descend_published_member(&self, key: &str) -> Option<ProjectionCursor<'a>> {
+        // (1) Explicit child wins — the consumer walked a deep path
+        // into this member; carry that demand verbatim.
+        if let Some(child) = self.node.children.get(&PathSegment::Member(Arc::from(key))) {
+            return Some(ProjectionCursor {
+                node: child,
+                surface: self.surface,
+                remaining: &[],
+            });
+        }
+
+        // F2/AX: explicit children enumerated + `KeyFilter::All` ⇒ a
+        // member with no explicit child is OUT OF SCOPE.
+        if !self.node.children.is_empty() && matches!(self.node.key_filter, KeyFilter::All) {
+            return None;
+        }
+
+        // F6: UnknownDeferred at the publication boundary is a Rule-5
+        // violation site — the caller must resolve the filter first.
+        if matches!(self.node.key_filter, KeyFilter::UnknownDeferred) {
+            debug_assert!(
+                false,
+                "KeyFilter::UnknownDeferred reached at publication \
+                 boundary in ProjectionCursor::descend_published_member \
+                 — Rule-5 violation site."
+            );
+            return None;
+        }
+
+        // (1b) Reject keys the filter excludes.
+        if !self.node.key_filter.admits(key) {
+            return None;
+        }
+
+        // (3) Admitted, no explicit child: publish the member's type
+        // as a TERMINAL CARRIER. `Navigate` keeps generic refs as
+        // refs — the macro publishes the member NAME, not its
+        // expanded type body.
+        Some(ProjectionCursor {
+            node: terminal_carrier_node(),
+            surface: self.surface,
+            remaining: &[],
+        })
+    }
+
+    /// The projection mode the caller should materialise a published
+    /// macro member's type at.
+    ///
+    /// Block 6.i Commit AX — when the cursor is a terminal carrier
+    /// (the `descend_published_member` no-explicit-child case) this
+    /// returns `ProjectionMode::Navigate`: the member's type is
+    /// published as a CARRIER (`Ref { name, type_arguments }`)
+    /// without expanding the underlying object body. When the cursor
+    /// carries an explicit child node with a deep `terminal_mode`
+    /// (the consumer walked `Foo['a']['b']` into this member), that
+    /// mode is honoured so the explicit path reduces path-precisely.
+    ///
+    /// `Navigate` (NOT `Shallow`) is the deliberate stop: `Shallow`
+    /// over a generic instantiation still synthesises the one-level
+    /// object surface, which would re-admit the carrier type's own
+    /// members into the published surface. `Navigate` keeps the ref
+    /// a carrier.
+    pub(crate) fn terminal_publication_mode(&self) -> ProjectionMode {
+        self.node.terminal_mode.unwrap_or(ProjectionMode::Navigate)
+    }
+}
+
+/// Lazy-initialised TERMINAL CARRIER node returned by
+/// [`ProjectionCursor::descend_published_member`] for an admitted
+/// macro member that has no explicit child in the projection trie.
+///
+/// Block 6.i Commit AX — `terminal_mode = Some(Navigate)`: the macro
+/// publishes the member's type AS A CARRIER (`Ref { name,
+/// type_arguments }`) rather than expanding its body. This is the
+/// shallow-by-default publication boundary — the leak fix. Distinct
+/// from [`whole_surface_descend_node`] (which is `Expanded`) so a
+/// per-member publication does NOT breadth-enumerate the member
+/// type's own surface.
+fn terminal_carrier_node() -> &'static ProjectionNode {
+    static NODE: std::sync::OnceLock<ProjectionNode> = std::sync::OnceLock::new();
+    NODE.get_or_init(|| ProjectionNode {
+        terminal_mode: Some(ProjectionMode::Navigate),
+        children: FxHashMap::default(),
+        key_filter: KeyFilter::All,
+    })
 }
 
 #[cfg(test)]
@@ -622,6 +738,73 @@ mod tests {
     fn key_filter_admits_panics_on_unknown_deferred_f6() {
         let filter = KeyFilter::UnknownDeferred;
         let _ = filter.admits("anything");
+    }
+
+    // -----------------------------------------------------------------
+    // Block 6.i Commit AX — `descend_published_member` returns a
+    // TERMINAL CARRIER cursor (Navigate mode) for an admitted member
+    // with no explicit child. This is the Rule-5 publication-boundary
+    // stop: a macro member's type body is NOT breadth-enumerated.
+    // -----------------------------------------------------------------
+    #[test]
+    fn descend_published_member_yields_navigate_carrier_for_whole_surface() {
+        let proj = SurfaceProjection::whole_surface(PublishedSurfaceKind::Props);
+        let cursor = proj.cursor();
+        // The root is a whole-surface Expanded node.
+        assert_eq!(cursor.terminal_publication_mode(), ProjectionMode::Expanded);
+        // Descending a published member yields a TERMINAL CARRIER
+        // cursor whose publication mode is Navigate — NOT Expanded.
+        let member = cursor
+            .descend_published_member("searchTool")
+            .expect("whole-surface admits every member");
+        assert_eq!(
+            member.terminal_publication_mode(),
+            ProjectionMode::Navigate,
+            "AX: a published macro member with no explicit child must \
+             publish at Navigate (carrier), not Expanded"
+        );
+        assert!(member.is_terminal());
+    }
+
+    #[test]
+    fn descend_published_member_honors_explicit_child_mode() {
+        // Build { searchTool → { Expanded terminal } } — the consumer
+        // explicitly walked into searchTool.
+        let mut child = ProjectionNode::whole_surface_expanded();
+        child.terminal_mode = Some(ProjectionMode::Expanded);
+        let mut root = ProjectionNode::whole_surface_expanded();
+        root.children
+            .insert(PathSegment::Member(Arc::from("searchTool")), child);
+        let proj = SurfaceProjection {
+            surface: PublishedSurfaceKind::Props,
+            root,
+        };
+        let cursor = proj.cursor();
+        // The explicit child carries deep demand → Expanded honoured.
+        let member = cursor
+            .descend_published_member("searchTool")
+            .expect("explicit child descends");
+        assert_eq!(member.terminal_publication_mode(), ProjectionMode::Expanded);
+        // A sibling with no explicit child is OUT OF SCOPE under an
+        // explicit-children + KeyFilter::All root.
+        assert!(
+            cursor.descend_published_member("other").is_none(),
+            "AX: explicit children + KeyFilter::All must reject \
+             un-enumerated members"
+        );
+    }
+
+    #[test]
+    fn descend_published_member_rejects_excluded_keys() {
+        let mut node = ProjectionNode::whole_surface_expanded();
+        node.key_filter = KeyFilter::Exclude(Arc::from([Arc::from("hidden")]));
+        let proj = SurfaceProjection {
+            surface: PublishedSurfaceKind::Props,
+            root: node,
+        };
+        let cursor = proj.cursor();
+        assert!(cursor.descend_published_member("hidden").is_none());
+        assert!(cursor.descend_published_member("visible").is_some());
     }
 
     #[test]

@@ -24,9 +24,9 @@ use crate::resolver_core::bare_name_resolve::{
 use crate::resolver_core::scope_shadowing::ScopeShadowing;
 use crate::semantic_query::{
     DeclIdentity, HashValue, IndexSignature, NodeScopeId, PathSegment, PrimitiveKind,
-    ProjectionMode, QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData,
-    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SurfaceMember, SurfaceView, TupleElement,
-    ValueRootKey,
+    ProjectionMode, ProjectionReductionContext, QueryError, QueryResult, ResolveDeclKey, ScopeId,
+    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SurfaceMember,
+    SurfaceView, TupleElement, ValueRootKey,
 };
 
 impl<'a> ProjectSemanticDispatch<'a> {
@@ -77,6 +77,43 @@ impl<'a> ProjectSemanticDispatch<'a> {
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         mode: ProjectionMode,
     ) -> SemanticNodeId {
+        // Default to a publication context; the
+        // `shallow_lower_type_expr_with_context` overload threads a
+        // caller-supplied [`ProjectionReductionContext`] through so a
+        // `StructuralTransit` instantiation lowers its body with the
+        // same demand and nested operator dispatches carrier-stop.
+        let context = ProjectionReductionContext::published(mode);
+        self.shallow_lower_type_expr_with_context(
+            expr,
+            env,
+            scope,
+            name_resolution,
+            scope_payload,
+            shadowing,
+            substitutions,
+            context,
+        )
+    }
+
+    /// Context-explicit variant of [`Self::shallow_lower_type_expr`]
+    /// (Block 6.i Commit AX, codex-hybrid). Accepts the full
+    /// [`ProjectionReductionContext`] so callers can thread
+    /// `StructuralTransit` through nested lowering. The legacy
+    /// `mode`-only overload above wraps `mode` in `Published` so
+    /// existing publication sites continue to compile unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn shallow_lower_type_expr_with_context(
+        &self,
+        expr: &TypeExpr,
+        env: &FxHashMap<String, SemanticNodeId>,
+        scope: &NodeScopeId,
+        name_resolution: &FxHashMap<String, ResolvedRootIdentity>,
+        scope_payload: Option<&DeclarationScopePayload>,
+        shadowing: &ScopeShadowing,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        reduction_context: ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let mode = reduction_context.mode;
         // Watchdog hooks for hang investigation. Both calls are inert
         // when the watchdog has not been spawned (single relaxed atomic
         // load + early return). When active, they advance a heartbeat
@@ -111,7 +148,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // constraint, default })` is complete.
                     // Cluster A.
                     let constraint = param.constraint.as_ref().map(|c| {
-                        self.shallow_lower_type_expr(
+                        self.shallow_lower_type_expr_with_context(
                             c,
                             env,
                             scope,
@@ -119,11 +156,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             scope_payload,
                             shadowing,
                             substitutions,
-                            mode,
+                            reduction_context,
                         )
                     });
                     let default = param.default.as_ref().map(|d| {
-                        self.shallow_lower_type_expr(
+                        self.shallow_lower_type_expr_with_context(
                             d,
                             env,
                             scope,
@@ -131,7 +168,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             scope_payload,
                             shadowing,
                             substitutions,
-                            mode,
+                            reduction_context,
                         )
                     });
                     let display_name: Arc<str> = Arc::from(param.name.as_str());
@@ -208,7 +245,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .and_then(|payload| payload.scope_type_bindings.get(name.as_ref()))
                     .expect("matched on scope_type_bindings.contains_key above");
                 let constraint = binding.constraint.as_ref().map(|c| {
-                    self.shallow_lower_type_expr(
+                    self.shallow_lower_type_expr_with_context(
                         c,
                         env,
                         scope,
@@ -216,11 +253,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         scope_payload,
                         shadowing,
                         substitutions,
-                        mode,
+                        reduction_context,
                     )
                 });
                 let default = binding.default.as_ref().map(|d| {
-                    self.shallow_lower_type_expr(
+                    self.shallow_lower_type_expr_with_context(
                         d,
                         env,
                         scope,
@@ -228,7 +265,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         scope_payload,
                         shadowing,
                         substitutions,
-                        mode,
+                        reduction_context,
                     )
                 });
                 let display_name = Arc::clone(&binding.name);
@@ -323,7 +360,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let arg_ids: Vec<SemanticNodeId> = type_arguments
                         .iter()
                         .map(|arg| {
-                            self.shallow_lower_type_expr(
+                            self.shallow_lower_type_expr_with_context(
                                 arg,
                                 env,
                                 scope,
@@ -331,7 +368,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope_payload,
                                 shadowing,
                                 substitutions,
-                                mode,
+                                reduction_context,
                             )
                         })
                         .collect();
@@ -364,7 +401,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     return match self.execute(SemanticQueryKey::Instantiate {
                         base: builtin_identity,
                         args: Arc::from(arg_ids.into_boxed_slice()),
-                        body_mode: mode,
+                        context: reduction_context,
                     }) {
                         QueryResult::Value(id) => id,
                         _ => self.opaque(QueryError::Miss),
@@ -472,7 +509,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         let arg_ids: Vec<SemanticNodeId> = type_arguments
                             .iter()
                             .map(|arg| {
-                                self.shallow_lower_type_expr(
+                                self.shallow_lower_type_expr_with_context(
                                     arg,
                                     env,
                                     scope,
@@ -480,7 +517,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     scope_payload,
                                     shadowing,
                                     substitutions,
-                                    mode,
+                                    reduction_context,
                                 )
                             })
                             .collect();
@@ -521,7 +558,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let arg_ids: Vec<SemanticNodeId> = type_arguments
                         .iter()
                         .map(|arg| {
-                            self.shallow_lower_type_expr(
+                            self.shallow_lower_type_expr_with_context(
                                 arg,
                                 env,
                                 scope,
@@ -529,14 +566,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope_payload,
                                 shadowing,
                                 substitutions,
-                                mode,
+                                reduction_context,
                             )
                         })
                         .collect();
                     match self.execute(SemanticQueryKey::Instantiate {
                         base: decl_identity,
                         args: Arc::from(arg_ids.into_boxed_slice()),
-                        body_mode: mode,
+                        context: reduction_context,
                     }) {
                         QueryResult::Value(id) => id,
                         _ => self.opaque(QueryError::Miss),
@@ -546,7 +583,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             TypeExpr::Union(arms) => {
                 let mut arm_ids: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
                 for arm in arms.iter() {
-                    arm_ids.push(self.shallow_lower_type_expr(
+                    arm_ids.push(self.shallow_lower_type_expr_with_context(
                         arm,
                         env,
                         scope,
@@ -554,7 +591,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         scope_payload,
                         shadowing,
                         substitutions,
-                        mode,
+                        reduction_context,
                     ));
                 }
                 if arm_ids.is_empty() {
@@ -571,7 +608,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             TypeExpr::Intersection(arms) => {
                 let mut arm_ids: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
                 for arm in arms.iter() {
-                    arm_ids.push(self.shallow_lower_type_expr(
+                    arm_ids.push(self.shallow_lower_type_expr_with_context(
                         arm,
                         env,
                         scope,
@@ -579,7 +616,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         scope_payload,
                         shadowing,
                         substitutions,
-                        mode,
+                        reduction_context,
                     ));
                 }
                 if arm_ids.is_empty() {
@@ -601,7 +638,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 for member in &obj.properties {
                     match member {
                         ObjectMember::Property(prop) => {
-                            let value = self.shallow_lower_type_expr(
+                            let value = self.shallow_lower_type_expr_with_context(
                                 &prop.ty,
                                 env,
                                 scope,
@@ -609,7 +646,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope_payload,
                                 shadowing,
                                 substitutions,
-                                mode,
+                                reduction_context,
                             );
                             members.push(SurfaceMember {
                                 name: Arc::from(prop.name.as_str()),
@@ -636,7 +673,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             // deferred shell.
                             let function_expr =
                                 TypeExpr::Function(Arc::new(method.function.clone()));
-                            let value = self.shallow_lower_type_expr(
+                            let value = self.shallow_lower_type_expr_with_context(
                                 &function_expr,
                                 env,
                                 scope,
@@ -644,7 +681,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope_payload,
                                 shadowing,
                                 substitutions,
-                                mode,
+                                reduction_context,
                             );
                             members.push(SurfaceMember {
                                 name: Arc::from(method.name.as_str()),
@@ -667,7 +704,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             // `SurfaceView.call_signatures` by matching
                             // `TypeExpr::Function(...)`.
                             let function_expr = TypeExpr::Function(Arc::new(func.clone()));
-                            let fn_id = self.shallow_lower_type_expr(
+                            let fn_id = self.shallow_lower_type_expr_with_context(
                                 &function_expr,
                                 env,
                                 scope,
@@ -675,13 +712,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope_payload,
                                 shadowing,
                                 substitutions,
-                                mode,
+                                reduction_context,
                             );
                             call_signatures.push(fn_id);
                         }
                         ObjectMember::ConstructSignature(func) => {
                             let function_expr = TypeExpr::Function(Arc::new(func.clone()));
-                            let fn_id = self.shallow_lower_type_expr(
+                            let fn_id = self.shallow_lower_type_expr_with_context(
                                 &function_expr,
                                 env,
                                 scope,
@@ -689,12 +726,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope_payload,
                                 shadowing,
                                 substitutions,
-                                mode,
+                                reduction_context,
                             );
                             construct_signatures.push(fn_id);
                         }
                         ObjectMember::IndexSignature(sig) => {
-                            let key_type = self.shallow_lower_type_expr(
+                            let key_type = self.shallow_lower_type_expr_with_context(
                                 &sig.key_type,
                                 env,
                                 scope,
@@ -702,9 +739,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope_payload,
                                 shadowing,
                                 substitutions,
-                                mode,
+                                reduction_context,
                             );
-                            let value_type = self.shallow_lower_type_expr(
+                            let value_type = self.shallow_lower_type_expr_with_context(
                                 &sig.value_type,
                                 env,
                                 scope,
@@ -712,7 +749,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope_payload,
                                 shadowing,
                                 substitutions,
-                                mode,
+                                reduction_context,
                             );
                             index_signatures.push(IndexSignature {
                                 key_type,
@@ -739,7 +776,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // pay generic `Array<T>` declaration-instantiation cost on
             // every access.
             TypeExpr::Array { element, readonly } => {
-                let element_id = self.shallow_lower_type_expr(
+                let element_id = self.shallow_lower_type_expr_with_context(
                     element,
                     env,
                     scope,
@@ -747,7 +784,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope_payload,
                     shadowing,
                     substitutions,
-                    mode,
+                    reduction_context,
                 );
                 graph.intern_node_with_scope(
                     SemanticNodeData::Array {
@@ -766,7 +803,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             TypeExpr::Tuple { elements, readonly } => {
                 let mut lowered_elements: Vec<TupleElement> = Vec::with_capacity(elements.len());
                 for element in elements.iter() {
-                    let value = self.shallow_lower_type_expr(
+                    let value = self.shallow_lower_type_expr_with_context(
                         &element.ty,
                         env,
                         scope,
@@ -774,7 +811,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         scope_payload,
                         shadowing,
                         substitutions,
-                        mode,
+                        reduction_context,
                     );
                     lowered_elements.push(TupleElement {
                         label: element.label.as_deref().map(Arc::<str>::from),
@@ -806,7 +843,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let lowered_expressions: Vec<SemanticNodeId> = expressions
                     .iter()
                     .map(|expr| {
-                        self.shallow_lower_type_expr(
+                        self.shallow_lower_type_expr_with_context(
                             expr,
                             env,
                             scope,
@@ -814,7 +851,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             scope_payload,
                             shadowing,
                             substitutions,
-                            mode,
+                            reduction_context,
                         )
                     })
                     .collect();
@@ -829,7 +866,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // Parenthesised types are structurally transparent — `(A | B)`
             // is equivalent to `A | B`. Unwrap and recurse (plan B4
             // follow-up).
-            TypeExpr::Parenthesized(inner) => self.shallow_lower_type_expr(
+            TypeExpr::Parenthesized(inner) => self.shallow_lower_type_expr_with_context(
                 inner,
                 env,
                 scope,
@@ -837,7 +874,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 scope_payload,
                 shadowing,
                 substitutions,
-                mode,
+                reduction_context,
             ),
             // Mapped types (`{ [K in keyof T]: T[K] }` and friends)
             // route through `SemanticQueryKey::MappedType` so `build_mapped_type`
@@ -916,7 +953,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let (source_sem, key_space_sem) = match source.as_ref() {
                     // `{ [K in keyof T]: ... }` — extract T.
                     TypeExpr::KeyOf(inner) => {
-                        let inner_id = self.shallow_lower_type_expr(
+                        let inner_id = self.shallow_lower_type_expr_with_context(
                             inner,
                             env,
                             scope,
@@ -924,18 +961,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             scope_payload,
                             shadowing,
                             substitutions,
-                            mode,
+                            reduction_context,
                         );
-                        let key_space =
-                            match self.execute(SemanticQueryKey::KeyOf { base: inner_id }) {
-                                QueryResult::Value(id) => id,
-                                _ => self.opaque(QueryError::Miss),
-                            };
+                        let key_space = match self.execute(SemanticQueryKey::KeyOf {
+                            base: inner_id,
+                            context: reduction_context,
+                        }) {
+                            QueryResult::Value(id) => id,
+                            _ => self.opaque(QueryError::Miss),
+                        };
                         (inner_id, key_space)
                     }
                     // Fallback: the source shape IS the key space.
                     _ => {
-                        let lowered = self.shallow_lower_type_expr(
+                        let lowered = self.shallow_lower_type_expr_with_context(
                             source,
                             env,
                             scope,
@@ -943,13 +982,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             scope_payload,
                             shadowing,
                             substitutions,
-                            mode,
+                            reduction_context,
                         );
                         (lowered, lowered)
                     }
                 };
 
-                let value_sem = self.shallow_lower_type_expr(
+                let value_sem = self.shallow_lower_type_expr_with_context(
                     value,
                     &mapper_env,
                     scope,
@@ -957,7 +996,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope_payload,
                     shadowing,
                     substitutions,
-                    mode,
+                    reduction_context,
                 );
 
                 let optionality = match optional {
@@ -972,7 +1011,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 };
 
                 let name_remap = name_type.as_ref().map(|nt| {
-                    self.shallow_lower_type_expr(
+                    self.shallow_lower_type_expr_with_context(
                         nt,
                         &mapper_env,
                         scope,
@@ -980,7 +1019,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         scope_payload,
                         shadowing,
                         substitutions,
-                        mode,
+                        reduction_context,
                     )
                 });
 
@@ -1013,6 +1052,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 match self.execute(SemanticQueryKey::MappedType {
                     source: source_sem,
                     mapper,
+                    context: reduction_context,
                 }) {
                     QueryResult::Value(id) => id,
                     _ => self.opaque(QueryError::Miss),
@@ -1020,7 +1060,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             // KeyOf at shell level routes through the KeyOf dispatch.
             TypeExpr::KeyOf(operand) => {
-                let base_id = self.shallow_lower_type_expr(
+                let base_id = self.shallow_lower_type_expr_with_context(
                     operand,
                     env,
                     scope,
@@ -1028,11 +1068,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope_payload,
                     shadowing,
                     substitutions,
-                    mode,
+                    reduction_context,
                 );
                 match graph.node_data(base_id).as_deref() {
                     Some(SemanticNodeData::Object(_)) => {
-                        match self.execute(SemanticQueryKey::KeyOf { base: base_id }) {
+                        match self.execute(SemanticQueryKey::KeyOf {
+                            base: base_id,
+                            context: reduction_context,
+                        }) {
                             QueryResult::Value(id) => id,
                             _ => self.opaque(QueryError::Miss),
                         }
@@ -1049,7 +1092,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // `ProjectPath` semantics.
             TypeExpr::IndexedAccess { object, index } => {
                 use crate::semantic_query::{IndexKey, ProjectionMode};
-                let obj_id = self.shallow_lower_type_expr(
+                let obj_id = self.shallow_lower_type_expr_with_context(
                     object,
                     env,
                     scope,
@@ -1057,7 +1100,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope_payload,
                     shadowing,
                     substitutions,
-                    mode,
+                    reduction_context,
                 );
                 // Try to reduce literal-string / literal-number indices
                 // to a `PathSegment::Index` — fall back to TypeNode for
@@ -1107,7 +1150,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             IndexKey::Number(*n as i64)
                         }
                         _ => {
-                            let idx_id = self.shallow_lower_type_expr(
+                            let idx_id = self.shallow_lower_type_expr_with_context(
                                 index,
                                 env,
                                 scope,
@@ -1115,13 +1158,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope_payload,
                                 shadowing,
                                 substitutions,
-                                mode,
+                                reduction_context,
                             );
                             IndexKey::TypeNode(idx_id)
                         }
                     },
                     _ => {
-                        let idx_id = self.shallow_lower_type_expr(
+                        let idx_id = self.shallow_lower_type_expr_with_context(
                             index,
                             env,
                             scope,
@@ -1129,7 +1172,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             scope_payload,
                             shadowing,
                             substitutions,
-                            mode,
+                            reduction_context,
                         );
                         IndexKey::TypeNode(idx_id)
                     }
@@ -1164,7 +1207,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 true_type,
                 false_type,
             } => {
-                let check_id = self.shallow_lower_type_expr(
+                let check_id = self.shallow_lower_type_expr_with_context(
                     check,
                     env,
                     scope,
@@ -1172,9 +1215,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope_payload,
                     shadowing,
                     substitutions,
-                    mode,
+                    reduction_context,
                 );
-                let extends_id = self.shallow_lower_type_expr(
+                let extends_id = self.shallow_lower_type_expr_with_context(
                     extends,
                     env,
                     scope,
@@ -1182,7 +1225,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope_payload,
                     shadowing,
                     substitutions,
-                    mode,
+                    reduction_context,
                 );
                 // Cluster A + Step 1.5 mapped+conditional infer
                 // closure: collect EVERY `SemanticNodeData::Infer { name }`
@@ -1215,7 +1258,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         env
                     }
                 };
-                let true_id = self.shallow_lower_type_expr(
+                let true_id = self.shallow_lower_type_expr_with_context(
                     true_type,
                     true_env,
                     scope,
@@ -1223,9 +1266,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope_payload,
                     shadowing,
                     substitutions,
-                    mode,
+                    reduction_context,
                 );
-                let false_id = self.shallow_lower_type_expr(
+                let false_id = self.shallow_lower_type_expr_with_context(
                     false_type,
                     env,
                     scope,
@@ -1233,7 +1276,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope_payload,
                     shadowing,
                     substitutions,
-                    mode,
+                    reduction_context,
                 );
                 match self.execute(SemanticQueryKey::Conditional {
                     check: check_id,
@@ -1353,7 +1396,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .iter()
                     .map(|param| FunctionParam {
                         name: param.name.as_deref().map(Arc::<str>::from),
-                        ty: self.shallow_lower_type_expr(
+                        ty: self.shallow_lower_type_expr_with_context(
                             &param.ty,
                             env,
                             scope,
@@ -1361,14 +1404,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             scope_payload,
                             shadowing,
                             substitutions,
-                            mode,
+                            reduction_context,
                         ),
                         optional: param.optional,
                         rest: param.rest,
                     })
                     .collect();
                 let return_type = match func.return_type.as_deref() {
-                    Some(ret) => self.shallow_lower_type_expr(
+                    Some(ret) => self.shallow_lower_type_expr_with_context(
                         ret,
                         env,
                         scope,
@@ -1376,7 +1419,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         scope_payload,
                         shadowing,
                         substitutions,
-                        mode,
+                        reduction_context,
                     ),
                     None => self.opaque(QueryError::Miss),
                 };
@@ -1386,7 +1429,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .map(|tp| TypeParamDecl {
                         name: Arc::from(tp.name.as_str()),
                         constraint: tp.constraint.as_deref().map(|c| {
-                            self.shallow_lower_type_expr(
+                            self.shallow_lower_type_expr_with_context(
                                 c,
                                 env,
                                 scope,
@@ -1394,11 +1437,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope_payload,
                                 shadowing,
                                 substitutions,
-                                mode,
+                                reduction_context,
                             )
                         }),
                         default: tp.default.as_deref().map(|d| {
-                            self.shallow_lower_type_expr(
+                            self.shallow_lower_type_expr_with_context(
                                 d,
                                 env,
                                 scope,
@@ -1406,7 +1449,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope_payload,
                                 shadowing,
                                 substitutions,
-                                mode,
+                                reduction_context,
                             )
                         }),
                     })

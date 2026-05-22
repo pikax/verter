@@ -11,7 +11,8 @@ use std::sync::Arc;
 use crate::fact_signature_helpers::ReadSetSignature;
 use crate::semantic_query::{
     DeclIdentity, DepSignature, HostResolvedNamedTypeKey, IndexKey, MapperKey, PathSegment,
-    ProjectionMode, QueryResult, ResolveDeclKey, SemanticNodeId, SemanticQueryKey, ValueRootKey,
+    ProjectionMode, ProjectionReductionContext, QueryResult, ReductionDemand, ResolveDeclKey,
+    SemanticNodeId, SemanticQueryKey, ValueRootKey,
 };
 
 #[derive(Clone)]
@@ -151,6 +152,14 @@ pub(super) enum FamilyKey {
 /// Per-family slot selector. For non-mode variants only `Single` is used;
 /// for mode-bearing variants one of `Identity` / `Navigate` / `Shallow` /
 /// `Expanded` is selected from the key's `ProjectionMode`.
+///
+/// Block 6.i Commit AX (codex-hybrid): the `Instantiate` / `KeyOf` /
+/// `MappedType` families carry a [`ProjectionReductionContext`] in
+/// their key, not just a `ProjectionMode`. Their slots are picked from
+/// the `TransitShallow` / `TransitNavigate` / `TransitIdentity` /
+/// `TransitExpanded` set whenever the context's `demand` is
+/// `StructuralTransit`, keeping transit results from colliding with
+/// `Published` results on the same node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum ModeSlot {
     Single,
@@ -163,6 +172,14 @@ pub(super) enum ModeSlot {
     /// TypeParam shells); does NOT backfill or get backfilled by other
     /// modes.
     Skeleton,
+    /// `StructuralTransit` variants of the four publication modes —
+    /// Block 6.i Commit AX (codex-hybrid). Distinct from the
+    /// publication slots; do NOT backfill the publication slots and
+    /// are not backfilled by them.
+    TransitIdentity,
+    TransitNavigate,
+    TransitShallow,
+    TransitExpanded,
 }
 
 /// Per-family per-slot warm storage. Each slot independently holds an
@@ -178,6 +195,14 @@ pub(super) struct FamilySlots {
     /// Skeleton mode slot. Independent from
     /// Navigate/Expanded; does NOT participate in backfill.
     skeleton: Option<MemoEntry>,
+    /// `StructuralTransit` slot mirrors of the four publication slots —
+    /// Block 6.i Commit AX (codex-hybrid). Independent from the
+    /// publication slots; backfill within the transit family follows
+    /// the same `Expanded → Shallow → Navigate → Identity` hierarchy.
+    transit_identity: Option<MemoEntry>,
+    transit_navigate: Option<MemoEntry>,
+    transit_shallow: Option<MemoEntry>,
+    transit_expanded: Option<MemoEntry>,
 }
 
 impl FamilySlots {
@@ -189,6 +214,10 @@ impl FamilySlots {
             ModeSlot::Shallow => self.shallow.as_ref(),
             ModeSlot::Expanded => self.expanded.as_ref(),
             ModeSlot::Skeleton => self.skeleton.as_ref(),
+            ModeSlot::TransitIdentity => self.transit_identity.as_ref(),
+            ModeSlot::TransitNavigate => self.transit_navigate.as_ref(),
+            ModeSlot::TransitShallow => self.transit_shallow.as_ref(),
+            ModeSlot::TransitExpanded => self.transit_expanded.as_ref(),
         }
     }
 
@@ -200,6 +229,10 @@ impl FamilySlots {
             ModeSlot::Shallow => &mut self.shallow,
             ModeSlot::Expanded => &mut self.expanded,
             ModeSlot::Skeleton => &mut self.skeleton,
+            ModeSlot::TransitIdentity => &mut self.transit_identity,
+            ModeSlot::TransitNavigate => &mut self.transit_navigate,
+            ModeSlot::TransitShallow => &mut self.transit_shallow,
+            ModeSlot::TransitExpanded => &mut self.transit_expanded,
         }
     }
 
@@ -243,6 +276,10 @@ impl FamilySlots {
             &self.shallow,
             &self.expanded,
             &self.skeleton,
+            &self.transit_identity,
+            &self.transit_navigate,
+            &self.transit_shallow,
+            &self.transit_expanded,
         ];
         slots.iter().filter(|s| s.is_some()).count()
     }
@@ -272,6 +309,18 @@ impl FamilySlots {
         if let Some(e) = &self.skeleton {
             out.push(("skeleton", e));
         }
+        if let Some(e) = &self.transit_identity {
+            out.push(("transit_identity", e));
+        }
+        if let Some(e) = &self.transit_navigate {
+            out.push(("transit_navigate", e));
+        }
+        if let Some(e) = &self.transit_shallow {
+            out.push(("transit_shallow", e));
+        }
+        if let Some(e) = &self.transit_expanded {
+            out.push(("transit_expanded", e));
+        }
         out
     }
 }
@@ -293,6 +342,13 @@ pub struct AuditEagerKeyRow {
 /// `Skeleton` is independent of the Identity/Navigate/Shallow/Expanded
 /// hierarchy (different semantics: preserves open generics) — it backfills
 /// nothing AND nothing backfills it.
+///
+/// Block 6.i Commit AX (codex-hybrid): the `Transit*` slots mirror the
+/// publication-slot fan-out within the transit family. Cross-family
+/// backfill (Transit → publication or publication → Transit) is NOT
+/// admitted — a publication-context result and a transit-context
+/// result have different reduction semantics and must not share a
+/// cache cell.
 pub(super) fn backfill_targets(slot: ModeSlot) -> &'static [ModeSlot] {
     match slot {
         ModeSlot::Single => &[],
@@ -301,6 +357,14 @@ pub(super) fn backfill_targets(slot: ModeSlot) -> &'static [ModeSlot] {
         ModeSlot::Shallow => &[ModeSlot::Navigate, ModeSlot::Identity],
         ModeSlot::Expanded => &[ModeSlot::Shallow, ModeSlot::Navigate, ModeSlot::Identity],
         ModeSlot::Skeleton => &[],
+        ModeSlot::TransitIdentity => &[],
+        ModeSlot::TransitNavigate => &[ModeSlot::TransitIdentity],
+        ModeSlot::TransitShallow => &[ModeSlot::TransitNavigate, ModeSlot::TransitIdentity],
+        ModeSlot::TransitExpanded => &[
+            ModeSlot::TransitShallow,
+            ModeSlot::TransitNavigate,
+            ModeSlot::TransitIdentity,
+        ],
     }
 }
 
@@ -311,6 +375,26 @@ pub(super) fn mode_to_slot(mode: ProjectionMode) -> ModeSlot {
         ProjectionMode::Shallow => ModeSlot::Shallow,
         ProjectionMode::Expanded => ModeSlot::Expanded,
         ProjectionMode::Skeleton => ModeSlot::Skeleton,
+    }
+}
+
+/// Map a [`ProjectionReductionContext`] to the matching [`ModeSlot`].
+/// Publication contexts use the standard
+/// Identity/Navigate/Shallow/Expanded/Skeleton slots; transit contexts
+/// use the `Transit*` mirrors.
+pub(super) fn context_to_slot(ctx: ProjectionReductionContext) -> ModeSlot {
+    match ctx.demand {
+        ReductionDemand::Published => mode_to_slot(ctx.mode),
+        ReductionDemand::StructuralTransit => match ctx.mode {
+            ProjectionMode::Identity => ModeSlot::TransitIdentity,
+            ProjectionMode::Navigate => ModeSlot::TransitNavigate,
+            ProjectionMode::Shallow => ModeSlot::TransitShallow,
+            ProjectionMode::Expanded => ModeSlot::TransitExpanded,
+            // Skeleton has its own slot — distinct semantics (open-
+            // generic preservation) that the codex-hybrid leaves
+            // outside the reduction-demand axis.
+            ProjectionMode::Skeleton => ModeSlot::Skeleton,
+        },
     }
 }
 
@@ -325,13 +409,13 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
         SemanticQueryKey::Instantiate {
             base,
             args,
-            body_mode,
+            context,
         } => (
             FamilyKey::Instantiate {
                 base: base.clone(),
                 args: Arc::clone(args),
             },
-            mode_to_slot(*body_mode),
+            context_to_slot(*context),
         ),
         SemanticQueryKey::ProjectMember { base, member, mode } => (
             FamilyKey::ProjectMember {
@@ -347,13 +431,19 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             },
             mode_to_slot(*mode),
         ),
-        SemanticQueryKey::KeyOf { base } => (FamilyKey::KeyOf { base: *base }, ModeSlot::Single),
-        SemanticQueryKey::MappedType { source, mapper } => (
+        SemanticQueryKey::KeyOf { base, context } => {
+            (FamilyKey::KeyOf { base: *base }, context_to_slot(*context))
+        }
+        SemanticQueryKey::MappedType {
+            source,
+            mapper,
+            context,
+        } => (
             FamilyKey::MappedType {
                 source: *source,
                 mapper: mapper.clone(),
             },
-            ModeSlot::Single,
+            context_to_slot(*context),
         ),
         SemanticQueryKey::Conditional {
             check,
@@ -477,4 +567,9 @@ pub(super) const ALL_MODE_SLOTS: &[ModeSlot] = &[
     ModeSlot::Navigate,
     ModeSlot::Shallow,
     ModeSlot::Expanded,
+    ModeSlot::Skeleton,
+    ModeSlot::TransitIdentity,
+    ModeSlot::TransitNavigate,
+    ModeSlot::TransitShallow,
+    ModeSlot::TransitExpanded,
 ];

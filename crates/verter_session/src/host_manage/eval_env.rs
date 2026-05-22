@@ -674,6 +674,19 @@ impl VerterHost {
                         }
                     }
 
+                    // Block 6.i Commit AX (codex-binding) — capture
+                    // the production-path SemanticNodeId for this
+                    // field. Each branch that lowers via dispatch
+                    // sets this variable to the produced terminal
+                    // node id. Branches that do not dispatch (fast
+                    // path, shallow-preserve, defineModel-without-
+                    // type-arg, etc.) leave it as `None`. The
+                    // captured id replaces the retired audit-only
+                    // re-lowering at the closure's tail (no
+                    // duplicate dispatch round-trip — audit is now a
+                    // pure reader of production work).
+                    let mut produced_node_id: Option<crate::semantic_query::SemanticNodeId> = None;
+
                     let expansion = if let Some(fast) =
                         engine.try_fast_shallow_field_expr(canonical, parsed)
                     {
@@ -806,6 +819,11 @@ impl VerterHost {
                                             ProjectionMode::Expanded,
                                         )
                                     {
+                                        // Block 6.i Commit AX — capture
+                                        // production node id for the audit
+                                        // record (replaces the retired
+                                        // audit-only re-lowering sidecar).
+                                        produced_node_id = Some(base_id);
                                         if let Some(raised) =
                                             dispatch.raise_node_to_type_expr(base_id)
                                         {
@@ -951,15 +969,27 @@ impl VerterHost {
                                                     Some(MacroPathSegment::Member(binding)),
                                                     None,
                                                 ) => {
+                                                    // Block 6.i Commit AX —
+                                                    // terminal-id variant
+                                                    // exposes the production
+                                                    // SemanticNodeId so the
+                                                    // audit record captures
+                                                    // identity from the
+                                                    // dispatch path (no
+                                                    // audit-only re-lower).
                                                     let slot_binding = dispatch
-                                                        .project_slot_binding_member(
+                                                        .project_slot_binding_member_with_terminal_id(
                                                             base_id,
                                                             slot.as_ref(),
                                                             binding.as_ref(),
                                                             ProjectionMode::Expanded,
                                                         );
                                                     match slot_binding.value {
-                                                        QueryResult::Value(raised) => {
+                                                        QueryResult::Value((
+                                                            terminal_id,
+                                                            raised,
+                                                        )) => {
+                                                            produced_node_id = Some(terminal_id);
                                                             ExpansionResult::exact_concrete(
                                                                 ExpandedNormalizedExpr {
                                                                     expr: raised,
@@ -1011,6 +1041,11 @@ impl VerterHost {
                                             });
                                         match projected {
                                             QueryResult::Value(node_id) => {
+                                                // Block 6.i Commit AX —
+                                                // capture production node
+                                                // id for the audit record
+                                                // before raise.
+                                                produced_node_id = Some(node_id);
                                                 match dispatch.raise_node_to_type_expr(node_id) {
                                                     Some(raised) => {
                                                         ExpansionResult::exact_concrete(
@@ -1049,35 +1084,36 @@ impl VerterHost {
                         }
                     };
 
-                    // Step 9.1 / D32: route the produced expanded type
-                    // through dispatch's lower to capture a SemanticNodeId
-                    // for sidecar storage. Audit-gated so non-audit
-                    // requests don't pay the dispatch round-trip cost.
-                    // None when the lowering misses (e.g., synthetic /
-                    // inline-annotation entries dispatch can't resolve).
-                    if audit_enabled {
-                        let dispatch =
-                            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
-                                engine.ctx(),
-                            );
-                        let node_id =
-                            dispatch.lower_type_expr_in_scope(canonical, &expansion.value.expr);
-                        let target = match ctx.kind {
-                            verter_semantic::analysis::type_eval_build::FieldKind::Prop => {
-                                &prop_node_ids
-                            }
-                            verter_semantic::analysis::type_eval_build::FieldKind::Emit => {
-                                &emit_node_ids
-                            }
-                            verter_semantic::analysis::type_eval_build::FieldKind::SlotBinding => {
-                                &slot_binding_node_ids
-                            }
-                            verter_semantic::analysis::type_eval_build::FieldKind::Binding => {
-                                &binding_node_ids
-                            }
-                        };
-                        target.borrow_mut().push(node_id);
-                    }
+                    // Block 6.i Commit AX (codex-binding) — the
+                    // audit-gated re-lowering sidecar is RETIRED.
+                    // `produced_node_id` was captured directly off
+                    // each production dispatch branch above (or left
+                    // as `None` for fast-path / symbolic / failed-
+                    // raise branches that legitimately have no
+                    // semantic node to publish). The buffer push is
+                    // unconditional so audit-on/off perform IDENTICAL
+                    // semantic work — the only audit-side cost is a
+                    // `Vec::push(Option<SemanticNodeId>)` per field,
+                    // which is microseconds. The
+                    // `SurfaceNodeIdentities` assembly below remains
+                    // audit-gated (it materialises the per-FieldKind
+                    // vectors into the audit record only when audit
+                    // is on).
+                    let target = match ctx.kind {
+                        verter_semantic::analysis::type_eval_build::FieldKind::Prop => {
+                            &prop_node_ids
+                        }
+                        verter_semantic::analysis::type_eval_build::FieldKind::Emit => {
+                            &emit_node_ids
+                        }
+                        verter_semantic::analysis::type_eval_build::FieldKind::SlotBinding => {
+                            &slot_binding_node_ids
+                        }
+                        verter_semantic::analysis::type_eval_build::FieldKind::Binding => {
+                            &binding_node_ids
+                        }
+                    };
+                    target.borrow_mut().push(produced_node_id);
 
                     expansion
                 },

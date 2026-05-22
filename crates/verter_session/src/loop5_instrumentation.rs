@@ -928,7 +928,9 @@ mod tests {
         let instantiate = SemanticQueryKey::Instantiate {
             base: identity.clone(),
             args: Arc::from(Vec::new().into_boxed_slice()),
-            body_mode: ProjectionMode::Skeleton,
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Skeleton,
+            ),
         };
         let project_member = SemanticQueryKey::ProjectMember {
             base: dummy_node,
@@ -940,7 +942,12 @@ mod tests {
             index: IndexKey::String(Arc::from("k")),
             mode: ProjectionMode::Navigate,
         };
-        let key_of = SemanticQueryKey::KeyOf { base: dummy_node };
+        let key_of = SemanticQueryKey::KeyOf {
+            base: dummy_node,
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Expanded,
+            ),
+        };
         let conditional = SemanticQueryKey::Conditional {
             check: dummy_node,
             extends: dummy_node,

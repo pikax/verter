@@ -5134,11 +5134,15 @@ defineProps<Props>()
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Props");
 
+    let projection = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
+        crate::meta_resolve::projection_demand::PublishedSurfaceKind::Props,
+    );
     let (shape, source) = produce_one_macro_object_shape(
         &mut query_engine,
         "/src/App.vue",
         &lowered,
         has_prop_shape_surface,
+        projection.cursor(),
     );
 
     assert!(
@@ -5187,11 +5191,15 @@ defineProps<Props>()
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Props");
 
+    let projection = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
+        crate::meta_resolve::projection_demand::PublishedSurfaceKind::Props,
+    );
     let (shape, source) = produce_one_macro_object_shape(
         &mut query_engine,
         "/src/App.vue",
         &lowered,
         has_prop_shape_surface,
+        projection.cursor(),
     );
     let shape = shape.expect("projection should produce a shape");
     let prop_names: Vec<&str> = shape
@@ -7283,11 +7291,15 @@ defineProps<Props<T>>()
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Props<T>");
 
+    let projection = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
+        crate::meta_resolve::projection_demand::PublishedSurfaceKind::Props,
+    );
     let (shape, source) = produce_one_macro_object_shape(
         &mut query_engine,
         "/src/App.vue",
         &lowered,
         has_prop_shape_surface,
+        projection.cursor(),
     );
     let shape =
         shape.expect("generic non-object aliases should still produce a defineProps surface");
@@ -7386,11 +7398,15 @@ defineProps<ColorModeSelectProps>()
     let lowered =
         verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("ColorModeSelectProps");
 
+    let projection = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
+        crate::meta_resolve::projection_demand::PublishedSurfaceKind::Props,
+    );
     let (shape, source) = produce_one_macro_object_shape(
         &mut query_engine,
         "/src/App.vue",
         &lowered,
         has_prop_shape_surface,
+        projection.cursor(),
     );
 
     assert!(shape.is_some(), "color-mode-style props should materialize");
@@ -7474,11 +7490,15 @@ defineProps<Props>()
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Props");
 
+    let projection = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
+        crate::meta_resolve::projection_demand::PublishedSurfaceKind::Props,
+    );
     let (shape, source) = produce_one_macro_object_shape(
         &mut query_engine,
         "/src/App.vue",
         &lowered,
         has_prop_shape_surface,
+        projection.cursor(),
     );
     let shape = shape.expect("dual-heritage alias-key props should materialize");
     let prop_names: Vec<&str> = shape
@@ -7698,11 +7718,15 @@ defineProps<ColorModeSelectProps>()
     let lowered =
         verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("ColorModeSelectProps");
 
+    let projection = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
+        crate::meta_resolve::projection_demand::PublishedSurfaceKind::Props,
+    );
     let (shape, source) = produce_one_macro_object_shape(
         &mut query_engine,
         component,
         &lowered,
         has_prop_shape_surface,
+        projection.cursor(),
     );
 
     assert!(shape.is_some(), "ColorModeSelectProps should materialize");
@@ -8022,11 +8046,15 @@ defineProps<ColorModeSelectProps>()
     let lowered =
         verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("ColorModeSelectProps");
     let direct_solves_before = 0u32;
+    let projection = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
+        crate::meta_resolve::projection_demand::PublishedSurfaceKind::Props,
+    );
     let (direct_shape, direct_source) = produce_one_macro_object_shape(
         &mut query_engine,
         component,
         &lowered,
         has_prop_shape_surface,
+        projection.cursor(),
     );
     assert!(
         direct_shape.is_some(),
@@ -8733,7 +8761,7 @@ defineProps<Props<T>>()
         }]),
     };
     let lowered = dispatch
-        .lower_type_expr_in_scope("/Generic.vue", &props_t)
+        .lower_type_expr_in_scope_with_mode("/Generic.vue", &props_t, ProjectionMode::Expanded)
         .expect("dispatch must lower the Props<T> shell rooted at /Generic.vue");
 
     let projected = dispatch.execute(SemanticQueryKey::ProjectPath {

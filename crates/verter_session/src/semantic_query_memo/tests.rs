@@ -963,7 +963,9 @@ fn invalidate_canonical_evicts_instantiate_entries_that_read_that_canonical_body
     let key = SemanticQueryKey::Instantiate {
         base,
         args: Arc::from(vec![arg].into_boxed_slice()),
-        body_mode: crate::semantic_query::ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
     };
 
     // Dep-sig references /w/body.ts — the declaration file the
@@ -1008,7 +1010,9 @@ fn invalidate_canonical_keeps_instantiate_entries_whose_bases_are_unrelated() {
     let key = SemanticQueryKey::Instantiate {
         base,
         args: Arc::from(vec![arg].into_boxed_slice()),
-        body_mode: crate::semantic_query::ProjectionMode::Expanded,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
     };
 
     let value_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));

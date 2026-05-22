@@ -255,47 +255,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
-    /// Convenience wrapper for consumer migrations.
-    /// Lowers a [`TypeExpr`] rooted at the supplied canonical file scope
-    /// via [`Self::shallow_lower_type_expr`] with empty env, empty
-    /// name-resolution, and the scope's prepared-decl payload for
-    /// bare-name fallback. The dispatch walker consults the scope's
-    /// `DeclarationScopePayload` + host-owned `shallow_file_state` to
-    /// resolve bare `TypeExpr::Ref` hops directly — no
-    /// `SessionSolverHost` is constructed on this path (
-    /// step 3).
+    /// Mode-aware lowering — the sole lowering entry point.
     ///
-    /// Lowers under [`ProjectionMode::Expanded`]. Callers that need
-    /// mode-aware lowering should use
-    /// [`Self::lower_type_expr_in_scope_with_mode`] (plan Step 1 / D1.6).
+    /// Block 6.i Commit AX: the implicit `lower_type_expr_in_scope`
+    /// wrapper that defaulted to `ProjectionMode::Expanded` is
+    /// retired. Every caller MUST state mode explicitly:
     ///
-    /// Returns `None` when the scope's file is not known to the host or
-    /// the expression lowers to an opaque miss.
-    pub fn lower_type_expr_in_scope(
-        &self,
-        scope_canonical_id: &str,
-        expr: &verter_type_expr::TypeExpr,
-    ) -> Option<SemanticNodeId> {
-        self.lower_type_expr_in_scope_with_mode(
-            scope_canonical_id,
-            expr,
-            crate::semantic_query::ProjectionMode::Expanded,
-        )
-    }
-
-    /// Mode-aware variant of [`Self::lower_type_expr_in_scope`].
+    /// - Intermediate base lowering (the result is fed into a
+    ///   subsequent `ProjectPath { base, .., mode }` dispatch) — use
+    ///   `Navigate`. Lowering the base in `Expanded` eagerly reduces
+    ///   `keyof T` / `MappedType<T>` operators at the lowering site
+    ///   even when the terminal demand is shallow.
+    /// - True full-expansion call sites that read the lowered node
+    ///   as the published result (no path-walking follow-up) — pass
+    ///   `Expanded` explicitly.
     ///
-    /// Threads `mode` into the underlying
-    /// [`Self::shallow_lower_type_expr`] call so callers can request a
-    /// `Navigate` lowering (lazy-terminal: keep `Ref`-shells lazy
-    /// instead of triggering wholesale body expansion at the lowering
-    /// site) or an `Expanded` lowering (the legacy default of the
-    /// non-mode-aware sibling).
-    ///
-    /// Used by Step 1's host-side closure (`compute_evaluated_types_*`)
-    /// to thread the macro shell through dispatch with the consumer's
-    /// chosen mode (currently `Expanded` — the consumer wants reduced
-    /// output for component-meta projection).
+    /// The audit footprint regression (ChatMessages cold-seq
+    /// `outputSchema|execute = 62`) traced to the implicit-Expanded
+    /// default surviving on intermediate-base lowering sites; the
+    /// fix is rule-3 of the Block 6.i Commit AX spec.
     pub fn lower_type_expr_in_scope_with_mode(
         &self,
         scope_canonical_id: &str,
@@ -600,8 +578,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticQueryKey::Instantiate {
                     base,
                     args,
-                    body_mode,
-                } => self.build_instantiate(base, args, *body_mode),
+                    context,
+                } => self.build_instantiate(base, args, *context),
                 // `ProjectMember` / `IndexedAccess` are API sugar that
                 // admission-time canonicalisation rewrites to
                 // `ProjectPath` above. The build closure never observes
@@ -620,10 +598,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticQueryKey::ProjectPath { base, path, mode } => {
                     self.build_project_path(*base, path, *mode)
                 }
-                SemanticQueryKey::KeyOf { base } => self.build_key_of(*base),
-                SemanticQueryKey::MappedType { source, mapper } => {
-                    self.build_mapped_type(*source, mapper)
-                }
+                SemanticQueryKey::KeyOf { base, context } => self.build_key_of(*base, *context),
+                SemanticQueryKey::MappedType {
+                    source,
+                    mapper,
+                    context,
+                } => self.build_mapped_type(*source, mapper, *context),
                 SemanticQueryKey::Conditional {
                     check,
                     extends,
@@ -857,8 +837,8 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
                     ctx.bump_type_resolution_hop(*mode);
                     ctx.bump_type_resolution_projection_op();
                 }
-                SemanticQueryKey::Instantiate { body_mode, .. } => {
-                    ctx.bump_type_resolution_hop(*body_mode);
+                SemanticQueryKey::Instantiate { context, .. } => {
+                    ctx.bump_type_resolution_hop(context.mode);
                 }
                 SemanticQueryKey::Conditional { .. } => {
                     ctx.bump_type_resolution_conditional_decision();
@@ -1036,7 +1016,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.execute(SemanticQueryKey::Instantiate {
             base: pick_builtin_decl_identity(),
             args: Arc::from(vec![base, key_set].into_boxed_slice()),
-            body_mode: mode,
+            context: crate::semantic_query::ProjectionReductionContext::published(mode),
         })
     }
 
@@ -1058,7 +1038,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.execute(SemanticQueryKey::Instantiate {
             base: omit_builtin_decl_identity(),
             args: Arc::from(vec![base, key_set].into_boxed_slice()),
-            body_mode: mode,
+            context: crate::semantic_query::ProjectionReductionContext::published(mode),
         })
     }
 
@@ -1088,51 +1068,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Slot-binding-parameter type lowering.
-    ///
-    /// Given the `defineSlots<T>()` macro payload's lowered base node
-    /// and the target `slot_name` + `binding_name` pair, projects the
-    /// slot's first-parameter Object's `binding_name` member through
-    /// dispatch via existing variants — i.e., composes:
-    ///
-    /// 1. `ProjectPath { base, [Member(slot_name)], Navigate }` →
-    ///    yields the slot value's `SemanticNodeId`. Navigate mode is
-    ///    correct here because this is an intermediate hop per
-    ///    CLAUDE.md "Macro Type Traversal Rule"
-    ///    (path-precise rule — only the terminal hop runs in the
-    ///    caller's mode).
-    /// 2. Reads the slot value's [`SemanticNodeData`]: a slot's value
-    ///    is a `Function` (call signature), and the binding lives on
-    ///    its first parameter's `Object` surface. Pull `params[0].ty`.
-    /// 3. `ProjectPath { base: param0_ty, [Member(binding_name)], mode }` →
-    ///    yields the binding's lowered type in the caller's mode
-    ///    (typically `Expanded` for component-meta).
-    ///
-    /// **Why a helper, not a new variant?** The slot-binding lowering
-    /// composes existing variants and lives as a non-variant dispatch
-    /// helper. Mirrors `execute_pick` / `execute_omit` /
-    /// `materialize_surface` / `execute_to_type_expr`, which are also
-    /// non-variant dispatch helpers.
-    ///
-    /// **Migration source:** the engine analysis path's
-    /// `expand_field_expr` closure used to dispatch a single
-    /// `ProjectPath { base, [Member(slot), Member(binding)], Expanded }`
-    /// directly. The walker emits `Opaque(Miss)` when it reaches the
-    /// slot's `Function` value with `Member(binding)` remaining (per
-    /// `walk.rs:606-625` — `SemanticNodeData::Function { .. }` falls
-    /// through to `opaque_miss`), so the engine output for typed slot
-    /// bindings was `Unknown { raw: "semanticMiss" }`. This helper
-    /// closes that gap by descending through the `Function`'s
-    /// first-parameter into the binding's Object member.
-    ///
-    /// Returns:
-    /// - `CacheRead<QueryResult<TypeExpr>>` so dep_signature flows
-    ///   back to the caller's local fence (mirrors
-    ///   `execute_to_type_expr`).
-    /// - `QueryResult::Error(Miss)` when the intermediate hop misses,
-    ///   the slot value is not a `Function`, or the function has no
-    ///   parameters. Caller falls back to symbolic preservation per
-    ///   the engine's existing pattern.
+    /// Slot-binding-parameter type lowering for `defineSlots<T>()`.
+    /// Three-hop composition: `Navigate` to the slot member, read
+    /// `params[0].ty` from the slot value's `Function`, then project
+    /// the binding member off the param Object in the caller's mode.
+    /// Returns `QueryResult::Error(Miss)` when an intermediate hop
+    /// fails or the slot value is not a `Function`.
     pub fn project_slot_binding_member(
         &self,
         base: SemanticNodeId,
@@ -1140,11 +1081,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
         binding_name: &str,
         mode: ProjectionMode,
     ) -> CacheRead<QueryResult<TypeExpr>> {
-        // Hop 1: navigate the slot member from the macro payload base.
-        // Path-precise rule: intermediate hops use Navigate mode so the
-        // shared memo stores the intermediate at Navigate-mode key
-        // regardless of the caller's terminal mode (CLAUDE.md "Macro
-        // Type Traversal Rule").
+        let read =
+            self.project_slot_binding_member_with_terminal_id(base, slot_name, binding_name, mode);
+        CacheRead {
+            value: match read.value {
+                QueryResult::Value((_id, expr)) => QueryResult::Value(expr),
+                QueryResult::Recursive(id) => QueryResult::Recursive(id),
+                QueryResult::Error(e) => QueryResult::Error(e),
+            },
+            dep_signature: read.dep_signature,
+            walker_diagnostics: read.walker_diagnostics,
+            cache_suppress: read.cache_suppress,
+        }
+    }
+
+    /// Slot-binding terminal-id variant: same three-hop traversal as
+    /// [`Self::project_slot_binding_member`], plus exposes the terminal
+    /// `SemanticNodeId` alongside the raised `TypeExpr`. The audit-record
+    /// assembly in `compute_evaluated_types` consumes the production-path
+    /// identity directly (no audit-only re-lowering — see Block 6.i
+    /// Commit AX).
+    pub fn project_slot_binding_member_with_terminal_id(
+        &self,
+        base: SemanticNodeId,
+        slot_name: &str,
+        binding_name: &str,
+        mode: ProjectionMode,
+    ) -> CacheRead<QueryResult<(SemanticNodeId, TypeExpr)>> {
+        // Hop 1: Navigate to the slot member off the macro payload base.
         let slot_path: Arc<[PathSegment]> =
             Arc::from(vec![PathSegment::Member(Arc::from(slot_name))].into_boxed_slice());
         let slot_read = self.execute_read(SemanticQueryKey::ProjectPath {
@@ -1171,11 +1135,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 };
             }
         };
-
-        // Hop 2: read the slot value's first-parameter type.
-        // Per the slot-binding semantics (Verter macros §slots), every
-        // slot key surfaces as a slot whose bindings live on the slot
-        // function's first parameter Object literal.
+        // Hop 2: the slot value's first-parameter type holds the bindings.
         let param0_ty = match node_data_for(self.ctx, slot_node).as_deref() {
             Some(SemanticNodeData::Function { params, .. }) => match params.first() {
                 Some(param) => param.ty,
@@ -1197,28 +1157,32 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 };
             }
         };
-
-        // Hop 3: project the binding member off the param Object in
-        // the caller's mode (terminal hop runs in the requested mode
-        // per the path-precise rule).
+        // Hop 3: project the binding member off the param Object at the
+        // caller's terminal mode (path-precise rule — only the terminal
+        // runs in the requested mode).
         let binding_path: Arc<[PathSegment]> =
             Arc::from(vec![PathSegment::Member(Arc::from(binding_name))].into_boxed_slice());
-        let binding_read = self.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
+        let binding_read = self.execute_read(SemanticQueryKey::ProjectPath {
             base: param0_ty,
             path: binding_path,
             mode,
         });
-        // Merge dep signatures across the three hops so any change in
-        // the intermediate (slot Function shape) or terminal (binding
-        // Object) is observed by the caller's local fence.
         let merged: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = slot_read
             .dep_signature
             .iter()
             .cloned()
             .chain(binding_read.dep_signature.iter().cloned())
             .collect();
+        let value = match binding_read.value {
+            QueryResult::Value(terminal_id) => match self.raise_node_to_type_expr(terminal_id) {
+                Some(expr) => QueryResult::Value((terminal_id, expr)),
+                None => QueryResult::Error(QueryError::Miss),
+            },
+            QueryResult::Recursive(id) => QueryResult::Recursive(id),
+            QueryResult::Error(e) => QueryResult::Error(e),
+        };
         CacheRead {
-            value: binding_read.value,
+            value,
             dep_signature: Arc::from(merged.into_boxed_slice()),
             walker_diagnostics: binding_read.walker_diagnostics,
             cache_suppress: binding_read.cache_suppress,

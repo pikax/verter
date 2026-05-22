@@ -246,7 +246,7 @@ fn query_projection_mode(key: &SemanticQueryKey) -> ProjectionMode {
         | SemanticQueryKey::ProjectMember { mode, .. }
         | SemanticQueryKey::IndexedAccess { mode, .. }
         | SemanticQueryKey::ResolveMacroPayload { mode, .. } => *mode,
-        SemanticQueryKey::Instantiate { body_mode, .. } => *body_mode,
+        SemanticQueryKey::Instantiate { context, .. } => context.mode,
         SemanticQueryKey::ResolveDecl(_)
         | SemanticQueryKey::KeyOf { .. }
         | SemanticQueryKey::MappedType { .. }

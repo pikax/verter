@@ -357,26 +357,38 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
 /// Dual-emits the accumulated `dep_signature` into the active fact
 /// tracer + `DISPATCH_DEP_SIGNATURE_ACCUMULATOR`, mirroring the
 /// TypeExpr entry's contract.
-pub(crate) fn reduce_member_value_graph_native(
+/// Context-explicit per-member graph-native reducer entry (Block 6.i
+/// Commit AX, codex-hybrid spec).
+///
+/// The caller supplies the publication
+/// [`crate::semantic_query::ProjectionReductionContext`] that flows
+/// through every operator dispatch and through the iterative reducer's
+/// demand-traversal selection. `Published(Navigate)` is the per-prop
+/// publication boundary that keeps the demanded terminal shallow;
+/// `Published(Expanded)` is the whole-surface mode. The pre-AX
+/// `reduce_member_value_graph_native(_, _, _, ProjectionMode)` entry
+/// was retired — there is one behaviour path and one entry point.
+pub(crate) fn reduce_member_value_graph_native_with_context(
     ctx: &dyn crate::resolver_core::ResolverContext,
     _scope_canonical_id: &str,
     member_value: crate::semantic_query::SemanticNodeId,
-    mode: crate::semantic_query::ProjectionMode,
+    context: crate::semantic_query::ProjectionReductionContext,
 ) -> crate::project_semantic_dispatch::raise::MaterializedTypeExpr {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 
     let dispatch = ProjectSemanticDispatch::new(ctx);
 
-    // Drive the graph-native reducer DIRECTLY on `member_value`. NO
-    // `shallow_lower_type_expr` round-trip. `raise_and_reduce`
-    // internally:
-    //   1. `reduce_graph_node_iterative(member_value, mode, …)` —
-    //      walks the reachable subgraph of `member_value`, dispatching
-    //      per shape via `execute_cooperative`.
+    // Drive the graph-native reducer DIRECTLY on `member_value` under
+    // the caller's `context`. NO `shallow_lower_type_expr` round-trip.
+    // `raise_and_reduce_with_context` internally:
+    //   1. `reduce_graph_node_iterative(member_value, context, …)` —
+    //      top-down demand-driven worklist that pushes ONLY the
+    //      children the demand context requires (per the codex-hybrid
+    //      traversal rules).
     //   2. `raise_node_to_type_expr(reduced)` — single terminal raise.
     //   3. Returns `MaterializedTypeExpr { node_id, type_expr,
     //      dep_signature }`.
-    let materialized = dispatch.raise_and_reduce(member_value, mode);
+    let materialized = dispatch.raise_and_reduce_with_context(member_value, context);
 
     // Dual-emit dispatch facts into BOTH downstream channels:
     // (1) the legacy `DISPATCH_DEP_SIGNATURE_ACCUMULATOR` drained at

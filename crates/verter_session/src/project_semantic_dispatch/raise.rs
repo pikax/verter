@@ -26,8 +26,9 @@ use crate::resolver_core::component_meta_query_engine::{
 };
 use crate::semantic_query::{
     DepSignature, IndexKey, MapperKey, OptionalityMod, PrimitiveKind as SemanticPrimitiveKind,
-    ProjectionMode, QueryError, QueryResult, ReadonlyMod, ResolveDeclKey, ScopeId,
-    SemanticNodeData, SemanticNodeId, SemanticQueryKey, SurfaceMember, SurfaceView, TupleElement,
+    ProjectionMode, ProjectionReductionContext, QueryError, QueryResult, ReadonlyMod,
+    ReductionDemand, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    SurfaceMember, SurfaceView, TupleElement,
 };
 
 // =====================================================================
@@ -614,14 +615,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Returns a [`MaterializedTypeExpr`] carrying the producing
     /// `SemanticNodeId`, the raised `TypeExpr`, and the accumulated
     /// `DepSignature` (D31).
+    ///
+    /// Backwards-compatible entry — defaults to a
+    /// `Published(mode)` reduction context. Callers that need the
+    /// reduction-demand axis (`Published` vs `StructuralTransit`) go
+    /// through [`Self::raise_and_reduce_with_context`].
     #[allow(dead_code)] // wired by Step 6.3 caller migration.
     pub(crate) fn raise_and_reduce(
         &self,
         node: SemanticNodeId,
         mode: ProjectionMode,
     ) -> MaterializedTypeExpr {
+        self.raise_and_reduce_with_context(node, ProjectionReductionContext::published(mode))
+    }
+
+    /// Context-explicit variant of [`Self::raise_and_reduce`] (Block 6.i
+    /// Commit AX, codex-hybrid spec).
+    ///
+    /// The caller supplies the publication
+    /// [`ProjectionReductionContext`] that flows into every operator
+    /// dispatch and propagates through child traversal selection.
+    /// `Published(Expanded)` keeps whole-surface behaviour;
+    /// `Published(Navigate)` is the per-prop publication boundary that
+    /// stops at the demanded terminal without breadth-enumerating
+    /// composite members or inactive conditional branches.
+    #[allow(dead_code)] // wired by projector per-member entry.
+    pub(crate) fn raise_and_reduce_with_context(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> MaterializedTypeExpr {
         let mut state = ReduceState::default();
-        let reduced = self.reduce_graph_node_iterative(node, mode, &mut state);
+        let reduced = self.reduce_graph_node_iterative(node, context, &mut state);
         let type_expr = self
             .raise_node_to_type_expr(reduced)
             .unwrap_or(TypeExpr::Unknown {
@@ -634,26 +659,47 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Iterative graph-native reducer (D33 — stack-safe).
+    /// Top-down demand-driven graph reducer (Block 6.i Commit AX,
+    /// codex-hybrid spec — stack-safe).
     ///
-    /// Two-phase iteration:
-    /// 1. **Top-down traversal**: walk every reachable `(node, mode)`
-    ///    pair starting from `root`, recording the visit order in
-    ///    `topo`. Cycles are broken via the `visited` set keyed by
-    ///    `(SemanticNodeId, ProjectionMode)`.
-    /// 2. **Bottom-up reduction**: process `topo` in reverse so children
-    ///    are fully reduced before parents. For each node, look up the
-    ///    `SemanticNodeData`, apply the per-shape rule, and record the
-    ///    reduction in `mapping`. Parent rebuilds substitute child
-    ///    reductions via `mapping`.
+    /// Replaces the pre-Block-6.i bottom-up topological reducer. The
+    /// pre-walk visited the ENTIRE reachable subgraph and then reduced
+    /// every visited node — that meant `keyof T` / `{ [K in S]: V }`
+    /// inside non-selected conditional branches, generic arguments, or
+    /// mapped value bodies dispatched their own `KeyOf` /
+    /// `MappedType` keys under `Published(Expanded)`, reifying
+    /// `outputSchema` / `execute` per-member edges that no caller asked
+    /// for. The demand-driven design treats `Published` as "this exact
+    /// node is the demanded terminal of the current step": composite
+    /// children, inactive branches, and operator-operand subgraphs are
+    /// only descended into when the publication boundary demands them.
     ///
-    /// Stack-safe for arbitrarily deep acyclic structures (≥5000 levels;
-    /// verified by stack-safety regression fixtures in §4.1).
+    /// Iterative work-stack with two frame kinds:
+    ///
+    /// - `Descend(node, context)` — entry frame. Marks
+    ///   `(node, context)` visited and pushes a `Reduce(node, context)`
+    ///   frame followed by the children selected for that node + context
+    ///   (see [`Self::push_demand_children`]). Children are pushed AFTER
+    ///   the Reduce frame so they pop FIRST — the LIFO stack acts as a
+    ///   post-order traversal.
+    /// - `Reduce(node, context)` — closure frame. All selected children
+    ///   have been reduced into `state.mapping`; invoke
+    ///   `reduce_one(node, context, state)` to produce this node's
+    ///   reduction.
+    ///
+    /// `visited` and `mapping` are keyed by
+    /// `(SemanticNodeId, ProjectionReductionContext)` so a
+    /// `StructuralTransit` reduction does not collide with a
+    /// `Published` reduction on the same node — they are distinct
+    /// evaluations.
+    ///
+    /// Stack-safe for arbitrarily deep acyclic structures (≥5000
+    /// levels; verified by stack-safety regression fixtures in §4.1).
     #[allow(dead_code)] // wired by raise_and_reduce above.
     fn reduce_graph_node_iterative(
         &self,
         root: SemanticNodeId,
-        mode: ProjectionMode,
+        root_context: ProjectionReductionContext,
         state: &mut ReduceState,
     ) -> SemanticNodeId {
         // Loop-5 instrumentation — count every iterative-reduction
@@ -668,67 +714,390 @@ impl<'a> ProjectSemanticDispatch<'a> {
             &crate::loop5_instrumentation::REDUCE_GRAPH_NODE_ITERATIVE_NS,
         );
 
-        // Collect every reachable `(node, mode)` pair in topo
-        // order with a worklist. `visited` short-circuits cycles —
-        // they reach a fixpoint at the first visit and are not re-pushed.
-        let mut topo: Vec<SemanticNodeId> = Vec::new();
-        let mut to_visit: Vec<SemanticNodeId> = vec![root];
-        while let Some(node) = to_visit.pop() {
-            if !state.visited.insert((node, mode)) {
-                continue;
-            }
-            topo.push(node);
-            let Some(data) = super::node_data_for(self.ctx, node) else {
-                continue;
-            };
-            // Push children for traversal. Operator-shape children
-            // (IndexedAccess.object, Conditional.check/extends/branches,
-            // KeyOf.base, etc.) are reachable via their concrete
-            // operands; the dispatch happens during reduction.
-            push_children(&data, &mut to_visit);
-        }
-
-        // Process topo in reverse — children first. Each
-        // (node, mode) reduces by looking at SemanticNodeData and
-        // dispatching the per-shape key. The result is recorded in
-        // `mapping`; subsequent parents look up child reductions there.
-        for &node in topo.iter().rev() {
-            let reduced = self.reduce_one(node, mode, state);
-            state.mapping.insert(node, reduced);
-        }
-        state.mapping.get(&root).copied().unwrap_or(root)
+        self.reduce_subtree(root, root_context, state)
     }
 
-    /// Reduce a single node assuming all its children have already been
-    /// reduced (their reductions live in `state.mapping`). Returns the
+    /// Reduce the subtree rooted at `root` under `context` using the
+    /// top-down demand-driven work stack. Shares `state.visited` /
+    /// `state.mapping` with the caller so cycles are broken once and a
+    /// dispatch-produced new node can re-enter the reducer without
+    /// re-traversing already-resolved subgraphs.
+    ///
+    /// Each `(node, context)` pair reduces at most once per call to
+    /// [`Self::raise_and_reduce_with_context`] — the visited set
+    /// deduplicates entry.
+    #[allow(dead_code)] // wired by reduce_graph_node_iterative + dispatch_operator_with_recurse.
+    fn reduce_subtree(
+        &self,
+        root: SemanticNodeId,
+        root_context: ProjectionReductionContext,
+        state: &mut ReduceState,
+    ) -> SemanticNodeId {
+        if let Some(&already) = state.mapping.get(&(root, root_context)) {
+            return already;
+        }
+        let mut stack: Vec<ReduceFrame> = Vec::with_capacity(8);
+        stack.push(ReduceFrame {
+            node: root,
+            context: root_context,
+            kind: ReduceFrameKind::Descend,
+        });
+        while let Some(frame) = stack.pop() {
+            match frame.kind {
+                ReduceFrameKind::Descend => {
+                    if !state.visited.insert((frame.node, frame.context)) {
+                        // Already in-progress or completed under this
+                        // context. Mapping carries the reduction once
+                        // it lands; cyclic re-entry returns the raw
+                        // node via the rebuild_* fall-through.
+                        continue;
+                    }
+                    let Some(data) = super::node_data_for(self.ctx, frame.node) else {
+                        // No graph data — record a self-identity
+                        // reduction so callers reading `mapping`
+                        // get the raw node.
+                        state
+                            .mapping
+                            .insert((frame.node, frame.context), frame.node);
+                        continue;
+                    };
+                    // Reduce frame is pushed FIRST so it pops AFTER
+                    // children (LIFO post-order).
+                    stack.push(ReduceFrame {
+                        node: frame.node,
+                        context: frame.context,
+                        kind: ReduceFrameKind::Reduce,
+                    });
+                    self.push_demand_children(&data, frame.context, &mut stack);
+                }
+                ReduceFrameKind::Reduce => {
+                    let reduced = self.reduce_one(frame.node, frame.context, state);
+                    state.mapping.insert((frame.node, frame.context), reduced);
+                }
+            }
+        }
+        state
+            .mapping
+            .get(&(root, root_context))
+            .copied()
+            .unwrap_or(root)
+    }
+
+    /// Push child frames for `data` onto `stack` according to the
+    /// codex-hybrid demand traversal rules (Block 6.i Commit AX).
+    ///
+    /// The rules are:
+    ///
+    /// - Aliases (`Alias`) push their target with the SAME context —
+    ///   aliases are semantically transparent and inherit the caller's
+    ///   publication demand.
+    /// - Operator operands (`KeyOf.base`, `Mapped.source`,
+    ///   `Conditional.check`/`extends`, `IndexedAccess.index` typed
+    ///   nodes) push as `StructuralTransit`. Their nested operators
+    ///   carrier-stop under [`super::may_reduce_operator`], so they
+    ///   contribute their structural shape without reifying their own
+    ///   members.
+    /// - `IndexedAccess.object` pushes as `Published(Navigate)` under
+    ///   any `Published` parent (`Foo['a']['b']` walks the path
+    ///   navigate-only at intermediate hops; the terminal hop carries
+    ///   the caller's mode through the dispatch). Under
+    ///   `StructuralTransit` parents, the object pushes as
+    ///   `StructuralTransit` (no path materialisation needed for a
+    ///   transit walk).
+    /// - `Conditional` branches are NOT pushed. The conditional
+    ///   dispatch returns the selected branch as its result; that
+    ///   branch is then reduced inline via
+    ///   [`Self::dispatch_operator_with_recurse`]. Inactive branches
+    ///   are never visited — this is the leak fix.
+    /// - `Mapped.value_expr` / `Mapped.name_remap` / `Mapped.parameter_node`
+    ///   are NOT pushed. The `MappedType` dispatch substitutes the
+    ///   binder and evaluates per-key internally under
+    ///   `StructuralTransit` (see `build.rs:1817` / `1852`).
+    /// - `TypeOf` carries `value_root` + path segments — no semantic
+    ///   children to descend.
+    /// - Composite shapes (`Object` members, `Union` /
+    ///   `Intersection` arms, `Tuple` elements, `Array` element,
+    ///   `Function` params / return / type-param constraints/defaults)
+    ///   are pushed ONLY under whole-surface `Published(Expanded)`.
+    ///   Per the codex spec, per-prop `Published(Navigate)` /
+    ///   `Published(Shallow)` and `StructuralTransit` callers do NOT
+    ///   traverse composite children — the parent IS the demand
+    ///   terminal. This is the structural leak fix: a per-member
+    ///   publication that resolves to an Object stays shallow at the
+    ///   object surface.
+    /// - `InstantiationRef.args` push under the same context the
+    ///   carrier reduces under (args become substituted into the
+    ///   instantiated body; their demand follows the body's demand).
+    /// - Terminals (`Primitive`, `Literal`, `TypeParam`, `Opaque`,
+    ///   `Infer`, `TemplateLiteral`, `VueMacroElements`, `DeclRef`)
+    ///   have no semantic operand children for the iterative reducer
+    ///   to pre-resolve.
+    #[allow(dead_code)] // wired by reduce_subtree above.
+    fn push_demand_children(
+        &self,
+        data: &SemanticNodeData,
+        parent_context: ProjectionReductionContext,
+        stack: &mut Vec<ReduceFrame>,
+    ) {
+        match data {
+            SemanticNodeData::Primitive(_)
+            | SemanticNodeData::Literal(_)
+            | SemanticNodeData::Opaque(_)
+            | SemanticNodeData::Infer { .. }
+            | SemanticNodeData::TemplateLiteral { .. }
+            | SemanticNodeData::TypeOf { .. }
+            | SemanticNodeData::VueMacroElements(_)
+            | SemanticNodeData::DeclRef { .. } => {}
+            SemanticNodeData::Alias(target) => {
+                stack.push(ReduceFrame::descend(*target, parent_context));
+            }
+            // Composite shapes — push children ONLY under whole-surface
+            // `Published(Expanded)`. Per-prop / structural-transit
+            // parents skip composite descent (the parent is the demand
+            // terminal).
+            SemanticNodeData::Object(view) => {
+                if is_whole_surface_published(parent_context) {
+                    for member in view.members.iter() {
+                        stack.push(ReduceFrame::descend(member.value, parent_context));
+                    }
+                    for sig in view.call_signatures.iter() {
+                        stack.push(ReduceFrame::descend(*sig, parent_context));
+                    }
+                    for sig in view.construct_signatures.iter() {
+                        stack.push(ReduceFrame::descend(*sig, parent_context));
+                    }
+                    for sig in view.index_signatures.iter() {
+                        stack.push(ReduceFrame::descend(sig.key_type, parent_context));
+                        stack.push(ReduceFrame::descend(sig.value_type, parent_context));
+                    }
+                    if let Some(ks) = view.keyspace {
+                        stack.push(ReduceFrame::descend(ks, parent_context));
+                    }
+                }
+            }
+            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+                if is_whole_surface_published(parent_context) {
+                    for arm in arms.iter() {
+                        stack.push(ReduceFrame::descend(*arm, parent_context));
+                    }
+                }
+            }
+            SemanticNodeData::Array { element, .. } => {
+                if is_whole_surface_published(parent_context) {
+                    stack.push(ReduceFrame::descend(*element, parent_context));
+                }
+            }
+            SemanticNodeData::Tuple { elements, .. } => {
+                if is_whole_surface_published(parent_context) {
+                    for el in elements.iter() {
+                        stack.push(ReduceFrame::descend(el.value, parent_context));
+                    }
+                }
+            }
+            SemanticNodeData::Function {
+                params,
+                return_type,
+                type_parameters,
+            } => {
+                if is_whole_surface_published(parent_context) {
+                    for p in params.iter() {
+                        stack.push(ReduceFrame::descend(p.ty, parent_context));
+                    }
+                    stack.push(ReduceFrame::descend(*return_type, parent_context));
+                    for tp in type_parameters.iter() {
+                        if let Some(c) = tp.constraint {
+                            stack.push(ReduceFrame::descend(c, parent_context));
+                        }
+                        if let Some(d) = tp.default {
+                            stack.push(ReduceFrame::descend(d, parent_context));
+                        }
+                    }
+                }
+            }
+            // Operator shapes — operands push as StructuralTransit
+            // (or Published(Navigate) for IndexedAccess.object under a
+            // Published parent). Branches / mapper-internal nodes are
+            // NEVER eagerly pushed — the dispatch picks the selected
+            // branch or evaluates the mapped value per-key.
+            SemanticNodeData::KeyOf { base } => {
+                stack.push(ReduceFrame::descend(
+                    *base,
+                    ProjectionReductionContext::structural_transit(),
+                ));
+            }
+            SemanticNodeData::IndexedAccess { object, index } => {
+                let object_context = indexed_access_object_context(parent_context);
+                stack.push(ReduceFrame::descend(*object, object_context));
+                if let IndexKey::TypeNode(n) = index {
+                    stack.push(ReduceFrame::descend(
+                        *n,
+                        ProjectionReductionContext::structural_transit(),
+                    ));
+                }
+            }
+            SemanticNodeData::Mapped { source, .. } => {
+                // Source pushes as StructuralTransit for key enumeration.
+                // value_expr / name_remap / parameter_node DO NOT push —
+                // the MappedType dispatch substitutes them per-key under
+                // an internal StructuralTransit evaluation (see
+                // build.rs:1817 / 1852).
+                stack.push(ReduceFrame::descend(
+                    *source,
+                    ProjectionReductionContext::structural_transit(),
+                ));
+            }
+            SemanticNodeData::Conditional { check, extends, .. } => {
+                // Check / extends reduce structurally so the conditional
+                // dispatch can decide the selected branch. The branches
+                // themselves are NOT pre-pushed — codex-hybrid: only the
+                // SELECTED branch is reduced (via the dispatch result).
+                stack.push(ReduceFrame::descend(
+                    *check,
+                    ProjectionReductionContext::structural_transit(),
+                ));
+                stack.push(ReduceFrame::descend(
+                    *extends,
+                    ProjectionReductionContext::structural_transit(),
+                ));
+            }
+            SemanticNodeData::TypeParam {
+                constraint,
+                default,
+                ..
+            } => {
+                if is_whole_surface_published(parent_context) {
+                    if let Some(c) = constraint {
+                        stack.push(ReduceFrame::descend(*c, parent_context));
+                    }
+                    if let Some(d) = default {
+                        stack.push(ReduceFrame::descend(*d, parent_context));
+                    }
+                }
+            }
+            SemanticNodeData::InstantiationRef { args, .. } => {
+                // Args travel with the carrier — substituted into the
+                // body if the carrier's dispatch reifies. Under
+                // Navigate the carrier stays terminal so args effectively
+                // stay un-reduced via the mapping fall-through.
+                for arg in args.iter() {
+                    stack.push(ReduceFrame::descend(*arg, parent_context));
+                }
+            }
+        }
+    }
+
+    /// Reduce a single node assuming all its demand-selected children
+    /// have already been reduced into `state.mapping`. Returns the
     /// reduced `SemanticNodeId`.
+    ///
+    /// `context` carries the publication / structural-transit demand;
+    /// child lookups in `state.mapping` are keyed by
+    /// `(child_node, child_context)` where `child_context` is derived
+    /// per the codex-hybrid traversal rules (see
+    /// [`Self::push_demand_children`]).
     ///
     /// Per-shape table:
     /// - Operator shapes (`IndexedAccess`, `KeyOf`, `Conditional`,
-    ///   `Mapped`, `TypeOf`) dispatch the matching `SemanticQueryKey`.
-    ///   `Value(reduced)` with `reduced != node` recurses; `Value(node)`
-    ///   (deferred over a free type parameter) accepts the form.
-    /// - `DeclRef` / `InstantiationRef`: in `Navigate` mode, terminal
-    ///   except DeclRef which still follows aliases via D41. In
-    ///   `Expanded`, dispatch `ResolveDecl` / `Instantiate`.
-    /// - Composite shapes (`Object` / `Union` / `Intersection` / `Array` /
-    ///   `Tuple` / `Function`) rebuild via `intern_preserving_scope`
-    ///   when any child reduced; else return `node` unchanged.
-    /// - `TemplateLiteral` / `Infer` / `Rest`-style hard-stops have no
-    ///   dispatch variant and become `Unknown { raw: "<…>" }`.
+    ///   `Mapped`, `TypeOf`) dispatch the matching `SemanticQueryKey`
+    ///   with the caller's `context`. `Value(reduced)` with `reduced
+    ///   != node` recurses through [`Self::dispatch_operator_with_recurse`];
+    ///   `Value(node)` (deferred over a free type parameter or
+    ///   carrier-stop) accepts the form.
+    /// - `DeclRef` / `InstantiationRef`: in `Published(Navigate)` /
+    ///   `StructuralTransit`, terminal (DeclRef still follows aliases
+    ///   via D41). In `Published(Expanded)`, dispatch `ResolveDecl` /
+    ///   `Instantiate`.
+    /// - Composite shapes (`Object` / `Union` / `Intersection` /
+    ///   `Array` / `Tuple` / `Function`) rebuild via
+    ///   `intern_preserving_scope` when any child reduced; else return
+    ///   `node` unchanged. Child reductions only land in `mapping`
+    ///   under whole-surface `Published(Expanded)` (codex demand rule)
+    ///   — so non-whole-surface contexts return the parent verbatim.
+    /// - `TemplateLiteral` / `Infer` hard-stops have no dispatch
+    ///   variant and become `Unknown { raw: "<…>" }`.
     /// - Terminals (`Primitive` / `Literal` / `TypeParam` / `Opaque(…)`)
     ///   return `node` as-is.
     #[allow(dead_code)] // wired by reduce_graph_node_iterative above.
     fn reduce_one(
         &self,
         node: SemanticNodeId,
-        mode: ProjectionMode,
+        context: ProjectionReductionContext,
         state: &mut ReduceState,
     ) -> SemanticNodeId {
         let Some(data) = super::node_data_for(self.ctx, node) else {
             return node;
         };
+        let mode = context.mode;
         match data.as_ref() {
+            // --- DeclPlaceholder unwrap (cross-file decl carrier) ---
+            //
+            // `ResolveDecl` returns
+            // `Opaque(DeclPlaceholder { canonical_id, name, whole_hash })`
+            // as a deferred carrier for cross-file declarations.
+            //
+            // The demand reducer unwraps the placeholder via the
+            // matching `Instantiate { args: [] }` ONLY when the caller's
+            // demand resolves deeply through cross-file aliases:
+            //
+            // - `Published(Expanded)` whole-surface — whole-surface
+            //   materialisation deep-resolves cross-file aliases.
+            // - `Published(Navigate)` — the navigate publication
+            //   inherits the consumer's path-precision intent:
+            //   intermediate hops (`IndexedAccess.object`,
+            //   `DeclRef` followed through an IA chain) resolve to
+            //   their bodies so the next hop / index lookup can
+            //   pattern-match. The body is materialised but the
+            //   surface stays shallow under Navigate because
+            //   `push_demand_children` does not push composite
+            //   children.
+            //
+            // Under `StructuralTransit` the carrier stays in place —
+            // transit walks observe the placeholder structurally.
+            //
+            // The architectural "package-backed alias stays shallow"
+            // rule is enforced at the PROJECTOR layer
+            // (`type_expr_has_package_backed_object_like_root_with_fence`
+            // gate) — not inside the reducer. Reducer-time unwrap
+            // is unconditional within a `Published` demand because
+            // the projector has already decided the alias chain is
+            // workspace-resolvable.
+            SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
+                canonical_id,
+                name,
+                whole_hash,
+            }) => {
+                if matches!(context.demand, ReductionDemand::StructuralTransit) {
+                    return node;
+                }
+                // Architectural rule: package-backed alias names stay
+                // shallow at the publication boundary. The placeholder
+                // for a `node_modules`-resident declaration is the
+                // intentional carrier — unwrapping it would inline the
+                // package alias's body into the published surface and
+                // violate the "imported alias names (workspace-owned
+                // OR package-backed) — stay shallow regardless of
+                // where they live" half of the shallow-by-default
+                // rule. The projector-layer gate
+                // (`type_expr_has_package_backed_object_like_root_with_fence`)
+                // only sees the OUTER raised root; a workspace-rooted
+                // IA whose value lands on a package-backed alias
+                // bypasses it. This check is the reducer-side mirror.
+                if self.ctx.workspace_is_package_backed(canonical_id.as_ref()) {
+                    return node;
+                }
+                let identity = crate::semantic_query::DeclIdentity {
+                    canonical_id: Arc::clone(canonical_id),
+                    whole_hash: *whole_hash,
+                    decl_name: Arc::clone(name),
+                };
+                let key = SemanticQueryKey::Instantiate {
+                    base: identity,
+                    args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                    context,
+                };
+                self.dispatch_operator_with_recurse(node, key, context, state)
+            }
+
             // --- terminal shapes ---
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
@@ -745,13 +1114,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
 
             // --- alias unwrap: follow target's reduction ---
-            SemanticNodeData::Alias(target) => {
-                state.mapping.get(target).copied().unwrap_or(*target)
-            }
+            SemanticNodeData::Alias(target) => state
+                .mapping
+                .get(&(*target, context))
+                .copied()
+                .unwrap_or(*target),
 
-            // --- operator dispatches (mode-aware via underlying key) ---
+            // --- operator dispatches (context-aware via underlying key) ---
             SemanticNodeData::IndexedAccess { object, index } => {
-                let object = state.mapping.get(object).copied().unwrap_or(*object);
+                let object_context = indexed_access_object_context(context);
+                let object = state
+                    .mapping
+                    .get(&(*object, object_context))
+                    .copied()
+                    .unwrap_or(*object);
                 let index = index.clone();
                 self.dispatch_operator_with_recurse(
                     node,
@@ -760,16 +1136,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         index,
                         mode,
                     },
-                    mode,
+                    context,
                     state,
                 )
             }
             SemanticNodeData::KeyOf { base } => {
-                let base = state.mapping.get(base).copied().unwrap_or(*base);
+                let base_context = ProjectionReductionContext::structural_transit();
+                let base = state
+                    .mapping
+                    .get(&(*base, base_context))
+                    .copied()
+                    .unwrap_or(*base);
+                // raise.rs is a publication-path consumer (the bounded
+                // fixed-point reducer + the typed-IR raise). Forward
+                // the caller's context — `Published(Expanded)` reifies
+                // the keyspace; `Published(Navigate)` /
+                // `StructuralTransit` carrier-stop per
+                // `may_reduce_operator`.
                 self.dispatch_operator_with_recurse(
                     node,
-                    SemanticQueryKey::KeyOf { base },
-                    mode,
+                    SemanticQueryKey::KeyOf { base, context },
+                    context,
                     state,
                 )
             }
@@ -780,18 +1167,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 false_branch_ref,
                 distributive,
             } => {
-                let check = state.mapping.get(check).copied().unwrap_or(*check);
-                let extends = state.mapping.get(extends).copied().unwrap_or(*extends);
-                let true_branch = state
+                let operand_context = ProjectionReductionContext::structural_transit();
+                let check = state
                     .mapping
-                    .get(true_branch_ref)
+                    .get(&(*check, operand_context))
                     .copied()
-                    .unwrap_or(*true_branch_ref);
-                let false_branch = state
+                    .unwrap_or(*check);
+                let extends = state
                     .mapping
-                    .get(false_branch_ref)
+                    .get(&(*extends, operand_context))
                     .copied()
-                    .unwrap_or(*false_branch_ref);
+                    .unwrap_or(*extends);
+                // Branches are NOT pre-pushed — the dispatch picks the
+                // selected branch and `dispatch_operator_with_recurse`
+                // reduces only that branch under the caller's context
+                // (codex-hybrid: "reduce only the selected branch").
+                let true_branch = *true_branch_ref;
+                let false_branch = *false_branch_ref;
                 let distributive = *distributive;
                 self.dispatch_operator_with_recurse(
                     node,
@@ -802,21 +1194,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         false_branch,
                         distributive,
                     },
-                    mode,
+                    context,
                     state,
                 )
             }
             SemanticNodeData::Mapped { source, mapper } => {
-                let source = state.mapping.get(source).copied().unwrap_or(*source);
-                // Re-key the mapper with reduced source nodes when those
-                // were touched. The mapper carries `key_space` /
-                // `value_expr` etc. — they're separate operator-graph
-                // edges and may have been reduced independently.
-                let mapper = remap_mapper(mapper, &state.mapping);
+                let source_context = ProjectionReductionContext::structural_transit();
+                let source = state
+                    .mapping
+                    .get(&(*source, source_context))
+                    .copied()
+                    .unwrap_or(*source);
+                // Re-key the mapper's `key_space` from any reduction the
+                // source push produced. `value_expr` / `name_remap` /
+                // `parameter_node` are NOT in mapping — the dispatch
+                // substitutes the binder and evaluates per-key
+                // internally.
+                let mapper = remap_mapper(mapper, &state.mapping, source_context);
                 self.dispatch_operator_with_recurse(
                     node,
-                    SemanticQueryKey::MappedType { source, mapper },
-                    mode,
+                    SemanticQueryKey::MappedType {
+                        source,
+                        mapper,
+                        context,
+                    },
+                    context,
                     state,
                 )
             }
@@ -825,7 +1227,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.dispatch_operator_with_recurse(
                     node,
                     SemanticQueryKey::TypeOf { value_root },
-                    mode,
+                    context,
                     state,
                 )
             }
@@ -845,57 +1247,97 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope,
                     name: Arc::clone(&identity.decl_name),
                 });
-                self.dispatch_operator_with_recurse(node, key, mode, state)
+                self.dispatch_operator_with_recurse(node, key, context, state)
             }
             SemanticNodeData::InstantiationRef { base, args } => {
-                if matches!(mode, ProjectionMode::Navigate) {
-                    // D41: InstantiationRef is TERMINAL in Navigate —
-                    // generic application is a structural expansion.
+                if matches!(context.demand, ReductionDemand::StructuralTransit) {
+                    // Codex-hybrid: an InstantiationRef inspected by a
+                    // structural-transit caller stays terminal —
+                    // structural observation only; do not reify the
+                    // body.
+                    return node;
+                }
+                if matches!(mode, ProjectionMode::Navigate)
+                    && base.canonical_id.as_ref() != "__builtin__"
+                    && userland_instantiation_body_is_closed_object(self.ctx, base)
+                {
+                    // Codex Q4 + ChatMessages leak verdict: a
+                    // userland `InstantiationRef` at a
+                    // `Published(Navigate)` publication terminal
+                    // STAYS TERMINAL **when its declared body is a
+                    // closed Object surface** (a generic interface
+                    // like `Tool<INPUT, OUTPUT> { outputSchema:
+                    // ..., execute: ... }`). The pre-AX
+                    // `Pub(Expanded)` hardcoding eagerly unwrapped
+                    // these and fired
+                    // `ProjectMember(outputSchema|execute)` audit
+                    // edges that no caller demanded.
+                    //
+                    // Userland generic HELPERS whose body is
+                    // operator-shaped (`Lookup<M, I> = M[I]`,
+                    // `MyPick<X, K> = { [P in K]: X[P] }`, etc.)
+                    // DO reduce even under Navigate per codex Q4 —
+                    // the type-arg substitution into an operator
+                    // body is the "demanded instantiation is
+                    // reduced as the terminal" case. Closed-object
+                    // bodies behave like nominal interfaces, not
+                    // operator helpers.
+                    //
+                    // Builtin utility types (`Pick`/`Omit`/...,
+                    // `canonical_id == "__builtin__"`) ALWAYS
+                    // reduce regardless of body shape.
                     return node;
                 }
                 let identity = base.clone();
                 let args: Arc<[SemanticNodeId]> = Arc::from(
                     args.iter()
-                        .map(|id| state.mapping.get(id).copied().unwrap_or(*id))
+                        .map(|id| state.mapping.get(&(*id, context)).copied().unwrap_or(*id))
                         .collect::<Vec<_>>()
                         .into_boxed_slice(),
                 );
                 let key = SemanticQueryKey::Instantiate {
                     base: identity,
                     args,
-                    body_mode: mode,
+                    context,
                 };
-                self.dispatch_operator_with_recurse(node, key, mode, state)
+                self.dispatch_operator_with_recurse(node, key, context, state)
             }
 
             // --- composite rebuilds via intern_preserving_scope ---
+            //
+            // Composite children are only reduced under whole-surface
+            // `Published(Expanded)` (codex demand traversal rule). For
+            // per-prop `Published(Navigate)` / `Published(Shallow)` and
+            // `StructuralTransit`, the composite parent is the demand
+            // terminal — the `rebuild_*` helpers see no child entries
+            // in `mapping` and return `node` unchanged.
             SemanticNodeData::Object(_) => {
-                // The Object surface carries pre-built SurfaceMember /
-                // signature ids. Rebuild only if any child changed.
-                rebuild_object(self, node, &state.mapping).unwrap_or(node)
+                rebuild_object(self, node, &state.mapping, context).unwrap_or(node)
             }
-            SemanticNodeData::Union(arms) => {
-                rebuild_union_or_intersection(
-                    self,
-                    node,
-                    arms,
-                    /* is_union */ true,
-                    &state.mapping,
-                )
-                .unwrap_or(node)
-            }
-            SemanticNodeData::Intersection(arms) => {
-                rebuild_union_or_intersection(
-                    self,
-                    node,
-                    arms,
-                    /* is_union */ false,
-                    &state.mapping,
-                )
-                .unwrap_or(node)
-            }
+            SemanticNodeData::Union(arms) => rebuild_union_or_intersection(
+                self,
+                node,
+                arms,
+                /* is_union */ true,
+                &state.mapping,
+                context,
+            )
+            .unwrap_or(node),
+            SemanticNodeData::Intersection(arms) => rebuild_union_or_intersection(
+                self,
+                node,
+                arms,
+                /* is_union */ false,
+                &state.mapping,
+                context,
+            )
+            .unwrap_or(node),
             SemanticNodeData::Array { element, readonly } => {
-                let new_elem = state.mapping.get(element).copied().unwrap_or(*element);
+                let new_elem = state
+                    .mapping
+                    .get(&(*element, context))
+                    .copied()
+                    .unwrap_or(*element);
                 if new_elem == *element {
                     node
                 } else {
@@ -909,7 +1351,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
             SemanticNodeData::Tuple { elements, readonly } => {
-                rebuild_tuple(self, node, elements, *readonly, &state.mapping).unwrap_or(node)
+                rebuild_tuple(self, node, elements, *readonly, &state.mapping, context)
+                    .unwrap_or(node)
             }
             SemanticNodeData::Function {
                 params,
@@ -922,6 +1365,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 *return_type,
                 type_parameters,
                 &state.mapping,
+                context,
             )
             .unwrap_or(node),
         }
@@ -941,7 +1385,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         node: SemanticNodeId,
         key: SemanticQueryKey,
-        mode: ProjectionMode,
+        context: ProjectionReductionContext,
         state: &mut ReduceState,
     ) -> SemanticNodeId {
         // Loop-5 instrumentation — every operator-node dispatch issues
@@ -953,7 +1397,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // wall-clock attribution. The kind index is captured BEFORE
         // `execute_read` consumes the key. The wall-clock window
         // covers `execute_read` (warm-hit fast-path AND cold-build
-        // close-down) AND any recursive `reduce_one` follow-up the
+        // close-down) AND any recursive `reduce_subtree` follow-up the
         // dispatch triggers — i.e. the entire wall-clock cost
         // attributable to this single operator-node dispatch.
         let kind_idx = crate::loop5_instrumentation::kind_index_for_key(&key);
@@ -967,19 +1411,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             QueryResult::Value(result) => {
                 if result == node {
                     node
-                } else if let Some(&already_reduced) = state.mapping.get(&result) {
+                } else if let Some(&already_reduced) = state.mapping.get(&(result, context)) {
                     already_reduced
-                } else if state.visited.insert((result, mode)) {
-                    // The dispatch produced a new node that wasn't in
-                    // our topo. Reduce it inline (single hop — its
-                    // children stay graph-native and their own
-                    // reduction is cheap because the visited-set
-                    // dedups). Cycle protection: visited.insert above.
-                    let recursed = self.reduce_one(result, mode, state);
-                    state.mapping.insert(result, recursed);
-                    recursed
                 } else {
-                    state.mapping.get(&result).copied().unwrap_or(result)
+                    // The dispatch produced a new node not yet in
+                    // `mapping`. Drive it through the iterative
+                    // reducer's worklist so its demanded children are
+                    // selectively reduced under `context` (the codex
+                    // demand-traversal rule). Cycle protection: the
+                    // shared `visited` set deduplicates re-entry.
+                    self.reduce_subtree(result, context, state)
                 }
             }
             QueryResult::Recursive(_id) => node,
@@ -1006,144 +1447,101 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 }
 
-/// Push all child `SemanticNodeId` references from `data` onto
-/// `worklist` (reducer traversal). Operator children, surface
-/// members, signatures, conditional branches, etc. are all collected so
-/// the topo order in reduces them before their parents.
-#[allow(dead_code)] // wired by reduce_graph_node_iterative above.
-fn push_children(data: &SemanticNodeData, worklist: &mut Vec<SemanticNodeId>) {
-    match data {
-        SemanticNodeData::Primitive(_)
-        | SemanticNodeData::Literal(_)
-        | SemanticNodeData::Opaque(_)
-        | SemanticNodeData::Infer { .. }
-        | SemanticNodeData::TemplateLiteral { .. }
-        | SemanticNodeData::TypeOf { .. }
-        | SemanticNodeData::VueMacroElements(_)
-        | SemanticNodeData::DeclRef { .. } => {}
-        SemanticNodeData::Alias(t) => worklist.push(*t),
-        SemanticNodeData::Object(view) => push_surface_children(view, worklist),
-        SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
-            for arm in arms.iter() {
-                worklist.push(*arm);
-            }
-        }
-        SemanticNodeData::Array { element, .. } => worklist.push(*element),
-        SemanticNodeData::Tuple { elements, .. } => {
-            for el in elements.iter() {
-                worklist.push(el.value);
-            }
-        }
-        SemanticNodeData::KeyOf { base } => worklist.push(*base),
-        SemanticNodeData::IndexedAccess { object, index } => {
-            worklist.push(*object);
-            if let IndexKey::TypeNode(n) = index {
-                worklist.push(*n);
-            }
-        }
-        SemanticNodeData::Mapped { source, mapper } => {
-            worklist.push(*source);
-            worklist.push(mapper.parameter_node);
-            worklist.push(mapper.key_space);
-            worklist.push(mapper.value_expr);
-            if let Some(name_remap) = mapper.name_remap {
-                worklist.push(name_remap);
-            }
-        }
-        SemanticNodeData::TypeParam {
-            constraint,
-            default,
-            ..
-        } => {
-            if let Some(c) = constraint {
-                worklist.push(*c);
-            }
-            if let Some(d) = default {
-                worklist.push(*d);
-            }
-        }
-        SemanticNodeData::Conditional {
-            check,
-            extends,
-            true_branch_ref,
-            false_branch_ref,
-            ..
-        } => {
-            worklist.push(*check);
-            worklist.push(*extends);
-            worklist.push(*true_branch_ref);
-            worklist.push(*false_branch_ref);
-        }
-        SemanticNodeData::Function {
-            params,
-            return_type,
-            type_parameters,
-        } => {
-            for p in params.iter() {
-                worklist.push(p.ty);
-            }
-            worklist.push(*return_type);
-            for tp in type_parameters.iter() {
-                if let Some(c) = tp.constraint {
-                    worklist.push(c);
-                }
-                if let Some(d) = tp.default {
-                    worklist.push(d);
-                }
-            }
-        }
-        SemanticNodeData::InstantiationRef { args, .. } => {
-            for arg in args.iter() {
-                worklist.push(*arg);
-            }
+/// `(SemanticNodeId, ProjectionReductionContext)` → `SemanticNodeId`
+/// map used by the reducer to fetch already-reduced operand / child
+/// reductions. Keyed by the operand's own context so a structural-
+/// transit reduction does not collide with a publication reduction of
+/// the same node.
+type MappingMap =
+    rustc_hash::FxHashMap<(SemanticNodeId, ProjectionReductionContext), SemanticNodeId>;
+
+/// Top-down demand reducer work-stack frame (Block 6.i Commit AX).
+#[derive(Clone, Copy)]
+#[allow(dead_code)] // wired by reduce_subtree.
+enum ReduceFrameKind {
+    /// Mark `(node, context)` visited, push the matching `Reduce`
+    /// frame, then push the demand-selected children.
+    Descend,
+    /// All demand-selected children have been reduced into
+    /// `state.mapping`; invoke `reduce_one(node, context, state)` and
+    /// record the result.
+    Reduce,
+}
+
+#[allow(dead_code)] // wired by reduce_subtree.
+struct ReduceFrame {
+    node: SemanticNodeId,
+    context: ProjectionReductionContext,
+    kind: ReduceFrameKind,
+}
+
+#[allow(dead_code)] // wired by reduce_subtree.
+impl ReduceFrame {
+    #[inline]
+    fn descend(node: SemanticNodeId, context: ProjectionReductionContext) -> Self {
+        Self {
+            node,
+            context,
+            kind: ReduceFrameKind::Descend,
         }
     }
 }
 
-#[allow(dead_code)] // wired by push_children above.
-fn push_surface_children(view: &SurfaceView, worklist: &mut Vec<SemanticNodeId>) {
-    for member in view.members.iter() {
-        worklist.push(member.value);
-    }
-    for sig in view.call_signatures.iter() {
-        worklist.push(*sig);
-    }
-    for sig in view.construct_signatures.iter() {
-        worklist.push(*sig);
-    }
-    for sig in view.index_signatures.iter() {
-        worklist.push(sig.key_type);
-        worklist.push(sig.value_type);
-    }
-    if let Some(ks) = view.keyspace {
-        worklist.push(ks);
+/// `true` when `ctx` is the codex-hybrid whole-surface publication
+/// demand (`Published + Expanded`). Composite-child traversal pushes
+/// descend frames ONLY in this case; per-prop `Published(Navigate)` /
+/// `Published(Shallow)` and any `StructuralTransit` walk treat the
+/// composite parent as the demand terminal.
+#[allow(dead_code)] // wired by push_demand_children + child-context helpers.
+#[inline]
+fn is_whole_surface_published(ctx: ProjectionReductionContext) -> bool {
+    matches!(ctx.demand, ReductionDemand::Published) && matches!(ctx.mode, ProjectionMode::Expanded)
+}
+
+/// Derive the `IndexedAccess.object` operand context from the parent
+/// IndexedAccess's reduction context.
+///
+/// The codex spec ("`Foo['a']['b']`: intermediate hops are
+/// navigate-only, terminal uses caller mode") describes the
+/// PATH-WALK semantics inside the dispatch's `ProjectPath` builder.
+/// At the iterative-reducer layer the object operand must be REDUCED
+/// enough for the `IndexedAccess` dispatch to look up the index — so
+/// a generic instantiation like `Pick<Foo, 'a'>` materialises its
+/// body and the indexed access can pick `'a'` out of it.
+///
+/// Under any `Published` parent → inherit the parent's mode so the
+/// object operand reduces with the same demand. Under
+/// `StructuralTransit` parent → `StructuralTransit` (the transit walk
+/// observes the object structurally without materialising it).
+#[allow(dead_code)] // wired by push_demand_children + reduce_one IndexedAccess.
+#[inline]
+fn indexed_access_object_context(
+    parent_context: ProjectionReductionContext,
+) -> ProjectionReductionContext {
+    if matches!(parent_context.demand, ReductionDemand::Published) {
+        parent_context
+    } else {
+        ProjectionReductionContext::structural_transit()
     }
 }
 
-/// Re-key a `MapperKey` using `mapping` (substituting reduced child node
-/// ids). Returns a fresh key with substituted ids; structural fields
-/// (`optionality`, `readonly`) are preserved.
+/// Re-key a `MapperKey` using `mapping` (substituting any reduced
+/// `key_space` id from the demand walk). The mapper's `value_expr` /
+/// `name_remap` / `parameter_node` are NOT looked up — the dispatch
+/// substitutes them per-key internally under a structural-transit
+/// evaluation (see [`crate::project_semantic_dispatch::evaluate`]'s
+/// context-explicit variant).
 #[allow(dead_code)] // wired by reduce_one above.
 fn remap_mapper(
     mapper: &MapperKey,
-    mapping: &rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+    mapping: &MappingMap,
+    source_context: ProjectionReductionContext,
 ) -> MapperKey {
     let mut new_mapper = mapper.clone();
-    new_mapper.parameter_node = mapping
-        .get(&mapper.parameter_node)
-        .copied()
-        .unwrap_or(mapper.parameter_node);
     new_mapper.key_space = mapping
-        .get(&mapper.key_space)
+        .get(&(mapper.key_space, source_context))
         .copied()
         .unwrap_or(mapper.key_space);
-    new_mapper.value_expr = mapping
-        .get(&mapper.value_expr)
-        .copied()
-        .unwrap_or(mapper.value_expr);
-    new_mapper.name_remap = mapper
-        .name_remap
-        .map(|id| mapping.get(&id).copied().unwrap_or(id));
     new_mapper
 }
 
@@ -1151,7 +1549,8 @@ fn remap_mapper(
 fn rebuild_object(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
-    mapping: &rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+    mapping: &MappingMap,
+    context: ProjectionReductionContext,
 ) -> Option<SemanticNodeId> {
     let data = super::node_data_for(dispatch.ctx, node)?;
     let SemanticNodeData::Object(view) = data.as_ref() else {
@@ -1161,7 +1560,7 @@ fn rebuild_object(
     let new_members: Arc<[SurfaceMember]> = {
         let mut out: Vec<SurfaceMember> = Vec::with_capacity(view.members.len());
         for m in view.members.iter() {
-            let new_value = mapping.get(&m.value).copied().unwrap_or(m.value);
+            let new_value = mapping.get(&(m.value, context)).copied().unwrap_or(m.value);
             if new_value != m.value {
                 changed = true;
             }
@@ -1175,7 +1574,7 @@ fn rebuild_object(
     let new_calls: Arc<[SemanticNodeId]> = {
         let mut out = Vec::with_capacity(view.call_signatures.len());
         for sig in view.call_signatures.iter() {
-            let new_sig = mapping.get(sig).copied().unwrap_or(*sig);
+            let new_sig = mapping.get(&(*sig, context)).copied().unwrap_or(*sig);
             if new_sig != *sig {
                 changed = true;
             }
@@ -1186,7 +1585,7 @@ fn rebuild_object(
     let new_constructs: Arc<[SemanticNodeId]> = {
         let mut out = Vec::with_capacity(view.construct_signatures.len());
         for sig in view.construct_signatures.iter() {
-            let new_sig = mapping.get(sig).copied().unwrap_or(*sig);
+            let new_sig = mapping.get(&(*sig, context)).copied().unwrap_or(*sig);
             if new_sig != *sig {
                 changed = true;
             }
@@ -1218,13 +1617,14 @@ fn rebuild_union_or_intersection(
     node: SemanticNodeId,
     arms: &Arc<[SemanticNodeId]>,
     is_union: bool,
-    mapping: &rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+    mapping: &MappingMap,
+    context: ProjectionReductionContext,
 ) -> Option<SemanticNodeId> {
     let mut changed = false;
     let new_arms: Vec<SemanticNodeId> = arms
         .iter()
         .map(|arm| {
-            let new = mapping.get(arm).copied().unwrap_or(*arm);
+            let new = mapping.get(&(*arm, context)).copied().unwrap_or(*arm);
             if new != *arm {
                 changed = true;
             }
@@ -1248,13 +1648,17 @@ fn rebuild_tuple(
     node: SemanticNodeId,
     elements: &Arc<[TupleElement]>,
     readonly: bool,
-    mapping: &rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+    mapping: &MappingMap,
+    context: ProjectionReductionContext,
 ) -> Option<SemanticNodeId> {
     let mut changed = false;
     let new_elements: Vec<TupleElement> = elements
         .iter()
         .map(|el| {
-            let new_value = mapping.get(&el.value).copied().unwrap_or(el.value);
+            let new_value = mapping
+                .get(&(el.value, context))
+                .copied()
+                .unwrap_or(el.value);
             if new_value != el.value {
                 changed = true;
             }
@@ -1283,13 +1687,14 @@ fn rebuild_function(
     params: &Arc<[crate::semantic_query::FunctionParam]>,
     return_type: SemanticNodeId,
     type_parameters: &Arc<[crate::semantic_query::TypeParamDecl]>,
-    mapping: &rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+    mapping: &MappingMap,
+    context: ProjectionReductionContext,
 ) -> Option<SemanticNodeId> {
     let mut changed = false;
     let new_params: Vec<crate::semantic_query::FunctionParam> = params
         .iter()
         .map(|p| {
-            let new_ty = mapping.get(&p.ty).copied().unwrap_or(p.ty);
+            let new_ty = mapping.get(&(p.ty, context)).copied().unwrap_or(p.ty);
             if new_ty != p.ty {
                 changed = true;
             }
@@ -1299,15 +1704,22 @@ fn rebuild_function(
             }
         })
         .collect();
-    let new_return = mapping.get(&return_type).copied().unwrap_or(return_type);
+    let new_return = mapping
+        .get(&(return_type, context))
+        .copied()
+        .unwrap_or(return_type);
     if new_return != return_type {
         changed = true;
     }
     let new_type_params: Vec<crate::semantic_query::TypeParamDecl> = type_parameters
         .iter()
         .map(|tp| {
-            let new_constraint = tp.constraint.map(|c| mapping.get(&c).copied().unwrap_or(c));
-            let new_default = tp.default.map(|d| mapping.get(&d).copied().unwrap_or(d));
+            let new_constraint = tp
+                .constraint
+                .map(|c| mapping.get(&(c, context)).copied().unwrap_or(c));
+            let new_default = tp
+                .default
+                .map(|d| mapping.get(&(d, context)).copied().unwrap_or(d));
             if new_constraint != tp.constraint || new_default != tp.default {
                 changed = true;
             }
@@ -1358,8 +1770,8 @@ pub struct MaterializedTypeExpr {
 #[allow(dead_code)] // wired by raise_and_reduce above.
 #[derive(Default)]
 struct ReduceState {
-    visited: FxHashSet<(SemanticNodeId, ProjectionMode)>,
-    mapping: rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+    visited: FxHashSet<(SemanticNodeId, ProjectionReductionContext)>,
+    mapping: MappingMap,
     dep_facts: Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
 }
 
@@ -1387,6 +1799,47 @@ impl ReduceState {
 
     fn into_dep_signature(self) -> DepSignature {
         Arc::from(self.dep_facts.into_boxed_slice())
+    }
+}
+
+/// Inspect a userland decl's prepared body to decide whether its
+/// `InstantiationRef` should stay terminal under
+/// `Published(Navigate)`. The discriminator:
+///
+/// - The prepared body's top-level kind is an `Object` /
+///   `Intersection of Objects` / closed nominal interface → the
+///   instantiation is a NOMINAL generic interface; stays terminal.
+/// - The body is operator-shaped (`IndexedAccess`, `KeyOf`,
+///   `Mapped`, `Conditional`, `IndexedAccess` chain, etc.) → the
+///   instantiation is a generic HELPER that materially substitutes
+///   type args; reduces even under Navigate.
+///
+/// When the body cannot be peeked cheaply (no prepared decl,
+/// resolution miss), the function returns `false` — the reducer
+/// proceeds with the `Instantiate` dispatch as the safe default
+/// (matches the pre-AX behaviour).
+#[allow(dead_code)] // wired by InstantiationRef Navigate-terminal gate.
+fn userland_instantiation_body_is_closed_object(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    base: &crate::semantic_query::DeclIdentity,
+) -> bool {
+    let prepared = match ctx.prepared_type_decl(base.canonical_id.as_ref(), base.decl_name.as_ref())
+    {
+        Some(prepared) => prepared,
+        None => return false,
+    };
+    is_closed_object_body(&prepared.body)
+}
+
+/// Inspect a `TypeExpr` body to decide whether it's a "closed
+/// nominal" Object surface. Used by
+/// [`userland_instantiation_body_is_closed_object`].
+fn is_closed_object_body(expr: &TypeExpr) -> bool {
+    match expr {
+        TypeExpr::Object(_) => true,
+        TypeExpr::Intersection(arms) => arms.iter().all(is_closed_object_body),
+        TypeExpr::Parenthesized(inner) => is_closed_object_body(inner),
+        _ => false,
     }
 }
 

@@ -167,7 +167,9 @@ fn pathological_self_shadowing_userland_pick() {
             let key = SemanticQueryKey::Instantiate {
                 base: pick_identity,
                 args: Arc::from(vec![arg_t, arg_k].into_boxed_slice()),
-                body_mode: ProjectionMode::Expanded,
+                context: crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
             };
             dispatch.execute(key)
         })
@@ -284,7 +286,9 @@ fn pathological_exclude_self_recursive() {
                 args: Arc::from(
                     Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
                 ),
-                body_mode: ProjectionMode::Expanded,
+                context: crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
             };
             dispatch.execute(key)
         })
@@ -481,7 +485,9 @@ fn pathological_template_literal_key_recursion() {
                 args: Arc::from(
                     Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
                 ),
-                body_mode: ProjectionMode::Expanded,
+                context: crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
             };
             dispatch.execute(key)
         })

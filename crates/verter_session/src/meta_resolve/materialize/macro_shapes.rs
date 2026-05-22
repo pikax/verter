@@ -139,11 +139,15 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                 if define_props_prefers_prepared_projection {
                     if let Some(lowered) = define_props_lowered {
                         let item_started = Instant::now();
+                        let props_projection = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
+                            crate::meta_resolve::projection_demand::PublishedSurfaceKind::Props,
+                        );
                         let (shape, source) = produce_one_macro_object_shape(
                             query_engine,
                             owner_canonical,
                             lowered,
                             has_prop_shape_surface,
+                            props_projection.cursor(),
                         );
                         if source.is_projection() {
                             projection_hits += 1;
@@ -173,11 +177,16 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                         && !define_props_has_matching_resolved_root
                 }) {
                     let item_started = Instant::now();
+                    let props_projection =
+                        crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
+                            crate::meta_resolve::projection_demand::PublishedSurfaceKind::Props,
+                        );
                     let (shape, source) = produce_one_macro_object_shape(
                         query_engine,
                         owner_canonical,
                         lowered,
                         has_prop_shape_surface,
+                        props_projection.cursor(),
                     );
                     if source.is_projection() {
                         projection_hits += 1;
@@ -270,11 +279,15 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                         );
                     } else if let Some(lowered) = params.define_props.get(define_props_index) {
                         let item_started = Instant::now();
+                        let props_projection = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
+                            crate::meta_resolve::projection_demand::PublishedSurfaceKind::Props,
+                        );
                         let (shape, source) = produce_one_macro_object_shape(
                             query_engine,
                             owner_canonical,
                             lowered,
                             has_prop_shape_surface,
+                            props_projection.cursor(),
                         );
                         if source.is_projection() {
                             projection_hits += 1;
@@ -341,11 +354,15 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                             );
                         } else if let Some(lowered) = define_props_lowered {
                             let item_started = Instant::now();
+                            let props_projection = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
+                                crate::meta_resolve::projection_demand::PublishedSurfaceKind::Props,
+                            );
                             let (shape, source) = produce_one_macro_object_shape(
                                 query_engine,
                                 owner_canonical,
                                 lowered,
                                 has_prop_shape_surface,
+                                props_projection.cursor(),
                             );
                             if source.is_projection() {
                                 projection_hits += 1;
@@ -372,11 +389,15 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                         }
                     } else if let Some(lowered) = define_props_lowered {
                         let item_started = Instant::now();
+                        let props_projection = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
+                            crate::meta_resolve::projection_demand::PublishedSurfaceKind::Props,
+                        );
                         let (shape, source) = produce_one_macro_object_shape(
                             query_engine,
                             owner_canonical,
                             lowered,
                             has_prop_shape_surface,
+                            props_projection.cursor(),
                         );
                         if source.is_projection() {
                             projection_hits += 1;
@@ -466,11 +487,15 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                         );
                     } else {
                         let item_started = Instant::now();
+                        let emits_projection = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
+                            crate::meta_resolve::projection_demand::PublishedSurfaceKind::Emits,
+                        );
                         let (shape, source) = produce_one_macro_object_shape(
                             query_engine,
                             owner_canonical,
                             lowered,
                             verter_semantic::analysis::type_eval_build::has_named_shape_surface,
+                            emits_projection.cursor(),
                         );
                         if source.is_projection() {
                             projection_hits += 1;
@@ -566,10 +591,14 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                         // defineSlots object shape.
                         if define_slots_owner_surface_incomplete {
                             let item_started = Instant::now();
+                            let slots_projection = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
+                                crate::meta_resolve::projection_demand::PublishedSurfaceKind::Slots,
+                            );
                             let (shape, source) = produce_one_macro_object_shape_for_slots(
                                 query_engine,
                                 owner_canonical,
                                 lowered,
+                                slots_projection.cursor(),
                             );
                             if source.is_projection() {
                                 projection_hits += 1;
@@ -599,10 +628,15 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                     }
                 } else if let Some(lowered) = define_slots_lowered {
                     let item_started = Instant::now();
+                    let slots_projection =
+                        crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
+                            crate::meta_resolve::projection_demand::PublishedSurfaceKind::Slots,
+                        );
                     let (shape, source) = produce_one_macro_object_shape_for_slots(
                         query_engine,
                         owner_canonical,
                         lowered,
+                        slots_projection.cursor(),
                     );
                     if source.is_projection() {
                         projection_hits += 1;
@@ -1583,11 +1617,21 @@ pub(crate) fn produce_one_macro_object_shape(
     owner_canonical: &str,
     lowered: &verter_type_expr::TypeExpr,
     shape_is_usable: impl Fn(&verter_semantic::analysis::type_expand::ExpandedObjectShape) -> bool,
+    cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) -> (Option<ShapeResult>, MacroShapeSource) {
+    // Block 6.i Commit AX — the threaded `cursor` carries the
+    // caller's published-surface demand. Every shape-producing path
+    // finalizes through `finalize_macro_shape_through_cursor` so the
+    // macro-shape mirror publishes carrier-shallow member types
+    // (`whole_surface(kind)` cursors admit every member name; each
+    // member's type body is published as a `Navigate` carrier unless
+    // the consumer walked a deep path).
+    //
     // ── Fast path: direct Object body → DB-backed projection ──────────
-    if let Some(projected) =
-        project_named_ref_prepared_surface_shape(query_engine, owner_canonical, lowered)
+    if let Some(mut projected) =
+        project_named_ref_prepared_surface_shape(query_engine, owner_canonical, lowered, cursor)
     {
+        finalize_macro_shape_through_cursor(cursor, &mut projected);
         return (Some(projected), MacroShapeSource::Projection);
     }
 
@@ -1609,12 +1653,12 @@ pub(crate) fn produce_one_macro_object_shape(
                     &def_name,
                 ) {
                     if shape_is_usable(&shape) {
-                        return (
-                            Some(
-                                verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape),
-                            ),
-                            MacroShapeSource::Projection,
-                        );
+                        let mut result =
+                            verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
+                                shape,
+                            );
+                        finalize_macro_shape_through_cursor(cursor, &mut result);
+                        return (Some(result), MacroShapeSource::Projection);
                     }
                 }
             }
@@ -1661,27 +1705,30 @@ pub(crate) fn produce_one_macro_object_shape(
     // as an exact-concrete SolverResult so
     // `solver_result_to_object_expansion` still derives the expansion.
     let solver_result = scoped_solver_result.unwrap_or_else(|| {
-        // Dispatch's surface projection is the sole solve path.
-        // Empty-path `ProjectPath` with mode Expanded expands
-        // terminal DeclAnchors via `Instantiate(anchor, [])` so
-        // non-generic aliases (including namespace-qualified
-        // `Types.Props` → `Props`) emit their body surface here.
-        //
-        // Route through `project_expr_class_a_via_dispatch_threaded`
-        // so IndexedAccess chains (`WrappedConfig<Theme>['nested']['palette']`)
-        // are decomposed into `(base_expr, [PathSegment::Index(...)])`
-        // and dispatched as `ProjectPath { base, path, Expanded }`.
-        // PathWalker threads the inner generic-substitution context
-        // (`T → Theme`) consistently across hops via per-segment
-        // walking, ensuring intermediate hops resolve the requested
-        // path rather than enumerating sibling members.
-        //
-        // This multi-macro-kind callsite routes through the bridge
-        // helper `project_expr_class_a_via_dispatch_threaded`, which
-        // threads `query_engine.ctx` so the request-local fuse +
-        // scope-payload state stays load-bearing for `Partial<T>`
-        // optionality propagation across props/emits/slots in the
-        // same request.
+        // Block 6.i Commit AX (continuation) — the cursor-aware
+        // Shallow-terminal macro-surface helper draft at this
+        // callsite is DEFERRED. The draft replaced
+        // `project_expr_class_a_via_dispatch_threaded` (Navigate
+        // base + Expanded terminal) with
+        // `project_macro_surface_shallow_via_dispatch_threaded`
+        // (Navigate base + Shallow terminal, no
+        // `deep_resolve_slot_function_refs` post-pass) but did
+        // NOT close the 62-edge `outputSchema|execute` audit gate
+        // — the residual leak originates in the slot path's
+        // `deep_resolve_slot_function_refs` chain that the slot-
+        // binding extraction contract requires (see
+        // `produce_one_macro_object_shape_for_slots`). The
+        // standalone Shallow helper for non-slot macros also
+        // regressed
+        // `project_emits_unresolved_import_publishes_diagnostic`
+        // because the Shallow walker's permissive output for
+        // unresolved imports suppresses the
+        // `resolve_payload_surface` failure path. See
+        // `D:/tmp/AX-continuation-fix-report.md` for the empirical
+        // findings; the rollout is blocked until
+        // `project_expr_surface_expr_via_host_threaded`
+        // demand-bounding lands (the KNOWN-RISK producer named in
+        // the brief).
         let projected = project_expr_class_a_via_dispatch_threaded(
             query_engine.ctx,
             Some(query_engine),
@@ -1713,7 +1760,13 @@ pub(crate) fn produce_one_macro_object_shape(
         None
     };
     let root_projected = if rescue_projection {
-        project_named_ref_surface_shape(query_engine, owner_canonical, lowered, &shape_is_usable)
+        project_named_ref_surface_shape(
+            query_engine,
+            owner_canonical,
+            lowered,
+            &shape_is_usable,
+            cursor,
+        )
     } else {
         None
     };
@@ -1723,6 +1776,7 @@ pub(crate) fn produce_one_macro_object_shape(
             owner_canonical,
             lowered,
             &shape_is_usable,
+            cursor,
         )
     } else {
         None
@@ -1732,7 +1786,7 @@ pub(crate) fn produce_one_macro_object_shape(
         .flatten()
         .max_by_key(shape_surface_count);
 
-    match projected {
+    let (mut result, source) = match projected {
         Some(proj) if solver_count == 0 => (Some(proj), MacroShapeSource::Projection),
         Some(proj) if projection_result_beats_solver_shape(&proj, &solver_result) => {
             (Some(proj), MacroShapeSource::Projection)
@@ -1742,14 +1796,60 @@ pub(crate) fn produce_one_macro_object_shape(
             Some(proj) => (Some(proj), MacroShapeSource::Projection),
             None => (None, MacroShapeSource::None),
         },
+    };
+    // Block 6.i Commit AX — finalize each published member through
+    // the cursor so the macro-shape mirror publishes carrier-shallow
+    // types (no eager `outputSchema` / `execute` breadth-enumeration).
+    if let Some(shape) = result.as_mut() {
+        finalize_macro_shape_through_cursor(cursor, shape);
     }
+    (result, source)
+}
+
+/// Block 6.i Commit AX — carrier-preserving per-member finalizer for
+/// a projected macro object shape.
+///
+/// A macro projector publishes EVERY top-level member NAME admitted
+/// by the cursor's published surface. This helper descends each
+/// property through `cursor.descend_published_member`:
+///
+/// - A member the cursor does NOT admit is DROPPED from the shape (a
+///   narrowed projection excludes it).
+/// - An admitted member is kept; its type body is published as a
+///   CARRIER unless the consumer explicitly walked a deep path. The
+///   per-member carrier depth-reduction for the published
+///   `evaluated_types.define_props` mirror is finalised by
+///   [`crate::meta_resolve::projectors::reduce_published_field_types`]'s
+///   back-sync (which runs the carrier-aware reducer in
+///   request-bound context); this helper owns the breadth gate so
+///   the macro-shape producer and the projector pipeline agree on
+///   the published surface membership.
+///
+/// `descend_published_member` keeps the breadth gate identical to
+/// the projector pipeline's per-member descent — when a future
+/// commit narrows the macro projection (`Pick`/`Omit`), siblings
+/// drop here exactly as they drop from `project_props`.
+fn finalize_macro_shape_through_cursor(
+    cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
+    shape: &mut ShapeResult,
+) {
+    shape.value.properties.retain(|property| {
+        cursor
+            .descend_published_member(property.name.as_str())
+            .is_some()
+    });
 }
 
 pub(crate) fn project_named_ref_prepared_surface_shape(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner_canonical: &str,
     lowered: &verter_type_expr::TypeExpr,
+    cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) -> Option<ShapeResult> {
+    // Block 6.i Commit AX — the projected macro root surface is
+    // finalized through `cursor.descend_published_member` so each
+    // published member's type body is a carrier (`Navigate` mode),
+    // not an eagerly-expanded object surface.
     let verter_type_expr::TypeExpr::Ref {
         name,
         type_arguments,
@@ -1787,7 +1887,7 @@ pub(crate) fn project_named_ref_prepared_surface_shape(
 
     // Bridge the engine method via the per-engine helper so the
     // pre-flight gate sees zero external engine-method callers.
-    project_prepared_type_surface_shape_via_host_threaded(
+    let mut result = project_prepared_type_surface_shape_via_host_threaded(
         query_engine,
         scope_canonical.as_str(),
         resolved_name.as_str(),
@@ -1795,7 +1895,9 @@ pub(crate) fn project_named_ref_prepared_surface_shape(
     .and_then(|shape| {
         has_prop_shape_surface(&shape)
             .then(|| verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape))
-    })
+    })?;
+    finalize_macro_shape_through_cursor(cursor, &mut result);
+    Some(result)
 }
 
 pub(crate) fn named_ref_can_use_prepared_projection(
@@ -1934,7 +2036,11 @@ pub(crate) fn project_named_ref_surface_shape(
     owner_canonical: &str,
     lowered: &verter_type_expr::TypeExpr,
     shape_is_usable: &impl Fn(&verter_semantic::analysis::type_expand::ExpandedObjectShape) -> bool,
+    cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) -> Option<ShapeResult> {
+    // Block 6.i Commit AX — the projected macro root surface is
+    // finalized through `cursor.descend_published_member` so each
+    // published member's type body is a carrier (`Navigate` mode).
     let verter_type_expr::TypeExpr::Ref { name, .. } = lowered else {
         return None;
     };
@@ -1953,12 +2059,17 @@ pub(crate) fn project_named_ref_surface_shape(
 
     // Bridge the engine method via the per-engine helper so the
     // pre-flight gate sees zero external engine-method callers.
-    project_type_surface_shape_via_host_threaded(query_engine, defining_canonical, defining_name)
-        .and_then(|shape| {
-            shape_is_usable(&shape).then(|| {
-                verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape)
-            })
-        })
+    let mut result = project_type_surface_shape_via_host_threaded(
+        query_engine,
+        defining_canonical,
+        defining_name,
+    )
+    .and_then(|shape| {
+        shape_is_usable(&shape)
+            .then(|| verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape))
+    })?;
+    finalize_macro_shape_through_cursor(cursor, &mut result);
+    Some(result)
 }
 
 pub(crate) fn project_named_ref_imported_scope_shape(
@@ -1966,7 +2077,11 @@ pub(crate) fn project_named_ref_imported_scope_shape(
     owner_canonical: &str,
     lowered: &verter_type_expr::TypeExpr,
     shape_is_usable: &impl Fn(&verter_semantic::analysis::type_expand::ExpandedObjectShape) -> bool,
+    cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) -> Option<ShapeResult> {
+    // Block 6.i Commit AX — the projected macro root surface is
+    // finalized through `cursor.descend_published_member` so each
+    // published member's type body is a carrier (`Navigate` mode).
     let verter_type_expr::TypeExpr::Ref { name, .. } = lowered else {
         return None;
     };
@@ -1983,12 +2098,15 @@ pub(crate) fn project_named_ref_imported_scope_shape(
 
     // Bridge the engine method via the per-engine helper so the
     // pre-flight gate sees zero external engine-method callers.
-    project_expr_surface_shape_via_host_threaded(query_engine, defining_canonical, lowered)
-        .and_then(|shape| {
-            shape_is_usable(&shape).then(|| {
-                verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape)
-            })
-        })
+    let mut result =
+        project_expr_surface_shape_via_host_threaded(query_engine, defining_canonical, lowered)
+            .and_then(|shape| {
+                shape_is_usable(&shape).then(|| {
+                    verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape)
+                })
+            })?;
+    finalize_macro_shape_through_cursor(cursor, &mut result);
+    Some(result)
 }
 
 /// Like `produce_one_macro_object_shape` but applies `deep_resolve_slot_function_refs`
@@ -1997,7 +2115,10 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner_canonical: &str,
     lowered: &verter_type_expr::TypeExpr,
+    cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) -> (Option<ShapeResult>, MacroShapeSource) {
+    // Block 6.i Commit AX — cursor threaded for path-precision in
+    // downstream walks. Pre-AX callers pass `whole_surface(Slots)`.
     // ── Fast path: direct Object body → DB-backed projection ──────────
     if let verter_type_expr::TypeExpr::Ref {
         name,
@@ -2050,6 +2171,18 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
     // `project_expr_surface_expr_with_compound_objects` fallback is
     // DEFERRED to 5e/5f per the brief note and stays on the engine
     // for now.
+    // Block 6.i Commit AX — slot-shape projection KEEPS the legacy
+    // Expanded-terminal path because slot-binding extraction requires
+    // Function-signature exposure inside each slot's value type (the
+    // slot's `(props: ...) => any` shape). Switching to the
+    // Shallow-terminal helper would leave slot members as Ref
+    // carriers, and `deep_resolve_slot_function_refs` cannot recover
+    // the per-slot parameter introspection needed by
+    // [`resolve_slot_bindings_graph_native`]. The non-slot
+    // (props/emits/exposed/options) callsite above uses the
+    // Shallow-terminal helper because those macro shapes publish
+    // member NAMES + carrier bodies; the slot path is the explicit
+    // exception captured here.
     let projected_body =
         project_expr_class_a_via_dispatch(query_engine.ctx, owner_canonical, lowered)
             .or_else(|| {
@@ -2061,6 +2194,7 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
                 )
             })
             .unwrap_or_else(|| lowered.clone());
+    let _ = cursor; // cursor finalisation runs at the call site of `produce_one_macro_object_shape_for_slots`.
     let deeply_resolved =
         query_engine.deep_resolve_slot_function_refs(owner_canonical, &projected_body);
     let solver_result = verter_semantic::analysis::type_expand::solver_result_to_object_expansion(
@@ -2089,6 +2223,7 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
         owner_canonical,
         lowered,
         &has_shape_surface,
+        cursor,
     )
     .and_then(|shape| {
         let projected_expr = expanded_shape_to_type_expr(&shape.value);

@@ -162,7 +162,7 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
             // Whole/MemberPath via its registry-route fast-path AND falls
             // back to the generic ProjectPath{[],Expanded} dispatch. Pick/Omit
             // route-targets reach the dispatch's `Instantiate` builtin
-            // utility path internally via lower_type_expr_in_scope.
+            // utility path internally via lower_type_expr_in_scope_with_mode.
             //
             // The two-step engine resolution (try direct scope, then
             // declaration scope) is preserved so re-exported / barrel-routed

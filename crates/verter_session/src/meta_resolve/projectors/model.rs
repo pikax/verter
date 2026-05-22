@@ -58,10 +58,25 @@ pub(crate) fn project_model(
     mac: &AnalyzedMacro,
     _snapshot: &FileAnalysisSnapshot,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
+    cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) -> Option<ExpandedField> {
     if !mac.is_type_based {
         return None;
     }
+
+    let model_name = mac
+        .model_name
+        .clone()
+        .unwrap_or_else(|| DEFAULT_MODEL_NAME.to_string());
+
+    // Block 6.i Commit AX — descend into the published model member.
+    // `descend_published_member` returns `None` (the model is dropped
+    // from the published surface) when a narrowed projection does not
+    // admit the model name; for the whole-surface default it yields a
+    // terminal carrier cursor. `project_model` raises a single payload
+    // (no surface walk) so the carrier mode does not gate a per-member
+    // breadth loop here — the descend gate IS the load-bearing use.
+    let _member_cursor = cursor.descend_published_member(&model_name)?;
 
     let ctx: &dyn ResolverContext = query_engine.ctx;
     let (raised, exactness, raise_failed) = {
@@ -96,6 +111,11 @@ pub(crate) fn project_model(
         ));
     }
 
+    // An operator-shape model type (`defineModel<Foo['a']>`) carries
+    // EXPLICIT path demand inside the type expression — reduce it
+    // path-precisely. A bare carrier (`defineModel<Tool<I, O>>`) has
+    // no operator node, so `raised` is returned verbatim — published
+    // as a carrier.
     let r#type = if super::type_expr_contains_reducible_operator(&raised) {
         super::super::materialize::materialize_component_meta_type_expr_until_stable(
             &raised,
@@ -107,10 +127,7 @@ pub(crate) fn project_model(
         raised
     };
 
-    let name = mac
-        .model_name
-        .clone()
-        .unwrap_or_else(|| DEFAULT_MODEL_NAME.to_string());
+    let name = model_name;
 
     Some(ExpandedField {
         name,

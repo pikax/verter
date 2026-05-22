@@ -548,6 +548,108 @@ impl From<ProjectionMode> for verter_audit::ProjectionModeTag {
     }
 }
 
+/// Reduction-demand axis (Block 6.i Commit AX, codex-hybrid spec).
+///
+/// Distinguishes whether the query result is going to be *published*
+/// (a consumer of the projector pipeline will read it on the final
+/// component-meta surface) or is needed *internally* as a structural
+/// transit value (e.g. by the relation engine to bind an `infer`
+/// parameter, by the deferred-shell evaluator to walk a `KeyOf` /
+/// `Mapped` carrier, by the BFS cycle guard).
+///
+/// The carrier-stop predicate [`may_reduce_operator`] gates whether
+/// `keyof T` enumerates its keyspace into per-key literal anchors and
+/// whether `{ [K in S]: V }` materialises its produced surface.
+/// Under `StructuralTransit` both operators return a carrier
+/// ([`SemanticNodeData::KeyOf`] / [`SemanticNodeData::Mapped`]) so the
+/// caller can substitute / inspect the operator structurally without
+/// paying for member materialisation that no published demand selects
+/// through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReductionDemand {
+    /// The caller will publish the result on a consumer-visible
+    /// surface. Operators reduce when `mode` admits.
+    Published,
+    /// The caller needs the result as a structural transit value
+    /// (relation engine binding, deferred-shell evaluation, generic
+    /// substitution, cycle BFS). Operators carrier-stop regardless of
+    /// `mode`.
+    StructuralTransit,
+}
+
+/// Projection reduction context — the `(mode, demand)` pair threaded
+/// through every operator dispatch (`Instantiate` / `KeyOf` /
+/// `MappedType` and the builtin-utility dispatch that composes them).
+///
+/// The cache slot is per-context so a `StructuralTransit/Shallow`
+/// result does not collide with a `Published/Shallow` result on the
+/// same node — they are distinct evaluations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProjectionReductionContext {
+    pub mode: ProjectionMode,
+    pub demand: ReductionDemand,
+}
+
+impl ProjectionReductionContext {
+    /// Construct a `Published` context with the supplied mode. The
+    /// canonical entry point for the publication pipeline (projector,
+    /// component-meta materialisation, typeinfo, explicit path walks).
+    pub const fn published(mode: ProjectionMode) -> Self {
+        Self {
+            mode,
+            demand: ReductionDemand::Published,
+        }
+    }
+
+    /// Construct a `StructuralTransit` context — used by the relation
+    /// engine, deferred-shell evaluator, and other internal transit
+    /// callers that need the structural shape but never publish the
+    /// result. `mode` is `Shallow` for transit callers per the
+    /// codex-hybrid spec.
+    pub const fn structural_transit() -> Self {
+        Self {
+            mode: ProjectionMode::Shallow,
+            demand: ReductionDemand::StructuralTransit,
+        }
+    }
+}
+
+/// Carrier-stop predicate (Block 6.i Commit AX, codex-hybrid spec).
+///
+/// Returns `true` exactly when an operator (`keyof T`, `{ [K in S]: V }`)
+/// should reduce — i.e. the caller is on the publication path.
+/// Otherwise the operator returns a deferred carrier
+/// ([`SemanticNodeData::KeyOf`] / [`SemanticNodeData::Mapped`])
+/// without enumerating keys or materialising produced members.
+///
+/// **Implementation note (codex-hybrid amendment).** The codex spec
+/// originally added `&& matches!(ctx.mode, ProjectionMode::Expanded)`
+/// to the predicate. Empirically that mode restriction is too tight:
+/// it carrier-stops the macro projector's `Published + Navigate`
+/// publication path, which breaks userland-`MyPick` structural
+/// equivalence (a userland `{ [P in K]: T[P] }` must materialise
+/// identically to the builtin `Pick<T,K>` — both enter the publication
+/// pipeline with `Published` demand). The demand axis alone is the
+/// load-bearing rail: `StructuralTransit` carrier-stops (relation
+/// engine, deferred-shell evaluation, generic substitution),
+/// `Published` reduces (every publication-reachable operator
+/// dispatch).
+///
+/// The ChatMessages leak fix is preserved: the relation engine's
+/// identity-carrier unwrap and Object-vs-Record arm both explicitly
+/// dispatch under `ProjectionReductionContext::structural_transit()`,
+/// so the inference-time chain that produces the
+/// `outputSchema|execute` derivation edges carrier-stops at the
+/// relation-engine boundary regardless of the surrounding mode.
+///
+/// Structural — does NOT inspect the operand's declaration name.
+/// A userland `type MyPick<T,K extends keyof T> = { [P in K]: T[P] }`
+/// follows the same code path as the builtin `Pick<T,K>` and obeys
+/// the SAME predicate.
+pub const fn may_reduce_operator(ctx: ProjectionReductionContext) -> bool {
+    matches!(ctx.demand, ReductionDemand::Published)
+}
+
 /// One hop in a navigation path. Used by [`TypeNavigator::choose_next_hop`]
 /// and as the segment list in [`SemanticQueryKey::ProjectPath`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -991,15 +1093,21 @@ pub enum SemanticQueryKey {
     ResolveDecl(ResolveDeclKey),
     /// Generic instantiation of `base` with the supplied `args`.
     ///
-    /// `body_mode` controls how the decl body is lowered after substitution
-    /// (Navigate keeps shells lazy, Expanded fully reduces). The memo splits
-    /// per body_mode (see [`SemanticQueryKey`] family-slot mapping in
-    /// [`semantic_query_memo`](crate::semantic_query_memo)) so a Navigate
-    /// caller and an Expanded caller never collide on a single shared entry.
+    /// `context` carries the reduction context: `mode` controls how the
+    /// decl body is lowered after substitution (Navigate keeps shells
+    /// lazy, Expanded fully reduces, Shallow walks one structural level);
+    /// `demand` distinguishes publication callers (`Published`) from
+    /// internal transit callers (`StructuralTransit`). Under
+    /// `StructuralTransit` nested `keyof` / mapped reductions carrier-
+    /// stop so spurious member materialisation does not run.
+    ///
+    /// The memo splits per context so `(Shallow, StructuralTransit)`
+    /// and `(Shallow, Published)` evaluations do not collide on a
+    /// single shared entry.
     Instantiate {
         base: DeclIdentity,
         args: Arc<[SemanticNodeId]>,
-        body_mode: ProjectionMode,
+        context: ProjectionReductionContext,
     },
     ProjectMember {
         base: SemanticNodeId,
@@ -1011,12 +1119,28 @@ pub enum SemanticQueryKey {
         index: IndexKey,
         mode: ProjectionMode,
     },
+    /// `keyof base` deferred / reduced lookup.
+    ///
+    /// `context` gates whether the build reifies the keyspace as a
+    /// union of literal anchors (with one `ProjectMember` edge per
+    /// literal) or returns a [`SemanticNodeData::KeyOf`] carrier. Only
+    /// `Published + Expanded` admits reification — see
+    /// [`may_reduce_operator`].
     KeyOf {
         base: SemanticNodeId,
+        context: ProjectionReductionContext,
     },
+    /// Mapped-type rewrite for `{ [K in source]: mapper.value_expr }`.
+    ///
+    /// `context` gates whether the build enumerates the source's keys
+    /// and materialises a produced surface (with per-member
+    /// `ProjectMember` edges), or returns a [`SemanticNodeData::Mapped`]
+    /// carrier without member materialisation. Only `Published +
+    /// Expanded` admits materialisation — see [`may_reduce_operator`].
     MappedType {
         source: SemanticNodeId,
         mapper: MapperKey,
+        context: ProjectionReductionContext,
     },
     Conditional {
         check: SemanticNodeId,
@@ -1781,7 +1905,7 @@ pub trait SemanticQueryApi {
         self.execute(SemanticQueryKey::Instantiate {
             base,
             args,
-            body_mode,
+            context: ProjectionReductionContext::published(body_mode),
         })
     }
     fn project_member(
@@ -1865,12 +1989,12 @@ mod tests {
         let a = SemanticQueryKey::Instantiate {
             base: base.clone(),
             args: Arc::from(vec![string_id].into_boxed_slice()),
-            body_mode: ProjectionMode::Expanded,
+            context: ProjectionReductionContext::published(ProjectionMode::Expanded),
         };
         let b = SemanticQueryKey::Instantiate {
             base,
             args: Arc::from(vec![number_id].into_boxed_slice()),
-            body_mode: ProjectionMode::Expanded,
+            context: ProjectionReductionContext::published(ProjectionMode::Expanded),
         };
         assert_ne!(a, b);
     }
@@ -2025,14 +2149,14 @@ mod tests {
         let key = SemanticQueryKey::Instantiate {
             base: base.clone(),
             args: Arc::clone(&args),
-            body_mode: ProjectionMode::Expanded,
+            context: ProjectionReductionContext::published(ProjectionMode::Expanded),
         };
         let mut map = std::collections::HashMap::new();
         map.insert(key.clone(), 1);
         let key2 = SemanticQueryKey::Instantiate {
             base,
             args,
-            body_mode: ProjectionMode::Expanded,
+            context: ProjectionReductionContext::published(ProjectionMode::Expanded),
         };
         assert_eq!(map.get(&key2), Some(&1), "same args dedup to one entry");
     }

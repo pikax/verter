@@ -441,7 +441,9 @@ fn slot_param_root_is_symbolic_only(
             let key = SemanticQueryKey::Instantiate {
                 base: base.clone(),
                 args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                body_mode: ProjectionMode::Skeleton,
+                context: crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Skeleton,
+                ),
             };
             let read = dispatch.execute_read(key);
             // Dual-emit: legacy accumulator + fact-tracer fan-out.

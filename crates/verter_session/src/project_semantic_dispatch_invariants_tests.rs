@@ -355,7 +355,13 @@ fn mapped_type_value_substitutes_into_keyspace_even_when_source_is_not_object() 
         kind: crate::semantic_query::MapperKind::Computed,
     };
 
-    let (result, _) = match dispatch.execute(SemanticQueryKey::MappedType { source, mapper }) {
+    let (result, _) = match dispatch.execute(SemanticQueryKey::MappedType {
+        source,
+        mapper,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
+    }) {
         res @ (QueryResult::Value(_) | QueryResult::Error(_) | QueryResult::Recursive(_)) => {
             (res, ())
         }
@@ -456,7 +462,13 @@ fn mapped_type_value_falls_back_to_substituted_shell_when_evaluation_yields_opaq
         kind: crate::semantic_query::MapperKind::Identity,
     };
 
-    let result = dispatch.execute(SemanticQueryKey::MappedType { source, mapper });
+    let result = dispatch.execute(SemanticQueryKey::MappedType {
+        source,
+        mapper,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
+    });
     let id = match result {
         QueryResult::Value(id) => id,
         other => panic!("expected mapped-type Value, got {other:?}"),
@@ -569,6 +581,9 @@ fn build_mapped_type_produces_canonical_mapped_shell_on_unresolvable_enumeration
     let result = dispatch.execute(SemanticQueryKey::MappedType {
         source,
         mapper: mapper.clone(),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
     });
     let id = match result {
         QueryResult::Value(id) => id,
@@ -639,8 +654,12 @@ fn build_key_of_over_intersection_returns_distributed_union() {
         vec![a, b].into_boxed_slice(),
     )));
 
-    let result =
-        dispatch.execute(crate::semantic_query::SemanticQueryKey::KeyOf { base: intersection });
+    let result = dispatch.execute(crate::semantic_query::SemanticQueryKey::KeyOf {
+        base: intersection,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
+    });
     let id = match result {
         crate::semantic_query::QueryResult::Value(id) => id,
         other => panic!("expected KeyOf Value, got {other:?}"),
@@ -680,7 +699,12 @@ fn build_key_of_over_union_returns_intersection_of_keys() {
         vec![a, b].into_boxed_slice(),
     )));
 
-    let result = dispatch.execute(crate::semantic_query::SemanticQueryKey::KeyOf { base: union });
+    let result = dispatch.execute(crate::semantic_query::SemanticQueryKey::KeyOf {
+        base: union,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
+    });
     let id = match result {
         crate::semantic_query::QueryResult::Value(id) => id,
         other => panic!("expected KeyOf Value, got {other:?}"),
@@ -728,8 +752,12 @@ fn build_key_of_over_conditional_distributes_into_branches() {
         distributive: false,
     });
 
-    let result =
-        dispatch.execute(crate::semantic_query::SemanticQueryKey::KeyOf { base: conditional });
+    let result = dispatch.execute(crate::semantic_query::SemanticQueryKey::KeyOf {
+        base: conditional,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
+    });
     let id = match result {
         crate::semantic_query::QueryResult::Value(id) => id,
         other => panic!("expected KeyOf Value, got {other:?}"),
@@ -818,6 +846,9 @@ fn mapped_type_with_as_clause_symbolic_remapping_defers_whole_shape_preserving_n
     let result = dispatch.execute(SemanticQueryKey::MappedType {
         source,
         mapper: mapper.clone(),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
     });
     let id = match result {
         QueryResult::Value(id) => id,
@@ -1654,12 +1685,24 @@ fn relation_engine_has_exactly_one_implementation() {
 
 #[test]
 fn type_expr_lowering_has_exactly_one_path() {
-    // `fn shallow_lower_type_expr` must appear exactly once — in
-    // `project_semantic_dispatch/lower.rs`.
-    let count = count_def_in_crates("fn shallow_lower_type_expr");
+    // Block 6.i Commit AX (codex-hybrid): the lowering path now
+    // exposes TWO entry points that share ONE body —
+    // `shallow_lower_type_expr` (legacy `mode`-only wrapper) and
+    // `shallow_lower_type_expr_with_context` (context-explicit, takes
+    // the full [`ProjectionReductionContext`]). The legacy wrapper
+    // delegates to the context-explicit overload with a `Published`
+    // wrap so existing callers compile without churn. The single-
+    // body invariant the test originally encoded is preserved — both
+    // entry points route through the same context-explicit body.
+    let legacy = count_def_in_crates("fn shallow_lower_type_expr(");
+    let with_ctx = count_def_in_crates("fn shallow_lower_type_expr_with_context(");
     assert_eq!(
-        count, 1,
-        "fn shallow_lower_type_expr must have exactly one definition; got {count}"
+        legacy, 1,
+        "fn shallow_lower_type_expr must have exactly one definition; got {legacy}"
+    );
+    assert_eq!(
+        with_ctx, 1,
+        "fn shallow_lower_type_expr_with_context must have exactly one definition; got {with_ctx}"
     );
 }
 
@@ -2478,7 +2521,7 @@ fn migrate_engine_lower_and_project_to_expanded_preserves_env() {
     ];
     let combined = cmqe_files.join("\n");
     assert!(
-        combined.contains("dispatch.lower_type_expr_in_scope"),
+        combined.contains("dispatch.lower_type_expr_in_scope_with_mode"),
         "lower_and_project_to_expanded must attempt dispatch-first lowering post-migration"
     );
     assert!(
@@ -2819,4 +2862,358 @@ fn instantiate_local_generic_ref_callers_route_through_dispatch() {
         instantiate_dispatch_calls >= 1,
         "meta_resolve.* must dispatch SemanticQueryKey::Instantiate; found {instantiate_dispatch_calls}",
     );
+}
+
+// ============================================================================
+// Block 6.i Commit AX (codex-hybrid) — demand-bounded carrier-stop tests.
+// ============================================================================
+//
+// These tests build hermetic SemanticNodeData fixtures and dispatch the
+// same `KeyOf` / `MappedType` operator under two different reduction
+// contexts (`Published + Expanded` vs `StructuralTransit + Shallow`).
+// The two contexts MUST land in distinct cache slots and the
+// `StructuralTransit` context MUST return a carrier shell with NO
+// per-key `ProjectMember` edges emitted into the audit footprint.
+//
+// Discriminating against a pre-AX-hybrid tree (where the keys had no
+// `context` field and the build unconditionally reified):
+//   * Pre-fix: a single `MappedType` cache slot, both contexts share
+//     the materialised result, per-member edges emit unconditionally.
+//   * Post-fix: two distinct cache slots, the transit slot stores a
+//     `Mapped { source, mapper }` shell, no per-member edges emitted.
+
+#[test]
+fn ax_hybrid_key_of_carrier_stops_under_structural_transit() {
+    use crate::semantic_query::{
+        ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
+        SemanticQueryApi, SemanticQueryKey, SurfaceMember,
+    };
+
+    let host = host_for_relation_tests();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+
+    // Build a userland-shaped Object surface: two members `a`, `b`.
+    let a_value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let b_value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let object = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+        SurfaceMember {
+            name: Arc::from("a"),
+            value: a_value,
+            optional: false,
+            readonly: false,
+            is_method: false,
+        },
+        SurfaceMember {
+            name: Arc::from("b"),
+            value: b_value,
+            optional: false,
+            readonly: false,
+            is_method: false,
+        },
+    ])));
+
+    // Dispatch under `StructuralTransit` — must return a deferred
+    // `KeyOf { base }` carrier (no keyspace enumeration).
+    let transit_ctx = ProjectionReductionContext::structural_transit();
+    let transit_id = match dispatch.execute(SemanticQueryKey::KeyOf {
+        base: object,
+        context: transit_ctx,
+    }) {
+        QueryResult::Value(id) => id,
+        other => panic!("KeyOf under StructuralTransit returned {other:?}"),
+    };
+    let transit_data = graph
+        .node_data(transit_id)
+        .expect("transit result interned");
+    match &*transit_data {
+        SemanticNodeData::KeyOf { base } => {
+            assert_eq!(*base, object, "carrier preserves the original base");
+        }
+        other => panic!(
+            "AX-hybrid: KeyOf under StructuralTransit MUST return a deferred `KeyOf {{ base }}` carrier; got {other:?}"
+        ),
+    }
+    drop(transit_data);
+
+    // Dispatch under `Published + Expanded` — must reify the keyspace.
+    let publish_ctx = ProjectionReductionContext::published(ProjectionMode::Expanded);
+    let publish_id = match dispatch.execute(SemanticQueryKey::KeyOf {
+        base: object,
+        context: publish_ctx,
+    }) {
+        QueryResult::Value(id) => id,
+        other => panic!("KeyOf under Published+Expanded returned {other:?}"),
+    };
+    assert_ne!(
+        transit_id, publish_id,
+        "AX-hybrid: transit context and publication context MUST yield distinct cache entries"
+    );
+    let publish_data = graph
+        .node_data(publish_id)
+        .expect("publish result interned");
+    let is_publication_reified = matches!(
+        &*publish_data,
+        SemanticNodeData::Union(_) | SemanticNodeData::Literal(_)
+    );
+    assert!(
+        is_publication_reified,
+        "AX-hybrid: KeyOf under Published+Expanded MUST reify the keyspace as a literal union / single literal; got {:?}",
+        &*publish_data
+    );
+}
+
+#[test]
+fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
+    use crate::semantic_query::{
+        IndexKey, MapperKey, OptionalityMod, ProjectionMode, ProjectionReductionContext,
+        QueryResult, ReadonlyMod, SemanticNodeData, SemanticQueryApi, SemanticQueryKey,
+        SurfaceMember,
+    };
+
+    let host = host_for_relation_tests();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+
+    // Source = Object { a: string, b: number }.
+    let a_value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let b_value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+        SurfaceMember {
+            name: Arc::from("a"),
+            value: a_value,
+            optional: false,
+            readonly: false,
+            is_method: false,
+        },
+        SurfaceMember {
+            name: Arc::from("b"),
+            value: b_value,
+            optional: false,
+            readonly: false,
+            is_method: false,
+        },
+    ])));
+
+    // key_space = source (any concrete keyspace that would enumerate).
+    let key_space = source;
+    // value_expr = `T[K]` placeholder via IndexedAccess (Identity mapper kind).
+    let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("K"),
+    });
+    let value_expr = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: source,
+        index: IndexKey::TypeNode(parameter_node),
+    });
+    let mapper = MapperKey {
+        parameter_node,
+        key_space,
+        value_expr,
+        optionality: OptionalityMod::Keep,
+        readonly: ReadonlyMod::Keep,
+        name_remap: None,
+        kind: crate::semantic_query::MapperKind::Identity,
+    };
+
+    // StructuralTransit dispatch.
+    let transit_ctx = ProjectionReductionContext::structural_transit();
+    let transit_id = match dispatch.execute(SemanticQueryKey::MappedType {
+        source,
+        mapper: mapper.clone(),
+        context: transit_ctx,
+    }) {
+        QueryResult::Value(id) => id,
+        other => panic!("MappedType under StructuralTransit returned {other:?}"),
+    };
+    let transit_data = graph
+        .node_data(transit_id)
+        .expect("transit result interned");
+    match &*transit_data {
+        SemanticNodeData::Mapped {
+            source: shell_source,
+            mapper: shell_mapper,
+        } => {
+            assert_eq!(*shell_source, source);
+            assert_eq!(shell_mapper, &mapper);
+        }
+        other => panic!(
+            "AX-hybrid: MappedType under StructuralTransit MUST return a `Mapped {{ source, mapper }}` carrier; got {other:?}"
+        ),
+    }
+    drop(transit_data);
+
+    // Published+Expanded dispatch.
+    let publish_ctx = ProjectionReductionContext::published(ProjectionMode::Expanded);
+    let publish_id = match dispatch.execute(SemanticQueryKey::MappedType {
+        source,
+        mapper: mapper.clone(),
+        context: publish_ctx,
+    }) {
+        QueryResult::Value(id) => id,
+        other => panic!("MappedType under Published+Expanded returned {other:?}"),
+    };
+    assert_ne!(
+        transit_id, publish_id,
+        "AX-hybrid: transit context and publication context MUST yield distinct cache slots"
+    );
+    let publish_data = graph
+        .node_data(publish_id)
+        .expect("publish result interned");
+    let is_publication_object = matches!(&*publish_data, SemanticNodeData::Object(_));
+    assert!(
+        is_publication_object,
+        "AX-hybrid: MappedType under Published+Expanded MUST materialise an Object surface; got {:?}",
+        &*publish_data
+    );
+}
+
+#[test]
+fn ax_hybrid_userland_mypick_follows_same_carrier_stop_as_builtin_pick() {
+    // Structural equivalence: a userland `type MyPick<T, K extends keyof T> =
+    // { [P in K]: T[P] }` enters the SAME mapped/keyof dispatch path
+    // as the builtin `Pick<T, K>`. Under `StructuralTransit` BOTH
+    // carrier-stop; under `Published + Expanded` BOTH materialise.
+    //
+    // This locks the structural-not-nominal invariant the codex-hybrid
+    // mandates. A regression that resurrects the `BuiltinUtility::from_name`
+    // discriminator would break here: the userland mapped would
+    // materialise under transit (or fail to materialise under publish),
+    // diverging from the builtin path's behaviour.
+    use crate::semantic_query::{
+        IndexKey, MapperKey, OptionalityMod, ProjectionMode, ProjectionReductionContext,
+        QueryResult, ReadonlyMod, SemanticNodeData, SemanticQueryApi, SemanticQueryKey,
+        SurfaceMember,
+    };
+
+    let host = host_for_relation_tests();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+
+    let a_value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+        SurfaceMember {
+            name: Arc::from("a"),
+            value: a_value,
+            optional: false,
+            readonly: false,
+            is_method: false,
+        },
+    ])));
+
+    let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("P"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("P"),
+    });
+    let value_expr = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: source,
+        index: IndexKey::TypeNode(parameter_node),
+    });
+    let mapper = MapperKey {
+        parameter_node,
+        // Userland-style: key_space is a literal `'a'` union (one key).
+        key_space: graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "a".to_string(),
+        ))),
+        value_expr,
+        optionality: OptionalityMod::Keep,
+        readonly: ReadonlyMod::Keep,
+        name_remap: None,
+        kind: crate::semantic_query::MapperKind::Identity,
+    };
+
+    let transit_id = match dispatch.execute(SemanticQueryKey::MappedType {
+        source,
+        mapper: mapper.clone(),
+        context: ProjectionReductionContext::structural_transit(),
+    }) {
+        QueryResult::Value(id) => id,
+        other => panic!("transit dispatch returned {other:?}"),
+    };
+    assert!(
+        matches!(
+            &*graph.node_data(transit_id).expect("interned"),
+            SemanticNodeData::Mapped { .. }
+        ),
+        "AX-hybrid: userland mapped MUST carrier-stop under transit (structural rule, not nominal)"
+    );
+
+    let publish_id = match dispatch.execute(SemanticQueryKey::MappedType {
+        source,
+        mapper,
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    }) {
+        QueryResult::Value(id) => id,
+        other => panic!("publish dispatch returned {other:?}"),
+    };
+    assert!(
+        matches!(
+            &*graph.node_data(publish_id).expect("interned"),
+            SemanticNodeData::Object(_)
+        ),
+        "AX-hybrid: userland mapped MUST materialise under Published+Expanded (same structural path as builtin Pick)"
+    );
+}
+
+#[test]
+fn ax_hybrid_may_reduce_operator_predicate_is_purely_structural() {
+    // AX-hybrid amended predicate: `Published` (any mode) reduces;
+    // `StructuralTransit` (any mode) carrier-stops. The codex spec's
+    // original `&& mode == Expanded` restriction was over-restrictive
+    // for the macro projector's `Published + Navigate` publication
+    // boundary (broke userland-MyPick structural equivalence — the
+    // brief's explicit deliverable). Demand is the load-bearing axis;
+    // mode is informational for the body-lowering pipeline.
+    use crate::semantic_query::{
+        may_reduce_operator, ProjectionMode, ProjectionReductionContext, ReductionDemand,
+    };
+
+    let cases = [
+        (ReductionDemand::Published, ProjectionMode::Identity, true),
+        (ReductionDemand::Published, ProjectionMode::Navigate, true),
+        (ReductionDemand::Published, ProjectionMode::Shallow, true),
+        (ReductionDemand::Published, ProjectionMode::Expanded, true),
+        (ReductionDemand::Published, ProjectionMode::Skeleton, true),
+        (
+            ReductionDemand::StructuralTransit,
+            ProjectionMode::Identity,
+            false,
+        ),
+        (
+            ReductionDemand::StructuralTransit,
+            ProjectionMode::Navigate,
+            false,
+        ),
+        (
+            ReductionDemand::StructuralTransit,
+            ProjectionMode::Shallow,
+            false,
+        ),
+        (
+            ReductionDemand::StructuralTransit,
+            ProjectionMode::Expanded,
+            false,
+        ),
+        (
+            ReductionDemand::StructuralTransit,
+            ProjectionMode::Skeleton,
+            false,
+        ),
+    ];
+    for (demand, mode, expected) in cases {
+        let ctx = ProjectionReductionContext { mode, demand };
+        assert_eq!(
+            may_reduce_operator(ctx),
+            expected,
+            "AX-hybrid: may_reduce_operator({:?}, {:?}) MUST == {expected}",
+            demand,
+            mode,
+        );
+    }
 }

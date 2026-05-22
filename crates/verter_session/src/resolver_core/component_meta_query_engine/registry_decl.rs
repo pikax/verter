@@ -866,7 +866,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             // root's surface members, call/construct lists, etc. Expanded
             // is required so the surface is interpretable; Navigate
             // would yield the lazy shell with no readable view.
-            body_mode: crate::semantic_query::ProjectionMode::Expanded,
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Expanded,
+            ),
         }) {
             QueryResult::Value(id) => Some(id),
             _ => Some(anchor),

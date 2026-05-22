@@ -244,17 +244,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
             _ => return IdentityCarrierUnwrap::Concrete(id),
         };
         drop(data);
+        // Block 6.i Commit AX (codex-hybrid): the relation engine's
+        // identity-carrier unwrap is a STRUCTURAL TRANSIT — the
+        // relation result is consumed for assignability decisions, not
+        // published on a consumer-visible surface. Dispatch the
+        // instantiation under `StructuralTransit/Shallow` so nested
+        // `keyof T` / `{ [K in S]: V }` operators carrier-stop and the
+        // identity-carrier audit footprint does NOT reify per-member
+        // anchors during binding.
+        let transit = crate::semantic_query::ProjectionReductionContext::structural_transit();
         let unwrapped = match self.execute(SemanticQueryKey::Instantiate {
             base: identity,
             args,
-            // Identity-carrier unwrap feeds `evaluate_deferred_semantic_node`
-            // which walks through the body's structural layers (object
-            // surfaces, conditionals, mapper applications). Expanded is
-            // required: with Navigate the unwrap stops at the lazy shell
-            // and the subsequent walk has nothing to inspect.
-            body_mode: crate::semantic_query::ProjectionMode::Expanded,
+            context: transit,
         }) {
-            QueryResult::Value(unwrapped) => self.evaluate_deferred_semantic_node(unwrapped),
+            QueryResult::Value(unwrapped) => {
+                self.evaluate_deferred_semantic_node_with_context(unwrapped, transit)
+            }
             _ => return IdentityCarrierUnwrap::Unresolvable,
         };
         let Some(unwrapped_data) = graph.node_data(unwrapped) else {
@@ -326,16 +332,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         let target_record = self.record_target_shape(target)?;
 
+        // Block 6.i Commit AX (codex-hybrid): the Object-vs-Record
+        // arm is a STRUCTURAL TRANSIT — the relation engine needs the
+        // unwrapped Object surface, but the surface itself is consumed
+        // for assignability, not published. Dispatch under
+        // `StructuralTransit/Shallow` so the unwrap reads members /
+        // index / call-construct signatures off a one-level surface
+        // without re-reducing nested `keyof` / `Mapped` operators.
+        let transit = crate::semantic_query::ProjectionReductionContext::structural_transit();
         let unwrapped = match self.execute(SemanticQueryKey::Instantiate {
             base: identity,
             args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            // Object-vs-Record relation reads `view.members`, index
-            // signatures, and call/construct lists off the unwrapped
-            // body. Expanded is required: Navigate would leave the body
-            // as a lazy Ref shell with no inspectable surface view.
-            body_mode: crate::semantic_query::ProjectionMode::Expanded,
+            context: transit,
         }) {
-            QueryResult::Value(id) => self.evaluate_deferred_semantic_node(id),
+            QueryResult::Value(id) => {
+                self.evaluate_deferred_semantic_node_with_context(id, transit)
+            }
             _ => return Some(RelationResult::Unknown),
         };
         let source_view = match graph.node_data(unwrapped).as_deref() {

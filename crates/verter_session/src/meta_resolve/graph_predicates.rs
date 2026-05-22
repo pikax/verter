@@ -583,7 +583,9 @@ pub(crate) fn bfs_compute_inner(
             // Opaque(Miss)). Without this, nested-Conditional fixtures like
             // canonical nuxt-ui DotPathKeys collapse the conditional and
             // recursive refs are invisible to collect_ref_identities_node.
-            body_mode: ProjectionMode::Skeleton,
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Skeleton,
+            ),
         };
         let read = dispatch.execute_read(key);
         crate::component_meta_audit::merge_dep_signature_into_local_fence(

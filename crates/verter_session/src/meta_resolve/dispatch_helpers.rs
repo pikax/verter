@@ -152,33 +152,46 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
         }
     }
 
-    // indexed-path dispatch via decomposed `ProjectPath`.
-    // For an IndexedAccess chain with literal-string indices over a
-    // generic-instantiated Ref base (e.g.,
-    // `WrappedConfig<Theme>['nested']['palette']`), the registry-route
-    // fast-path does not match (it requires `type_arguments.is_empty()`),
-    // so the chain reaches `lower_type_expr_in_scope` which lowers each
-    // hop into deferred IndexedAccess shells. The shell wrapping the
-    // generic-substitution context cannot be evaluated in
-    // `expand_empty_path_terminal` without losing the substitution
-    // thread. CLAUDE.md "Macro Type Traversal Rule" — "walking
-    // A['c']['full']['bar'] should navigate intermediate hops and
-    // expand only the terminal requested projection" — directs the
-    // walker to receive the full path as `PathSegment::Index` segments
-    // so `PathWalker` threads the substitution context across hops
-    // consistently. Decompose the IndexedAccess chain at the caller
-    // boundary, lower only the innermost (non-IndexedAccess) base, then
-    // dispatch `ProjectPath { base, path: [..segments], Expanded }`.
+    // Block 6.i Commit AX — every lowering site explicitly states
+    // its mode (the implicit-Expanded wrapper has been retired).
+    //
+    // Empty path: lowering the whole expr is the carrier hop that
+    // feeds the empty-terminal `ProjectPath { ..., Expanded }`. The
+    // walker's `expand_empty_path_terminal` does NOT have a generic
+    // `InstantiationRef` arm (the catch-all returns the node
+    // unchanged), so a `Navigate` carrier would prevent the
+    // expanded-surface filter downstream from observing an
+    // Object/Intersection. The lowering mode therefore stays
+    // `Expanded` here; the audit-leak fix lands at the macro-shape
+    // publication boundary in a follow-up commit once the Shallow
+    // walker grows InstantiationRef / deferred-Mapped enumeration
+    // support (see Commit AX STOP report).
+    //
+    // Non-empty path: the base is an intermediate hop, and PathWalker
+    // handles `InstantiationRef` per-hop. `Navigate` is correct here
+    // — operator reductions inside the base body do NOT fire at the
+    // lowering site, only at the terminal hop (CLAUDE.md "Macro Type
+    // Traversal Rule" — walking `A['c']['full']['bar']` navigates
+    // intermediate hops and expands only the terminal requested
+    // projection).
     let (base_expr, path_segments) = decompose_indexed_access_chain(expr);
     let dispatch = ProjectSemanticDispatch::new(ctx);
     let (base, project_path) = if path_segments.is_empty() {
-        let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
+        let base = dispatch.lower_type_expr_in_scope_with_mode(
+            scope_canonical_id,
+            expr,
+            ProjectionMode::Expanded,
+        )?;
         (
             base,
             Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
         )
     } else {
-        let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, base_expr)?;
+        let base = dispatch.lower_type_expr_in_scope_with_mode(
+            scope_canonical_id,
+            base_expr,
+            ProjectionMode::Navigate,
+        )?;
         (base, path_segments)
     };
     let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
@@ -299,7 +312,13 @@ pub(crate) fn pick_via_dispatch_pick_helper(
         name: Arc::from(symbol_name),
         type_arguments: Arc::from(Vec::new().into_boxed_slice()),
     };
-    let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, &symbol_ref)?;
+    // Block 6.i Commit AX — bare-Ref base for the Pick builtin is an
+    // intermediate hop; the Pick result is the terminal demand.
+    let base = dispatch.lower_type_expr_in_scope_with_mode(
+        scope_canonical_id,
+        &symbol_ref,
+        ProjectionMode::Navigate,
+    )?;
 
     let members_arc: Vec<Arc<str>> = members.iter().map(|s| Arc::from(s.as_str())).collect();
     let result = dispatch.execute_pick(base, &members_arc, ProjectionMode::Expanded);
@@ -351,7 +370,15 @@ pub(crate) fn instantiate_local_generic_ref_via_dispatch(
     }
 
     let dispatch = ProjectSemanticDispatch::new(ctx);
-    let lowered = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
+    // Block 6.i Commit AX — generic-Ref instantiation publishes its
+    // raised body as the result; the caller reads the raised TypeExpr
+    // directly without a path-walking follow-up. Lower at Expanded so
+    // the body materialises in one step.
+    let lowered = dispatch.lower_type_expr_in_scope_with_mode(
+        scope_canonical_id,
+        expr,
+        ProjectionMode::Expanded,
+    )?;
     let raised = dispatch.raise_node_to_type_expr(lowered)?;
     // Engine-method parity: callers use `.unwrap_or_else(|| original.clone())`,
     // so a no-op (raised == expr) must surface as `None` to preserve the
@@ -465,7 +492,13 @@ pub(crate) fn project_expr_surface_shape_via_host_threaded<'ctx>(
     }
     let ctx = engine.ctx();
     let dispatch = ProjectSemanticDispatch::new(ctx);
-    let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
+    // Block 6.i Commit AX — intermediate-base lowering is Navigate;
+    // the terminal `ProjectPath { .., Shallow }` carries the demand.
+    let base = dispatch.lower_type_expr_in_scope_with_mode(
+        scope_canonical_id,
+        expr,
+        ProjectionMode::Navigate,
+    )?;
     let QueryResult::Value(node) = dispatch.execute(SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
@@ -504,7 +537,18 @@ pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'ctx>(
     }
     let ctx = engine.ctx();
     let dispatch = ProjectSemanticDispatch::new(ctx);
-    let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
+    // Block 6.i Commit AX — empty-terminal `ProjectPath { ..,
+    // Expanded }` requires the base to be a structural surface that
+    // `expand_empty_path_terminal` can walk. `Navigate` would freeze
+    // a generic carrier at `InstantiationRef` (catch-all), so the
+    // expanded-surface filter downstream would reject. Keep
+    // `Expanded` lowering until the walker grows InstantiationRef
+    // support (Commit AX STOP report).
+    let base = dispatch.lower_type_expr_in_scope_with_mode(
+        scope_canonical_id,
+        expr,
+        ProjectionMode::Expanded,
+    )?;
     let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
@@ -565,7 +609,14 @@ pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
     }
     let ctx = engine.ctx();
     let dispatch = ProjectSemanticDispatch::new(ctx);
-    let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
+    // Block 6.i Commit AX — empty-terminal Expanded requires the
+    // base to be a structural surface (see comment on
+    // `lower_and_project_to_expanded_via_host_threaded`).
+    let base = dispatch.lower_type_expr_in_scope_with_mode(
+        scope_canonical_id,
+        expr,
+        ProjectionMode::Expanded,
+    )?;
     let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
@@ -593,7 +644,14 @@ pub(crate) fn project_expr_surface_expr_with_compound_objects_via_host_threaded<
     }
     let ctx = engine.ctx();
     let dispatch = ProjectSemanticDispatch::new(ctx);
-    let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
+    // Block 6.i Commit AX — empty-terminal Expanded requires the
+    // base to be a structural surface (see comment on
+    // `lower_and_project_to_expanded_via_host_threaded`).
+    let base = dispatch.lower_type_expr_in_scope_with_mode(
+        scope_canonical_id,
+        expr,
+        ProjectionMode::Expanded,
+    )?;
     let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),

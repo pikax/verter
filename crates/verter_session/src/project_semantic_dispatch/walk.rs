@@ -697,10 +697,12 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     return;
                 }
                 SemanticNodeData::KeyOf { base } => {
-                    let resolved = match self
-                        .dispatch
-                        .execute(SemanticQueryKey::KeyOf { base: *base })
-                    {
+                    let resolved = match self.dispatch.execute(SemanticQueryKey::KeyOf {
+                        base: *base,
+                        context: crate::semantic_query::ProjectionReductionContext::published(
+                            self.mode,
+                        ),
+                    }) {
                         QueryResult::Value(id) => id,
                         _ => {
                             results.push(self.opaque_miss());
@@ -978,7 +980,19 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             mapper.parameter_node,
                             key_arg,
                         );
-                        let evaluated = self.dispatch.evaluate_deferred_semantic_node(substituted);
+                        // Block 6.i Commit AX (codex Q5): context-
+                        // explicit evaluation inherits the path-walker's
+                        // `mode` as a `Published(mode)` context.
+                        // Mirrors `build_mapped_type`'s substitution
+                        // contract — publication walks reify nested
+                        // operators; transit walks carrier-stop. The
+                        // implicit `Published(Expanded)` default is
+                        // replaced so the walker's actual mode flows
+                        // through.
+                        let evaluated = self.dispatch.evaluate_deferred_semantic_node_with_context(
+                            substituted,
+                            crate::semantic_query::ProjectionReductionContext::published(self.mode),
+                        );
                         // Preserve `build_mapped_type`'s contract:
                         // when evaluation yields Opaque, publish the
                         // un-evaluated substituted node so re-dispatch
@@ -1036,6 +1050,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     let resolved = match self.dispatch.execute(SemanticQueryKey::MappedType {
                         source: *source,
                         mapper: mapper.clone(),
+                        context: crate::semantic_query::ProjectionReductionContext::published(
+                            self.mode,
+                        ),
                     }) {
                         QueryResult::Value(id) => id,
                         _ => {
@@ -1133,6 +1150,20 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 }
                 // C16: DeclPlaceholder — expand via Instantiate before
                 // continuing the path walk.
+                //
+                // Block 6.i Commit AX — intermediate-hop demand demotion.
+                // We are inside `while index < path.len()`: a path
+                // segment is still pending, so this unwrap is an
+                // INTERMEDIATE hop in the type-resolution rule
+                // "intermediate hops run in Navigate, the terminal hop
+                // runs in the caller's mode." Dispatch under
+                // `structural_transit()` so the body lowers in
+                // transit demand — `keyof` / `Mapped` operators along
+                // the decl body publish carriers (no reify) and never
+                // reach the publication-edge loops. The terminal
+                // expander (`expand_empty_path_terminal`,
+                // walk.rs:1403) keeps `published(self.mode)` for
+                // empty-path terminal demand.
                 SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                     canonical_id,
                     name,
@@ -1147,7 +1178,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     let expanded = match self.dispatch.execute(SemanticQueryKey::Instantiate {
                         base: identity,
                         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                        body_mode: self.mode,
+                        context:
+                            crate::semantic_query::ProjectionReductionContext::structural_transit(),
                     }) {
                         QueryResult::Value(id) => id,
                         QueryResult::Recursive(id) => {
@@ -1206,17 +1238,63 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 //     case keeps the lazy `Ref` shape.
                 //   - Expanded: dispatch Instantiate, recurse on result.
                 SemanticNodeData::InstantiationRef { base, args } => {
-                    if matches!(self.mode, ProjectionMode::Navigate) {
+                    // Block 6.i Commit AX (codex Q4 — IA path-precision).
+                    // "Intermediate hops are navigate-only, terminal uses
+                    // caller mode." When there is still a `PathSegment`
+                    // ahead of us, the InstantiationRef is an
+                    // INTERMEDIATE hop in the path walk — we MUST unwrap
+                    // it through `Instantiate` so the next segment can
+                    // pattern-match on the body's surface. When the
+                    // walker reaches a USERLAND InstantiationRef at the
+                    // terminal hop under Navigate, it stays terminal
+                    // (the codex carrier-preservation contract for
+                    // generic-application bodies under shallow-by-
+                    // default publication). Builtin utility types (
+                    // `Pick`/`Omit`/`Partial`/…, `canonical_id ==
+                    // "__builtin__"`) ALWAYS unwrap even under
+                    // Navigate per codex Q4 ("the demanded
+                    // instantiation is reduced as the terminal").
+                    let still_more_path = index < path.len();
+                    let is_builtin = base.canonical_id.as_ref() == "__builtin__";
+                    if matches!(self.mode, ProjectionMode::Navigate)
+                        && !still_more_path
+                        && !is_builtin
+                    {
                         results.push(current);
                         return;
                     }
                     let identity = base.clone();
                     let args_clone = Arc::clone(args);
                     drop(data);
+                    // Block 6.i Commit AX — intermediate-hop demand
+                    // demotion (codex spec). An InstantiationRef
+                    // unwrapped with a path segment still pending is
+                    // an INTERMEDIATE hop — dispatch under
+                    // `structural_transit()` so the body lowers in
+                    // transit demand and nested `keyof` / `Mapped`
+                    // operators carrier-stop without reifying their
+                    // members. The terminal unwrap (no more segments,
+                    // walker about to return `current`) keeps the
+                    // caller's mode under `published(self.mode)` so a
+                    // genuine terminal `Mapped`/`KeyOf` prop still
+                    // reduces.
+                    //
+                    // The previous "upgrade Navigate→Expanded" rule
+                    // was wrong on two axes: it only fired for Navigate
+                    // callers (Expanded intermediate hops kept
+                    // `published(Expanded)` and reified) and it
+                    // *upgraded* rather than *demoted* — the root
+                    // cause of the ChatMessages `outputSchema|execute`
+                    // 62-edge leak in `compute_evaluated_types`.
+                    let unwrap_context = if still_more_path {
+                        crate::semantic_query::ProjectionReductionContext::structural_transit()
+                    } else {
+                        crate::semantic_query::ProjectionReductionContext::published(self.mode)
+                    };
                     let resolved = match self.dispatch.execute(SemanticQueryKey::Instantiate {
                         base: identity,
                         args: args_clone,
-                        body_mode: self.mode,
+                        context: unwrap_context,
                     }) {
                         QueryResult::Value(id) => id,
                         QueryResult::Recursive(id) => {
@@ -1424,7 +1502,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 let expanded = match self.dispatch.execute(SemanticQueryKey::Instantiate {
                     base: identity,
                     args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                    body_mode: self.mode,
+                    context: crate::semantic_query::ProjectionReductionContext::published(
+                        self.mode,
+                    ),
                 }) {
                     QueryResult::Value(id) => id,
                     QueryResult::Recursive(id) => {
@@ -1442,16 +1522,31 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 }
                 work.push(ExpandFrame::Expand(expanded));
             }
+            // Block 6.i Commit AX — `DeclRef`/`InstantiationRef`
+            // arms are deliberately NOT added to
+            // `expand_terminal_step`. Eagerly unwrapping these
+            // carriers in the empty-path terminal under publication
+            // demand collapsed the slot-binding indexed-access
+            // preservation policy (the symbolic
+            // `IndexedAccess { object: DeclRef(AppProps), index }`
+            // form). The carrier-preserving path-walker arms above
+            // (`PathWalker::advance_step` at walk.rs:1204-1313)
+            // handle DeclRef/InstantiationRef under demand-bounded
+            // intermediate-vs-terminal selection; the empty-path
+            // terminal expander does not need a duplicate arm.
             SemanticNodeData::Mapped { source, mapper }
                 if matches!(self.mode, ProjectionMode::Expanded) =>
             {
                 let source = *source;
                 let mapper = mapper.clone();
                 drop(data);
-                let materialised = match self
-                    .dispatch
-                    .execute(SemanticQueryKey::MappedType { source, mapper })
-                {
+                let materialised = match self.dispatch.execute(SemanticQueryKey::MappedType {
+                    source,
+                    mapper,
+                    context: crate::semantic_query::ProjectionReductionContext::published(
+                        self.mode,
+                    ),
+                }) {
                     QueryResult::Value(id) => id,
                     QueryResult::Recursive(id) => {
                         results.push(id);
@@ -1924,7 +2019,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 match self.dispatch.execute(SemanticQueryKey::Instantiate {
                     base: identity.clone(),
                     args: args_clone,
-                    body_mode: ProjectionMode::Navigate,
+                    context: crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Navigate,
+                    ),
                 }) {
                     QueryResult::Value(body) => {
                         // Continue the walk into the materialised body.
@@ -1974,7 +2071,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 match self.dispatch.execute(SemanticQueryKey::Instantiate {
                     base: identity.clone(),
                     args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                    body_mode: ProjectionMode::Navigate,
+                    context: crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Navigate,
+                    ),
                 }) {
                     QueryResult::Value(body) => {
                         work.push(Frame::Visit { node: body, target });
@@ -2231,22 +2330,32 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         optionality: crate::semantic_query::OptionalityMod,
         readonly_mod: crate::semantic_query::ReadonlyMod,
     ) -> Option<ShallowSurface> {
-        // Prefer the explicit key_space; fall back to dispatching KeyOf
-        // on the source if the key_space itself is opaque.
+        // Prefer the explicit `key_space` for fast literal-union
+        // collection; fall back to the shared key-name enumerator on
+        // the SOURCE so the Shallow walker enumerates member names
+        // for mapped types whose source is a deferred shell
+        // (`Opaque(DeclPlaceholder)` from an imported interface,
+        // `InstantiationRef` from a generic alias body, etc.). The
+        // pre-AX walker bailed on these cases via a `collect_literal_keys`-only
+        // fallback, which left imported `[K in keyof Foo]?: V` mapped
+        // arms unenumerated under empty-path Shallow.
+        // `key_names_from_base_node` is the same enumerator
+        // `build_mapped_type` uses (`enumerate.rs`); routing the
+        // Shallow synthesiser through it keeps the two paths
+        // structurally aligned.
         let mut keys: Vec<Arc<str>> = Vec::new();
         let collected = collect_literal_keys(self.graph(), key_space, &mut keys);
         if !collected {
-            // Try dispatching KeyOf on the source.
-            let keyof_id = match self
-                .dispatch
-                .execute(SemanticQueryKey::KeyOf { base: source })
-            {
-                QueryResult::Value(id) => id,
-                _ => return None,
-            };
+            // The shared enumerator on the SOURCE handles
+            // `Opaque(DeclPlaceholder)` / `Object` / `Intersection` /
+            // `Union` uniformly. Block 6.i Commit AX (codex-binding) —
+            // empty-path Shallow with an imported mapped carrier MUST
+            // enumerate just like the Expanded path's MappedType
+            // dispatch.
             keys.clear();
-            if !collect_literal_keys(self.graph(), keyof_id, &mut keys) {
-                return None;
+            match self.dispatch.key_names_from_base_node(source) {
+                Some(enumerated) => keys = enumerated,
+                None => return None,
             }
         }
         if keys.is_empty() {

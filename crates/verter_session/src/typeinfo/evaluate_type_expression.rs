@@ -276,7 +276,7 @@ fn evaluate_inner(
     let instantiate_key = SemanticQueryKey::Instantiate {
         base: identity,
         args: Arc::from(Vec::new().into_boxed_slice()),
-        body_mode: req.mode,
+        context: crate::semantic_query::ProjectionReductionContext::published(req.mode),
     };
     let resolved_alias_node = match dispatch.execute(instantiate_key) {
         QueryResult::Value(node) | QueryResult::Recursive(node) => node,
@@ -374,7 +374,7 @@ fn materialize_through_aliases(
                 let key = SemanticQueryKey::Instantiate {
                     base: identity,
                     args: Arc::from(Vec::new().into_boxed_slice()),
-                    body_mode: mode,
+                    context: crate::semantic_query::ProjectionReductionContext::published(mode),
                 };
                 match dispatch.execute(key) {
                     QueryResult::Value(next) | QueryResult::Recursive(next) => {
