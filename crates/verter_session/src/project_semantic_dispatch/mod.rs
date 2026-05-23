@@ -280,6 +280,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
         expr: &verter_type_expr::TypeExpr,
         mode: crate::semantic_query::ProjectionMode,
     ) -> Option<SemanticNodeId> {
+        self.lower_type_expr_in_scope_with_context(
+            scope_canonical_id,
+            expr,
+            crate::semantic_query::ProjectionReductionContext::published(mode),
+        )
+    }
+
+    /// Context-explicit lowering — the demand-aware sibling of
+    /// [`Self::lower_type_expr_in_scope_with_mode`].
+    ///
+    /// Block 6.i leak-fix-1 (codex Fix C3). The macro publication
+    /// boundary lowers the slot/object carrier with
+    /// `ProjectionReductionContext::structural_transit_with_mode(
+    /// ProjectionMode::Navigate)`. The transit demand propagates
+    /// through every recursive `shallow_lower_type_expr_with_context`
+    /// frame so each nested operator dispatch
+    /// (`Instantiate` / `KeyOf` / `MappedType`) carrier-stops via
+    /// `may_reduce_operator(context) == false`. No keyspace literals
+    /// are reified along the carrier; the publication terminal then
+    /// walks the structural shell under `Published(Shallow)` to
+    /// synthesise the one-level Object surface the consumer needs.
+    ///
+    /// `_with_mode(scope, expr, m)` is exactly
+    /// `_with_context(scope, expr, published(m))` — the existing
+    /// publication callers keep their semantics unchanged.
+    pub fn lower_type_expr_in_scope_with_context(
+        &self,
+        scope_canonical_id: &str,
+        expr: &verter_type_expr::TypeExpr,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
         let shallow = self.ctx.shallow_file_state(scope_canonical_id)?;
         let scope = NodeScopeId::File {
             canonical_id: Arc::from(scope_canonical_id),
@@ -306,7 +337,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             scope_payload.as_ref(),
         );
         let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-        let id = self.shallow_lower_type_expr(
+        let id = self.shallow_lower_type_expr_with_context(
             expr,
             &env,
             &scope,
@@ -314,7 +345,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             scope_payload.as_ref(),
             &shadowing,
             &mut substitutions,
-            mode,
+            context,
         );
         Some(id)
     }

@@ -612,6 +612,26 @@ impl ProjectionReductionContext {
             demand: ReductionDemand::StructuralTransit,
         }
     }
+
+    /// Construct a `StructuralTransit` context with an explicit
+    /// `mode`. Used by the macro publication boundary's carrier
+    /// lowering: the slot/object surface publisher lowers the macro
+    /// expression with `(Navigate, StructuralTransit)` so every
+    /// recursive lowering frame propagates the transit demand and
+    /// `may_reduce_operator` evaluates false at every nested
+    /// `Instantiate` / `KeyOf` / `MappedType` dispatch (no keyspace
+    /// reification along the lowering carrier).
+    ///
+    /// The publication terminal then walks the structural carrier
+    /// under `Published(Shallow)` so the consumer observes a one-level
+    /// Object surface; member values stay as their carrier nodes per
+    /// the shallow-by-default rule.
+    pub const fn structural_transit_with_mode(mode: ProjectionMode) -> Self {
+        Self {
+            mode,
+            demand: ReductionDemand::StructuralTransit,
+        }
+    }
 }
 
 /// Carrier-stop predicate (Block 6.i Commit AX, codex-hybrid spec).
