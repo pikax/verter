@@ -2719,15 +2719,23 @@ fn expanded_slot_bindings(
         return evaluated_bindings;
     }
 
-    let mut evaluated_by_name: rustc_hash::FxHashMap<String, SlotBindingAnalysis> =
-        evaluated_bindings
-            .into_iter()
-            .map(|binding| (binding.name.clone(), binding))
-            .collect();
+    // Order discipline: `direct_bindings` arrives in declaration order
+    // (Vec walk via `slot_bindings_from_type_expr`); `evaluated_bindings`
+    // arrives in the evaluator's emission order (Vec filter over
+    // `evaluated.slot_bindings`). Walk both Vecs in arrival order —
+    // matched entries fold into `direct_bindings`; evaluator-only
+    // remainder appends in its emission order. No hash structure
+    // (FxHashMap/IndexMap) participates: the order-preserving Vec is
+    // the canonical source.
+    let mut evaluated_remaining: Vec<SlotBindingAnalysis> = evaluated_bindings;
     for binding in &mut direct_bindings {
-        let Some(evaluated) = evaluated_by_name.remove(&binding.name) else {
+        let Some(pos) = evaluated_remaining
+            .iter()
+            .position(|candidate| candidate.name == binding.name)
+        else {
             continue;
         };
+        let evaluated = evaluated_remaining.remove(pos);
         if should_prefer_evaluated_slot_binding(binding, &evaluated) {
             binding.type_expr = evaluated.type_expr;
             binding.type_expansion = evaluated.type_expansion;
@@ -2736,7 +2744,7 @@ fn expanded_slot_bindings(
             binding.raw_type = evaluated.raw_type;
         }
     }
-    direct_bindings.extend(evaluated_by_name.into_values());
+    direct_bindings.extend(evaluated_remaining);
     direct_bindings
 }
 
@@ -2764,31 +2772,37 @@ fn merge_slot_bindings_with_source(
             .collect();
     }
 
-    let mut expanded_by_name: rustc_hash::FxHashMap<String, SlotBindingAnalysis> =
-        expanded_bindings
-            .into_iter()
-            .map(|binding| (binding.name.clone(), binding))
-            .collect();
-    let mut merged = Vec::new();
+    // Order discipline: source-captured bindings (parser-side
+    // `AnalyzedSlotField::bindings`) come first in parser order;
+    // expansion-only remainder appends in `expanded_bindings`'s
+    // declaration order (Vec walk via `slot_bindings_from_type_expr`
+    // / evaluator emission order). No hash structure participates.
+    let mut expanded_remaining: Vec<SlotBindingAnalysis> = expanded_bindings;
+    let mut merged: Vec<SlotBindingAnalysis> = Vec::with_capacity(expanded_remaining.len());
 
     for source_binding in &source_field.bindings {
-        if let Some(mut binding) = expanded_by_name.remove(&source_binding.name) {
-            let raw_type = symbolic_type_from_evaluated_and_source(
-                binding.raw_type.as_deref(),
-                source_binding.type_annotation.as_deref(),
-            );
-            binding.type_expr = prefer_symbolic_prop_type_expr(
-                &binding.type_expr,
-                source_binding.binding_expr.as_ref(),
-                raw_type.as_deref(),
-                binding.type_expansion.as_ref(),
-            );
-            binding.raw_type = raw_type;
-            merged.push(binding);
-        }
+        let Some(pos) = expanded_remaining
+            .iter()
+            .position(|candidate| candidate.name == source_binding.name)
+        else {
+            continue;
+        };
+        let mut binding = expanded_remaining.remove(pos);
+        let raw_type = symbolic_type_from_evaluated_and_source(
+            binding.raw_type.as_deref(),
+            source_binding.type_annotation.as_deref(),
+        );
+        binding.type_expr = prefer_symbolic_prop_type_expr(
+            &binding.type_expr,
+            source_binding.binding_expr.as_ref(),
+            raw_type.as_deref(),
+            binding.type_expansion.as_ref(),
+        );
+        binding.raw_type = raw_type;
+        merged.push(binding);
     }
 
-    merged.extend(expanded_by_name.into_values());
+    merged.extend(expanded_remaining);
     merged
 }
 
