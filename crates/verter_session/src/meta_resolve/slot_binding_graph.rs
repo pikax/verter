@@ -835,18 +835,19 @@ pub(crate) fn compute_bindings_via_graph(
     let slot_members = read_surface_members(ctx, slot_surface);
 
     for slot_member in slot_members.iter() {
-        // Block 6.i round-8 — Transit-Shallow Publication: realize the
-        // slot member value through the callable-realization substrate
-        // before the `Function`-arm match. Under transit-shallow macro
-        // publication the slot value may carry a non-Function shell
-        // (Alias / Conditional / InstantiationRef / DeclRef carriers)
-        // that the publication terminal `Published(Shallow)` chose not
-        // to reduce. `realize_callable_member` normalises through the
-        // carrier chain (relation-engine Conditional reduction,
-        // transit-mode Instantiate, ResolveDecl unwrap) so a decidable
-        // callable surfaces as a `Function` node; non-callable shapes
-        // (Object / Union / Intersection / Mapped / KeyOf / primitives)
-        // return `None` and skip naturally below.
+        // Realize the slot member value through the callable-
+        // realization substrate before the `Function`-arm match.
+        // Under transit-shallow macro publication the slot value may
+        // carry a non-Function shell (Alias / Conditional /
+        // InstantiationRef / DeclRef carriers) that the publication
+        // terminal `Published(Shallow)` chose not to reduce.
+        // [`crate::meta_resolve::dispatch_helpers::realize_callable_member`]
+        // normalises through the carrier chain (relation-engine
+        // Conditional reduction, transit-mode Instantiate,
+        // ResolveDecl unwrap) so a decidable callable surfaces as a
+        // `Function` node; non-callable shapes (Object / Union /
+        // Intersection / Mapped / KeyOf / primitives) return `None`
+        // and skip naturally below.
         let realized = crate::meta_resolve::dispatch_helpers::realize_callable_member(
             dispatch,
             slot_member.value,

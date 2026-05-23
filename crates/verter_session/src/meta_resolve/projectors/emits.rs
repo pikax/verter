@@ -36,7 +36,7 @@ pub(crate) fn project_emits(
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) -> Vec<ExpandedField> {
-    // Block 6.i Commit AX — each surface member descends via
+    // Each surface member descends via
     // `cursor.descend_published_member(name)`; the per-member type
     // body publishes as a carrier (`Navigate`) unless the consumer
     // walked a deep path.
@@ -61,16 +61,16 @@ pub(crate) fn project_emits(
             None => return Vec::new(),
         };
 
-        // Block 6.i round-8 — branch-merged shallow semantics for
-        // emit-class macro object payloads. When the payload is an
-        // undecided `Conditional` (e.g. inherited emits via
+        // Branch-merged shallow semantics for emit-class macro object
+        // payloads. When the payload is an undecided `Conditional`
+        // (e.g. inherited emits via
         // `defineEmits<Mode extends 'editor' ? EditorEmits : ViewerEmits>()`),
-        // `PayloadSurfaceScope::EmitClassMacroObject` projects BOTH
+        // [`PayloadSurfaceScope::EmitClassMacroObject`] projects BOTH
         // branches under `Published(Shallow)` and merges their
         // top-level Object members so the inherited `accepted_events`
-        // set publishes without giving the inheritance reducer an
-        // `Expanded`-only escape hatch. Non-conditional payloads pass
-        // through to the legacy single-dispatch path verbatim.
+        // set publishes without forcing the inheritance reducer onto
+        // an `Expanded`-only escape hatch. Non-conditional payloads
+        // pass through to the default single-dispatch path verbatim.
         let surface_node = match resolve_payload_surface_with_scope(
             &dispatch,
             payload_node,

@@ -69,11 +69,11 @@ pub(crate) mod published_reducer;
 pub(crate) mod round7_substrate;
 pub(crate) mod slots;
 
-// Block 6.i round 7 substrate re-exports. Marked `#[allow(unused_imports)]`
-// because the substrate commit lands the primitives ahead of the
-// atomic 7-consumer cutover — consumers wire them in the cutover
-// commit. The `#[allow(dead_code)]` on each primitive itself parallels
-// this allowance at the definition site.
+// Substrate re-exports for the transit-shallow macro publication
+// pipeline (see [`round7_substrate`]). Marked
+// `#[allow(unused_imports)]` because individual consumers can be
+// wired by independent commits; the `#[allow(dead_code)]` on each
+// primitive at the definition site parallels this allowance.
 #[allow(unused_imports)]
 pub(crate) use round7_substrate::{
     resolve_macro_payload_diagnostic_probe, resolve_payload_surface_with_scope, MemberValueRole,
@@ -166,10 +166,10 @@ pub(crate) fn project_evaluated_types(
 ) {
     let owner = build_owner_decl_identity(query_engine.ctx, file);
 
-    // Block 6.i Commit AX — construct a `SurfaceProjection` per
-    // macro kind so each projector entry receives a path-precise
-    // cursor. `whole_surface(kind)` preserves pre-AX behaviour;
-    // future commits narrow this when consumer demand is known.
+    // Construct a `SurfaceProjection` per macro kind so each
+    // projector entry receives a path-precise cursor.
+    // `whole_surface(kind)` admits every published member name;
+    // narrower cursors are threaded in when consumer demand is known.
     use crate::meta_resolve::projection_demand::{PublishedSurfaceKind, SurfaceProjection};
 
     for (macro_index, mac) in snapshot.macros.iter().enumerate() {
@@ -390,10 +390,11 @@ pub(crate) fn peek_member_shape_known(
         } if type_arguments.is_empty() => Some(PeekedShape::BareCarrier { name: name.clone() }),
         _ => {
             // Operator-shape (Pick/Omit/IndexedAccess/Conditional/Mapped)
-            // or generic instantiation: consult `ShapeCacheDb` only
-            // (Block 6.i universal cache). Does NOT consult RouteDb/
-            // OwnerImportSurfaceDb (those would rebuild HostStoreView
-            // and force the very cost driver Block 6.g closed).
+            // or generic instantiation: consult `ShapeCacheDb` only.
+            // Does NOT consult RouteDb / OwnerImportSurfaceDb (those
+            // would rebuild HostStoreView and re-introduce the
+            // per-query workspace-snapshot rebuild cost the peek path
+            // exists to avoid).
             let ctx: &dyn ResolverContext = query_engine.ctx;
             let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
                 Arc::<str>::from(scope_canonical_id),
@@ -559,17 +560,17 @@ pub(crate) fn resolve_macro_payload(
         return None;
     }
 
-    // Block 6.i round-8 — silent-miss compensation for the
-    // Transit-Shallow Publication contract. When the macro publication
-    // boundary lowers under `Navigate` mode + `Published(Shallow)`
-    // terminal (slot path), the dispatch chain no longer eagerly
-    // resolves `DeclRef` carriers for unresolved imports — the cached
-    // payload becomes an EMPTY `Object` surface instead of an `Opaque`
-    // sentinel, so the check above silently passes. Detect the empty-
-    // surface payload and probe the macro's `parsed_type_argument` via
+    // Silent-miss compensation for the transit-shallow publication
+    // contract. When the macro publication boundary lowers under
+    // `Navigate` mode + `Published(Shallow)` terminal (slot path),
+    // the dispatch chain no longer eagerly resolves `DeclRef`
+    // carriers for unresolved imports — the cached payload becomes
+    // an EMPTY `Object` surface instead of an `Opaque` sentinel, so
+    // the check above silently passes. Detect the empty-surface
+    // payload and probe the macro's `parsed_type_argument` via
     // `Published(Expanded)` lowering: an unresolved declaration
-    // surfaces as `Opaque(DeclPlaceholder)` under eager resolution and
-    // the diagnostic fires here. Legitimate empty macros
+    // surfaces as `Opaque(DeclPlaceholder)` under eager resolution
+    // and the diagnostic fires here. Legitimate empty macros
     // (`defineProps<{}>()`) pass through because the eager lowering
     // returns a non-`Opaque` empty Object.
     let payload_is_empty_surface = matches!(
@@ -653,9 +654,9 @@ pub(crate) fn resolve_payload_surface(
     }
 }
 
-// Block 6.i round 7 substrate primitives — diagnostic probe, scope
-// tag, branch-merged scope-gated resolver, MemberValueRole — live
-// in the sibling [`round7_substrate`] module to keep this file
+// Macro-payload boundary substrate primitives — diagnostic probe,
+// scope tag, branch-merged scope-gated resolver, MemberValueRole —
+// live in the sibling [`round7_substrate`] module to keep this file
 // under the `no_oversize_files` architecture-guard cap. The
 // primitives are re-exported at the module top so call sites
 // continue to import them as `crate::meta_resolve::projectors::*`.
@@ -713,7 +714,6 @@ fn member_shape_peek_or_compute(
     // entry's dep_signature must be re-emitted into the active fact
     // tracer + dispatch dep-signature accumulator so the request's
     // dep set sees the same facts the cold compute emitted.
-    // Block 6.i universal cache (replaces `MemberShapeCacheDb`).
     let cache = ctx.project_type_store().shape_cache_db();
     if let Some(cached) = cache.peek(&key, ctx) {
         emit_dispatch_dep_signature_facts(ctx, &cached.dep_signature);
@@ -759,11 +759,11 @@ fn member_shape_peek_or_compute(
         );
     if route_is_package_backed {
         // Gate short-circuit: the published shape stays as the
-        // raised carrier (package-backed roots are shallow). Block
-        // 6.i universal caching: admit so sibling members of the
-        // same package-backed parent (e.g. siblings of `Foo['a']`
-        // when `Foo` is from a package) reuse this verdict at peek
-        // time rather than re-running the package-backed predicate.
+        // raised carrier (package-backed roots are shallow). Admit
+        // so sibling members of the same package-backed parent
+        // (e.g. siblings of `Foo['a']` when `Foo` is from a package)
+        // reuse this verdict at peek time rather than re-running the
+        // package-backed predicate.
         // F1: thread the gate's cross-file fence into the admit so
         // edits to the package-backing declaration file invalidate.
         // H2: refuse admission if the gate refused.
@@ -815,8 +815,7 @@ fn member_shape_peek_or_compute(
         if reaches_cycle {
             // Recursive parameterised helper: the published shape stays
             // as the raised carrier (the cycle prevents finite reduction).
-            // Block 6.i universal caching: admit so subsequent peeks
-            // skip the cycle BFS.
+            // Admit so subsequent peeks skip the cycle BFS.
             // F1: combine both gate fences (package-backed + cycle BFS)
             // so the admit's `fact_dep_signature` invalidates on edits
             // to any visited declaration file.
@@ -833,14 +832,13 @@ fn member_shape_peek_or_compute(
     } else {
         Arc::from(Vec::new())
     };
-    // Block 6.i Commit AX (codex-hybrid): the carrier-stop decision
-    // is now the dispatch-layer reduction-demand context, NOT a
-    // projector-side name predicate. The demand axis lives on every
-    // `Instantiate` / `KeyOf` / `MappedType` key, so a userland
-    // `MyPick<T,K>` and the builtin `Pick<T,K>` follow the same
-    // path. Generic instantiations enter the reducer; the dispatch
-    // carrier-stops downstream operators when the context does not
-    // admit reduction.
+    // The carrier-stop decision lives on the dispatch-layer
+    // reduction-demand context, NOT on a projector-side name
+    // predicate. The demand axis lives on every `Instantiate` /
+    // `KeyOf` / `MappedType` key, so a userland `MyPick<T,K>` and
+    // the builtin `Pick<T,K>` follow the same path. Generic
+    // instantiations enter the reducer; the dispatch carrier-stops
+    // downstream operators when the context does not admit reduction.
     let needs_reduction =
         type_expr_contains_reducible_operator(&raised) || is_generic_instantiation;
     // F1: combined gate fence threaded through every remaining admit
@@ -849,13 +847,13 @@ fn member_shape_peek_or_compute(
     let gate_fence =
         combine_dep_signatures(&package_backed_fence, &cycle_fence, scope_canonical_id);
     if !needs_reduction {
-        // Block 6.i universal-caching invariant: a shape that
-        // resolves to a non-reducible TypeExpr (primitive / literal /
-        // bare alias / closed object / function / union / intersection
-        // without operator nodes) is a STABLE shape — admit it so
-        // sibling members hitting the same `SurfaceMember.value` (or
-        // the same `(scope, node, mode)` triple from a downstream
-        // call) short-circuit at peek time.
+        // Universal-caching invariant: a shape that resolves to a
+        // non-reducible TypeExpr (primitive / literal / bare alias /
+        // closed object / function / union / intersection without
+        // operator nodes) is a STABLE shape — admit it so sibling
+        // members hitting the same `SurfaceMember.value` (or the
+        // same `(scope, node, mode)` triple from a downstream call)
+        // short-circuit at peek time.
         let value = MaterializedTypeExpr {
             node_id: Some(member_value),
             type_expr: raised,
@@ -871,10 +869,10 @@ fn member_shape_peek_or_compute(
     // because the package-backed and cycle paths already returned
     // above.
     //
-    // Block 6.i universal-caching invariant: when the peek returns
-    // `Leaf` / `BareCarrier` we still admit a SemanticNode-subject
-    // entry to the cache via `admit_computed` so subsequent member
-    // peeks short-circuit at peek time.
+    // Universal-caching invariant: when the peek returns `Leaf` /
+    // `BareCarrier` we still admit a SemanticNode-subject entry to
+    // the cache via `admit_computed` so subsequent member peeks
+    // short-circuit at peek time.
     if let Some(peeked) = peek_member_shape_known(query_engine, scope_canonical_id, &raised, mode) {
         match peeked {
             PeekedShape::Leaf(leaf) => {
@@ -910,17 +908,16 @@ fn member_shape_peek_or_compute(
     // pre-computed value is the correct answer; no second reducer
     // call.
     //
-    // Block 6.i Commit AX (codex-hybrid binding spec). The reducer
-    // runs under the CALLER's publication mode wrapped in a
-    // `Published(mode)` reduction context — the top-down demand-
-    // driven reducer treats `Published` as "this exact node is the
-    // demanded terminal of the current step." A per-prop publication
-    // with `Navigate` no longer breadth-enumerates composite members
-    // / inactive conditional branches / mapped value bodies; the
-    // reducer's child selection (`push_demand_children`) only
-    // descends into composite children under whole-surface
-    // `Published(Expanded)`. Explicit narrowing operators
-    // (`IndexedAccess`, finite `Pick`/`Omit`, closed/open
+    // The reducer runs under the CALLER's publication mode wrapped
+    // in a `Published(mode)` reduction context — the top-down
+    // demand-driven reducer treats `Published` as "this exact node
+    // is the demanded terminal of the current step." A per-prop
+    // publication with `Navigate` does NOT breadth-enumerate
+    // composite members / inactive conditional branches / mapped
+    // value bodies; the reducer's child selection
+    // (`push_demand_children`) only descends into composite children
+    // under whole-surface `Published(Expanded)`. Explicit narrowing
+    // operators (`IndexedAccess`, finite `Pick`/`Omit`, closed/open
     // conditionals) STILL reduce path-precisely because their
     // operands are pushed onto the worklist with the appropriate
     // context. The cache `key` continues to use the caller's `mode`
@@ -1006,10 +1003,10 @@ fn merge_gate_fence_into_materialized(
 /// Admit a freshly-computed SemanticNode-subject shape into the
 /// universal [`crate::component_meta_caches::ShapeCacheDb`] when the
 /// scope has a tear-free `observe_materialize_scope` observation.
-/// Block 6.i universal-caching invariant — every successful
-/// `(node, scope, mode)` shape compute admits so sibling members and
-/// future peeks return the cached value rather than re-paying the
-/// raise + gate cost.
+///
+/// Universal-caching invariant: every successful `(node, scope, mode)`
+/// shape compute admits so sibling members and future peeks return
+/// the cached value rather than re-paying the raise + gate cost.
 ///
 /// Falls through to returning the value verbatim when the
 /// observation is unavailable (session tombstone / evicted scope /
@@ -1021,8 +1018,8 @@ fn merge_gate_fence_into_materialized(
 /// [`crate::component_meta_caches::ShapeCacheDb`] when the scope has
 /// a tear-free observation. Used by the `reduce_field_type_expr`
 /// peek primitive's `Leaf` / `BareCarrier` arms to enforce the
-/// Block 6.i universal-caching invariant: every successful shape
-/// compute admits, regardless of how cheap the compute was.
+/// universal-caching invariant: every successful shape compute
+/// admits, regardless of how cheap the compute was.
 ///
 /// F1 — callers MUST pass the `dep_signature` capturing any cross-file
 /// dependencies observed during the path that produced
@@ -1054,12 +1051,13 @@ fn admit_type_expr_shape_if_possible(
     let _ = admit_member_shape_if_possible(ctx, &key, value);
 }
 
-/// Block 6.i G3 — universal-caching admission for the projector
-/// pipeline. Computes the `fact_dep_signature` from the value's
-/// `dep_signature` + scope observation, then delegates to
-/// [`ShapeCacheDb::admit_computed`] — the single centralised
-/// admission point that handles the `get_or_compute` invocation and
-/// the verbatim fallback when admission is refused.
+/// Universal-caching admission for the projector pipeline. Computes
+/// the `fact_dep_signature` from the value's `dep_signature` + scope
+/// observation, then delegates to
+/// [`crate::component_meta_caches::ShapeCacheDb::admit_computed`] —
+/// the single centralised admission point that handles the
+/// `get_or_compute` invocation and the verbatim fallback when
+/// admission is refused.
 ///
 /// Returns the input `value` verbatim when:
 /// - the scope observation cannot be obtained (no scope view);
@@ -1135,9 +1133,9 @@ pub(crate) fn surface_member_to_expanded_field(
     member_cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) -> ExpandedField {
     let ctx: &dyn ResolverContext = query_engine.ctx;
-    // Block 6.i Commit AX — the publication mode comes from the
-    // `member_cursor`. `Navigate` (carrier) mode means the member's
-    // type body is published as a carrier `Ref`, not breadth-expanded.
+    // The publication mode comes from the `member_cursor`.
+    // `Navigate` (carrier) mode means the member's type body is
+    // published as a carrier `Ref`, not breadth-expanded.
     let publish_mode = member_cursor.terminal_publication_mode();
     let carrier_mode = matches!(publish_mode, ProjectionMode::Navigate);
     // Exactness classification is independent of the member's reduced
@@ -1159,12 +1157,11 @@ pub(crate) fn surface_member_to_expanded_field(
     // or the shallow-gate cost; cold misses raise once, run the
     // gates, then dispatch the graph-native reducer + admit.
     //
-    // Block 6.i Commit AX — `publish_mode` (from the `member_cursor`,
-    // computed above) drives the per-member materialise. `Navigate`
-    // keeps a generic instantiation `Tool<INPUT, OUTPUT>` as a `Ref`
-    // carrier instead of breadth-enumerating `Tool`'s own members
-    // (`outputSchema` / `execute`) into the published surface — the
-    // Rule-5 depth-leak fix.
+    // `publish_mode` (from the `member_cursor`, computed above)
+    // drives the per-member materialise. `Navigate` keeps a generic
+    // instantiation `Tool<INPUT, OUTPUT>` as a `Ref` carrier instead
+    // of breadth-enumerating `Tool`'s own members into the published
+    // surface — Rule-5 shallow-by-default depth gate.
     let materialized =
         member_shape_peek_or_compute(query_engine, scope_canonical_id, member.value, publish_mode);
     let r#type = materialized.type_expr;
@@ -1238,28 +1235,27 @@ pub(crate) fn reduce_field_type_expr(
 
 /// Carrier-aware variant of [`reduce_field_type_expr`].
 ///
-/// Block 6.i Commit AX — when `publish_mode` is `Navigate` (the
-/// shallow-by-default macro publication boundary), arbitrary
-/// userland generic instantiations (`Tool<INPUT, OUTPUT>`) are
-/// returned AS CARRIERS — the second-pass reducer does NOT re-expand
-/// what the projector pipeline deliberately kept shallow. Explicit
-/// narrowing operators (`IndexedAccess`, finite `Pick`/`Omit`/other
-/// built-in utilities) STILL reduce path-precisely: those are
-/// explicit consumer demand inside the type expression.
+/// When `publish_mode` is `Navigate` (the shallow-by-default macro
+/// publication boundary), arbitrary userland generic instantiations
+/// (`Tool<INPUT, OUTPUT>`) are returned AS CARRIERS — the second-
+/// pass reducer does NOT re-expand what the projector pipeline
+/// deliberately kept shallow. Explicit narrowing operators
+/// (`IndexedAccess`, finite `Pick`/`Omit`/other built-in utilities)
+/// STILL reduce path-precisely: those are explicit consumer demand
+/// inside the type expression.
 pub(crate) fn reduce_field_type_expr_with_mode(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     scope_canonical_id: &str,
     expr: TypeExpr,
     publish_mode: ProjectionMode,
 ) -> TypeExpr {
-    // Block 6.i Commit AX (codex Q5): `publish_mode` drives both the
-    // peek key and the cold-path materialiser dispatch so a per-prop
-    // `Navigate` publication does not collide with an `Expanded`
-    // consumer slot. The dispatch's reduction-demand context
-    // (`Published` vs `StructuralTransit`) remains the sole carrier-
-    // stop gate at the operator level; `publish_mode` carries the
-    // caller's mode through the cache slot and into the iterative
-    // reducer.
+    // `publish_mode` drives both the peek key and the cold-path
+    // materialiser dispatch so a per-prop `Navigate` publication
+    // does not collide with an `Expanded` consumer slot. The
+    // dispatch's reduction-demand context (`Published` vs
+    // `StructuralTransit`) remains the sole carrier-stop gate at the
+    // operator level; `publish_mode` carries the caller's mode
+    // through the cache slot and into the iterative reducer.
     // Peek-before-reduce. Short-circuit when the expression's shape
     // is already known cheaply:
     //
@@ -1283,8 +1279,8 @@ pub(crate) fn reduce_field_type_expr_with_mode(
     // / literal / bare alias name) and are independent of the route's
     // package-backing.
     //
-    // Block 6.i universal-caching invariant: when the peek returns
-    // `Leaf` / `BareCarrier`, ADMIT a TypeExpr-subject entry into
+    // Universal-caching invariant: when the peek returns `Leaf` /
+    // `BareCarrier`, ADMIT a TypeExpr-subject entry into
     // `ShapeCacheDb` so subsequent TypeExpr-start callers (e.g.
     // `materialize_component_meta_type_expr_until_stable_full` peek
     // path) hit at peek time. Peek-time admission is cheap (no raise
@@ -1375,13 +1371,13 @@ pub(crate) fn reduce_field_type_expr_with_mode(
     let is_generic_instantiation =
         matches!(&expr, TypeExpr::Ref { type_arguments, .. } if !type_arguments.is_empty());
 
-    // Block 6.i Commit AX (codex-hybrid): the carrier-stop decision
-    // is dispatch-layer (demand context), not a projector-side name
-    // predicate. The dispatch's `may_reduce_operator(ctx)` predicate
-    // is structural and uniform: a userland `MyPick<T,K>` follows
-    // the same path as the builtin `Pick<T,K>`, and `Tool<INPUT,
-    // OUTPUT>` only carrier-stops when the inner `keyof T` /
-    // `Mapped` dispatches enter a non-publication context.
+    // The carrier-stop decision is dispatch-layer (demand context),
+    // not a projector-side name predicate. The dispatch's
+    // `may_reduce_operator(ctx)` predicate is structural and uniform:
+    // a userland `MyPick<T,K>` follows the same path as the builtin
+    // `Pick<T,K>`, and `Tool<INPUT, OUTPUT>` only carrier-stops when
+    // the inner `keyof T` / `Mapped` dispatches enter a non-
+    // publication context.
     if is_generic_instantiation
         && crate::meta_resolve::lowered_root_reaches_transitive_cycle(
             query_engine,
@@ -1409,19 +1405,19 @@ pub(crate) fn reduce_field_type_expr_with_mode(
         return materialized.type_expr;
     }
 
-    // Block 6.i Commit AX (codex Q5): the materializer runs at
-    // `Expanded` regardless of `publish_mode`. `publish_mode` was
-    // used for the peek-cache slot above (so a `Navigate` caller does
-    // not collide with an `Expanded` caller's entry) — but the
-    // materializer's INTERNAL reduction runs at `Published(Expanded)`.
-    // The top-down demand-driven reducer (Block 6.i Commit AX) still
-    // fixes the inactive-conditional-branch leak under any root
-    // context: inactive branches are never visited regardless of
-    // whether the root demand is `Navigate` or `Expanded`. Per-prop
-    // shallow-by-default behaviour at the PROJECTOR layer is enforced
-    // upstream by `member_shape_peek_or_compute` (Q1), which threads
+    // The materializer runs at `Expanded` regardless of
+    // `publish_mode`. `publish_mode` is used for the peek-cache slot
+    // above (so a `Navigate` caller does not collide with an
+    // `Expanded` caller's entry) — but the materializer's INTERNAL
+    // reduction runs at `Published(Expanded)`. The top-down
+    // demand-driven reducer fixes the inactive-conditional-branch
+    // leak under any root context: inactive branches are never
+    // visited regardless of whether the root demand is `Navigate`
+    // or `Expanded`. Per-prop shallow-by-default behaviour at the
+    // PROJECTOR layer is enforced upstream by
+    // [`member_shape_peek_or_compute`], which threads
     // `Published(publish_mode)` directly through the per-member
-    // reducer entry. `reduce_field_type_expr_with_mode` is the
+    // reducer entry. [`reduce_field_type_expr_with_mode`] is the
     // TypeExpr-start fallback for callers that genuinely start from
     // a `TypeExpr` (slot bindings, model bindings, the
     // `Pick`/`Omit`/`IndexedAccess`/`keyof` paths the existing tests
@@ -1443,19 +1439,19 @@ pub(crate) fn reduce_field_type_expr_with_mode(
 /// other variants the value is returned unchanged — `classify_node`
 /// already alias-unwraps a single `Alias` hop.
 ///
-/// Block 6.i Commit AX — when `carrier_mode` is set (the member is
-/// published as a `Navigate` carrier), an `InstantiationRef`
-/// (a generic instantiation such as `Tool<INPUT, OUTPUT>`) is NOT
-/// expanded to its `Shallow` object surface. `Shallow` synthesises
-/// the one-level object surface — for an interface-bodied generic
-/// that breadth-enumerates `outputSchema` / `execute` into the
-/// audit footprint, the exact Rule-5 depth leak. A carrier member's
-/// exactness IS `ExactSymbolic` (the un-expanded `InstantiationRef`
-/// node classifies as symbolic), so skipping the expansion produces
-/// the correct exactness without the leak. `DeclRef` (an
-/// unparameterised alias such as `type MyStr = string`) is still
-/// expanded — that is a single-hop alias unwrap, not an object
-/// breadth-enumeration.
+/// When `carrier_mode` is set (the member is published as a
+/// `Navigate` carrier), an `InstantiationRef` (a generic
+/// instantiation such as `Tool<INPUT, OUTPUT>`) is NOT expanded to
+/// its `Shallow` object surface. `Shallow` synthesises the one-level
+/// object surface — for an interface-bodied generic that breadth-
+/// enumerates the instantiated type's members into the audit
+/// footprint, which is a Rule-5 (shallow-by-default) violation. A
+/// carrier member's exactness IS `ExactSymbolic` (the un-expanded
+/// `InstantiationRef` node classifies as symbolic), so skipping the
+/// expansion produces the correct exactness without the leak.
+/// `DeclRef` (an unparameterised alias such as
+/// `type MyStr = string`) is still expanded — that is a single-hop
+/// alias unwrap, not an object breadth-enumeration.
 ///
 /// Dep-signature is fanned into every active fact tracer
 /// unconditionally so the final-result cache observes the same
@@ -1468,10 +1464,12 @@ fn resolve_member_value_for_classification(
     let should_expand =
         match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, value).as_deref() {
             Some(SemanticNodeData::DeclRef { .. }) => true,
-            // Carrier-mode: do NOT expand a generic instantiation to its
-            // shallow object surface — that is the `outputSchema` /
-            // `execute` breadth leak. The un-expanded node classifies as
-            // `ExactSymbolic`, the correct exactness for a carrier.
+            // Carrier-mode: do NOT expand a generic instantiation to
+            // its shallow object surface — that would breadth-
+            // enumerate the instantiated type's members (a Rule-5
+            // shallow-by-default violation). The un-expanded node
+            // classifies as `ExactSymbolic`, the correct exactness
+            // for a carrier.
             Some(SemanticNodeData::InstantiationRef { .. }) => !carrier_mode,
             _ => false,
         };

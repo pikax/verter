@@ -339,8 +339,8 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
         }
     }
 
-    // Block 6.i Commit AX — every lowering site explicitly states
-    // its mode (the implicit-Expanded wrapper has been retired).
+    // Every lowering site explicitly states its mode; there is no
+    // implicit-Expanded wrapper.
     //
     // Empty path: lowering the whole expr is the carrier hop that
     // feeds the empty-terminal `ProjectPath { ..., Expanded }`. The
@@ -349,10 +349,11 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
     // unchanged), so a `Navigate` carrier would prevent the
     // expanded-surface filter downstream from observing an
     // Object/Intersection. The lowering mode therefore stays
-    // `Expanded` here; the audit-leak fix lands at the macro-shape
-    // publication boundary in a follow-up commit once the Shallow
-    // walker grows InstantiationRef / deferred-Mapped enumeration
-    // support (see Commit AX STOP report).
+    // `Expanded` here — the Shallow walker would need an
+    // `InstantiationRef` / deferred-`Mapped` enumeration arm before
+    // a carrier base could feed an Expanded terminal, and the
+    // transit-shallow leak-fix lives at the macro-shape publication
+    // boundary instead (see `project_expr_class_a_via_dispatch_transit_shallow`).
     //
     // Non-empty path: the base is an intermediate hop, and PathWalker
     // handles `InstantiationRef` per-hop. `Navigate` is correct here
@@ -449,12 +450,19 @@ fn decompose_indexed_access_chain(
 /// (CLAUDE.md §"Component-Meta Shallow-By-Default Rule").
 ///
 /// Difference vs [`project_expr_class_a_via_dispatch`]:
-/// - Empty-path lowering: still `Published(Expanded)` (mirrors the
-///   Expanded sibling). Eager `DeclRef` / `InstantiationRef`
-///   resolution at the lowering surface continues to surface opaque
-///   sentinels for unresolved imports — the silent-miss diagnostic
-///   contract is preserved through the existing `Opaque` check in
-///   `super::projectors::resolve_macro_payload`.
+/// - Empty-path lowering: `Navigate` (keeps the lowering chain's
+///   nested `Instantiate` / `KeyOf` / `MappedType` operators lazy so
+///   the inner operator-reduction work that would breadth-enumerate
+///   carrier member bodies does not fire at the publication boundary).
+///   The silent-miss diagnostic contract is restored at the macro-
+///   payload boundary by [`super::projectors::resolve_macro_payload`]'s
+///   empty-surface probe: when the transit-shallow payload resolves to
+///   an empty Object surface (instead of the eager-resolution `Opaque`
+///   sentinel a `Published(Expanded)` lowering would have produced),
+///   the payload boundary re-runs `Published(Expanded)` lowering on
+///   the macro's `parsed_type_argument` and emits a
+///   `macro-payload-decl-unresolved` diagnostic on an
+///   `Opaque(DeclPlaceholder)` result.
 /// - Terminal `ProjectPath` context: `Published(Shallow)` (one-level
 ///   surface; inner carrier shells preserved at the publication
 ///   boundary) instead of `Published(Expanded)` (fully reduce all
@@ -482,7 +490,9 @@ pub(crate) fn project_expr_class_a_via_dispatch_transit_shallow(
 /// indexed-access shapes route through `project_route_surface_expr`
 /// independently of the lowering demand — the routes produce already-
 /// projected TypeExprs); only the generic `ProjectPath` fallback
-/// switches to `Published(Shallow)` terminal.
+/// uses the `Navigate`-base + `Published(Shallow)`-terminal pair so
+/// the transit-shallow surface contract is enforced where the registry
+/// routes don't already publish a fully-projected shape.
 pub(crate) fn project_expr_class_a_via_dispatch_transit_shallow_threaded<'ctx>(
     ctx: &'ctx dyn ResolverContext,
     engine: Option<&mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>>,
@@ -531,13 +541,13 @@ pub(crate) fn project_expr_class_a_via_dispatch_transit_shallow_threaded<'ctx>(
     let dispatch = ProjectSemanticDispatch::new(ctx);
     // Empty-path lowering: `Navigate` mode keeps the lowering chain's
     // nested operators (`Instantiate` / `KeyOf` / `MappedType`) lazy
-    // so the inner operator-reduction work that produced the
-    // ChatMessages Rule-5 leak under `Published(Expanded)` lowering
-    // does not fire. Combined with the `Published(Shallow)` terminal
-    // below, the macro publication boundary observes a one-level
-    // Object surface with carrier-shaped member values per the
-    // shallow-by-default rule. The silent-miss diagnostic contract is
-    // restored at the slot-binding-graph payload boundary
+    // so the inner operator-reduction work that would breadth-enumerate
+    // carrier member bodies (the Rule-5 leak shape) does not fire.
+    // Combined with the `Published(Shallow)` terminal below, the macro
+    // publication boundary observes a one-level Object surface with
+    // carrier-shaped member values per the shallow-by-default rule.
+    // The silent-miss diagnostic contract is restored at the slot-
+    // binding-graph payload boundary
     // (`resolve_slot_bindings_graph_native`'s explicit `DeclRef` /
     // `Opaque` payload check) since the eager-resolution side effect
     // of `Published(Expanded)` lowering is no longer available.
@@ -599,14 +609,12 @@ pub(crate) fn project_expr_class_a_shape_via_dispatch_transit_shallow(
     (!shape.properties.is_empty() || !shape.call_signatures.is_empty()).then_some(shape)
 }
 
-// Class B helpers were prototyped during 5d but caused regressions
-// in transitive heritage chains and barrel-routed declarations
-// because their dispatch-only path bypasses the engine's
-// prepared-decl fallback (`cached_prepared_root_surface`). The
-// trampoline's `project_type_surface` body is dispatch-first then
-// prepared-decl-second; threading the prepared-decl path through
-// dispatch atomically is a change. Class B callsite
-// migration deferred to 5g per CLAUDE.md fix-quality discipline.
+// Class B helpers (dispatch-only surface projection) bypass the
+// engine's prepared-decl fallback (`cached_prepared_root_surface`)
+// and have regressed in the past on transitive heritage chains and
+// barrel-routed declarations. The trampoline's `project_type_surface`
+// body remains dispatch-first then prepared-decl-second; threading
+// the prepared-decl path through dispatch is not done here.
 
 /// Class D — Pick route-target via dispatch's `execute_pick`
 ///.
@@ -635,8 +643,8 @@ pub(crate) fn pick_via_dispatch_pick_helper(
         name: Arc::from(symbol_name),
         type_arguments: Arc::from(Vec::new().into_boxed_slice()),
     };
-    // Block 6.i Commit AX — bare-Ref base for the Pick builtin is an
-    // intermediate hop; the Pick result is the terminal demand.
+    // Bare-Ref base for the Pick builtin is an intermediate hop;
+    // the Pick result is the terminal demand.
     let base = dispatch.lower_type_expr_in_scope_with_mode(
         scope_canonical_id,
         &symbol_ref,
@@ -693,10 +701,10 @@ pub(crate) fn instantiate_local_generic_ref_via_dispatch(
     }
 
     let dispatch = ProjectSemanticDispatch::new(ctx);
-    // Block 6.i Commit AX — generic-Ref instantiation publishes its
-    // raised body as the result; the caller reads the raised TypeExpr
-    // directly without a path-walking follow-up. Lower at Expanded so
-    // the body materialises in one step.
+    // Generic-Ref instantiation publishes its raised body as the
+    // result; the caller reads the raised TypeExpr directly without
+    // a path-walking follow-up. Lower at Expanded so the body
+    // materialises in one step.
     let lowered = dispatch.lower_type_expr_in_scope_with_mode(
         scope_canonical_id,
         expr,
@@ -815,8 +823,8 @@ pub(crate) fn project_expr_surface_shape_via_host_threaded<'ctx>(
     }
     let ctx = engine.ctx();
     let dispatch = ProjectSemanticDispatch::new(ctx);
-    // Block 6.i Commit AX — intermediate-base lowering is Navigate;
-    // the terminal `ProjectPath { .., Shallow }` carries the demand.
+    // Intermediate-base lowering is `Navigate`; the terminal
+    // `ProjectPath { .., Shallow }` carries the publication demand.
     let base = dispatch.lower_type_expr_in_scope_with_mode(
         scope_canonical_id,
         expr,
@@ -862,13 +870,14 @@ pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'ctx>(
     }
     let ctx = engine.ctx();
     let dispatch = ProjectSemanticDispatch::new(ctx);
-    // Block 6.i Commit AX — empty-terminal `ProjectPath { ..,
-    // Expanded }` requires the base to be a structural surface that
-    // `expand_empty_path_terminal` can walk. `Navigate` would freeze
-    // a generic carrier at `InstantiationRef` (catch-all), so the
-    // expanded-surface filter downstream would reject. Keep
-    // `Expanded` lowering until the walker grows InstantiationRef
-    // support (Commit AX STOP report).
+    // Empty-terminal `ProjectPath { .., Expanded }` requires the
+    // base to be a structural surface that `expand_empty_path_terminal`
+    // can walk. `Navigate` would freeze a generic carrier at
+    // `InstantiationRef` (catch-all), so the expanded-surface filter
+    // downstream would reject. The lowering therefore stays `Expanded`
+    // here — the Shallow walker would need an `InstantiationRef`
+    // enumeration arm before a carrier base could feed an Expanded
+    // terminal.
     let base = dispatch.lower_type_expr_in_scope_with_mode(
         scope_canonical_id,
         expr,
@@ -891,10 +900,10 @@ pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'ctx>(
         .then_some(reduced)
 }
 
-/// Mode-explicit dispatch-direct surface projection (Block 6.i
-/// leak-close-2). Caller states `(base_mode, terminal_mode, demand)`
-/// so each callsite expresses its publication intent rather than
-/// inheriting the legacy `Expanded`/`Expanded` default.
+/// Mode-explicit dispatch-direct surface projection. Caller states
+/// `(base_mode, terminal_mode, demand)` so each callsite expresses
+/// its publication intent rather than inheriting the legacy
+/// `Expanded`/`Expanded` default.
 ///
 /// Behaviour:
 /// 1. **Registry-route fast-path** — `Pick<…>` / `Omit<…>` /
@@ -929,17 +938,16 @@ pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'ctx>(
 /// the `MacroExpansionDiagnostics` envelope without observing a
 /// synthesised `TypeExpr::Error`.
 ///
-/// Caller note on `base_mode` vs `terminal_mode`: per the Block 6.i
-/// AX-WIP constraint (documented on
-/// `lower_and_project_to_expanded_via_host_threaded`), empty-terminal
-/// `Expanded` requires the base to be a structural surface that
-/// `expand_empty_path_terminal` can walk. A `Navigate` carrier would
-/// freeze a generic `InstantiationRef` and the expanded-surface filter
-/// would reject. Callers that need Expanded terminal output on
-/// arbitrary inputs MUST pass `base_mode = Expanded`; callers on
-/// the empty-terminal Shallow path may pass `base_mode = Navigate`
-/// (carrier-preserving) per the sister
-/// `project_expr_surface_shape_via_host_threaded` pattern.
+/// Caller note on `base_mode` vs `terminal_mode`: per the empty-
+/// terminal Expanded constraint documented on
+/// [`lower_and_project_to_expanded_via_host_threaded`], the base must
+/// be a structural surface that `expand_empty_path_terminal` can walk.
+/// A `Navigate` carrier would freeze a generic `InstantiationRef` and
+/// the expanded-surface filter would reject. Callers that need
+/// Expanded terminal output on arbitrary inputs MUST pass
+/// `base_mode = Expanded`; callers on the empty-terminal Shallow
+/// path may pass `base_mode = Navigate` (carrier-preserving) per the
+/// sister [`project_expr_surface_shape_via_host_threaded`] pattern.
 pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
@@ -1009,10 +1017,10 @@ pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
         // `type_expr_is_expanded_surface` would reject the carrier
         // form callers explicitly asked for.
         ProjectionMode::Shallow => Some(projected),
-        // `Identity` / `Navigate` / `Skeleton` are not expected from
-        // the leak-close-2 callsites today; admit the result as-is so
-        // the helper remains a single drop-in dispatch primitive if a
-        // future caller picks them up.
+        // `Identity` / `Navigate` / `Skeleton` are not produced by
+        // current callsites; admit the result as-is so the helper
+        // remains a single drop-in dispatch primitive if a future
+        // caller picks them up.
         ProjectionMode::Identity | ProjectionMode::Navigate | ProjectionMode::Skeleton => {
             Some(projected)
         }
@@ -1033,9 +1041,9 @@ pub(crate) fn project_expr_surface_expr_with_compound_objects_via_host_threaded<
     }
     let ctx = engine.ctx();
     let dispatch = ProjectSemanticDispatch::new(ctx);
-    // Block 6.i Commit AX — empty-terminal Expanded requires the
-    // base to be a structural surface (see comment on
-    // `lower_and_project_to_expanded_via_host_threaded`).
+    // Empty-terminal Expanded requires the base to be a structural
+    // surface (see comment on
+    // [`lower_and_project_to_expanded_via_host_threaded`]).
     let base = dispatch.lower_type_expr_in_scope_with_mode(
         scope_canonical_id,
         expr,

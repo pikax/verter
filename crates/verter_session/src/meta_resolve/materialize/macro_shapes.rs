@@ -1619,13 +1619,13 @@ pub(crate) fn produce_one_macro_object_shape(
     shape_is_usable: impl Fn(&verter_semantic::analysis::type_expand::ExpandedObjectShape) -> bool,
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) -> (Option<ShapeResult>, MacroShapeSource) {
-    // Block 6.i Commit AX — the threaded `cursor` carries the
-    // caller's published-surface demand. Every shape-producing path
-    // finalizes through `finalize_macro_shape_through_cursor` so the
-    // macro-shape mirror publishes carrier-shallow member types
-    // (`whole_surface(kind)` cursors admit every member name; each
-    // member's type body is published as a `Navigate` carrier unless
-    // the consumer walked a deep path).
+    // The threaded `cursor` carries the caller's published-surface
+    // demand. Every shape-producing path finalizes through
+    // [`finalize_macro_shape_through_cursor`] so the macro-shape
+    // mirror publishes carrier-shallow member types (`whole_surface(kind)`
+    // cursors admit every member name; each member's type body is
+    // published as a `Navigate` carrier unless the consumer walked a
+    // deep path).
     //
     // ── Fast path: direct Object body → DB-backed projection ──────────
     if let Some(mut projected) =
@@ -1704,29 +1704,24 @@ pub(crate) fn produce_one_macro_object_shape(
     // and treat the result as an exact-concrete `SolverResult` so
     // `solver_result_to_object_expansion` still derives the expansion.
     //
-    // Block 6.i leak-close-3 (Q7) — the deep_resolve_slot_function_refs
-    // post-pass that previously walked every Ref-typed property body
-    // is deleted. Class A Expanded still produces the macro's top-
-    // level Object surface (preserving unresolved-import diagnostics);
-    // each property's Ref-typed body stays as a carrier the consumer
-    // re-resolves on demand. This closes the ChatMessages
-    // `outputSchema|execute` audit-footprint leak for non-slot macros
-    // (props / emits / exposed / options).
+    // Non-slot macros (props / emits / exposed / options) publish each
+    // property's value verbatim from the Class A Expanded surface — no
+    // post-pass walks Ref-typed property bodies. Class A Expanded
+    // produces the macro's top-level Object surface (preserving
+    // unresolved-import diagnostics); each property's Ref-typed body
+    // stays as a carrier the consumer re-resolves on demand.
     //
-    // Block 6.i round-8 STOP-condition: the non-slot path's empirical
-    // migration to transit-shallow Class A breaks the inherited emits
-    // branch-merge tests
-    // (`resolver_coverage_inherited_emits_branch_merged_surface`,
-    // `round7_inherited_emits_branch_merged_surface_survives_transit_cutover`).
-    // The pre-existing ChatMessage (singular) `outputSchema | execute`
-    // props-path leak (61 edges, present at HEAD baseline `3974c11e0`)
-    // is therefore NOT closed in round 8 — closure requires either
-    // (a) a finer-grained gate on the Class A surface filter to admit
-    // carrier shells for props but not for inherited-emits branch
-    // merges, or (b) a separate consumer migration with cooperating
-    // path-precise carrier-stop. Both are out of scope for round 8 per
-    // brief STOP condition #4 ("new consumer regression appears that
-    // round-7 didn't predict: STOP").
+    // The non-slot path retains the `Published(Expanded)` lowering
+    // here because the inherited-emits branch-merge protocol (see
+    // [`crate::meta_resolve::projectors::emits::project_emits`] and
+    // [`crate::meta_resolve::projectors::PayloadSurfaceScope::EmitClassMacroObject`])
+    // requires the top-level Object surface to enumerate root
+    // Conditional carriers via the projector pipeline rather than at
+    // this lowering site. A blanket switch to transit-shallow lowering
+    // here would admit root `Conditional` carriers and bypass the
+    // branch-merge — the slot-only transit-shallow lowering lives in
+    // [`produce_one_macro_object_shape_for_slots`] which has no such
+    // root-Conditional caller.
     let solver_result = scoped_solver_result.unwrap_or_else(|| {
         let projected = project_expr_class_a_via_dispatch_threaded(
             query_engine.ctx,
@@ -1792,17 +1787,18 @@ pub(crate) fn produce_one_macro_object_shape(
             None => (None, MacroShapeSource::None),
         },
     };
-    // Block 6.i Commit AX — finalize each published member through
-    // the cursor so the macro-shape mirror publishes carrier-shallow
-    // types (no eager `outputSchema` / `execute` breadth-enumeration).
+    // Finalize each published member through the cursor so the macro-
+    // shape mirror publishes carrier-shallow types (member bodies stay
+    // as carrier Refs at the publication boundary, no breadth-
+    // enumeration of nested members).
     if let Some(shape) = result.as_mut() {
         finalize_macro_shape_through_cursor(cursor, shape);
     }
     (result, source)
 }
 
-/// Block 6.i Commit AX — carrier-preserving per-member finalizer for
-/// a projected macro object shape.
+/// Carrier-preserving per-member finalizer for a projected macro
+/// object shape.
 ///
 /// A macro projector publishes EVERY top-level member NAME admitted
 /// by the cursor's published surface. This helper descends each
@@ -1821,8 +1817,8 @@ pub(crate) fn produce_one_macro_object_shape(
 ///   the published surface membership.
 ///
 /// `descend_published_member` keeps the breadth gate identical to
-/// the projector pipeline's per-member descent — when a future
-/// commit narrows the macro projection (`Pick`/`Omit`), siblings
+/// the projector pipeline's per-member descent — when a narrowed
+/// macro projection cursor (`Pick`/`Omit`) is threaded in, siblings
 /// drop here exactly as they drop from `project_props`.
 fn finalize_macro_shape_through_cursor(
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
@@ -1841,10 +1837,10 @@ pub(crate) fn project_named_ref_prepared_surface_shape(
     lowered: &verter_type_expr::TypeExpr,
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) -> Option<ShapeResult> {
-    // Block 6.i Commit AX — the projected macro root surface is
-    // finalized through `cursor.descend_published_member` so each
-    // published member's type body is a carrier (`Navigate` mode),
-    // not an eagerly-expanded object surface.
+    // The projected macro root surface is finalized through
+    // `cursor.descend_published_member` so each published member's
+    // type body is a carrier (`Navigate` mode), not an eagerly-
+    // expanded object surface.
     let verter_type_expr::TypeExpr::Ref {
         name,
         type_arguments,
@@ -2033,9 +2029,9 @@ pub(crate) fn project_named_ref_surface_shape(
     shape_is_usable: &impl Fn(&verter_semantic::analysis::type_expand::ExpandedObjectShape) -> bool,
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) -> Option<ShapeResult> {
-    // Block 6.i Commit AX — the projected macro root surface is
-    // finalized through `cursor.descend_published_member` so each
-    // published member's type body is a carrier (`Navigate` mode).
+    // The projected macro root surface is finalized through
+    // `cursor.descend_published_member` so each published member's
+    // type body is a carrier (`Navigate` mode).
     let verter_type_expr::TypeExpr::Ref { name, .. } = lowered else {
         return None;
     };
@@ -2074,9 +2070,9 @@ pub(crate) fn project_named_ref_imported_scope_shape(
     shape_is_usable: &impl Fn(&verter_semantic::analysis::type_expand::ExpandedObjectShape) -> bool,
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) -> Option<ShapeResult> {
-    // Block 6.i Commit AX — the projected macro root surface is
-    // finalized through `cursor.descend_published_member` so each
-    // published member's type body is a carrier (`Navigate` mode).
+    // The projected macro root surface is finalized through
+    // `cursor.descend_published_member` so each published member's
+    // type body is a carrier (`Navigate` mode).
     let verter_type_expr::TypeExpr::Ref { name, .. } = lowered else {
         return None;
     };
@@ -2106,14 +2102,14 @@ pub(crate) fn project_named_ref_imported_scope_shape(
 
 /// `defineSlots` macro-shape publication.
 ///
-/// Block 6.i leak-close-3 (Q7 architecture). Slot Function param
-/// types stay as Ref carriers — the published `Function { params:
-/// [(propsName, RefCarrier)], return }` shape preserves the consumer
-/// re-resolution contract. Slot-binding extraction runs through
-/// [`compute_bindings_via_graph`] (`slot_binding_graph.rs`), which is
-/// graph-native and dispatches its own `ProjectPath { mode: Shallow }`
-/// queries on the macro payload — independent of the published shape.
-/// The parser-side enumerator `slot_bindings_from_type_expr`
+/// Slot Function param types stay as Ref carriers — the published
+/// `Function { params: [(propsName, RefCarrier)], return }` shape
+/// preserves the consumer re-resolution contract. Slot-binding
+/// extraction runs through [`compute_bindings_via_graph`]
+/// (`slot_binding_graph.rs`), which is graph-native and dispatches
+/// its own `ProjectPath { mode: Shallow }` queries on the macro
+/// payload — independent of the published shape. The parser-side
+/// enumerator `slot_bindings_from_type_expr`
 /// (`verter_semantic::analysis::component_meta`) handles Ref-typed
 /// param surfaces by falling through to `evaluated_slot_bindings`,
 /// which fills the row from the graph-native path.
@@ -2123,8 +2119,9 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
     lowered: &verter_type_expr::TypeExpr,
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) -> (Option<ShapeResult>, MacroShapeSource) {
-    // Block 6.i Commit AX — cursor threaded for path-precision in
-    // downstream walks. Pre-AX callers pass `whole_surface(Slots)`.
+    // Cursor threaded for path-precision in downstream walks; most
+    // callers pass `whole_surface(Slots)` so every member name is
+    // admitted.
     // ── Fast path: direct Object body → DB-backed projection ──────────
     if let verter_type_expr::TypeExpr::Ref {
         name,
@@ -2154,37 +2151,33 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
         }
     }
 
-    // ── Non-object body: dispatch projection through Class A Expanded
-    // ── then fall back to the compound-objects lenient path.
+    // ── Non-object body: dispatch projection through Class A
+    //    transit-shallow then fall back to the compound-objects
+    //    lenient path.
     //
-    // Path C C11-residual-A: when the strict `project_expr_class_a_via_dispatch`
+    // Slot macro publication lowers the payload under `Navigate` mode
+    // and walks the publication terminal under `Published(Shallow)`
+    // so the outer Object surface publishes while slot member values
+    // (slot Function param types, etc.) stay as carrier Refs. The
+    // slot-binding consumer reaches the bindings via the graph-native
+    // path (see fn docstring) and the callable-realization substrate
+    // (`realize_callable_member`) normalises carrier-shaped slot
+    // values for the graph-native `Function`-arm match.
+    //
+    // Compound-shape recovery: when the strict transit-shallow Class A
     // returns `None` because a compound-shape sibling is still a
     // deferred shell (e.g. `{ explicit slots } & DynamicSlots<...>` —
     // the `DynamicSlots` arm is a Mapped that can't enumerate keys
     // when the type parameters are unresolved), fall back to the
     // lenient `project_expr_surface_expr_with_compound_objects` so the
     // explicit Object arm's properties still reach
-    // `solver_result_to_object_expansion`. The expansion's existing
+    // [`solver_result_to_object_expansion`]. The expansion's existing
     // Intersection-merging in [`type_expr_to_expanded_shape`] then
-    // collects the explicit slot members from the compound shape.
-    //
-    // Block 6.i round-8 — Transit-Shallow Publication cutover.
-    // Slot macro publication lowers the payload under
-    // `structural_transit_with_mode(Navigate)` and walks the
-    // publication terminal under `Published(Shallow)` so the outer
-    // Object surface publishes while slot member values (slot
-    // Function param types, etc.) stay as carrier Refs. The slot-
-    // binding consumer reaches the bindings via the graph-native path
-    // (see fn docstring) and the leak-fix-3b realization substrate
-    // (`realize_callable_member`) normalises carrier-shaped slot
-    // values for the graph-native `Function`-arm match.
-    //
-    // The compound-objects fallback retains the Expanded helper —
-    // `project_expr_surface_expr_with_compound_objects_via_host_threaded`
-    // walks the compound-shape sibling chain for legacy lenient
-    // recovery and is unchanged at this commit; the
-    // transit-shallow Class A above is the demand-driven publication
-    // path.
+    // collects the explicit slot members from the compound shape. The
+    // compound-objects helper walks under the Expanded helper and is
+    // intentionally lenient; transit-shallow Class A above is the
+    // demand-driven publication path that the slot publication
+    // boundary favours.
     let projected_body = project_expr_class_a_via_dispatch_transit_shallow(
         query_engine.ctx,
         owner_canonical,
@@ -2214,8 +2207,9 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
     )
     .and_then(|shape| {
         let projected_expr = expanded_shape_to_type_expr(&shape);
-        // Block 6.i leak-close-3 (Q7) — drop the
-        // `deep_resolve_slot_function_refs` post-pass.
+        // No post-pass over Ref-typed slot Function bodies — slot
+        // member values stay as carriers; consumers re-resolve on
+        // demand.
         registry_entry_to_expanded_shape(&projected_expr).and_then(|resolved_shape| {
             has_shape_surface(&resolved_shape).then(|| {
                 verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
@@ -2233,8 +2227,9 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
     )
     .and_then(|shape| {
         let projected_expr = expanded_shape_to_type_expr(&shape.value);
-        // Block 6.i leak-close-3 (Q7) — drop the
-        // `deep_resolve_slot_function_refs` post-pass.
+        // No post-pass over Ref-typed slot Function bodies — slot
+        // member values stay as carriers; consumers re-resolve on
+        // demand.
         registry_entry_to_expanded_shape(&projected_expr).and_then(|resolved_shape| {
             has_shape_surface(&resolved_shape).then(|| {
                 verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(

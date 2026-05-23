@@ -1,27 +1,39 @@
-//! Block 6.i round 7 substrate primitives — codex 4th consult Q2 /
-//! Q3 / Q4 building blocks for the Selected-Key Transit Realization
-//! + Boundary Diagnostics architecture.
+//! Macro-payload boundary substrate primitives for the transit-
+//! shallow macro publication pipeline.
 //!
-//! Split out of [`super::mod`] to keep the projector entry-point
-//! file under the architecture-guard line cap (`no_oversize_files`).
-//! The substrate primitives are re-exported from
-//! [`super`](super) so call sites continue to import from
-//! `crate::meta_resolve::projectors::*` unchanged.
+//! Split out of [`super`] to keep the projector entry-point file
+//! under the architecture-guard line cap (`no_oversize_files`). The
+//! substrate primitives are re-exported from [`super`] so call sites
+//! continue to import from `crate::meta_resolve::projectors::*`
+//! unchanged.
 //!
 //! Primitives in this module:
 //!
 //! - [`resolve_macro_payload_diagnostic_probe`] — boundary probe
 //!   that restores silent-miss diagnostics under transit-shallow
-//!   macro publication (codex Q2).
+//!   macro publication. Re-dispatches the macro payload under
+//!   publication demand on a non-value-publishing path so unresolved
+//!   `DeclRef` / `Opaque` carriers surface as
+//!   `MacroExpansionDiagnostics` envelopes even though the macro's
+//!   published value stays shallow.
 //! - [`PayloadSurfaceScope`] + [`resolve_payload_surface_with_scope`]
-//!   — scope-gated payload surface resolver with branch-merged
-//!   shallow semantics for emit-class macro object payloads (codex
-//!   Q3 / Q4).
+//!   — scope-gated payload surface resolver. Enables branch-merged
+//!   shallow semantics for emit-class macro object payloads (an
+//!   undecided root `Conditional` projects both branches under
+//!   `Published(Shallow)` and merges their top-level Object members),
+//!   while every other macro kind (props / slots / options / exposed
+//!   / model) keeps the default single-dispatch behaviour.
 //! - [`MemberValueRole`] — disambiguates Field vs CallableSlot
-//!   handling for the surface-member projection pipeline (codex Q4).
+//!   handling for the surface-member projection pipeline. The
+//!   CallableSlot role threads slot member values through
+//!   `realize_callable_member` BEFORE caching/classifying/raising so
+//!   the slot consumer's `Function`-arm match fires on the closed
+//!   Function node, not on the carrier shell that the transit-shallow
+//!   publication terminal preserved.
 //!
-//! All primitives carry `#[allow(dead_code)]` at the substrate
-//! commit. The atomic 7-consumer cutover wires every callsite.
+//! All primitives carry `#[allow(dead_code)]` so the substrate can
+//! be introduced and wired by independent commits without a clippy
+//! breakage in the interim.
 
 use std::sync::Arc;
 
@@ -36,52 +48,46 @@ use super::{empty_path, macro_expansion_for_cycle, macro_expansion_for_query_err
 use crate::meta_resolve::dep_signature::emit_dispatch_dep_signature_facts;
 use crate::meta_resolve::diagnostic_convert::shallow_diagnostics_to_macro_expansion;
 
-/// **Macro-payload boundary diagnostic probe** — Block 6.i round 7
-/// codex 4th consult Q2 substrate.
+/// **Macro-payload boundary diagnostic probe.**
 ///
-/// The macro payload lowering migrates from `Published(Navigate)` to
-/// `StructuralTransit(Navigate)` at the macro publication boundary
-/// once the consumer-side cutover lands. Under transit demand the
-/// publication boundary carrier-stops `KeyOf` / `Mapped` operators,
-/// but an unresolved-import surface may also resolve to a `DeclRef`
-/// carrier WITHOUT firing `walker_diagnostics` — silently passing
-/// the missing decl through. The legacy `Published(Navigate)`
-/// lowering surfaced the failure loudly
-/// (`lower_type_expr_in_scope_with_mode` returned `None`); the
-/// transit-shallow lowering does not.
+/// Restores the silent-miss diagnostic contract for the transit-
+/// shallow macro publication path. Under transit-shallow lowering
+/// the publication boundary carrier-stops `KeyOf` / `Mapped` /
+/// `DeclRef` carriers, so an unresolved-import surface can resolve
+/// to a `DeclRef` shell WITHOUT firing `walker_diagnostics` — the
+/// missing-decl failure that an eager `Published(Expanded)` lowering
+/// would have surfaced loudly (by returning `None` from
+/// `lower_type_expr_in_scope_with_mode`) silently passes through.
 ///
-/// The probe restores the silent-miss diagnostic contract by running
-/// a **second**, non-value-publishing dispatch under publication
-/// demand on the transit-shallow payload node. The probe's result is
-/// DISCARDED at the value level (the macro publication still uses
-/// the transit-shallow payload); only its diagnostics, dep-
-/// signatures, and cache-suppress flag flow into the consumer-
-/// visible `MacroExpansionDiagnostics` envelope.
+/// The probe runs a **second**, non-value-publishing dispatch under
+/// publication demand on the transit-shallow payload node. The
+/// probe's result is DISCARDED at the value level (the macro
+/// publication still publishes the transit-shallow payload); only
+/// its diagnostics, dep-signatures, and cache-suppress flag flow
+/// into the consumer-visible `MacroExpansionDiagnostics` envelope.
 ///
-/// Probe dispatch chain (codex Q2):
+/// Probe dispatch:
 /// - The probe runs `ProjectPath { base: payload, [], Published(Shallow) }`
 ///   so the publication path tries to enumerate the payload's
 ///   surface members under publication demand. The `ProjectPath`
 ///   walker internally re-dispatches `DeclRef` → `ResolveDecl`,
 ///   `InstantiationRef` → `Instantiate { Published(Shallow) }`,
-///   `Mapped` → `MappedType { Published(Shallow) }` etc. — so a
+///   `Mapped` → `MappedType { Published(Shallow) }`, etc. — so a
 ///   single `ProjectPath` probe exercises the full carrier-
-///   resolution surface the codex spec enumerates ("DeclRef →
-///   ResolveDecl; InstantiationRef → Instantiate {
-///   Published(Navigate) }; payload surface candidates →
-///   ProjectPath([], Published(Shallow))").
+///   resolution surface.
 /// - `walker_diagnostics`, `cache_suppress`, and the dispatch's
 ///   `dep_signature` translate into `MacroExpansionDiagnostics`
 ///   envelopes via the existing
 ///   `shallow_diagnostics_to_macro_expansion` /
 ///   `macro_expansion_for_query_error` / `macro_expansion_for_cycle`
-///   helpers — identical to the `Published(Navigate)`-era contract.
+///   helpers — identical to the diagnostic contract that eager
+///   lowering used to enforce.
 ///
 /// **Probe result MUST NOT replace the transit-shallow payload
 /// value.** The probe is diagnostic-only; the macro publication's
 /// downstream consumers continue reading the transit-shallow payload
-/// node so the round-7 publication contract (carrier-stop / no
-/// outputSchema-execute leak) holds.
+/// node so the publication contract (carrier-stop / no deep member
+/// breadth-enumeration) holds.
 ///
 /// `Opaque` carrier handling: the probe treats `Opaque(_)` payloads
 /// (e.g. `Opaque(DeclPlaceholder)` for an unresolved import) as
@@ -153,18 +159,17 @@ pub(crate) fn resolve_macro_payload_diagnostic_probe(
     }
 }
 
-/// **Branch-merge primitive scope tag** — Block 6.i round 7 codex
-/// 4th consult Q3 substrate.
+/// **Branch-merge primitive scope tag.**
 ///
-/// The branch-merged shallow conditional surface scopes to macro
-/// **object** publication only (emit-class macro payloads). Codex
-/// Q6 top risk: the branch-merge must NOT widen unrelated symbolic
-/// surfaces. This enum is the explicit gating parameter
+/// The branch-merged shallow conditional surface is scoped to macro
+/// **object** publication only (emit-class macro payloads). The
+/// branch-merge must NOT widen unrelated symbolic surfaces, so this
+/// enum is the explicit gating parameter
 /// [`resolve_payload_surface_with_scope`] accepts to decide whether
 /// to apply the branch-merge when the payload is an undecided
 /// `Conditional` shell.
 ///
-/// - [`PayloadSurfaceScope::Default`] preserves the legacy
+/// - [`PayloadSurfaceScope::Default`] preserves the default
 ///   behaviour: a Conditional payload yields whatever the
 ///   `ProjectPath { Published(Shallow) }` walker produces directly
 ///   (typically a carrier shell). No branch-merge.
@@ -183,16 +188,15 @@ pub(crate) enum PayloadSurfaceScope {
     Default,
     /// Emit-class macro object payload scope — enables branch-merge
     /// of undecided `Conditional` shells via top-level event-row
-    /// union. Codex Q3 / Q4: restores
-    /// `resolver_coverage_inherited_emits_branch_merged_surface`
+    /// union. Preserves the inherited-emits branch-merged surface
     /// under transit-shallow macro publication without giving the
     /// inheritance reducer an `Expanded`-only escape hatch.
     EmitClassMacroObject,
 }
 
-/// **Scope-gated payload surface resolver** — Block 6.i round 7
-/// codex 4th consult Q3 / Q4 substrate. Sibling of
-/// [`super::resolve_payload_surface`] that consults
+/// **Scope-gated payload surface resolver.**
+///
+/// Sibling of [`super::resolve_payload_surface`] that consults
 /// [`PayloadSurfaceScope`] to decide whether to apply branch-merged
 /// shallow semantics when the payload is an undecided `Conditional`.
 ///
@@ -210,12 +214,11 @@ pub(crate) enum PayloadSurfaceScope {
 /// takes the union of member names — events that appear in either
 /// branch surface on the inherited `accepted_events` set.
 ///
-/// Codex Q6 risk scoping: the branch-merge runs ONLY when the
-/// caller explicitly passes
-/// [`PayloadSurfaceScope::EmitClassMacroObject`]. Non-emit macros
-/// (slots / props / options / exposed / model) pass
-/// [`PayloadSurfaceScope::Default`] so the round-7 substrate does
-/// not widen unrelated symbolic surfaces.
+/// Risk scoping: the branch-merge runs ONLY when the caller
+/// explicitly passes [`PayloadSurfaceScope::EmitClassMacroObject`].
+/// Non-emit macros (slots / props / options / exposed / model) pass
+/// [`PayloadSurfaceScope::Default`] so this resolver does not widen
+/// unrelated symbolic surfaces.
 ///
 /// **Diagnostic propagation**: the wrapper inherits the dep-
 /// signature, `walker_diagnostics`, and `cache_suppress` translation
@@ -381,28 +384,27 @@ pub(crate) fn resolve_payload_surface_with_scope(
     }
 }
 
-/// **Member-value role tag** — Block 6.i round 7 codex 4th consult
-/// Q4 substrate.
+/// **Member-value role tag.**
 ///
 /// Disambiguates how the `surface_member_to_expanded_field` /
 /// `member_shape_peek_or_compute` /
 /// `resolve_member_value_for_classification` pipeline handles a
 /// macro surface member's value. Two roles:
 ///
-/// - [`MemberValueRole::Field`] — the legacy "field shape" path
+/// - [`MemberValueRole::Field`] — the default "field shape" path
 ///   (props / emits / options / exposed / model). The pipeline
-///   raises/classifies the member's value verbatim (unchanged
-///   pre-cutover behaviour).
+///   raises/classifies the member's value verbatim.
 /// - [`MemberValueRole::CallableSlot`] — slot members. Contract:
 ///   the pipeline calls `realize_callable_member` on the member's
 ///   value FIRST, then caches / classifies / raises the
 ///   **realized** function node (not the original carrier). Cache
 ///   keys use the realized node so the cache shape matches what
 ///   downstream consumers see, and the slot-binding consumer's
-///   `Function`-arm match fires on the closed Function. Pre-cutover
-///   the macro publication's Expanded lowering closed the
-///   Conditional during publication; under transit-shallow it
-///   stays carrier-shaped and consumers must realize.
+///   `Function`-arm match fires on the closed Function. An eager
+///   `Published(Expanded)` lowering would close the Conditional /
+///   carrier chain during publication; under transit-shallow the
+///   value stays carrier-shaped, so this realization step is what
+///   restores the Function node the slot consumer expects.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemberValueRole {
@@ -411,8 +413,9 @@ pub(crate) enum MemberValueRole {
     /// verbatim.
     Field,
     /// Callable-slot role. Slot members — the pipeline realizes the
-    /// member's value through `realize_callable_member` (carrier-
-    /// shell normalization + conditional re-dispatch) FIRST, then
-    /// caches/classifies/raises the realized function node.
+    /// member's value through
+    /// [`crate::meta_resolve::dispatch_helpers::realize_callable_member`]
+    /// (carrier-shell normalization + conditional re-dispatch) FIRST,
+    /// then caches/classifies/raises the realized function node.
     CallableSlot,
 }
