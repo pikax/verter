@@ -559,6 +559,49 @@ pub(crate) fn resolve_macro_payload(
         return None;
     }
 
+    // Block 6.i round-8 — silent-miss compensation for the
+    // Transit-Shallow Publication contract. When the macro publication
+    // boundary lowers under `Navigate` mode + `Published(Shallow)`
+    // terminal (slot path), the dispatch chain no longer eagerly
+    // resolves `DeclRef` carriers for unresolved imports — the cached
+    // payload becomes an EMPTY `Object` surface instead of an `Opaque`
+    // sentinel, so the check above silently passes. Detect the empty-
+    // surface payload and probe the macro's `parsed_type_argument` via
+    // `Published(Expanded)` lowering: an unresolved declaration
+    // surfaces as `Opaque(DeclPlaceholder)` under eager resolution and
+    // the diagnostic fires here. Legitimate empty macros
+    // (`defineProps<{}>()`) pass through because the eager lowering
+    // returns a non-`Opaque` empty Object.
+    let payload_is_empty_surface = matches!(
+        crate::project_semantic_dispatch::node_data_for(dispatch.ctx, payload_node).as_deref(),
+        Some(SemanticNodeData::Object(view))
+            if view.members.is_empty()
+                && view.call_signatures.is_empty()
+                && view.construct_signatures.is_empty()
+                && view.index_signatures.is_empty()
+    );
+    if payload_is_empty_surface {
+        if let Some(parsed_arg) = mac.parsed_type_argument.as_ref() {
+            if let Some(probe_node) = dispatch.lower_type_expr_in_scope_with_mode(
+                file,
+                parsed_arg,
+                ProjectionMode::Expanded,
+            ) {
+                if let Some(SemanticNodeData::Opaque(err)) =
+                    crate::project_semantic_dispatch::node_data_for(dispatch.ctx, probe_node)
+                        .as_deref()
+                {
+                    diag_sink.push(macro_expansion_for_query_error(
+                        macro_index,
+                        expansion_kind,
+                        format!("macro-payload-decl-unresolved::{:?}", err),
+                    ));
+                    return None;
+                }
+            }
+        }
+    }
+
     Some(payload_node)
 }
 

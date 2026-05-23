@@ -437,30 +437,164 @@ fn decompose_indexed_access_chain(
     (base, Arc::from(path.into_boxed_slice()))
 }
 
-/// Class A shape variant — dispatch-direct equivalent
-/// of `ComponentMetaQueryEngine::project_expr_surface_shape`.
+/// **Transit-shallow Class A surface projection** — dispatch-direct
+/// variant of [`project_expr_class_a_via_dispatch`] for the macro
+/// publication boundary's transit-shallow path.
 ///
-/// Returns the projection's `ExpandedObjectShape` when it has at least
-/// one property or call signature (matching the trampoline's
-/// shape-has-surface filter).
-pub(crate) fn project_expr_class_a_shape_via_dispatch(
+/// Used by macro publication paths (e.g.
+/// `produce_one_macro_object_shape_for_slots`) that publish the
+/// macro's outer Object surface but keep inner member values (slot
+/// Function param types, mapped helper carriers, conditional shells)
+/// as carrier nodes for the consumer's graph-native re-resolution
+/// (CLAUDE.md §"Component-Meta Shallow-By-Default Rule").
+///
+/// Difference vs [`project_expr_class_a_via_dispatch`]:
+/// - Empty-path lowering: still `Published(Expanded)` (mirrors the
+///   Expanded sibling). Eager `DeclRef` / `InstantiationRef`
+///   resolution at the lowering surface continues to surface opaque
+///   sentinels for unresolved imports — the silent-miss diagnostic
+///   contract is preserved through the existing `Opaque` check in
+///   `super::projectors::resolve_macro_payload`.
+/// - Terminal `ProjectPath` context: `Published(Shallow)` (one-level
+///   surface; inner carrier shells preserved at the publication
+///   boundary) instead of `Published(Expanded)` (fully reduce all
+///   nested operators across the surface).
+/// - Surface filter: accepts any non-`semantic_miss` projection. The
+///   `type_expr_is_expanded_surface` check applied by the Expanded
+///   sibling is intentionally NOT applied — under transit-shallow the
+///   surface intentionally retains carrier shells (`KeyOf`, `Mapped`,
+///   `Conditional`, `IndexedAccess`) that the consumer re-resolves on
+///   demand. The downstream convert-to-object path
+///   (`solver_result_to_object_expansion`) handles Intersection
+///   merging where one arm is an Object and another is a deferred
+///   operator carrier.
+pub(crate) fn project_expr_class_a_via_dispatch_transit_shallow(
     ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
     expr: &verter_type_expr::TypeExpr,
-) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-    project_expr_class_a_shape_via_dispatch_threaded(ctx, None, scope_canonical_id, expr)
+) -> Option<verter_type_expr::TypeExpr> {
+    project_expr_class_a_via_dispatch_transit_shallow_threaded(ctx, None, scope_canonical_id, expr)
 }
 
 /// Engine-threaded variant of
-/// [`project_expr_class_a_shape_via_dispatch`].
-pub(crate) fn project_expr_class_a_shape_via_dispatch_threaded<'ctx>(
+/// [`project_expr_class_a_via_dispatch_transit_shallow`]. The route
+/// fast-path is preserved (registry-routed `Pick<>` / `Omit<>` /
+/// indexed-access shapes route through `project_route_surface_expr`
+/// independently of the lowering demand — the routes produce already-
+/// projected TypeExprs); only the generic `ProjectPath` fallback
+/// switches to `Published(Shallow)` terminal.
+pub(crate) fn project_expr_class_a_via_dispatch_transit_shallow_threaded<'ctx>(
     ctx: &'ctx dyn ResolverContext,
     engine: Option<&mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>>,
     scope_canonical_id: &str,
     expr: &verter_type_expr::TypeExpr,
+) -> Option<verter_type_expr::TypeExpr> {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::resolver_core::{
+        component_meta_registry::{
+            component_meta_registry_public_indexed_access_route,
+            component_meta_registry_public_utility_route,
+        },
+        type_expr_contains_semantic_miss, ComponentMetaQueryEngine,
+    };
+    use crate::semantic_query::{PathSegment, QueryResult, SemanticQueryKey};
+
+    let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope(
+        ctx,
+        scope_canonical_id,
+    );
+    let route = component_meta_registry_public_indexed_access_route(expr)
+        .or_else(|| component_meta_registry_public_utility_route(expr))
+        .filter(|(root_symbol, _)| !shadowing.is_shadowing_lib(root_symbol));
+    if let Some((root_symbol, route)) = route {
+        let mut transient_engine: Option<ComponentMetaQueryEngine<'_>> = None;
+        let engine_ref: &mut ComponentMetaQueryEngine<'_> = match engine {
+            Some(e) => e,
+            None => transient_engine.insert(ComponentMetaQueryEngine::new(ctx)),
+        };
+        if let Some(projected) = project_route_surface_expr_via_host_threaded(
+            engine_ref,
+            scope_canonical_id,
+            &root_symbol,
+            &route,
+        ) {
+            return Some(projected);
+        }
+        if let Some(solved) =
+            lower_and_project_to_expanded_via_host_threaded(engine_ref, scope_canonical_id, expr)
+        {
+            return Some(solved);
+        }
+    }
+
+    let (base_expr, path_segments) = decompose_indexed_access_chain(expr);
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    // Empty-path lowering: `Navigate` mode keeps the lowering chain's
+    // nested operators (`Instantiate` / `KeyOf` / `MappedType`) lazy
+    // so the inner operator-reduction work that produced the
+    // ChatMessages Rule-5 leak under `Published(Expanded)` lowering
+    // does not fire. Combined with the `Published(Shallow)` terminal
+    // below, the macro publication boundary observes a one-level
+    // Object surface with carrier-shaped member values per the
+    // shallow-by-default rule. The silent-miss diagnostic contract is
+    // restored at the slot-binding-graph payload boundary
+    // (`resolve_slot_bindings_graph_native`'s explicit `DeclRef` /
+    // `Opaque` payload check) since the eager-resolution side effect
+    // of `Published(Expanded)` lowering is no longer available.
+    let (base, project_path) = if path_segments.is_empty() {
+        let base = dispatch.lower_type_expr_in_scope_with_mode(
+            scope_canonical_id,
+            expr,
+            ProjectionMode::Navigate,
+        )?;
+        (
+            base,
+            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        )
+    } else {
+        let base = dispatch.lower_type_expr_in_scope_with_mode(
+            scope_canonical_id,
+            base_expr,
+            ProjectionMode::Navigate,
+        )?;
+        (base, path_segments)
+    };
+    let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
+        base,
+        path: project_path,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Shallow,
+        ),
+    });
+    let projected = match read.value {
+        QueryResult::Value(expr) => expr,
+        QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
+    };
+    // Transit-shallow surface admission: accept any non-semantic-miss
+    // projection. The `type_expr_is_expanded_surface` filter applied by
+    // the Expanded sibling deliberately rejects residual `KeyOf` /
+    // `Mapped` / `Conditional` / `IndexedAccess` shells — but under
+    // transit-shallow those shells are the canonical published value
+    // for carrier-shaped member positions (the shallow-by-default
+    // rule). The downstream convert-to-object path
+    // (`solver_result_to_object_expansion`) handles Intersection
+    // merging where one arm is an Object and another is a deferred
+    // operator carrier.
+    (!type_expr_contains_semantic_miss(&projected)).then_some(projected)
+}
+
+/// **Transit-shallow Class A shape variant** — consumes the
+/// transit-shallow Class A projection and lowers it to an
+/// [`verter_semantic::analysis::type_expand::ExpandedObjectShape`].
+/// Mirrors the Expanded variant's post-filter (at least one property
+/// or call signature) so a publication-empty shape returns `None`.
+pub(crate) fn project_expr_class_a_shape_via_dispatch_transit_shallow(
+    ctx: &dyn ResolverContext,
+    scope_canonical_id: &str,
+    expr: &verter_type_expr::TypeExpr,
 ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
     let projected =
-        project_expr_class_a_via_dispatch_threaded(ctx, engine, scope_canonical_id, expr)?;
+        project_expr_class_a_via_dispatch_transit_shallow(ctx, scope_canonical_id, expr)?;
     let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(&projected);
     (!shape.properties.is_empty() || !shape.call_signatures.is_empty()).then_some(shape)
 }

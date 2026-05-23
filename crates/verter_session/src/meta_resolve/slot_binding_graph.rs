@@ -163,6 +163,13 @@ pub(crate) struct SynthesisResult {
     pub should_suppress: bool,
 }
 
+/// Declaration-ordered (slot_name, binding_name) → resolved binding
+/// staging type for the graph-native synthesis pass. A `Vec` preserves
+/// the synthesis-time iteration order (declaration order of the slot's
+/// function parameter object) through to `publish_merged_bindings`,
+/// which walks the slice without sorting.
+type GraphNativeBindingEntry = ((Arc<str>, Arc<str>), ResolvedSlotBinding);
+
 /// Owner declaration sentinel used for SFC `<script setup>` macro
 /// identities. Every macro invocation in an SFC's `<script setup>`
 /// resolves under the same synthetic declaration name; downstream
@@ -539,11 +546,16 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         }
     };
 
-    // First pass: graph-native synthesis. Build a map keyed by
-    // `(slot_name, binding_name)`. Map dedups distinct macro
-    // invocations that surface the same slot/binding combination.
-    let mut graph_native_bindings: FxHashMap<(Arc<str>, Arc<str>), ResolvedSlotBinding> =
-        FxHashMap::default();
+    // First pass: graph-native synthesis. Accumulate bindings in
+    // declaration order — `compute_bindings_via_graph` walks slot
+    // members and binding-row members in surface order, which is the
+    // declaration order of the slot's function parameter object. A Vec
+    // preserves that order through to `publish_merged_bindings`; the
+    // (slot_name, binding_name) tuple is the dedup key for distinct
+    // macro invocations that surface the same slot/binding combination
+    // (the dedup is rare in practice — a single `defineSlots<T>()`
+    // typically owns the slot surface).
+    let mut graph_native_bindings: Vec<GraphNativeBindingEntry> = Vec::new();
 
     'macro_loop: for (macro_index, mac) in snapshot.macros.iter().enumerate() {
         if mac.kind != AnalyzedMacroKind::DefineSlots || !mac.is_type_based {
@@ -694,10 +706,18 @@ pub(crate) fn resolve_slot_bindings_graph_native(
                 binding = %binding.binding_name,
                 "graph_native_binding_collected",
             );
-            graph_native_bindings.insert(
-                (binding.slot_name.clone(), binding.binding_name.clone()),
-                binding,
-            );
+            let key = (binding.slot_name.clone(), binding.binding_name.clone());
+            // Linear-scan dedup: prefer the earlier-arrival binding
+            // (declaration order takes precedence). Distinct macro
+            // invocations rarely collide on the same (slot, binding);
+            // when they do, the FIRST observation wins to preserve the
+            // declaration-order rule.
+            if graph_native_bindings
+                .iter()
+                .all(|(existing, _)| existing != &key)
+            {
+                graph_native_bindings.push((key, binding));
+            }
         }
     }
 
@@ -815,19 +835,34 @@ pub(crate) fn compute_bindings_via_graph(
     let slot_members = read_surface_members(ctx, slot_surface);
 
     for slot_member in slot_members.iter() {
-        // Step 4: read Function.params[0].ty.
-        let param0_ty = match crate::project_semantic_dispatch::node_data_for(
-            ctx,
+        // Block 6.i round-8 — Transit-Shallow Publication: realize the
+        // slot member value through the callable-realization substrate
+        // before the `Function`-arm match. Under transit-shallow macro
+        // publication the slot value may carry a non-Function shell
+        // (Alias / Conditional / InstantiationRef / DeclRef carriers)
+        // that the publication terminal `Published(Shallow)` chose not
+        // to reduce. `realize_callable_member` normalises through the
+        // carrier chain (relation-engine Conditional reduction,
+        // transit-mode Instantiate, ResolveDecl unwrap) so a decidable
+        // callable surfaces as a `Function` node; non-callable shapes
+        // (Object / Union / Intersection / Mapped / KeyOf / primitives)
+        // return `None` and skip naturally below.
+        let realized = crate::meta_resolve::dispatch_helpers::realize_callable_member(
+            dispatch,
             slot_member.value,
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow),
         )
-        .as_deref()
-        {
-            Some(SemanticNodeData::Function { params, .. }) => match params.first() {
-                Some(p) => p.ty,
-                None => continue,
-            },
-            _ => continue,
-        };
+        .unwrap_or(slot_member.value);
+
+        // Step 4: read Function.params[0].ty.
+        let param0_ty =
+            match crate::project_semantic_dispatch::node_data_for(ctx, realized).as_deref() {
+                Some(SemanticNodeData::Function { params, .. }) => match params.first() {
+                    Some(p) => p.ty,
+                    None => continue,
+                },
+                _ => continue,
+            };
 
         // Skip slots whose binding parameter has a symbolic-only root
         // shape (Conditional/IndexedAccess/Mapped/KeyOf/TypeParam/etc.).
@@ -929,7 +964,7 @@ pub(crate) fn compute_bindings_via_graph(
 /// `raw_type` and `ExactConcrete` exactness.
 pub(crate) fn publish_merged_bindings(
     dispatch: &ProjectSemanticDispatch<'_>,
-    graph_native: &FxHashMap<(Arc<str>, Arc<str>), ResolvedSlotBinding>,
+    graph_native: &[GraphNativeBindingEntry],
     resolved_macros: &[ResolvedMacroMeta],
     expanded: &mut ExpandedComponentTypes,
     existing_names: &mut FxHashSet<String>,
@@ -956,16 +991,14 @@ pub(crate) fn publish_merged_bindings(
         }
     }
 
-    // Publish each graph-native binding, merging parser-path metadata
-    // when present.
-    let mut graph_native_keys: Vec<(Arc<str>, Arc<str>)> = graph_native.keys().cloned().collect();
-    graph_native_keys.sort();
-    for key in graph_native_keys {
-        let gb = match graph_native.get(&key) {
-            Some(gb) => gb,
-            None => continue,
-        };
-        let (slot_name, binding_name) = key;
+    // Publish each graph-native binding in declaration order, merging
+    // parser-path metadata when present. The slice walk preserves the
+    // insertion order set by `compute_bindings_via_graph` — declaration
+    // order of the slot's function parameter object. No alphabetic
+    // sort here (the previous FxHashMap-keyed iteration needed a sort
+    // for determinism; the Vec source is already deterministic).
+    for (key, gb) in graph_native.iter() {
+        let (slot_name, binding_name) = key.clone();
         let field_name = format!("{}.{}", slot_name, binding_name);
         if !existing_names.insert(field_name.clone()) {
             continue;

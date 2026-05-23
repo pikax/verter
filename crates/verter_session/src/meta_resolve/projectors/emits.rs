@@ -14,8 +14,8 @@ use crate::semantic_query::DeclIdentity;
 use crate::types::FileAnalysisSnapshot;
 
 use super::{
-    read_surface_members, resolve_macro_payload, resolve_payload_surface,
-    surface_member_to_expanded_field,
+    read_surface_members, resolve_macro_payload, resolve_payload_surface_with_scope,
+    surface_member_to_expanded_field, PayloadSurfaceScope,
 };
 
 /// Project a `defineEmits<T>()` macro to a `Vec<ExpandedField>` for
@@ -61,11 +61,22 @@ pub(crate) fn project_emits(
             None => return Vec::new(),
         };
 
-        let surface_node = match resolve_payload_surface(
+        // Block 6.i round-8 — branch-merged shallow semantics for
+        // emit-class macro object payloads. When the payload is an
+        // undecided `Conditional` (e.g. inherited emits via
+        // `defineEmits<Mode extends 'editor' ? EditorEmits : ViewerEmits>()`),
+        // `PayloadSurfaceScope::EmitClassMacroObject` projects BOTH
+        // branches under `Published(Shallow)` and merges their
+        // top-level Object members so the inherited `accepted_events`
+        // set publishes without giving the inheritance reducer an
+        // `Expanded`-only escape hatch. Non-conditional payloads pass
+        // through to the legacy single-dispatch path verbatim.
+        let surface_node = match resolve_payload_surface_with_scope(
             &dispatch,
             payload_node,
             macro_index,
             MacroExpansionKind::DefineEmits,
+            PayloadSurfaceScope::EmitClassMacroObject,
             diag_sink,
         ) {
             Some(node) => node,

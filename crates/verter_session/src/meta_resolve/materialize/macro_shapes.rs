@@ -21,8 +21,8 @@ use crate::types::FileAnalysisSnapshot;
 use verter_semantic::analysis::types::AnalyzedMacro;
 
 use super::super::dispatch_helpers::{
-    project_expr_class_a_shape_via_dispatch, project_expr_class_a_via_dispatch,
-    project_expr_class_a_via_dispatch_threaded,
+    project_expr_class_a_shape_via_dispatch_transit_shallow,
+    project_expr_class_a_via_dispatch_threaded, project_expr_class_a_via_dispatch_transit_shallow,
     project_expr_surface_expr_with_compound_objects_via_host_threaded,
     project_expr_surface_shape_via_host_threaded,
     project_prepared_type_surface_shape_via_host_threaded,
@@ -2153,25 +2153,37 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
     // Intersection-merging in [`type_expr_to_expanded_shape`] then
     // collects the explicit slot members from the compound shape.
     //
-    // Block 6.i leak-close-3 (Q7) — the `deep_resolve_slot_function_refs`
-    // post-pass that previously walked each slot Function's
-    // parameter types and recursively materialised every Ref through
-    // `project_expr_surface_expr_via_host_threaded(Expanded, Expanded,
-    // Published)` is deleted. The Class A Expanded projection still
-    // produces the slot Object surface; each slot Function's param
-    // type stays as a Ref carrier. The slot-binding consumer reaches
-    // the bindings via the graph-native path (see fn docstring).
-    let projected_body =
-        project_expr_class_a_via_dispatch(query_engine.ctx, owner_canonical, lowered)
-            .or_else(|| {
-                // bridge via per-engine helper.
-                project_expr_surface_expr_with_compound_objects_via_host_threaded(
-                    query_engine,
-                    owner_canonical,
-                    lowered,
-                )
-            })
-            .unwrap_or_else(|| lowered.clone());
+    // Block 6.i round-8 — Transit-Shallow Publication cutover.
+    // Slot macro publication lowers the payload under
+    // `structural_transit_with_mode(Navigate)` and walks the
+    // publication terminal under `Published(Shallow)` so the outer
+    // Object surface publishes while slot member values (slot
+    // Function param types, etc.) stay as carrier Refs. The slot-
+    // binding consumer reaches the bindings via the graph-native path
+    // (see fn docstring) and the leak-fix-3b realization substrate
+    // (`realize_callable_member`) normalises carrier-shaped slot
+    // values for the graph-native `Function`-arm match.
+    //
+    // The compound-objects fallback retains the Expanded helper —
+    // `project_expr_surface_expr_with_compound_objects_via_host_threaded`
+    // walks the compound-shape sibling chain for legacy lenient
+    // recovery and is unchanged at this commit; the
+    // transit-shallow Class A above is the demand-driven publication
+    // path.
+    let projected_body = project_expr_class_a_via_dispatch_transit_shallow(
+        query_engine.ctx,
+        owner_canonical,
+        lowered,
+    )
+    .or_else(|| {
+        // bridge via per-engine helper.
+        project_expr_surface_expr_with_compound_objects_via_host_threaded(
+            query_engine,
+            owner_canonical,
+            lowered,
+        )
+    })
+    .unwrap_or_else(|| lowered.clone());
     let _ = cursor; // cursor finalisation runs at the call site of `produce_one_macro_object_shape_for_slots`.
     let solver_result = verter_semantic::analysis::type_expand::solver_result_to_object_expansion(
         verter_semantic::analysis::type_solver::result::SolverResult::exact_concrete(
@@ -2180,20 +2192,23 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
     );
     let solver_count = shape_surface_count(&solver_result);
 
-    let projected =
-        project_expr_class_a_shape_via_dispatch(query_engine.ctx, owner_canonical, lowered)
-            .and_then(|shape| {
-                let projected_expr = expanded_shape_to_type_expr(&shape);
-                // Block 6.i leak-close-3 (Q7) — drop the
-                // `deep_resolve_slot_function_refs` post-pass.
-                registry_entry_to_expanded_shape(&projected_expr).and_then(|resolved_shape| {
-                    has_shape_surface(&resolved_shape).then(|| {
-                        verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
-                            resolved_shape,
-                        )
-                    })
-                })
-            });
+    let projected = project_expr_class_a_shape_via_dispatch_transit_shallow(
+        query_engine.ctx,
+        owner_canonical,
+        lowered,
+    )
+    .and_then(|shape| {
+        let projected_expr = expanded_shape_to_type_expr(&shape);
+        // Block 6.i leak-close-3 (Q7) — drop the
+        // `deep_resolve_slot_function_refs` post-pass.
+        registry_entry_to_expanded_shape(&projected_expr).and_then(|resolved_shape| {
+            has_shape_surface(&resolved_shape).then(|| {
+                verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
+                    resolved_shape,
+                )
+            })
+        })
+    });
     let imported_scope_projected = project_named_ref_imported_scope_shape(
         query_engine,
         owner_canonical,
