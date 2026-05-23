@@ -29,6 +29,7 @@ use super::super::dispatch_helpers::{
     project_expr_surface_shape_via_host_threaded,
     project_prepared_type_surface_shape_via_host_threaded,
     project_type_surface_expr_via_host_threaded, project_type_surface_shape_via_host_threaded,
+    project_type_surface_shape_transit_shallow_via_host_threaded,
 };
 // `request_host` source moved to
 // `host_manage/component_meta_request_impl.rs`. Import rewritten to
@@ -1646,14 +1647,52 @@ pub(crate) fn produce_one_macro_object_shape(
             if let Some((def_canonical, def_name)) =
                 classify_named_ref_for_db_projection(query_engine, owner_canonical, name)
             {
-                // Bridge the engine method via the per-engine helper
-                // so the pre-flight gate sees zero external
-                // engine-method callers.
-                if let Some(shape) = project_type_surface_shape_via_host_threaded(
+                // Block 6.i Round 10 Commit 5 (Chain Y closure, codex
+                // Q1-Y) — route fast-path is now demand-explicit. The
+                // pre-Round-10 path always called
+                // `project_type_surface_shape_via_host_threaded`
+                // → `engine.dispatch_projected_surface`
+                // → `dispatch_root_instantiated`
+                // → `Instantiate(Published(Expanded))`, which
+                // instantiated the root's full structural body and
+                // emitted per-key `ProjectMember` edges for inherited
+                // library member names on `extends Omit<…>` /
+                // generic-substituted macro payloads (the diagnostic's
+                // EditorDragHandle Chain Y).
+                //
+                // The path-precision predicate
+                // `macro_payload_root_is_conditional_carrier` mirrors
+                // the round-9 non-fast-path gate (see the same
+                // predicate threaded into the solver block below): a
+                // Conditional macro payload root retains
+                // `Published(Expanded)` so the inherited-emits
+                // branch-merge protocol
+                // (`PayloadSurfaceScope::EmitClassMacroObject`) can
+                // enumerate both branches' members; a non-Conditional
+                // root (Object / Intersection / Mapped / Ref /
+                // InstantiationRef) routes through the transit-shallow
+                // sibling that carrier-lowers the synthesised
+                // `Ref { def_name, [] }` under `Navigate` mode and
+                // projects under `Published(Shallow)`.
+                let payload_root_is_conditional = macro_payload_root_is_conditional_carrier(
                     query_engine,
-                    &def_canonical,
-                    &def_name,
-                ) {
+                    owner_canonical,
+                    lowered,
+                );
+                let shape_opt = if payload_root_is_conditional {
+                    project_type_surface_shape_via_host_threaded(
+                        query_engine,
+                        &def_canonical,
+                        &def_name,
+                    )
+                } else {
+                    project_type_surface_shape_transit_shallow_via_host_threaded(
+                        query_engine,
+                        &def_canonical,
+                        &def_name,
+                    )
+                };
+                if let Some(shape) = shape_opt {
                     if shape_is_usable(&shape) {
                         let mut result =
                             verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(

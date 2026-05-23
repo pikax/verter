@@ -903,6 +903,65 @@ pub(crate) fn project_type_surface_shape_via_host_threaded<'ctx>(
     Some(projected_surface_to_expanded_shape(&surface))
 }
 
+/// **Transit-shallow** sibling of
+/// [`project_type_surface_shape_via_host_threaded`] (Block 6.i Round
+/// 10 Commit 5 — Chain Y closure, codex Q1-Y).
+///
+/// Closes the route fast-path leak on the nuxt-ui corpus
+/// `EditorDragHandle` (9.9% / 36 of 364 captured ProjectMember
+/// emissions per the round-10 diagnostic). The pre-Round-10 fast
+/// path in `produce_one_macro_object_shape` routed
+/// `Ref { name, type_arguments: [] }` macro payloads through
+/// [`project_type_surface_shape_via_host_threaded`] →
+/// `engine.dispatch_projected_surface` → `dispatch_root_instantiated`
+/// → `Instantiate(Published(Expanded))`. The Expanded demand
+/// instantiated the root's full structural body, re-entering
+/// `build_key_of` / `build_mapped_type` for the `extends Omit<…>` /
+/// generic-substituted carrier members and emitting 36 per-key
+/// `ProjectMember` edges.
+///
+/// Per codex Q1-Y (BINDING):
+///
+/// > route projection must be demand-explicit. Retire the implicit
+/// > Expanded route helper or make all callers pass demand
+/// > explicitly. Add a transit-shallow route path for macro
+/// > publication: carrier lower under shallow/navigation demand,
+/// > then terminal surface projection under shallow publication.
+///
+/// This sibling builds a synthetic `Ref { name, [] }` carrier for
+/// `(scope, symbol)` and dispatches it through
+/// [`project_expr_class_a_shape_via_dispatch_transit_shallow`] —
+/// the existing transit-shallow Class A helper that:
+///
+/// - **Empty-path lowering**: `Navigate` (keeps nested operators
+///   lazy at the publication boundary).
+/// - **Terminal `ProjectPath` context**: `Published(Shallow)`
+///   (one-level surface; inner carrier shells preserved).
+///
+/// The macro fast-path in `produce_one_macro_object_shape` uses
+/// this sibling when the payload root is NOT a Conditional carrier
+/// (path-precise per round-9 — Conditional macro payloads still
+/// route through the Expanded path for the inherited-emits
+/// branch-merge protocol).
+pub(crate) fn project_type_surface_shape_transit_shallow_via_host_threaded<'ctx>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
+    scope_canonical_id: &str,
+    symbol_name: &str,
+) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
+    if engine.projection_op_budget_exhausted() {
+        return None;
+    }
+    let synthetic_ref = verter_type_expr::TypeExpr::Ref {
+        name: Arc::from(symbol_name),
+        type_arguments: Arc::from(Vec::<verter_type_expr::TypeExpr>::new().into_boxed_slice()),
+    };
+    project_expr_class_a_shape_via_dispatch_transit_shallow(
+        engine.ctx(),
+        scope_canonical_id,
+        &synthetic_ref,
+    )
+}
+
 #[cfg(test)]
 pub(crate) fn project_prepared_type_surface_expr_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
