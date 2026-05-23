@@ -1280,7 +1280,7 @@ impl crate::cache_schema::CacheSchemaVersioned for PreparedTargetDb {
 //       },
 //       demand: ShapeDemand {
 //           path: Arc<[PathSegment]>,
-//           terminal_mode: ProjectionMode,
+//           terminal_context: ProjectionReductionContext,  // mode + demand
 //           key_filter: KeyFilter,
 //           surface: PublishedSurfaceKind,
 //       },
@@ -1307,7 +1307,8 @@ impl crate::cache_schema::CacheSchemaVersioned for PreparedTargetDb {
 //   1. **No production callers produce narrower demands yet.** Commit A
 //      added the `ProjectionCursor` substrate, but all production
 //      caller sites pass `SurfaceProjection::whole_surface(Registry)`
-//      which constructs a `ShapeDemand::whole_subject(mode)` key. The
+//      which constructs a `ShapeDemand::whole_subject_with_context`
+//      key under `Published(mode)`. The
 //      cache never sees a narrowed key, so a `try_satisfy_via_superset`
 //      method has zero callers today and would be untested.
 //   2. **Implementation is non-trivial.** A correct broader-to-narrower
@@ -1404,15 +1405,31 @@ impl ShapeSubject {
 
 /// Per-call demand a [`ShapeCacheKey`] addresses — the *how* the shape
 /// will be consumed. Distinct demands for the same subject keep
-/// disjoint entries (e.g. Shallow vs Expanded over the same TypeExpr).
+/// disjoint entries (e.g. Shallow vs Expanded over the same TypeExpr,
+/// or `Published(Navigate)` vs `StructuralTransit(Navigate)` over the
+/// same expression).
+///
+/// Block 6.i Round 10 (Commit 1) — the terminal-hop demand carries the
+/// FULL [`ProjectionReductionContext`] (mode + demand), not just a bare
+/// [`ProjectionMode`]. The substrate change unblocks Commits 2 / 5 from
+/// keying a per-prop `Navigate` publication slot disjointly from a
+/// `StructuralTransit(Navigate)` carrier-lower slot — same subject,
+/// same mode, but distinct reduction work and distinct results. Without
+/// the demand axis a transit lower would poison the publication slot
+/// (or vice versa) the first time both routes touched the same subject.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ShapeDemand {
     /// Path segments narrowing the requested shape. Empty path =
     /// whole subject. Non-empty path = path-precise demand (Block
     /// 6.i Commits C–F narrow this at the publication boundary).
     pub(crate) path: Arc<[crate::semantic_query::PathSegment]>,
-    /// Terminal-hop projection mode.
-    pub(crate) terminal_mode: ProjectionMode,
+    /// Terminal-hop projection / reduction context. `(mode, demand)`
+    /// keyed disjointly. Pre-Round 10 this was a bare
+    /// `terminal_mode: ProjectionMode`; the Round-10 substrate
+    /// migrates it to the full context so cache slots split per the
+    /// codex Q3-V finding ("ShapeCacheKey must carry the complete
+    /// demand/context, not a Navigate boolean").
+    pub(crate) terminal_context: crate::semantic_query::ProjectionReductionContext,
     /// Key filter at the terminal hop (Pick/Omit narrowing, etc.).
     pub(crate) key_filter: crate::meta_resolve::projection_demand::KeyFilter,
     /// Which published surface this demand serves. Used by the
@@ -1423,13 +1440,22 @@ pub struct ShapeDemand {
 
 impl ShapeDemand {
     /// Demand encoding "whole subject, no path narrowing,
-    /// Internal-surface caller". Used by call sites that have not
-    /// yet adopted path-precision — preserves the pre-6.i behaviour
-    /// of `MaterializeMemoDb`/`MemberShapeCacheDb`.
-    pub(crate) fn whole_subject(mode: ProjectionMode) -> Self {
+    /// Internal-surface caller, caller-supplied reduction context".
+    /// The single entry point for whole-subject demand construction.
+    /// Pre-Round-10 callers that named only a `ProjectionMode` route
+    /// through [`ShapeCacheKey::type_expr_whole`] /
+    /// [`ShapeCacheKey::semantic_node_whole`], which wrap the mode in
+    /// `ProjectionReductionContext::published(mode)` — preserves the
+    /// implicit-Published behaviour every existing call site relied
+    /// on. Demand-explicit callers (Round-10 Commit 2 / Commit 5)
+    /// build the context themselves and use the `_with_context`
+    /// constructors.
+    pub(crate) fn whole_subject_with_context(
+        terminal_context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Self {
         Self {
             path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
-            terminal_mode: mode,
+            terminal_context,
             key_filter: crate::meta_resolve::projection_demand::KeyFilter::All,
             surface: crate::meta_resolve::projection_demand::PublishedSurfaceKind::Internal {
                 caller: "ShapeCacheDb::whole_subject",
@@ -1447,28 +1473,63 @@ pub struct ShapeCacheKey {
 impl ShapeCacheKey {
     /// Construct a key for the legacy `MaterializeMemoDb` shape
     /// (TypeExpr-subject, whole-subject demand). The default for
-    /// callers that have not yet adopted path-precise demand.
+    /// callers that have not yet adopted path-precise demand. The
+    /// terminal context is implicitly `Published(mode)` — matches
+    /// the pre-Round-10 behaviour where every caller was Published.
     pub(crate) fn type_expr_whole(
         scope: Arc<str>,
         expr: Arc<TypeExpr>,
         mode: ProjectionMode,
     ) -> Self {
+        Self::type_expr_whole_with_context(
+            scope,
+            expr,
+            crate::semantic_query::ProjectionReductionContext::published(mode),
+        )
+    }
+
+    /// Construct a TypeExpr-subject whole-subject key under an
+    /// explicit [`ProjectionReductionContext`]. Used by Round-10
+    /// Commit 2's TypeExpr field materialiser so a per-prop
+    /// `Published(Navigate)` publication slot stays disjoint from a
+    /// `StructuralTransit(Navigate)` carrier-lower slot — same
+    /// subject, distinct cache entries.
+    pub(crate) fn type_expr_whole_with_context(
+        scope: Arc<str>,
+        expr: Arc<TypeExpr>,
+        terminal_context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Self {
         Self {
             subject: ShapeSubject::TypeExpr { scope, expr },
-            demand: ShapeDemand::whole_subject(mode),
+            demand: ShapeDemand::whole_subject_with_context(terminal_context),
         }
     }
 
     /// Construct a key for the legacy `MemberShapeCacheDb` shape
-    /// (SemanticNode-subject, whole-subject demand).
+    /// (SemanticNode-subject, whole-subject demand). Terminal
+    /// context is implicitly `Published(mode)`.
     pub(crate) fn semantic_node_whole(
         scope: Arc<str>,
         node: crate::semantic_query::SemanticNodeId,
         mode: ProjectionMode,
     ) -> Self {
+        Self::semantic_node_whole_with_context(
+            scope,
+            node,
+            crate::semantic_query::ProjectionReductionContext::published(mode),
+        )
+    }
+
+    /// Construct a SemanticNode-subject whole-subject key under an
+    /// explicit [`ProjectionReductionContext`].
+    pub(crate) fn semantic_node_whole_with_context(
+        scope: Arc<str>,
+        node: crate::semantic_query::SemanticNodeId,
+        terminal_context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Self {
         Self {
             subject: ShapeSubject::SemanticNode { scope, node },
-            demand: ShapeDemand::whole_subject(mode),
+            demand: ShapeDemand::whole_subject_with_context(terminal_context),
         }
     }
 }
