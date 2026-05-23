@@ -302,14 +302,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let data = self.graph().node_data(node)?;
         match data.as_ref() {
             // A single literal: admits iff it matches.
-            SemanticNodeData::Literal(LiteralValue::String(name)) => {
-                Some(name.as_str() == needle)
-            }
+            SemanticNodeData::Literal(LiteralValue::String(name)) => Some(name.as_str() == needle),
             SemanticNodeData::Literal(LiteralValue::Number(n)) => {
-                let s = if n.fract() == 0.0
-                    && *n >= i64::MIN as f64
-                    && *n <= i64::MAX as f64
-                {
+                let s = if n.fract() == 0.0 && *n >= i64::MIN as f64 && *n <= i64::MAX as f64 {
                     (*n as i64).to_string()
                 } else {
                     n.to_string()

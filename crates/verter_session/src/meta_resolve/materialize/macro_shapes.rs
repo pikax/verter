@@ -28,8 +28,9 @@ use super::super::dispatch_helpers::{
     project_expr_surface_expr_with_compound_objects_transit_shallow_via_host_threaded,
     project_expr_surface_shape_via_host_threaded,
     project_prepared_type_surface_shape_via_host_threaded,
-    project_type_surface_expr_via_host_threaded, project_type_surface_shape_via_host_threaded,
+    project_type_surface_expr_via_host_threaded,
     project_type_surface_shape_transit_shallow_via_host_threaded,
+    project_type_surface_shape_via_host_threaded,
 };
 // `request_host` source moved to
 // `host_manage/component_meta_request_impl.rs`. Import rewritten to
