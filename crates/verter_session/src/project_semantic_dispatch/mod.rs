@@ -287,23 +287,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
-    /// Context-explicit lowering — the demand-aware sibling of
-    /// [`Self::lower_type_expr_in_scope_with_mode`].
+    /// Context-explicit lowering — demand-aware sibling of
+    /// [`Self::lower_type_expr_in_scope_with_mode`]. The macro
+    /// publication boundary lowers the slot/object carrier with
+    /// `structural_transit_with_mode(Navigate)`; the transit demand
+    /// propagates through every nested operator dispatch
+    /// (`Instantiate` / `KeyOf` / `MappedType`) which carrier-stops
+    /// via `may_reduce_operator(context) == false`. The publication
+    /// terminal then walks the structural shell under
+    /// `Published(Shallow)` to synthesise the one-level surface.
     ///
-    /// Block 6.i leak-fix-1 (codex Fix C3). The macro publication
-    /// boundary lowers the slot/object carrier with
-    /// `ProjectionReductionContext::structural_transit_with_mode(
-    /// ProjectionMode::Navigate)`. The transit demand propagates
-    /// through every recursive `shallow_lower_type_expr_with_context`
-    /// frame so each nested operator dispatch
-    /// (`Instantiate` / `KeyOf` / `MappedType`) carrier-stops via
-    /// `may_reduce_operator(context) == false`. No keyspace literals
-    /// are reified along the carrier; the publication terminal then
-    /// walks the structural shell under `Published(Shallow)` to
-    /// synthesise the one-level Object surface the consumer needs.
-    ///
-    /// `_with_mode(scope, expr, m)` is exactly
-    /// `_with_context(scope, expr, published(m))` — the existing
+    /// `_with_mode(scope, expr, m)` ≡
+    /// `_with_context(scope, expr, published(m))` — existing
     /// publication callers keep their semantics unchanged.
     pub fn lower_type_expr_in_scope_with_context(
         &self,
@@ -619,18 +614,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticQueryKey::ProjectMember { base, member, mode } => {
                     let path: Arc<[PathSegment]> =
                         Arc::from(vec![PathSegment::Member(Arc::clone(member))].into_boxed_slice());
-                    self.build_project_path(*base, &path, *mode)
+                    let ctx = crate::semantic_query::ProjectionReductionContext::published(*mode);
+                    self.build_project_path(*base, &path, ctx)
                 }
                 SemanticQueryKey::IndexedAccess { base, index, mode } => {
                     let path: Arc<[PathSegment]> =
                         Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice());
-                    self.build_project_path(*base, &path, *mode)
+                    let ctx = crate::semantic_query::ProjectionReductionContext::published(*mode);
+                    self.build_project_path(*base, &path, ctx)
                 }
                 SemanticQueryKey::ProjectPath {
                     base,
                     path,
                     context,
-                } => self.build_project_path(*base, path, context.mode),
+                } => self.build_project_path(*base, path, *context),
                 SemanticQueryKey::KeyOf { base, context } => self.build_key_of(*base, *context),
                 SemanticQueryKey::MappedType {
                     source,

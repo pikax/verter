@@ -359,7 +359,16 @@ enum LiteralKey {
 /// caller emits the whole-path `ProjectPath` edge after the walk finishes.
 pub(super) struct PathWalker<'a, 'b> {
     dispatch: &'a ProjectSemanticDispatch<'b>,
-    mode: ProjectionMode,
+    /// The walker carries the full [`ProjectionReductionContext`]
+    /// from its constructing caller — the `mode` field is preserved
+    /// as a derived accessor ([`Self::mode`]) so the existing call
+    /// sites that consult `self.mode` remain unchanged. The demand
+    /// axis flows through to per-key Mapped surface synthesis in
+    /// `synthesise_mapped_surface` (gated on Published demand per the
+    /// boundary constraint that StructuralTransit MUST NOT enumerate
+    /// / materialise mapped members — transit is the non-publication
+    /// rail).
+    context: crate::semantic_query::ProjectionReductionContext,
     fence: &'a DepSignature,
     /// Alias-cycle detection set. Records every
     /// declaration identity the walker has unwrapped on this single
@@ -393,12 +402,12 @@ pub(super) struct PathWalker<'a, 'b> {
 impl<'a, 'b> PathWalker<'a, 'b> {
     pub(super) fn new(
         dispatch: &'a ProjectSemanticDispatch<'b>,
-        mode: ProjectionMode,
+        context: crate::semantic_query::ProjectionReductionContext,
         fence: &'a DepSignature,
     ) -> Self {
         Self {
             dispatch,
-            mode,
+            context,
             fence,
             visited_aliases: smallvec::SmallVec::new(),
             visited_nodes: rustc_hash::FxHashSet::default(),
@@ -406,6 +415,13 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
         }
+    }
+
+    /// Derived accessor — equivalent to the pre-Commit-2 `self.mode`
+    /// field. The full demand axis lives on [`Self::context`].
+    #[inline]
+    fn mode(&self) -> ProjectionMode {
+        self.context.mode
     }
 
     fn graph(&self) -> &Arc<SemanticGraphStore> {
@@ -658,14 +674,14 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         base: true_branch,
                         path: Arc::clone(&rest_path),
                         context: crate::semantic_query::ProjectionReductionContext::published(
-                            self.mode,
+                            self.mode(),
                         ),
                     });
                     let false_projection = self.dispatch.execute(SemanticQueryKey::ProjectPath {
                         base: false_branch,
                         path: rest_path,
                         context: crate::semantic_query::ProjectionReductionContext::published(
-                            self.mode,
+                            self.mode(),
                         ),
                     });
                     let true_id = match true_projection {
@@ -704,7 +720,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     let resolved = match self.dispatch.execute(SemanticQueryKey::KeyOf {
                         base: *base,
                         context: crate::semantic_query::ProjectionReductionContext::published(
-                            self.mode,
+                            self.mode(),
                         ),
                     }) {
                         QueryResult::Value(id) => id,
@@ -723,7 +739,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     let resolved = match self.dispatch.execute(SemanticQueryKey::IndexedAccess {
                         base: *object,
                         index: ix.clone(),
-                        mode: self.mode,
+                        mode: self.mode(),
                     }) {
                         QueryResult::Value(id) => id,
                         _ => {
@@ -995,7 +1011,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         // through.
                         let evaluated = self.dispatch.evaluate_deferred_semantic_node_with_context(
                             substituted,
-                            crate::semantic_query::ProjectionReductionContext::published(self.mode),
+                            crate::semantic_query::ProjectionReductionContext::published(
+                                self.mode(),
+                            ),
                         );
                         // Preserve `build_mapped_type`'s contract:
                         // when evaluation yields Opaque, publish the
@@ -1055,7 +1073,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         source: *source,
                         mapper: mapper.clone(),
                         context: crate::semantic_query::ProjectionReductionContext::published(
-                            self.mode,
+                            self.mode(),
                         ),
                     }) {
                         QueryResult::Value(id) => id,
@@ -1095,7 +1113,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             base: resolved,
                             path: projection_path,
                             context: crate::semantic_query::ProjectionReductionContext::published(
-                                self.mode,
+                                self.mode(),
                             ),
                         }) {
                             QueryResult::Value(id) => id,
@@ -1262,7 +1280,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // instantiation is reduced as the terminal").
                     let still_more_path = index < path.len();
                     let is_builtin = base.canonical_id.as_ref() == "__builtin__";
-                    if matches!(self.mode, ProjectionMode::Navigate)
+                    if matches!(self.mode(), ProjectionMode::Navigate)
                         && !still_more_path
                         && !is_builtin
                     {
@@ -1295,7 +1313,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     let unwrap_context = if still_more_path {
                         crate::semantic_query::ProjectionReductionContext::structural_transit()
                     } else {
-                        crate::semantic_query::ProjectionReductionContext::published(self.mode)
+                        crate::semantic_query::ProjectionReductionContext::published(self.mode())
                     };
                     let resolved = match self.dispatch.execute(SemanticQueryKey::Instantiate {
                         base: identity,
@@ -1355,9 +1373,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         //
         // Identity / Navigate / Skeleton retain their bare carriers —
         // those modes' contracts promise no terminal-surface synthesis.
-        if matches!(self.mode, ProjectionMode::Expanded) {
+        if matches!(self.mode(), ProjectionMode::Expanded) {
             current = self.expand_empty_path_terminal(current);
-        } else if matches!(self.mode, ProjectionMode::Shallow) {
+        } else if matches!(self.mode(), ProjectionMode::Shallow) {
             current = self.expand_empty_path_shallow_terminal_surface(current);
         }
         results.push(current);
@@ -1509,7 +1527,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     base: identity,
                     args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                     context: crate::semantic_query::ProjectionReductionContext::published(
-                        self.mode,
+                        self.mode(),
                     ),
                 }) {
                     QueryResult::Value(id) => id,
@@ -1541,7 +1559,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             // intermediate-vs-terminal selection; the empty-path
             // terminal expander does not need a duplicate arm.
             SemanticNodeData::Mapped { source, mapper }
-                if matches!(self.mode, ProjectionMode::Expanded) =>
+                if matches!(self.mode(), ProjectionMode::Expanded) =>
             {
                 let source = *source;
                 let mapper = mapper.clone();
@@ -1550,7 +1568,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     source,
                     mapper,
                     context: crate::semantic_query::ProjectionReductionContext::published(
-                        self.mode,
+                        self.mode(),
                     ),
                 }) {
                     QueryResult::Value(id) => id,
@@ -1603,7 +1621,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 true_branch_ref,
                 false_branch_ref,
                 ..
-            } if matches!(self.mode, ProjectionMode::Expanded)
+            } if matches!(self.mode(), ProjectionMode::Expanded)
                 && matches!(
                     self.graph().node_data(*check).as_deref(),
                     Some(SemanticNodeData::TypeParam { .. } | SemanticNodeData::Infer { .. })
@@ -2178,23 +2196,20 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             }
             SemanticNodeData::Mapped { source, mapper } => {
                 let source = *source;
-                let value_expr = mapper.value_expr;
-                let optionality = mapper.optionality;
-                let readonly_mod = mapper.readonly;
-                let key_space = mapper.key_space;
+                let mapper = mapper.clone();
                 drop(data);
-                // Resolve the mapped key-space via dispatch's KeyOf
-                // shell (or directly if the key_space is a Union/Literal
-                // already). Enumerate string-literal keys; for each,
-                // contribute a member to the surface with the mapped
-                // value's id. Non-literal keyspace contributes nothing.
-                let surface = self.synthesise_mapped_surface(
-                    source,
-                    key_space,
-                    value_expr,
-                    optionality,
-                    readonly_mod,
-                );
+                // Per-key substitution at the Shallow Mapped surface
+                // boundary. `synthesise_mapped_surface` takes the full
+                // [`MapperKey`] (not just `value_expr`) so it can
+                // substitute the mapper binder with each enumerated
+                // key literal and materialise the substituted value
+                // just enough to close the selected key — preventing
+                // publication of mapped members whose `value` still
+                // contains the free mapper binder. Gated on Published
+                // demand: StructuralTransit walks return None (transit
+                // is the non-publication rail; mapped enumeration is
+                // publication work).
+                let surface = self.synthesise_mapped_surface(source, &mapper);
                 self.contribute_surface(
                     target,
                     root_contribution,
@@ -2324,18 +2339,53 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     }
 
     /// Synthesise a Mapped-shape surface from the dispatched key-space.
+    ///
+    /// **Per-key Mapped substitution at the Shallow walker.**
+    ///
     /// For each string-literal key that the dispatched `KeyOf(source)`
-    /// or the direct `key_space` exposes, emit a surface member whose
-    /// `value` is the mapped `value_expr` id. Returns `None` when the
-    /// key-space cannot be enumerated (open generic, infinite, etc.).
+    /// or the direct `key_space` exposes, substitute the mapper binder
+    /// (`mapper.parameter_node`) with the key literal in
+    /// `mapper.value_expr`, then materialise the substituted node only
+    /// enough to close the selected key via the shared
+    /// [`ProjectSemanticDispatch::materialize_mapped_member_value_for_key`]
+    /// helper. The materialisation runs under
+    /// `structural_transit_with_mode(Navigate)`: nested `KeyOf` /
+    /// `MappedType` operators carrier-stop via
+    /// [`crate::semantic_query::may_reduce_operator`], while
+    /// `Conditional` reduction (gated separately by the relation
+    /// engine) still fires — turning a substituted
+    /// `ExtendSlotWithPlan<TPlan, "badge">` into the `Function` surface
+    /// the slot-binding extractor reads. Returns `None` when the
+    /// key-space cannot be enumerated (open generic, infinite, etc.)
+    /// OR when the caller's demand is `StructuralTransit` (transit is
+    /// the non-publication rail; mapped enumeration is publication
+    /// work that no transit-mode caller selects through).
+    ///
+    /// The architectural amendment closes the publication boundary
+    /// defect: a prior implementation published mapped members whose
+    /// `value` was the raw `mapper.value_expr` — still containing the
+    /// free mapper binder `K`. Downstream consumers
+    /// (`compute_bindings_via_graph`,
+    /// `surface_member_to_expanded_field`, model/reducer paths,
+    /// component-meta materialisation) saw `InstantiationRef` shells
+    /// where `Function` shapes were expected, and the slot-binding
+    /// extractor fell through the `_ => continue` arm. Per-key
+    /// substitution at the producer fixes ALL consumer paths
+    /// uniformly.
     fn synthesise_mapped_surface(
         &mut self,
         source: SemanticNodeId,
-        key_space: SemanticNodeId,
-        value_expr: SemanticNodeId,
-        optionality: crate::semantic_query::OptionalityMod,
-        readonly_mod: crate::semantic_query::ReadonlyMod,
+        mapper: &crate::semantic_query::MapperKey,
     ) -> Option<ShallowSurface> {
+        // Boundary constraint: per-key Mapped substitution is
+        // publication work and MUST only run for `Published` demand.
+        // `StructuralTransit(Shallow)` walks carrier-stop here
+        // without enumeration; the transit demand is the
+        // non-publication rail and no consumer reads the synthesised
+        // surface on that path.
+        if !crate::semantic_query::may_reduce_operator(self.context) {
+            return None;
+        }
         // Prefer the explicit `key_space` for fast literal-union
         // collection; fall back to the shared key-name enumerator on
         // the SOURCE so the Shallow walker enumerates member names
@@ -2350,7 +2400,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         // Shallow synthesiser through it keeps the two paths
         // structurally aligned.
         let mut keys: Vec<Arc<str>> = Vec::new();
-        let collected = collect_literal_keys(self.graph(), key_space, &mut keys);
+        let collected = collect_literal_keys(self.graph(), mapper.key_space, &mut keys);
         if !collected {
             // The shared enumerator on the SOURCE handles
             // `Opaque(DeclPlaceholder)` / `Object` / `Intersection` /
@@ -2367,16 +2417,58 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         if keys.is_empty() {
             return None;
         }
+        // Per-key Mapped materialisation context.
+        //
+        // `structural_transit_with_mode(Navigate)`:
+        // - `StructuralTransit` demand → `may_reduce_operator` is
+        //   `false`, so nested `KeyOf` / `MappedType` re-dispatches
+        //   carrier-stop in the substituted body (no spurious
+        //   keyspace-literal anchor emissions).
+        // - `Navigate` mode → intermediate hops stay carrier-shaped;
+        //   only `Conditional` reduction (gated separately) fires
+        //   when the post-substitution check is concrete.
+        //
+        // The substituted value is materialised "only enough to close
+        // the selected key" so `ExtendSlotWithPlan<TPlan, "badge">`
+        // reduces to a `Function` node, while unrelated `keyof` /
+        // `Mapped` carriers in the body never expand their member
+        // surfaces.
+        let materialise_context =
+            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                ProjectionMode::Navigate,
+            );
+        let optionality = mapper.optionality;
+        let readonly_mod = mapper.readonly;
         let optional = matches!(optionality, crate::semantic_query::OptionalityMod::Add);
         let readonly = matches!(readonly_mod, crate::semantic_query::ReadonlyMod::Add);
         let members = keys
             .into_iter()
-            .map(|name| ShallowSurfaceMember {
-                name,
-                value: value_expr,
-                optional,
-                readonly,
-                is_method: false,
+            .map(|name| {
+                // Per-key value: substitute the binder and materialise
+                // through the shared helper. Falls back to the
+                // SUBSTITUTED carrier (binder replaced) on Opaque /
+                // Miss — NEVER the raw `mapper.value_expr` which
+                // contains the free binder.
+                let value = self.dispatch.materialize_mapped_member_value_for_key(
+                    mapper,
+                    name.as_ref(),
+                    materialise_context,
+                );
+                // Per-key produced name: apply `name_remap` through
+                // the same shared helper so `as <expr>` clauses fold
+                // identically to the Expanded path.
+                let produced_name = self.dispatch.materialize_mapped_member_name_for_key(
+                    mapper,
+                    &name,
+                    materialise_context,
+                );
+                ShallowSurfaceMember {
+                    name: produced_name,
+                    value,
+                    optional,
+                    readonly,
+                    is_method: false,
+                }
             })
             .collect();
         Some(ShallowSurface { members })

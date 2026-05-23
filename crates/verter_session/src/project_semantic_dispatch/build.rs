@@ -1415,7 +1415,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         base: SemanticNodeId,
         path: &Arc<[PathSegment]>,
-        mode: ProjectionMode,
+        context: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         let fence = self.project_generation_signature();
         self.graph().record_path_length(path.len() as u32);
@@ -1433,7 +1433,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else {
             Arc::from(path[start_index..].to_vec().into_boxed_slice())
         };
-        let mut walker = PathWalker::new(self, mode, &fence);
+        // The walker carries the full `ProjectionReductionContext`
+        // (not just `mode`) so the empty-path Shallow synthesiser can
+        // gate per-key Mapped surface materialisation on the demand
+        // axis. Published(Shallow) walks enumerate & substitute mapped
+        // members; StructuralTransit walks carrier-stop without
+        // enumeration (per the boundary constraint that transit is the
+        // non-publication rail).
+        let mut walker = PathWalker::new(self, context, &fence);
         let result = walker.walk(start_base, walker_path.as_ref());
         // Drain the walker's diagnostics + cache_suppress flag so the
         // memo no-poison contract sees them at admission time.
@@ -1822,88 +1829,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
             //   structurally `T[K]` → use the member value directly
             //   (Partial/Required/Readonly-style mapped types).
             // - Otherwise (`value_expr` is not `T[K]`, or the source
-            //   has no matching member) → substitute `name →
-            //   Literal(name)` into `mapper.value_expr`, evaluate; if
-            //   evaluation yields `Opaque(_)`, publish the
-            //   un-evaluated substituted node (preserves re-dispatch
-            //   once one of the inputs becomes enumerable).
+            //   has no matching member) → defer to the shared per-key
+            //   materialiser [`Self::materialize_mapped_member_value_for_key`].
+            //   That helper substitutes the binder, evaluates under the
+            //   caller's `context` (publication callers reify; transit
+            //   callers carrier-stop), and falls back to the substituted
+            //   carrier on `Opaque` so the free mapper binder never leaks
+            //   onto the published surface. The Shallow walker's
+            //   `synthesise_mapped_surface` calls the same helper at the
+            //   Published(Shallow) macro publication boundary so both
+            //   paths converge on identical per-key semantics.
             let value = if let (Some(source_member), true) = (source_member, value_is_identity) {
                 source_member.value
             } else {
-                let key_arg =
-                    self.graph()
-                        .intern_node(SemanticNodeData::Literal(LiteralValue::String(
-                            name.as_ref().to_string(),
-                        )));
-                let substituted = self.substitute_semantic_type_param(
-                    mapper.value_expr,
-                    mapper.parameter_node,
-                    key_arg,
-                );
-                // Block 6.i Commit AX (codex Q5): context-explicit
-                // evaluation INHERITS the build_mapped_type caller's
-                // `context`. The pre-AX implicit `Published(Expanded)`
-                // forced mapped-value substitution to reify nested
-                // operators (`keyof`, `Mapped`, `Conditional`) even
-                // when the dispatch was running under a
-                // `StructuralTransit` walk — that was the silent
-                // re-publication of operator surfaces no caller asked
-                // for. Inheriting `context` keeps publication callers
-                // (Pub(Expanded)/Pub(Navigate)) reifying as before
-                // while StructuralTransit callers carrier-stop
-                // through `may_reduce_operator`.
-                let evaluated =
-                    self.evaluate_deferred_semantic_node_with_context(substituted, context);
-                if matches!(
-                    self.graph().node_data(evaluated).as_deref(),
-                    Some(SemanticNodeData::Opaque(_))
-                ) {
-                    substituted
-                } else {
-                    evaluated
-                }
+                self.materialize_mapped_member_value_for_key(mapper, name.as_ref(), context)
             };
-            // Apply `name_remap` (the `as <expr>` clause) to
-            // produce the member's surface name. When unset, the
-            // produced name is the iteration key directly. When set,
-            // substitute the mapper binder → `Literal(name)` into the
-            // remap expression and evaluate; the resolved literal
-            // string becomes the member name (template-literal
-            // interpolation closes via the Literal/TemplateLiteral
-            // evaluator). When the remap fails to resolve to a
-            // string literal, the iteration falls back to the bare
-            // key name so the surface stays addressable — a regression
-            // in the remap evaluator surfaces as keys that match the
-            // pre-remap shape rather than silently dropping members.
-            let produced_name = match mapper.name_remap {
-                None => Arc::clone(name),
-                Some(remap_node) => {
-                    let key_literal =
-                        self.graph()
-                            .intern_node(SemanticNodeData::Literal(LiteralValue::String(
-                                name.as_ref().to_string(),
-                            )));
-                    let substituted_remap = self.substitute_semantic_type_param(
-                        remap_node,
-                        mapper.parameter_node,
-                        key_literal,
-                    );
-                    // Block 6.i Commit AX (codex Q5): context-explicit
-                    // evaluation inherits the build_mapped_type
-                    // caller's `context` for the `as <expr>`
-                    // name-remap. Mirrors the value_expr evaluation
-                    // above — publication callers reify; transit
-                    // callers carrier-stop.
-                    let evaluated_remap = self
-                        .evaluate_deferred_semantic_node_with_context(substituted_remap, context);
-                    match graph.node_data(evaluated_remap).as_deref() {
-                        Some(SemanticNodeData::Literal(LiteralValue::String(text))) => {
-                            Arc::from(text.as_str())
-                        }
-                        _ => Arc::clone(name),
-                    }
-                }
-            };
+            // Apply `name_remap` (the `as <expr>` clause) via the
+            // shared [`Self::materialize_mapped_member_name_for_key`]
+            // helper — same substitution + context-aware evaluation
+            // the Shallow walker uses, so the two paths produce
+            // identical post-remap names.
+            let produced_name = self.materialize_mapped_member_name_for_key(mapper, name, context);
             produced.push(SurfaceMember {
                 name: Arc::clone(&produced_name),
                 value,
@@ -1949,6 +1895,115 @@ impl<'a> ProjectSemanticDispatch<'a> {
             fence,
         ))
         .with_observed_self_roots(observed_self_roots)
+    }
+
+    /// Per-key Mapped member value materialiser — the SHARED
+    /// substrate used by both [`Self::build_mapped_type`]
+    /// (Published(Expanded) publication path) and the Shallow walker's
+    /// `synthesise_mapped_surface` (Published(Shallow) surface
+    /// synthesis at the macro publication boundary).
+    ///
+    /// Substitutes the mapper binder (`mapper.parameter_node`) with the
+    /// enumerated `key_name` literal inside `mapper.value_expr`, then
+    /// materialises the substituted node only enough to close the
+    /// selected key under the caller's `context`:
+    ///
+    /// 1. [`Self::evaluate_deferred_semantic_node_with_context`] walks
+    ///    Alias / KeyOf / IndexedAccess / Mapped / Conditional / TypeOf
+    ///    / TemplateLiteral / DeclPlaceholder hops. Under
+    ///    [`crate::semantic_query::ReductionDemand::StructuralTransit`]
+    ///    every `KeyOf` / `MappedType` re-dispatch carrier-stops via
+    ///    [`crate::semantic_query::may_reduce_operator`]; `Conditional`
+    ///    reduction is gated separately by the relation engine and
+    ///    still fires when the post-substitution check is concrete.
+    /// 2. When the evaluator leaves an `InstantiationRef` shell (the
+    ///    deferred-shell evaluator deliberately stops at carrier
+    ///    boundaries — the relation-engine identity-carrier rule),
+    ///    dispatch `SemanticQueryKey::Instantiate` so the substituted
+    ///    args bind into the body. Under the caller's transit demand
+    ///    the body lowering inherits
+    ///    `may_reduce_operator(context) == false`, so nested `KeyOf`/
+    ///    `Mapped` operators stay carrier-shaped; only `Conditional`
+    ///    reduces. This is what turns `ExtendSlotWithPlan<TPlan,
+    ///    "badge">` into the `Function` surface the slot-binding
+    ///    extractor reads.
+    /// 3. When materialisation returns `Opaque`, fall back to the
+    ///    SUBSTITUTED carrier (the InstantiationRef with the binder
+    ///    replaced) — NEVER the original `mapper.value_expr`, which
+    ///    still contains the free mapper binder. The substituted
+    ///    carrier remains addressable by path re-dispatch and never
+    ///    leaks the free binder onto the consumer surface.
+    pub(super) fn materialize_mapped_member_value_for_key(
+        &self,
+        mapper: &crate::semantic_query::MapperKey,
+        key_name: &str,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let key_arg = self
+            .graph()
+            .intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                key_name.to_string(),
+            )));
+        let substituted =
+            self.substitute_semantic_type_param(mapper.value_expr, mapper.parameter_node, key_arg);
+        let evaluated = self.evaluate_deferred_semantic_node_with_context(substituted, context);
+        let resolved = match self.graph().node_data(evaluated).as_deref() {
+            Some(SemanticNodeData::InstantiationRef { base, args }) => {
+                let base = base.clone();
+                let args = Arc::clone(args);
+                match self.execute(SemanticQueryKey::Instantiate {
+                    base,
+                    args,
+                    context,
+                }) {
+                    QueryResult::Value(id) => id,
+                    _ => evaluated,
+                }
+            }
+            _ => evaluated,
+        };
+        if matches!(
+            self.graph().node_data(resolved).as_deref(),
+            Some(SemanticNodeData::Opaque(_))
+        ) {
+            substituted
+        } else {
+            resolved
+        }
+    }
+
+    /// Per-key Mapped member name materialiser — shared by
+    /// [`Self::build_mapped_type`] and the Shallow walker's
+    /// `synthesise_mapped_surface`.
+    ///
+    /// Applies the mapper's `name_remap` (the `as <expr>` clause) by
+    /// substituting the binder with the key literal, evaluating the
+    /// remap under the caller's `context`, and folding the result to a
+    /// string-literal name (the template-literal evaluator handles
+    /// `` `prefix-${K}` `` shapes). Falls back to the iteration key on
+    /// remap resolution failure so the surface remains addressable.
+    pub(super) fn materialize_mapped_member_name_for_key(
+        &self,
+        mapper: &crate::semantic_query::MapperKey,
+        key_name: &Arc<str>,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Arc<str> {
+        let Some(remap_node) = mapper.name_remap else {
+            return Arc::clone(key_name);
+        };
+        let key_literal =
+            self.graph()
+                .intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                    key_name.as_ref().to_string(),
+                )));
+        let substituted_remap =
+            self.substitute_semantic_type_param(remap_node, mapper.parameter_node, key_literal);
+        let evaluated_remap =
+            self.evaluate_deferred_semantic_node_with_context(substituted_remap, context);
+        match self.graph().node_data(evaluated_remap).as_deref() {
+            Some(SemanticNodeData::Literal(LiteralValue::String(text))) => Arc::from(text.as_str()),
+            _ => Arc::clone(key_name),
+        }
     }
 
     /// Conditional type ( C2 + §2 lazy block + §3

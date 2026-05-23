@@ -408,6 +408,19 @@ pub mod for_tests {
         dispatch.execute(key)
     }
 
+    /// Drive `ProjectSemanticDispatch::lower_type_expr_in_scope_with_context`
+    /// from integration tests so they can exercise the
+    /// `structural_transit_with_mode` substrate from outside the crate.
+    pub fn dispatch_lower_type_expr_in_scope_with_context_for_tests(
+        host: &crate::VerterHost,
+        scope_canonical_id: &str,
+        expr: &verter_type_expr::TypeExpr,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<crate::semantic_query::SemanticNodeId> {
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host)
+            .lower_type_expr_in_scope_with_context(scope_canonical_id, expr, context)
+    }
+
     /// Returns `true` iff `host.active_session_view()` returns `None`.
     ///
     /// This shim is needed because `ResolverContext` is sealed — integration
