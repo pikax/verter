@@ -21,8 +21,10 @@ use crate::types::FileAnalysisSnapshot;
 use verter_semantic::analysis::types::AnalyzedMacro;
 
 use super::super::dispatch_helpers::{
+    macro_payload_root_is_conditional_carrier,
     project_expr_class_a_shape_via_dispatch_transit_shallow,
     project_expr_class_a_via_dispatch_threaded, project_expr_class_a_via_dispatch_transit_shallow,
+    project_expr_class_a_via_dispatch_transit_shallow_threaded,
     project_expr_surface_expr_with_compound_objects_via_host_threaded,
     project_expr_surface_shape_via_host_threaded,
     project_prepared_type_surface_shape_via_host_threaded,
@@ -1700,35 +1702,62 @@ pub(crate) fn produce_one_macro_object_shape(
         }
         _ => None,
     };
-    // Route through dispatch's Class A Expanded surface projection
-    // and treat the result as an exact-concrete `SolverResult` so
+    // Route through dispatch's Class A surface projection and treat
+    // the result as an exact-concrete `SolverResult` so
     // `solver_result_to_object_expansion` still derives the expansion.
     //
     // Non-slot macros (props / emits / exposed / options) publish each
-    // property's value verbatim from the Class A Expanded surface — no
-    // post-pass walks Ref-typed property bodies. Class A Expanded
-    // produces the macro's top-level Object surface (preserving
-    // unresolved-import diagnostics); each property's Ref-typed body
-    // stays as a carrier the consumer re-resolves on demand.
+    // property's value verbatim from the Class A surface — no
+    // post-pass walks Ref-typed property bodies.
     //
-    // The non-slot path retains the `Published(Expanded)` lowering
-    // here because the inherited-emits branch-merge protocol (see
-    // [`crate::meta_resolve::projectors::emits::project_emits`] and
-    // [`crate::meta_resolve::projectors::PayloadSurfaceScope::EmitClassMacroObject`])
-    // requires the top-level Object surface to enumerate root
-    // Conditional carriers via the projector pipeline rather than at
-    // this lowering site. A blanket switch to transit-shallow lowering
-    // here would admit root `Conditional` carriers and bypass the
-    // branch-merge — the slot-only transit-shallow lowering lives in
-    // [`produce_one_macro_object_shape_for_slots`] which has no such
-    // root-Conditional caller.
+    // **Path-precise lowering** (Block 6.i Round 9): the producer
+    // branches on the lowered root's semantic shape:
+    //
+    // - **Conditional root** — the inherited-emits branch-merge
+    //   protocol (see
+    //   [`crate::meta_resolve::projectors::emits::project_emits`] and
+    //   [`crate::meta_resolve::projectors::PayloadSurfaceScope::EmitClassMacroObject`])
+    //   needs the top-level Conditional carrier visible at the
+    //   publication surface so the projector pipeline can enumerate
+    //   both branches' members under `Published(Shallow)`. Dispatch
+    //   the existing `Published(Expanded)` helper
+    //   ([`project_expr_class_a_via_dispatch_threaded`]) which
+    //   produces the carrier surface the downstream branch-merge
+    //   consumes.
+    //
+    // - **Object / Intersection / Mapped / Ref / InstantiationRef
+    //   root** — the macro payload is a structural body (or a route
+    //   pointing at one). The transit-shallow dispatch
+    //   ([`project_expr_class_a_via_dispatch_transit_shallow_threaded`])
+    //   keeps Mapped/KeyOf operators deferred at the publication
+    //   boundary so inherited library member names do not enumerate
+    //   into `ProjectMember` edges at the macro-publication site
+    //   (Rule-5 shallow-by-default). Each property's Ref-typed body
+    //   stays as a carrier the consumer re-resolves on demand.
+    //
+    // The path-precision predicate is the root-shape classifier
+    // [`macro_payload_root_is_conditional_carrier`] in
+    // `dispatch_helpers.rs`; it Navigate-lowers the payload and walks
+    // pure-carrier shells (Alias, DeclRef) to find the first
+    // structural root.
+    let payload_root_is_conditional =
+        macro_payload_root_is_conditional_carrier(query_engine, owner_canonical, lowered);
     let solver_result = scoped_solver_result.unwrap_or_else(|| {
-        let projected = project_expr_class_a_via_dispatch_threaded(
-            query_engine.ctx,
-            Some(query_engine),
-            owner_canonical,
-            lowered,
-        )
+        let projected = if payload_root_is_conditional {
+            project_expr_class_a_via_dispatch_threaded(
+                query_engine.ctx,
+                Some(query_engine),
+                owner_canonical,
+                lowered,
+            )
+        } else {
+            project_expr_class_a_via_dispatch_transit_shallow_threaded(
+                query_engine.ctx,
+                Some(query_engine),
+                owner_canonical,
+                lowered,
+            )
+        }
         .unwrap_or_else(|| lowered.clone());
         verter_semantic::analysis::type_expand::solver_result_to_object_expansion(
             verter_semantic::analysis::type_solver::result::SolverResult::exact_concrete(projected),

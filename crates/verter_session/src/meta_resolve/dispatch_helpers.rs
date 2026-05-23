@@ -223,6 +223,143 @@ fn realize_callable_member_inner(
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Macro payload root-shape classifier — path-precise non-slot
+// Class A transit-shallow gate (Block 6.i Round 9).
+// ─────────────────────────────────────────────────────────────────────
+
+/// Classify the macro payload's lowered root as a top-level Conditional
+/// carrier vs an Object/Intersection/Mapped/Ref/InstantiationRef-rooted
+/// shape.
+///
+/// Used by [`super::materialize::macro_shapes::produce_one_macro_object_shape`]
+/// to choose between the existing `Published(Expanded)` dispatch
+/// (Conditional root → projector pipeline branch-merge protocol fires
+/// on the open Conditional via
+/// [`super::projectors::resolve_payload_surface_with_scope`]) and the
+/// transit-shallow dispatch
+/// ([`project_expr_class_a_via_dispatch_transit_shallow_threaded`])
+/// for non-Conditional roots.
+///
+/// ## Algorithm — structural TypeExpr walk
+///
+/// The classifier inspects the macro payload's [`TypeExpr`] directly
+/// without going through dispatch lowering. Dispatch-lowering under
+/// `Expanded` mode would reduce nested Mapped/KeyOf operators and
+/// emit `ProjectMember` audit edges (the exact leak we are closing).
+/// Dispatch-lowering under `Navigate` mode interns a `DeclRef`
+/// carrier whose `ResolveDecl` returns an `Opaque(DeclPlaceholder)`
+/// sentinel rather than the alias body, so the carrier walker
+/// can't reach the body's structural shape that way either.
+///
+/// The structural walker:
+/// 1. Strips `Parenthesized` wrappers.
+/// 2. If the expr is `TypeExpr::Conditional { .. }`, returns `true`.
+/// 3. If the expr is `TypeExpr::Ref { name, type_arguments: [] }`
+///    AND the engine can resolve a `named_decl_body` for that name
+///    in the current scope, recurses on the body TypeExpr.
+/// 4. Otherwise (Object, Intersection, Mapped, KeyOf, Union, generic
+///    Ref with args, Function, Primitive, etc.) — returns `false`.
+///
+/// ## Discrimination
+///
+/// - `defineEmits<ConditionalEmits>()` where
+///   `type ConditionalEmits = Mode extends X ? Y : Z` →
+///   `Ref("ConditionalEmits", [])` → engine's `named_decl_body` →
+///   `Conditional { … }` → returns `true`.
+/// - `defineProps<Partial<EditorOptions>>()` →
+///   `Ref("Partial", [EditorOptions])` (type_arguments non-empty) →
+///   returns `false`.
+/// - `defineProps<EditorProps>()` where
+///   `interface EditorProps extends Omit<Partial<EditorOptions>, …>` →
+///   `Ref("EditorProps", [])` → `named_decl_body` for an interface →
+///   `Object` body (with heritage merged) → returns `false`.
+///
+/// ## Cycle / depth safety
+///
+/// Bounded at depth 32 — generous enough for real-world alias
+/// chains (Conditional aliases that re-route through 2–3 named
+/// helpers), tight enough to fail loudly on pathological graphs
+/// (alias self-cycles, mutual aliases without TypeAlias resolution
+/// fences).
+pub(crate) fn macro_payload_root_is_conditional_carrier(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    expr: &verter_type_expr::TypeExpr,
+) -> bool {
+    walk_type_expr_to_root_conditional(query_engine, owner_canonical, expr, 0)
+}
+
+fn walk_type_expr_to_root_conditional(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    expr: &verter_type_expr::TypeExpr,
+    depth: u32,
+) -> bool {
+    use verter_type_expr::TypeExpr;
+
+    if depth > 32 {
+        return false;
+    }
+
+    match expr {
+        // Top-level Conditional carrier. The inherited-emits branch-
+        // merge protocol downstream needs the Conditional to remain
+        // visible at the macro publication surface; the existing
+        // `Published(Expanded)` dispatch in
+        // `produce_one_macro_object_shape` produces that surface.
+        TypeExpr::Conditional { .. } => true,
+
+        // Transparent wrapper — recurse on inner.
+        TypeExpr::Parenthesized(inner) => {
+            walk_type_expr_to_root_conditional(query_engine, owner_canonical, inner, depth + 1)
+        }
+
+        // Zero-arg named reference — resolve the alias body in the
+        // owner scope (or the cross-file declaration's scope) and
+        // recurse on the body. Generic-arg refs (`Foo<X>`) stop here:
+        // the InstantiationRef's body may Conditional-reduce under
+        // substitution (decidable → the macro publication root is
+        // the chosen branch, not a Conditional shell) OR stay open
+        // (the projector pipeline's branch-merge fires on the
+        // deferred Conditional at the payload boundary, not at the
+        // macro publication site).
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.is_empty() => {
+            let declaration = query_engine.resolve_type_declaration(owner_canonical, name.as_ref());
+            let body_canonical = if declaration.canonical_source.is_empty() {
+                owner_canonical.to_string()
+            } else {
+                declaration.canonical_source.clone()
+            };
+            let body_name = if declaration.resolved_name.is_empty() {
+                name.as_ref().to_string()
+            } else {
+                declaration.resolved_name.clone()
+            };
+            let Some(body) =
+                query_engine.named_decl_body(body_canonical.as_str(), body_name.as_str())
+            else {
+                return false;
+            };
+            walk_type_expr_to_root_conditional(
+                query_engine,
+                body_canonical.as_str(),
+                &body,
+                depth + 1,
+            )
+        }
+
+        // Every concrete root shape (Object, Intersection, Mapped,
+        // KeyOf, IndexedAccess, Union, generic Ref with args,
+        // Function, Primitive, Literal, etc.) — NOT a top-level
+        // Conditional carrier.
+        _ => false,
+    }
+}
+
 /// Class A surface projection — dispatch-equivalent
 /// of `ComponentMetaQueryEngine::project_expr_surface_expr`.
 ///
