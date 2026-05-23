@@ -25,7 +25,7 @@ use super::super::dispatch_helpers::{
     project_expr_class_a_shape_via_dispatch_transit_shallow,
     project_expr_class_a_via_dispatch_threaded, project_expr_class_a_via_dispatch_transit_shallow,
     project_expr_class_a_via_dispatch_transit_shallow_threaded,
-    project_expr_surface_expr_with_compound_objects_via_host_threaded,
+    project_expr_surface_expr_with_compound_objects_transit_shallow_via_host_threaded,
     project_expr_surface_shape_via_host_threaded,
     project_prepared_type_surface_shape_via_host_threaded,
     project_type_surface_expr_via_host_threaded, project_type_surface_shape_via_host_threaded,
@@ -2225,6 +2225,21 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
     // intentionally lenient; transit-shallow Class A above is the
     // demand-driven publication path that the slot publication
     // boundary favours.
+    // Block 6.i Round 10 Commit 4 (Chain Z closure, codex Q1-Z) —
+    // the slot fallback's compound-objects helper migrates from the
+    // pre-Round-10 Expanded path (`...via_host_threaded`) to the
+    // transit-shallow sibling (`...transit_shallow_via_host_threaded`)
+    // added to `dispatch_helpers.rs`. The Expanded helper lowered the
+    // slot payload's TypeExpr in `Published(Expanded)` and emitted
+    // 30 of the 364 captured ProjectMember leak edges on ChatMessages
+    // fresh-cold (per `D:/tmp/round10-diagnostic-report.md` Chain Z).
+    // The transit-shallow sibling lowers under `Navigate` mode and
+    // walks the publication terminal under `Published(Shallow)` so
+    // the slot payload's `Mapped<...>` body stays deferred at the
+    // macro-publication boundary; the slot-binding consumer reaches
+    // the bindings via the graph-native path (per the fn docstring
+    // above) and the callable-realization substrate normalises
+    // carrier-shaped slot values.
     let projected_body = project_expr_class_a_via_dispatch_transit_shallow(
         query_engine.ctx,
         owner_canonical,
@@ -2232,7 +2247,7 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
     )
     .or_else(|| {
         // bridge via per-engine helper.
-        project_expr_surface_expr_with_compound_objects_via_host_threaded(
+        project_expr_surface_expr_with_compound_objects_transit_shallow_via_host_threaded(
             query_engine,
             owner_canonical,
             lowered,

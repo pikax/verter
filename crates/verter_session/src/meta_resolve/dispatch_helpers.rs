@@ -1164,7 +1164,41 @@ pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
     }
 }
 
-pub(crate) fn project_expr_surface_expr_with_compound_objects_via_host_threaded<'ctx>(
+/// Per codex Q1-Z (BINDING):
+///
+/// > the slot fallback must not call the compound-object helper in
+/// > Expanded mode. Either replace
+/// > `project_expr_surface_expr_with_compound_objects_via_host_threaded`
+/// > with a demand-aware helper or add a transit-shallow
+/// > compound-object sibling and use that from
+/// > `produce_one_macro_object_shape_for_slots`.
+///
+/// The Expanded sibling has been retired (it had exactly one
+/// caller, now migrated). This transit-shallow helper mirrors the
+/// transit-shallow Class A helper's demand profile:
+/// - **Empty-path lowering**: `Navigate` (keeps nested
+///   `Instantiate` / `KeyOf` / `MappedType` operators lazy).
+/// - **Terminal `ProjectPath` context**: `Published(Shallow)`
+///   (one-level surface; inner carrier shells preserved at the
+///   publication boundary).
+/// - **Surface filter**: `type_expr_has_any_object_arm` retained
+///   — the slot fallback's pre-Round-10 acceptance contract (the
+///   `lower_type_expr` must produce a structural shape with at
+///   least one Object arm, otherwise the fallback returns `None`
+///   and the slot publication leaves the carrier as-is). The
+///   transit-shallow projection still admits Intersection-of-Object
+///   shapes through `solver_result_to_object_expansion` downstream;
+///   the filter here only refuses results that have NO object arm
+///   anywhere (purely scalar / Function / deferred shells), which
+///   the slot fallback also refused pre-Round-10.
+///
+/// Used exclusively by `produce_one_macro_object_shape_for_slots`'s
+/// `or_else` fallback when the primary
+/// `project_expr_class_a_via_dispatch_transit_shallow` returns
+/// `None`.
+pub(crate) fn project_expr_surface_expr_with_compound_objects_transit_shallow_via_host_threaded<
+    'ctx,
+>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
     expr: &verter_type_expr::TypeExpr,
@@ -1178,19 +1212,20 @@ pub(crate) fn project_expr_surface_expr_with_compound_objects_via_host_threaded<
     }
     let ctx = engine.ctx();
     let dispatch = ProjectSemanticDispatch::new(ctx);
-    // Empty-terminal Expanded requires the base to be a structural
-    // surface (see comment on
-    // [`lower_and_project_to_expanded_via_host_threaded`]).
+    // Navigate-mode lowering keeps nested operators lazy. The
+    // Published(Shallow) terminal walks the one-level Object
+    // publication surface; member values stay as carrier shells per
+    // the shallow-by-default rule.
     let base = dispatch.lower_type_expr_in_scope_with_mode(
         scope_canonical_id,
         expr,
-        ProjectionMode::Expanded,
+        ProjectionMode::Navigate,
     )?;
     let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
         context: crate::semantic_query::ProjectionReductionContext::published(
-            ProjectionMode::Expanded,
+            ProjectionMode::Shallow,
         ),
     });
     let projected = match read.value {
