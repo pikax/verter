@@ -1764,8 +1764,26 @@ pub(crate) fn produce_one_macro_object_shape(
         )
     });
     let solver_count = shape_surface_count(&solver_result);
-    let rescue_projection =
-        solver_count == 0 || expr_needs_projection_rescue(query_engine, owner_canonical, lowered);
+    // Path-precise rescue gate (Block 6.i Round 9). The three rescue
+    // projectors below (`project_expr_surface_shape_via_host_threaded`,
+    // `project_named_ref_surface_shape`,
+    // `project_named_ref_imported_scope_shape`) all lower under
+    // `Published(Expanded)` internally and walk the macro payload's
+    // inherited library body — emitting one `ProjectMember` edge per
+    // enumerated key. For non-Conditional macro payload roots the
+    // transit-shallow path above is the canonical lowering (shallow-
+    // by-default); rescue widening MUST NOT re-introduce the eager
+    // enumeration the transit-shallow swap was written to eliminate.
+    //
+    // Conditional macro payload roots keep the rescue gate. The
+    // `Published(Expanded)` lowering above produces the carrier shell
+    // the inherited-emits branch-merge consumes; rescue widening on
+    // the same Conditional-rooted surface is the round-7 + round-8
+    // behaviour and must persist to satisfy the round-8 inherited-
+    // emits locked-down tests under solver-empty fallback paths.
+    let rescue_projection = payload_root_is_conditional
+        && (solver_count == 0
+            || expr_needs_projection_rescue(query_engine, owner_canonical, lowered));
     let projected = if rescue_projection {
         // Bridge the engine method via the per-engine helper so the
         // pre-flight gate sees zero external engine-method callers.
