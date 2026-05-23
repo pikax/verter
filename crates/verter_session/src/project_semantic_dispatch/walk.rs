@@ -995,39 +995,34 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         let key_arg = self
                             .graph()
                             .intern_node(SemanticNodeData::Literal(key_literal_value));
-                        let substituted = self.dispatch.substitute_semantic_type_param(
-                            mapper.value_expr,
-                            mapper.parameter_node,
-                            key_arg,
-                        );
-                        // Block 6.i Commit AX (codex Q5): context-
-                        // explicit evaluation inherits the path-walker's
-                        // `mode` as a `Published(mode)` context.
-                        // Mirrors `build_mapped_type`'s substitution
-                        // contract — publication walks reify nested
-                        // operators; transit walks carrier-stop. The
-                        // implicit `Published(Expanded)` default is
-                        // replaced so the walker's actual mode flows
-                        // through.
-                        let evaluated = self.dispatch.evaluate_deferred_semantic_node_with_context(
-                            substituted,
-                            crate::semantic_query::ProjectionReductionContext::published(
-                                self.mode(),
-                            ),
-                        );
-                        // Preserve `build_mapped_type`'s contract:
-                        // when evaluation yields Opaque, publish the
-                        // un-evaluated substituted node so re-dispatch
-                        // can pick up the lazy form once inputs become
-                        // enumerable.
-                        let value = if matches!(
-                            self.graph().node_data(evaluated).as_deref(),
-                            Some(SemanticNodeData::Opaque(_))
-                        ) {
-                            substituted
-                        } else {
-                            evaluated
-                        };
+                        // Block 6.i round 7 (codex 4th consult Q1) —
+                        // route through the shared
+                        // `materialize_selected_key_mapped_value_with_node`
+                        // substrate. The node-keyed entry preserves
+                        // String / Number literal kind through
+                        // substitution (G4 soundness — `M[1]` keeps
+                        // `K = Literal::Number(1)`). The helper does
+                        // substitute → evaluate → Instantiate →
+                        // **trailing Conditional reduction**: the
+                        // last step drives the body's `Conditional`
+                        // dispatch through C11a so per-key narrowing
+                        // closes generic-helper conditionals
+                        // (`ExtendSlotWithPlan<TPlan, K>`-style) to
+                        // the realized `Function` instead of leaving
+                        // a Conditional carrier shell. The
+                        // Opaque-fallback contract (substituted
+                        // carrier on stall) is preserved inside the
+                        // helper so the free mapper binder is never
+                        // leaked.
+                        let value = self
+                            .dispatch
+                            .materialize_selected_key_mapped_value_with_node(
+                                mapper,
+                                key_arg,
+                                crate::semantic_query::ProjectionReductionContext::published(
+                                    self.mode(),
+                                ),
+                            );
                         // Emit the per-key edge mirroring
                         // `build_mapped_type`'s ProjectMember edge so
                         // downstream origin-graph consumers see the
@@ -2520,11 +2515,24 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 };
                 // Identity fast path — use source_member.value
                 // verbatim. Computed path — substitute the binder
-                // and materialise through the shared substrate.
+                // and materialise through the **Selected-Key Transit
+                // Realization** substrate (round 7 / codex 4th
+                // consult Q1). The selected-key helper extends the
+                // per-key materialiser with an explicit trailing
+                // Conditional reduction: when the mapper body is a
+                // Conditional generic helper (e.g.
+                // `ExtendSlotWithPlan<TPlan, K>` with a
+                // `PricingPlanSlots[K] extends (props: infer P) =>
+                // unknown ? ... : ...` body), the per-key value
+                // closes to the realized `Function` rather than the
+                // Conditional carrier shell. Without this, the
+                // graph-native slot-binding consumer's `Function`-arm
+                // match fails at the publication boundary
+                // (round-6 STOP Defect 1).
                 let value = if let (Some(sm), true) = (source_member, value_is_identity) {
                     sm.value
                 } else {
-                    self.dispatch.materialize_mapped_member_value_for_key(
+                    self.dispatch.materialize_selected_key_mapped_value(
                         mapper,
                         name.as_ref(),
                         materialise_context,

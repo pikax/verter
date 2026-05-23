@@ -1,4 +1,4 @@
-//! Per-macro projectors for component-meta extraction.
+﻿//! Per-macro projectors for component-meta extraction.
 //!
 //! Each projector resolves a single macro's surface members through
 //! the shared dispatch primitives (`SemanticQueryKey::ResolveMacroPayload`
@@ -66,7 +66,19 @@ pub(crate) mod model;
 pub(crate) mod options;
 pub(crate) mod props;
 pub(crate) mod published_reducer;
+pub(crate) mod round7_substrate;
 pub(crate) mod slots;
+
+// Block 6.i round 7 substrate re-exports. Marked `#[allow(unused_imports)]`
+// because the substrate commit lands the primitives ahead of the
+// atomic 7-consumer cutover — consumers wire them in the cutover
+// commit. The `#[allow(dead_code)]` on each primitive itself parallels
+// this allowance at the definition site.
+#[allow(unused_imports)]
+pub(crate) use round7_substrate::{
+    resolve_macro_payload_diagnostic_probe, resolve_payload_surface_with_scope, MemberValueRole,
+    PayloadSurfaceScope,
+};
 
 pub(crate) use emits::project_emits;
 pub(crate) use exposed::project_exposed;
@@ -597,6 +609,13 @@ pub(crate) fn resolve_payload_surface(
         }
     }
 }
+
+// Block 6.i round 7 substrate primitives — diagnostic probe, scope
+// tag, branch-merged scope-gated resolver, MemberValueRole — live
+// in the sibling [`round7_substrate`] module to keep this file
+// under the `no_oversize_files` architecture-guard cap. The
+// primitives are re-exported at the module top so call sites
+// continue to import them as `crate::meta_resolve::projectors::*`.
 
 /// Peek-before-raise per-member helper.
 ///

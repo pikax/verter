@@ -234,21 +234,30 @@ fn pathwalker_does_not_resolve_mapped_through_build_mapped_type() {
         .expect("guard F.1: TypeOf arm must follow the Mapped arm in walk.rs");
     let arm_body = &src[mapped_arm_idx..arm_end_idx];
 
-    // (1) The narrowing path must substitute + evaluate
-    // mapper.value_expr per the brief's Commit F contract.
+    // (1) The narrowing path must per-key materialise via the
+    // shared `materialize_selected_key_mapped_value_with_node`
+    // substrate, which internally performs substitute + evaluate +
+    // Instantiate + **trailing Conditional reduction** (Block 6.i
+    // round 7 / codex 4th consult Q1). Pre-round-7 the arm called
+    // `substitute_semantic_type_param` + `evaluate_deferred_semantic_node`
+    // inline; round 7 factored those into the shared helper so the
+    // synthesise + path-walker callers converge on identical per-key
+    // semantics. Either textual surface (the round-7 helper OR the
+    // pre-round-7 inline pair) satisfies the F.1 contract: per-key
+    // narrowing must actually fire, not be replaced by the
+    // whole-surface MappedType dispatch alone.
+    let uses_round7_helper = arm_body.contains("materialize_selected_key_mapped_value_with_node");
+    let uses_inline_substitute_and_evaluate = arm_body.contains("substitute_semantic_type_param")
+        && arm_body.contains("evaluate_deferred_semantic_node");
     assert!(
-        arm_body.contains("substitute_semantic_type_param"),
-        "guard F.1: `PathWalker`'s Mapped arm MUST substitute the mapper's parameter via \
-         `substitute_semantic_type_param` for per-key path-precision (Block 6.i Commit F \
-         operator-level narrowing). The MappedType dispatch alone enumerates every key and \
-         leaks `Tool<INPUT, OUTPUT>['outputSchema']`-shaped queries into the audit \
-         footprint.",
-    );
-    assert!(
-        arm_body.contains("evaluate_deferred_semantic_node"),
-        "guard F.1: `PathWalker`'s Mapped arm MUST evaluate the substituted node via \
-         `evaluate_deferred_semantic_node` so the per-key value resolves without \
-         enumerating the whole mapped surface.",
+        uses_round7_helper || uses_inline_substitute_and_evaluate,
+        "guard F.1: `PathWalker`'s Mapped arm MUST per-key narrow — either via the round-7 \
+         `materialize_selected_key_mapped_value_with_node` substrate (which internally does \
+         substitute + evaluate + Instantiate + trailing Conditional reduction) OR via the \
+         pre-round-7 inline `substitute_semantic_type_param` + `evaluate_deferred_semantic_node` \
+         pair (Block 6.i Commit F operator-level narrowing). The MappedType dispatch alone \
+         enumerates every key and leaks `Tool<INPUT, OUTPUT>['outputSchema']`-shaped queries \
+         into the audit footprint.",
     );
 
     // (2) The narrowing must inspect a remaining path segment + the

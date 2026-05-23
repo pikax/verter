@@ -460,6 +460,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     true,
                 )
             }
+            // Block 6.i round 7 (codex 4th consult Q1 dispatch chain
+            // prerequisite) — InstantiationRef arm. Pre-round-7 the
+            // catch-all left InstantiationRef shells untouched, so
+            // type-parameter references inside `Helper<TPlan, K>`'s
+            // args leaked through substitution unchanged. The pre-
+            // round-7 path "worked" for the Expanded lowering only
+            // because Expanded inlines the generic body into a
+            // Conditional / Function shape directly at lowering time;
+            // under `StructuralTransit(Navigate)` macro publication
+            // (the round-7 cutover demand) the lowering preserves
+            // `InstantiationRef` as a lazy carrier and the args
+            // (`[TPlan-typeparam, K-typeparam]`) must substitute
+            // when the outer mapper's binder fires per-key
+            // realization. Without this arm, the per-key materialiser's
+            // `Instantiate { ExtendSlotWithPlan<TPlan, "badge"> }` body
+            // lowering re-binds `TKey_E ← K-typeparam` (the free outer
+            // binder) instead of `TKey_E ← "badge"-literal`, and the
+            // body's Conditional never closes. base / DeclIdentity is
+            // preserved verbatim — DeclIdentity has no type-param
+            // references inside it; only args carry call-site type
+            // arguments.
+            SemanticNodeData::InstantiationRef { base, args } => {
+                let mut new_args = Vec::with_capacity(args.len());
+                let mut any_changed = false;
+                for arg_node in args.iter() {
+                    let (sub, c) =
+                        self.substitute_with_change_tracking(*arg_node, parameter_node, arg);
+                    any_changed |= c;
+                    new_args.push(sub);
+                }
+                if !any_changed {
+                    return (node, false);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::InstantiationRef {
+                            base: base.clone(),
+                            args: Arc::from(new_args.into_boxed_slice()),
+                        },
+                    ),
+                    true,
+                )
+            }
             // Path C C11a — Function arm. Pre-C11a the catch-all left
             // Function shells untouched, so `T` / `infer X` references
             // inside `(x: T, y: infer X) => R` leaked through

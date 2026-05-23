@@ -1972,6 +1972,153 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Per-key Mapped member value materialiser with explicit
+    /// **Selected-Key Transit Realization** — the round-7 substrate
+    /// extension that closes the publication boundary defect codex's
+    /// 4th consult Q1 identifies.
+    ///
+    /// Extends [`Self::materialize_mapped_member_value_for_key`] by
+    /// dispatching one more
+    /// [`Self::evaluate_deferred_semantic_node_with_context`] on the
+    /// post-`Instantiate` body. The Instantiate of a Conditional-bodied
+    /// generic helper (e.g.
+    /// `ExtendSlotWithPlan<TPlan, K> = PricingPlanSlots[K] extends
+    /// (props: infer P) => unknown ? ... : ...`) returns the body
+    /// `Conditional` carrier WITHOUT triggering Conditional reduction;
+    /// the per-key materialiser's caller would see a shell where
+    /// `Function` was expected. The trailing evaluate dispatches the
+    /// evaluator's `Conditional` arm
+    /// ([`crate::project_semantic_dispatch::evaluate`]: 142) →
+    /// `SemanticQueryKey::Conditional` →
+    /// [`Self::build_conditional`]'s **C11a infer-binding path**
+    /// (build.rs: 2266) → `evaluate_deferred_semantic_node(check)`
+    /// at default `Published(Expanded)` → IndexedAccess evaluator arm
+    /// (evaluate.rs: 95) which hard-codes `ProjectionMode::Navigate`
+    /// for the index re-dispatch, so the `PricingPlanSlots["badge"]`
+    /// **selected-index / path projection** reduces independently of
+    /// the caller's `StructuralTransit(Navigate)` demand. The C11a
+    /// binding then closes the conditional to a `Function`.
+    ///
+    /// Codex Q1 dispatch chain (slot fixture):
+    /// ```text
+    /// DefineSlots payload lowered StructuralTransit(Navigate)
+    ///   → ProjectPath([], Published(Shallow))
+    ///     → InstantiationRef body
+    ///       → Mapped shallow synthesis
+    ///         → selected key "badge"
+    ///           → substitute K = "badge"
+    ///             → instantiate ExtendSlotWithPlan<PricingPlan, "badge">
+    ///                                      under StructuralTransit(Navigate)
+    ///               → conditional check resolves PricingPlanSlots["badge"]
+    ///                            through selected-index/path projection
+    ///                 → C11a infer binds P
+    ///                   → true branch becomes a Function.
+    /// ```
+    ///
+    /// `Opaque` fallback policy: when the trailing evaluate returns
+    /// `Opaque`, the result is whatever the inner per-key materialiser
+    /// produced (which already falls back to the substituted carrier on
+    /// its own Opaque-handling — the free mapper binder is never
+    /// leaked).
+    ///
+    /// Call sites (publication-only):
+    /// - [`crate::project_semantic_dispatch::walk::ProjectPathContext::synthesise_mapped_surface`]
+    /// - [`crate::project_semantic_dispatch::walk::PathWalker`]'s
+    ///   mapped-type literal-key narrowing arm (walk.rs ≈ 980).
+    pub(super) fn materialize_selected_key_mapped_value(
+        &self,
+        mapper: &crate::semantic_query::MapperKey,
+        key_name: &str,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let key_arg = self
+            .graph()
+            .intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                key_name.to_string(),
+            )));
+        self.materialize_selected_key_mapped_value_with_node(mapper, key_arg, context)
+    }
+
+    /// Node-keyed variant of
+    /// [`Self::materialize_selected_key_mapped_value`] — the PathWalker
+    /// mapped-type literal-key narrowing arm passes a pre-interned key
+    /// literal node so the String / Number kind survives substitution
+    /// (Block 6.i G4 series soundness — `M[1]` substitutes
+    /// `K = Literal::Number(1)`, NOT `Literal::String("1")`).
+    ///
+    /// Factors the common substrate path with
+    /// [`Self::materialize_mapped_member_value_for_key`] so both
+    /// publication-side callers (synthesise + PathWalker narrowing)
+    /// route through the same substitute → evaluate → Instantiate →
+    /// **trailing Conditional reduction** chain. The trailing
+    /// evaluate is what distinguishes the selected-key helper from
+    /// the round-6 baseline: the round-6 helper stops at the
+    /// Instantiate boundary, leaving the body's Conditional shell
+    /// addressable by re-dispatch but unrealised; the round-7 helper
+    /// drives Conditional reduction inline so consumers see the
+    /// closed `Function` (or projected member).
+    pub(super) fn materialize_selected_key_mapped_value_with_node(
+        &self,
+        mapper: &crate::semantic_query::MapperKey,
+        key_arg: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let substituted =
+            self.substitute_semantic_type_param(mapper.value_expr, mapper.parameter_node, key_arg);
+        let evaluated = self.evaluate_deferred_semantic_node_with_context(substituted, context);
+        let resolved = match self.graph().node_data(evaluated).as_deref() {
+            Some(SemanticNodeData::InstantiationRef { base, args }) => {
+                let base = base.clone();
+                let args = Arc::clone(args);
+                match self.execute(SemanticQueryKey::Instantiate {
+                    base,
+                    args,
+                    context,
+                }) {
+                    QueryResult::Value(id) => id,
+                    _ => evaluated,
+                }
+            }
+            _ => evaluated,
+        };
+        // Selected-Key Transit Realization: drive Conditional
+        // reduction on the post-Instantiate body. The evaluator's
+        // Conditional arm dispatches `SemanticQueryKey::Conditional`,
+        // which routes through `build_conditional`'s C11a
+        // infer-binding path (build.rs:2266) — the check operand
+        // evaluates via `evaluate_deferred_semantic_node` (default
+        // `Published(Expanded)`) which dispatches `IndexedAccess` in
+        // `Navigate` mode (evaluate.rs:95). The check operand
+        // (e.g. `PricingPlanSlots["badge"]`) reduces to a `Function`
+        // even though the caller's demand is `StructuralTransit`, and
+        // C11a binds the `infer P` then substitutes into the true
+        // branch — closing the conditional to a `Function` and
+        // unlocking the round-7 consumer contracts.
+        let realized = self.evaluate_deferred_semantic_node_with_context(resolved, context);
+        if matches!(
+            self.graph().node_data(realized).as_deref(),
+            Some(SemanticNodeData::Opaque(_))
+        ) {
+            // Trailing Conditional reduction stalled (e.g. the
+            // relation engine could not bind / the check operand was
+            // not yet enumerable). Preserve the per-key
+            // `materialize_mapped_member_value_for_key` substrate's
+            // Opaque-fallback contract: hand the substituted carrier
+            // back to the caller so the free mapper binder is never
+            // leaked but the value stays addressable by re-dispatch.
+            if matches!(
+                self.graph().node_data(resolved).as_deref(),
+                Some(SemanticNodeData::Opaque(_))
+            ) {
+                substituted
+            } else {
+                resolved
+            }
+        } else {
+            realized
+        }
+    }
+
     /// Source-surface enumeration for the Shallow walker's
     /// `synthesise_mapped_surface` ONLY.
     ///
