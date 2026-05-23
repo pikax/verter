@@ -13,8 +13,9 @@ use rustc_hash::FxHashSet;
 
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
+    HashValue, LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
 };
+use verter_semantic::facts::registry::{FactKey, InternedName, SymbolSpace};
 
 /// Worklist frame for the iterative `key_names_from_base_node`
 /// driver (Path C C10). `Expand` advances one node; `Combine*`
@@ -385,6 +386,69 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::Object(view) => {
                 Some(view.members.iter().any(|m| m.name.as_ref() == needle))
             }
+            // Block 6.i Round 11 Commit 3 (Chain X closure, codex
+            // 6th-consult Q1-X BINDING) — consult the parse-fact
+            // `MemberPresence` substrate for `DeclRef` /
+            // `InstantiationRef` bases.
+            //
+            // Pre-Round-11 the `DeclRef` arm fell through to `None`,
+            // which (because Tier 3's `primitive_keyspace_admits_segment`
+            // is `false` for non-primitives) made `key_admitted ==
+            // Some(false)`. The walker then fell through to the whole-
+            // surface MappedType dispatch at `walk.rs:1091` under
+            // `Published(Expanded)` — `build_mapped_type` enumerated
+            // the entire keyspace and emitted per-key `ProjectMember`
+            // edges for EVERY library member, the dominant residual
+            // emitter on the nuxt-ui-codex-bench corpus (Editor 383,
+            // ChatMessage 60, Carousel 89).
+            //
+            // The fix routes admission through
+            // [`crate::file_artifact_store::FileFacts`]'s parse-domain
+            // `FactKey::MemberPresence(exporter, name, Type)` fact.
+            // The fact is content-addressed against the file's
+            // observed content version, so the answer matches the
+            // node's interned `DeclIdentity.whole_hash` exactly.
+            //
+            // - `Some(true)`  — the parse fact says the declared type
+            //   has a member named `needle`. The walker admits the
+            //   segment structurally; the narrowing path runs and
+            //   never falls through to the whole-surface dispatch.
+            // - `Some(false)` — the artifact for `(canonical,
+            //   whole_hash)` exists and lacks a `MemberPresence` for
+            //   `needle`. The walker refutes the segment; the
+            //   admission predicate returns `Some(false)` so the
+            //   walker's `can_narrow == false` path stops at an
+            //   `opaque_miss` instead of triggering the leak.
+            // - `None`        — the artifact is not recoverable for
+            //   the observed whole_hash (evicted, schema mismatch,
+            //   tombstoned). The predicate returns `None` and the
+            //   caller falls through to the existing tiers; no
+            //   regression vs pre-Round-11 behaviour.
+            //
+            // The fact lookup is non-emitting by construction — it
+            // reads from `FileFacts`'s registry, never dispatches an
+            // `Instantiate` / `Mapped` / `KeyOf` query and never calls
+            // `build_mapped_type`'s publication loop.
+            SemanticNodeData::DeclRef { identity } => self.member_presence_fact_admission(
+                identity.canonical_id.as_ref(),
+                identity.whole_hash,
+                identity.decl_name.as_ref(),
+                needle,
+            ),
+            SemanticNodeData::InstantiationRef { base, .. } => {
+                // For a generic instantiation `Lib<…>`, the `keyof`
+                // surface is determined by `Lib`'s member set — the
+                // type arguments do not add or remove members at the
+                // surface level. Query the base declaration's parse
+                // facts directly; the same content-addressed
+                // `MemberPresence` lookup is sound.
+                self.member_presence_fact_admission(
+                    base.canonical_id.as_ref(),
+                    base.whole_hash,
+                    base.decl_name.as_ref(),
+                    needle,
+                )
+            }
             SemanticNodeData::Intersection(arms) => {
                 let arms = Arc::clone(arms);
                 drop(data);
@@ -512,5 +576,69 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }),
             _ => false,
         }
+    }
+
+    /// Block 6.i Round 11 Commit 3 (Chain X closure, codex 6th-consult
+    /// Q1-X BINDING) — non-emitting member-presence admission backed
+    /// by the parse-fact `FactKey::MemberPresence` substrate.
+    ///
+    /// Looks up the file artifact for `(canonical, observed_hash)` and
+    /// queries the artifact's parse-fact registry for
+    /// `MemberPresence { exporter: type_name, name: needle, space:
+    /// Type }`. The lookup is constant-time and never dispatches an
+    /// `Instantiate` / `Mapped` / `KeyOf` query.
+    ///
+    /// - `Some(true)`  — the parse fact records the member's presence
+    ///   on the type's declaration body at the observed content
+    ///   version. Admit structurally.
+    /// - `Some(false)` — the artifact exists for the observed content
+    ///   version, but the fact registry has no
+    ///   `MemberPresence(type_name, needle, Type)` entry. The member
+    ///   is provably absent. Refute structurally.
+    /// - `None`        — the file artifact for `(canonical,
+    ///   observed_hash)` is not recoverable (evicted, schema
+    ///   mismatch, content-hash drift). Fall through to the caller's
+    ///   existing tiers; this preserves the pre-Round-11 behaviour
+    ///   exactly for the unrecoverable case so no warm read regresses.
+    ///
+    /// The fact-registry's `MemberPresence` keys are emitted by the
+    /// shallow-analysis fact emitter
+    /// (`fact_emission::emit_type_symbols` at `fact_emission.rs:233`
+    /// for type symbols, `:335` for enum members, `:364` for value-
+    /// space object shapes) — every declared member of a type that
+    /// the shallow walker observed has a corresponding presence fact
+    /// in the file's `FileArtifacts.facts` registry. The fact is
+    /// content-addressed so the observed `whole_hash` keys the same
+    /// artifact the `DeclIdentity` was interned against.
+    fn member_presence_fact_admission(
+        &self,
+        canonical: &str,
+        observed_hash: HashValue,
+        type_name: &str,
+        needle: &str,
+    ) -> Option<bool> {
+        // Empty identity (a synthesised carrier with no real
+        // declaration) cannot resolve to a parse fact — fall through.
+        if canonical.is_empty() || type_name.is_empty() {
+            return None;
+        }
+        // Normalise the analysis canonical (matches the lookup used by
+        // the signature builder at
+        // `fact_signature_helpers::parse_fact_ref_for_observed_current_content`).
+        let analysis_canonical = self.ctx.normalized_analysis_canonical(canonical);
+        let artifacts = self
+            .ctx
+            .project_type_store()
+            .indexed()
+            .get_artifacts_for_content(analysis_canonical.as_ref(), observed_hash)?;
+        let presence_key = FactKey::MemberPresence {
+            exporter: InternedName::from(type_name),
+            name: InternedName::from(needle),
+            space: SymbolSpace::Type,
+        };
+        // `lookup` returns `Some(&Fact)` when the presence fact exists
+        // — admit. `None` means the type's declared body has no member
+        // named `needle` in its shallow inventory — refute.
+        Some(artifacts.facts.lookup(&presence_key).is_some())
     }
 }
