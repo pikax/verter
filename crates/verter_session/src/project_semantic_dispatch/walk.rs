@@ -951,11 +951,35 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         {
                             return view.members.iter().any(|m| m.name.as_ref() == needle);
                         }
-                        // Tier 2: key_space enumerates.
-                        if let Some(names) =
-                            self.dispatch.key_names_from_keyspace_node(mapper.key_space)
+                        // Tier 2: **non-emitting** key-domain
+                        // membership predicate (Block 6.i Round 10
+                        // Commit 3, codex Q1-X closure of Chain X).
+                        //
+                        // The pre-Round-10 admission called
+                        // `key_names_from_keyspace_node` here — which
+                        // routed through `evaluate_deferred_semantic_node`
+                        // and `key_names_from_base_node`, both emitting
+                        // one `ProjectMember` edge per enumerated key
+                        // (`build_key_of` / `build_mapped_type`
+                        // publication loop). The diagnostic at
+                        // `D:/tmp/round10-diagnostic-report.md` Chain X
+                        // attributed 31.3% of the residual leak (114 of
+                        // 364 captured emissions) to this admission
+                        // tier: the walker emitted the entire keyspace
+                        // just to test membership of ONE segment.
+                        //
+                        // The non-emitting predicate decides admission
+                        // structurally without `evaluate_deferred_*`
+                        // and without `Instantiate` round-trips. When
+                        // it cannot decide (`None`), the walker falls
+                        // through to Tier 3 (primitive keyspace) or
+                        // accepts the unresolved carrier — NEVER
+                        // enumerating to prove membership.
+                        if let Some(admits) = self
+                            .dispatch
+                            .keyspace_admits_literal_non_emitting(mapper.key_space, needle)
                         {
-                            return names.iter().any(|n| n.as_ref() == needle);
+                            return admits;
                         }
                         // Tier 3: key_space is a non-enumerable
                         // primitive whose domain admits the segment.
