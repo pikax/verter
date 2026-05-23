@@ -1119,7 +1119,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         return (QueryResult::Value(result), fence);
                     }
                 };
-                let source_resolved = self.evaluate_deferred_semantic_node(source);
+                // Block 6.i Round 12 — context-propagating deferred
+                // resolution. Under `StructuralTransit(_)` the source's
+                // nested operators carrier-stop (`may_reduce_operator
+                // (StructuralTransit(_)) == false`); the Pick falls through
+                // to its deferred shell (Opaque(Miss)) so callers re-
+                // dispatch once admission lifts to publication demand.
+                // Closes the V chain leak empirically traced to this
+                // call (`evaluate_deferred_semantic_node` defaulted to
+                // `Published(Expanded)`, breaking context propagation
+                // when the outer caller dispatched with
+                // `StructuralTransit(Shallow)`).
+                let source_resolved =
+                    self.evaluate_deferred_semantic_node_with_context(source, context);
                 let surface = match graph.node_data(source_resolved).as_deref() {
                     Some(SemanticNodeData::Object(view)) => view.clone(),
                     _ => {
@@ -1160,7 +1172,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         return (QueryResult::Value(result), fence);
                     }
                 };
-                let source_resolved = self.evaluate_deferred_semantic_node(source);
+                // Block 6.i Round 12 — context-propagating deferred
+                // resolution (see Pick comment above for chain).
+                let source_resolved =
+                    self.evaluate_deferred_semantic_node_with_context(source, context);
                 let surface = match graph.node_data(source_resolved).as_deref() {
                     Some(SemanticNodeData::Object(view)) => view.clone(),
                     _ => {
@@ -1223,7 +1238,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             "Extract" | "Exclude" if args.len() == 2 => {
                 let source_arg = args[0];
                 let filter_arg = args[1];
-                let source_resolved = self.evaluate_deferred_semantic_node(source_arg);
+                // Block 6.i Round 12 — context-propagating deferred
+                // resolution (see Pick comment above for chain).
+                let source_resolved =
+                    self.evaluate_deferred_semantic_node_with_context(source_arg, context);
                 let source_data = graph.node_data(source_resolved);
                 let arms: Vec<SemanticNodeId> = match source_data.as_deref() {
                     Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
