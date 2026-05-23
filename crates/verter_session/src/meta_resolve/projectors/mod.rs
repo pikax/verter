@@ -1405,28 +1405,44 @@ pub(crate) fn reduce_field_type_expr_with_mode(
         return materialized.type_expr;
     }
 
-    // The materializer runs at `Expanded` regardless of
-    // `publish_mode`. `publish_mode` is used for the peek-cache slot
-    // above (so a `Navigate` caller does not collide with an
-    // `Expanded` caller's entry) — but the materializer's INTERNAL
-    // reduction runs at `Published(Expanded)`. The top-down
-    // demand-driven reducer fixes the inactive-conditional-branch
-    // leak under any root context: inactive branches are never
-    // visited regardless of whether the root demand is `Navigate`
-    // or `Expanded`. Per-prop shallow-by-default behaviour at the
-    // PROJECTOR layer is enforced upstream by
-    // [`member_shape_peek_or_compute`], which threads
-    // `Published(publish_mode)` directly through the per-member
-    // reducer entry. [`reduce_field_type_expr_with_mode`] is the
-    // TypeExpr-start fallback for callers that genuinely start from
-    // a `TypeExpr` (slot bindings, model bindings, the
+    // Block 6.i Round 10 Commit 2 (Chain V closure, codex Q1-V) —
+    // the materializer now propagates the caller's `publish_mode`
+    // verbatim. Pre-Round-10 this entry hardcoded
+    // `ProjectionMode::Expanded` "because the top-down demand-driven
+    // reducer fixes inactive-conditional-branch leaks under any
+    // root context". Empirically that was insufficient: the per-prop
+    // publication surface (`reduce_published_field_types` →
+    // `reduce_field_type_expr_with_mode(Navigate)`) silently upgraded
+    // to `Expanded` here, then `shallow_lower_type_expr(... Expanded)`
+    // re-entered `build_key_of` / `build_mapped_type` for the
+    // inherited `Partial<EditorOptions>` / `Omit<EmblaOptionsType>` /
+    // generic-substituted carriers — emitting 184 of 364 residual
+    // Rule-5 ProjectMember leak edges on the nuxt-ui corpus
+    // (Editor + ChatMessage + ChatMessages chain V).
+    //
+    // The codex-spec'd fix: lower + raise under `publish_mode`
+    // directly so the per-prop publication boundary sees the
+    // shallower demand at every recursive `Instantiate` / `KeyOf` /
+    // `Mapped` dispatch. The materialiser's cache key is keyed on
+    // `(scope, expr, ProjectionReductionContext::published(mode))`
+    // (Round-10 Commit 1 substrate), so the demand-explicit
+    // `Published(Navigate)` slot stays disjoint from the implicit
+    // `Published(Expanded)` slot — no cache poisoning between
+    // per-prop callers and slot/model-binding callers.
+    //
+    // Legitimate TypeExpr-start callers that genuinely need
+    // `Expanded` (slot bindings, model bindings, the
     // `Pick`/`Omit`/`IndexedAccess`/`keyof` paths the existing tests
-    // exercise) — those expect deep materialisation through this
-    // entry point.
+    // exercise) enter through
+    // [`reduce_field_type_expr`] (the default-`Expanded` overload)
+    // and pass `Expanded` here — their behaviour is preserved
+    // verbatim. Only callers that explicitly named `Navigate` at the
+    // `reduce_field_type_expr_with_mode` entry see the new shallower
+    // materialisation depth.
     super::materialize::materialize_component_meta_type_expr_until_stable(
         &expr,
         scope_canonical_id,
-        ProjectionMode::Expanded,
+        publish_mode,
         query_engine,
     )
 }
