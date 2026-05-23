@@ -1762,21 +1762,50 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode() {
         });
     let window = &source_lf[arm_start..arm_body_start + next_arm_offset];
 
+    // rustfmt is free to wrap `ProjectionReductionContext::published(self.mode)`
+    // across multiple lines when the surrounding indent pushes the
+    // call past max line width. Collapse every whitespace run in the
+    // window to a single space before searching so the literal-string
+    // match tolerates the breaking. The window remains bounded to the
+    // Conditional arm body so the count remains discriminating.
+    let normalized_window: String = {
+        let mut out = String::with_capacity(window.len());
+        let mut prev_space = false;
+        for c in window.chars() {
+            if c.is_whitespace() {
+                if !prev_space {
+                    out.push(' ');
+                }
+                prev_space = true;
+            } else {
+                out.push(c);
+                prev_space = false;
+            }
+        }
+        out
+    };
+
     // Both per-branch `ProjectPath` sub-dispatches must carry the
     // OUTER caller's mode. The conditional handler distributes the
     // remaining path into both branches; the per-branch dispatches
     // must thread `self.mode` (wrapped as
     // `ProjectionReductionContext::published(self.mode)` after Block
     // 6.i's `ProjectPath` substrate extension) so the outer-terminal
-    // contract is preserved.
-    let context_self_count = window
-        .matches("ProjectionReductionContext::published(self.mode)")
-        .count();
+    // contract is preserved. Allow an optional single space after the
+    // opening paren so both `published(self.mode)` (single-line) and
+    // `published( self.mode, )` (wrapped → normalized) match.
+    let context_self_count = normalized_window
+        .matches("ProjectionReductionContext::published(self.mode")
+        .count()
+        + normalized_window
+            .matches("ProjectionReductionContext::published( self.mode")
+            .count();
     assert!(
         context_self_count >= 2,
         "Conditional arm in walk.rs must contain at least two \
          `ProjectionReductionContext::published(self.mode)` sub-dispatches \
-         (one per branch). Found {context_self_count}. Window:\n{window}"
+         (one per branch). Found {context_self_count}. \
+         Normalized window:\n{normalized_window}"
     );
 
     // No per-branch dispatch may hardcode a different mode. The
@@ -1784,19 +1813,24 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode() {
     // — both that helper and any literal `published(ProjectionMode::Navigate)`
     // / `published(ProjectionMode::Identity)` /
     // `published(ProjectionMode::Shallow)` would defeat the outer-terminal
-    // contract.
+    // contract. Forbidden checks run on the normalized window with the
+    // same single-space tolerance after the open paren.
     for forbidden in [
         "mode: mode_for_hop",
-        "published(ProjectionMode::Navigate)",
-        "published(ProjectionMode::Identity)",
-        "published(ProjectionMode::Shallow)",
+        "published(ProjectionMode::Navigate",
+        "published( ProjectionMode::Navigate",
+        "published(ProjectionMode::Identity",
+        "published( ProjectionMode::Identity",
+        "published(ProjectionMode::Shallow",
+        "published( ProjectionMode::Shallow",
         "published(mode_for_hop",
+        "published( mode_for_hop",
     ] {
         assert!(
-            !window.contains(forbidden),
+            !normalized_window.contains(forbidden),
             "Conditional arm must not hardcode `{forbidden}` for sub-dispatch — \
              the outer caller's `self.mode` is the load-bearing terminal mode. \
-             Window:\n{window}"
+             Normalized window:\n{normalized_window}"
         );
     }
 
