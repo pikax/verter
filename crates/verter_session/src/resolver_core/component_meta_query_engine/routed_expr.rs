@@ -519,11 +519,21 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 Some(member.ty.clone())
             }
             _ => {
-                // dispatch path replaces the deprecated method.
+                // Block 6.i leak-close-2 — Navigate base + Shallow
+                // terminal under Published demand. The projected value
+                // feeds `ProjectedMember.ty` on the projector surface,
+                // and per Rule-5 (shallow-by-default at projection
+                // boundary) the body stays shallow unless a downstream
+                // cursor walks into it. Carriers admitted by the
+                // Shallow terminal preserve symbolic identity for
+                // re-resolution on demand.
                 crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
                     self,
                     scope_canonical_id,
                     &member.ty,
+                    crate::semantic_query::ProjectionMode::Navigate,
+                    crate::semantic_query::ProjectionMode::Shallow,
+                    crate::semantic_query::ReductionDemand::Published,
                 )
             }
         }?;
@@ -923,10 +933,26 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 &current,
             )
             .or_else(|| {
+                // Block 6.i leak-close-2 — Expanded base + Expanded
+                // terminal, Published. The fixpoint loop is the
+                // engine method's "stabilise leaf via expanded"
+                // pattern; reducing either dimension below Expanded
+                // breaks fixpoint convergence for imported alias
+                // helpers like `Button['ui']` where the Navigate
+                // carrier would freeze a generic InstantiationRef at
+                // the empty-path terminal (see AX-WIP comment on
+                // `lower_and_project_to_expanded_via_host_threaded`
+                // for the documented constraint). Per the consult's
+                // "Keep Expanded" hint, this callsite preserves the
+                // legacy behaviour while the helper signature itself
+                // becomes mode-explicit.
                 crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
                     self,
                     scope_canonical_id,
                     &current,
+                    crate::semantic_query::ProjectionMode::Expanded,
+                    crate::semantic_query::ProjectionMode::Expanded,
+                    crate::semantic_query::ReductionDemand::Published,
                 )
             });
             let Some(next) = next else {

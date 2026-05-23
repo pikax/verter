@@ -862,6 +862,9 @@ defineProps<Omit<SelectMenuProps<SelectMenuItem[]>, 'items'>>()
         &mut query_engine,
         "/src/App.vue",
         &target_expr,
+        crate::semantic_query::ProjectionMode::Expanded,
+        crate::semantic_query::ProjectionMode::Expanded,
+        crate::semantic_query::ReductionDemand::Published,
     );
     let shape = crate::meta_resolve::project_expr_surface_shape_via_host_threaded(
         &mut query_engine,
@@ -1035,6 +1038,9 @@ export interface TabsProps<T extends TabsItem = TabsItem> extends Pick<TabsRootP
         &mut query_engine,
         "/src/App.vue",
         &expr,
+        crate::semantic_query::ProjectionMode::Expanded,
+        crate::semantic_query::ProjectionMode::Expanded,
+        crate::semantic_query::ReductionDemand::Published,
     )
     .expect("nested indexed-access helper should project");
 
@@ -3014,6 +3020,9 @@ type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
         &mut query_engine,
         "/src/Button.vue",
         &expr,
+        crate::semantic_query::ProjectionMode::Expanded,
+        crate::semantic_query::ProjectionMode::Expanded,
+        crate::semantic_query::ReductionDemand::Published,
     )
     .expect("component-config indexed access route should project");
 

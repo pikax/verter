@@ -1261,10 +1261,20 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     fn deep_resolve_type_refs(&mut self, scope_canonical_id: &str, expr: &TypeExpr) -> TypeExpr {
         match expr {
             TypeExpr::Ref { .. } => {
+                // Block 6.i leak-close-2 — this callsite is on the
+                // leak path; it is DELETED in leak-close-3 (Q7 Claude
+                // architecture) together with the whole `deep_resolve_*`
+                // chain. For this commit, pass the legacy Expanded
+                // base + Expanded terminal under Published demand so
+                // behaviour is unchanged while the helper signature
+                // becomes mode-explicit.
                 crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
                     self,
                     scope_canonical_id,
                     expr,
+                    crate::semantic_query::ProjectionMode::Expanded,
+                    crate::semantic_query::ProjectionMode::Expanded,
+                    crate::semantic_query::ReductionDemand::Published,
                 )
                 .unwrap_or_else(|| expr.clone())
             }

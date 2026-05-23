@@ -570,20 +570,62 @@ pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'ctx>(
         .then_some(reduced)
 }
 
-/// direct equivalent of the deleted
-/// `ComponentMetaQueryEngine::project_expr_surface_expr` engine method:
-/// the registry-route fast-path falls through to
-/// `lower_and_project_to_expanded_via_host_threaded`, then to a
-/// pure-dispatch `ProjectPath { empty, Expanded }` against the lowered
-/// expression. Distinct from `project_expr_class_a_via_dispatch_threaded`
-/// in that this bridge does NOT decompose IndexedAccess chains —
-/// matching the engine method's "lower the whole expr, dispatch with
-/// empty path" semantics for callers that depend on it (e.g.
-/// `solve_or_project_leaf_expr_until_stable`).
+/// Mode-explicit dispatch-direct surface projection (Block 6.i
+/// leak-close-2). Caller states `(base_mode, terminal_mode, demand)`
+/// so each callsite expresses its publication intent rather than
+/// inheriting the legacy `Expanded`/`Expanded` default.
+///
+/// Behaviour:
+/// 1. **Registry-route fast-path** — `Pick<…>` / `Omit<…>` /
+///    `Button['ui']` shapes route through the engine's
+///    `project_routed_expr_surface_expr` / `lower_and_project_to_expanded`
+///    helpers. The fast-path returns the registry's pre-computed
+///    Expanded shape regardless of caller mode; downstream caches store
+///    one canonical entry per route, so reusing it on a Shallow request
+///    does not introduce a new leak.
+/// 2. **Pure-dispatch path** — lower the whole expression at
+///    `base_mode`, dispatch
+///    `ProjectPath { base, path: [], context: { mode: terminal_mode, demand } }`
+///    against the lowered base. The empty-path form preserves the
+///    engine method's "no IndexedAccess decomposition" semantics for
+///    callers that depend on it (e.g.
+///    `solve_or_project_leaf_expr_until_stable`).
+///
+/// Mode-aware result filter:
+///   - `terminal_mode == Expanded`: gate on `type_expr_is_expanded_surface`
+///     so only fully-materialised surfaces pass (no deferred
+///     `KeyOf` / `IndexedAccess` / `Mapped` / `TypeOf` / `Conditional`
+///     shells).
+///   - `terminal_mode == Shallow`: admit Ref carriers and one-level
+///     Object surfaces — do NOT call `type_expr_is_expanded_surface`,
+///     which would reject the carrier form the caller explicitly asked
+///     for.
+///   - either way: refuse `semanticMiss`-bearing results.
+///
+/// Diagnostic propagation: `QueryResult::Error` and
+/// `QueryResult::Recursive` map to `None` so the macro-shape
+/// diagnostic flow at `produce_one_macro_object_shape*` keeps emitting
+/// the `MacroExpansionDiagnostics` envelope without observing a
+/// synthesised `TypeExpr::Error`.
+///
+/// Caller note on `base_mode` vs `terminal_mode`: per the Block 6.i
+/// AX-WIP constraint (documented on
+/// `lower_and_project_to_expanded_via_host_threaded`), empty-terminal
+/// `Expanded` requires the base to be a structural surface that
+/// `expand_empty_path_terminal` can walk. A `Navigate` carrier would
+/// freeze a generic `InstantiationRef` and the expanded-surface filter
+/// would reject. Callers that need Expanded terminal output on
+/// arbitrary inputs MUST pass `base_mode = Expanded`; callers on
+/// the empty-terminal Shallow path may pass `base_mode = Navigate`
+/// (carrier-preserving) per the sister
+/// `project_expr_surface_shape_via_host_threaded` pattern.
 pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
     expr: &verter_type_expr::TypeExpr,
+    base_mode: ProjectionMode,
+    terminal_mode: ProjectionMode,
+    demand: crate::semantic_query::ReductionDemand,
 ) -> Option<verter_type_expr::TypeExpr> {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::resolver_core::component_meta_registry::{
@@ -591,7 +633,9 @@ pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
         component_meta_registry_public_utility_route,
     };
     use crate::resolver_core::{type_expr_contains_semantic_miss, type_expr_is_expanded_surface};
-    use crate::semantic_query::{PathSegment, ProjectionMode, QueryResult, SemanticQueryKey};
+    use crate::semantic_query::{
+        PathSegment, ProjectionReductionContext, QueryResult, SemanticQueryKey,
+    };
 
     if engine.projection_op_budget_exhausted() {
         return None;
@@ -615,27 +659,43 @@ pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
     }
     let ctx = engine.ctx();
     let dispatch = ProjectSemanticDispatch::new(ctx);
-    // Block 6.i Commit AX — empty-terminal Expanded requires the
-    // base to be a structural surface (see comment on
-    // `lower_and_project_to_expanded_via_host_threaded`).
-    let base = dispatch.lower_type_expr_in_scope_with_mode(
-        scope_canonical_id,
-        expr,
-        ProjectionMode::Expanded,
-    )?;
+    let base = dispatch.lower_type_expr_in_scope_with_mode(scope_canonical_id, expr, base_mode)?;
     let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            ProjectionMode::Expanded,
-        ),
+        context: ProjectionReductionContext {
+            mode: terminal_mode,
+            demand,
+        },
     });
     let projected = match read.value {
         QueryResult::Value(expr) => expr,
         QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
     };
-    (!type_expr_contains_semantic_miss(&projected) && type_expr_is_expanded_surface(&projected))
-        .then_some(projected)
+    if type_expr_contains_semantic_miss(&projected) {
+        return None;
+    }
+    match terminal_mode {
+        // Expanded terminal — only fully materialised surfaces qualify.
+        // A residual `KeyOf` / `IndexedAccess` / `Mapped` / `TypeOf` /
+        // `Conditional` shell means the projection did not reach a
+        // structural answer and the caller MUST fall back.
+        ProjectionMode::Expanded => type_expr_is_expanded_surface(&projected).then_some(projected),
+        // Shallow terminal — accept Ref carriers and one-level
+        // surfaces. The whole point of the Shallow contract is that
+        // the published value may stay as a carrier the consumer
+        // re-resolves on demand; running it through
+        // `type_expr_is_expanded_surface` would reject the carrier
+        // form callers explicitly asked for.
+        ProjectionMode::Shallow => Some(projected),
+        // `Identity` / `Navigate` / `Skeleton` are not expected from
+        // the leak-close-2 callsites today; admit the result as-is so
+        // the helper remains a single drop-in dispatch primitive if a
+        // future caller picks them up.
+        ProjectionMode::Identity | ProjectionMode::Navigate | ProjectionMode::Skeleton => {
+            Some(projected)
+        }
+    }
 }
 
 pub(crate) fn project_expr_surface_expr_with_compound_objects_via_host_threaded<'ctx>(

@@ -627,11 +627,21 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 }
             }
             if let Some(projected) =
+                // Block 6.i leak-close-2 — Navigate base + Shallow
+                // terminal, Published. The sister
+                // `project_expr_surface_shape_via_host_threaded` at
+                // the line above already uses Navigate+Shallow; this
+                // fallback was the asymmetric Expanded path that the
+                // 3-way consult identified as a leak source for
+                // utility-route fallbacks.
                 crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
-                    query_engine,
-                    scope_canonical_id,
-                    target,
-                )
+                        query_engine,
+                        scope_canonical_id,
+                        target,
+                        crate::semantic_query::ProjectionMode::Navigate,
+                        crate::semantic_query::ProjectionMode::Shallow,
+                        crate::semantic_query::ReductionDemand::Published,
+                    )
             {
                 let shape =
                     verter_semantic::analysis::type_expand::type_expr_to_object_shape(&projected);
@@ -657,11 +667,19 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     }
                 }
                 if let Some(projected) =
+                    // Block 6.i leak-close-2 — same disposition as the
+                    // first fallback arm (Navigate+Shallow+Published);
+                    // applied to the `expanded_ref` instantiation
+                    // result so both arms stay symmetric with the
+                    // sister-helper shape.
                     crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
-                        query_engine,
-                        scope_canonical_id,
-                        &expanded_ref,
-                    )
+                            query_engine,
+                            scope_canonical_id,
+                            &expanded_ref,
+                            crate::semantic_query::ProjectionMode::Navigate,
+                            crate::semantic_query::ProjectionMode::Shallow,
+                            crate::semantic_query::ReductionDemand::Published,
+                        )
                 {
                     let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(
                         &projected,
