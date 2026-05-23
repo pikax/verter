@@ -1972,6 +1972,98 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Source-surface enumeration for the Shallow walker's
+    /// `synthesise_mapped_surface` ONLY.
+    ///
+    /// Block 6.i Transit-Shallow Publication (leak-fix-3b) — closes the
+    /// architectural gap that prevented the macro-publication boundary
+    /// from migrating from `Published(Expanded)` to
+    /// `StructuralTransit(Navigate)`.
+    ///
+    /// **Why this helper, not an extension of `key_names_step`**: codex
+    /// Q1 #3 explicitly locks the global key-name enumerators
+    /// (`key_names_from_base_node`, `key_names_from_keyspace_node`,
+    /// `key_names_step`) untouched — those serve `build_mapped_type`'s
+    /// Identity fast path (`Readonly<T>` / `Partial<T>` / `Required<T>`)
+    /// where the source surface is already an `Object` lowered through
+    /// the Expanded path. Teaching them to unwrap `DeclRef` /
+    /// `InstantiationRef` interferes with that Identity-mapper case
+    /// (round-5 STOP report empirically confirmed the regression on
+    /// `mapped_readonly.correctness.snap.json`).
+    ///
+    /// This helper is the local fallback `synthesise_mapped_surface`
+    /// calls when `key_names_from_base_node(source)` returns `None`
+    /// because the source is a `DeclRef` / `InstantiationRef` carrier
+    /// (the canonical form imported interfaces take under
+    /// `structural_transit_with_mode(Navigate)` lowering). It dispatches
+    /// `ProjectPath { source, [], Published(Shallow) }` so the walker
+    /// unwraps the carrier through the existing `Instantiate(Published(
+    /// Shallow))` path and returns the source's
+    /// [`SurfaceMember`]s directly.
+    ///
+    /// Returning the full `SurfaceMember` list (not just names) lets the
+    /// Shallow walker's `synthesise_mapped_surface`:
+    ///   - reuse `source_member.value` directly for the Identity-mapper
+    ///     case (preserving `Readonly<T>` / `Partial<T>` semantics even
+    ///     when the source is a DeclRef);
+    ///   - inherit `source_member.optional` / `source_member.readonly`
+    ///     bits for the `OptionalityMod::Keep` / `ReadonlyMod::Keep`
+    ///     cases;
+    ///   - fall back to the per-key
+    ///     [`Self::materialize_mapped_member_value_for_key`] substrate
+    ///     for the `MapperKind::Computed` case.
+    ///
+    /// **Diagnostic propagation**: the inner dispatch's
+    /// `walker_diagnostics` / `dep_signature` / `cache_suppress` flow
+    /// into the active fact tracer via the dispatch's own
+    /// `execute` cache pipeline; no diagnostics are silently dropped.
+    ///
+    /// **Recursion safety**: the helper dispatches one
+    /// `SemanticQueryKey::ProjectPath` and reads its terminal node. The
+    /// dispatch's same-path recursion sentinel guards against
+    /// `Mapped`-shaped sources whose synthesise call re-enters this
+    /// helper (the recursion is caught by the dispatch layer's
+    /// reentrance check and returns `Recursive`, which surfaces as
+    /// `None` here).
+    ///
+    /// **`context` parameter**: carries the caller's
+    /// `ProjectionReductionContext` for telemetry / cache scoping
+    /// alignment — the internal dispatch is fixed at
+    /// `Published(Shallow)` per the codex contract (Q3). Callers
+    /// passing a non-Published context to this helper are calling
+    /// out-of-contract; only `synthesise_mapped_surface` (running
+    /// under publication demand) is meant to drive it.
+    pub(super) fn mapped_surface_source_members_for_projection(
+        &self,
+        source: SemanticNodeId,
+        _context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<Vec<SurfaceMember>> {
+        let read = self.execute_read(SemanticQueryKey::ProjectPath {
+            base: source,
+            path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Shallow,
+            ),
+        });
+        // Fan the sub-dispatch's dep_signature into the active fact
+        // tracer so the caller's cache-validity signature observes the
+        // same facts the source enumeration depended on. Without this
+        // the parent Mapped surface would warm with a signature missing
+        // the source-file content version.
+        crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, &read.dep_signature);
+        let node = match read.value {
+            QueryResult::Value(id) => id,
+            // `Recursive` (same-path reentrance) and `Error` propagate
+            // as a None-from-enumeration signal — `synthesise_mapped_surface`
+            // falls through to the per-key substrate or returns None.
+            QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
+        };
+        match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Object(view)) => Some(view.members.to_vec()),
+            _ => None,
+        }
+    }
+
     /// Per-key Mapped member name materialiser — shared by
     /// [`Self::build_mapped_type`] and the Shallow walker's
     /// `synthesise_mapped_surface`.

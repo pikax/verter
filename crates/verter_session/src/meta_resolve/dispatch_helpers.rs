@@ -36,6 +36,193 @@ use crate::resolver_core::ResolverContext;
 use crate::types::ProjectionMode;
 use std::sync::Arc;
 
+// ─────────────────────────────────────────────────────────────────────
+// Realize-callable-member primitive — Transit-Shallow Publication.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Realize a slot/macro member value to its underlying callable
+/// [`crate::semantic_query::SemanticNodeData::Function`] node, if one
+/// exists, by normalizing through the carrier shells the
+/// `StructuralTransit(Navigate)` macro-publication path produces.
+///
+/// Under the Transit-Shallow Publication contract, a macro
+/// publication helper lowers its payload at
+/// `structural_transit_with_mode(Navigate)`. The published slot
+/// member's value is therefore NOT a fully-reduced `Function` —
+/// it may be:
+///   - a `Function` (the simple case);
+///   - an `Alias { inner }` (one-level alias wrap);
+///   - a `Conditional` that's decidable but didn't reduce because the
+///     publication context carrier-stopped operator reduction;
+///   - an `InstantiationRef { base, args }` carrier waiting for
+///     instantiation;
+///   - a `DeclRef { identity }` carrier waiting for declaration
+///     resolution.
+///
+/// Consumers (the graph-native slot binding extractor's `Function`
+/// match arm, `surface_member_to_expanded_field`'s classification,
+/// the slot projector) MUST normalize their input through this
+/// realization primitive BEFORE deciding "not a callable".
+///
+/// ## Realization steps (in order)
+///
+/// 1. **`Function`** → return verbatim.
+/// 2. **`Alias { inner }`** → recurse on `inner` (one-hop alias unwrap).
+/// 3. **`Conditional`** → dispatch the conditional through the relation
+///    engine so a decidable conditional reduces to a single branch.
+///    The reduction is independent of the parent's
+///    `may_reduce_operator` gate (the relation engine has its own
+///    decidability check). Recurse on the reduced result.
+/// 4. **`InstantiationRef { base, args }`** → dispatch `Instantiate`
+///    under `structural_transit_with_mode(Navigate)` so the body's
+///    nested operators carrier-stop while `Conditional` reduction
+///    (which is what produces the Function for `T extends (props: P)
+///    => any ? F : ...`) still fires. Recurse on the body.
+/// 5. **`DeclRef { identity }`** → dispatch `ResolveDecl` to unwrap the
+///    identity, then recurse on the resolved body.
+///
+/// Any other shape (Object, Union, Intersection, Primitive, Mapped,
+/// KeyOf, ...) returns `None` — the consumer's "not a function" arm
+/// fires.
+///
+/// **Cycle / depth safety**: bounded at depth 32 — generous enough for
+/// real-world carrier nesting (Alias → InstantiationRef → Conditional →
+/// Function is depth 4), tight enough to fail loudly on pathological
+/// graphs without consuming the test budget.
+///
+/// **Diagnostic propagation**: every sub-dispatch uses `execute_read`
+/// and fans the `dep_signature` into the active fact tracer so the
+/// caller's cache validity signature observes the same facts the
+/// realization depended on.
+#[allow(dead_code)]
+pub(crate) fn realize_callable_member(
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    node: crate::semantic_query::SemanticNodeId,
+    context: crate::semantic_query::ProjectionReductionContext,
+) -> Option<crate::semantic_query::SemanticNodeId> {
+    realize_callable_member_inner(dispatch, node, context, 0)
+}
+
+#[allow(dead_code, clippy::only_used_in_recursion)]
+fn realize_callable_member_inner(
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    node: crate::semantic_query::SemanticNodeId,
+    context: crate::semantic_query::ProjectionReductionContext,
+    depth: u32,
+) -> Option<crate::semantic_query::SemanticNodeId> {
+    use crate::meta_resolve::dep_signature::emit_dispatch_dep_signature_facts;
+    use crate::semantic_query::{
+        ProjectionMode, ProjectionReductionContext, QueryResult, ResolveDeclKey, SemanticNodeData,
+        SemanticQueryKey,
+    };
+
+    if depth > 32 {
+        return None;
+    }
+    let data = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node)?;
+    match data.as_ref() {
+        // (1) Function — the realized callable. Return verbatim.
+        SemanticNodeData::Function { .. } => Some(node),
+
+        // (2) Alias → recurse on inner.
+        SemanticNodeData::Alias(inner) => {
+            realize_callable_member_inner(dispatch, *inner, context, depth + 1)
+        }
+
+        // (3) Conditional — re-dispatch through the relation engine so
+        // a decidable conditional reduces to a single branch (the
+        // SemanticQueryKey::Conditional dispatch carries its own
+        // decidability gate independent of the parent's
+        // may_reduce_operator demand). The Conditional node stores
+        // structurally-normalised `true_branch` / `false_branch` ids;
+        // the `*_ref` companion fields hold the pre-normalisation
+        // carrier identities used for cache identity but are not
+        // needed here (the query key uses the normalised branches).
+        SemanticNodeData::Conditional {
+            check,
+            extends,
+            true_branch_ref,
+            false_branch_ref,
+            distributive,
+        } => {
+            let check = *check;
+            let extends = *extends;
+            let true_branch = *true_branch_ref;
+            let false_branch = *false_branch_ref;
+            let distributive = *distributive;
+            drop(data);
+            let read = dispatch.execute_read(SemanticQueryKey::Conditional {
+                check,
+                extends,
+                true_branch,
+                false_branch,
+                distributive,
+            });
+            emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
+            let reduced = match read.value {
+                QueryResult::Value(id) if id != node => id,
+                // A `Value(id) where id == node` means the dispatch
+                // returned the deferred Conditional shell unchanged
+                // (not decidable) — nothing further to realize.
+                _ => return None,
+            };
+            realize_callable_member_inner(dispatch, reduced, context, depth + 1)
+        }
+
+        // (4) InstantiationRef — instantiate under transit demand so
+        // the body's Mapped / KeyOf carriers stay shallow while
+        // Conditional reduction (which is what turns
+        // `ExtendSlotWithPlan<TPlan, K>` into a Function) fires.
+        SemanticNodeData::InstantiationRef { base, args } => {
+            let base = base.clone();
+            let args = Arc::clone(args);
+            drop(data);
+            let body_context =
+                ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
+            let read = dispatch.execute_read(SemanticQueryKey::Instantiate {
+                base,
+                args,
+                context: body_context,
+            });
+            emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
+            let body = match read.value {
+                QueryResult::Value(id) => id,
+                QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
+            };
+            realize_callable_member_inner(dispatch, body, context, depth + 1)
+        }
+
+        // (5) DeclRef — resolve the declaration, then recurse. The
+        // `whole_hash` on the DeclIdentity participates in DeclRef
+        // interning but the resolver picks the current artifact via
+        // `ScopeId { canonical_id, local_scope }` — the canonical
+        // ResolveDecl dispatch pattern from
+        // `project_semantic_dispatch::mod::resolve_decl_key`.
+        SemanticNodeData::DeclRef { identity } => {
+            let identity = identity.clone();
+            drop(data);
+            let read = dispatch.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                scope: crate::semantic_query::ScopeId {
+                    canonical_id: Arc::clone(&identity.canonical_id),
+                    local_scope: None,
+                },
+                name: Arc::clone(&identity.decl_name),
+            }));
+            emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
+            let resolved = match read.value {
+                QueryResult::Value(id) => id,
+                QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
+            };
+            realize_callable_member_inner(dispatch, resolved, context, depth + 1)
+        }
+
+        // Any other shape (Object, Union, Intersection, Primitive,
+        // Mapped, KeyOf, IndexedAccess, TypeOf, TypeParam, Literal,
+        // Tuple, Array, TemplateLiteral, Opaque) — not callable.
+        _ => None,
+    }
+}
+
 /// Class A surface projection — dispatch-equivalent
 /// of `ComponentMetaQueryEngine::project_expr_surface_expr`.
 ///

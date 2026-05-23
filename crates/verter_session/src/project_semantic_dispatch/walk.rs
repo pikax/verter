@@ -2401,6 +2401,20 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         // structurally aligned.
         let mut keys: Vec<Arc<str>> = Vec::new();
         let collected = collect_literal_keys(self.graph(), mapper.key_space, &mut keys);
+        // Optional source-member surface — populated only when the new
+        // `mapped_surface_source_members_for_projection` helper resolves
+        // the source carrier to an `Object`. Used by the per-key build
+        // loop to:
+        //   - feed the Identity-mapper fast path (`mapper.kind ==
+        //     MapperKind::Identity` → use `source_member.value`
+        //     directly, exactly as `build_mapped_type` does at the
+        //     Expanded publication path); and
+        //   - inherit `OptionalityMod::Keep` / `ReadonlyMod::Keep`
+        //     modifiers from the source member.
+        // `None` for sources that did not resolve to an Object (e.g.,
+        // the source is itself a Mapped / KeyOf carrier-stop, primitive,
+        // etc.).
+        let mut source_members: Option<Vec<crate::semantic_query::SurfaceMember>> = None;
         if !collected {
             // The shared enumerator on the SOURCE handles
             // `Opaque(DeclPlaceholder)` / `Object` / `Intersection` /
@@ -2411,7 +2425,33 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             keys.clear();
             match self.dispatch.key_names_from_base_node(source) {
                 Some(enumerated) => keys = enumerated,
-                None => return None,
+                None => {
+                    // Block 6.i Transit-Shallow Publication (codex Q1
+                    // #2 / Q3): the source is a `DeclRef` /
+                    // `InstantiationRef` carrier under
+                    // `StructuralTransit(Navigate)` lowering and the
+                    // global `key_names_from_base_node` deliberately
+                    // does NOT unwrap those (the Identity fast path
+                    // depends on that constraint). Fall back to the
+                    // synthesise-local
+                    // `mapped_surface_source_members_for_projection`
+                    // helper which dispatches the source through
+                    // `ProjectPath { source, [], Published(Shallow) }`
+                    // and reads its terminal `Object` surface. The
+                    // helper returns the full `SurfaceMember` list so
+                    // the per-key build loop can pick Identity fast
+                    // path values + source modifiers when available.
+                    match self
+                        .dispatch
+                        .mapped_surface_source_members_for_projection(source, self.context)
+                    {
+                        Some(members) => {
+                            keys = members.iter().map(|m| Arc::clone(&m.name)).collect();
+                            source_members = Some(members);
+                        }
+                        None => return None,
+                    }
+                }
             }
         }
         if keys.is_empty() {
@@ -2439,21 +2479,57 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             );
         let optionality = mapper.optionality;
         let readonly_mod = mapper.readonly;
-        let optional = matches!(optionality, crate::semantic_query::OptionalityMod::Add);
-        let readonly = matches!(readonly_mod, crate::semantic_query::ReadonlyMod::Add);
+        // Identity-mapper fast path detection. Block 6.i
+        // Transit-Shallow Publication (codex Q1 #3): when
+        // `mapper.kind == Identity` (the canonical
+        // `[K in keyof T]: T[K]` shape under `Readonly` / `Partial` /
+        // `Required`) AND the source enumeration yielded a usable
+        // `SurfaceMember` list, the per-key value is the source
+        // member's `value` directly — exactly as `build_mapped_type`
+        // does at the Expanded publication path. The per-key
+        // `materialize_mapped_member_value_for_key` substrate is
+        // reserved for the Computed mapper case (e.g.
+        // `ExtendSlotWithPlan<TPlan, K>`-style Conditional bodies).
+        let value_is_identity = matches!(mapper.kind, crate::semantic_query::MapperKind::Identity);
         let members = keys
             .into_iter()
             .map(|name| {
-                // Per-key value: substitute the binder and materialise
-                // through the shared helper. Falls back to the
-                // SUBSTITUTED carrier (binder replaced) on Opaque /
-                // Miss — NEVER the raw `mapper.value_expr` which
-                // contains the free binder.
-                let value = self.dispatch.materialize_mapped_member_value_for_key(
-                    mapper,
-                    name.as_ref(),
-                    materialise_context,
-                );
+                let source_member = source_members
+                    .as_ref()
+                    .and_then(|m| m.iter().find(|sm| sm.name == name));
+                // Optionality / readonly resolution per TS semantics:
+                //   - Add → always on
+                //   - Remove → always off
+                //   - Keep → inherit from source member (if known,
+                //     else false). Knowing the source member is what
+                //     the new source-surface helper unlocks for
+                //     DeclRef-source mapped types.
+                let optional = match optionality {
+                    crate::semantic_query::OptionalityMod::Add => true,
+                    crate::semantic_query::OptionalityMod::Remove => false,
+                    crate::semantic_query::OptionalityMod::Keep => {
+                        source_member.map(|m| m.optional).unwrap_or(false)
+                    }
+                };
+                let readonly = match readonly_mod {
+                    crate::semantic_query::ReadonlyMod::Add => true,
+                    crate::semantic_query::ReadonlyMod::Remove => false,
+                    crate::semantic_query::ReadonlyMod::Keep => {
+                        source_member.map(|m| m.readonly).unwrap_or(false)
+                    }
+                };
+                // Identity fast path — use source_member.value
+                // verbatim. Computed path — substitute the binder
+                // and materialise through the shared substrate.
+                let value = if let (Some(sm), true) = (source_member, value_is_identity) {
+                    sm.value
+                } else {
+                    self.dispatch.materialize_mapped_member_value_for_key(
+                        mapper,
+                        name.as_ref(),
+                        materialise_context,
+                    )
+                };
                 // Per-key produced name: apply `name_remap` through
                 // the same shared helper so `as <expr>` clauses fold
                 // identically to the Expanded path.
