@@ -1712,6 +1712,21 @@ pub(crate) fn produce_one_macro_object_shape(
     // re-resolves on demand. This closes the ChatMessages
     // `outputSchema|execute` audit-footprint leak for non-slot macros
     // (props / emits / exposed / options).
+    //
+    // Block 6.i round-8 STOP-condition: the non-slot path's empirical
+    // migration to transit-shallow Class A breaks the inherited emits
+    // branch-merge tests
+    // (`resolver_coverage_inherited_emits_branch_merged_surface`,
+    // `round7_inherited_emits_branch_merged_surface_survives_transit_cutover`).
+    // The pre-existing ChatMessage (singular) `outputSchema | execute`
+    // props-path leak (61 edges, present at HEAD baseline `3974c11e0`)
+    // is therefore NOT closed in round 8 — closure requires either
+    // (a) a finer-grained gate on the Class A surface filter to admit
+    // carrier shells for props but not for inherited-emits branch
+    // merges, or (b) a separate consumer migration with cooperating
+    // path-precise carrier-stop. Both are out of scope for round 8 per
+    // brief STOP condition #4 ("new consumer regression appears that
+    // round-7 didn't predict: STOP").
     let solver_result = scoped_solver_result.unwrap_or_else(|| {
         let projected = project_expr_class_a_via_dispatch_threaded(
             query_engine.ctx,
