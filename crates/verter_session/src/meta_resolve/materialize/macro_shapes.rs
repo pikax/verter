@@ -1700,35 +1700,19 @@ pub(crate) fn produce_one_macro_object_shape(
         }
         _ => None,
     };
-    // Route through dispatch's surface projection + the dispatch-backed
-    // `deep_resolve_slot_function_refs` on CMQE, treating the result
-    // as an exact-concrete SolverResult so
+    // Route through dispatch's Class A Expanded surface projection
+    // and treat the result as an exact-concrete `SolverResult` so
     // `solver_result_to_object_expansion` still derives the expansion.
+    //
+    // Block 6.i leak-close-3 (Q7) — the deep_resolve_slot_function_refs
+    // post-pass that previously walked every Ref-typed property body
+    // is deleted. Class A Expanded still produces the macro's top-
+    // level Object surface (preserving unresolved-import diagnostics);
+    // each property's Ref-typed body stays as a carrier the consumer
+    // re-resolves on demand. This closes the ChatMessages
+    // `outputSchema|execute` audit-footprint leak for non-slot macros
+    // (props / emits / exposed / options).
     let solver_result = scoped_solver_result.unwrap_or_else(|| {
-        // Block 6.i Commit AX (continuation) — the cursor-aware
-        // Shallow-terminal macro-surface helper draft at this
-        // callsite is DEFERRED. The draft replaced
-        // `project_expr_class_a_via_dispatch_threaded` (Navigate
-        // base + Expanded terminal) with
-        // `project_macro_surface_shallow_via_dispatch_threaded`
-        // (Navigate base + Shallow terminal, no
-        // `deep_resolve_slot_function_refs` post-pass) but did
-        // NOT close the 62-edge `outputSchema|execute` audit gate
-        // — the residual leak originates in the slot path's
-        // `deep_resolve_slot_function_refs` chain that the slot-
-        // binding extraction contract requires (see
-        // `produce_one_macro_object_shape_for_slots`). The
-        // standalone Shallow helper for non-slot macros also
-        // regressed
-        // `project_emits_unresolved_import_publishes_diagnostic`
-        // because the Shallow walker's permissive output for
-        // unresolved imports suppresses the
-        // `resolve_payload_surface` failure path. See
-        // `D:/tmp/AX-continuation-fix-report.md` for the empirical
-        // findings; the rollout is blocked until
-        // `project_expr_surface_expr_via_host_threaded`
-        // demand-bounding lands (the KNOWN-RISK producer named in
-        // the brief).
         let projected = project_expr_class_a_via_dispatch_threaded(
             query_engine.ctx,
             Some(query_engine),
@@ -1736,12 +1720,8 @@ pub(crate) fn produce_one_macro_object_shape(
             lowered,
         )
         .unwrap_or_else(|| lowered.clone());
-        let deeply_resolved =
-            query_engine.deep_resolve_slot_function_refs(owner_canonical, &projected);
         verter_semantic::analysis::type_expand::solver_result_to_object_expansion(
-            verter_semantic::analysis::type_solver::result::SolverResult::exact_concrete(
-                deeply_resolved,
-            ),
+            verter_semantic::analysis::type_solver::result::SolverResult::exact_concrete(projected),
         )
     });
     let solver_count = shape_surface_count(&solver_result);
@@ -2109,8 +2089,19 @@ pub(crate) fn project_named_ref_imported_scope_shape(
     Some(result)
 }
 
-/// Like `produce_one_macro_object_shape` but applies `deep_resolve_slot_function_refs`
-/// on the solver path for defineSlots.
+/// `defineSlots` macro-shape publication.
+///
+/// Block 6.i leak-close-3 (Q7 architecture). Slot Function param
+/// types stay as Ref carriers — the published `Function { params:
+/// [(propsName, RefCarrier)], return }` shape preserves the consumer
+/// re-resolution contract. Slot-binding extraction runs through
+/// [`compute_bindings_via_graph`] (`slot_binding_graph.rs`), which is
+/// graph-native and dispatches its own `ProjectPath { mode: Shallow }`
+/// queries on the macro payload — independent of the published shape.
+/// The parser-side enumerator `slot_bindings_from_type_expr`
+/// (`verter_semantic::analysis::component_meta`) handles Ref-typed
+/// param surfaces by falling through to `evaluated_slot_bindings`,
+/// which fills the row from the graph-native path.
 pub(crate) fn produce_one_macro_object_shape_for_slots(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner_canonical: &str,
@@ -2148,14 +2139,10 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
         }
     }
 
-    // ── Non-object body: dispatch projection first, then projection on warm caches ─
-    // dispatch's `project_expr_surface_expr` replaces
-    // `owner_engine.solve`; `CMQE::deep_resolve_slot_function_refs`
-    // replaces the retired `type_eval_build::deep_resolve_slot_function_refs`
-    // pass. Both route through the shared dispatch memo so caches stay
-    // path-independent.
+    // ── Non-object body: dispatch projection through Class A Expanded
+    // ── then fall back to the compound-objects lenient path.
     //
-    // Path C C11-residual-A: when the strict `project_expr_surface_expr`
+    // Path C C11-residual-A: when the strict `project_expr_class_a_via_dispatch`
     // returns `None` because a compound-shape sibling is still a
     // deferred shell (e.g. `{ explicit slots } & DynamicSlots<...>` —
     // the `DynamicSlots` arm is a Mapped that can't enumerate keys
@@ -2165,24 +2152,15 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
     // `solver_result_to_object_expansion`. The expansion's existing
     // Intersection-merging in [`type_expr_to_expanded_shape`] then
     // collects the explicit slot members from the compound shape.
-    // the strict
-    // `project_expr_surface_expr` migrates to the shared dispatch
-    // helper. The lenient
-    // `project_expr_surface_expr_with_compound_objects` fallback is
-    // DEFERRED to 5e/5f per the brief note and stays on the engine
-    // for now.
-    // Block 6.i Commit AX — slot-shape projection KEEPS the legacy
-    // Expanded-terminal path because slot-binding extraction requires
-    // Function-signature exposure inside each slot's value type (the
-    // slot's `(props: ...) => any` shape). Switching to the
-    // Shallow-terminal helper would leave slot members as Ref
-    // carriers, and `deep_resolve_slot_function_refs` cannot recover
-    // the per-slot parameter introspection needed by
-    // [`resolve_slot_bindings_graph_native`]. The non-slot
-    // (props/emits/exposed/options) callsite above uses the
-    // Shallow-terminal helper because those macro shapes publish
-    // member NAMES + carrier bodies; the slot path is the explicit
-    // exception captured here.
+    //
+    // Block 6.i leak-close-3 (Q7) — the `deep_resolve_slot_function_refs`
+    // post-pass that previously walked each slot Function's
+    // parameter types and recursively materialised every Ref through
+    // `project_expr_surface_expr_via_host_threaded(Expanded, Expanded,
+    // Published)` is deleted. The Class A Expanded projection still
+    // produces the slot Object surface; each slot Function's param
+    // type stays as a Ref carrier. The slot-binding consumer reaches
+    // the bindings via the graph-native path (see fn docstring).
     let projected_body =
         project_expr_class_a_via_dispatch(query_engine.ctx, owner_canonical, lowered)
             .or_else(|| {
@@ -2195,11 +2173,9 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
             })
             .unwrap_or_else(|| lowered.clone());
     let _ = cursor; // cursor finalisation runs at the call site of `produce_one_macro_object_shape_for_slots`.
-    let deeply_resolved =
-        query_engine.deep_resolve_slot_function_refs(owner_canonical, &projected_body);
     let solver_result = verter_semantic::analysis::type_expand::solver_result_to_object_expansion(
         verter_semantic::analysis::type_solver::result::SolverResult::exact_concrete(
-            deeply_resolved,
+            projected_body,
         ),
     );
     let solver_count = shape_surface_count(&solver_result);
@@ -2208,9 +2184,9 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
         project_expr_class_a_shape_via_dispatch(query_engine.ctx, owner_canonical, lowered)
             .and_then(|shape| {
                 let projected_expr = expanded_shape_to_type_expr(&shape);
-                let resolved_expr =
-                    query_engine.deep_resolve_slot_function_refs(owner_canonical, &projected_expr);
-                registry_entry_to_expanded_shape(&resolved_expr).and_then(|resolved_shape| {
+                // Block 6.i leak-close-3 (Q7) — drop the
+                // `deep_resolve_slot_function_refs` post-pass.
+                registry_entry_to_expanded_shape(&projected_expr).and_then(|resolved_shape| {
                     has_shape_surface(&resolved_shape).then(|| {
                         verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
                             resolved_shape,
@@ -2227,9 +2203,9 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
     )
     .and_then(|shape| {
         let projected_expr = expanded_shape_to_type_expr(&shape.value);
-        let resolved_expr =
-            query_engine.deep_resolve_slot_function_refs(owner_canonical, &projected_expr);
-        registry_entry_to_expanded_shape(&resolved_expr).and_then(|resolved_shape| {
+        // Block 6.i leak-close-3 (Q7) — drop the
+        // `deep_resolve_slot_function_refs` post-pass.
+        registry_entry_to_expanded_shape(&projected_expr).and_then(|resolved_shape| {
             has_shape_surface(&resolved_shape).then(|| {
                 verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
                     resolved_shape,

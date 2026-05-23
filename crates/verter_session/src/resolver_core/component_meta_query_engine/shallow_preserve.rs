@@ -1188,159 +1188,43 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         )
     }
 
-    /// Walk an Object's properties/methods and resolve any
-    /// `TypeExpr::Ref` leaves (inside property types, function return
-    /// types, array elements, union/intersection arms) to their
-    /// dispatch-projected surface (replacement for the
-    /// retired `type_eval_build::deep_resolve_slot_function_refs`).
-    ///
-    /// Non-Object inputs are returned verbatim. Ref resolution routes
-    /// through [`Self::project_expr_surface_expr`] so it uses the same
-    /// dispatch memo (`SemanticGraphStore`) + `instantiate_active`
-    /// guards as the rest of the component-meta pipeline,
-    /// guaranteeing one cache entry per `(scope, expr)` regardless of
-    /// entry point.
-    pub fn deep_resolve_slot_function_refs(
-        &mut self,
-        scope_canonical_id: &str,
-        expr: &TypeExpr,
-    ) -> TypeExpr {
-        use verter_type_expr::{ObjectMember, ObjectProperty};
-
-        match expr {
-            TypeExpr::Object(obj) => {
-                let properties: Vec<ObjectMember> = obj
-                    .properties
-                    .iter()
-                    .map(|member| match member {
-                        ObjectMember::Property(p) => ObjectMember::Property(ObjectProperty {
-                            name: p.name.clone(),
-                            ty: self.deep_resolve_type_refs(scope_canonical_id, &p.ty),
-                            optional: p.optional,
-                            readonly: p.readonly,
-                        }),
-                        ObjectMember::Method(m) => {
-                            ObjectMember::Method(verter_type_expr::MethodSignature {
-                                name: m.name.clone(),
-                                function: self
-                                    .deep_resolve_fn_refs(scope_canonical_id, &m.function),
-                                optional: m.optional,
-                            })
-                        }
-                        other => other.clone(),
-                    })
-                    .collect();
-                TypeExpr::Object(std::sync::Arc::new(verter_type_expr::ObjectExpr {
-                    properties,
-                }))
-            }
-            // Path C C11-residual-A: walk compound shapes so
-            // `defineSlots<TabsSlots<T>>` patterns with
-            // `{ leading?, content? } & DynamicSlots<...>` bodies still
-            // resolve their explicit Object arm's `SlotProps<T>` members
-            // into Function signatures for slot-binding extraction.
-            TypeExpr::Parenthesized(inner) => TypeExpr::Parenthesized(std::sync::Arc::new(
-                self.deep_resolve_slot_function_refs(scope_canonical_id, inner),
-            )),
-            TypeExpr::Intersection(parts) => TypeExpr::Intersection(std::sync::Arc::from(
-                parts
-                    .iter()
-                    .map(|p| self.deep_resolve_slot_function_refs(scope_canonical_id, p))
-                    .collect::<Vec<_>>(),
-            )),
-            TypeExpr::Union(variants) => TypeExpr::Union(std::sync::Arc::from(
-                variants
-                    .iter()
-                    .map(|v| self.deep_resolve_slot_function_refs(scope_canonical_id, v))
-                    .collect::<Vec<_>>(),
-            )),
-            _ => expr.clone(),
-        }
-    }
-
-    fn deep_resolve_type_refs(&mut self, scope_canonical_id: &str, expr: &TypeExpr) -> TypeExpr {
-        match expr {
-            TypeExpr::Ref { .. } => {
-                // Block 6.i leak-close-2 — this callsite is on the
-                // leak path; it is DELETED in leak-close-3 (Q7 Claude
-                // architecture) together with the whole `deep_resolve_*`
-                // chain. For this commit, pass the legacy Expanded
-                // base + Expanded terminal under Published demand so
-                // behaviour is unchanged while the helper signature
-                // becomes mode-explicit.
-                crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
-                    self,
-                    scope_canonical_id,
-                    expr,
-                    crate::semantic_query::ProjectionMode::Expanded,
-                    crate::semantic_query::ProjectionMode::Expanded,
-                    crate::semantic_query::ReductionDemand::Published,
-                )
-                .unwrap_or_else(|| expr.clone())
-            }
-            TypeExpr::Function(func) => TypeExpr::Function(std::sync::Arc::new(
-                self.deep_resolve_fn_refs(scope_canonical_id, func),
-            )),
-            TypeExpr::Array { element, readonly } => TypeExpr::Array {
-                element: std::sync::Arc::new(
-                    self.deep_resolve_type_refs(scope_canonical_id, element),
-                ),
-                readonly: *readonly,
-            },
-            TypeExpr::Union(variants) => TypeExpr::Union(std::sync::Arc::from(
-                variants
-                    .iter()
-                    .map(|v| self.deep_resolve_type_refs(scope_canonical_id, v))
-                    .collect::<Vec<_>>(),
-            )),
-            TypeExpr::Intersection(parts) => TypeExpr::Intersection(std::sync::Arc::from(
-                parts
-                    .iter()
-                    .map(|p| self.deep_resolve_type_refs(scope_canonical_id, p))
-                    .collect::<Vec<_>>(),
-            )),
-            // Operator shells preserve their symbolic identity
-            // through deep-resolve. Per the type-resolution
-            // architecture rule "type navigation must stay narrower
-            // than expansion": projecting an `IndexedAccess` /
-            // `Conditional` / `Mapped` / `KeyOf` / `TypeOf` at a
-            // slot-binding boundary materialises the helper away
-            // (e.g. `Button['ui']` -> `Object<base, label>`) and
-            // erases the source-text shape downstream consumers
-            // re-resolve from. The graph-native synthesizer handles
-            // these shapes via empty-path Shallow + the standard
-            // Conditional / IndexedAccess / Mapped dispatch arms;
-            // deep-resolve does not need to pre-materialise them.
-            TypeExpr::Conditional { .. }
-            | TypeExpr::IndexedAccess { .. }
-            | TypeExpr::Mapped { .. }
-            | TypeExpr::KeyOf(_)
-            | TypeExpr::TypeOf(_) => expr.clone(),
-            _ => expr.clone(),
-        }
-    }
-
-    fn deep_resolve_fn_refs(
-        &mut self,
-        scope_canonical_id: &str,
-        func: &verter_type_expr::FunctionExpr,
-    ) -> verter_type_expr::FunctionExpr {
-        verter_type_expr::FunctionExpr {
-            parameters: func
-                .parameters
-                .iter()
-                .map(|p| verter_type_expr::FunctionParam {
-                    name: p.name.clone(),
-                    ty: self.deep_resolve_type_refs(scope_canonical_id, &p.ty),
-                    optional: p.optional,
-                    rest: p.rest,
-                })
-                .collect(),
-            return_type: func
-                .return_type
-                .as_ref()
-                .map(|rt| std::sync::Arc::new(self.deep_resolve_type_refs(scope_canonical_id, rt))),
-            type_parameters: func.type_parameters.clone(),
-        }
-    }
+    // Block 6.i leak-close-3 — Q7 deletion (Claude architecture).
+    //
+    // The trio `deep_resolve_slot_function_refs` /
+    // `deep_resolve_type_refs` / `deep_resolve_fn_refs` previously
+    // walked Object members / Function params / Array elements /
+    // Union / Intersection arms and dispatched every `TypeExpr::Ref`
+    // through `project_expr_surface_expr_via_host_threaded(Expanded,
+    // Expanded, Published)`. That per-Ref Expanded recursion was the
+    // ChatMessages `outputSchema|execute` audit-footprint leak —
+    // walking `UIMessage<M,D,U>` slot-bindings expanded `UITools<…>`
+    // into per-tool Object surfaces and emitted ProjectMember edges
+    // for `outputSchema` / `execute`.
+    //
+    // Q7 deletes the trio entirely. Macro-shape publication keeps
+    // its top-level Class A Expanded projection so unresolved-import
+    // diagnostics still surface, but slot Function param types and
+    // Object property bodies stay as Ref carriers. Consumers re-
+    // resolve the carrier on demand:
+    //
+    //   * `compute_bindings_via_graph` (graph-native, slot_binding_graph.rs):
+    //     already Shallow throughout. Independent of the published shape.
+    //   * `slot_bindings_from_type_expr` (verter_semantic/component_meta.rs):
+    //     walks `func.parameters.first().ty`. When the param is a Ref
+    //     carrier the recursive enumerator hits the `_ => {}` arm and
+    //     emits no parser-path bindings; `evaluated_slot_bindings` from
+    //     `compute_bindings_via_graph` fills the row instead.
+    //   * Final-result cache, projector surface: re-resolve on demand
+    //     via the universal-caching dispatch substrate.
+    //
+    // Verified discriminating by:
+    //   - `block_6i_leak_closure` audit-invariant test
+    //   - `imported_mapped_slots_reach_resolved_evaluated_types`
+    //     (locked-down): graph-native bindings still produce `plan`
+    //     and `planId`.
+    //   - `slot_binding_imported_props_with_any_index_signature_stays_symbolic`
+    //     (locked-down): IndexedAccess symbolic preservation unaffected.
+    //   - `project_emits_unresolved_import_publishes_diagnostic`
+    //     (locked-down): Class A Expanded still surfaces unresolved-
+    //     import diagnostics; only the post-pass is removed.
 }
