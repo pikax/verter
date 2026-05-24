@@ -526,7 +526,7 @@ pub use host_audit_runtime::{
 };
 pub use types::*;
 
-// Block 6.e per-call-site instrumentation accessors. Production-on
+// Per-call-site instrumentation accessors. Production-on
 // (the counter map is bumped on every `HostStoreView::from_host`
 // invocation) so the bench can dump the attribution table at the end
 // of each pass. The dump is keyed by `&'static Location` propagated

@@ -95,7 +95,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         return cached;
     }
 
-    // Block 6.i — peek the universal ShapeCacheDb (TypeExpr subject,
+    // Peek the universal ShapeCacheDb (TypeExpr subject,
     // whole-subject demand). Path-precise demand narrowing emerges
     // in Commits C–F when projectors thread `SurfaceProjection`
     // cursors and consult `ShapeCacheDb` per-hop.
@@ -357,8 +357,8 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
 /// Dual-emits the accumulated `dep_signature` into the active fact
 /// tracer + `DISPATCH_DEP_SIGNATURE_ACCUMULATOR`, mirroring the
 /// TypeExpr entry's contract.
-/// Context-explicit per-member graph-native reducer entry (Block 6.i
-/// Commit AX, codex-hybrid spec).
+/// Context-explicit per-member graph-native reducer entry
+/// (codex-hybrid spec).
 ///
 /// The caller supplies the publication
 /// [`crate::semantic_query::ProjectionReductionContext`] that flows
@@ -416,14 +416,14 @@ pub(crate) fn type_expr_has_package_backed_object_like_root(
 /// Variant of [`type_expr_has_package_backed_object_like_root`] that
 /// also returns the observed declaration-scope dependency fence.
 ///
-/// Block 6.i F1 — used by the projector's gate-short-circuit admit
+/// Used by the projector's gate-short-circuit admit
 /// paths to thread the package-backed gate's cross-file deps into the
 /// cache entry's `fact_dep_signature`. Records the
 /// `declaration_scope` (and, when distinct, the prepared
 /// `target_scope`) so a content edit to the declaring file
 /// invalidates the cached gate-shortcut entry.
 ///
-/// Block 6.i H2 — the second tuple element is `Option<DepSignature>`:
+/// The second tuple element is `Option<DepSignature>`:
 ///
 ///   * `Some(fence)` — the fence is rooted on `authoritative_current_content_hash`
 ///     observations for every contributing canonical (consistent with

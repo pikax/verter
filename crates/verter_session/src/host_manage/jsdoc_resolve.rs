@@ -686,7 +686,7 @@ pub(crate) fn resolve_jsdoc_tag_type(
     // annotation when projection misses so the caller still receives
     // the unresolved TypeExpr rather than `None`.
     //
-    // Block 6.g C8: route the dispatch helper through the
+    // Route the dispatch helper through the
     // request-bound `ctx` rather than `host: &VerterHost`. Passing
     // `host` here coerced into the bare-host
     // `<&VerterHost as ResolverContext>` impl, which panics under

@@ -375,7 +375,7 @@ pub(crate) fn type_node_has_package_backed_root(
 ///
 /// Reserved for re-wiring once migrates the inline-route
 /// composition site to graph-native (the predicate's only consumer
-/// before commit I sub-task 4 was the registry-route inline
+/// previously the registry-route inline
 /// composition predicate, which was deleted). Tests in
 /// `meta_resolve_tests.rs` exercise this predicate directly.
 #[allow(

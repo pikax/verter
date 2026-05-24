@@ -34,7 +34,7 @@ impl VerterHost {
     /// resolver-tier code on the per-component-meta hot path MUST use
     /// [`Self::prepared_decl_bundle_with_store_view`] instead so the view
     /// is built ONCE at the request boundary and threaded down (per the
-    /// Block 6.c per-request hoist). This entry point survives for
+    /// per-request hoist). This entry point survives for
     /// integration tests + the test-only arm on `impl ResolverContext
     /// for VerterHost::prepared_decl_bundle` — production callers go
     /// through `ctx.prepared_decl_bundle` (which routes through
@@ -180,7 +180,7 @@ impl VerterHost {
                 return self.materialize_prepared_decl_bundle_via_ctx(ctx, &identity);
             }
         }
-        // Block 6.c per-request hoist: route the non-overlay fall-through
+        // Per-request hoist: route the non-overlay fall-through
         // through the view-bound helper, threading `ctx.store_view()`
         // (the request-bound borrow) instead of building a fresh owned
         // snapshot via `self.prepared_decl_bundle(canonical_id)`.
@@ -2006,7 +2006,7 @@ impl VerterHost {
                     &mut seen_facts,
                 );
 
-                // Block 6.c per-request hoist: thread the already-built
+                // Per-request hoist: thread the already-built
                 // request view down through the imported-root resolver
                 // instead of building a fresh owned snapshot per call
                 // (the diagnostic's named hot-path site at

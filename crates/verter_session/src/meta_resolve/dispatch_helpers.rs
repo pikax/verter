@@ -225,7 +225,7 @@ fn realize_callable_member_inner(
 
 // ─────────────────────────────────────────────────────────────────────
 // Macro payload root-shape classifier — path-precise non-slot
-// Class A transit-shallow gate (Block 6.i Round 9).
+// Class A transit-shallow gate.
 // ─────────────────────────────────────────────────────────────────────
 
 /// Classify the macro payload's lowered root as a top-level Conditional
@@ -904,8 +904,8 @@ pub(crate) fn project_type_surface_shape_via_host_threaded<'ctx>(
 }
 
 /// **Transit-shallow** sibling of
-/// [`project_type_surface_shape_via_host_threaded`] (Block 6.i Round
-/// 10 Commit 5 — Chain Y closure, codex Q1-Y).
+/// [`project_type_surface_shape_via_host_threaded`]
+/// (Chain Y closure, codex Q1-Y).
 ///
 /// Closes the route fast-path leak on the nuxt-ui corpus
 /// `EditorDragHandle` (9.9% / 36 of 364 captured ProjectMember

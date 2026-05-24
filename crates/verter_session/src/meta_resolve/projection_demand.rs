@@ -1,4 +1,4 @@
-//! Path-precise projection demand substrate (Block 6.i).
+//! Path-precise projection demand substrate.
 //!
 //! Encodes the published-surface demand at every projection boundary
 //! so projectors / registry walker / fallthrough / cache keys can
@@ -22,7 +22,7 @@
 //!   bare carrier → `All`).
 //! - `KeyFilter::UnknownDeferred` is the explicit STOP marker for
 //!   publication boundaries that still need pre-resolution — the
-//!   architectural invariant under Block 6.i is that production
+//!   architectural invariant is that production
 //!   publication code never observes `UnknownDeferred` at a hop it
 //!   intends to walk (cf. STOP trigger #2: no eager fallback path).
 //! - `ProjectionCursor<'a>` is the call-scoped threading mechanism:
@@ -33,9 +33,9 @@
 //!   `SurfaceProjection` so the recursive descent doesn't fan out
 //!   allocation.
 //!
-//! ## Scope of use (Block 6.i)
+//! ## Scope of use
 //!
-//! Commit A threads `ProjectionCursor` through
+//! The substrate threads `ProjectionCursor` through
 //! `produce_one_macro_object_shape`, its solver/projection helpers,
 //! and `collect_component_meta_registry_refs`. Top-level callers
 //! pass `SurfaceProjection::whole_surface(kind)` (which has
@@ -105,7 +105,7 @@ pub(crate) enum KeyFilter {
 impl KeyFilter {
     /// Whether a candidate key passes this filter.
     ///
-    /// Block 6.i F6 — `UnknownDeferred` at the publication boundary
+    /// `UnknownDeferred` at the publication boundary
     /// is a Rule-5 violation site. The threaded helpers MUST resolve
     /// the filter to `All`/`Include`/`Exclude` before walking. This
     /// method panics via `debug_assert!` when `UnknownDeferred` is
@@ -264,7 +264,7 @@ impl<'a> ProjectionCursor<'a> {
     /// Descend into a child by segment. Returns `None` when the
     /// segment is NOT in the cursor's allowed children.
     ///
-    /// Block 6.i F2+F3 — narrowing-aware contract:
+    /// Narrowing-aware contract:
     ///
     /// 1. If `children[segment]` is explicit → descend into that
     ///    refined child node (true trie navigation; supports deep
@@ -388,7 +388,7 @@ impl<'a> ProjectionCursor<'a> {
 
     /// Descend into a published macro member by name.
     ///
-    /// Block 6.i Commit AX — the per-member publication primitive. A
+    /// The per-member publication primitive. A
     /// macro projector publishes EVERY top-level member name
     /// (`whole_surface` selects the member NAMES). For each admitted
     /// member it then calls this method to obtain the cursor to
@@ -464,7 +464,7 @@ impl<'a> ProjectionCursor<'a> {
     /// The projection mode the caller should materialise a published
     /// macro member's type at.
     ///
-    /// Block 6.i Commit AX — when the cursor is a terminal carrier
+    /// When the cursor is a terminal carrier
     /// (the `descend_published_member` no-explicit-child case) this
     /// returns `ProjectionMode::Navigate`: the member's type is
     /// published as a CARRIER (`Ref { name, type_arguments }`)
@@ -487,7 +487,7 @@ impl<'a> ProjectionCursor<'a> {
 /// [`ProjectionCursor::descend_published_member`] for an admitted
 /// macro member that has no explicit child in the projection trie.
 ///
-/// Block 6.i Commit AX — `terminal_mode = Some(Navigate)`: the macro
+/// `terminal_mode = Some(Navigate)`: the macro
 /// publishes the member's type AS A CARRIER (`Ref { name,
 /// type_arguments }`) rather than expanding its body. This is the
 /// shallow-by-default publication boundary — the leak fix. Distinct
@@ -601,7 +601,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Block 6.i F2 — cursor with explicit children + KeyFilter::All
+    // Cursor with explicit children + KeyFilter::All
     // rejects unspecified segments. Whole-surface self-pin applies ONLY
     // when `children` is empty.
     // -----------------------------------------------------------------
@@ -645,7 +645,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Block 6.i F3 — descend() is a TRUE trie cursor; descending an
+    // descend() is a TRUE trie cursor; descending an
     // Include/Exclude-admitted key yields a fresh whole-surface child
     // cursor (deeper structure is unrestricted; parent filter does not
     // re-apply).
@@ -726,7 +726,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Block 6.i F6 — `KeyFilter::UnknownDeferred` doc/impl mismatch.
+    // `KeyFilter::UnknownDeferred` doc/impl mismatch.
     // The variant's doc claims a debug_assert! panic on the publication
     // boundary. The pre-F6 impl returned `true` (conservative-admit)
     // and never panicked. F6 makes the impl panic in debug builds and
@@ -741,7 +741,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Block 6.i Commit AX — `descend_published_member` returns a
+    // `descend_published_member` returns a
     // TERMINAL CARRIER cursor (Navigate mode) for an admitted member
     // with no explicit child. This is the Rule-5 publication-boundary
     // stop: a macro member's type body is NOT breadth-enumerated.

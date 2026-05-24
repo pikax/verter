@@ -1648,7 +1648,7 @@ pub(crate) fn produce_one_macro_object_shape(
             if let Some((def_canonical, def_name)) =
                 classify_named_ref_for_db_projection(query_engine, owner_canonical, name)
             {
-                // Block 6.i Round 10 Commit 5 (Chain Y closure, codex
+                // Chain Y closure (codex
                 // Q1-Y) — route fast-path is now demand-explicit. The
                 // pre-Round-10 path always called
                 // `project_type_surface_shape_via_host_threaded`
@@ -1750,7 +1750,7 @@ pub(crate) fn produce_one_macro_object_shape(
     // property's value verbatim from the Class A surface — no
     // post-pass walks Ref-typed property bodies.
     //
-    // **Path-precise lowering** (Block 6.i Round 9): the producer
+    // **Path-precise lowering**: the producer
     // branches on the lowered root's semantic shape:
     //
     // - **Conditional root** — the inherited-emits branch-merge
@@ -1804,7 +1804,7 @@ pub(crate) fn produce_one_macro_object_shape(
         )
     });
     let solver_count = shape_surface_count(&solver_result);
-    // Path-precise rescue gate (Block 6.i Round 9). The three rescue
+    // Path-precise rescue gate. The three rescue
     // projectors below (`project_expr_surface_shape_via_host_threaded`,
     // `project_named_ref_surface_shape`,
     // `project_named_ref_imported_scope_shape`) all lower under
@@ -2265,7 +2265,7 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
     // intentionally lenient; transit-shallow Class A above is the
     // demand-driven publication path that the slot publication
     // boundary favours.
-    // Block 6.i Round 10 Commit 4 (Chain Z closure, codex Q1-Z) —
+    // Chain Z closure (codex Q1-Z) —
     // the slot fallback's compound-objects helper migrates from the
     // pre-Round-10 Expanded path (`...via_host_threaded`) to the
     // transit-shallow sibling (`...transit_shallow_via_host_threaded`)

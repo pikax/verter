@@ -106,7 +106,7 @@ impl VerterHost {
         )
         .or_else(|| {
             let expr = verter_type_expr::TypeExpr::named(type_name);
-            // Block 6.g C8: route the dispatch helper through the
+            // Route the dispatch helper through the
             // request-bound `ctx` rather than `self: &VerterHost`.
             // Passing `self` here coerced into the bare-host
             // `<&VerterHost as ResolverContext>` impl, which panics
@@ -150,7 +150,7 @@ impl VerterHost {
         // materialiser still uses the engine for its own bundle-level
         // scope cache.
         //
-        // Block 6.g C8: route through the request-bound `ctx` rather
+        // Route through the request-bound `ctx` rather
         // than `self: &VerterHost`. Same rationale as line 109 above:
         // the bare-host coercion panics under
         // `cfg(not(any(test, debug_assertions)))` deeper in the

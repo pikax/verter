@@ -674,7 +674,7 @@ impl VerterHost {
                         }
                     }
 
-                    // Block 6.i Commit AX (codex-binding) — capture
+                    // Capture
                     // the production-path SemanticNodeId for this
                     // field. Each branch that lowers via dispatch
                     // sets this variable to the produced terminal
@@ -819,7 +819,7 @@ impl VerterHost {
                                             ProjectionMode::Expanded,
                                         )
                                     {
-                                        // Block 6.i Commit AX — capture
+                                        // Capture
                                         // production node id for the audit
                                         // record (replaces the retired
                                         // audit-only re-lowering sidecar).
@@ -969,7 +969,7 @@ impl VerterHost {
                                                     Some(MacroPathSegment::Member(binding)),
                                                     None,
                                                 ) => {
-                                                    // Block 6.i Commit AX —
+                                                    //
                                                     // terminal-id variant
                                                     // exposes the production
                                                     // SemanticNodeId so the
@@ -1041,7 +1041,7 @@ impl VerterHost {
                                             });
                                         match projected {
                                             QueryResult::Value(node_id) => {
-                                                // Block 6.i Commit AX —
+                                                //
                                                 // capture production node
                                                 // id for the audit record
                                                 // before raise.
@@ -1084,7 +1084,7 @@ impl VerterHost {
                         }
                     };
 
-                    // Block 6.i Commit AX (codex-binding) — the
+                    // The
                     // audit-gated re-lowering sidecar is RETIRED.
                     // `produced_node_id` was captured directly off
                     // each production dispatch branch above (or left
