@@ -503,16 +503,6 @@ fn walk_rs_files(path: &PathBuf, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Collect the set of every valid guard-name in the workspace:
-/// 1. `#[test] fn <name>(` declarations in
-///    `crates/*/tests/**/*.rs` and `crates/*/src/**/*_tests.rs`
-///    (i.e. test functions that `cargo test <name>` can run).
-/// 2. Basenames of integration-test files at
-///    `crates/*/tests/<name>.rs` (i.e. the per-test-binary names
-///    that `cargo test --test <name>` can run).
-///
-/// The scan is purely static — no cargo invocation — so it runs
-/// in well under a second on the workspace.
 fn collect_known_guard_names() -> std::collections::HashSet<String> {
     let mut names = std::collections::HashSet::<String>::new();
     let root = workspace_root();
@@ -547,20 +537,33 @@ fn collect_known_guard_names() -> std::collections::HashSet<String> {
             }
         }
 
-        // (2) `fn <name>(` declarations inside the test surfaces.
+        // (2) `#[test] fn <name>(` declarations inside the test surfaces.
         //
         // Test functions live in:
         //   - crates/<X>/tests/**/*.rs (integration tests)
         //   - crates/<X>/src/**/*_tests.rs (extracted #[cfg(test)] modules)
         //
-        // We accept any `fn <name>(` (with optional `pub `) because:
-        //   - the registry already chooses `fn` names that match the
-        //     `#[test]` they refer to (verified by reading the
-        //     surrounding `#[test]` attribute would be stricter but
-        //     adds a parser without changing the predicate's value);
-        //   - non-test helper functions that happen to share a name
-        //     with a registry entry would still let `cargo test <name>`
-        //     find the real test, so accepting them is harmless.
+        // Adjacency contract: a function name is accepted as a
+        // valid guard target ONLY IF the function's `fn <name>(`
+        // declaration line is preceded (within the immediately
+        // adjacent attribute block — typically one or two lines
+        // above, allowing attribute stacking like `#[test]` followed
+        // by `#[ignore]` or `#[serial]`) by a test attribute:
+        //
+        //   - `#[test]` (the standard libtest attribute),
+        //   - `#[tokio::test]` / `#[tokio::test(...)]`,
+        //   - `#[rstest]` / `#[rstest(...)]`,
+        //   - `#[cfg_attr(..., test)]` (conditional-test pattern),
+        //   - any path-attribute ending in `::test` (custom test
+        //     macros that integrate with `cargo test <name>`).
+        //
+        // A bare `fn <name>(` declaration with no `#[test]`-family
+        // attribute on the adjacent attribute block is NOT a test
+        // and MUST NOT be accepted — `cargo test <name>` cannot run
+        // such a function, so a registry entry naming it is a
+        // dangling reference (R6 validity gap closed in Round 19a
+        // Commit 2; reopened post-Round-19a if this predicate
+        // relaxes back to accepting non-`#[test]` declarations).
         let mut files = Vec::new();
         walk_rs_files(&tests_dir, &mut files);
         let src_dir = crate_path.join("src");
@@ -585,10 +588,14 @@ fn collect_known_guard_names() -> std::collections::HashSet<String> {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            for line in src_text.lines() {
+            let lines: Vec<&str> = src_text.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
                 let trimmed = line.trim_start();
-                let after_pub = trimmed.strip_prefix("pub ").unwrap_or(trimmed);
-                let after_fn = match after_pub.strip_prefix("fn ") {
+                let after_async = trimmed.strip_prefix("async ").unwrap_or(trimmed);
+                let after_pub = after_async.strip_prefix("pub ").unwrap_or(after_async);
+                let after_async = after_pub.strip_prefix("async ").unwrap_or(after_pub);
+                let after_const = after_async.strip_prefix("const ").unwrap_or(after_async);
+                let after_fn = match after_const.strip_prefix("fn ") {
                     Some(rest) => rest,
                     None => continue,
                 };
@@ -603,12 +610,94 @@ fn collect_known_guard_names() -> std::collections::HashSet<String> {
                 if name.is_empty() {
                     continue;
                 }
-                names.insert(name.to_string());
+
+                // Adjacency check: walk backwards from the `fn`
+                // line, allowing whitespace-only lines and adjacent
+                // attribute lines (`#[...]`), looking for a
+                // `#[<test-attr>]`. Stop walking on the first
+                // non-attribute, non-blank line — that boundary is
+                // the previous declaration, and the current `fn` is
+                // NOT part of a test attribute block.
+                let mut idx = i;
+                let mut has_test_attr = false;
+                while idx > 0 {
+                    idx -= 1;
+                    let prev = lines[idx].trim();
+                    if prev.is_empty() {
+                        continue;
+                    }
+                    // Comment lines are skipped — they may appear
+                    // between attributes and the `fn` declaration.
+                    if prev.starts_with("//") || prev.starts_with("///") {
+                        continue;
+                    }
+                    if !prev.starts_with("#[") {
+                        break;
+                    }
+                    // Match `#[test]`, `#[tokio::test]`,
+                    // `#[rstest]`, `#[*::test]`, `#[cfg_attr(...,
+                    // test)]`, etc.
+                    if attribute_line_marks_test(prev) {
+                        has_test_attr = true;
+                        break;
+                    }
+                    // Other `#[...]` attribute (e.g. `#[ignore]`,
+                    // `#[serial]`, `#[allow(...)]`) — keep walking
+                    // to look for a `#[test]` above it.
+                }
+
+                if has_test_attr {
+                    names.insert(name.to_string());
+                }
             }
         }
     }
 
     names
+}
+
+/// Returns `true` when `line` (a trimmed source line starting with
+/// `#[`) is a `#[test]`-family attribute that registers the next
+/// function as a libtest test entry-point — see the adjacency
+/// contract in `collect_known_guard_names` for the accepted set.
+fn attribute_line_marks_test(line: &str) -> bool {
+    debug_assert!(line.starts_with("#["));
+    // Strip the leading `#[` and the trailing `]` (or anything
+    // after, since some attributes span lines — but the test
+    // attributes we recognise are single-line forms).
+    let inner = line.strip_prefix("#[").unwrap_or(line).trim_start();
+    // `#[test]` — exact match (allowing for trailing `]`).
+    if inner.starts_with("test]") || inner.starts_with("test(") || inner == "test" {
+        return true;
+    }
+    // `#[<path>::test]` or `#[<path>::test(...)]` —
+    // e.g. `tokio::test`, `async_std::test`, `actix_web::test`,
+    // `serde_test::test`. The path-attribute form is recognised by
+    // a `::test` segment followed by `]` or `(`.
+    if let Some(after_double_colon) = inner.rfind("::test") {
+        let after = &inner[after_double_colon + "::test".len()..];
+        let next = after.chars().next();
+        if matches!(next, Some(']') | Some('(')) {
+            return true;
+        }
+    }
+    // `#[rstest]` / `#[rstest(...)]` — the rstest fixture-driven
+    // test attribute; libtest still names the generated test by
+    // the `fn` name.
+    if inner.starts_with("rstest]") || inner.starts_with("rstest(") || inner == "rstest" {
+        return true;
+    }
+    // `#[cfg_attr(<predicate>, test)]` — conditional-test pattern.
+    // The structural marker is `, test)` at the tail (allowing
+    // whitespace).
+    if inner.starts_with("cfg_attr") {
+        // Look for `, test)` or `,test)` (allowing whitespace).
+        let normalised: String = inner.chars().filter(|c| !c.is_whitespace()).collect();
+        if normalised.contains(",test)") || normalised.contains(",test]") {
+            return true;
+        }
+    }
+    false
 }
 
 /// R6 validity scanner: every guard-name in `CRITICAL_RULE_GUARDS`
