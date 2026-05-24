@@ -339,9 +339,24 @@ async function validateEmissions(results, config) {
   for (const r of results) {
     if (!r.audit_emitted || !r.analysis_emitted) continue;
     const baseName = r.component.replace(/^.*\//, "").replace(/\.vue$/, "");
-    if (!specFiles.has(baseName)) continue;
-    const specPath = resolve(specDir, `${baseName}.json`);
-    const spec = JSON.parse(readFileSync(specPath, "utf-8"));
+    let spec;
+    let specSource;
+    if (specFiles.has(baseName)) {
+      const specPath = resolve(specDir, `${baseName}.json`);
+      spec = JSON.parse(readFileSync(specPath, "utf-8"));
+      specSource = baseName;
+    } else {
+      // Round-16 Commit 3: components without an explicit corpus spec
+      // still participate in the Rule-5 compliance gate. The implicit
+      // spec carries only the Rule-5 invariant (no per-component count
+      // caps or expected-result assertions); broader gates remain
+      // opt-in via authored specs.
+      spec = {
+        component: baseName,
+        rule5Compliance: { enabled: true },
+      };
+      specSource = "<implicit-rule5>";
+    }
     const bundle = {
       analysis: JSON.parse(readFileSync(r.analysis_path, "utf-8")),
       resolution: null,
@@ -350,7 +365,7 @@ async function validateEmissions(results, config) {
     const validation = validateAuditBundle(bundle, spec);
     outputs.push({
       component: r.component,
-      spec: baseName,
+      spec: specSource,
       passed: validation.passed,
       violations: validation.violations,
     });

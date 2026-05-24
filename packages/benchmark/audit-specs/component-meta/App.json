@@ -8,5 +8,8 @@
   },
   "expectedResult": {
     "minProps": 1
+  },
+  "rule5Compliance": {
+    "enabled": true
   }
 }
