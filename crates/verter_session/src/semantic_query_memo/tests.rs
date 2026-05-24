@@ -3455,7 +3455,7 @@ fn alias_resolve_edge_walk_returns_declaration_identity() {
         target,
         OriginEdgeKind::AliasResolve,
         Arc::from(vec![alias_decl].into_boxed_slice()),
-        crate::semantic_query::OriginMeta::MemberName(Arc::from("AliasName")),
+        crate::semantic_query::OriginMeta::AliasName(Arc::from("AliasName")),
         dep_sig_for("/w/a.ts", 1),
     );
 
@@ -3464,7 +3464,7 @@ fn alias_resolve_edge_walk_returns_declaration_identity() {
     assert_eq!(alias_edges[0].sources.as_ref(), &[alias_decl]);
     assert!(matches!(
         &alias_edges[0].meta,
-        crate::semantic_query::OriginMeta::MemberName(name) if name.as_ref() == "AliasName"
+        crate::semantic_query::OriginMeta::AliasName(name) if name.as_ref() == "AliasName"
     ));
 }
 

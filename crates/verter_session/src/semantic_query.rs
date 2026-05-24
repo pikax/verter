@@ -878,9 +878,24 @@ pub enum OriginMeta {
     None,
     /// Branch decision for [`OriginEdgeKind::ConditionalSelect`].
     Branch(BranchSelection),
-    /// Member name for [`OriginEdgeKind::ProjectMember`] /
-    /// [`OriginEdgeKind::AliasResolve`].
-    MemberName(Arc<str>),
+    /// Single-hop projected-member payload for
+    /// [`OriginEdgeKind::ProjectMember`]. Carries the projected member
+    /// name plus a typed [`verter_audit::MemberEdgeProvenance`]
+    /// discriminator that names WHY the edge was emitted (KeyOf
+    /// enumeration, Mapped key enumeration, path-projection step,
+    /// direct published-field emission). The provenance is set at
+    /// every production emit site and consumed by the audit-validator's
+    /// Rule-5 compliance check.
+    ProjectedMember {
+        /// Projected member name.
+        name: Arc<str>,
+        /// Structural provenance for this single-hop ProjectMember edge.
+        provenance: verter_audit::MemberEdgeProvenance,
+    },
+    /// Alias-name payload for [`OriginEdgeKind::AliasResolve`].
+    /// Distinct from [`OriginMeta::ProjectedMember`] so the audit
+    /// bridge translates exhaustively without a `_ =>` fallback.
+    AliasName(Arc<str>),
     /// Index expression for [`OriginEdgeKind::ProjectIndex`].
     Index(IndexKey),
     /// Full path segment list for [`OriginEdgeKind::ProjectPath`].

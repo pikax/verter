@@ -2904,7 +2904,8 @@ fn normalize_records_sources() {
 
 /// `keyof` emits one `ProjectMember` edge per keyspace literal,
 /// sourcing the original object base and carrying the member name
-/// in `OriginMeta::MemberName`.
+/// in `OriginMeta::ProjectedMember` with provenance
+/// `MemberEdgeProvenance::KeyOfEnumerated`.
 #[test]
 fn key_of_records_source_members() {
     let host = host();
@@ -2934,11 +2935,16 @@ fn key_of_records_source_members() {
     for arm in &arms {
         let edges = graph.origins_of_kind(*arm, OriginEdgeKind::ProjectMember);
         for e in &edges {
-            if let OriginMeta::MemberName(name) = &e.meta {
+            if let OriginMeta::ProjectedMember { name, provenance } = &e.meta {
                 found_names.push(name.to_string());
                 assert!(
                     e.sources.contains(&obj),
                     "keyof ProjectMember edge must source the object base"
+                );
+                assert_eq!(
+                    *provenance,
+                    verter_audit::MemberEdgeProvenance::KeyOfEnumerated,
+                    "keyof emit-site must tag KeyOfEnumerated provenance"
                 );
             }
         }

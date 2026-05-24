@@ -578,9 +578,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     match member {
                         Some(m) => {
                             let meta = match segment {
-                                PathSegment::Member(name) => {
-                                    OriginMeta::MemberName(Arc::clone(name))
-                                }
+                                PathSegment::Member(name) => OriginMeta::ProjectedMember {
+                                    name: Arc::clone(name),
+                                    provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                                },
                                 PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
                             };
                             let edge_kind = match segment {
@@ -1056,9 +1057,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             PathSegment::Index(_) => OriginEdgeKind::ProjectIndex,
                         };
                         let meta = match next_segment.expect("checked above") {
-                            PathSegment::Member(member_name) => {
-                                OriginMeta::MemberName(Arc::clone(member_name))
-                            }
+                            PathSegment::Member(member_name) => OriginMeta::ProjectedMember {
+                                name: Arc::clone(member_name),
+                                provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                            },
                             PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
                         };
                         self.graph().record_origin_edge(

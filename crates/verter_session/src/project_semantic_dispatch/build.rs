@@ -1545,7 +1545,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// Emits one `ProjectMember` edge per keyspace literal back to the
     /// source object base, carrying the member name in
-    /// `OriginMeta::MemberName`. The edge lets walkers
+    /// `OriginMeta::ProjectedMember` with provenance
+    /// `MemberEdgeProvenance::KeyOfEnumerated`. The edge lets walkers
     /// reconstruct which source member each keyspace literal derives from.
     pub(super) fn build_key_of(
         &self,
@@ -1634,7 +1635,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 *lit_id,
                 OriginEdgeKind::ProjectMember,
                 Arc::from(vec![base].into_boxed_slice()),
-                OriginMeta::MemberName(Arc::clone(name)),
+                OriginMeta::ProjectedMember {
+                    name: Arc::clone(name),
+                    provenance: verter_audit::MemberEdgeProvenance::KeyOfEnumerated,
+                },
                 Arc::clone(fence),
             );
         }
@@ -1680,7 +1684,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///    keyspace + value expression.
     /// 4. Emit `Normalize` edges from the mapped result to each
     ///    contributing key. Emit one `ProjectMember` edge per produced
-    ///    member sourcing `[source, key]` with `OriginMeta::MemberName`
+    ///    member sourcing `[source, key]` with `OriginMeta::ProjectedMember`
+    ///    (provenance `MemberEdgeProvenance::MappedKeyEnumerated`)
     ///    carrying the produced name (post-remap if `name_remap` is
     ///    set).
     ///
@@ -1903,7 +1908,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 value_id,
                 OriginEdgeKind::ProjectMember,
                 Arc::from(vec![source, mapper.key_space].into_boxed_slice()),
-                OriginMeta::MemberName(name),
+                OriginMeta::ProjectedMember {
+                    name,
+                    provenance: verter_audit::MemberEdgeProvenance::MappedKeyEnumerated,
+                },
                 Arc::clone(&fence),
             );
         }
