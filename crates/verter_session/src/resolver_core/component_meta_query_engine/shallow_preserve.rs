@@ -1188,7 +1188,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         )
     }
 
-    // Block 6.i leak-close-3 — Q7 deletion (Claude architecture).
+    // Leak-close-3 — Q7 deletion (Claude architecture).
     //
     // The trio `deep_resolve_slot_function_refs` /
     // `deep_resolve_type_refs` / `deep_resolve_fn_refs` previously

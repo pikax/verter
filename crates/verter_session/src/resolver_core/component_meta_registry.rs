@@ -1378,7 +1378,7 @@ pub(crate) fn component_meta_registry_indexed_ref_penalty(
 /// Walk `expr` and enqueue every nominal `Ref` reachable through the
 /// supplied [`ProjectionCursor`].
 ///
-/// **Cursor contract** (Block 6.i Commit A + G1 + G2): when the
+/// **Cursor contract** (per the G1 + G2 path-precision gates): when the
 /// cursor is at a whole-surface node (`is_whole_surface()`), descent
 /// is unbounded — preserves pre-Block-6.i behaviour. When the cursor
 /// carries a narrowed filter (Pick → `Include`, Omit → `Exclude`,
@@ -1517,7 +1517,7 @@ pub(crate) fn collect_component_meta_registry_refs(
             for member in &obj.properties {
                 match member {
                     ObjectMember::Property(prop) => {
-                        // Block 6.i Commit A: path-precise gate. If
+                        // Path-precise gate. If
                         // the cursor's key filter rejects this
                         // property's name, skip the member's nested
                         // refs entirely — that sibling is OUTSIDE
@@ -1538,7 +1538,7 @@ pub(crate) fn collect_component_meta_registry_refs(
                         );
                     }
                     ObjectMember::IndexSignature(sig) => {
-                        // Block 6.i G2 — path-precision gate for
+                        // G2 path-precision gate for
                         // non-Property members. `IndexSignature`
                         // (`[key: K]: V`) is anonymous; it
                         // applies structurally to every key
@@ -1570,7 +1570,7 @@ pub(crate) fn collect_component_meta_registry_refs(
                         );
                     }
                     ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
-                        // Block 6.i G2 — path-precision gate.
+                        // G2 path-precision gate.
                         // `CallSignature` / `ConstructSignature`
                         // are anonymous callable shapes; named-
                         // key narrowing (`Pick<Foo, "k">`)
@@ -1589,7 +1589,7 @@ pub(crate) fn collect_component_meta_registry_refs(
                         );
                     }
                     ObjectMember::Method(method) => {
-                        // Block 6.i G2 — path-precision gate.
+                        // G2 path-precision gate.
                         // Methods are named members; apply the
                         // same `admits_key` gate as the Property
                         // arm so a `Pick<Foo, "methodA">`-style
@@ -1647,7 +1647,7 @@ pub(crate) fn collect_component_meta_registry_refs(
             if !allow_plain_member_refs {
                 return;
             }
-            // Block 6.i G1 — path-precision gate. The doc-comment on
+            // G1 path-precision gate. The doc-comment on
             // this fn promises the Conditional arm gates on
             // `is_whole_surface()`; the pre-G1 impl unconditionally
             // recursed into all four branches, leaking unselected
@@ -1716,7 +1716,7 @@ pub(crate) fn collect_component_meta_registry_refs(
             if !allow_plain_member_refs {
                 return;
             }
-            // Block 6.i G1 — path-precision gate. The doc-comment on
+            // G1 path-precision gate. The doc-comment on
             // this fn promises the Mapped arm gates on
             // `is_whole_surface()`; the pre-G1 impl unconditionally
             // recursed into source + value + name_type, leaking the
@@ -2415,7 +2415,7 @@ pub(crate) fn collect_component_meta_registry_member_surface_refs(
 // logic is inlined into the body of
 // `component_meta_registry_raw_member_path_surface` (its only
 // surviving caller). The retired symbols are listed in the
-// `RETIRED_SYMBOLS` array of the static-grep gate test (commit I).
+// `RETIRED_SYMBOLS` array of the static-grep gate test.
 
 #[cfg(test)]
 mod tests {
@@ -2954,7 +2954,7 @@ export interface AvatarProps {
     }
 
     // -----------------------------------------------------------------
-    // Block 6.i G1 — Conditional / Mapped walker gates on
+    // G1 — Conditional / Mapped walker gates on
     // `cursor.is_whole_surface()`. Under a narrowed cursor the
     // type-level predicate sides (Conditional.check/extends,
     // Mapped.source/name_type) must NOT contribute refs.
@@ -3151,7 +3151,7 @@ export interface AvatarProps {
     }
 
     // -----------------------------------------------------------------
-    // Block 6.i G2 — non-Property ObjectMember arms (Method,
+    // G2 — non-Property ObjectMember arms (Method,
     // IndexSignature, CallSignature, ConstructSignature) apply the
     // path-precision gate.
     // -----------------------------------------------------------------

@@ -220,11 +220,11 @@ pub struct PerRequestCacheCounters {
     pub semantic_graph: HitMiss,
     /// `MaterializeStructureDb` — structural materialisation cache.
     pub materialize_structure: HitMiss,
-    /// `ShapeCacheDb` (Block 6.i) — universal shape cache, TypeExpr
+    /// `ShapeCacheDb` — universal shape cache, TypeExpr
     /// subject. Counter retained under the legacy name to preserve
     /// audit-harness JSON schema compatibility.
     pub materialize_memo: HitMiss,
-    /// `ShapeCacheDb` (Block 6.i) — universal shape cache,
+    /// `ShapeCacheDb` — universal shape cache,
     /// SemanticNode subject. Counter retained under the legacy name
     /// to preserve audit-harness JSON schema compatibility.
     pub member_shape_cache: HitMiss,
@@ -258,7 +258,7 @@ pub struct PerRequestCacheCounters {
 #[derive(Debug, Default)]
 pub struct BypassDiagnosticCounters {
     /// Number of `HostStoreView::from_host` invocations on the
-    /// current request. The per-request hoist landed by Block 6.c
+    /// current request. The per-request hoist
     /// expects this to drop to a small constant; counts >1 reveal
     /// resolver-tier carriers that still build their own owned view
     /// instead of borrowing the request-bound view.

@@ -519,7 +519,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 Some(member.ty.clone())
             }
             _ => {
-                // Block 6.i leak-close-2 — Navigate base + Shallow
+                // Leak-close-2 — Navigate base + Shallow
                 // terminal under Published demand. The projected value
                 // feeds `ProjectedMember.ty` on the projector surface,
                 // and per Rule-5 (shallow-by-default at projection
@@ -933,7 +933,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 &current,
             )
             .or_else(|| {
-                // Block 6.i leak-close-2 — Expanded base + Expanded
+                // Leak-close-2 — Expanded base + Expanded
                 // terminal, Published. The fixpoint loop is the
                 // engine method's "stabilise leaf via expanded"
                 // pattern; reducing either dimension below Expanded

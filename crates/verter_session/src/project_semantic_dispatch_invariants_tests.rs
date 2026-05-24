@@ -1689,7 +1689,7 @@ fn relation_engine_has_exactly_one_implementation() {
 
 #[test]
 fn type_expr_lowering_has_exactly_one_path() {
-    // Block 6.i Commit AX (codex-hybrid): the lowering path now
+    // Codex-hybrid spec: the lowering path now
     // exposes TWO entry points that share ONE body —
     // `shallow_lower_type_expr` (legacy `mode`-only wrapper) and
     // `shallow_lower_type_expr_with_context` (context-explicit, takes
@@ -2873,7 +2873,7 @@ fn instantiate_local_generic_ref_callers_route_through_dispatch() {
 }
 
 // ============================================================================
-// Block 6.i Commit AX (codex-hybrid) — demand-bounded carrier-stop tests.
+// Codex-hybrid demand-bounded carrier-stop tests.
 // ============================================================================
 //
 // These tests build hermetic SemanticNodeData fixtures and dispatch the

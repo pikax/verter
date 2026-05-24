@@ -1687,7 +1687,7 @@ pub struct ProjectTypeStore {
     resolvability_db: ResolvabilityDb,
     owner_collection_db: OwnerCollectionDb,
     prepared_target_db: PreparedTargetDb,
-    /// Block 6.i universal shape cache. Replaces the previously-split
+    /// Universal shape cache. Replaces the previously-split
     /// `MaterializeMemoDb` (TypeExpr-keyed) and `MemberShapeCacheDb`
     /// (SemanticNode-keyed) with a single store keyed on
     /// `ShapeCacheKey { subject, demand }`. The `ShapeSubject` enum
@@ -2096,7 +2096,7 @@ impl ProjectTypeStore {
         &self.prepared_target_db
     }
 
-    /// Block 6.i universal shape cache. Replaces
+    /// Universal shape cache. Replaces
     /// `MaterializeMemoDb` + `MemberShapeCacheDb`. The `ShapeSubject`
     /// enum on the key discriminates TypeExpr-start vs
     /// SemanticNode-start callers.
@@ -2234,7 +2234,7 @@ impl ProjectTypeStore {
         self.resolvability_db.invalidate_canonical(canonical_id);
         self.owner_collection_db.invalidate_canonical(canonical_id);
         self.prepared_target_db.invalidate_canonical(canonical_id);
-        // Block 6.i universal shape cache joins the per-canonical
+        // The universal shape cache joins the per-canonical
         // eviction cascade. Replaces the previously-split
         // `materialize_memo_db` + `member_shape_cache_db`.
         self.shape_cache_db.invalidate_canonical(canonical_id);
@@ -2438,7 +2438,7 @@ impl ProjectTypeStore {
         self.resolvability_db.invalidate_all();
         self.owner_collection_db.invalidate_all();
         self.prepared_target_db.invalidate_all();
-        // Block 6.i universal shape cache joins the project-generation
+        // The universal shape cache joins the project-generation
         // invalidation cascade. Replaces `materialize_memo_db` +
         // `member_shape_cache_db`.
         self.shape_cache_db.invalidate_all();

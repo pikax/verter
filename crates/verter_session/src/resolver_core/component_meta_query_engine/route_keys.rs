@@ -627,7 +627,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 }
             }
             if let Some(projected) =
-                // Block 6.i leak-close-2 — Navigate base + Shallow
+                // Leak-close-2 — Navigate base + Shallow
                 // terminal, Published. The sister
                 // `project_expr_surface_shape_via_host_threaded` at
                 // the line above already uses Navigate+Shallow; this
@@ -667,7 +667,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     }
                 }
                 if let Some(projected) =
-                    // Block 6.i leak-close-2 — same disposition as the
+                    // Leak-close-2 — same disposition as the
                     // first fallback arm (Navigate+Shallow+Published);
                     // applied to the `expanded_ref` instantiation
                     // result so both arms stay symmetric with the

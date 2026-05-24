@@ -953,8 +953,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             return view.members.iter().any(|m| m.name.as_ref() == needle);
                         }
                         // Tier 2: **non-emitting** key-domain
-                        // membership predicate (Block 6.i Round 10
-                        // Commit 3, codex Q1-X closure of Chain X).
+                        // membership predicate (codex Q1-X closure of
+                        // Chain X).
                         //
                         // The pre-Round-10 admission called
                         // `key_names_from_keyspace_node` here — which
@@ -1020,7 +1020,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         let key_arg = self
                             .graph()
                             .intern_node(SemanticNodeData::Literal(key_literal_value));
-                        // Block 6.i round 7 (codex 4th consult Q1) —
+                        // Codex 4th-consult Q1 —
                         // route through the shared
                         // `materialize_selected_key_mapped_value_with_node`
                         // substrate. The node-keyed entry preserves
@@ -1196,7 +1196,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // C16: DeclPlaceholder — expand via Instantiate before
                 // continuing the path walk.
                 //
-                // Block 6.i Commit AX — intermediate-hop demand demotion.
+                // Intermediate-hop demand demotion.
                 // We are inside `while index < path.len()`: a path
                 // segment is still pending, so this unwrap is an
                 // INTERMEDIATE hop in the type-resolution rule
@@ -1283,7 +1283,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 //     case keeps the lazy `Ref` shape.
                 //   - Expanded: dispatch Instantiate, recurse on result.
                 SemanticNodeData::InstantiationRef { base, args } => {
-                    // Block 6.i Commit AX (codex Q4 — IA path-precision).
+                    // Codex Q4 — IA path-precision.
                     // "Intermediate hops are navigate-only, terminal uses
                     // caller mode." When there is still a `PathSegment`
                     // ahead of us, the InstantiationRef is an
@@ -1311,7 +1311,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     let identity = base.clone();
                     let args_clone = Arc::clone(args);
                     drop(data);
-                    // Block 6.i Commit AX — intermediate-hop demand
+                    // Intermediate-hop demand
                     // demotion (codex spec). An InstantiationRef
                     // unwrapped with a path segment still pending is
                     // an INTERMEDIATE hop — dispatch under
@@ -1567,7 +1567,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 }
                 work.push(ExpandFrame::Expand(expanded));
             }
-            // Block 6.i Commit AX — `DeclRef`/`InstantiationRef`
+            // `DeclRef`/`InstantiationRef`
             // arms are deliberately NOT added to
             // `expand_terminal_step`. Eagerly unwrapping these
             // carriers in the empty-path terminal under publication
@@ -2439,7 +2439,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         if !collected {
             // The shared enumerator on the SOURCE handles
             // `Opaque(DeclPlaceholder)` / `Object` / `Intersection` /
-            // `Union` uniformly. Block 6.i Commit AX (codex-binding) —
+            // `Union` uniformly. Codex-binding —
             // empty-path Shallow with an imported mapped carrier MUST
             // enumerate just like the Expanded path's MappedType
             // dispatch.
@@ -2447,7 +2447,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             match self.dispatch.key_names_from_base_node(source) {
                 Some(enumerated) => keys = enumerated,
                 None => {
-                    // Block 6.i Transit-Shallow Publication (codex Q1
+                    // Transit-Shallow Publication (codex Q1
                     // #2 / Q3): the source is a `DeclRef` /
                     // `InstantiationRef` carrier under
                     // `StructuralTransit(Navigate)` lowering and the
@@ -2500,7 +2500,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             );
         let optionality = mapper.optionality;
         let readonly_mod = mapper.readonly;
-        // Identity-mapper fast path detection. Block 6.i
+        // Identity-mapper fast path detection.
         // Transit-Shallow Publication (codex Q1 #3): when
         // `mapper.kind == Identity` (the canonical
         // `[K in keyof T]: T[K]` shape under `Readonly` / `Partial` /

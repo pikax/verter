@@ -899,7 +899,7 @@ fn materialize_memo_db_untracked_self_root_rejects_warm_entry() {
     );
 }
 
-/// Block 6.d / Block 6.i universal `ShapeCacheDb` (SemanticNode
+/// Universal `ShapeCacheDb` (SemanticNode
 /// subject) validates the keyed scope canonical's self-root strictly.
 ///
 /// Discriminating property: the prime attempt's materialized
@@ -6157,7 +6157,7 @@ const IN_SCOPE_QUERY_IDENTITY_SELF_ROOT_COVERAGE: &[(&str, &str)] = &[
         "routed_expr_surface_db",
         "routed_expr_surface_db_untracked_self_root_rejects_warm_entry",
     ),
-    // Block 6.i universal `ShapeCacheDb` — replaces the previously-
+    // Universal `ShapeCacheDb` — replaces the previously-
     // split `materialize_memo_db` (TypeExpr subject) +
     // `member_shape_cache_db` (SemanticNode subject). Both subjects
     // share the same cache substrate; each retains its own
