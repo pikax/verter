@@ -115,6 +115,27 @@ The official/native component-meta payload is the semantic authority. `@verter/c
 - Host-owned resolver artifacts, graph artifacts, and encoded payload caches must share one invalidation story. Do not add a second ownership path for the same component-meta query state.
 - Raw graph cycles reaching JS without explicit recursion nodes are native bugs, not a normal compat fallback path.
 
+## Component-Meta Heuristic Prevention (CRITICAL)
+
+Component-meta may use heuristics only as meaning-preserving performance gates. It must not use heuristics as semantic policy, result repair, or compatibility recovery.
+
+Forbidden patterns:
+
+- String parsing, regex, source-slice parsing, rendered-type splitting, `rawType` inspection, or display-text matching to recover type meaning in native, bridge, or compat code.
+- Compatibility paths that keep old heuristic behavior alive. If native payloads are missing meaning, fix the native producer, extend `@verter/type-ir`, or return a structured unsupported result with diagnostics.
+- Shape-scoring a candidate as "better" unless the result carries explicit exactness/provenance proving which candidate is authoritative.
+- Using package-boundary, shallow/deep, recursion, cycle, or budget decisions as hidden local predicates. These decisions must be explicit projection-plan policy and must appear in semantic identity or cached-value validation metadata when they can affect output.
+- Publishing `unknown` or raw text for a TypeScript construct that the typed IR can represent or should be extended to represent.
+
+Allowed performance gates must fail closed. A gate may decide "do not expand yet", "do not cache this degraded result", or "enter the shared resolver"; it must not invent members, flatten aliases, hide unresolved branches, or silently replace representable structure with raw text.
+
+Best-architecture target for component-meta:
+
+- Native Rust owns semantic completeness. The TS bridge and compat layer perform mechanical schema adaptation only.
+- Published metadata is derived from typed `TypeExpr` / `TypeDescriptor` structures plus explicit exactness/provenance, never from display strings.
+- Projection planning is explicit: shallow publication, path walking, package-backed object preservation, cycle handling, and fuse behavior are modeled as policy data, not scattered predicates.
+- Unsupported cases are visible API states with diagnostics/provenance, not fallback strings.
+
 ## Typed-IR-Only Resolver Rule (CRITICAL)
 
 The native component-meta / typeinfo type resolver — analyzer (`verter_semantic::analysis::macros`) → projector (`meta_resolve::projectors`) → registry (`resolver_core::component_meta_registry`) → policy (`component_meta_resolution_policy`) → materialiser (`meta_resolve::materialize`) → JS compat (`@verter/component-meta/compat`) — drives semantic decisions exclusively from the typed IR. Source slicing, regex against type text, hand-rolled type-text splitters, `starts_with("Pick<")` shape sniffing, `path.contains("/node_modules/")` classification, and the synthesise-then-reparse pattern (`format!(...).parse_type_annotation(...)`) are all forbidden inside that pipeline.

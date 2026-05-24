@@ -1,6 +1,6 @@
 ---
 name: type-cache-architecture
-description: "Verter fact-based cache architecture — env hash split, FileArtifactStore, content-addressed caches, query-identity caches, R1–R29 architectural rules, module augmentation, multi-candidate storage"
+description: "Verter fact-based cache architecture — env hash split, FileArtifactStore, content-addressed caches, query-identity caches, R1–R30 architectural rules, module augmentation, multi-candidate storage"
 ---
 
 # Verter Fact-Based Cache Architecture
@@ -37,7 +37,7 @@ Target end-state rule:
 > **slot** identity (content-free); versioned declaration identity
 > lives inside cached values.
 
-## Architectural rules (R1–R29)
+## Architectural rules (R1–R30)
 
 ### Mutation semantics
 
@@ -687,6 +687,32 @@ by `tests/module_augmentation_stitching.rs::effective_export_set_rejects_session
 Session-correct augmentation stitching — an overlay-aware
 `AugmentationTargetKey` with artifact-population identity plus the
 wired live session consumer — is deferred to a future block.
+
+**R30 (No heuristic cache semantics).** Cache identity and cache
+admission must not encode semantic policy through local heuristics.
+Every dimension that can change the returned type, published members,
+alias/provenance shape, exactness, or completeness must be represented
+as one of:
+
+- a typed cache-slot key dimension;
+- a per-mode/per-policy entry inside a shared cache family;
+- cached-value validation metadata such as a fact signature,
+  self-root set, or store-view constraint;
+- explicit result state such as `Exact`, `SurfaceOnly`,
+  `Unsupported`, `BudgetExceeded`, or a recursion sentinel.
+
+Rendered type text, raw source slices, path substrings, identifier
+spelling conventions, arbitrary numeric caps, and candidate
+"better shape" scoring are not cache correctness mechanisms. A fast
+path or gate may decide that work should stay cold, avoid admission, or
+enter the shared semantic query layer; it must not return or admit a
+different semantic result than the typed query contract would produce.
+If a cached result depends on projection mode, substitution
+environment, conditional context, package/workspace policy, scope
+version, source generation, solver options, or component-meta schema
+options, that dependency must be visible in the cache family shape or
+the cached value's validation/provenance. Otherwise the result is
+non-cacheable.
 
 ## Cache layer key composition
 
