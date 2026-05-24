@@ -462,6 +462,19 @@ function projectPathRecord(resultId: number, baseId: number, names: string[]) {
   };
 }
 
+function projectPathEdge(resultId: number, sourceId: number, names: string[]): DerivationEdge {
+  return {
+    result: resultId,
+    kind: "ProjectPath",
+    sources: [sourceId],
+    meta: {
+      ProjectPath: {
+        path: names.map((n) => ({ Member: { name: n } })),
+      },
+    },
+  };
+}
+
 function namedSurfaceEntry(name: string): { name: string } {
   return { name };
 }
@@ -572,16 +585,103 @@ describe("audit_validator_rule5_compliance_path_segments_count_as_legitimate", (
   it("subtracts ProjectPath segment names as legitimate intermediates", () => {
     const bundle = emptyBundle();
     bundle.analysis.props = [namedSurfaceEntry("root")];
-    // ProjectPath edge walks through `intermediate.deeper.root`.
-    // The path segments are legitimate intermediates by construction.
-    bundle.record.footprint!.projections = [
-      projectPathRecord(1, 100, ["intermediate", "deeper", "root"]),
+    // Multi-segment `ProjectPath` edge walking
+    // `intermediate.deeper.root`. By edge kind, every Member segment
+    // is a structural intermediate — collected with the
+    // `"ProjectPath"` sentinel provenance (NOT `null`, which would
+    // re-introduce the round-17 false-negative class).
+    bundle.record.footprint!.derivation_subgraph.edges = [
+      projectPathEdge(1, 100, ["intermediate", "deeper", "root"]),
     ] as never;
     const result = validateAuditBundle(bundle, {
       component: "C",
       rule5Compliance: { enabled: true },
     });
     expect(result.passed).toBe(true);
+    expect(result.violations).toHaveLength(0);
+  });
+});
+
+describe("audit_validator_rule5_compliance_published_field_not_masked_by_fp_projections", () => {
+  it("FAILS when a PublishedField edge names an off-surface member even if fp.projections lifts the same name (round-17 codex bug)", () => {
+    // Reproducer for the round-17 codex BINDING finding:
+    //
+    //   `mine_footprint` lifts every `ProjectMember` edge into
+    //   `fp.projections` (member-name only, no provenance).
+    //   The pre-round-17 validator iterated `fp.projections` and
+    //   inserted `(name, provenance: null)` rows that auto-classified
+    //   as "legitimate intermediate" — masking the offending
+    //   `PublishedField` edge that named the same off-surface name.
+    //
+    // This test wires both halves of the bug condition and asserts
+    // the validator now refuses to mask:
+    //
+    //   1. A real `PublishedField` edge naming `phantom`, which is
+    //      NOT on the published surface (surface = ["label"]).
+    //   2. An `fp.projections` record also naming `phantom` (the
+    //      lift that used to auto-legitimize via null provenance).
+    //
+    // POST round-17 fix: `collectAuditMemberEdges` ignores
+    // `fp.projections` entirely (every audit-name comes from a
+    // typed edge in `derivation_subgraph.edges`), and the validator
+    // checks each edge structurally without cross-edge masking.
+    const bundle = emptyBundle();
+    bundle.analysis.props = [namedSurfaceEntry("label")];
+    bundle.record.footprint!.derivation_subgraph.edges = [
+      projectMemberEdge(2, "phantom", "PublishedField"),
+    ] as never;
+    bundle.record.footprint!.projections = [
+      // The bug-condition lift: same name appears in fp.projections,
+      // which used to give the validator a `null`-provenance
+      // legitimacy bucket and mask the PublishedField mismatch.
+      projectPathRecord(2, 100, ["phantom"]),
+    ] as never;
+    const result = validateAuditBundle(bundle, {
+      component: "ChatMessages",
+      rule5Compliance: { enabled: true },
+    });
+    expect(result.passed).toBe(false);
+    expect(result.violations[0]).toContain("phantom@PublishedField");
+    expect(result.violations[0]).toContain("rule5Compliance: ChatMessages");
+  });
+});
+
+describe("audit_validator_rule5_compliance_published_field_not_masked_by_cross_edge", () => {
+  it("FAILS when a PublishedField edge names an off-surface member even if another edge legitimizes the same name (round-17 Claude caveat)", () => {
+    // Reproducer for the round-17 Claude live-code caveat:
+    //
+    //   The pre-round-17 validator aggregated a
+    //   `legitimateIntermediateNames` set across ALL edges — if
+    //   ANY edge with allowlisted provenance named a member, every
+    //   non-allowlisted edge for the same member was masked.
+    //
+    //   This silently legitimized a mistagged `PublishedField` edge
+    //   whose name happened to ALSO appear on a `MappedKeyEnumerated`
+    //   edge (e.g. a member walked via both a Pick-equivalent
+    //   structural walk and a direct `PublishedField` emit).
+    //
+    // POST round-17 fix: the validator's check is per-edge
+    // structural — `PublishedField` MUST name a published-surface
+    // field regardless of what any other edge says about the same
+    // name. Cross-edge masking is removed.
+    const bundle = emptyBundle();
+    bundle.analysis.props = [namedSurfaceEntry("label")];
+    bundle.record.footprint!.derivation_subgraph.edges = [
+      // Allowlisted edge naming `outputSchema` — pre-fix this used
+      // to add `outputSchema` to the legitimateIntermediateNames set
+      // and mask the PublishedField mismatch below.
+      projectMemberEdge(1, "outputSchema", "MappedKeyEnumerated"),
+      // PublishedField edge for the same name. NOT on surface —
+      // this is the Rule-5 leak the validator must catch.
+      projectMemberEdge(2, "outputSchema", "PublishedField"),
+    ] as never;
+    const result = validateAuditBundle(bundle, {
+      component: "ChatMessages",
+      rule5Compliance: { enabled: true },
+    });
+    expect(result.passed).toBe(false);
+    expect(result.violations[0]).toContain("outputSchema@PublishedField");
+    expect(result.violations[0]).toContain("rule5Compliance: ChatMessages");
   });
 });
 

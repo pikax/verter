@@ -287,8 +287,17 @@ const DEFAULT_ALLOWED_INTERMEDIATE_PROVENANCE: ReadonlyArray<MemberEdgeProvenanc
 
 interface AuditMemberEdge {
   memberName: string;
-  /** Provenance carried on the edge. `null` for `ProjectPath` segment names. */
-  provenance: MemberEdgeProvenance | null;
+  /**
+   * Provenance carried on the edge. Either a typed
+   * [`MemberEdgeProvenance`] (from a single-hop `ProjectMember` edge)
+   * or the `"ProjectPath"` sentinel (from a multi-segment
+   * `ProjectPath` edge — the segment is legitimate by edge-kind
+   * alone, no typed per-segment provenance exists). `null` is
+   * intentionally NOT a value here — every audit-name carries an
+   * explicit, source-of-truth provenance bucket so the validator
+   * cannot silently auto-legitimize an off-surface leak.
+   */
+  provenance: MemberEdgeProvenance | "ProjectPath";
 }
 
 /**
@@ -309,18 +318,23 @@ function collectAuditMemberEdges(
   const edges: AuditMemberEdge[] = [];
   for (const edge of fp.derivation_subgraph.edges) {
     const meta = edge.meta as OriginEdgeMetaDto;
-    if (typeof meta === "object" && meta !== null && "ProjectMember" in meta) {
+    if (typeof meta !== "object" || meta === null) continue;
+    if ("ProjectMember" in meta) {
       const pm = meta.ProjectMember;
       edges.push({
         memberName: pm.member_name,
         provenance: pm.provenance,
       });
-    }
-  }
-  for (const projection of fp.projections) {
-    for (const seg of projection.path as ProjectPathSegment[]) {
-      if (typeof seg === "object" && seg !== null && "Member" in seg) {
-        edges.push({ memberName: seg.Member.name, provenance: null });
+    } else if ("ProjectPath" in meta) {
+      // Multi-segment path-walk — every Member segment is a
+      // structurally legitimate intermediate by edge-kind alone.
+      // We tag each name with the `"ProjectPath"` sentinel so the
+      // validator never sees a `null`-provenance bucket (the
+      // round-17 false-negative class).
+      for (const seg of meta.ProjectPath.path as ProjectPathSegment[]) {
+        if (typeof seg === "object" && seg !== null && "Member" in seg) {
+          edges.push({ memberName: seg.Member.name, provenance: "ProjectPath" });
+        }
       }
     }
   }
@@ -361,31 +375,31 @@ function validateRule5Compliance(
   const publishedNames = collectPublishedSurfaceNames(bundle.analysis);
   const edges = collectAuditMemberEdges(fp);
 
-  // A name is "legitimately intermediate" if AT LEAST ONE edge naming
-  // it carries an allowlisted provenance, OR if it appeared as a
-  // `ProjectPath` segment (provenance=null). The gate subtracts the
-  // union of legitimate-intermediate names from the audit set.
-  const legitimateIntermediateNames = new Set<string>();
-  for (const edge of edges) {
-    if (edge.provenance === null || allowlist.has(edge.provenance)) {
-      legitimateIntermediateNames.add(edge.memberName);
-    }
-  }
-
-  // Offending edges: names appearing on edges with NON-allowlisted
-  // provenance (or `PublishedField`-tagged edges) that are NOT on the
-  // published surface and NOT legitimized via any other edge.
+  // Per-edge structural classification — no cross-edge masking. An
+  // edge's legitimacy depends ONLY on its own provenance bucket and
+  // (for non-allowlisted typed provenance, e.g. `PublishedField`)
+  // whether its member-name is on the component's published surface.
+  //
+  //   - `"ProjectPath"`  sentinel → always legitimate (multi-segment
+  //                                 structural walk; intermediate by
+  //                                 edge kind).
+  //   - typed ∈ allowlist          → always legitimate (the path-walk
+  //                                 / keyspace-fan-out / mapped-key
+  //                                 emission is structural by kind).
+  //   - typed ∉ allowlist          → MUST name a published-surface
+  //     (e.g. `PublishedField`)    field; otherwise it is a Rule-5
+  //                                 leak. No other edge's allowlisted
+  //                                 provenance can mask this — the
+  //                                 PublishedField claim itself is
+  //                                 the contract.
   const offending: Array<{
     name: string;
-    provenance: MemberEdgeProvenance | null;
+    provenance: MemberEdgeProvenance;
   }> = [];
   for (const edge of edges) {
-    const provenanceAllowed = edge.provenance === null || allowlist.has(edge.provenance);
-    if (provenanceAllowed) continue;
+    if (edge.provenance === "ProjectPath") continue;
+    if (allowlist.has(edge.provenance)) continue;
     if (publishedNames.has(edge.memberName)) continue;
-    if (legitimateIntermediateNames.has(edge.memberName)) continue;
-    // Deduplicate by (name, provenance) to keep the violation message
-    // signal-rich without flooding on multi-edge leaks.
     if (offending.some((o) => o.name === edge.memberName && o.provenance === edge.provenance)) {
       continue;
     }
@@ -393,9 +407,7 @@ function validateRule5Compliance(
   }
 
   if (offending.length > 0) {
-    const offendersStr = offending
-      .map((o) => `${o.name}@${o.provenance ?? "ProjectPath"}`)
-      .join(", ");
+    const offendersStr = offending.map((o) => `${o.name}@${o.provenance}`).join(", ");
     violations.push(
       `rule5Compliance: ${component} — audit edges name members outside the ` +
         `published surface and outside the structural-intermediate allowlist ` +
