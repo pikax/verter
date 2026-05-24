@@ -162,8 +162,13 @@ fn hash_origin_meta(meta: &OriginMeta) -> u64 {
             1u8.hash(&mut h);
             b.hash(&mut h);
         }
-        OriginMeta::MemberName(name) => {
+        OriginMeta::ProjectedMember { name, provenance } => {
             2u8.hash(&mut h);
+            name.as_ref().hash(&mut h);
+            (*provenance as u8).hash(&mut h);
+        }
+        OriginMeta::AliasName(name) => {
+            6u8.hash(&mut h);
             name.as_ref().hash(&mut h);
         }
         OriginMeta::Index(index) => {

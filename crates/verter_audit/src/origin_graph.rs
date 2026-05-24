@@ -248,6 +248,12 @@ pub enum OriginEdgeMetaDto {
     ProjectMember {
         /// Member name that was projected out.
         member_name: Arc<str>,
+        /// Typed discriminator naming WHY this edge was emitted. See
+        /// [`MemberEdgeProvenance`]. Always populated at the producer
+        /// (no default); the audit-validator's Rule-5 check inspects
+        /// this field to distinguish published-surface fields from
+        /// legitimate structural intermediates.
+        provenance: MemberEdgeProvenance,
     },
     /// Single-segment indexed projection.
     ProjectIndex {
@@ -313,6 +319,49 @@ pub enum ProjectPathSegment {
     },
     /// `keyof T` — yields the union of keys.
     KeyOf,
+}
+
+/// Typed discriminator naming WHY a single-hop `ProjectMember` edge
+/// was emitted. The variant identifies the structural operation that
+/// produced the member edge; it is set at every production emit site
+/// in `verter_session` (exhaustively — there is no default).
+///
+/// Audit-side consumers (the validator, the inspect CLI) use this
+/// provenance to distinguish edges whose member names are part of the
+/// user-visible published surface from edges whose member names are
+/// legitimate intermediates of a structural walk
+/// (KeyOf-enumeration, Mapped-instantiation, multi-hop path projection).
+///
+/// Adding a new emit site **must** add a new variant here and update
+/// the validator's allowlist explicitly. The translator in
+/// `verter_session::component_meta_audit::footprint_miner::translate_meta`
+/// matches exhaustively on `OriginMeta::ProjectedMember`'s provenance
+/// field, so no `_ =>` wildcard is permitted.
+#[derive(
+    Debug, Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, ts_rs::TS,
+)]
+#[ts(export, export_to = "audit.generated.ts")]
+pub enum MemberEdgeProvenance {
+    /// Final published surface field — direct emission onto the
+    /// user-visible surface (a published prop / emit / slot / exposed).
+    /// Edges with this provenance participate in the published-set
+    /// check; they are NOT subtracted as legitimate intermediates.
+    PublishedField,
+    /// Member name produced by walking a declared multi-segment path
+    /// (e.g. `Foo['a']['b']` — each segment's per-hop ProjectMember
+    /// edge carries this provenance). Legitimate intermediate; the
+    /// name is on the user's declared path.
+    PathProjection,
+    /// Key literal enumerated from a `keyof T` / keyspace expansion.
+    /// One ProjectMember edge is emitted per discovered key; legitimate
+    /// intermediate of a structural keyspace operation.
+    KeyOfEnumerated,
+    /// Member produced by a Mapped-type instantiation
+    /// (`{ [K in keyof T]: ... }` and its derivatives Pick / Omit /
+    /// Partial / Required / Readonly, which lower to Mapped). One
+    /// ProjectMember edge is emitted per produced key; legitimate
+    /// intermediate.
+    MappedKeyEnumerated,
 }
 
 /// Kind of normalization performed (union-flatten, intersection-

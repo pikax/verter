@@ -136,7 +136,7 @@ pub fn mine_footprint(
             | OriginEdgeKind::ProjectIndex
             | OriginEdgeKind::ProjectPath => {
                 let path = match &edge.meta {
-                    OriginEdgeMetaDto::ProjectMember { member_name } => {
+                    OriginEdgeMetaDto::ProjectMember { member_name, .. } => {
                         vec![ProjectPathSegment::Member {
                             name: Arc::clone(member_name),
                         }]
@@ -533,11 +533,25 @@ fn translate_meta(kind: CoreOriginEdgeKind, meta: &OriginMeta) -> OriginEdgeMeta
             },
             bound_to: NodeId(u32::MAX),
         },
-        CoreOriginEdgeKind::ProjectMember => OriginEdgeMetaDto::ProjectMember {
-            member_name: match meta {
-                OriginMeta::MemberName(n) => Arc::clone(n),
-                _ => Arc::from(""),
+        // Exhaustive bridge for ProjectMember: producers MUST emit
+        // `OriginMeta::ProjectedMember { name, provenance }` (see the
+        // four production emit sites in
+        // `crates/verter_session/src/project_semantic_dispatch/build.rs`
+        // and `…/walk.rs`). A future producer that emits ProjectMember
+        // through any other OriginMeta variant is a structural bug and
+        // panics here — the Rule-5 validator depends on the provenance
+        // being preserved through the bridge.
+        CoreOriginEdgeKind::ProjectMember => match meta {
+            OriginMeta::ProjectedMember { name, provenance } => OriginEdgeMetaDto::ProjectMember {
+                member_name: Arc::clone(name),
+                provenance: *provenance,
             },
+            other => panic!(
+                "ProjectMember edge emitted with non-ProjectedMember OriginMeta variant: {other:?}. \
+                 Every ProjectMember producer MUST construct OriginMeta::ProjectedMember with a \
+                 typed MemberEdgeProvenance — see the architecture guard \
+                 `crates/verter_audit/tests/member_edge_provenance_arch_guard.rs`.",
+            ),
         },
         CoreOriginEdgeKind::ProjectIndex => OriginEdgeMetaDto::ProjectIndex {
             index_key: match meta {
@@ -557,10 +571,17 @@ fn translate_meta(kind: CoreOriginEdgeKind, meta: &OriginMeta) -> OriginEdgeMeta
         CoreOriginEdgeKind::Normalize => OriginEdgeMetaDto::Normalize {
             kind: NormalizeKind::Simplify,
         },
+        // Exhaustive bridge for AliasResolve: producers MUST emit
+        // `OriginMeta::AliasName(arc)`. `OriginMeta::None` is tolerated
+        // here for legacy test-scaffold emissions that pass no payload.
         CoreOriginEdgeKind::AliasResolve => OriginEdgeMetaDto::AliasResolve {
             alias_name: match meta {
-                OriginMeta::MemberName(n) => Arc::clone(n),
-                _ => Arc::from(""),
+                OriginMeta::AliasName(n) => Arc::clone(n),
+                OriginMeta::None => Arc::from(""),
+                other => panic!(
+                    "AliasResolve edge emitted with non-AliasName OriginMeta variant: {other:?}. \
+                     Producers must emit OriginMeta::AliasName(arc).",
+                ),
             },
         },
     }
@@ -745,13 +766,19 @@ mod tests {
                 i,
                 &[i + 100],
                 CoreOriginEdgeKind::ProjectMember,
-                OriginMeta::MemberName(Arc::from(format!("m{i}"))),
+                OriginMeta::ProjectedMember {
+                    name: Arc::from(format!("m{i}")),
+                    provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                },
             ));
             state_b.derivation_edges_raw.push(synth_edge(
                 i,
                 &[i + 100],
                 CoreOriginEdgeKind::ProjectMember,
-                OriginMeta::MemberName(Arc::from(format!("m{i}"))),
+                OriginMeta::ProjectedMember {
+                    name: Arc::from(format!("m{i}")),
+                    provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                },
             ));
         }
         let fp_a = mine_footprint(&graph, state_a, &ctx_a, 10_000);
@@ -805,7 +832,7 @@ mod tests {
                 hop,
                 &[hop + 1],
                 CoreOriginEdgeKind::AliasResolve,
-                OriginMeta::MemberName(Arc::from(format!("alias_{hop}"))),
+                OriginMeta::AliasName(Arc::from(format!("alias_{hop}"))),
             ));
         }
         let fp = mine_footprint(&graph, state, &ctx, 10_000);
@@ -872,13 +899,13 @@ mod tests {
             42,
             &[10],
             CoreOriginEdgeKind::AliasResolve,
-            OriginMeta::MemberName(Arc::from("path_a")),
+            OriginMeta::AliasName(Arc::from("path_a")),
         ));
         state.derivation_edges_raw.push(synth_edge(
             42,
             &[20],
             CoreOriginEdgeKind::AliasResolve,
-            OriginMeta::MemberName(Arc::from("path_b")),
+            OriginMeta::AliasName(Arc::from("path_b")),
         ));
         let fp = mine_footprint(&graph, state, &ctx, 10_000);
         assert_eq!(fp.derivation_subgraph.edges.len(), 2);

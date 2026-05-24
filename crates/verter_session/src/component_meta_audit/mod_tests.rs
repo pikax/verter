@@ -92,6 +92,7 @@ fn derivation_subgraph_serde_round_trips_nodes_and_edges_preserving_node_ids() {
             sources: vec![NodeId(0)],
             meta: OriginEdgeMetaDto::ProjectMember {
                 member_name: Arc::from("foo"),
+                provenance: verter_audit::MemberEdgeProvenance::PathProjection,
             },
         }],
     };

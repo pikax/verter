@@ -362,7 +362,10 @@ fn prefix_backfill_skips_record_origin_edge_when_target_already_warm() {
     );
     let sources: Arc<[crate::semantic_query::SemanticNodeId]> =
         Arc::from(vec![source].into_boxed_slice());
-    let meta = OriginMeta::MemberName(Arc::<str>::from("initial"));
+    let meta = OriginMeta::ProjectedMember {
+        name: Arc::<str>::from("initial"),
+        provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+    };
 
     // Bind a CaptureToken over the two emissions.
     let snap = {
@@ -435,14 +438,20 @@ fn prefix_backfill_emits_record_origin_edge_when_target_cold() {
             target_a,
             OriginEdgeKind::ProjectMember,
             Arc::clone(&sources),
-            OriginMeta::MemberName(Arc::<str>::from("a")),
+            OriginMeta::ProjectedMember {
+                name: Arc::<str>::from("a"),
+                provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+            },
             Arc::clone(&fence),
         );
         graph.record_origin_edge(
             target_b,
             OriginEdgeKind::ProjectMember,
             Arc::clone(&sources),
-            OriginMeta::MemberName(Arc::<str>::from("b")),
+            OriginMeta::ProjectedMember {
+                name: Arc::<str>::from("b"),
+                provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+            },
             Arc::clone(&fence),
         );
         _guard.end()
@@ -527,14 +536,20 @@ fn audit_mining_traces_dropped_prefix_edges() {
             target,
             OriginEdgeKind::ProjectMember,
             Arc::clone(&sources),
-            OriginMeta::MemberName(Arc::<str>::from("initial")),
+            OriginMeta::ProjectedMember {
+                name: Arc::<str>::from("initial"),
+                provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+            },
             Arc::clone(&fence),
         );
         graph.record_origin_edge(
             target,
             OriginEdgeKind::ProjectMember,
             Arc::clone(&sources),
-            OriginMeta::MemberName(Arc::<str>::from("initial")),
+            OriginMeta::ProjectedMember {
+                name: Arc::<str>::from("initial"),
+                provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+            },
             Arc::clone(&fence),
         );
     }
@@ -595,7 +610,10 @@ fn repo_first_pass_diagnosis_dup_edge_ratio_under_5_percent() {
                 target,
                 OriginEdgeKind::ProjectMember,
                 Arc::clone(&sources),
-                OriginMeta::MemberName(Arc::<str>::from("initial")),
+                OriginMeta::ProjectedMember {
+                    name: Arc::<str>::from("initial"),
+                    provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                },
                 Arc::clone(&fence),
             );
         }
@@ -607,7 +625,10 @@ fn repo_first_pass_diagnosis_dup_edge_ratio_under_5_percent() {
                 decoy_target,
                 OriginEdgeKind::ProjectMember,
                 Arc::clone(&sources),
-                OriginMeta::MemberName(Arc::<str>::from(format!("decoy_{i}"))),
+                OriginMeta::ProjectedMember {
+                    name: Arc::<str>::from(format!("decoy_{i}")),
+                    provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                },
                 Arc::clone(&fence),
             );
         }

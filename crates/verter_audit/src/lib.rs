@@ -79,8 +79,9 @@ pub use observer::{current_observer, AuditEvent, AuditObserver};
 pub use origin_graph::{
     ConditionalBranch, DerivationEdgeRaw, DerivationEdgeRecord, DerivationSubgraph,
     DispatchKeyKind, EdgeId, MaterializationScopeAudit, MaterializationSubject,
-    MaterializeSkipReason, NamedIdentity, NodeId, NodeRecord, NormalizeKind, OriginEdgeKind,
-    OriginEdgeMetaDto, ProjectPathSegment, ProjectionModeAudit, SemanticNodeKind, VfsLayer,
+    MaterializeSkipReason, MemberEdgeProvenance, NamedIdentity, NodeId, NodeRecord, NormalizeKind,
+    OriginEdgeKind, OriginEdgeMetaDto, ProjectPathSegment, ProjectionModeAudit, SemanticNodeKind,
+    VfsLayer,
 };
 pub use payloads::cache_outcomes::CacheOutcomeKind;
 pub use payloads::tags::{
