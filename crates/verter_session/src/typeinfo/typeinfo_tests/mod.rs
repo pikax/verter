@@ -1,0 +1,65 @@
+//! @ai-generated - Host-backed typeinfo tests for component-shaped
+//! generic, utility, conditional, slot, and path-projection type
+//! surfaces.
+//!
+//! These fixtures are synthetic and hermetic. They intentionally use
+//! generic type and file names so the tests encode resolver contracts,
+//! not behaviour copied from any external component library.
+
+mod apparent_types;
+mod basic;
+mod branded_types;
+mod cache_invalidation;
+mod call_resolution;
+mod class_features;
+mod conditional_infer;
+mod const_type_param;
+mod contextual_typing;
+mod cross_file;
+mod decorators;
+mod deep_path;
+mod demand_boundary;
+mod enums;
+mod expansion_boundaries;
+mod flow_invalidations;
+mod flow_return_catalog;
+mod flow_return_edge_catalog;
+mod flow_return_parity_contracts;
+mod flow_return_path_contracts;
+mod footprint;
+mod function_advanced;
+mod generic_defaults;
+mod index_signatures;
+mod indexed_utilities;
+mod jsx;
+mod mapped_modifiers;
+mod mapped_template;
+mod menu_like;
+mod message_list_like;
+mod mode_boundary_invariants;
+mod modern_ts_features;
+mod module_features;
+mod narrow_discriminated_union;
+mod narrow_equality;
+mod narrow_in_operator;
+mod narrow_instanceof;
+mod narrow_truthiness;
+mod narrow_typeof;
+mod no_infer;
+mod recursive_conditional;
+mod recursive_union;
+mod relation_semantics;
+mod substitution_types;
+mod support;
+mod table_like;
+mod template_literal_inference;
+mod tuple_labels;
+mod typescript_rules;
+mod union_key_access;
+mod unique_symbol;
+mod utility_composition;
+mod utility_edge;
+mod utility_top_bottom;
+mod value_inference;
+mod variadic_tuples;
+mod wide_deep;

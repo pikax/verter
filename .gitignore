@@ -69,3 +69,4 @@ benchmark-results.json
 
 .claude/scheduled_tasks.lock
 tmp/
+.tmp-tsgo-checks/
