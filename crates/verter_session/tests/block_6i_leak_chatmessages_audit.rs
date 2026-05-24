@@ -93,7 +93,7 @@ fn chatmessages_shape_audit_has_zero_outputschema_execute_project_member_edges()
         if !matches!(edge.kind, OriginEdgeKind::ProjectMember) {
             continue;
         }
-        if let OriginEdgeMetaDto::ProjectMember { member_name } = &edge.meta {
+        if let OriginEdgeMetaDto::ProjectMember { member_name, .. } = &edge.meta {
             match member_name.as_ref() {
                 "outputSchema" => outputschema_count += 1,
                 "execute" => execute_count += 1,

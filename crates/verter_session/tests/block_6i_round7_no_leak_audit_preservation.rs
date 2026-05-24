@@ -80,7 +80,7 @@ fn round7_literal_union_slots_audit_stays_at_zero_outputschema_execute_edges() {
         if !matches!(edge.kind, OriginEdgeKind::ProjectMember) {
             continue;
         }
-        if let OriginEdgeMetaDto::ProjectMember { member_name } = &edge.meta {
+        if let OriginEdgeMetaDto::ProjectMember { member_name, .. } = &edge.meta {
             match member_name.as_ref() {
                 "outputSchema" => outputschema_count += 1,
                 "execute" => execute_count += 1,

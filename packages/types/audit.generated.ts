@@ -928,6 +928,26 @@ result_size_bytes: number,
 error: string | null, };
 
 /**
+ * Typed discriminator naming WHY a single-hop `ProjectMember` edge
+ * was emitted. The variant identifies the structural operation that
+ * produced the member edge; it is set at every production emit site
+ * in `verter_session` (exhaustively — there is no default).
+ *
+ * Audit-side consumers (the validator, the inspect CLI) use this
+ * provenance to distinguish edges whose member names are part of the
+ * user-visible published surface from edges whose member names are
+ * legitimate intermediates of a structural walk
+ * (KeyOf-enumeration, Mapped-instantiation, multi-hop path projection).
+ *
+ * Adding a new emit site **must** add a new variant here and update
+ * the validator's allowlist explicitly. The translator in
+ * `verter_session::component_meta_audit::footprint_miner::translate_meta`
+ * matches exhaustively on `OriginMeta::ProjectedMember`'s provenance
+ * field, so no `_ =>` wildcard is permitted.
+ */
+export type MemberEdgeProvenance = "PublishedField" | "PathProjection" | "KeyOfEnumerated" | "MappedKeyEnumerated";
+
+/**
  * Named-type identity projection — `(canonical, symbol, args)` triple
  * used to key instantiation equality.
  */
@@ -1025,7 +1045,15 @@ bound_to: NodeId, } } | { "ProjectMember": {
 /**
  * Member name that was projected out.
  */
-member_name: string, } } | { "ProjectIndex": { 
+member_name: string, 
+/**
+ * Typed discriminator naming WHY this edge was emitted. See
+ * [`MemberEdgeProvenance`]. Always populated at the producer
+ * (no default); the audit-validator's Rule-5 check inspects
+ * this field to distinguish published-surface fields from
+ * legitimate structural intermediates.
+ */
+provenance: MemberEdgeProvenance, } } | { "ProjectIndex": { 
 /**
  * Index key that was projected out.
  */

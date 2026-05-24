@@ -103,7 +103,7 @@ fn chain_z_slot_compound_fallback_does_not_leak_inherited_library_members() {
         if !matches!(edge.kind, OriginEdgeKind::ProjectMember) {
             continue;
         }
-        if let OriginEdgeMetaDto::ProjectMember { member_name } = &edge.meta {
+        if let OriginEdgeMetaDto::ProjectMember { member_name, .. } = &edge.meta {
             if LEAK_MEMBERS.contains(&member_name.as_ref()) {
                 leak_edge_count += 1;
                 leak_edge_names.push(member_name.to_string());
