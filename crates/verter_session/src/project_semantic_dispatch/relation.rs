@@ -373,6 +373,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// generic-key Record (single index signature, no members).
     fn record_target_shape(&self, target: SemanticNodeId) -> Option<RecordTargetShape> {
         let graph = self.graph();
+        // The Cluster-C Object-vs-Record arm needs the target
+        // normalised to a concrete `SemanticNodeData::Object`
+        // (literal-key members surface or generic-key index
+        // signature) to recognise a `Record<K, V>` shape — a `Mapped`
+        // shell returned under `StructuralTransit` does not match.
+        // Normalisation runs under the default `Published(Expanded)`
+        // context so `Record<U, Record<K, any>>` reduces to its
+        // Object surface for shape decision. Empirically (Round-13
+        // Step-0 on the corpus `ChatMessage.vue`) this site emits
+        // zero `ProjectMember` edges on the Chain W chain — the
+        // ChatMessage leak enters via the `TypeExpr::Conditional`
+        // `extends` lowering, not via this normalisation. Swapping
+        // this call to `StructuralTransit` (the round-12 codex
+        // proposal) provably regresses Record-target recognition
+        // for `A extends Record<U, K>`-style conditionals (the
+        // `neutral` overlay-augmented member in
+        // `component_meta_host::tests::overlay_queries_reapply_owner_after_overlay_only_helper_upserts`
+        // and the two sibling `ComponentConfig` materialisation
+        // tests stop seeing the augmented variant member). The
+        // round-12 codex TOP RISK warned about exactly this
+        // regression.
         let normalised = self.evaluate_deferred_semantic_node(target);
         let data = graph.node_data(normalised)?;
         match &*data {

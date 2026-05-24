@@ -1207,6 +1207,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 true_type,
                 false_type,
             } => {
+                // Lower `check` under the caller's outer
+                // `reduction_context` first. `check` lowers to a
+                // graph-node identity (`TypeParameter` / `Ref`-
+                // substituted generics resolve via the env without
+                // dispatching operators on their surface).
                 let check_id = self.shallow_lower_type_expr_with_context(
                     check,
                     env,
@@ -1217,6 +1222,75 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     substitutions,
                     reduction_context,
                 );
+                // Decide the `extends`-arm reduction context based
+                // on the lowered `check`'s structural form. When
+                // `check` resolves to a SHELL whose shape the
+                // relation engine cannot decide structurally —
+                // `TypeParam` (unbound generic), `IndexedAccess`
+                // (deferred projection), `KeyOf` / `Mapped`
+                // (deferred operator), `Conditional` (deferred sub-
+                // conditional), `Opaque` (resolution miss) — the
+                // conditional is guaranteed to defer at relation
+                // time (the relation engine returns `Unknown` for
+                // these check shapes against any non-trivial
+                // target). In that case the `extends` shape is
+                // consumed only for the deferred shell's identity
+                // — it is never published. Lower it under
+                // `StructuralTransit` so any nested `Mapped` /
+                // `KeyOf` / built-in utility along the relation-
+                // input lowering frame carrier-stops
+                // (`may_reduce_operator(StructuralTransit(_)) ==
+                // false`) without reifying per-member keyspace
+                // edges. The mode axis is preserved so navigation
+                // depth still matches the outer demand; only the
+                // publication-emission axis flips to transit.
+                //
+                // When `check` resolves to a concrete shape (Object,
+                // Union, primitive, alias-backed shell, etc.), the
+                // relation engine may decide the conditional
+                // eagerly — the `extends` MUST be lowered under the
+                // caller's outer demand so the relation engine sees
+                // its concrete shape (e.g. `Record<primitive, V>`
+                // reducing to an Object surface with one index
+                // signature, the literal-key Object form, etc.).
+                // The augmentation pattern `A extends Record<U,
+                // Record<K, any>> ? A[U][K] : {}` falls in this
+                // branch: `check = AppConfig` is a concrete Object,
+                // the conditional decides True, and the augmenting
+                // intersection arm contributes its overlay keys.
+                // `Opaque(DeclPlaceholder)` is EXCLUDED because the
+                // relation engine has a Cluster-C arm that navigates
+                // through DeclPlaceholders via
+                // `evaluate_deferred_semantic_node` — keeping
+                // `extends` at the outer demand lets that
+                // normalisation see a concrete target shape (the
+                // augmentation pattern's `A extends Record<U,
+                // Record<K, any>>` flattens to a literal-key Object).
+                // The other `Opaque` variants (`Miss`,
+                // `RecursiveRef`, `BudgetExceeded`, etc.) have no
+                // navigation path so the conditional defers — flip
+                // them to transit to stop nested keyspace edges.
+                let check_is_deferred_for_relation = matches!(
+                    graph.node_data(check_id).as_deref(),
+                    Some(
+                        SemanticNodeData::TypeParam { .. }
+                            | SemanticNodeData::IndexedAccess { .. }
+                            | SemanticNodeData::KeyOf { .. }
+                            | SemanticNodeData::Mapped { .. }
+                            | SemanticNodeData::Conditional { .. }
+                    )
+                ) || matches!(
+                    graph.node_data(check_id).as_deref(),
+                    Some(SemanticNodeData::Opaque(err))
+                        if !matches!(err, crate::semantic_query::QueryError::DeclPlaceholder { .. })
+                );
+                let extends_context = if check_is_deferred_for_relation {
+                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                        reduction_context.mode,
+                    )
+                } else {
+                    reduction_context
+                };
                 let extends_id = self.shallow_lower_type_expr_with_context(
                     extends,
                     env,
@@ -1225,7 +1299,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope_payload,
                     shadowing,
                     substitutions,
-                    reduction_context,
+                    extends_context,
                 );
                 // Cluster A + Step 1.5 mapped+conditional infer
                 // closure: collect EVERY `SemanticNodeData::Infer { name }`
