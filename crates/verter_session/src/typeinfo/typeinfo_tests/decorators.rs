@@ -1,4 +1,4 @@
-//! @ai-generated - Synthetic TS7 (TC39 stage 3) decorators typeinfo contracts.
+//! @ai-generated - Synthetic TS7 decorators typeinfo contracts.
 //!
 //! Decorator semantics (the contract the resolver must honour):
 //!

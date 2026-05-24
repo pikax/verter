@@ -47,7 +47,7 @@ pub(crate) mod scope_shadowing;
 pub(crate) mod session_resolver_context;
 
 pub use fact_read_set::{FactReadSet, FactReadSetCell, FactReadSetFinalise};
-// Block 6.c substrate re-export. Hot-path callers construct the
+// Substrate re-export. Hot-path callers construct the
 // request-bound wrapper at entry points; the wiring lands in the
 // hot-path conversion commit (C).
 #[cfg(any(test, debug_assertions))]

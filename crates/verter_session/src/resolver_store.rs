@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 
 /// Per-call-site counter for [`HostStoreView::from_host`] invocations.
 ///
-/// **Block 6.e instrumentation.** `HostStoreView::from_host` rebuilds
+/// **Per-call-site instrumentation.** `HostStoreView::from_host` rebuilds
 /// the entire workspace snapshot on every call; the dominant cost
 /// surfaces as `host_store_view_from_host_builds` per-Button counts in
 /// the audit-record diagnostic counters. To attribute those builds
@@ -70,7 +70,7 @@ pub fn reset_from_host_call_sites() {
 /// Each tuple is `(file_line, call_count)` where `file_line` is the
 /// canonical `file:line:col` `Location` debug string.
 ///
-/// **Block 6.e diagnostic accessor.** The bench example dumps this at
+/// **Diagnostic accessor.** The bench example dumps this at
 /// the end of each pass to attribute `HostStoreView::from_host` builds
 /// to specific warm-hit validator call sites. The `#[track_caller]`
 /// rail on `from_host`, `VerterHost::resolver_store_view`, the trait
@@ -175,7 +175,7 @@ pub struct HostStoreView {
     /// (`admit_resolved_import_facts_for_owner`) admitted under.
     /// Absent entries fall back to `[0u8; 16]` (owners with no
     /// recorded known-misses or canonicals whose route resolution
-    /// never ran). Codex P2.2 / Block 1.f-fix.
+    /// never ran). Codex P2.2 fix.
     resolved_import_facts_known_miss_tags: FxHashMap<String, Hash16>,
     /// Route-surface-domain handle (R26): `Arc` clone of the
     /// project store's `RouteDb`. The validator for
@@ -267,7 +267,7 @@ impl Default for HostStoreView {
 
 // Test-only thread-local counter incremented every time
 // `HostStoreView::from_host` is called. The discriminating tests for
-// Block 6.c's per-request hoist read this counter to assert that a
+// The per-request hoist read this counter to assert that a
 // single component-meta request builds the view exactly once instead
 // of 8-12+ times. Thread-local so parallel `cargo test` execution
 // does not cross-pollute counts. Production builds do not pay for
@@ -282,7 +282,7 @@ thread_local! {
 impl HostStoreView {
     #[track_caller]
     pub(crate) fn from_host(host: &VerterHost) -> Self {
-        // Block 6.e per-call-site instrumentation: record the
+        // Per-call-site instrumentation: record the
         // `#[track_caller]`-propagated location so the bench can
         // attribute `from_host` builds back to specific warm-hit
         // validator call sites. The location flows back through the
@@ -595,7 +595,7 @@ impl HostStoreView {
 
                 // import_routes lives on DerivedRawState (D48 split).
                 // The known-miss generation sidecar (Codex P2.2 /
-                // Block 1.f-fix) lives alongside it; capture both
+                // Codex-P2.2 fix) lives alongside it; capture both
                 // under the same `derived_raw_cache().get(...)` so
                 // the validator can compose
                 // `ResolvedImportFactsKey.known_miss_generation`
@@ -985,7 +985,7 @@ impl HostStoreView {
             None => return false,
         };
 
-        // `known_miss_generation` (Codex P2.2 / Block 1.f-fix):
+        // `known_miss_generation` (Codex P2.2 fix):
         // captured at view-build time from
         // `DerivedRawState::import_routes_known_miss_recorded_at_generation`.
         // Absent entries → `[0u8; 16]` so an owner that never had

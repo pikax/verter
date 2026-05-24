@@ -9,7 +9,7 @@
 //! workspace's per-canonical facts at request-entry time.
 //!
 //! `HostStoreView::from_host` does 5-7 full workspace sweeps and
-//! allocates ~5 hashmaps + an artifact `Vec` per call. Block 6.c hoists
+//! allocates ~5 hashmaps + an artifact `Vec` per call. The per-request hoist
 //! the build to once-per-request, then threads a borrow through the
 //! pipeline. But `ensure_loaded` and `ensure_indexed_ready` deliberately
 //! do not bump `store_view_epoch` on first-time additive loads — so a

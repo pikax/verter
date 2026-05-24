@@ -8,7 +8,7 @@
 //! no `HostStoreView`. The previous trait shape returned a freshly-built
 //! owned `HostStoreView` from every call, which made every
 //! `ValidatedFactCache::get_if_valid*` warm-hit pay for a full workspace
-//! sweep (5-7 sweeps, no memoisation). That is the regression Block 6.c
+//! sweep (5-7 sweeps, no memoisation). That is the regression the per-request hoist
 //! fixes.
 //!
 //! [`HostResolverContext`] holds `(&'a VerterHost, &'a HostStoreView)`
@@ -161,7 +161,7 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         // Pass the request-bound `RequestStoreView` (which chains the
         // `CanonicalCompletionOverlay` in front of the base) so cache
         // validation consults the overlay-shadowed view rather than
-        // bypassing it via `self.view.base()`. Block 6.c overlay-bypass
+        // bypassing it via `self.view.base()`. The overlay-bypass
         // bug fix (codex consult #3 diagnosis): the previous
         // `self.view.base()` argument made every prepared-decl bundle
         // warm-read pay the request-level snapshot cost without
@@ -328,7 +328,7 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         owner_canonical: &str,
         local_name: &str,
     ) -> Option<(String, String)> {
-        // Overlay-aware view (Block 6.c overlay-bypass bug fix — see
+        // Overlay-aware view (overlay-bypass bug fix — see
         // `prepared_decl_bundle` above for the diagnosis).
         self.inner.resolve_owner_direct_import_with_store_view(
             &self.view,

@@ -83,7 +83,7 @@ impl SessionRuntime {
     /// that threads a borrowed `&HostStoreView` so the host-side warm
     /// validation avoids rebuilding a full workspace snapshot. Used by
     /// `SessionRequestHost::try_get_cached_component_meta` on the
-    /// session-bearing hot path (Block 6.c iter3 — bypass audit).
+    /// session-bearing hot path (bypass-audit fast path).
     #[inline]
     pub(crate) fn try_get_cached_resolved_meta_with_store_view(
         &self,
@@ -136,7 +136,7 @@ impl SessionRuntime {
         let host = self.host();
         let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
 
-        // Block 6.c Shape 1: the request-scoped
+        // Request-scoped overlay shape: the request-scoped
         // `CanonicalCompletionOverlay` is built ONCE here at the request
         // boundary and stored on the adapter struct. Every resolver
         // call inside the request shares this same `Arc` so promoted

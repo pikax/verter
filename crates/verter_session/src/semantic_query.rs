@@ -548,7 +548,7 @@ impl From<ProjectionMode> for verter_audit::ProjectionModeTag {
     }
 }
 
-/// Reduction-demand axis (Block 6.i Commit AX, codex-hybrid spec).
+/// Reduction-demand axis (codex-hybrid spec).
 ///
 /// Distinguishes whether the query result is going to be *published*
 /// (a consumer of the projector pipeline will read it on the final
@@ -634,7 +634,7 @@ impl ProjectionReductionContext {
     }
 }
 
-/// Carrier-stop predicate (Block 6.i Commit AX, codex-hybrid spec).
+/// Carrier-stop predicate (codex-hybrid spec).
 ///
 /// Returns `true` exactly when an operator (`keyof T`, `{ [K in S]: V }`)
 /// should reduce — i.e. the caller is on the publication path.

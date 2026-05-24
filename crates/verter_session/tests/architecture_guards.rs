@@ -4169,6 +4169,11 @@ mod foundations_guards {
     /// substring scanning where the plan calls for it, plus a numeric
     /// scan for `phase \d+` / `phase-\d+` and the equivalent
     /// `Stage \d+` / `Stage-\d+` family.
+    ///
+    /// Also catches the orchestrator's project-management vocabulary
+    /// `Block N.x` (e.g. `Block 6.i`, `Block 6.j`) and uppercase
+    /// `Commit XY` markers (e.g. `Commit AX`, `Commit BX`) which the
+    /// numeric-only `Commit \d+` scan does not see.
     pub fn line_has_phase_archaeology(line: &str) -> bool {
         // Substring matches for fixed vocabulary. These are unambiguous
         // in production source and never appear as legitimate prose.
@@ -4314,6 +4319,65 @@ mod foundations_guards {
                 search_from = abs + prefix.len();
             }
         }
+        // `Block \d+\.[a-z]` — orchestrator's project-management
+        // vocabulary (e.g. `Block 6.i`, `Block 6.j`, `Block 12.a`).
+        // The decimal+letter suffix is unique to orchestrator block
+        // references and does not appear in legitimate code prose
+        // (a basic block, allocator block, etc. never carries that
+        // shape). Case-sensitive on the leading B to avoid flagging
+        // ordinary uses of the noun "block".
+        for prefix in ["Block "] {
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(prefix) {
+                let abs = search_from + rel;
+                let mut after = abs + prefix.len();
+                let bytes = line.as_bytes();
+                let digit_start = after;
+                while after < bytes.len() && bytes[after].is_ascii_digit() {
+                    after += 1;
+                }
+                if after > digit_start
+                    && after + 1 < bytes.len()
+                    && bytes[after] == b'.'
+                    && bytes[after + 1].is_ascii_lowercase()
+                {
+                    return true;
+                }
+                search_from = abs + prefix.len();
+            }
+        }
+        // `Commit XY` — orchestrator commit markers like `Commit AX`,
+        // `Commit BX`, `Commit C`. Distinct from the legitimate
+        // `Commit \d+` numeric pattern caught elsewhere.
+        //
+        // Discriminator after `Commit [A-Z]`:
+        //   - another upper / digit (`AX`, `A0`) is archaeology
+        //   - lowercase letter (`Atlas`, `Source`) is verb-noun prose,
+        //     NOT archaeology
+        //   - any non-alphabetic byte (space, punctuation, EOL) is a
+        //     single-letter orchestrator marker (`Commit C`,
+        //     `Commit C.`), archaeology
+        for prefix in ["Commit ", "commit "] {
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(prefix) {
+                let abs = search_from + rel;
+                let after = abs + prefix.len();
+                let bytes = line.as_bytes();
+                if after < bytes.len() && bytes[after].is_ascii_uppercase() {
+                    if after + 1 >= bytes.len() {
+                        return true;
+                    }
+                    let trailing = bytes[after + 1];
+                    if trailing.is_ascii_uppercase()
+                        || trailing.is_ascii_digit()
+                        || !trailing.is_ascii_alphabetic()
+                    {
+                        return true;
+                    }
+                }
+                search_from = abs + prefix.len();
+            }
+        }
         false
     }
 
@@ -4410,6 +4474,14 @@ mod foundations_guards {
             "/// Stage 6e installs the legacy_dep_signature shadow scaffold.",
             "/// stage 6a wires the real ResolvedImportFacts cache.",
             "// Stage-4d compliance from the pre-state.",
+            // Block N.x — orchestrator block vocabulary.
+            "// Block 6.i Commit AX — descend the per-member cursor.",
+            "// Block 6.j R18 — emit PublishedField at the macro publication boundary.",
+            "/// Block 6.c per-request hoist read this counter.",
+            "// Block 12.a substrate cutover deleted the legacy walker.",
+            // Commit XY — alpha-suffixed commit markers.
+            "// Commit AX (codex-hybrid): the call-site provides the cursor.",
+            "// see Commit BX for the carrier-stop closure.",
         ];
         for line in cases {
             assert!(
@@ -4437,6 +4509,13 @@ mod foundations_guards {
             // Final-state joiner-accounting prose — no plan citation,
             // no decimal section ref tied to audit vocabulary.
             "// Joiner-accounting contract: per-request hits/misses attribute exactly.",
+            // Block prose that is NOT orchestrator vocabulary.
+            "// Walk each basic block in source order.",
+            "// allocator block reuse counter.",
+            "// `block_until_idle` waits until the queue drains.",
+            // Commit prose that is NOT an orchestrator marker.
+            "// On commit, flush the buffered writes.",
+            "/// Commit the in-flight transaction.", // sentence-initial verb, no alphanumeric suffix
         ];
         for line in allowed {
             assert!(
@@ -4488,6 +4567,10 @@ mod foundations_guards {
     /// because production code currently contains no algorithm-phase
     /// comments to protect — the broader rule documents the
     /// distinction so future authors know it.
+    ///
+    /// Also catches the orchestrator's project-management vocabulary
+    /// `Block N.x` (decimal-letter suffix) and `Commit XY` (alpha
+    /// suffix) which the existing numeric scans do not see.
     pub fn line_has_phase_archaeology_d111(line: &str) -> bool {
         let bytes = line.as_bytes();
         // ── Fixed substrings — always archaeology. ──
@@ -4528,13 +4611,10 @@ mod foundations_guards {
                     after += 1;
                 }
                 if after > digit_start {
-                    // Found at least one digit. Check the next byte.
-                    // EOL after digit is archaeology.
                     if after >= bytes.len() {
                         return true;
                     }
                     let next = bytes[after];
-                    // Carve-out: colon-prefixed verb is algorithm-phase.
                     if next != b':' {
                         return true;
                     }
@@ -4543,10 +4623,6 @@ mod foundations_guards {
             }
         }
         // ── `Stage \d+` with the `:` carve-out. ──
-        // Mirrors the Phase scan: `Stage 1: collect ...` is
-        // algorithm-stage (preserve). Any other byte after the digit
-        // run (letter, `-`, `.`, space, EOL, `,`, `)`, `—`, etc.)
-        // is archaeology.
         for prefix in ["Stage ", "stage ", "Stage-", "stage-"] {
             let mut search_from = 0usize;
             while let Some(rel) = line[search_from..].find(prefix) {
@@ -4580,6 +4656,58 @@ mod foundations_guards {
                 search_from = abs + prefix.len();
             }
         }
+        // ── `Commit XY` — alpha-suffixed orchestrator commit markers
+        // like `Commit AX`, `Commit BX`, `Commit C`. Discriminator
+        // after `Commit [A-Z]`:
+        //   - another upper / digit is archaeology
+        //   - lowercase letter is verb-noun prose (`Commit Source`,
+        //     `Commit Atlas`), NOT archaeology
+        //   - any non-alphabetic byte (space, punctuation, EOL) is a
+        //     single-letter orchestrator marker, archaeology
+        for prefix in ["Commit ", "commit "] {
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(prefix) {
+                let abs = search_from + rel;
+                let after = abs + prefix.len();
+                if after < bytes.len() && bytes[after].is_ascii_uppercase() {
+                    if after + 1 >= bytes.len() {
+                        return true;
+                    }
+                    let trailing = bytes[after + 1];
+                    if trailing.is_ascii_uppercase()
+                        || trailing.is_ascii_digit()
+                        || !trailing.is_ascii_alphabetic()
+                    {
+                        return true;
+                    }
+                }
+                search_from = abs + prefix.len();
+            }
+        }
+        // ── `Block \d+\.[a-z]` — orchestrator block vocabulary
+        // (`Block 6.i`, `Block 6.j`, `Block 12.a`). The decimal+letter
+        // suffix is unique to the orchestrator's block naming and
+        // does not appear in legitimate prose ("basic block",
+        // "allocator block" etc.). Case-sensitive on the leading B.
+        for prefix in ["Block "] {
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(prefix) {
+                let abs = search_from + rel;
+                let mut after = abs + prefix.len();
+                let digit_start = after;
+                while after < bytes.len() && bytes[after].is_ascii_digit() {
+                    after += 1;
+                }
+                if after > digit_start
+                    && after + 1 < bytes.len()
+                    && bytes[after] == b'.'
+                    && bytes[after + 1].is_ascii_lowercase()
+                {
+                    return true;
+                }
+                search_from = abs + prefix.len();
+            }
+        }
         // ── `deleted in \d` — deletion history with digit reference. ──
         let lower = line.to_ascii_lowercase();
         if let Some(idx) = lower.find("deleted in ") {
@@ -4588,8 +4716,6 @@ mod foundations_guards {
             if after < bytes_l.len() && bytes_l[after].is_ascii_digit() {
                 return true;
             }
-            // `deleted in Commit N` / `deleted in Plan §...` are also
-            // covered by the `Commit \d+` and `Plan §` checks above.
         }
         // ── `revision N` / `Revision N`. ──
         for prefix in ["revision ", "Revision "] {
@@ -4604,9 +4730,6 @@ mod foundations_guards {
             }
         }
         // ── `rev N` standalone word. ──
-        // Only flag when `rev ` is preceded by whitespace / line start /
-        // `(` (so legitimate prose like `revs 1..3` is not flagged) and
-        // followed by a digit.
         for (i, _) in line.match_indices("rev ") {
             if i > 0 {
                 let prev = bytes[i - 1];
@@ -4705,6 +4828,13 @@ mod foundations_guards {
             "// Stage-5b instrumentation counter — admission discriminator.",
             "/// Stage 6e installs the legacy_dep_signature shadow.",
             "/// stage 6a wires the real cache.",
+            // Block N.x — orchestrator block vocabulary.
+            "// Block 6.i Commit AX — descend the per-member cursor.",
+            "// Block 6.j R18 — emit PublishedField at the boundary.",
+            "/// Block 6.c per-request hoist.",
+            // Commit XY — alpha-suffixed commit markers.
+            "// Commit AX (codex-hybrid): the call-site provides the cursor.",
+            "// per Commit BX of the cutover.",
         ];
         for line in cases {
             assert!(
@@ -4733,10 +4863,17 @@ mod foundations_guards {
             "// Reverses (rev) the iteration order.",
             "/// The phase angle in radians for the easing curve.",
             // `Phase` followed by a letter without digits — not archaeology
-            // by the broader rule (the rule specifies `Phase \d+`).
+            // by the broader rule (the rule specifies `Phase \\d+`).
             "// Builder Phase C owns the second pass.",
             // Stage followed by a letter — same carve-out as Phase.
             "// Build Stage C handles the second pass.",
+            // Block prose that is NOT orchestrator vocabulary.
+            "// Walk each basic block in source order.",
+            "// allocator block reuse counter.",
+            "// `block_until_idle` waits until the queue drains.",
+            // Commit verb prose — sentence-initial verb usage.
+            "// On commit, flush the buffered writes.",
+            "/// Commit the in-flight transaction.",
         ];
         for line in allowed {
             assert!(

@@ -153,7 +153,7 @@ pub(super) enum FamilyKey {
 /// for mode-bearing variants one of `Identity` / `Navigate` / `Shallow` /
 /// `Expanded` is selected from the key's `ProjectionMode`.
 ///
-/// Block 6.i Commit AX (codex-hybrid): the `Instantiate` / `KeyOf` /
+/// Codex-hybrid spec: the `Instantiate` / `KeyOf` /
 /// `MappedType` families carry a [`ProjectionReductionContext`] in
 /// their key, not just a `ProjectionMode`. Their slots are picked from
 /// the `TransitShallow` / `TransitNavigate` / `TransitIdentity` /
@@ -173,7 +173,7 @@ pub(super) enum ModeSlot {
     /// modes.
     Skeleton,
     /// `StructuralTransit` variants of the four publication modes —
-    /// Block 6.i Commit AX (codex-hybrid). Distinct from the
+    /// Codex-hybrid spec. Distinct from the
     /// publication slots; do NOT backfill the publication slots and
     /// are not backfilled by them.
     TransitIdentity,
@@ -196,7 +196,7 @@ pub(super) struct FamilySlots {
     /// Navigate/Expanded; does NOT participate in backfill.
     skeleton: Option<MemoEntry>,
     /// `StructuralTransit` slot mirrors of the four publication slots —
-    /// Block 6.i Commit AX (codex-hybrid). Independent from the
+    /// Codex-hybrid spec. Independent from the
     /// publication slots; backfill within the transit family follows
     /// the same `Expanded → Shallow → Navigate → Identity` hierarchy.
     transit_identity: Option<MemoEntry>,
@@ -343,7 +343,7 @@ pub struct AuditEagerKeyRow {
 /// hierarchy (different semantics: preserves open generics) — it backfills
 /// nothing AND nothing backfills it.
 ///
-/// Block 6.i Commit AX (codex-hybrid): the `Transit*` slots mirror the
+/// Codex-hybrid spec: the `Transit*` slots mirror the
 /// publication-slot fan-out within the transit family. Cross-family
 /// backfill (Transit → publication or publication → Transit) is NOT
 /// admitted — a publication-context result and a transit-context

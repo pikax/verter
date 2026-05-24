@@ -308,7 +308,7 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// threaded down.
     ///
     /// `impl ResolverContext for VerterHost::resolver_store_view` rebuilds
-    /// a full workspace snapshot on every call — the cost Block 6.c
+    /// a full workspace snapshot on every call — the cost the per-request hoist
     /// hoists to per-request scope.
     #[track_caller]
     fn resolver_store_view(&self) -> HostStoreView;
