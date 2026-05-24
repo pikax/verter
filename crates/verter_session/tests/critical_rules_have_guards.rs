@@ -1,4 +1,4 @@
-//! Block 6.j R18 — R6 meta-guard.
+//! R6 meta-guard.
 //!
 //! Codex Round-2 Rule 6 (BINDING): every `(CRITICAL)` architecture
 //! rule in `CLAUDE.md` and `.claude/skills/*/SKILL.md` must ship with
@@ -67,11 +67,14 @@ use std::path::PathBuf;
 ///    → `crates/verter_session/tests/import_route_writer_guard.rs`),
 ///    discoverable via `cargo test --test <name>`.
 ///
-/// The registry does NOT validate that the name resolves to a
-/// runnable test — scanning the entire workspace symbol table on
-/// every CI run is pointlessly expensive. Reviewers and reviewers'
-/// tooling can cross-reference; the contract this enforces is
-/// "there exists a named guard the rule's author committed to".
+/// Guard-name validity is enforced by
+/// [`every_registry_guard_name_resolves_to_a_known_test`]: each
+/// registry entry must either name a `#[test] fn <name>(` declared
+/// in `crates/*/tests/**/*.rs` or `crates/*/src/**/*_tests.rs`, OR
+/// name the basename of an integration-test file at
+/// `crates/*/tests/<name>.rs`. The scanner is a static file walk +
+/// regex over compiled test source — no cargo invocation — so the
+/// check runs in well under a second.
 const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
     // ──────────────────────── CLAUDE.md ────────────────────────────
     (
@@ -254,10 +257,13 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
         "Component-Meta Completeness Contract",
         &[
             // Completeness-contract substrate (typed degraded states,
-            // no `Complete(None)` for missing inputs) is Block 6.j R19
-            // (Codex Round-2 Rule 2). The interim guard pins the
+            // no `Complete(None)` for missing inputs) is a follow-up
+            // batch (Codex Round-2 Rule 2). The interim guard pins the
             // current invariant via the audit-validator's
-            // PublishedField gate + the no-silent-skip guard.
+            // PublishedField gate + the no-silent-skip guard. The
+            // completeness substrate (typed degraded states, no
+            // `Complete(None)` for missing inputs) is a follow-up
+            // batch; the interim guards pin today's contract.
             "macro_impacting_constructs_fail_lowering_not_silent_skip",
             "audit_publishes_member_edge_with_published_field_provenance_at_macro_boundaries",
         ],
@@ -273,7 +279,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
     (
         "Typed Degradation And Completeness Contract",
         &[
-            // Same Block 6.j R19 substrate as the component-meta
+            // Same follow-up substrate as the component-meta
             // completeness contract.
             "macro_impacting_constructs_fail_lowering_not_silent_skip",
             "audit_publishes_member_edge_with_published_field_provenance_at_macro_boundaries",
@@ -380,7 +386,7 @@ fn every_critical_rule_in_docs_has_registered_guard() {
 
     assert!(
         missing.is_empty(),
-        "Block 6.j R18 R6 META-GUARD — every `(CRITICAL)` section in \
+        "R6 META-GUARD — every `(CRITICAL)` section in \
          CLAUDE.md and `.claude/skills/*/SKILL.md` MUST be registered \
          in `CRITICAL_RULE_GUARDS` (in \
          `crates/verter_session/tests/critical_rules_have_guards.rs`) \
@@ -423,7 +429,7 @@ fn registry_does_not_reference_stale_critical_rules() {
 
     assert!(
         stale.is_empty(),
-        "Block 6.j R18 R6 META-GUARD — `CRITICAL_RULE_GUARDS` \
+        "R6 META-GUARD — `CRITICAL_RULE_GUARDS` \
          references rule titles that no longer appear in the docs. A \
          stale registry entry hides removed-but-still-tracked rules \
          from the inverse audit. Retire the registry row in the same \
@@ -445,7 +451,7 @@ fn every_registry_entry_lists_at_least_one_guard() {
 
     assert!(
         empty.is_empty(),
-        "Block 6.j R18 R6 META-GUARD — `CRITICAL_RULE_GUARDS` entries \
+        "R6 META-GUARD — `CRITICAL_RULE_GUARDS` entries \
          with an empty guard list bypass the meta-guard's intent (a \
          CRITICAL rule without an executable guard is prose). Each \
          row MUST reference at least one named guard test or scanner. \
@@ -478,4 +484,202 @@ fn title_normaliser_handles_markdown_and_critical_suffix() {
     // only invokes this for lines that contain `(CRITICAL)` so this
     // is defence-in-depth).
     assert_eq!(normalise_title("## Not A Rule"), "Not A Rule".to_string(),);
+}
+
+/// Walk every `.rs` file rooted at `path` (recursively) and call
+/// `visit` with each file's path.
+fn walk_rs_files(path: &PathBuf, out: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(path) {
+        Ok(it) => it,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            walk_rs_files(&p, out);
+        } else if p.extension().and_then(|e| e.to_str()) == Some("rs") {
+            out.push(p);
+        }
+    }
+}
+
+/// Collect the set of every valid guard-name in the workspace:
+/// 1. `#[test] fn <name>(` declarations in
+///    `crates/*/tests/**/*.rs` and `crates/*/src/**/*_tests.rs`
+///    (i.e. test functions that `cargo test <name>` can run).
+/// 2. Basenames of integration-test files at
+///    `crates/*/tests/<name>.rs` (i.e. the per-test-binary names
+///    that `cargo test --test <name>` can run).
+///
+/// The scan is purely static — no cargo invocation — so it runs
+/// in well under a second on the workspace.
+fn collect_known_guard_names() -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::<String>::new();
+    let root = workspace_root();
+    let crates_dir = root.join("crates");
+
+    let crate_entries = match fs::read_dir(&crates_dir) {
+        Ok(it) => it,
+        Err(e) => panic!("read crates/: {e}"),
+    };
+    for crate_entry in crate_entries.flatten() {
+        let crate_path = crate_entry.path();
+        if !crate_path.is_dir() {
+            continue;
+        }
+
+        // (1) Integration-test FILE basenames at crates/<X>/tests/<name>.rs
+        // (top-level files only — not files inside subdirectories,
+        // which `cargo test --test <name>` cannot run directly).
+        let tests_dir = crate_path.join("tests");
+        if let Ok(entries) = fs::read_dir(&tests_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if !p.is_file() {
+                    continue;
+                }
+                if p.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                    names.insert(stem.to_string());
+                }
+            }
+        }
+
+        // (2) `fn <name>(` declarations inside the test surfaces.
+        //
+        // Test functions live in:
+        //   - crates/<X>/tests/**/*.rs (integration tests)
+        //   - crates/<X>/src/**/*_tests.rs (extracted #[cfg(test)] modules)
+        //
+        // We accept any `fn <name>(` (with optional `pub `) because:
+        //   - the registry already chooses `fn` names that match the
+        //     `#[test]` they refer to (verified by reading the
+        //     surrounding `#[test]` attribute would be stricter but
+        //     adds a parser without changing the predicate's value);
+        //   - non-test helper functions that happen to share a name
+        //     with a registry entry would still let `cargo test <name>`
+        //     find the real test, so accepting them is harmless.
+        let mut files = Vec::new();
+        walk_rs_files(&tests_dir, &mut files);
+        let src_dir = crate_path.join("src");
+        if src_dir.is_dir() {
+            walk_rs_files(&src_dir, &mut files);
+        }
+        for file in files {
+            // For src files, restrict to *_tests.rs (the
+            // architectural-rule convention for extracted
+            // #[cfg(test)] modules).
+            let is_src = file.starts_with(&src_dir);
+            if is_src {
+                let name = file
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                if !(name.ends_with("_tests.rs") || name == "tests.rs") {
+                    continue;
+                }
+            }
+            let src_text = match fs::read_to_string(&file) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            for line in src_text.lines() {
+                let trimmed = line.trim_start();
+                let after_pub = trimmed.strip_prefix("pub ").unwrap_or(trimmed);
+                let after_fn = match after_pub.strip_prefix("fn ") {
+                    Some(rest) => rest,
+                    None => continue,
+                };
+                // `<name>(` or `<name><`-then-`(` (generic).
+                let name_end = after_fn
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(after_fn.len());
+                if name_end == 0 {
+                    continue;
+                }
+                let name = &after_fn[..name_end];
+                if name.is_empty() {
+                    continue;
+                }
+                names.insert(name.to_string());
+            }
+        }
+    }
+
+    names
+}
+
+/// R6 validity scanner: every guard-name in `CRITICAL_RULE_GUARDS`
+/// MUST resolve to a real test in the workspace. Closes the
+/// guard-name validity gap the original R6 substrate left open —
+/// without this, the registry could be padded with arbitrary
+/// `&["fake_guard_a", "fake_guard_b"]` and the other R6 tests would
+/// still PASS.
+///
+/// The check is a binary structural predicate
+/// (`name ∈ {test functions} ∪ {test file basenames}`) — no
+/// heuristics, no fuzzy thresholds.
+#[test]
+fn every_registry_guard_name_resolves_to_a_known_test() {
+    let known = collect_known_guard_names();
+    let mut dangling: Vec<(String, String)> = Vec::new();
+    for (rule_title, guards) in CRITICAL_RULE_GUARDS {
+        for guard_name in *guards {
+            if !known.contains(*guard_name) {
+                dangling.push((rule_title.to_string(), guard_name.to_string()));
+            }
+        }
+    }
+    assert!(
+        dangling.is_empty(),
+        "R6 VALIDITY SCANNER — `CRITICAL_RULE_GUARDS` references \
+         guard names that do not resolve to any known test in the \
+         workspace. Each entry must either name a `#[test] fn \
+         <name>(` declared in `crates/*/tests/**/*.rs` or \
+         `crates/*/src/**/*_tests.rs`, OR name the basename of an \
+         integration-test file at `crates/*/tests/<name>.rs`. \
+         Without this check the registry could be padded with \
+         arbitrary strings, defeating the R6 contract. Dangling \
+         entries (rule -> guard):\n  {}",
+        dangling
+            .iter()
+            .map(|(rule, guard)| format!("`{rule}` -> `{guard}`"))
+            .collect::<Vec<_>>()
+            .join("\n  "),
+    );
+}
+
+/// Self-discriminator for the validity scanner: injecting a fake
+/// guard name into the predicate input MUST fail. Without this
+/// negative case the scanner could silently pass a permissive
+/// implementation.
+#[test]
+fn every_registry_guard_name_validity_scanner_discriminates_against_fake() {
+    let known = collect_known_guard_names();
+    // Inject a deliberately-bogus name and verify the lookup fails.
+    let bogus = "definitely_not_a_real_guard_name_for_R6_validity_self_test";
+    assert!(
+        !known.contains(bogus),
+        "validity-scanner self-test: a fake guard-name unexpectedly \
+         matched a real test — the scanner's predicate is too \
+         permissive."
+    );
+    // Sanity check: the real guard names that are in use today
+    // (sample 3 from different registry rows) must resolve. If this
+    // fails, the scanner is rejecting real guard names — a false
+    // positive.
+    for sample in [
+        "no_macro_string_heuristics_in_resolver_core",
+        "every_registry_entry_lists_at_least_one_guard",
+        "import_route_writer_guard",
+    ] {
+        assert!(
+            known.contains(sample),
+            "validity-scanner self-test: known good guard `{sample}` \
+             did not resolve — the scanner's predicate is too \
+             strict (false positive)."
+        );
+    }
 }
