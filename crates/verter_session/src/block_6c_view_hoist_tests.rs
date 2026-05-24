@@ -1,4 +1,4 @@
-//! Discriminating tests for Block 6.c's per-request `HostStoreView`
+//! Discriminating tests for the per-request `HostStoreView`
 //! hoist.
 //!
 //! These tests pin properties of the hoist that would silently regress

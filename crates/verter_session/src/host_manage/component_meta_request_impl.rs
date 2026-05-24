@@ -94,7 +94,7 @@ pub struct CapturedComponentMetaInputs {
 /// so cold-compute reads observe overlay content for the owner
 /// canonical. All other methods delegate to the inner host.
 ///
-/// ## Block 6.c Shape 1: attempt-scoped overlay carrier
+/// ## Attempt-scoped overlay carrier
 ///
 /// `overlay` is the request-scoped
 /// [`CanonicalCompletionOverlay`](crate::resolver_core::CanonicalCompletionOverlay)
@@ -104,7 +104,7 @@ pub struct CapturedComponentMetaInputs {
 /// overlay; subsequent reads through the same request observe the
 /// promotions through the `RequestStoreView` shadowing rail.
 ///
-/// Pre-Shape-1 (commit F), the overlay was constructed inside each
+/// Before the attempt-scoped overlay carrier, the overlay was constructed inside each
 /// `compute_component_meta_state_*_with_view` helper call — that
 /// allocated a fresh empty overlay per cold compute and paid the
 /// shadowing write overhead with zero cross-call accumulation
@@ -225,7 +225,7 @@ impl ComponentMetaRequestHost for VerterHost {
         );
         // Thread the request-bound view through the warm-hit accessor
         // so the per-warm-hit `HostStoreView` rebuild is eliminated on
-        // the bare-host hot path (Block 6.c iter3 — bypass audit
+        // the bare-host hot path (bypass audit
         // top-leverage fix).
         let result = self.try_get_cached_resolved_meta_with_store_view(store_view, canonical, mode);
         component_meta_trace_custom!(
@@ -344,7 +344,7 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
     ) -> Option<Self::Resolution> {
         // View-aware variant: thread the request-bound view through so
         // the per-warm-hit rebuild is eliminated on the view-bound hot
-        // path (Block 6.c iter3 — bypass audit top-leverage fix).
+        // path (bypass-audit top-leverage fix).
         self.host
             .try_get_cached_resolved_meta_for_view_fingerprint_with_store_view(
                 store_view,
@@ -425,7 +425,7 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
 /// `component_meta_request.rs` calls these methods on the trait object,
 /// so every axis is session-aware end to end.
 ///
-/// ## Block 6.c Shape 1: attempt-scoped overlay carrier
+/// ## Attempt-scoped overlay carrier
 ///
 /// `overlay` is the request-scoped
 /// [`CanonicalCompletionOverlay`](crate::resolver_core::CanonicalCompletionOverlay)
@@ -517,7 +517,7 @@ impl<'a> ComponentMetaRequestHost for SessionRequestHost<'a> {
         store_view: &Self::View,
     ) -> Option<Self::Resolution> {
         // Session-bearing hot path: thread the request-bound view
-        // through so the per-warm-hit rebuild is eliminated (Block 6.c
+        // through so the per-warm-hit rebuild is eliminated (per the
         // iter3 — bypass audit top-leverage fix).
         self.runtime
             .try_get_cached_resolved_meta_with_store_view(store_view, canonical, mode)

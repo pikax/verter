@@ -1266,7 +1266,7 @@ impl crate::cache_schema::CacheSchemaVersioned for PreparedTargetDb {
 // ===========================================================================
 // 6. ShapeCacheDb — `ShapeCacheKey → MaterializedTypeExpr`
 //
-// Block 6.i universal shape cache. Replaces the previously-split
+// Universal shape cache. Replaces the previously-split
 // `MaterializeMemoDb` (TypeExpr-keyed) and `MemberShapeCacheDb`
 // (SemanticNode-keyed) by lifting the discriminant into a
 // `ShapeSubject` variant. ONE cache, not two. Every shape lookup at
@@ -1287,55 +1287,18 @@ impl crate::cache_schema::CacheSchemaVersioned for PreparedTargetDb {
 //   }
 //
 // The empty-path All-filter Registry-surface variant collapses to the
-// pre-6.i unkeyed-path cache identity, so existing callers preserve
-// behaviour. Path-precise narrowing emerges in Commits C–F when
-// projectors / fallthrough / operator reducers thread narrowed
-// `SurfaceProjection` cursors and consult `ShapeCacheDb` per-hop.
+// previously-unkeyed-path cache identity, so existing callers preserve
+// behaviour. Path-precise narrowing emerges when projectors, fallthrough,
+// and operator reducers thread narrowed `SurfaceProjection` cursors and
+// consult `ShapeCacheDb` per-hop.
 //
-// ## F5 deferral — `try_satisfy_via_superset` lands in Commit C
-//
-// The original Block 6.i Commit B brief specified a
-// `try_satisfy_via_superset` method on `ShapeCacheDb` with the
-// contract "broader cached result may satisfy narrower demand —
-// validates by checking that the broader entry's fact dep set is a
-// SUPERSET of the narrower demand's reachable facts". The Batch 1
-// review (P2-2) confirms it was not landed in Commit B.
-//
-// F5 deliberately DEFERS this implementation to **Block 6.i Commit C**
-// rather than landing a non-functional stub. Rationale:
-//
-//   1. **No production callers produce narrower demands yet.** Commit A
-//      added the `ProjectionCursor` substrate, but all production
-//      caller sites pass `SurfaceProjection::whole_surface(Registry)`
-//      which constructs a `ShapeDemand::whole_subject_with_context`
-//      key under `Published(mode)`. The
-//      cache never sees a narrowed key, so a `try_satisfy_via_superset`
-//      method has zero callers today and would be untested.
-//   2. **Implementation is non-trivial.** A correct broader-to-narrower
-//      satisfaction requires: (a) identifying which cached entries are
-//      "broader" (same subject, demand SUPERSET of narrower demand —
-//      empty path + All filter superset is the trivial case; nested
-//      children + Include sets need real subset checks), (b) extracting
-//      the narrower subset from the broader payload (path projection
-//      through the cached `MaterializedTypeExpr`), and (c) computing
-//      the `fact_dep_signature` subset that applies to the narrower
-//      demand (the broader's deps may include facts only relevant
-//      under broader's KeyFilter — those must be filtered out for
-//      the narrower demand's signature).
-//   3. **Commit C is the right landing point.** Commit C threads
-//      narrowed cursors through `produce_one_macro_object_shape`,
-//      registry helpers, and per-member projectors. That commit will
-//      ALSO produce the narrower keys that `try_satisfy_via_superset`
-//      addresses; landing both atomically lets the implementation be
-//      driven by real callers + tested by real fixtures (the
-//      `path_precise_superset_cache_hit` runtime guard from the brief
-//      §"Additional runtime guard").
-//
-// Landing a stub-returns-None implementation now would mask Commit C's
-// readiness check (review would see the method exists and might
-// assume superset matching is wired). The cleaner state is: explicit
-// deferral here, with Commit C delivering the implementation + the
-// `path_precise_superset_cache_hit` runtime guard atomically.
+// Broader-to-narrower satisfaction (superset-cache-hit) is intentionally
+// absent. Production callers pass `SurfaceProjection::whole_surface
+// (Registry)`, which constructs a `ShapeDemand::whole_subject_with_context`
+// key under `Published(mode)`; the cache never sees a narrowed key today,
+// so retroactive subset extraction would have no callers and no test
+// coverage. Narrowing instead emerges path-precisely as projectors call
+// `descend_published_member` and re-consult the cache at each hop.
 // ===========================================================================
 
 #[derive(Clone)]
@@ -1409,26 +1372,24 @@ impl ShapeSubject {
 /// or `Published(Navigate)` vs `StructuralTransit(Navigate)` over the
 /// same expression).
 ///
-/// Block 6.i Round 10 (Commit 1) — the terminal-hop demand carries the
-/// FULL [`ProjectionReductionContext`] (mode + demand), not just a bare
-/// [`ProjectionMode`]. The substrate change unblocks Commits 2 / 5 from
-/// keying a per-prop `Navigate` publication slot disjointly from a
-/// `StructuralTransit(Navigate)` carrier-lower slot — same subject,
-/// same mode, but distinct reduction work and distinct results. Without
-/// the demand axis a transit lower would poison the publication slot
-/// (or vice versa) the first time both routes touched the same subject.
+/// The terminal-hop demand carries the FULL
+/// [`ProjectionReductionContext`] (mode + demand), not just a bare
+/// [`ProjectionMode`]. The demand axis lets a per-prop `Navigate`
+/// publication slot key disjointly from a `StructuralTransit(Navigate)`
+/// carrier-lower slot — same subject, same mode, but distinct reduction
+/// work and distinct results. Without the demand axis a transit lower
+/// would poison the publication slot (or vice versa) the first time
+/// both routes touched the same subject.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ShapeDemand {
     /// Path segments narrowing the requested shape. Empty path =
-    /// whole subject. Non-empty path = path-precise demand (Block
-    /// 6.i Commits C–F narrow this at the publication boundary).
+    /// whole subject. Non-empty path = path-precise demand: projectors
+    /// narrow this at the publication boundary.
     pub(crate) path: Arc<[crate::semantic_query::PathSegment]>,
     /// Terminal-hop projection / reduction context. `(mode, demand)`
-    /// keyed disjointly. Pre-Round 10 this was a bare
-    /// `terminal_mode: ProjectionMode`; the Round-10 substrate
-    /// migrates it to the full context so cache slots split per the
-    /// codex Q3-V finding ("ShapeCacheKey must carry the complete
-    /// demand/context, not a Navigate boolean").
+    /// keyed disjointly so cache slots split per the codex Q3-V
+    /// finding ("ShapeCacheKey must carry the complete demand/context,
+    /// not a Navigate boolean").
     pub(crate) terminal_context: crate::semantic_query::ProjectionReductionContext,
     /// Key filter at the terminal hop (Pick/Omit narrowing, etc.).
     pub(crate) key_filter: crate::meta_resolve::projection_demand::KeyFilter,
@@ -1442,14 +1403,11 @@ impl ShapeDemand {
     /// Demand encoding "whole subject, no path narrowing,
     /// Internal-surface caller, caller-supplied reduction context".
     /// The single entry point for whole-subject demand construction.
-    /// Pre-Round-10 callers that named only a `ProjectionMode` route
-    /// through [`ShapeCacheKey::type_expr_whole`] /
-    /// [`ShapeCacheKey::semantic_node_whole`], which wrap the mode in
-    /// `ProjectionReductionContext::published(mode)` — preserves the
-    /// implicit-Published behaviour every existing call site relied
-    /// on. Demand-explicit callers (Round-10 Commit 2 / Commit 5)
-    /// build the context themselves and use the `_with_context`
-    /// constructors.
+    /// Mode-only callers route through [`ShapeCacheKey::type_expr_whole`]
+    /// / [`ShapeCacheKey::semantic_node_whole`], which wrap the mode in
+    /// `ProjectionReductionContext::published(mode)` for the
+    /// implicit-Published default. Demand-explicit callers build the
+    /// context themselves and use the `_with_context` constructors.
     pub(crate) fn whole_subject_with_context(
         terminal_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Self {
@@ -1471,11 +1429,10 @@ pub struct ShapeCacheKey {
 }
 
 impl ShapeCacheKey {
-    /// Construct a key for the legacy `MaterializeMemoDb` shape
-    /// (TypeExpr-subject, whole-subject demand). The default for
-    /// callers that have not yet adopted path-precise demand. The
-    /// terminal context is implicitly `Published(mode)` — matches
-    /// the pre-Round-10 behaviour where every caller was Published.
+    /// Construct a TypeExpr-subject whole-subject key (the default
+    /// for callers that have not adopted path-precise demand). The
+    /// terminal context is implicitly `Published(mode)` for backwards-
+    /// compatible whole-subject lookups.
     pub(crate) fn type_expr_whole(
         scope: Arc<str>,
         expr: Arc<TypeExpr>,
@@ -1490,7 +1447,7 @@ impl ShapeCacheKey {
 
     /// Construct a TypeExpr-subject whole-subject key under an
     /// explicit [`ProjectionReductionContext`]. Used by Round-10
-    /// Commit 2's TypeExpr field materialiser so a per-prop
+    /// the TypeExpr field materialiser so a per-prop
     /// `Published(Navigate)` publication slot stays disjoint from a
     /// `StructuralTransit(Navigate)` carrier-lower slot — same
     /// subject, distinct cache entries.

@@ -464,7 +464,7 @@ defineModel<string>()
         .expect("audit record must publish for the surfaces fixture")
 }
 
-/// Block 6.j R18 non-vacuity gate (DISCRIMINATING).
+/// PublishedField non-vacuity gate (DISCRIMINATING).
 ///
 /// Round 17 closed the Rule-5 validator's false-negative class
 /// (`PublishedField` edges crossing the `fp.projections` lift), but
@@ -473,7 +473,7 @@ defineModel<string>()
 /// `MemberEdgeProvenance::PublishedField`. 179/179 corpus PASS was
 /// vacuous via the structural-allowlist short-circuit.
 ///
-/// This test pins the producer-side wiring landed in Block 6.j R18.
+/// This test pins the producer-side PublishedField wiring.
 /// Every macro projector (`defineProps` / `defineEmits` /
 /// `defineSlots` / `defineExpose` / `defineModel`) MUST emit one
 /// `ProjectMember` origin edge with `MemberEdgeProvenance::PublishedField`
@@ -527,7 +527,7 @@ fn audit_publishes_member_edge_with_published_field_provenance_at_macro_boundari
 
     assert!(
         missing.is_empty(),
-        "Block 6.j R18 non-vacuity gate: every macro projector \
+        "PublishedField non-vacuity gate: every macro projector \
          publication boundary MUST emit a `ProjectMember` origin edge \
          tagged `MemberEdgeProvenance::PublishedField` for every \
          declared surface field. Missing names: {missing:?}. Observed \
@@ -545,6 +545,6 @@ fn audit_publishes_member_edge_with_published_field_provenance_at_macro_boundari
         "PublishedField origin edges must be emitted at the macro \
          publication boundary. Zero observed — the Rule-5 validator's \
          `PublishedField` discriminating branch is dead code, \
-         reverting Block 6.j R18.",
+         reverting the PublishedField wiring.",
     );
 }

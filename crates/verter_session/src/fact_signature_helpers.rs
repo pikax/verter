@@ -183,7 +183,7 @@ pub(crate) fn validate_fact_signature(
     if signature.is_empty() {
         return true;
     }
-    // Context-aware dispatch (Block 6.g Bug 2 fix).
+    // Context-aware dispatch.
     //
     // Request-bound contexts (`HostResolverContext`,
     // `SessionResolverContext`) expose the request-entry-snapshotted
@@ -246,7 +246,7 @@ pub(crate) fn validate_fact_signature_with_self_roots(
     if signature.is_empty() {
         return true;
     }
-    // Context-aware dispatch (Block 6.g Bug 2 fix).
+    // Context-aware dispatch.
     //
     // Same dispatch rationale as [`validate_fact_signature`] above —
     // request-bound contexts validate against the borrowed

@@ -87,7 +87,7 @@ pub struct CacheLayerBreakdown {
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct BypassDiagnostics {
     /// `HostStoreView::from_host` invocation count on this request.
-    /// Per-request hoist (Block 6.c) expects this to drop to a
+    /// The per-request hoist expects this to drop to a
     /// small constant; counts >1 reveal carriers that still build
     /// their own owned view.
     #[serde(with = "u64_as_decimal_string")]

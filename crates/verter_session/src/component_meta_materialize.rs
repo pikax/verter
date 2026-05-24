@@ -1830,7 +1830,7 @@ mod tests {
     // (`ref_root_reaches_transitive_cycle_node`). All tests drive through
     // a real `MetaProject` so the dispatch path matches production usage.
     //
-    // Predicates remain `#[allow(dead_code)]`; commit B1 wires them into
+    // Predicates remain `#[allow(dead_code)]`; downstream wiring pulls them into
     // the materialiser registry-route + recursive-helper guards.
     // =====================================================================
 
@@ -2036,7 +2036,7 @@ export type X = number
     /// assert the BFS-side observable: the predicate returns true on
     /// the recursive-helper fixture (matching A0's discrimination).
     /// A separate audit test exercises the event emission once an
-    /// audit harness is wired in commit I.
+    /// audit harness is wired downstream.
     #[test]
     fn recursive_helper_cycle_guard_predicate_fires_on_dot_path_keys_helper() {
         let project = a0_make_project();
@@ -2288,7 +2288,7 @@ export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
     /// F-prep canonical-fixture A0 test #3b.
     ///
     /// **Provenance:** the plan's docstring says this helper is "added in
-    /// commit A0", but A0 already landed at `11512752` without it
+    /// originally intended", but that ship has sailed without it
     /// (interactive-rebase amend is forbidden per CLAUDE.md global rules).
     /// Practical placement: the helper + test live in F-prep, alongside
     /// the Skeleton-mode primitive that this test specifically validates.

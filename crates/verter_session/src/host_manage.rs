@@ -753,7 +753,7 @@ impl FallthroughRequestHost for VerterHost {
             prop_type_overrides,
         );
 
-        // Block 6.c per-request hoist: read through the caller-supplied
+        // Per-request hoist: read through the caller-supplied
         // `store_view` (built ONCE at the request boundary) instead of
         // building a fresh owned snapshot per call.
         let live_view = store_view;
@@ -835,7 +835,7 @@ impl FallthroughRequestHost for VerterHost {
         visiting: &mut rustc_hash::FxHashSet<String>,
         store_view: &Self::View,
     ) -> Option<Self::Resolution> {
-        // Block 6.g C5: the trait-method signature is tightened to
+        // The trait-method signature is tightened to
         // require a request-bound `store_view` (no `Option`) — the
         // singleflight executor in `resolver_core::fallthrough_request`
         // always passes the view it built in `snapshot_view`. The

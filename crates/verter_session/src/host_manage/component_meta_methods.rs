@@ -149,7 +149,7 @@ impl VerterHost {
         // flows through `capture_component_meta_inputs_with_view` into
         // the cold compute path.
         //
-        // Block 6.c Shape 1: the request-scoped
+        // Request-scoped overlay shape: the request-scoped
         // `CanonicalCompletionOverlay` is built ONCE here at the request
         // boundary and stored on the adapter struct. Every resolver
         // call inside the request shares this same `Arc` so promoted
@@ -379,7 +379,7 @@ impl VerterHost {
     /// `*_with_view` / `*_with_session_view` / `*_with_overlay` /
     /// `*_for_fallthrough` variants — those supply the overlay-aware
     /// ctx that `compute_component_meta_state_inner` now requires
-    /// unconditionally (Block 6.g C6 / P1-3).
+    /// unconditionally.
     ///
     /// This wrapper exists for test fixtures that drive cold-compute
     /// directly from a bare `&VerterHost`. It builds the request-bound
@@ -423,13 +423,13 @@ impl VerterHost {
     ) -> Option<ResolvedComponentMetaState> {
         // Build the overlay-rooted view ONCE here so the
         // [`SessionResolverContext`] threads a borrow down through the
-        // entire cold-compute pipeline (per Block 6.c per-request
+        // entire cold-compute pipeline (per per-request
         // hoist). Canonicals additively loaded mid-request are promoted
         // into the request-scoped
         // [`crate::resolver_core::CanonicalCompletionOverlay`] so the
         // self-root fact validator observes them without false-missing.
         //
-        // Block 6.c Shape 1: the `overlay` parameter is the
+        // The `overlay` parameter is the
         // request-scoped overlay owned by the
         // [`ViewBoundRequestHost`](crate::host_manage::component_meta_request_impl::ViewBoundRequestHost)
         // adapter. Pre-Shape-1 each call allocated `Arc::new(CCO::new())`
@@ -494,13 +494,13 @@ impl VerterHost {
     ) -> Option<ResolvedComponentMetaState> {
         // Build the overlay-rooted store view ONCE here so the
         // SessionResolverContext threads a borrow down through the entire
-        // cold-compute pipeline (per Block 6.c per-request hoist).
+        // cold-compute pipeline (per per-request hoist).
         // Canonicals additively loaded mid-request are promoted into
         // the request-scoped
         // [`crate::resolver_core::CanonicalCompletionOverlay`] so the
         // self-root fact validator observes them without false-missing.
         //
-        // Block 6.c Shape 1: `overlay` is the request-scoped overlay
+        // `overlay` is the request-scoped overlay
         // owned by the
         // [`ViewBoundRequestHost`](crate::host_manage::component_meta_request_impl::ViewBoundRequestHost)
         // adapter; see
@@ -548,7 +548,7 @@ impl VerterHost {
         )
     }
 
-    /// Bare-host overlay-aware cold compute entry (Block 6.c Shape 1).
+    /// Bare-host overlay-aware cold compute entry.
     ///
     /// Routes the bare-host (no [`SessionView`](crate::session_view::SessionView))
     /// cold-compute through a
@@ -778,11 +778,11 @@ impl VerterHost {
         registry_materialization: RegistryMaterialization,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
     ) -> Option<ResolvedComponentMetaState> {
-        // Block 6.g C6 (P1-3): the `ctx` parameter is required (no
+        // The `ctx` parameter is required (no
         // `Option`) — the previous shape carried
         // `ctx_override: Option<&dyn ResolverContext>` with a
         // `unwrap_or(&self as &dyn ResolverContext)` bare-host
-        // fallback, which the Block 6.g Claude review flagged as a
+        // fallback, which the Claude review flagged as a
         // production exfiltration path that could panic any caller
         // reaching the inner via a bare-host ctx. Production callers
         // (session-bearing + view-bearing + overlay-bearing) all
@@ -1163,7 +1163,7 @@ impl VerterHost {
             &crate::loop5_instrumentation::APPEND_REGISTRY_ENTRIES_CALLS,
             &crate::loop5_instrumentation::APPEND_REGISTRY_ENTRIES_NS,
         );
-        // Block 6.i Commit A: top-level whole-surface registry
+        // Top-level whole-surface registry
         // projection. Subsequent commits narrow this to the actual
         // consumer demand (Pick → Include filter, Conditional → branch
         // selection); the threading through helpers + recursive call

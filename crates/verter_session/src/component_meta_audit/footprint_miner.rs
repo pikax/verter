@@ -135,8 +135,8 @@ pub fn mine_footprint(
             OriginEdgeKind::ProjectMember
             | OriginEdgeKind::ProjectIndex
             | OriginEdgeKind::ProjectPath => {
-                // Block 6.j R18 — `MemberEdgeProvenance::PublishedField`
-                // edges are publication-boundary markers (the producer
+                // `MemberEdgeProvenance::PublishedField` edges are
+                // publication-boundary markers (the producer
                 // declaring "this member is admitted to the
                 // user-visible surface"), NOT structural projection
                 // steps. The `projections` lane summarises structural
