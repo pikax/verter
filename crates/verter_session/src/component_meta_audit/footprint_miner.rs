@@ -135,6 +135,24 @@ pub fn mine_footprint(
             OriginEdgeKind::ProjectMember
             | OriginEdgeKind::ProjectIndex
             | OriginEdgeKind::ProjectPath => {
+                // Block 6.j R18 — `MemberEdgeProvenance::PublishedField`
+                // edges are publication-boundary markers (the producer
+                // declaring "this member is admitted to the
+                // user-visible surface"), NOT structural projection
+                // steps. The `projections` lane summarises structural
+                // walk steps (path / keyof-enumeration /
+                // mapped-enumeration). Lifting `PublishedField` into
+                // `projections` would conflate the declaration with a
+                // walk hop and break leak audits that count
+                // intermediate projection-path Member segments.
+                if let OriginEdgeMetaDto::ProjectMember { provenance, .. } = &edge.meta {
+                    if matches!(
+                        provenance,
+                        verter_audit::MemberEdgeProvenance::PublishedField
+                    ) {
+                        continue;
+                    }
+                }
                 let path = match &edge.meta {
                     OriginEdgeMetaDto::ProjectMember { member_name, .. } => {
                         vec![ProjectPathSegment::Member {

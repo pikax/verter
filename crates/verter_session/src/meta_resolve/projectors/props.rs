@@ -21,20 +21,6 @@ use super::{
     surface_member_to_expanded_field,
 };
 
-/// Project a `defineProps<T>()` macro to a `Vec<ExpandedField>` for
-/// publication into `evaluated_types.props`.
-///
-/// The empty `Vec` return is reserved for two scenarios:
-///
-/// 1. The macro is not type-based (no `parsed_type_argument`). The
-///    parser-side analysis already covers runtime `defineProps`.
-/// 2. A `Recursive` or `Error` result from `ResolveMacroPayload` /
-///    `ProjectPath`. In both cases a `MacroExpansionDiagnostics`
-///    envelope has been pushed to `diag_sink` per §7.5
-///    silent-miss prevention — the caller observes the failure
-///    through the analysis-wide diagnostics stream rather than
-///    silently treating an empty `Vec` as a successful empty
-///    surface.
 pub(crate) fn project_props(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner: &DeclIdentity,
@@ -58,7 +44,12 @@ pub(crate) fn project_props(
     }
 
     let ctx: &dyn ResolverContext = query_engine.ctx;
-    let members_with_raw = {
+    // Block 6.j R18 — admit members under the cursor and emit
+    // `MemberEdgeProvenance::PublishedField` origin edges for every
+    // admitted name BEFORE dispatch drops, so the Rule-5 compliance
+    // validator can attest that every published member is a declared
+    // surface member.
+    let admitted: Vec<_> = {
         let dispatch = ProjectSemanticDispatch::new(ctx);
         let payload_node = match resolve_macro_payload(
             &dispatch,
@@ -88,7 +79,14 @@ pub(crate) fn project_props(
         let members = read_surface_members(ctx, surface_node);
         members
             .into_iter()
-            .map(|member| {
+            .filter_map(|member| {
+                let member_cursor = cursor.descend_published_member(member.name.as_ref())?;
+                dispatch.record_published_field_edge(
+                    owner,
+                    surface_node,
+                    member.value,
+                    &member.name,
+                );
                 let analyzed = mac
                     .prop_fields
                     .iter()
@@ -96,21 +94,21 @@ pub(crate) fn project_props(
                 let raw_type = analyzed.and_then(|p| p.type_annotation.clone());
                 let shallow_type_expr = analyzed.and_then(|p| p.type_expr.clone());
                 let shallow_type_expr_scope = analyzed.and_then(|p| p.type_expr_scope.clone());
-                (member, raw_type, shallow_type_expr, shallow_type_expr_scope)
+                Some((
+                    member,
+                    raw_type,
+                    shallow_type_expr,
+                    shallow_type_expr_scope,
+                    member_cursor,
+                ))
             })
-            .collect::<Vec<_>>()
+            .collect()
     };
-    members_with_raw
+    admitted
         .into_iter()
-        .filter_map(
-            |(member, raw_type, shallow_type_expr, shallow_type_expr_scope)| {
-                // Descend into the published member: the macro
-                // publishes every member NAME; the descended cursor
-                // carries the per-member publication mode. A member
-                // the cursor does not admit (a narrowed projection)
-                // is dropped from the published surface.
-                let member_cursor = cursor.descend_published_member(member.name.as_ref())?;
-                Some(surface_member_to_expanded_field(
+        .map(
+            |(member, raw_type, shallow_type_expr, shallow_type_expr_scope, member_cursor)| {
+                surface_member_to_expanded_field(
                     query_engine,
                     file,
                     &member,
@@ -118,7 +116,7 @@ pub(crate) fn project_props(
                     shallow_type_expr,
                     shallow_type_expr_scope,
                     member_cursor,
-                ))
+                )
             },
         )
         .collect()

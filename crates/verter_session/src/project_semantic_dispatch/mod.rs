@@ -255,6 +255,47 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
+    /// Emit a `ProjectMember` origin-graph edge tagged
+    /// `MemberEdgeProvenance::PublishedField` at the moment a
+    /// component-meta projector admits `member` onto the user-visible
+    /// surface (`defineProps` / `defineEmits` / `defineSlots` /
+    /// `defineExpose` / `defineModel`).
+    ///
+    /// This is the production emit site that gives the Rule-5
+    /// compliance validator its enforcement teeth. The validator
+    /// inspects every `PublishedField` edge against the declared
+    /// published surface — a `PublishedField` edge naming an
+    /// off-surface member is a Rule-5 leak. Without this emit, the
+    /// validator's `PublishedField` branch is dead code on real
+    /// corpus data and 179/179 PASS is vacuous.
+    ///
+    /// `parent_surface` is the semantic node id of the macro
+    /// payload's expanded surface (or the payload itself for the
+    /// single-field `defineModel` projector). `member_value` is the
+    /// semantic node id of the member's type body. `name` is the
+    /// published member name as it appears on the user-visible
+    /// surface — for `defineModel` this is the resolved model name
+    /// (defaulting to `modelValue`).
+    pub(crate) fn record_published_field_edge(
+        &self,
+        owner: &DeclIdentity,
+        parent_surface: SemanticNodeId,
+        member_value: SemanticNodeId,
+        name: &Arc<str>,
+    ) {
+        let fence = self.dep_signature_for(&owner.canonical_id, owner.whole_hash);
+        self.graph().record_origin_edge(
+            member_value,
+            OriginEdgeKind::ProjectMember,
+            Arc::from(vec![parent_surface].into_boxed_slice()),
+            OriginMeta::ProjectedMember {
+                name: Arc::clone(name),
+                provenance: verter_audit::MemberEdgeProvenance::PublishedField,
+            },
+            fence,
+        );
+    }
+
     /// Mode-aware lowering — the sole lowering entry point.
     ///
     /// Block 6.i Commit AX: the implicit `lower_type_expr_in_scope`

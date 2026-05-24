@@ -28,9 +28,6 @@ use super::{
     surface_member_to_expanded_field,
 };
 
-/// Project a `defineSlots<T>()` macro to a `Vec<ExpandedField>` for
-/// publication into the slot-shape surface. One field per slot name;
-/// the field's `r#type` carries the slot function's signature.
 pub(crate) fn project_slots(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner: &DeclIdentity,
@@ -50,7 +47,9 @@ pub(crate) fn project_slots(
     }
 
     let ctx: &dyn ResolverContext = query_engine.ctx;
-    let members = {
+    // Block 6.j R18 — see `project_props` for the PublishedField
+    // origin-edge emit rationale.
+    let admitted: Vec<_> = {
         let dispatch = ProjectSemanticDispatch::new(ctx);
         let payload_node = match resolve_macro_payload(
             &dispatch,
@@ -77,18 +76,30 @@ pub(crate) fn project_slots(
             None => return Vec::new(),
         };
 
-        read_surface_members(ctx, surface_node)
+        let members = read_surface_members(ctx, surface_node);
+        members
+            .into_iter()
+            .filter_map(|member| {
+                let member_cursor = cursor.descend_published_member(member.name.as_ref())?;
+                dispatch.record_published_field_edge(
+                    owner,
+                    surface_node,
+                    member.value,
+                    &member.name,
+                );
+                Some((member, member_cursor))
+            })
+            .collect()
     };
     // Slot fields don't carry a payload-style raw_type per member;
     // their parser-side annotation lives on bindings. The slot
     // surface itself is left without raw_type so the merge layer
     // (parser-side `extract_component_meta`) can populate the slot
     // structure via its own slot_fields traversal.
-    members
+    admitted
         .into_iter()
-        .filter_map(|member| {
-            let member_cursor = cursor.descend_published_member(member.name.as_ref())?;
-            Some(surface_member_to_expanded_field(
+        .map(|(member, member_cursor)| {
+            surface_member_to_expanded_field(
                 query_engine,
                 file,
                 &member,
@@ -96,7 +107,7 @@ pub(crate) fn project_slots(
                 None,
                 None,
                 member_cursor,
-            ))
+            )
         })
         .collect()
 }

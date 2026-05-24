@@ -81,13 +81,30 @@ fn pattern_b_generic_parameter_substitution_does_not_leak_inherited_library_memb
         .as_ref()
         .expect("footprint_capture is enabled in this harness");
 
+    // Block 6.j R18 — scope leak counter to intermediate provenances.
+    // `MemberEdgeProvenance::PublishedField` is the producer-side
+    // declaration of the user-visible surface; the leak this test
+    // pins is intermediate enumeration (`MappedKeyEnumerated` /
+    // `KeyOfEnumerated` / `PathProjection`) through the Mapped
+    // publication path, NOT the legitimate publication of declared
+    // members.
     let mut outputschema_count = 0usize;
     let mut execute_count = 0usize;
     for edge in footprint.derivation_subgraph.edges.iter() {
         if !matches!(edge.kind, OriginEdgeKind::ProjectMember) {
             continue;
         }
-        if let OriginEdgeMetaDto::ProjectMember { member_name, .. } = &edge.meta {
+        if let OriginEdgeMetaDto::ProjectMember {
+            member_name,
+            provenance,
+        } = &edge.meta
+        {
+            if matches!(
+                provenance,
+                verter_audit::MemberEdgeProvenance::PublishedField
+            ) {
+                continue;
+            }
             match member_name.as_ref() {
                 "outputSchema" => outputschema_count += 1,
                 "execute" => execute_count += 1,

@@ -429,3 +429,122 @@ fn chat_messages_attribution_sheet_has_dominant_cost_arm_and_bridge_max_depth_re
          OR name a chat fixture.",
     );
 }
+
+/// Drive a small SFC fixture exercising every macro-projector
+/// publication boundary (`defineProps` / `defineEmits` / `defineSlots`
+/// / `defineExpose` / `defineModel`) and return its
+/// `RequestAuditRecord`.
+fn run_macro_surface_probe_request() -> RequestAuditRecord {
+    let host = crate::VerterHost::new_standalone(crate::types::HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        audit_enabled: true,
+        footprint_capture: true,
+        ..crate::types::HostConfig::default()
+    });
+    let project = crate::meta::MetaProject::new(host);
+    project
+        .upsert_base(
+            "/Surfaces.vue",
+            r#"<script setup lang="ts">
+defineProps<{ foo: string; bar: number }>()
+defineEmits<{ baz: [string]; qux: [] }>()
+defineSlots<{ default(): unknown; named(): unknown }>()
+defineExpose<{ expoA: number; expoB: string }>()
+defineModel<string>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let (_analysis, resolution) = host
+        .get_component_meta_with_resolution("/Surfaces.vue")
+        .expect("resolver must produce metadata for the surfaces fixture");
+    host.take_audit_record(resolution.request_id)
+        .expect("audit record must publish for the surfaces fixture")
+}
+
+/// Block 6.j R18 non-vacuity gate (DISCRIMINATING).
+///
+/// Round 17 closed the Rule-5 validator's false-negative class
+/// (`PublishedField` edges crossing the `fp.projections` lift), but
+/// the validator's `PublishedField` discriminating branch was dead
+/// code on real corpus data: zero production sites emitted
+/// `MemberEdgeProvenance::PublishedField`. 179/179 corpus PASS was
+/// vacuous via the structural-allowlist short-circuit.
+///
+/// This test pins the producer-side wiring landed in Block 6.j R18.
+/// Every macro projector (`defineProps` / `defineEmits` /
+/// `defineSlots` / `defineExpose` / `defineModel`) MUST emit one
+/// `ProjectMember` origin edge with `MemberEdgeProvenance::PublishedField`
+/// for every published member name. Pre-fix the test FAILS with
+/// `published_field_edges` empty; post-fix it PASSES with one edge
+/// per declared surface field.
+#[test]
+fn audit_publishes_member_edge_with_published_field_provenance_at_macro_boundaries() {
+    let record = run_macro_surface_probe_request();
+    let footprint = record
+        .footprint
+        .as_ref()
+        .expect("footprint must publish when HostConfig::footprint_capture is enabled");
+
+    let mut published_field_names: Vec<String> = footprint
+        .derivation_subgraph
+        .edges
+        .iter()
+        .filter(|e| e.kind == OriginEdgeKind::ProjectMember)
+        .filter_map(|e| match &e.meta {
+            OriginEdgeMetaDto::ProjectMember {
+                member_name,
+                provenance,
+            } if *provenance == verter_audit::MemberEdgeProvenance::PublishedField => {
+                Some(member_name.as_ref().to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    published_field_names.sort();
+    published_field_names.dedup();
+
+    // Every declared surface field across the five macro projectors
+    // MUST appear as a `PublishedField` origin edge.
+    let expected: &[&str] = &[
+        "foo",        // defineProps
+        "bar",        // defineProps
+        "baz",        // defineEmits
+        "qux",        // defineEmits
+        "default",    // defineSlots
+        "named",      // defineSlots
+        "expoA",      // defineExpose
+        "expoB",      // defineExpose
+        "modelValue", // defineModel (default name)
+    ];
+
+    let missing: Vec<&&str> = expected
+        .iter()
+        .filter(|name| !published_field_names.iter().any(|seen| seen == **name))
+        .collect();
+
+    assert!(
+        missing.is_empty(),
+        "Block 6.j R18 non-vacuity gate: every macro projector \
+         publication boundary MUST emit a `ProjectMember` origin edge \
+         tagged `MemberEdgeProvenance::PublishedField` for every \
+         declared surface field. Missing names: {missing:?}. Observed \
+         PublishedField edge names: {published_field_names:?}. If this \
+         test fails post-Block-6.j R18, a macro projector was added \
+         WITHOUT wiring `dispatch.record_published_field_edge(...)` at \
+         the publish boundary — see `crates/verter_session/src/\
+         meta_resolve/projectors/{{props,emits,slots,exposed,model}}.rs`.",
+    );
+
+    // Discriminator: the validator branch must be live. Assert at
+    // least one PublishedField edge was observed on this fixture.
+    assert!(
+        !published_field_names.is_empty(),
+        "PublishedField origin edges must be emitted at the macro \
+         publication boundary. Zero observed — the Rule-5 validator's \
+         `PublishedField` discriminating branch is dead code, \
+         reverting Block 6.j R18.",
+    );
+}

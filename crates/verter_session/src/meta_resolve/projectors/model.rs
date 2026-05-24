@@ -34,22 +34,6 @@ use crate::meta_resolve::exactness::classify_node;
 /// an explicit name argument.
 const DEFAULT_MODEL_NAME: &str = "modelValue";
 
-/// Project a `defineModel<T>()` macro to a single [`ExpandedField`].
-///
-/// Returns `None` when:
-/// - the macro is not type-based (no `parsed_type_argument` to
-///   resolve), or
-/// - `ResolveMacroPayload` returned `Recursive` / `Error` (a
-///   diagnostic has been pushed to `diag_sink`).
-///
-/// The returned field's `name` is the resolved model name from
-/// `mac.model_name` or the [`DEFAULT_MODEL_NAME`] fallback.
-///
-/// After raising the payload, the resulting `TypeExpr` is run
-/// through [`materialize_component_meta_type_expr_until_stable`] in
-/// `Expanded` mode so nested `IndexedAccess` chains collapse to the
-/// concrete leaf shape — the same self-reduction contract every
-/// per-macro projector honours.
 pub(crate) fn project_model(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner: &DeclIdentity,
@@ -91,6 +75,15 @@ pub(crate) fn project_model(
             MacroExpansionKind::DefineProps,
             diag_sink,
         )?;
+
+        // Block 6.j R18 — emit the PublishedField origin edge for the
+        // model member. `defineModel<T>()` publishes the raised
+        // payload under `model_name` (defaulting to `modelValue`).
+        // The payload_node is both the parent surface and the member
+        // value here because model is a single-field projection (no
+        // wrapping object surface separate from the payload).
+        let model_name_arc: std::sync::Arc<str> = std::sync::Arc::from(model_name.as_str());
+        dispatch.record_published_field_edge(owner, payload_node, payload_node, &model_name_arc);
 
         let (raised, raise_failed) = match dispatch.raise_node_to_type_expr(payload_node) {
             Some(expr) => (expr, false),

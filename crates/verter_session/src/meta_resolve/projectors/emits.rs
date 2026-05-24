@@ -18,14 +18,6 @@ use super::{
     surface_member_to_expanded_field, PayloadSurfaceScope,
 };
 
-/// Project a `defineEmits<T>()` macro to a `Vec<ExpandedField>` for
-/// publication into `evaluated_types.emits`.
-///
-/// See [`super::props::project_props`] for the per-field semantics
-/// — the only differences are:
-/// - the macro kind passed to `ResolveMacroPayload` is `DefineEmits`
-/// - the diagnostic envelope's `MacroExpansionKind` is `DefineEmits`
-/// - the raw_type comes from `mac.emit_fields[i].payload_type`
 pub(crate) fn project_emits(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner: &DeclIdentity,
@@ -45,7 +37,9 @@ pub(crate) fn project_emits(
     }
 
     let ctx: &dyn ResolverContext = query_engine.ctx;
-    let members_with_raw = {
+    // Block 6.j R18 — see `project_props` for the PublishedField
+    // origin-edge emit rationale.
+    let admitted: Vec<_> = {
         let dispatch = ProjectSemanticDispatch::new(ctx);
         let payload_node = match resolve_macro_payload(
             &dispatch,
@@ -86,7 +80,14 @@ pub(crate) fn project_emits(
         let members = read_surface_members(ctx, surface_node);
         members
             .into_iter()
-            .map(|member| {
+            .filter_map(|member| {
+                let member_cursor = cursor.descend_published_member(member.name.as_ref())?;
+                dispatch.record_published_field_edge(
+                    owner,
+                    surface_node,
+                    member.value,
+                    &member.name,
+                );
                 let analyzed = mac
                     .emit_fields
                     .iter()
@@ -94,16 +95,21 @@ pub(crate) fn project_emits(
                 let raw_type = analyzed.and_then(|e| e.payload_type.clone());
                 let shallow_type_expr = analyzed.and_then(|e| e.payload_expr.clone());
                 let shallow_type_expr_scope = analyzed.and_then(|e| e.payload_expr_scope.clone());
-                (member, raw_type, shallow_type_expr, shallow_type_expr_scope)
+                Some((
+                    member,
+                    raw_type,
+                    shallow_type_expr,
+                    shallow_type_expr_scope,
+                    member_cursor,
+                ))
             })
-            .collect::<Vec<_>>()
+            .collect()
     };
-    members_with_raw
+    admitted
         .into_iter()
-        .filter_map(
-            |(member, raw_type, shallow_type_expr, shallow_type_expr_scope)| {
-                let member_cursor = cursor.descend_published_member(member.name.as_ref())?;
-                Some(surface_member_to_expanded_field(
+        .map(
+            |(member, raw_type, shallow_type_expr, shallow_type_expr_scope, member_cursor)| {
+                surface_member_to_expanded_field(
                     query_engine,
                     file,
                     &member,
@@ -111,7 +117,7 @@ pub(crate) fn project_emits(
                     shallow_type_expr,
                     shallow_type_expr_scope,
                     member_cursor,
-                ))
+                )
             },
         )
         .collect()

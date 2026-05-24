@@ -87,13 +87,33 @@ fn chatmessages_shape_audit_has_zero_outputschema_execute_project_member_edges()
 
     // Sum ProjectMember edges in the derivation subgraph whose
     // member_name is one of the leak keys.
+    //
+    // Block 6.j R18 — scope the leak counter to intermediate
+    // provenances (`PathProjection` / `KeyOfEnumerated` /
+    // `MappedKeyEnumerated`). The `PublishedField` provenance is the
+    // producer-side declaration "this member is admitted to the
+    // user-visible surface" and is the audit signal Rule-5 USES, not a
+    // leak it observes. Counting `PublishedField` edges here would
+    // criminalise the legitimate publication of a `defineSlots`
+    // surface whose declared slot names happen to be `outputSchema` /
+    // `execute` — that publication is the user's intent.
     let mut outputschema_count = 0usize;
     let mut execute_count = 0usize;
     for edge in footprint.derivation_subgraph.edges.iter() {
         if !matches!(edge.kind, OriginEdgeKind::ProjectMember) {
             continue;
         }
-        if let OriginEdgeMetaDto::ProjectMember { member_name, .. } = &edge.meta {
+        if let OriginEdgeMetaDto::ProjectMember {
+            member_name,
+            provenance,
+        } = &edge.meta
+        {
+            if matches!(
+                provenance,
+                verter_audit::MemberEdgeProvenance::PublishedField
+            ) {
+                continue;
+            }
             match member_name.as_ref() {
                 "outputSchema" => outputschema_count += 1,
                 "execute" => execute_count += 1,
