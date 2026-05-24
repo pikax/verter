@@ -96,7 +96,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Context-explicit variant of [`Self::shallow_lower_type_expr`]
-    /// (Block 6.i Commit AX, codex-hybrid). Accepts the full
+    /// (codex-hybrid spec). Accepts the full
     /// [`ProjectionReductionContext`] so callers can thread
     /// `StructuralTransit` through nested lowering. The legacy
     /// `mode`-only overload above wraps `mode` in `Published` so

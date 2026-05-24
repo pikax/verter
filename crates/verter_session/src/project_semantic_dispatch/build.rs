@@ -371,7 +371,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         args: &Arc<[SemanticNodeId]>,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        // Block 6.i Commit AX (codex-hybrid): the call-site provides
+        // Codex-hybrid spec: the call-site provides
         // the publication / structural-transit context. `body_mode` is
         // shorthand for `context.mode` everywhere the existing lowering
         // pipeline consults it; the demand axis flows through to
@@ -500,7 +500,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let arg_id = if let Some(explicit) = args.get(index).copied() {
                 explicit
             } else if let Some(default) = param.default.as_deref() {
-                // Block 6.i Commit AX — propagate the full
+                // Propagate the full
                 // `ProjectionReductionContext` through default-param
                 // lowering so a `StructuralTransit` instantiation
                 // survives. The legacy `body_mode`-only wrapper at
@@ -580,7 +580,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             )
                 .into();
         }
-        // Block 6.i Commit AX — propagate the full
+        // Propagate the full
         // `ProjectionReductionContext` through body lowering so a
         // `StructuralTransit` instantiation lowers its body in transit
         // demand. The legacy `body_mode`-only wrapper at
@@ -702,7 +702,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .iter()
             .filter(|(name, _)| !existing.contains(name.as_str()))
             .map(|(name, member)| {
-                // Block 6.i Commit AX — honour the caller's
+                // Honour the caller's
                 // `ProjectionReductionContext`. The previous
                 // hardcoded `Published(Expanded)` would reify nested
                 // operators along the appended members even when the
@@ -1119,7 +1119,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         return (QueryResult::Value(result), fence);
                     }
                 };
-                // Block 6.i Round 12 — context-propagating deferred
+                // Context-propagating deferred
                 // resolution. Under `StructuralTransit(_)` the source's
                 // nested operators carrier-stop (`may_reduce_operator
                 // (StructuralTransit(_)) == false`); the Pick falls through
@@ -1172,7 +1172,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         return (QueryResult::Value(result), fence);
                     }
                 };
-                // Block 6.i Round 12 — context-propagating deferred
+                // Context-propagating deferred
                 // resolution (see Pick comment above for chain).
                 let source_resolved =
                     self.evaluate_deferred_semantic_node_with_context(source, context);
@@ -1238,7 +1238,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             "Extract" | "Exclude" if args.len() == 2 => {
                 let source_arg = args[0];
                 let filter_arg = args[1];
-                // Block 6.i Round 12 — context-propagating deferred
+                // Context-propagating deferred
                 // resolution (see Pick comment above for chain).
                 let source_resolved =
                     self.evaluate_deferred_semantic_node_with_context(source_arg, context);
@@ -1555,7 +1555,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         let data = self.graph().node_data(base);
         let fence = self.project_generation_signature();
-        // Block 6.i Commit AX (codex-hybrid) carrier-stop: when the
+        // Codex-hybrid carrier-stop: when the
         // caller's context is not a publication-mode-Expanded demand,
         // return a deferred `KeyOf { base }` carrier instead of
         // reifying the keyspace as a literal-anchor union with one
@@ -1715,7 +1715,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let observed_self_roots =
             self.observed_self_roots_from_nodes([source, mapper.key_space, mapper.value_expr]);
 
-        // Block 6.i Commit AX (codex-hybrid) carrier-stop: outside a
+        // Codex-hybrid carrier-stop: outside a
         // publication-mode-Expanded demand the build returns a
         // deferred `Mapped { source, mapper }` carrier without
         // enumerating the source's key space or emitting per-member
@@ -2069,7 +2069,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// [`Self::materialize_selected_key_mapped_value`] — the PathWalker
     /// mapped-type literal-key narrowing arm passes a pre-interned key
     /// literal node so the String / Number kind survives substitution
-    /// (Block 6.i G4 series soundness — `M[1]` substitutes
+    /// (G4-series soundness — `M[1]` substitutes
     /// `K = Literal::Number(1)`, NOT `Literal::String("1")`).
     ///
     /// Factors the common substrate path with
@@ -2148,7 +2148,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Source-surface enumeration for the Shallow walker's
     /// `synthesise_mapped_surface` ONLY.
     ///
-    /// Block 6.i Transit-Shallow Publication (leak-fix-3b) — closes the
+    /// Transit-shallow publication (leak-fix-3b) — closes the
     /// architectural gap that prevented the macro-publication boundary
     /// from migrating from `Published(Expanded)` to
     /// `StructuralTransit(Navigate)`.

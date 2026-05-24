@@ -345,7 +345,7 @@ pub(crate) fn lowered_root_reaches_transitive_cycle(
 /// the BFS-observed dependency fence (per-canonical
 /// `(Arc<str>, DepVersion)` pairs).
 ///
-/// Block 6.i F1 — used by the projector's gate-short-circuit admit
+/// Used by the projector's gate-short-circuit admit
 /// paths to thread the cycle gate's cross-file deps into the cache
 /// entry's `fact_dep_signature`. The bare bool variant remains for
 /// callers that only need the predicate verdict.

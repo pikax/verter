@@ -629,8 +629,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.raise_and_reduce_with_context(node, ProjectionReductionContext::published(mode))
     }
 
-    /// Context-explicit variant of [`Self::raise_and_reduce`] (Block 6.i
-    /// Commit AX, codex-hybrid spec).
+    /// Context-explicit variant of [`Self::raise_and_reduce`]
+    /// (codex-hybrid spec).
     ///
     /// The caller supplies the publication
     /// [`ProjectionReductionContext`] that flows into every operator
@@ -659,7 +659,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Top-down demand-driven graph reducer (Block 6.i Commit AX,
+    /// Top-down demand-driven graph reducer (codex-hybrid,
     /// codex-hybrid spec — stack-safe).
     ///
     /// Replaces the pre-Block-6.i bottom-up topological reducer. The
@@ -784,7 +784,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Push child frames for `data` onto `stack` according to the
-    /// codex-hybrid demand traversal rules (Block 6.i Commit AX).
+    /// codex-hybrid demand traversal rules.
     ///
     /// The rules are:
     ///
@@ -1455,7 +1455,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 type MappingMap =
     rustc_hash::FxHashMap<(SemanticNodeId, ProjectionReductionContext), SemanticNodeId>;
 
-/// Top-down demand reducer work-stack frame (Block 6.i Commit AX).
+/// Top-down demand reducer work-stack frame.
 #[derive(Clone, Copy)]
 #[allow(dead_code)] // wired by reduce_subtree.
 enum ReduceFrameKind {

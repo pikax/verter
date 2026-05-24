@@ -187,7 +187,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // shape (Object members, Union arms, etc.) — Expanded
                     // is required so the next Expand frame can read keys
                     // off the unwrapped surface, not a lazy Ref shell.
-                    // Block 6.i Commit AX (codex-hybrid): key
+                    // Codex-hybrid spec: key
                     // enumeration is a legitimate publication-grade
                     // demand (the keyspace is the explicit consumer
                     // surface), so the context stays `Published +
@@ -243,7 +243,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Block 6.i Round 10 Commit 3 (Chain X closure, codex Q1-X) —
+    /// Chain X closure (codex Q1-X) —
     /// **non-emitting** key-domain membership predicate for path
     /// admission.
     ///
@@ -386,7 +386,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::Object(view) => {
                 Some(view.members.iter().any(|m| m.name.as_ref() == needle))
             }
-            // Block 6.i Round 11 Commit 3 (Chain X closure, codex
+            // Chain X closure (codex
             // 6th-consult Q1-X BINDING) — consult the parse-fact
             // `MemberPresence` substrate for `DeclRef` /
             // `InstantiationRef` bases.
@@ -578,7 +578,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Block 6.i Round 11 Commit 3 (Chain X closure, codex 6th-consult
+    /// Chain X closure (codex 6th-consult
     /// Q1-X BINDING) — non-emitting member-presence admission backed
     /// by the parse-fact `FactKey::MemberPresence` substrate.
     ///

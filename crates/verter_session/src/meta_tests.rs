@@ -2809,7 +2809,7 @@ defineProps<ExternalProps>()
 }
 
 // ---------------------------------------------------------------------------
-// Block 6.i Commit AX — carrier-preserving per-member publication.
+// Carrier-preserving per-member publication.
 //
 // A prop typed as an arbitrary userland generic instantiation
 // (`Tool<INPUT, OUTPUT>`) MUST publish as the SHALLOW CARRIER
@@ -2860,7 +2860,7 @@ defineProps<{
         .find(|p| p.name == "searchTool")
         .expect("searchTool prop must be published");
 
-    // Block 6.i Commit AX (codex-hybrid): an EXPLICITLY-published
+    // Codex-hybrid spec: an EXPLICITLY-published
     // parameterised reference (`searchTool: Tool<...>` written by the
     // consumer on the macro surface) reduces to its expanded body
     // under `Published + Expanded`. The codex-hybrid retired the

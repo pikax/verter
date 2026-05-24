@@ -460,7 +460,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     true,
                 )
             }
-            // Block 6.i round 7 (codex 4th consult Q1 dispatch chain
+            // Codex 4th-consult Q1 dispatch chain
             // prerequisite) — InstantiationRef arm. Pre-round-7 the
             // catch-all left InstantiationRef shells untouched, so
             // type-parameter references inside `Helper<TPlan, K>`'s

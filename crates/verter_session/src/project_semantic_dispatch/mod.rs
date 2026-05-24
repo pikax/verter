@@ -298,7 +298,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// Mode-aware lowering — the sole lowering entry point.
     ///
-    /// Block 6.i Commit AX: the implicit `lower_type_expr_in_scope`
+    /// The implicit `lower_type_expr_in_scope`
     /// wrapper that defaulted to `ProjectionMode::Expanded` is
     /// retired. Every caller MUST state mode explicitly:
     ///
@@ -314,7 +314,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// The audit footprint regression (ChatMessages cold-seq
     /// `outputSchema|execute = 62`) traced to the implicit-Expanded
     /// default surviving on intermediate-base lowering sites; the
-    /// fix is rule-3 of the Block 6.i Commit AX spec.
+    /// fix is rule-3 of the codex-hybrid spec.
     pub fn lower_type_expr_in_scope_with_mode(
         &self,
         scope_canonical_id: &str,
@@ -1173,8 +1173,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// [`Self::project_slot_binding_member`], plus exposes the terminal
     /// `SemanticNodeId` alongside the raised `TypeExpr`. The audit-record
     /// assembly in `compute_evaluated_types` consumes the production-path
-    /// identity directly (no audit-only re-lowering — see Block 6.i
-    /// Commit AX).
+    /// identity directly (no audit-only re-lowering — per the
+    /// codex-hybrid spec).
     pub fn project_slot_binding_member_with_terminal_id(
         &self,
         base: SemanticNodeId,

@@ -54,7 +54,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Context-explicit variant of
-    /// [`Self::evaluate_deferred_semantic_node`] (Block 6.i Commit AX,
+    /// [`Self::evaluate_deferred_semantic_node`] (codex-hybrid,
     /// codex-hybrid). The caller supplies the
     /// [`ProjectionReductionContext`] that flows into every operator
     /// re-dispatch (`KeyOf`, `MappedType`, decl-placeholder
@@ -214,7 +214,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         decl_name: Arc::clone(name),
                     };
                     drop(data);
-                    // Block 6.i Commit AX (codex-hybrid): the
+                    // Codex-hybrid spec: the
                     // declaration-placeholder unwrap inherits the
                     // caller's reduction context. The implicit
                     // `Published + Expanded` unwrap was the path that
@@ -230,7 +230,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         _ => return self.opaque(QueryError::Miss),
                     }
                 }
-                // Block 6.i Commit AX — `DeclRef`/`InstantiationRef`
+                // `DeclRef`/`InstantiationRef`
                 // arms are deliberately NOT added to the deferred-
                 // shell evaluator. The path-walker (walk.rs) and the
                 // keyspace enumerator (enumerate.rs) handle these

@@ -244,7 +244,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             _ => return IdentityCarrierUnwrap::Concrete(id),
         };
         drop(data);
-        // Block 6.i Commit AX (codex-hybrid): the relation engine's
+        // Codex-hybrid spec: the relation engine's
         // identity-carrier unwrap is a STRUCTURAL TRANSIT — the
         // relation result is consumed for assignability decisions, not
         // published on a consumer-visible surface. Dispatch the
@@ -332,7 +332,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         let target_record = self.record_target_shape(target)?;
 
-        // Block 6.i Commit AX (codex-hybrid): the Object-vs-Record
+        // Codex-hybrid spec: the Object-vs-Record
         // arm is a STRUCTURAL TRANSIT — the relation engine needs the
         // unwrapped Object surface, but the surface itself is consumed
         // for assignability, not published. Dispatch under
