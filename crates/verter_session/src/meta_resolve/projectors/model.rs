@@ -53,7 +53,7 @@ pub(crate) fn project_model(
         .clone()
         .unwrap_or_else(|| DEFAULT_MODEL_NAME.to_string());
 
-    // Block 6.i Commit AX — descend into the published model member.
+    // Descend into the published model member.
     // `descend_published_member` returns `None` (the model is dropped
     // from the published surface) when a narrowed projection does not
     // admit the model name; for the whole-surface default it yields a
@@ -76,7 +76,7 @@ pub(crate) fn project_model(
             diag_sink,
         )?;
 
-        // Block 6.j R18 — emit the PublishedField origin edge for the
+        // Emit the PublishedField origin edge for the
         // model member. `defineModel<T>()` publishes the raised
         // payload under `model_name` (defaulting to `modelValue`).
         // The payload_node is both the parent surface and the member

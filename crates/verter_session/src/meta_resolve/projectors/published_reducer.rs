@@ -1,6 +1,6 @@
 //! Published-surface field-type reducer + reducible-operator predicate.
 //!
-//! Block 6.i Commit AX (codex-hybrid). This module hosts the two
+//! This module hosts the two
 //! helpers the projector pipeline needs to finalise published field
 //! shapes — the per-pipeline driver that runs the shared field-type
 //! reducer over every `evaluated_types` row, and the structural
@@ -25,7 +25,7 @@ use super::{reduce_field_type_expr, reduce_field_type_expr_with_mode};
 /// `evaluated_types` so consumers see the same finalised shapes the
 /// per-macro projectors already publish for `props` / `emits`.
 ///
-/// Per Block 6.i Commit AX (codex-hybrid): published macro props /
+/// Published macro props /
 /// emits are reduced under `ProjectionMode::Navigate`. The dispatch's
 /// reduction-demand context propagates this through every nested
 /// operator dispatch — `keyof T` and `{ [K in S]: V }` carrier-stop

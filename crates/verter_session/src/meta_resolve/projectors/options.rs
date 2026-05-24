@@ -42,7 +42,7 @@ pub(crate) fn project_options(
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) -> Vec<ExpandedField> {
-    // Block 6.i Commit AX — each surface member descends via
+    // Each surface member descends via
     // `cursor.descend_published_member(name)`; the per-member type
     // body publishes as a carrier (`Navigate`) unless the consumer
     // walked a deep path.

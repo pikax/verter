@@ -37,7 +37,7 @@ pub(crate) fn project_emits(
     }
 
     let ctx: &dyn ResolverContext = query_engine.ctx;
-    // Block 6.j R18 — see `project_props` for the PublishedField
+    // See `project_props` for the PublishedField
     // origin-edge emit rationale.
     let admitted: Vec<_> = {
         let dispatch = ProjectSemanticDispatch::new(ctx);

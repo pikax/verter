@@ -1,4 +1,4 @@
-//! Tests for the Block 6.h `peek_member_shape_known` primitive.
+//! Tests for the `peek_member_shape_known` primitive.
 //!
 //! The peek is a graph-native Rule-6 enforcement substrate: callers
 //! ask "do you already know this expression's shape at this scope /
@@ -380,7 +380,7 @@ fn peek_bare_host_invocation_triggers_debug_assert() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. Block 6.i H1 — `reduce_field_type_expr` MUST NOT admit a
+// 8. H1 invariant — `reduce_field_type_expr` MUST NOT admit a
 //    `BareCarrier` shape into `ShapeCacheDb` under
 //    `ShapeCacheKey::type_expr_whole(scope, Foo_expr, Expanded)`.
 //
@@ -497,7 +497,7 @@ fn h1_reduce_bare_alias_does_not_poison_expanded_typeexpr_cache_slot() {
 }
 
 // ---------------------------------------------------------------------------
-// 9. Block 6.i H2 — the package-backed gate's fence MUST refuse
+// 9. H2 invariant — the package-backed gate's fence MUST refuse
 //    shared admission when a contributing canonical's
 //    `authoritative_current_content_hash` is unavailable.
 //
@@ -622,7 +622,7 @@ fn h2_package_backed_gate_observes_authoritative_current_content_hash_not_shallo
 }
 
 // ---------------------------------------------------------------------------
-// 10. Block 6.i H2 — the projector caller MUST honour the gate's
+// 10. H2 invariant — the projector caller MUST honour the gate's
 //     fence refusal. When the gate returns `(verdict, None)`, the
 //     caller MUST NOT admit a cache entry rooted on a stand-in
 //     fence; it must return the raised value verbatim.

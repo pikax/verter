@@ -1142,7 +1142,7 @@ pub(crate) fn component_meta_registry_should_keep_raw_symbolic_non_object_alias(
 
 // The TypeExpr-keyed free package-ref check was
 // The 5 callers migrated to a temporary engine
-// method adapter (commit D), which was itself
+// method adapter, which was itself
 // after migrated production callers to graph-native
 // predicates. The graph-native primitive
 // `component_meta_ref_resolves_to_package_node` is the canonical
@@ -1153,6 +1153,6 @@ pub(crate) fn component_meta_registry_should_keep_raw_symbolic_non_object_alias(
 // handled by B1's materialiser registry-route branch, which
 // dispatches Pick/Omit + IndexedAccess shapes through dispatch's
 // canonical projection. Retired symbols are listed in the
-// `RETIRED_SYMBOLS` array of the static-grep gate test (commit I).
+// `RETIRED_SYMBOLS` array of the static-grep gate test.
 
 // ===========================================================================

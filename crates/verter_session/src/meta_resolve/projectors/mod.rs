@@ -1405,7 +1405,7 @@ pub(crate) fn reduce_field_type_expr_with_mode(
         return materialized.type_expr;
     }
 
-    // Block 6.i Round 10 Commit 2 (Chain V closure, codex Q1-V) —
+    // Chain V closure (codex Q1-V) —
     // the materializer now propagates the caller's `publish_mode`
     // verbatim. Pre-Round-10 this entry hardcoded
     // `ProjectionMode::Expanded` "because the top-down demand-driven
@@ -1425,7 +1425,7 @@ pub(crate) fn reduce_field_type_expr_with_mode(
     // shallower demand at every recursive `Instantiate` / `KeyOf` /
     // `Mapped` dispatch. The materialiser's cache key is keyed on
     // `(scope, expr, ProjectionReductionContext::published(mode))`
-    // (Round-10 Commit 1 substrate), so the demand-explicit
+    // (demand-substrate), so the demand-explicit
     // `Published(Navigate)` slot stays disjoint from the implicit
     // `Published(Expanded)` slot — no cache poisoning between
     // per-prop callers and slot/model-binding callers.

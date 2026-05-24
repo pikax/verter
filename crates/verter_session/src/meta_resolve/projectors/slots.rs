@@ -38,7 +38,7 @@ pub(crate) fn project_slots(
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) -> Vec<ExpandedField> {
-    // Block 6.i Commit AX — each surface member descends via
+    // Each surface member descends via
     // `cursor.descend_published_member(name)`; the per-member type
     // body publishes as a carrier (`Navigate`) unless the consumer
     // walked a deep path.
@@ -47,7 +47,7 @@ pub(crate) fn project_slots(
     }
 
     let ctx: &dyn ResolverContext = query_engine.ctx;
-    // Block 6.j R18 — see `project_props` for the PublishedField
+    // See `project_props` for the PublishedField
     // origin-edge emit rationale.
     let admitted: Vec<_> = {
         let dispatch = ProjectSemanticDispatch::new(ctx);

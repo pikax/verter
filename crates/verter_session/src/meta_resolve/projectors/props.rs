@@ -31,7 +31,7 @@ pub(crate) fn project_props(
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) -> Vec<ExpandedField> {
-    // Block 6.i Commit AX — `cursor` carries the publication-boundary
+    // `cursor` carries the publication-boundary
     // demand. Each surface member is descended via
     // `cursor.descend_published_member(name)`: the macro publishes
     // every member NAME, and each member's type body is published as
@@ -44,7 +44,7 @@ pub(crate) fn project_props(
     }
 
     let ctx: &dyn ResolverContext = query_engine.ctx;
-    // Block 6.j R18 — admit members under the cursor and emit
+    // Admit members under the cursor and emit
     // `MemberEdgeProvenance::PublishedField` origin edges for every
     // admitted name BEFORE dispatch drops, so the Rule-5 compliance
     // validator can attest that every published member is a declared
