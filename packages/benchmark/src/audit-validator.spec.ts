@@ -431,3 +431,174 @@ function instantiation(
     args: [],
   } as never;
 }
+
+// ── Rule-5 compliance test helpers ────────────────────────────────
+
+type DerivationEdge = {
+  result: number;
+  kind: string;
+  sources: number[];
+  meta: unknown;
+};
+
+function projectMemberEdge(
+  resultId: number,
+  memberName: string,
+  provenance: string,
+): DerivationEdge {
+  return {
+    result: resultId,
+    kind: "ProjectMember",
+    sources: [resultId + 100],
+    meta: { ProjectMember: { member_name: memberName, provenance } },
+  };
+}
+
+function projectPathRecord(resultId: number, baseId: number, names: string[]) {
+  return {
+    result: resultId,
+    base: baseId,
+    path: names.map((n) => ({ Member: { name: n } })),
+  };
+}
+
+function namedSurfaceEntry(name: string): { name: string } {
+  return { name };
+}
+
+describe("audit_validator_rule5_compliance_published_surface_pass", () => {
+  it("passes when every ProjectMember edge names a published surface field", () => {
+    // ChatMessages-style scenario: 3 leak-edge candidate names
+    // (messages, user, assistant) ALL appear on the published
+    // surface, so the gate is vacuously satisfied.
+    const bundle = emptyBundle();
+    bundle.analysis.props = [
+      namedSurfaceEntry("messages"),
+      namedSurfaceEntry("user"),
+      namedSurfaceEntry("assistant"),
+    ];
+    bundle.record.footprint!.derivation_subgraph.edges = [
+      projectMemberEdge(1, "messages", "MappedKeyEnumerated"),
+      projectMemberEdge(2, "user", "MappedKeyEnumerated"),
+      projectMemberEdge(3, "assistant", "MappedKeyEnumerated"),
+    ] as never;
+    const result = validateAuditBundle(bundle, {
+      component: "ChatMessages",
+      rule5Compliance: { enabled: true },
+    });
+    expect(result.passed).toBe(true);
+    expect(result.violations).toHaveLength(0);
+  });
+});
+
+describe("audit_validator_rule5_compliance_extends_inherited_legitimate_intermediate", () => {
+  it("passes when leak-edge names are subtracted via legitimate-intermediate provenance", () => {
+    // Editor-style scenario: members inherited via `extends`
+    // chain show up as MappedKeyEnumerated edges (Pick-equivalent
+    // structural walk). Names are not on the published surface
+    // but the provenance is allowlisted -> subtracted.
+    const bundle = emptyBundle();
+    bundle.analysis.props = [namedSurfaceEntry("content")];
+    bundle.record.footprint!.derivation_subgraph.edges = [
+      projectMemberEdge(1, "content", "PublishedField"),
+      // EditorOptions members walked via extends — legitimate.
+      projectMemberEdge(2, "fontFamily", "MappedKeyEnumerated"),
+      projectMemberEdge(3, "lineHeight", "MappedKeyEnumerated"),
+    ] as never;
+    const result = validateAuditBundle(bundle, {
+      component: "Editor",
+      rule5Compliance: { enabled: true },
+    });
+    expect(result.passed).toBe(true);
+    expect(result.violations).toHaveLength(0);
+  });
+});
+
+describe("audit_validator_rule5_compliance_listbox_own_surface_pass", () => {
+  it("passes when every edge member-name is in the component's published surface", () => {
+    // Listbox-style scenario: every leak-edge name (label, value,
+    // multiple, etc.) is published. The gate trivially passes.
+    const bundle = emptyBundle();
+    const surface = [
+      "label",
+      "value",
+      "multiple",
+      "by",
+      "disabled",
+      "name",
+      "size",
+      "color",
+      "highlight",
+      "modelValue",
+      "items",
+      "trailingIcon",
+    ];
+    bundle.analysis.props = surface.map(namedSurfaceEntry);
+    bundle.record.footprint!.derivation_subgraph.edges = surface.map((n, i) =>
+      projectMemberEdge(i + 1, n, "MappedKeyEnumerated"),
+    ) as never;
+    const result = validateAuditBundle(bundle, {
+      component: "Listbox",
+      rule5Compliance: { enabled: true },
+    });
+    expect(result.passed).toBe(true);
+    expect(result.violations).toHaveLength(0);
+  });
+});
+
+describe("audit_validator_rule5_compliance_published_field_must_match_surface", () => {
+  it("FAILS when a PublishedField edge names a member outside the published surface", () => {
+    // PublishedField provenance is intentionally NOT in the
+    // allowlist — it must name a real published-surface field.
+    const bundle = emptyBundle();
+    bundle.analysis.props = [namedSurfaceEntry("label")];
+    bundle.record.footprint!.derivation_subgraph.edges = [
+      projectMemberEdge(1, "label", "PublishedField"),
+      // This edge claims to publish "phantom" but the surface only
+      // has "label" — Rule-5 leak.
+      projectMemberEdge(2, "phantom", "PublishedField"),
+    ] as never;
+    const result = validateAuditBundle(bundle, {
+      component: "Listbox",
+      rule5Compliance: { enabled: true },
+    });
+    expect(result.passed).toBe(false);
+    expect(result.violations[0]).toContain("phantom@PublishedField");
+    expect(result.violations[0]).toContain("rule5Compliance: Listbox");
+  });
+});
+
+describe("audit_validator_rule5_compliance_path_segments_count_as_legitimate", () => {
+  it("subtracts ProjectPath segment names as legitimate intermediates", () => {
+    const bundle = emptyBundle();
+    bundle.analysis.props = [namedSurfaceEntry("root")];
+    // ProjectPath edge walks through `intermediate.deeper.root`.
+    // The path segments are legitimate intermediates by construction.
+    bundle.record.footprint!.projections = [
+      projectPathRecord(1, 100, ["intermediate", "deeper", "root"]),
+    ] as never;
+    const result = validateAuditBundle(bundle, {
+      component: "C",
+      rule5Compliance: { enabled: true },
+    });
+    expect(result.passed).toBe(true);
+  });
+});
+
+describe("audit_validator_rule5_compliance_disabled_short_circuits", () => {
+  it("does NOT run the gate when rule5Compliance.enabled is false", () => {
+    const bundle = emptyBundle();
+    bundle.record.footprint!.derivation_subgraph.edges = [
+      projectMemberEdge(1, "leaked", "PublishedField"),
+    ] as never;
+    // No `rule5Compliance` spec at all — the gate is silent.
+    expect(validateAuditBundle(bundle, { component: "C" }).passed).toBe(true);
+    // Explicit `enabled: false` — gate is silent.
+    expect(
+      validateAuditBundle(bundle, {
+        component: "C",
+        rule5Compliance: { enabled: false },
+      }).passed,
+    ).toBe(true);
+  });
+});

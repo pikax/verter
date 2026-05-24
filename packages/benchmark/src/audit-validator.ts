@@ -10,7 +10,7 @@
  *
  * ## Supported checks (legacy-parity)
  *
- * | Legacy TraceSpec field     | Audit-spec field                | Source in RustAuditRecord      |
+ * | Legacy TraceSpec field     | Audit-spec field                | Source in RequestAuditRecord      |
  * | -------------------------- | ------------------------------- | ------------------------------ |
  * | required (file loaded)     | requireLoadedFiles              | footprint.loadedFiles()        |
  * | forbidden (file loaded)    | forbidLoadedFiles               | footprint.loadedFiles()        |
@@ -26,9 +26,11 @@
  */
 
 import type {
-  ComponentMetaFlags,
   MaterializationRecord,
-  RustAuditRecord,
+  MemberEdgeProvenance,
+  OriginEdgeMetaDto,
+  ProjectPathSegment,
+  RequestAuditRecord,
 } from "@verter/types/audit.generated";
 
 /**
@@ -41,14 +43,16 @@ export interface AnalysisSideCar {
   props?: unknown[];
   events?: unknown[];
   slots?: unknown[];
-  flags?: Partial<ComponentMetaFlags> & Record<string, unknown>;
+  /** Subset of analysis exposed entries (`exposed: [{ name: ... }, ...]`). */
+  exposed?: unknown[];
+  flags?: Record<string, unknown>;
 }
 
 /** Audit bundle as emitted by `ComponentMetaSession.getComponentMetaWithAudit`. */
 export interface AuditBundle {
   analysis: AnalysisSideCar;
   resolution: unknown;
-  record: RustAuditRecord;
+  record: RequestAuditRecord;
 }
 
 export interface RequireInstantiationSpec {
@@ -63,6 +67,38 @@ export interface ExpectedResultSpec {
   minEvents?: number;
   minSlots?: number;
   hasEvaluatedTypes?: boolean;
+}
+
+/**
+ * Rule-5 compliance spec — gates that every `ProjectMember` audit edge
+ * either names a field on the user-visible published surface OR carries
+ * a [`MemberEdgeProvenance`] variant in the `allowedIntermediateProvenance`
+ * allowlist (a legitimate intermediate of a structural walk).
+ *
+ * The gate is a binary subset check (no ratios, no thresholds):
+ *
+ *   `audit_member_names \ legitimate_intermediate_names ⊆ published_surface_names`
+ *
+ * where `legitimate_intermediate_names` is the union of edge member
+ * names whose provenance ∈ `allowedIntermediateProvenance`. Names
+ * outside both sets indicate a Rule-5 leak — a future producer change
+ * that broadens the audit footprint past the user's declared surface.
+ *
+ * The default allowlist is the closure of legitimate-structural
+ * provenance variants set at Verter's current emit sites (KeyOf
+ * enumeration, Mapped instantiation, multi-hop path projection).
+ * `PublishedField` is intentionally NOT in the allowlist — edges with
+ * that provenance MUST name a published-surface field.
+ */
+export interface Rule5ComplianceSpec {
+  enabled: boolean;
+  /**
+   * Provenance variants whose member-name edges are subtracted as
+   * legitimate structural intermediates. Defaults to
+   * `["PathProjection", "KeyOfEnumerated", "MappedKeyEnumerated"]` —
+   * see [`MemberEdgeProvenance`] for the per-variant rationale.
+   */
+  allowedIntermediateProvenance?: MemberEdgeProvenance[];
 }
 
 export interface AuditSpec {
@@ -91,6 +127,13 @@ export interface AuditSpec {
    * Rust side. Plan §3 Commit 10 future-facing check.
    */
   expectedFootprintSnapshot?: string;
+  /**
+   * Rule-5 compliance check. When `enabled: true`, the validator
+   * gates that every `ProjectMember` audit edge member-name appears
+   * on the user-visible published surface OR is emitted with a
+   * structurally-legitimate provenance variant.
+   */
+  rule5Compliance?: Rule5ComplianceSpec;
 }
 
 export type AuditCountableKind =
@@ -217,10 +260,153 @@ export function validateAuditBundle(bundle: AuditBundle, spec: AuditSpec): Valid
     }
   }
 
+  if (spec.rule5Compliance?.enabled === true) {
+    validateRule5Compliance(spec.component, bundle, spec.rule5Compliance, violations);
+  }
+
   return { passed: violations.length === 0, violations };
 }
 
-function loadedFilesOf(fp: NonNullable<RustAuditRecord["footprint"]>): string[] {
+/**
+ * Default allowlist of legitimate-intermediate provenance variants.
+ * Each variant names a structural operation Verter's resolver performs
+ * during type resolution; their member-name edges are NOT leaks even
+ * when the names fall outside the published surface (e.g. a
+ * `Pick<Foo, "a">` walk emits a `MappedKeyEnumerated` edge for "a"
+ * which is legitimate by construction).
+ *
+ * `PublishedField` is intentionally NOT in this list: any edge tagged
+ * `PublishedField` MUST name a published-surface field, and the
+ * Rule-5 gate enforces that constraint.
+ */
+const DEFAULT_ALLOWED_INTERMEDIATE_PROVENANCE: ReadonlyArray<MemberEdgeProvenance> = [
+  "PathProjection",
+  "KeyOfEnumerated",
+  "MappedKeyEnumerated",
+];
+
+interface AuditMemberEdge {
+  memberName: string;
+  /** Provenance carried on the edge. `null` for `ProjectPath` segment names. */
+  provenance: MemberEdgeProvenance | null;
+}
+
+/**
+ * Collect every member-name reference in the audit footprint:
+ *   - Single-hop `OriginEdgeMetaDto::ProjectMember` edges contribute
+ *     `(member_name, provenance)`.
+ *   - Multi-segment `OriginEdgeMetaDto::ProjectPath` edges contribute
+ *     `(segment.name, null)` for every `Member` segment in the path.
+ *
+ * `ProjectPath` segments do not carry per-segment provenance (the whole
+ * path is the structural operation). For Rule-5 purposes, every
+ * `ProjectPath` segment counts as a structurally legitimate intermediate
+ * (the path is the user's declared projection by definition).
+ */
+function collectAuditMemberEdges(
+  fp: NonNullable<RequestAuditRecord["footprint"]>,
+): AuditMemberEdge[] {
+  const edges: AuditMemberEdge[] = [];
+  for (const edge of fp.derivation_subgraph.edges) {
+    const meta = edge.meta as OriginEdgeMetaDto;
+    if (typeof meta === "object" && meta !== null && "ProjectMember" in meta) {
+      const pm = meta.ProjectMember;
+      edges.push({
+        memberName: pm.member_name,
+        provenance: pm.provenance,
+      });
+    }
+  }
+  for (const projection of fp.projections) {
+    for (const seg of projection.path as ProjectPathSegment[]) {
+      if (typeof seg === "object" && seg !== null && "Member" in seg) {
+        edges.push({ memberName: seg.Member.name, provenance: null });
+      }
+    }
+  }
+  return edges;
+}
+
+function collectPublishedSurfaceNames(analysis: AnalysisSideCar): Set<string> {
+  const names = new Set<string>();
+  const harvest = (xs?: unknown[]) => {
+    if (!xs) return;
+    for (const item of xs) {
+      if (typeof item === "object" && item !== null) {
+        const name = (item as { name?: unknown }).name;
+        if (typeof name === "string") {
+          names.add(name);
+        }
+      }
+    }
+  };
+  harvest(analysis.props);
+  harvest(analysis.events);
+  harvest(analysis.slots);
+  harvest(analysis.exposed);
+  return names;
+}
+
+function validateRule5Compliance(
+  component: string,
+  bundle: AuditBundle,
+  spec: Rule5ComplianceSpec,
+  violations: string[],
+): void {
+  const fp = bundle.record.footprint;
+  if (!fp) return;
+  const allowlist = new Set<MemberEdgeProvenance>(
+    spec.allowedIntermediateProvenance ?? DEFAULT_ALLOWED_INTERMEDIATE_PROVENANCE,
+  );
+  const publishedNames = collectPublishedSurfaceNames(bundle.analysis);
+  const edges = collectAuditMemberEdges(fp);
+
+  // A name is "legitimately intermediate" if AT LEAST ONE edge naming
+  // it carries an allowlisted provenance, OR if it appeared as a
+  // `ProjectPath` segment (provenance=null). The gate subtracts the
+  // union of legitimate-intermediate names from the audit set.
+  const legitimateIntermediateNames = new Set<string>();
+  for (const edge of edges) {
+    if (edge.provenance === null || allowlist.has(edge.provenance)) {
+      legitimateIntermediateNames.add(edge.memberName);
+    }
+  }
+
+  // Offending edges: names appearing on edges with NON-allowlisted
+  // provenance (or `PublishedField`-tagged edges) that are NOT on the
+  // published surface and NOT legitimized via any other edge.
+  const offending: Array<{
+    name: string;
+    provenance: MemberEdgeProvenance | null;
+  }> = [];
+  for (const edge of edges) {
+    const provenanceAllowed = edge.provenance === null || allowlist.has(edge.provenance);
+    if (provenanceAllowed) continue;
+    if (publishedNames.has(edge.memberName)) continue;
+    if (legitimateIntermediateNames.has(edge.memberName)) continue;
+    // Deduplicate by (name, provenance) to keep the violation message
+    // signal-rich without flooding on multi-edge leaks.
+    if (offending.some((o) => o.name === edge.memberName && o.provenance === edge.provenance)) {
+      continue;
+    }
+    offending.push({ name: edge.memberName, provenance: edge.provenance });
+  }
+
+  if (offending.length > 0) {
+    const offendersStr = offending
+      .map((o) => `${o.name}@${o.provenance ?? "ProjectPath"}`)
+      .join(", ");
+    violations.push(
+      `rule5Compliance: ${component} — audit edges name members outside the ` +
+        `published surface and outside the structural-intermediate allowlist ` +
+        `[${Array.from(allowlist).join(", ")}]. ` +
+        `Offending edges: [${offendersStr}]. ` +
+        `Published surface: [${Array.from(publishedNames).sort().join(", ")}].`,
+    );
+  }
+}
+
+function loadedFilesOf(fp: NonNullable<RequestAuditRecord["footprint"]>): string[] {
   const set = new Set<string>();
   for (const r of fp.vfs_reads) set.add(r.canonical_id);
   for (const r of fp.shared_load_reuses) set.add(r.canonical_id);
@@ -254,7 +440,7 @@ function argsFingerprintToHex(fp: readonly number[]): string {
     .join("");
 }
 
-function countForKind(fp: RustAuditRecord["footprint"], kind: AuditCountableKind): number {
+function countForKind(fp: RequestAuditRecord["footprint"], kind: AuditCountableKind): number {
   if (!fp) return 0;
   switch (kind) {
     case "indexedReadyBuilds":
@@ -338,7 +524,7 @@ function validateExpectedResult(
  * string. Exported so tests can pin exact-match behaviour without
  * copy-pasting the normalization schema. Plan §3 Commit 10 + review F11.
  */
-export function renderFootprintForSnapshot(fp: RustAuditRecord["footprint"]): string {
+export function renderFootprintForSnapshot(fp: RequestAuditRecord["footprint"]): string {
   // Normalized JSON for snapshot comparison. Intentionally diverges
   // from the Rust-side `mask_incidental_spans` helper: Rust only
   // clears the fields enumerated by the `IncidentalFields` trait
@@ -347,7 +533,7 @@ export function renderFootprintForSnapshot(fp: RustAuditRecord["footprint"]): st
   // form collapses per-record lists to counts so snapshots are
   // readable in a PR diff without flapping on subgraph detail —
   // useful for bench specs, unsuitable when the exact record list
-  // matters. Use the Rust helper + `RustAuditRecord::emit_json`
+  // matters. Use the Rust helper + `RequestAuditRecord::emit_json`
   // when you need the full structural payload. Plan §3 Commit 10 +
   // review F9.
   if (!fp) return "null";
