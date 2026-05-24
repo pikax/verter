@@ -18,7 +18,13 @@ use crate::host_manage::component_meta_trace_custom;
 use crate::instant::Instant;
 use crate::types::FileAnalysisSnapshot;
 
+use std::sync::Arc;
+use verter_semantic::analysis::component_meta::MacroExpansionKind;
 use verter_semantic::analysis::types::AnalyzedMacro;
+use verter_semantic::analysis::AnalyzedMacroKind;
+
+use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+use crate::resolver_core::ResolverContext;
 
 use super::super::dispatch_helpers::{
     macro_payload_root_is_conditional_carrier,
@@ -39,6 +45,92 @@ use super::super::resolved_state::lowered_root_reaches_transitive_cycle;
 use crate::host_manage::component_meta_request_impl::{
     ResolvedMacroMeta, ResolvedTypeRegistryMeta,
 };
+
+/// Emit `MemberEdgeProvenance::PublishedField` origin edges for every
+/// property in a macro-shape that the orchestrator has just admitted
+/// onto the user-visible surface (`evaluated_types.define_props` /
+/// `define_emits` / `define_slots`).
+///
+/// Wired by the macro-shape orchestrator (this module's
+/// `produce_macro_object_shapes_for_purpose`). The projector pipeline
+/// in `meta_resolve::projectors::*` already records
+/// `PublishedField` edges at its per-member admission boundary, but
+/// that path only fires when the macro payload's surface lowers to a
+/// `SemanticNodeData::Object` shell (i.e. an inline `defineProps<{
+/// foo: string }>()` style payload). Cross-file generic payloads
+/// (`defineProps<AccordionProps<T>>()`) lower to a `Ref` carrier
+/// surface, where `read_surface_members` is empty and the
+/// projector-side per-member emit fires zero times — leaving the
+/// Rule-5 validator's `PublishedField` branch as dead code on real
+/// corpus data.
+///
+/// The macro-shape orchestrator owns the carrier-shape production
+/// path (`synthesize_define_*_shape_from_known_surface_*`,
+/// `synthesize_define_*_shape_from_registry_root`,
+/// `produce_one_macro_object_shape*`). After it admits a shape to
+/// `evaluated_types`, this helper resolves the macro payload + surface
+/// node through the same dispatch primitives the projector pipeline
+/// uses (so cache keys collide path-independently) and emits one
+/// `PublishedField` edge per published property name.
+///
+/// `SemanticGraphStore::record_origin_edge` deduplicates by edge
+/// identity, so when the projector pipeline ALSO emits for the same
+/// `(owner, surface_node, member_value, name, provenance)` tuple, the
+/// second emit is a no-op. Concretely: hermetic inline-Object macros
+/// emit from both sites (orchestrator + projector); cross-file generic
+/// macros emit only from the orchestrator. Either way every published
+/// member name reaches the origin graph as a `PublishedField` edge.
+///
+/// Silent on resolution failure — when the payload / surface cannot
+/// be resolved, no edges are emitted (the projector pipeline's
+/// diagnostic stream covers the failure on its later pass).
+fn record_published_field_edges_for_macro_shape(
+    ctx: &dyn ResolverContext,
+    owner_canonical: &str,
+    macro_index: usize,
+    mac: &AnalyzedMacro,
+    macro_kind: AnalyzedMacroKind,
+    expansion_kind: MacroExpansionKind,
+    shape: &ShapeResult,
+) {
+    if shape.value.properties.is_empty() {
+        return;
+    }
+    let owner = crate::meta_resolve::projectors::build_owner_decl_identity(ctx, owner_canonical);
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    // Local diag sink — discarded. The projector pipeline that runs
+    // after `produce_macro_object_shapes_for_purpose` re-issues the
+    // same `ResolveMacroPayload` + `ProjectPath` dispatches (which
+    // hit the path-independent content-addressed cache) and owns the
+    // diagnostic stream for any silent-miss failure that surfaces
+    // there.
+    let mut discard_diag = Vec::new();
+    let payload_node = match crate::meta_resolve::projectors::resolve_macro_payload(
+        &dispatch,
+        &owner,
+        owner_canonical,
+        macro_index,
+        mac,
+        macro_kind,
+        expansion_kind.clone(),
+        &mut discard_diag,
+    ) {
+        Some(node) => node,
+        None => return,
+    };
+    let surface_node = crate::meta_resolve::projectors::resolve_payload_surface(
+        &dispatch,
+        payload_node,
+        macro_index,
+        expansion_kind,
+        &mut discard_diag,
+    )
+    .unwrap_or(payload_node);
+    for property in &shape.value.properties {
+        let name_arc: Arc<str> = Arc::from(property.name.as_str());
+        dispatch.record_published_field_edge(&owner, surface_node, surface_node, &name_arc);
+    }
+}
 
 /// Sole-authority producer for type-based macro object shapes.
 ///
@@ -168,6 +260,15 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                                     item_started.elapsed(),
                                 ),
                             );
+                            record_published_field_edges_for_macro_shape(
+                                query_engine.ctx,
+                                owner_canonical,
+                                macro_index,
+                                mac,
+                                AnalyzedMacroKind::DefineProps,
+                                MacroExpansionKind::DefineProps,
+                                &shape,
+                            );
                             evaluated_types.define_props.push(
                                 verter_semantic::analysis::type_expand::ExpandedMacroProps {
                                     macro_index,
@@ -210,6 +311,15 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                                 item_started.elapsed(),
                             ),
                         );
+                        record_published_field_edges_for_macro_shape(
+                            query_engine.ctx,
+                            owner_canonical,
+                            macro_index,
+                            mac,
+                            AnalyzedMacroKind::DefineProps,
+                            MacroExpansionKind::DefineProps,
+                            &shape,
+                        );
                         evaluated_types.define_props.push(
                             verter_semantic::analysis::type_expand::ExpandedMacroProps {
                                 macro_index,
@@ -238,6 +348,15 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                             source.label(),
                             count,
                         ),
+                    );
+                    record_published_field_edges_for_macro_shape(
+                        query_engine.ctx,
+                        owner_canonical,
+                        macro_index,
+                        mac,
+                        AnalyzedMacroKind::DefineProps,
+                        MacroExpansionKind::DefineProps,
+                        &shape,
                     );
                     evaluated_types.define_props.push(
                         verter_semantic::analysis::type_expand::ExpandedMacroProps {
@@ -275,6 +394,15 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                                 count,
                             ),
                         );
+                        record_published_field_edges_for_macro_shape(
+                            query_engine.ctx,
+                            owner_canonical,
+                            macro_index,
+                            mac,
+                            AnalyzedMacroKind::DefineProps,
+                            MacroExpansionKind::DefineProps,
+                            &shape,
+                        );
                         evaluated_types.define_props.push(
                             verter_semantic::analysis::type_expand::ExpandedMacroProps {
                                 macro_index,
@@ -307,6 +435,15 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                                     owner_canonical, macro_index, source.label(), count,
                                     item_started.elapsed(),
                                 ),
+                            );
+                            record_published_field_edges_for_macro_shape(
+                                query_engine.ctx,
+                                owner_canonical,
+                                macro_index,
+                                mac,
+                                AnalyzedMacroKind::DefineProps,
+                                MacroExpansionKind::DefineProps,
+                                &shape,
                             );
                             evaluated_types.define_props.push(
                                 verter_semantic::analysis::type_expand::ExpandedMacroProps {
@@ -350,6 +487,15 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                                     count,
                                 ),
                             );
+                            record_published_field_edges_for_macro_shape(
+                                query_engine.ctx,
+                                owner_canonical,
+                                macro_index,
+                                mac,
+                                AnalyzedMacroKind::DefineProps,
+                                MacroExpansionKind::DefineProps,
+                                &shape,
+                            );
                             evaluated_types.define_props.push(
                                 verter_semantic::analysis::type_expand::ExpandedMacroProps {
                                     macro_index,
@@ -382,6 +528,15 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                                         owner_canonical, macro_index, source.label(), count,
                                         item_started.elapsed(),
                                     ),
+                                );
+                                record_published_field_edges_for_macro_shape(
+                                    query_engine.ctx,
+                                    owner_canonical,
+                                    macro_index,
+                                    mac,
+                                    AnalyzedMacroKind::DefineProps,
+                                    MacroExpansionKind::DefineProps,
+                                    &shape,
                                 );
                                 evaluated_types.define_props.push(
                                     verter_semantic::analysis::type_expand::ExpandedMacroProps {
@@ -417,6 +572,15 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                                     owner_canonical, macro_index, source.label(), count,
                                     item_started.elapsed(),
                                 ),
+                            );
+                            record_published_field_edges_for_macro_shape(
+                                query_engine.ctx,
+                                owner_canonical,
+                                macro_index,
+                                mac,
+                                AnalyzedMacroKind::DefineProps,
+                                MacroExpansionKind::DefineProps,
+                                &shape,
                             );
                             evaluated_types.define_props.push(
                                 verter_semantic::analysis::type_expand::ExpandedMacroProps {
@@ -457,6 +621,15 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                             count,
                         ),
                     );
+                    record_published_field_edges_for_macro_shape(
+                        query_engine.ctx,
+                        owner_canonical,
+                        macro_index,
+                        mac,
+                        AnalyzedMacroKind::DefineEmits,
+                        MacroExpansionKind::DefineEmits,
+                        &shape,
+                    );
                     evaluated_types.define_emits.push(
                         verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
                             macro_index,
@@ -482,6 +655,15 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                                 source.label(),
                                 count,
                             ),
+                        );
+                        record_published_field_edges_for_macro_shape(
+                            query_engine.ctx,
+                            owner_canonical,
+                            macro_index,
+                            mac,
+                            AnalyzedMacroKind::DefineEmits,
+                            MacroExpansionKind::DefineEmits,
+                            &shape,
                         );
                         evaluated_types.define_emits.push(
                             verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
@@ -516,6 +698,15 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                                     owner_canonical, macro_index, source.label(), count,
                                     item_started.elapsed(),
                                 ),
+                            );
+                            record_published_field_edges_for_macro_shape(
+                                query_engine.ctx,
+                                owner_canonical,
+                                macro_index,
+                                mac,
+                                AnalyzedMacroKind::DefineEmits,
+                                MacroExpansionKind::DefineEmits,
+                                &shape,
                             );
                             evaluated_types.define_emits.push(
                                 verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
@@ -556,6 +747,15 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                                 count,
                             ),
                         );
+                        record_published_field_edges_for_macro_shape(
+                            query_engine.ctx,
+                            owner_canonical,
+                            macro_index,
+                            mac,
+                            AnalyzedMacroKind::DefineSlots,
+                            MacroExpansionKind::DefineSlots,
+                            &shape,
+                        );
                         evaluated_types.define_slots.push(
                             verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
                                 macro_index,
@@ -581,6 +781,15 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                                 source.label(),
                                 count,
                             ),
+                        );
+                        record_published_field_edges_for_macro_shape(
+                            query_engine.ctx,
+                            owner_canonical,
+                            macro_index,
+                            mac,
+                            AnalyzedMacroKind::DefineSlots,
+                            MacroExpansionKind::DefineSlots,
+                            &shape,
                         );
                         evaluated_types.define_slots.push(
                             verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
@@ -620,6 +829,15 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                                             item_started.elapsed(),
                                         ),
                                     );
+                                    record_published_field_edges_for_macro_shape(
+                                        query_engine.ctx,
+                                        owner_canonical,
+                                        macro_index,
+                                        mac,
+                                        AnalyzedMacroKind::DefineSlots,
+                                        MacroExpansionKind::DefineSlots,
+                                        &shape,
+                                    );
                                     evaluated_types.define_slots.push(
                                         verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
                                             macro_index,
@@ -657,6 +875,15 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                                     owner_canonical, macro_index, source.label(), count,
                                     item_started.elapsed(),
                                 ),
+                            );
+                            record_published_field_edges_for_macro_shape(
+                                query_engine.ctx,
+                                owner_canonical,
+                                macro_index,
+                                mac,
+                                AnalyzedMacroKind::DefineSlots,
+                                MacroExpansionKind::DefineSlots,
+                                &shape,
                             );
                             evaluated_types.define_slots.push(
                                 verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
