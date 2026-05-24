@@ -81,12 +81,39 @@ pub(crate) fn project_props(
             .into_iter()
             .filter_map(|member| {
                 let member_cursor = cursor.descend_published_member(member.name.as_ref())?;
-                dispatch.record_published_field_edge(
-                    owner,
-                    surface_node,
-                    member.value,
-                    &member.name,
-                );
+                // Emit `PublishedField` origin edges with the Vue
+                // intrinsic filter applied (`class` / `style` /
+                // `key` / `ref` never appear on the consumer-facing
+                // surface — vue-component-meta's global flag strips
+                // them, and `@verter/component-meta/compat` mirrors
+                // that contract). Inline-Object surfaces with an
+                // HTMLAttributes intersection (`AccordionProps &
+                // HTMLAttributes`) WOULD otherwise admit `class`
+                // into `read_surface_members` and the audit graph
+                // would assert publication for a name the API does
+                // not publish — codex's R19a TOP RISK on the
+                // orchestrator-pre-filter emit, fixed here by
+                // applying the filter at the producer instead of
+                // shifting the emit site.
+                //
+                // Ref-carrier surfaces (cross-file generic payloads
+                // like `defineProps<AccordionProps<T>>()`) lower
+                // to a `SemanticNodeData::Ref` shell where
+                // `read_surface_members` returns empty, so this
+                // emit fires ZERO times. The orchestrator's
+                // [`crate::meta_resolve::materialize::macro_shapes::record_published_field_edges_for_macro_shape`]
+                // covers Ref carriers via the cross-file-resolved
+                // `shape.value.properties`.
+                if !crate::meta_resolve::materialize::is_vue_intrinsic_published_name(
+                    member.name.as_ref(),
+                ) {
+                    dispatch.record_published_field_edge(
+                        owner,
+                        surface_node,
+                        member.value,
+                        &member.name,
+                    );
+                }
                 let analyzed = mac
                     .prop_fields
                     .iter()

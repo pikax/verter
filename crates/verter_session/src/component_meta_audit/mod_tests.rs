@@ -527,15 +527,17 @@ fn audit_publishes_member_edge_with_published_field_provenance_at_macro_boundari
 
     assert!(
         missing.is_empty(),
-        "PublishedField non-vacuity gate: every macro projector \
-         publication boundary MUST emit a `ProjectMember` origin edge \
+        "PublishedField non-vacuity gate: the final component-meta \
+         surface boundary MUST emit a `ProjectMember` origin edge \
          tagged `MemberEdgeProvenance::PublishedField` for every \
          declared surface field. Missing names: {missing:?}. Observed \
          PublishedField edge names: {published_field_names:?}. If this \
-         test fails post-Block-6.j R18, a macro projector was added \
-         WITHOUT wiring `dispatch.record_published_field_edge(...)` at \
-         the publish boundary — see `crates/verter_session/src/\
-         meta_resolve/projectors/{{props,emits,slots,exposed,model}}.rs`.",
+         test fails, the final-surface emit at \
+         `record_published_field_edges_for_meta_surface` in \
+         `crates/verter_session/src/host_manage/component_meta_extract.rs` \
+         was either skipped (production caller dropped the call) or \
+         a new macro kind was added to `meta.{{props,events,slots,exposed,models}}` \
+         without extending the helper's per-kind surface-resolution match.",
     );
 
     // Discriminator: the validator branch must be live. Assert at
@@ -547,4 +549,126 @@ fn audit_publishes_member_edge_with_published_field_provenance_at_macro_boundari
          `PublishedField` discriminating branch is dead code, \
          reverting the PublishedField wiring.",
     );
+}
+
+/// Ref-carrier alignment discriminator for the producer-side
+/// `PublishedField` emit.
+///
+/// Round 19a's orchestrator-pre-filter emit fired against the
+/// macro-shape orchestrator's `shape.value.properties` BEFORE the
+/// consumer-facing Vue-intrinsic strip (`class` / `style` / `key` /
+/// `ref`) ran. Empirical corpus inspection (claude live-code,
+/// 88.8% of nuxt-ui components) showed PublishedField asserting
+/// publication for `class` whenever a macro payload composed with
+/// an `HTMLAttributes`-flavoured ancestor — codex's R19a TOP RISK.
+///
+/// This test pins the Vue-intrinsic strip at the producer emit
+/// site. The fixture uses an inline `HTMLAttributes`-style
+/// intersection so the macro's surface admits both real declared
+/// members AND `class` / `style`. The emit MUST publish the real
+/// members and MUST NOT publish `class` / `style`.
+///
+/// Discriminating contract:
+/// - Pre-fix (orchestrator emits raw `shape.value.properties`):
+///   `class` and `style` appear in PublishedField names — test
+///   would FAIL on the "must NOT include" branch.
+/// - Post-fix (orchestrator + projectors filter via
+///   [`crate::meta_resolve::materialize::is_vue_intrinsic_published_name`]):
+///   `class` and `style` never reach the audit graph's
+///   PublishedField rail — test PASSES.
+///
+/// The fixture path exercises the inline-Object surface (so the
+/// projector emit covers it) AND the orchestrator emit
+/// (`record_published_field_edges_for_macro_shape`) covers the
+/// payload-shape pushed to `evaluated_types.define_props` — both
+/// sites are gated by the same Vue-intrinsic filter, so the
+/// discriminator catches a regression at EITHER site.
+#[test]
+fn audit_strips_vue_intrinsic_names_from_published_field_emit_at_producer() {
+    let host = crate::VerterHost::new_standalone(crate::types::HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        audit_enabled: true,
+        footprint_capture: true,
+        ..crate::types::HostConfig::default()
+    });
+    let project = crate::meta::MetaProject::new(host);
+    project
+        .upsert_base(
+            "/HtmlAttrCarrier.vue",
+            r#"<script setup lang="ts">
+interface BaseAttrs { class?: string; style?: string; key?: string }
+interface PanelProps extends BaseAttrs {
+    title: string
+    expanded: boolean
+}
+defineProps<PanelProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let (_analysis, resolution) = host
+        .get_component_meta_with_resolution("/HtmlAttrCarrier.vue")
+        .expect("resolver must produce metadata for the HtmlAttrCarrier fixture");
+    let record = host
+        .take_audit_record(resolution.request_id)
+        .expect("audit record must publish for the HtmlAttrCarrier fixture");
+    let footprint = record
+        .footprint
+        .as_ref()
+        .expect("footprint must publish when HostConfig::footprint_capture is enabled");
+
+    let mut published_field_names: Vec<String> = footprint
+        .derivation_subgraph
+        .edges
+        .iter()
+        .filter(|e| e.kind == OriginEdgeKind::ProjectMember)
+        .filter_map(|e| match &e.meta {
+            OriginEdgeMetaDto::ProjectMember {
+                member_name,
+                provenance,
+            } if *provenance == verter_audit::MemberEdgeProvenance::PublishedField => {
+                Some(member_name.as_ref().to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    published_field_names.sort();
+    published_field_names.dedup();
+
+    // Positive branch: the declared non-intrinsic members MUST
+    // appear as PublishedField origin edges. Without this, the
+    // emit is regressively over-stripping (filter applied too
+    // broadly) and the Rule-5 validator's PublishedField branch
+    // returns to dead-code-on-corpus status.
+    assert!(
+        published_field_names.iter().any(|n| n == "title"),
+        "PublishedField must include declared real surface member 'title'. \
+         Observed: {published_field_names:?}",
+    );
+    assert!(
+        published_field_names.iter().any(|n| n == "expanded"),
+        "PublishedField must include declared real surface member 'expanded'. \
+         Observed: {published_field_names:?}",
+    );
+
+    // Negative branch: Vue intrinsics declared on the carrier
+    // surface (here via `extends BaseAttrs`) MUST NOT appear as
+    // PublishedField origin edges. Pre-fix (Round 19a) the
+    // orchestrator-pre-filter emit asserted publication for
+    // `class` / `style` even though `vue-component-meta` (and
+    // `@verter/component-meta/compat`) strip them on the
+    // consumer-facing path. Post-fix the producer-side filter at
+    // `is_vue_intrinsic_published_name` gates them off so the
+    // audit graph aligns with the consumer surface.
+    for intrinsic in ["class", "style", "key", "ref"] {
+        assert!(
+            !published_field_names.iter().any(|n| n == intrinsic),
+            "PublishedField MUST NOT include Vue intrinsic '{intrinsic}'. \
+             Audit asserts publication for a name the consumer-facing API never publishes — \
+             Rule-5 false-positive regression. \
+             Observed: {published_field_names:?}",
+        );
+    }
 }
