@@ -107,7 +107,7 @@ Caches divide into two families: **content-addressed artifact caches** (`FileArt
 
 `FileArtifactStore` is the authoritative per-file storage layer. The store is keyed by `(canonical, content_hash, parse_env_hash, parser_version)` and stores `IndexedReady`, `FileFacts`, `ParsedEdges`, `parse_stable_hash`, `augmentations`. The `augmentation_index` skeleton on the same store provides inverse-lookup for module augmentation under `AugmentationTargetKey { project_identity, resolve_env_hash, lib_env_hash, target }` — project + env isolation prevents cross-project poisoning (Codex P0.1). `parse_stable_hash` is a structural hash over the post-shallow-analysis decl skeleton, invariant under cosmetic edits.
 
-See `/type-cache-architecture` skill for the full rule set (R1–R30, two-fact `MemberPresence`/`Member` model, multi-candidate substrate, signature-overflow contract, module augmentation completeness, heuristic-cache-semantics prevention) and `docs/arch/fact-based-cache.md` for the per-field audit table + per-cache-layer key composition.
+See `/type-cache-architecture` skill for the full rule set (R1–R31, two-fact `MemberPresence`/`Member` model, multi-candidate substrate, signature-overflow contract, module augmentation completeness, heuristic-cache-semantics prevention, exact policy identity) and `docs/arch/fact-based-cache.md` for the per-field audit table + per-cache-layer key composition.
 
 ### Macro Type Traversal Rule (CRITICAL)
 
@@ -273,6 +273,8 @@ Skip this for purely internal refactors that don't change any public behavior, m
 Coverage: new features need tests, bug fixes need regression tests, refactors must keep existing tests passing.
 
 **Always include negative assertions**: verify both what SHOULD and should NOT be present. Codegen tests must check removed syntax is absent. Type tests must include `@ts-expect-error` guards against `any`/`never`.
+
+**Architecture guards for critical rules**: every new `CRITICAL` architecture rule must land with either a static architecture guard or a discriminating regression test in the same change. If a guard cannot be automated yet, the rule text must name the planned guard/test and the temporary gap must be tracked in the owning skill/doc.
 
 **Rust test file organization**: When inline `#[cfg(test)]` exceeds ~400 lines, extract to a sibling `*_tests.rs` file.
 
@@ -457,7 +459,7 @@ Detailed reference material is available as on-demand skills (loaded automatical
 | Skill                    | Use When                                                                                         |
 | ------------------------ | ------------------------------------------------------------------------------------------------ |
 | `/type-resolution`       | Type solver, cross-file types, ShallowFileState, frontier engine, cache rules, macro traversal   |
-| `/type-cache-architecture` | Fact-based cache architecture, env hash split (R21), `FileArtifactStore`, R1–R30 rules, module augmentation, multi-candidate storage |
+| `/type-cache-architecture` | Fact-based cache architecture, env hash split (R21), `FileArtifactStore`, R1–R31 rules, module augmentation, multi-candidate storage |
 | `/component-meta`        | Component metadata extraction, native/compat boundary, fallthrough, root inheritance             |
 | `/compiler-codegen`      | Template codegen (VDOM/IDE), CodeTransform, cached directives, strict slots, style preprocessing |
 | `/host-session`          | TypeProvider (TSGO/tsserver), workspace management, async scheduler, LSP host integration        |

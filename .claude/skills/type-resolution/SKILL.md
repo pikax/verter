@@ -144,6 +144,15 @@ Best-architecture target:
 - Projection planning is explicit. Callers request identity/navigation/shallow/expanded behavior and package-boundary/depth policy up front; resolvers do not infer these policies from ad hoc shape checks.
 - If the current IR cannot represent a TypeScript construct, extend the IR/schema or return a structured unsupported result with diagnostics. Do not recover meaning by reparsing display text.
 
+## Typed Degradation And Completeness Contract (CRITICAL)
+
+Semantic degraded states are part of the type system contract. They must be typed, propagated, and observable.
+
+- `TypeExpr::Unknown { raw }` is not a carrier for semantic control flow. Misses, unsupported intrinsics/operators, alias cycles, recursion sentinels, budget exits, unstable-state exits, and bridge-depth exits must use typed variants or typed sidecar state. Do not encode them as strings such as `"budgetExceeded(...)"` / `"aliasCycle(...)"` and do not recover them with `starts_with` / regex checks.
+- `Unknown` is allowed only for a genuine unknown type value with provenance explaining why the producer could not represent it. If the producer knows this is `Unsupported`, `BudgetExceeded`, `Recursive`, `Miss`, or `Unstable`, use that state instead.
+- Public query envelopes must preserve completeness. `Complete` means the required inputs were available, current, and no budget/unsupported/unstable branch affected the answer. A query may return `Complete(None)` only when absence itself was proven under the current facts; missing analysis, stale cache data, unavailable providers, unsupported operators, and budget exits must surface as `Unavailable`, `Partial`, or a typed degraded result.
+- Degraded results may be displayed and may be returned to callers, but they must not be promoted into warm shared caches as complete answers.
+
 ## Cache Population Target Contract
 
 Architectural target for the project-global cache cutover:
@@ -171,20 +180,21 @@ Concrete expectation:
 
 ## Query Mode Contract
 
-The shared semantic query system has exactly four modes. Every caller picks one; there is no implicit mode. Every `SemanticQueryKey` carries its mode as part of the cache key.
+The shared semantic query system has exactly five modes. Every caller picks one; there is no implicit mode. Every `SemanticQueryKey` carries its mode as part of the cache key.
 
 - **`Identity`** — return the declaration identity only (canonical file + symbol name + optional substitution environment). Do not read the body; do not walk the decl graph; do not produce a result shape. Cheapest operation. For an alias `type X = Y`, `Identity(X)` returns **`X`'s** declaration identity — not `Y`'s. Used for "does this name resolve" checks and for wiring dependency edges.
 - **`Navigate`** — do the minimum semantic work required to continue a requested path. Unwrap aliases transparently (aliases have no independent structural shell; `Navigate(X)` where `type X = Y` returns the same node as `Navigate(Y)`), follow member / index hops that are already materialized in the graph, reduce closed conditionals, stop at undecidability barriers. Does NOT recursively materialize subtrees; does NOT expand sibling members. Used by path projection to step one hop at a time.
 - **`Shallow`** — return one shell / one surface level of the requested node without recursive expansion. For an object: produce member names + per-member reference nodes; do NOT recurse into member bodies. For a conditional: if the check is open / undecidable, expose both branches as references; if the check is closed / decidable, reduce immediately and return only the selected branch shell. For a union / intersection: expose contributor references. For an alias: unwrap transparently to the target's `Shallow` form (aliases have no structural shell to materialize).
 - **`Expanded`** — recursively materialize the requested result. Walk into member bodies, resolve nested references, evaluate every decidable conditional, distribute open conditionals into their remaining path projections, normalize unions / intersections. For aliases: unwrap transparently. Most expensive mode.
+- **`Skeleton`** — specialised traversal mode for BFS/generic-helper surfaces where unbound type parameters must remain `TypeParam` shells and conditional branches must not collapse to `never` just because arguments are intentionally absent. It is not a display mode and does not alias `Navigate`; it is a distinct semantic policy.
 
 **Alias boundary preservation.** Although `Navigate` / `Shallow` / `Expanded` unwrap aliases structurally, the alias boundary is preserved on the origin layer via the `AliasResolve` edge kind (see "Derivation / Origin Layer Contract"). Clients that need to render alias provenance (LSP hover, error messages, compat display) walk that edge; clients that need pure structural meaning ignore it. Each alias hop (direct alias, re-export alias, barrel alias) emits one `AliasResolve` edge; chains are walkable end-to-end.
 
 **Backfill rule.** Broader successful results may backfill narrower modes for the same key: an `Expanded` result satisfies `Shallow`, `Navigate`, and `Identity`; a `Shallow` result satisfies `Navigate` and `Identity`; a `Navigate` result satisfies `Identity`. Narrower successful results MUST NOT claim broader modes are cached.
 
-**Cache topology.** The four modes do NOT imply four separate cache subsystems. `SemanticGraphStore` owns one semantic memo layer. At the semantic-contract level, mode is part of request identity; at the storage level, implementations should group same-base different-mode requests into one memo-entry family (or an equivalent single-authority structure) keyed by the mode-erased semantic shape — operation, base identity, path / projection, substitutions, scope, and version root — with per-mode slots or equivalent one-way upgrade/backfill semantics. The required behaviour is: `Expanded` may satisfy `Shallow` / `Navigate` / `Identity`, `Shallow` may satisfy `Navigate` / `Identity`, `Navigate` may satisfy `Identity`, and no lower mode may claim a broader mode is cached. Distinct mode requests must not duplicate in-flight authority or split into independent wait graphs.
+**Cache topology.** The five modes do NOT imply five separate cache subsystems. `SemanticGraphStore` owns one semantic memo layer. At the semantic-contract level, mode is part of request identity; at the storage level, implementations should group same-base different-mode requests into one memo-entry family (or an equivalent single-authority structure) keyed by the mode-erased semantic shape — operation, base identity, path / projection, substitutions, scope, and version root — with per-mode slots or equivalent one-way upgrade/backfill semantics. The required behaviour is: `Expanded` may satisfy `Shallow` / `Navigate` / `Identity`, `Shallow` may satisfy `Navigate` / `Identity`, `Navigate` may satisfy `Identity`, and no lower mode may claim a broader mode is cached. `Skeleton` is a separate policy slot; it does not alias `Navigate` or any other mode unless a typed equivalence proof and regression tests justify a backfill edge. Distinct mode requests must not duplicate in-flight authority or split into independent wait graphs.
 
-**Cache-key distinctness.** `ProjectMember(C, "foo", Shallow)` and `ProjectMember(C, "foo", Expanded)` are distinct cache entries. Generic substitutions are part of the key: `MyType<string>` and `MyType<number>` never alias; two callers reaching `MyType<string>` through different entry paths dedup to one entry.
+**Cache-key distinctness.** `ProjectMember(C, "foo", Shallow)` and `ProjectMember(C, "foo", Expanded)` are distinct cache entries. Generic substitutions are part of the key: `MyType<string>` and `MyType<number>` never alias; two callers reaching `MyType<string>` through different entry paths dedup to one entry. Do not compress mode identity into booleans or partial encodings such as "is navigate"; store the exact `ProjectionMode` or a typed projection-policy key.
 
 ## Path-Precise Navigation And Projection Contract
 
@@ -539,13 +549,14 @@ All type expansion (macro types, component-meta, imported type aliases) goes thr
 When resolving cross-file macro types (`defineProps<T>()`, `defineEmits<T>()`, and other shared host-backed queries), only follow the import graph reachable from the requested type's declaration graph.
 
 - There is one shared cross-file type resolver. Consumer-specific ownership rules live in `/component-meta`.
-- The resolver has exactly four public query modes (see "Query Mode Contract" above):
+- The resolver has exactly five query modes (see "Query Mode Contract" above):
   - `Identity`: declaration identity and canonical source location only. No body read, no shape materialization.
   - `Navigate`: minimum semantic work needed to continue a requested path. Intermediate hops run in this mode.
   - `Shallow`: one surface level of the requested node without recursive expansion.
   - `Expanded`: recursive materialization of the requested result.
-- A fifth mode, `Skeleton`, is internal and **scoped to cycle detection only**. `build_instantiate` synthesizes `TypeParam` shells for unbound type parameters when invoked with `body_mode: Skeleton`, preserving Conditional branches that would otherwise collapse for `args: []` calls against generic decls. Used exclusively by `ref_root_reaches_transitive_cycle_node`'s BFS step to discover recursive references through nested mapped/template-literal/conditional bodies. Public callers MUST use the four modes above; do not invoke `Skeleton` from non-cycle code paths.
-- Do not introduce ad hoc navigate/shallow flags; use the canonical four modes and the path-precise projection surface.
+  - `Skeleton`: specialised generic-helper/cycle traversal that keeps unbound type parameters as shells.
+- `Skeleton` is a distinct mode, not a synonym for `Navigate`. It is currently scoped to cycle/generic-helper traversal such as `ref_root_reaches_transitive_cycle_node`'s BFS step. New call sites must justify why they need Skeleton semantics instead of `Navigate` / `Shallow`.
+- Do not introduce ad hoc navigate/shallow flags; use the canonical modes and the path-precise projection surface.
 - Do not walk unrelated imports from the same file.
 - Do not treat plain imports as implicit exports.
 - Keep direct re-exports (`export { X } from`, `export * from`) as an explicit separate path.

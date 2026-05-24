@@ -142,6 +142,12 @@ assert!(parsed.errors.is_empty(), "JS parse error: {:?}\n{}", parsed.errors, tpl
 - **Type tests**: Verify TypeScript inference (using `vitest --typecheck`)
 - **Sourcemap tests**: Verify position mappings
 
+### Architecture Guard Rule (MANDATORY)
+
+Every new `CRITICAL` architecture rule must ship with an executable guard in the same change: either a static architecture guard, an AST/source scanner with narrow allowlists, or a discriminating regression test that fails against the old behavior. A rule without a guard is not durable enough for this repository's migration style.
+
+When the correct guard cannot be automated immediately, the owning skill/doc must name the missing guard, explain the temporary gap, and link the follow-up. Do not add broad prose-only critical rules that future changes can violate silently.
+
 
 ### Test Hermeticity (MANDATORY)
 

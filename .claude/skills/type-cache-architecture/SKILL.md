@@ -1,6 +1,6 @@
 ---
 name: type-cache-architecture
-description: "Verter fact-based cache architecture — env hash split, FileArtifactStore, content-addressed caches, query-identity caches, R1–R30 architectural rules, module augmentation, multi-candidate storage"
+description: "Verter fact-based cache architecture — env hash split, FileArtifactStore, content-addressed caches, query-identity caches, R1–R31 architectural rules, module augmentation, multi-candidate storage"
 ---
 
 # Verter Fact-Based Cache Architecture
@@ -37,7 +37,7 @@ Target end-state rule:
 > **slot** identity (content-free); versioned declaration identity
 > lives inside cached values.
 
-## Architectural rules (R1–R30)
+## Architectural rules (R1–R31)
 
 ### Mutation semantics
 
@@ -713,6 +713,25 @@ version, source generation, solver options, or component-meta schema
 options, that dependency must be visible in the cache family shape or
 the cached value's validation/provenance. Otherwise the result is
 non-cacheable.
+
+**R31 (Exact policy identity and complete-result admission).** Query
+policy dimensions are typed identities, not compressed flags. Projection
+mode, traversal mode, package-boundary policy, output schema/options,
+substitution environment, conditional context, and solver profile must
+be represented exactly in either the cache slot, the per-policy entry,
+or the cached value's validation/provenance. A boolean such as
+`is_navigate`, a mode-erased string, or an enum subset is not a valid
+key when two concrete policies can diverge now or after a new mode is
+added.
+
+Cache admission also depends on result completeness. Entries may be
+admitted to warm shared caches only when the value is complete for the
+policy it claims to satisfy and its read-set/fact signature is known.
+`Partial`, `Unavailable`, `Unsupported`, `BudgetExceeded`,
+`UnstableState`, recursion-sentinel, bridge-truncated, and cancelled
+results may be returned to a caller, but they must be marked
+non-cacheable or cached only in a typed degraded-result cache whose
+callers cannot mistake them for exact answers.
 
 ## Cache layer key composition
 

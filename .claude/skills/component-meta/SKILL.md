@@ -126,6 +126,7 @@ Forbidden patterns:
 - Shape-scoring a candidate as "better" unless the result carries explicit exactness/provenance proving which candidate is authoritative.
 - Using package-boundary, shallow/deep, recursion, cycle, or budget decisions as hidden local predicates. These decisions must be explicit projection-plan policy and must appear in semantic identity or cached-value validation metadata when they can affect output.
 - Publishing `unknown` or raw text for a TypeScript construct that the typed IR can represent or should be extended to represent.
+- Encoding semantic miss, unsupported, cycle, unstable-state, or budget information inside `Unknown.raw`, descriptor `rawType`, or string prefixes. These states are API facts and must be typed.
 
 Allowed performance gates must fail closed. A gate may decide "do not expand yet", "do not cache this degraded result", or "enter the shared resolver"; it must not invent members, flatten aliases, hide unresolved branches, or silently replace representable structure with raw text.
 
@@ -135,6 +136,15 @@ Best-architecture target for component-meta:
 - Published metadata is derived from typed `TypeExpr` / `TypeDescriptor` structures plus explicit exactness/provenance, never from display strings.
 - Projection planning is explicit: shallow publication, path walking, package-backed object preservation, cycle handling, and fuse behavior are modeled as policy data, not scattered predicates.
 - Unsupported cases are visible API states with diagnostics/provenance, not fallback strings.
+- TS adapters may be lossy only through explicit unsupported/partial output. They must not silently erase typed structure to `unknown`, prefer raw display text over typed descriptors, or turn structured degraded state back into strings.
+
+## Component-Meta Completeness Contract (CRITICAL)
+
+Component-meta completeness is part of the public API surface.
+
+- `acceptedSurfaceCompleteness`, expansion exactness, bridge-depth state, unsupported operators, unresolved branches, and budget exits must remain explicit through Rust payloads, protocol conversion, the TS bridge, native component-meta, and compat adapters.
+- Missing native data is a native bug or a structured unsupported result, not a compat repair opportunity.
+- `Complete` / `Exact` means all required semantic inputs were current and all required branches were represented. Stale cache data, missing analysis, unavailable providers, bridge truncation, unsupported operators, and budget exits must produce partial/degraded state and must not warm final-result caches as exact.
 
 ## Typed-IR-Only Resolver Rule (CRITICAL)
 
