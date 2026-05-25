@@ -1458,38 +1458,35 @@ fn extract_props_from_macro(
                     default_value,
                     description,
                     tags,
-                    // R21-F1 c5: structural-fact read from the
-                    // expanded field. `ExpandedField` carries
-                    // `declared_in_macro_type_arg` propagated
-                    // end-to-end through the resolver stack:
+                    // Structural-fact read from the expanded field.
+                    // `ExpandedField` carries `declared_in_macro_type_arg`
+                    // propagated end-to-end through the resolver stack:
                     //
-                    // - Parser (c2): `resolve_interface_with_extends`
+                    // - Parser: `resolve_interface_with_extends`
                     //   stamps own-body interface members with `true`
                     //   and heritage-descent members (`extends`,
                     //   `Omit<...>` source, intersection non-literal
                     //   arms) with `false`.
-                    // - Semantic propagation (c3):
+                    // - Semantic propagation:
                     //   `expand_macro_types_impl_with_expander` and
                     //   `surface_member_to_expanded_field` thread the
-                    //   fact through `AnalyzedPropField` ->
-                    //   `ProjectedMember` -> `SurfaceMember` ->
+                    //   fact through `AnalyzedPropField` →
+                    //   `ProjectedMember` → `SurfaceMember` →
                     //   `ExpandedField`.
-                    // - Session prepared-surface walker (c4):
+                    // - Session prepared-surface walker:
                     //   `project_prepared_surface_from_expr` threads
                     //   `from_root_body` through every recursion arm
                     //   and gates `PreparedSurfaceCacheKey` /
                     //   `PreparedMemberCacheKey` on it, so two
                     //   distinct entry contexts publish two distinct
-                    //   cache slots (closes codex's BINDING TOP RISK
-                    //   on partial / cache-incomplete F1 landings).
+                    //   cache slots.
                     //
-                    // For ALL of the brief's reference shapes -
-                    // fully-local (`defineProps<LocalProps>()`),
-                    // cross-file simple (`import type { Props } from
-                    // './x'; defineProps<Props>()`), cross-file
-                    // heritage (`interface Carrier extends
-                    // Omit<V,'k'> { k: T }`), and inline-literal
-                    // (`defineProps<{ k: T }>()`) -
+                    // For every reference shape — fully-local
+                    // (`defineProps<LocalProps>()`), cross-file simple
+                    // (`import type { Props } from './x';
+                    // defineProps<Props>()`), cross-file heritage
+                    // (`interface Carrier extends Omit<V,'k'> { k: T }`),
+                    // and inline-literal (`defineProps<{ k: T }>()`) —
                     // `field.declared_in_macro_type_arg` is the
                     // structurally-correct value.
                     declared_in_macro_type_arg: field.declared_in_macro_type_arg,

@@ -1392,14 +1392,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         member_name: &str,
         visited: &mut FxHashSet<(String, String)>,
     ) -> Option<ProjectedMember> {
-        // R21-F1 c4: the inherited-route projection path follows
-        // members that reach the surface via the prepared decl's
-        // heritage chain — by construction, `from_root_body = false`.
-        // The cache key carries the flag to keep the inherited-route
-        // entries separate from any same-`(canonical, symbol, member)`
+        // The inherited-route projection path follows members that
+        // reach the surface via the prepared decl's heritage chain —
+        // by construction, `from_root_body = false`. The cache key
+        // carries the flag to keep the inherited-route entries
+        // separate from any same-`(canonical, symbol, member)`
         // requested-route entries (different `PreparedMemberCacheKind`
         // already discriminates them; threading `from_root_body`
-        // through preserves the R21 split-rule key shape).
+        // through preserves the per-member key's entry-context
+        // split).
         let inherited_from_root_body = false;
         let cache_key = PreparedMemberCacheKey {
             canonical_id: scope_canonical_id.to_string(),

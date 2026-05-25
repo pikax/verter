@@ -406,7 +406,7 @@ pub(super) fn projected_surface_from_object_expr(
     let mut construct_signatures = Vec::new();
     let mut has_index_signature = false;
 
-    // R21-F1 c4: `from_root_body` is the caller's macro-T own-body flag
+    // `from_root_body` is the caller's macro-T own-body flag
     // threaded through the walker. A `TypeExpr::Object` reached at a
     // body position (`from_root_body=true`) declares its members in
     // the consumer's macro T argument; the same object reached via a
@@ -467,8 +467,8 @@ pub(super) fn projected_surface_from_object_expr_with_substitutions(
     let mut construct_signatures = Vec::new();
     let mut has_index_signature = false;
 
-    // R21-F1 c4: `from_root_body` is the caller's macro-T own-body
-    // flag threaded through the walker — see companion comment on
+    // `from_root_body` is the caller's macro-T own-body flag
+    // threaded through the walker — see companion comment on
     // `projected_surface_from_object_expr`. Generic instantiation
     // does not change the body/heritage status of the object literal.
     for member in &object.properties {
