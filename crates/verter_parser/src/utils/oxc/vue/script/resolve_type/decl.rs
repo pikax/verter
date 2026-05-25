@@ -368,20 +368,23 @@ pub(super) fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
                 ),
             );
         }
-        // Companion definitions were resolved with `from_root_body
-        // = false` (see `extract_companion_types`). When the caller
-        // is at the macro-T root (`from_root_body = true`), the
-        // companion's body IS the macro T's body — re-stamp the
-        // cloned props' fact. When the caller is at heritage
-        // descent, the cached `false` already matches.
+        // Companion definitions carry accurate per-prop provenance from
+        // `extract_companion_types` (resolved with `from_root_body = true`):
+        // own-body literal members are marked `true`, heritage-injected
+        // members are marked `false`. When the caller is itself at heritage
+        // descent (`from_root_body = false`), every member of the companion
+        // reaches the carrier via a heritage boundary, so flip the entire
+        // surface to `false`. At the macro-T root, use the cached per-prop
+        // facts as-is — that preserves the heritage `false` for inherited
+        // members instead of blanket-stamping them `true`.
         if from_root_body {
-            let mut stamped = companion;
-            for prop in &mut stamped.props {
-                prop.declared_in_macro_type_arg = true;
-            }
-            return Some(Arc::new(stamped));
+            return Some(Arc::new(companion));
         }
-        return Some(Arc::new(companion));
+        let mut stamped = companion;
+        for prop in &mut stamped.props {
+            prop.declared_in_macro_type_arg = false;
+        }
+        return Some(Arc::new(stamped));
     }
 
     if component_meta_core_trace_enabled() {
@@ -688,7 +691,7 @@ pub(super) fn resolve_type_elements_inner(
 /// - `extends` / heritage descent ALWAYS forces `from_root_body =
 ///   false` because the user did not type heritage-target member
 ///   names in the carrier's own literal body.
-#[allow(clippy::too_many_arguments)] // R21-F1: explicit `from_root_body` threading
+#[allow(clippy::too_many_arguments)] // explicit `from_root_body` threading
 pub(super) fn resolve_interface_with_extends_ctx<'ctx, 'a: 'ctx>(
     members: &[TSSignature],
     extends: &[String],
@@ -791,7 +794,7 @@ pub(super) fn resolve_interface_with_extends_ctx<'ctx, 'a: 'ctx>(
 /// - `extends` / heritage descent ALWAYS forces `from_root_body =
 ///   false` because the user did not type heritage-target member
 ///   names in the carrier's own literal body.
-#[allow(clippy::too_many_arguments)] // R21-F1: explicit `from_root_body` threading
+#[allow(clippy::too_many_arguments)] // explicit `from_root_body` threading
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(super) fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
     members: &[TSSignature],

@@ -4154,9 +4154,10 @@ fn type_resolution_context_handle_is_send_and_sync() {
     _assert_send_sync::<dyn super::cache_keys::NamedTypeCache>();
 }
 
-/// R21-F1 Commit 2 discriminating test: `declared_in_macro_type_arg`
-/// distinguishes own-body literal members from heritage-injected
-/// members reaching the surface via `Omit<Imported, K>`.
+/// Discriminating test for `declared_in_macro_type_arg`:
+/// own-body literal members must be distinguished from
+/// heritage-injected members reaching the surface via
+/// `Omit<Imported, K>`.
 ///
 /// The reference shape:
 ///
@@ -4176,8 +4177,7 @@ fn type_resolution_context_handle_is_send_and_sync() {
 /// - `x` should NOT appear on the surface — `Omit<Bar, 'x'>` excluded
 ///   it.
 ///
-/// **Discrimination contract** (per the R21-F1 plan): if the
-/// `from_root_body` threading at
+/// **Discrimination contract**: if the `from_root_body` threading at
 /// `resolve_interface_with_extends_ctx_ref` is reverted (the
 /// own-body call site stamps `false` instead of propagating the
 /// caller's flag), the `y` assertion below FLIPS to `false` and the
@@ -4251,5 +4251,168 @@ export interface Foo extends Omit<Bar, 'x'> {
     assert!(
         !by_name.contains_key("x"),
         "Omit<Bar, 'x'> should exclude `x`; got {by_name:?}"
+    );
+}
+
+/// Discriminating test for the companion-root restamping fix at
+/// `resolve_named_local_type_with_ctx_ref_inner` (`decl.rs`):
+/// when a companion type's resolved members include heritage-injected
+/// members (e.g. via `extends Omit<Vendor, K>`), consuming the
+/// companion at the macro-T root MUST preserve the heritage `false`
+/// for inherited members. Blanket-stamping every prop to `true`
+/// (the inverse-revert) drops the structural distinction between
+/// own-body and heritage-injected members.
+///
+/// The reference shape:
+///
+/// ```text
+/// // Companion (pre-resolved with per-prop provenance):
+/// type Foo = { y: own-body, kept: heritage-injected }
+/// // Setup script consumes Foo at root:
+/// type Test = Foo
+/// ```
+///
+/// **Discrimination contract**: if the consumer's heritage-aware
+/// branch at `decl.rs` is reverted to the inverse blanket-stamp
+/// (every prop forced `true` when `from_root_body == true`), the
+/// `kept` assertion below FLIPS from `false` to `true` and the
+/// test FAILS.
+#[test]
+fn declared_in_macro_type_arg_companion_root_preserves_inherited_heritage_false() {
+    let mut companion_types = FxHashMap::default();
+    let mut foo = ResolvedElements::default();
+
+    // Own-body literal member of the companion — marked `true` by the
+    // post-fix `extract_companion_types` producer (which resolves with
+    // `from_root_body = true`).
+    foo.props.push(ResolvedProp {
+        span: Span::new(0, 0),
+        key: Span::new(0, 0),
+        key_name: Some("y".to_string()),
+        optional: false,
+        types: vec![RuntimeType::Number],
+        visibility: ResolvedMemberVisibility::Public,
+        type_span: None,
+        type_text: None,
+        map_local: false,
+        span_is_absolute: false,
+        type_expr: None,
+        type_expr_scope: None,
+        declared_in_macro_type_arg: true,
+    });
+    // Heritage-injected member — marked `false` by the producer
+    // (heritage descent inside the companion's `extends` forces
+    // `from_root_body = false`).
+    foo.props.push(ResolvedProp {
+        span: Span::new(0, 0),
+        key: Span::new(0, 0),
+        key_name: Some("kept".to_string()),
+        optional: false,
+        types: vec![RuntimeType::Number],
+        visibility: ResolvedMemberVisibility::Public,
+        type_span: None,
+        type_text: None,
+        map_local: false,
+        span_is_absolute: false,
+        type_expr: None,
+        type_expr_scope: None,
+        declared_in_macro_type_arg: false,
+    });
+    companion_types.insert("Foo".to_string(), foo);
+
+    let (resolved, _diags) =
+        resolve_with_ctx_ref_and_companions("type Test = Foo", companion_types);
+
+    let by_name: std::collections::HashMap<&str, bool> = resolved
+        .props
+        .iter()
+        .filter_map(|p| {
+            p.key_name
+                .as_deref()
+                .map(|n| (n, p.declared_in_macro_type_arg))
+        })
+        .collect();
+
+    // Own-body literal: must stay `true` at root-body consumption.
+    assert_eq!(
+        by_name.get("y").copied(),
+        Some(true),
+        "own-body literal `y` must carry declared_in_macro_type_arg == true \
+         at root-body consumption; got {by_name:?}",
+    );
+
+    // Heritage-injected: must stay `false` at root-body consumption —
+    // the bug case is the inverse blanket-stamp re-flipping this to `true`.
+    assert_eq!(
+        by_name.get("kept").copied(),
+        Some(false),
+        "heritage-injected `kept` must carry declared_in_macro_type_arg == false \
+         at root-body consumption; got {by_name:?}",
+    );
+}
+
+/// Companion at heritage descent (`from_root_body = false`) flips every
+/// resolved prop's `declared_in_macro_type_arg` to `false`. This guards
+/// the symmetric side of the companion consumer contract: when a
+/// carrier accesses the companion through its own `extends`, every
+/// member of the companion crosses a heritage boundary on the way to
+/// the carrier's surface.
+#[test]
+fn declared_in_macro_type_arg_companion_at_heritage_descent_flips_to_false() {
+    let mut companion_types = FxHashMap::default();
+    let mut foo = ResolvedElements::default();
+
+    // Own-body literal member of the companion — declared at the
+    // companion's macro-T root (true).
+    foo.props.push(ResolvedProp {
+        span: Span::new(0, 0),
+        key: Span::new(0, 0),
+        key_name: Some("y".to_string()),
+        optional: false,
+        types: vec![RuntimeType::Number],
+        visibility: ResolvedMemberVisibility::Public,
+        type_span: None,
+        type_text: None,
+        map_local: false,
+        span_is_absolute: false,
+        type_expr: None,
+        type_expr_scope: None,
+        declared_in_macro_type_arg: true,
+    });
+    companion_types.insert("Foo".to_string(), foo);
+
+    // Carrier interface `Carrier` extends the companion `Foo`. The
+    // carrier's heritage clause descends into `Foo` at
+    // `from_root_body = false`, so the companion's `y` reaches the
+    // carrier's surface via heritage and must flip to `false`.
+    let (resolved, _diags) = resolve_with_ctx_ref_and_companions(
+        "interface Carrier extends Foo { own_member: string }\n\
+         type Test = Carrier",
+        companion_types,
+    );
+
+    let by_name: std::collections::HashMap<&str, bool> = resolved
+        .props
+        .iter()
+        .filter_map(|p| {
+            p.key_name
+                .as_deref()
+                .map(|n| (n, p.declared_in_macro_type_arg))
+        })
+        .collect();
+
+    // Carrier's own literal body member — stays `true`.
+    assert_eq!(
+        by_name.get("own_member").copied(),
+        Some(true),
+        "carrier own-body `own_member` must remain true at root consumption; got {by_name:?}",
+    );
+
+    // Companion-inherited member — must flip to false on the heritage hop.
+    assert_eq!(
+        by_name.get("y").copied(),
+        Some(false),
+        "companion-inherited `y` must flip to false on the heritage hop \
+         (carrier extends Foo); got {by_name:?}",
     );
 }

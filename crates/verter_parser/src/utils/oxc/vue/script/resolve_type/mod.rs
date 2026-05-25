@@ -1611,13 +1611,22 @@ fn instantiate_type_params_ctx<'ctx, 'a: 'ctx>(
 /// returning a map from type name → resolved elements. This allows the setup
 /// script's type resolver to look up types defined in the companion block.
 ///
-/// Companion types are NOT macro-T's own body — they are ambient type
-/// definitions that the setup script's macros may later reference. The
-/// resolver chain is therefore invoked with `from_root_body = false`
-/// so every produced `ResolvedProp.declared_in_macro_type_arg` is
-/// `false`. If a setup-script macro later consumes one of these
-/// companion types (e.g. `defineProps<CompanionProps>()`), the named
-/// resolver re-stamps the cloned props' fact on the macro-root side.
+/// The resolver chain runs with `from_root_body = true`. This makes each
+/// produced `ResolvedProp.declared_in_macro_type_arg` carry accurate
+/// per-prop provenance:
+///   - Own-body literal members → `true` (caller propagates `true` to
+///     `resolve_type_literal_members`).
+///   - Heritage-injected members (via `extends Omit<...>` etc.) → `false`
+///     (the heritage-descent boundary inside
+///     `resolve_interface_with_extends_ctx_ref` forces
+///     `from_root_body = false` on every named-target lookup).
+///
+/// The consumer (`resolve_named_local_type_with_ctx_ref_inner`) preserves
+/// these per-prop facts when the caller is at the macro-T root, and flips
+/// every prop to `false` when the caller is itself at heritage descent.
+/// This preserves the invariant that a companion's heritage-injected
+/// members never reach a published surface as `declared_in_macro_type_arg
+/// = true`, regardless of how the companion is consumed.
 pub fn extract_companion_types(
     program: &Program<'_>,
     source: &[u8],
@@ -1628,8 +1637,16 @@ pub fn extract_companion_types(
 
     let mut types = rustc_hash::FxHashMap::default();
 
-    // Companion definitions are ambient — see the doc comment above.
-    let from_root_body = false;
+    // Companion definitions are resolved with `from_root_body = true` so each
+    // resolved prop carries accurate per-prop provenance:
+    //   - Own-body literal members: `declared_in_macro_type_arg = true`.
+    //   - Heritage-injected members (via `extends Omit<...>` etc.): `false`,
+    //     because the heritage-descent boundary inside `resolve_interface_with_extends_ctx_ref`
+    //     forces `from_root_body = false` on every named-target lookup.
+    // The consumer (`resolve_named_local_type_with_ctx_ref_inner`) preserves
+    // these per-prop facts when the caller is at the macro-T root, and flips
+    // every prop to `false` when the caller is itself at heritage descent.
+    let from_root_body = true;
 
     for stmt in &program.body {
         match stmt {
