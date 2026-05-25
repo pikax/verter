@@ -351,6 +351,7 @@ mod tests {
                     resolution_error: None,
                     type_expr: Some(TypeExpr::primitive(PrimitiveName::String)),
                     type_expr_scope: None,
+                    declared_in_macro_type_arg: false,
                 },
                 verter_semantic::analysis::AnalyzedPropField {
                     name: "count".to_string(),
@@ -363,6 +364,7 @@ mod tests {
                     resolution_error: None,
                     type_expr: Some(TypeExpr::primitive(PrimitiveName::Number)),
                     type_expr_scope: None,
+                    declared_in_macro_type_arg: false,
                 },
             ],
             emits: vec![],
@@ -634,6 +636,7 @@ export interface Button {
             resolution_error: None,
             type_expr: Some(TypeExpr::named("Button")),
             type_expr_scope: None,
+            declared_in_macro_type_arg: false,
         }];
 
         let (result, _trace) = resolved_macro_to_expansion_via_solver(&macro_meta, &host);

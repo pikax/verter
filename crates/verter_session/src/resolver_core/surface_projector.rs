@@ -110,6 +110,7 @@ pub fn project_macro_surfaces_with_owner(
                         resolution_error: None,
                         type_expr,
                         type_expr_scope,
+                        declared_in_macro_type_arg: false,
                     }
                 })
                 .collect();

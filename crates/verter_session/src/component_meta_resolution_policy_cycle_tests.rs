@@ -92,6 +92,7 @@ fn prop(name: &str, type_expr: TypeExpr) -> PropAnalysis {
         default_value: None,
         description: None,
         tags: vec![],
+        declared_in_macro_type_arg: false,
     }
 }
 

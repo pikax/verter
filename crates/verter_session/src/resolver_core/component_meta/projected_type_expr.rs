@@ -179,6 +179,7 @@ pub(crate) fn project_macro_surfaces_from_expanded_shape(
                         resolution_error: None,
                         type_expr,
                         type_expr_scope,
+                        declared_in_macro_type_arg: false,
                     }
                 })
                 .collect(),
@@ -661,6 +662,7 @@ mod tests {
                 resolution_error: None,
                 type_expr: Some(TypeExpr::Literal(LiteralValue::String("done".to_string()))),
                 type_expr_scope: None,
+                declared_in_macro_type_arg: false,
             }],
             emits: Vec::new(),
             slots: Vec::new(),
@@ -736,6 +738,7 @@ mod tests {
                     raw: "unknown".to_string(),
                 }),
                 type_expr_scope: None,
+                declared_in_macro_type_arg: false,
             }],
             emits: Vec::new(),
             slots: Vec::new(),

@@ -142,6 +142,7 @@ fn prop(name: &str, type_expr: TypeExpr) -> PropAnalysis {
         default_value: None,
         description: None,
         tags: vec![],
+        declared_in_macro_type_arg: false,
     }
 }
 
@@ -635,6 +636,7 @@ fn w2_4_restore_macro_participating_from_typed_annotation_replaces_eager_object(
         default_value: None,
         description: None,
         tags: vec![],
+        declared_in_macro_type_arg: false,
     });
 
     // `ButtonProps` lives in an imported file — the policy needs

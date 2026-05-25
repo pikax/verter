@@ -17979,6 +17979,7 @@ fn symbolic_budget_is_not_fatal_when_component_surface_exists() {
             default_value: None,
             description: None,
             tags: Vec::new(),
+            declared_in_macro_type_arg: false,
         }],
         events: Vec::new(),
         slots: Vec::new(),
