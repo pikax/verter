@@ -1,22 +1,6 @@
-//! R21-F1 c5 — discriminating cross-file fixtures for
-//! `declared_in_macro_type_arg` on `PropAnalysis`.
+//! Cross-file `declared_in_macro_type_arg` provenance characterizations.
 //!
-//! These tests close the cross-file provenance hole the R20-fix2 STOP
-//! framing left at `crates/verter_semantic/src/analysis/component_meta.rs`
-//! (the former `R20-fix2 F1 STOP` block at lines 1469-1484, replaced
-//! in c5 with the structural-fact read `field.declared_in_macro_type_arg`).
-//!
-//! Discrimination property: reverting the c5 production change in
-//! `component_meta.rs` to the prior `source_field.map(|p|
-//! p.declared_in_macro_type_arg).unwrap_or(false)` form causes the
-//! body-context cross-file assertions to fail with `declared=false`
-//! for cross-file imported macros — the analyzer's local
-//! `AnalyzedPropField` never sees the imported interface's members,
-//! so `source_field` is `None` and the old expression collapses to
-//! `unwrap_or(false)`.
-//!
-//! Each test exercises one of the brief's reference cross-file
-//! shapes:
+//! Each test exercises one of the reference cross-file shapes:
 //!
 //! 1. cross-file-simple: `import type { Props } from './x';
 //!    defineProps<Props>()` — own-body members of `Props` reach the
@@ -28,14 +12,15 @@
 //!    Vendor members reached via heritage carry `false`.
 //! 3. cross-file-no-own-body-name (negative): a contested name only
 //!    reaches the surface through the heritage chain (NOT in any
-//!    own-body) — assert `declared = false` AND assert the member is
-//!    correctly stripped under the Refined publication policy by
-//!    `verter_audit::PublishedSurfacePolicy` (it survives the unrefined
-//!    surface; the discriminator targets the structural fact, which
-//!    in turn governs the Refined policy's reject-non-author-declared
-//!    rule).
+//!    own-body) — assert `declared = false`. The
+//!    `cross_file_provenance_fixtures_tests` module adds the
+//!    downstream `PublishedSurfacePolicy::Refined` strip assertion
+//!    on a sibling fixture so the published-surface consequence is
+//!    discriminating end-to-end.
 //!
-//! Reference: `D:/tmp/round21-f1-cross-file-brief.md` (R21 c5 scope).
+//! See `cross_file_provenance_fixtures_tests` for the fixture-driven
+//! variants that exercise on-disk inputs and the Refined-policy
+//! projection.
 
 #![cfg(test)]
 
@@ -50,20 +35,27 @@ fn metahost() -> ComponentMetaHost {
     })
 }
 
-/// CASE B (R21 brief) — fully-cross-file simple import.
+/// Positive characterization for the cross-file-simple shape.
 ///
 /// `types.ts` declares `interface FooProps { onSubmit?: ...; label?:
 /// string }`. `component.vue` imports and consumes via
-/// `defineProps<FooProps>()`. Assert each own-body member surfaces with
-/// `declared_in_macro_type_arg = true`.
+/// `defineProps<FooProps>()`. Assert each own-body member surfaces
+/// with `declared_in_macro_type_arg = true`.
 ///
-/// Why this test discriminates: the analyzer's local
-/// `AnalyzedPropField` for `component.vue` does NOT contain `onSubmit`
-/// or `label` (they're cross-file). Pre-c5,
-/// `source_field.map(...).unwrap_or(false)` collapsed to `false`.
-/// Post-c5 reads `field.declared_in_macro_type_arg` from the
-/// `ExpandedField` produced by the resolver pipeline (c2 parser fact
-/// + c3 semantic propagation + c4 prepared-surface walker keying).
+/// Discrimination note (honest): this test exercises the resolver
+/// stack end-to-end for the imported-own-body shape, but it does
+/// NOT uniquely discriminate any single commit in the
+/// `declared_in_macro_type_arg` chain — the upstream pipeline
+/// (parser stamping, semantic propagation, prepared-surface walker)
+/// already populates `field.declared_in_macro_type_arg` for own-body
+/// imported members. A genuinely-discriminating test for the
+/// cross-file consumer read at `component_meta.rs` lives in
+/// `cross_file_provenance_fixtures_tests.rs`
+/// (`fixture_cross_file_simple_own_body_members_survive_refined_projection`)
+/// — that test asserts BOTH the structural fact AND the Refined
+/// policy's downstream consequence (keeping `onSubmit` on the
+/// published surface), which makes the consumer-read regression
+/// observable through the audit projection.
 #[test]
 fn cross_file_simple_imported_interface_own_body_members_carry_declared_true() {
     let mh = metahost();
@@ -107,14 +99,12 @@ fn cross_file_simple_imported_interface_own_body_members_carry_declared_true() {
     assert!(
         on_submit.declared_in_macro_type_arg,
         "cross-file-simple: FooProps.onSubmit MUST carry \
-         declared_in_macro_type_arg=true. Got declared={}. A `false` \
-         here means component_meta.rs reverted to the pre-c5 \
-         `source_field.map(...).unwrap_or(false)` framing — the \
+         declared_in_macro_type_arg=true. Got declared={}. The \
          analyzer's local registry never sees the imported \
-         interface's members, so the lookup defaults to `false`. \
-         Post-c5 reads `field.declared_in_macro_type_arg` from the \
-         `ExpandedField` produced by the c2 parser + c3 semantic \
-         propagation + c4 prepared-surface walker.",
+         interface's members, so the resolver pipeline must \
+         supply `field.declared_in_macro_type_arg` from the \
+         `ExpandedField` published by the parser + semantic \
+         propagation + prepared-surface walker.",
         on_submit.declared_in_macro_type_arg,
     );
     assert!(
@@ -125,8 +115,7 @@ fn cross_file_simple_imported_interface_own_body_members_carry_declared_true() {
     );
 }
 
-/// CASE C (R21 brief) — cross-file heritage with Omit + own-body
-/// re-introduction.
+/// Cross-file heritage with Omit + own-body re-introduction.
 ///
 /// `vendor.ts` declares `interface Vendor { state: …; onStateChange:
 /// …; renderFallbackValue: …; other: … }`. `types.ts` declares
@@ -231,8 +220,8 @@ fn cross_file_omit_then_reintroduce_own_body_members_carry_declared_true() {
     );
 }
 
-/// NEGATIVE (R21 brief) — contested name reaches the surface only via
-/// heritage, no own-body re-introduction.
+/// NEGATIVE — contested name reaches the surface only via heritage,
+/// no own-body re-introduction.
 ///
 /// `vendor.ts` declares `interface Vendor { contested: number; alpha:
 /// string }`. `types.ts` declares `interface Carrier extends Vendor
