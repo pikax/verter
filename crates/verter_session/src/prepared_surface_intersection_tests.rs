@@ -12,58 +12,58 @@
 //!   matches TypeScript's intersection semantics — an unresolvable
 //!   `B` does not poison `A`'s contributions.
 //!
-//! ## Test scope and discrimination caveat
+//! ## Test scope
 //!
-//! The Class A / Class B tests below characterize the **post-fix
-//! invariant**: with the non-fatal-unsupported merge in place, the
-//! explicit body member survives an unresolvable heritage arm. They
-//! are POSITIVE regression guards — if a future change reverts the
-//! Intersection branch to the short-circuit form and these tests
-//! still pass against synthetic fixtures, that does not vindicate the
-//! revert: the prepared-surface path is one of several paths
-//! contributing to `meta.props`, and synthetic single-component
-//! fixtures often have the analyzer's local-resolver solver fallback
-//! rescue them even when the prepared-surface intersection is broken
-//! (this is the `[solver-rescue]` blocker the Phase C
-//! implementer documented in the original report).
+//! Three layers of coverage:
 //!
-//! The discriminating proof of the Phase C fix is the
-//! 177-component nuxt-ui bench corpus — `pnpm --filter
-//! @verter/benchmark bench:meta:ui -- --scenarios=repo_first_pass
-//! --hard-timeout-ms=60000`. The corpus contains `AuthForm.vue`,
-//! `Form.vue`, and `Table.vue` whose actual TS shapes do hit the
-//! `prepared_surface.rs::TypeExpr::Intersection` branch and lose
-//! `onSubmit` / `state` / `onStateChange` / `renderFallbackValue`
-//! under the pre-fix short-circuit.
+//! 1. **Class A / Class B** — positive regression characterizations
+//!    of the post-fix invariant: with the non-fatal-unsupported
+//!    merge in place, the explicit body member survives an
+//!    unresolvable heritage arm. These tests document the desired
+//!    behaviour on the realistic corpus shapes (`AuthForm.vue` /
+//!    `Form.vue` / `Table.vue` from the nuxt-ui bench corpus).
 //!
-//! The tests below remain valuable as positive regression characterizations:
-//! if either the explicit body member OR the sibling assertion ever
-//! disappears from these fixtures, that is a real signal that the
-//! intersection short-circuit (or an equivalent regression) has
-//! returned somewhere in the pipeline.
+//! 2. **`intersection_merge_tests::merge_prepared_intersection_arms_*`**
+//!    in `resolver_core/component_meta_query_engine/prepared_surface.rs`
+//!    — the F4 discriminating tests added in R20-fix2. They exercise
+//!    the pure `merge_prepared_intersection_arms` helper directly
+//!    with synthesised `PreparedSurfaceProjection` inputs, bypassing
+//!    the component-meta pipeline's rescue paths entirely. Reverting
+//!    the helper's `// Skip` arm on `Unsupported` to the pre-fix
+//!    `return PreparedSurfaceProjection::Unsupported;` makes the
+//!    `..._skips_unsupported_arm_when_sibling_resolves` and
+//!    `..._treats_empty_arm_as_resolved` tests fail with precise
+//!    diffs; the R20-fix2 report captures the RED output at
+//!    `bench-evidence/r20fix2-f4-red-discrimination.txt`.
 //!
-//! ## Fix 1 `declared_in_macro_type_arg` analyzer-side contract
+//! 3. **Fix 1 analyzer-side `declared_in_macro_type_arg` contract**
+//!    — `inline_literal_..._for_on_event_shadow_of_declared_emit`
+//!    and `local_interface_own_body_marked_declared_while_heritage_arm_unresolvable`.
+//!    Inline-literal `defineProps<{ onSubmit?: ... }>()` + a
+//!    declared `submit` emit must yield an `AnalyzedPropField`
+//!    whose `declared_in_macro_type_arg` is `true` (and
+//!    `PropAnalysis` / `FfiPropMeta` / `PropMeta` likewise). These
+//!    tests discriminate at the analyzer boundary — removing the
+//!    body-extractor `declared = true` populations makes them
+//!    fail.
 //!
-//! Inline-literal `defineProps<{ onSubmit?: ... }>()` + a declared
-//! `submit` emit must yield an `AnalyzedPropField` whose
-//! `declared_in_macro_type_arg` is `true` (and `PropAnalysis` /
-//! `FfiPropMeta` / `PropMeta` likewise). This is the structural fact
-//! that the `Refined` publication policy consults to preserve
-//! Vue intrinsics (`class`, `style`) and `on{Event}` shadows of
-//! declared emits when the author wrote them on purpose.
+//! ## Cross-file imported-interface provenance scope (R20-fix2 F1 STOP)
 //!
-//! The Fix 1 tests (`inline_literal_..._for_on_event_shadow_of_declared_emit`
-//! and `local_interface_own_body_marked_declared_while_heritage_arm_unresolvable`)
-//! ARE discriminating at the analyzer boundary: removing the
-//! `declared_in_macro_type_arg: true` populations from the analyzer's
-//! body extractors makes them fail.
-//!
-//! Cross-file resolution (importing the prop interface from another
-//! file) currently loses provenance at the `SurfaceMember` boundary
-//! — that propagation belongs to a follow-up that threads the fact
-//! through `prepared_surface.rs` and `SurfaceMember` to
-//! `ExpandedField`. See `TODO(follow-up)` in
-//! `extract_props_from_macro`.
+//! The R20-fix2 round audited cross-file `defineProps<ImportedProps>()`
+//! provenance flow and confirmed the architecturally-correct
+//! threading touches five types (`ResolvedProp`, `ProjectedMember`,
+//! `SurfaceMember`, `ExpandedField`, `ExpandedProperty`) across
+//! three crates, plus prepared-surface walker heritage tracking,
+//! plus FFI / proto re-wire, plus ~30 fixture constructor
+//! updates. That scope is a dedicated architectural cycle, not a
+//! fix-cycle item. The bench gate stays green at HEAD because the
+//! Phase C intersection fix (Class A / Class B / the F4
+//! discriminator) covers membership; the cross-file
+//! `declared_in_macro_type_arg` propagation affects override
+//! semantics that the current bench corpus does not exercise
+//! (codex#2 measured 0/179 components hit the cross-file
+//! imported-macro-root shape). See `D:/tmp/round20-fix2-report.md`
+//! for the STATUS escalation.
 
 use super::*;
 use crate::types::HostConfig;
@@ -388,3 +388,20 @@ defineEmits<{ submit: [event: Event] }>()
         explicit.declared_in_macro_type_arg
     );
 }
+
+// Note: an integration-level F4 discriminating test was attempted in
+// this file using an `Omit<Generic<T>, key>` cross-file heritage
+// fixture, but empirically the component-meta pipeline's rescue paths
+// (analyzer-side intersection branch, cold-resolver, parser-side
+// utility-heritage handler) collectively cover the synthetic shape
+// even when the prepared-surface intersection short-circuit is
+// reverted. The unit-level discriminating coverage now lives in
+// `crates/verter_session/src/resolver_core/component_meta_query_engine/prepared_surface.rs`
+// under `intersection_merge_tests::merge_prepared_intersection_arms_*`,
+// which exercises the pure `merge_prepared_intersection_arms` helper
+// directly with synthesised `PreparedSurfaceProjection` inputs.
+// Reverting the helper's `// Skip` arm to the pre-fix
+// `return PreparedSurfaceProjection::Unsupported;` makes those unit
+// tests fail with precise diffs — see
+// `bench-evidence/r20fix2-f4-red-discrimination.txt` for the RED
+// output observed during R20-fix2 verification.

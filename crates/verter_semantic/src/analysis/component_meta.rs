@@ -1466,19 +1466,23 @@ fn extract_props_from_macro(
                     // cross-file expansion (heritage / Pick / Omit / etc.),
                     // the analyzer never saw it so `declared = false`.
                     //
-                    // TODO(follow-up): for cross-file imported interfaces
-                    // (`import { Props } from './x'; defineProps<Props>()`),
-                    // the analyzer's local registry never sees `Props`, so
-                    // the source-field lookup always misses and the fact
-                    // is forced to `false` for every member. Threading
-                    // provenance through the cross-file resolver
-                    // (`prepared_surface.rs` → `SurfaceMember` →
-                    // `surface_member_to_expanded_field` →
-                    // `ExpandedField.declared_in_macro_type_arg`) is the
-                    // architecturally-correct fix; until that lands the
-                    // `Refined` policy's override semantics only fully
-                    // activate for inline-literal / locally-defined
-                    // interface T arguments.
+                    // R20-fix2 F1 STOP: for cross-file imported
+                    // interfaces (`import { Props } from './x';
+                    // defineProps<Props>()`), the analyzer's local
+                    // registry never sees `Props`, so the source-field
+                    // lookup always misses and this branch reaches
+                    // `unwrap_or(false)`. The architecturally-correct
+                    // fix threads `declared_in_macro_type_arg` through
+                    // five types (`ResolvedProp`, `ProjectedMember`,
+                    // `SurfaceMember`, `ExpandedField`, `ExpandedProperty`)
+                    // across three crates plus the prepared-surface
+                    // walker's heritage tracking plus FFI / proto
+                    // re-wire — a dedicated architectural cycle,
+                    // escalated via STOP-and-escalate per the R20-fix2
+                    // brief. The bench corpus does not currently
+                    // exercise this branch (0/179 components per
+                    // codex#2's measurement). See
+                    // `D:/tmp/round20-fix2-report.md` STATUS section.
                     declared_in_macro_type_arg: source_field
                         .map(|p| p.declared_in_macro_type_arg)
                         .unwrap_or(false),
