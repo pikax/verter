@@ -419,6 +419,7 @@ macro_rules! catalog_contract {
     };
 }
 
+#[allow(unused_macros)]
 macro_rules! catalog_warm_contract {
     ($name:ident, $alias:literal, $check:expr) => {
         #[test]

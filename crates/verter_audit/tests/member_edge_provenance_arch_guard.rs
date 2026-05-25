@@ -230,8 +230,12 @@ fn audit_dto_project_member_construction_carries_provenance() {
             // bare `}` line; rare to extend beyond 8).
             let mut found_provenance = false;
             let mut closed = false;
-            for look in (idx + 1)..(idx + 10).min(lines.len()) {
-                let l = lines[look].trim();
+            for l in lines
+                .iter()
+                .take((idx + 10).min(lines.len()))
+                .skip(idx + 1)
+                .map(|s| s.trim())
+            {
                 if l.starts_with("provenance:") || l.starts_with("provenance ") {
                     found_provenance = true;
                     break;
