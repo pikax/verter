@@ -4011,9 +4011,24 @@ mod foundations_guards {
             "crates/verter_session/src/resolver_store.rs",
             "crates/verter_session/src/meta_resolve/materialize/field_types.rs",
             "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
+            // Projector entry-points module. `ProjectedMember →
+            // ExpandedField` lowering, per-member projection, the
+            // intersection-arm merge handoff, and the published-surface
+            // projector trampoline all live here so the projection
+            // contract stays in one file. Splitting along
+            // expander-vs-projector lines is the eventual cleanup.
+            "crates/verter_session/src/meta_resolve/projectors/mod.rs",
             "crates/verter_session/src/parse.rs",
             "crates/verter_session/src/project_semantic_dispatch/build.rs",
             "crates/verter_session/src/project_semantic_dispatch/lower.rs",
+            // Project semantic dispatch entry-points module. The
+            // `ProjectSemanticDispatch::execute` memo, the
+            // `SemanticQueryKey` cooperative-admission dispatcher, and
+            // the per-variant shape walkers are co-located so the
+            // cache invariants stay byte-coherent. Splitting along
+            // dispatch / cooperative-admission lines is the eventual
+            // cleanup.
+            "crates/verter_session/src/project_semantic_dispatch/mod.rs",
             "crates/verter_session/src/project_semantic_dispatch/raise.rs",
             "crates/verter_session/src/project_type_store.rs",
             "crates/verter_session/src/resolver_core/component_meta.rs",
@@ -4032,6 +4047,17 @@ mod foundations_guards {
             "crates/verter_session/src/semantic_query_memo/stats.rs",
             "crates/verter_session/src/semantic_query_memo/tests.rs",
             "crates/verter_session/src/types.rs",
+            // Typeinfo flow-return catalog. Single-file cataloguing the
+            // function-body flow-return inference rules under
+            // `#[cfg(test)]` module hierarchy (`typeinfo::typeinfo_tests`).
+            // Per the typeinfo design these inference rules are gated
+            // behind the cfg-test parent and intentionally co-located
+            // so the rule table stays in one place. The architecture
+            // guard walks `src/` recursively without filtering on
+            // ancestor `*_tests/` directories; this exemption is the
+            // documented escape until the walker grows directory
+            // filtering.
+            "crates/verter_session/src/typeinfo/typeinfo_tests/flow_return_catalog.rs",
             "crates/verter_tsc/src/checker.rs",
             "crates/verter_type_runtime/src/tsgo/ipc.rs",
             "crates/verter_type_runtime/src/tsserver/ipc.rs",

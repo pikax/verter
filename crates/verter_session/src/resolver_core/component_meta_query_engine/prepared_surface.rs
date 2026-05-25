@@ -88,7 +88,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         result
     }
 
-    /// R21-F1 c4 test-only escape hatch.
+    /// Test-only escape hatch exposing the `from_root_body` parameter.
     ///
     /// Drives `project_prepared_surface_from_symbol` with an explicit
     /// `from_root_body` flag so the discriminating cache-identity
@@ -136,7 +136,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             self.prepared_root_surface_projection_count += 1;
         }
         let mut active = FxHashSet::default();
-        // R21-F1 c4: top-level entry through `cached_prepared_root_surface`
+        // Top-level entry through `cached_prepared_root_surface`
         // enters the requested symbol AT THE BODY POSITION of the macro
         // T argument — `from_root_body = true`. Recursive descents
         // inside the walker thread their own arm-specific flag.
@@ -165,12 +165,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         from_root_body: bool,
         active: &mut FxHashSet<(String, String)>,
     ) -> PreparedSurfaceProjection {
-        // R21-F1 c4: `from_root_body` is the caller's macro-T own-body
-        // flag. It is part of the cache identity per the R21 split rule:
-        // the cached `ProjectedSurface`'s per-member
-        // `declared_in_macro_type_arg` reflects whether the symbol was
-        // entered at a body position vs. a heritage descent, so two
-        // distinct entry contexts publish two distinct cache slots.
+        // `from_root_body` is the caller's macro-T own-body flag and
+        // is part of the cache identity: the cached
+        // `ProjectedSurface`'s per-member `declared_in_macro_type_arg`
+        // reflects whether the symbol was entered at a body position
+        // vs. a heritage descent, so two distinct entry contexts must
+        // publish two distinct cache slots.
         let cache_key = PreparedSurfaceCacheKey {
             canonical_id: scope_canonical_id.to_string(),
             symbol_name: symbol_name.to_string(),
@@ -370,7 +370,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         });
     }
 
-    /// R21-F1 c4: `from_root_body` threading.
+    /// Surface projection with `from_root_body` threading.
     ///
     /// `from_root_body` is the caller's macro-T own-body flag. The walker
     /// mirrors the parser's `resolve_type_elements_inner_with_ctx_ref_guarded`
@@ -515,9 +515,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    /// R21-F1 c4: `from_root_body` threading for the Ref dispatch.
+    /// Ref-dispatch `from_root_body` threading.
     ///
-    /// Mirrors the parser's utility-type handling (decl.rs:1779+ +
+    /// Mirrors the parser's utility-type handling (decl.rs +
     /// `try_resolve_heritage_utility_type`): the FIRST type-argument of
     /// `Pick`/`Omit`/`Partial`/`Required`/`Readonly`/`NonNullable` is a
     /// heritage-like descent that descends with `from_root_body=false`.
@@ -692,11 +692,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }))
     }
 
-    /// R21-F1 c4: `from_root_body` is part of the cache identity for
-    /// `PreparedMemberCacheKey` per the R21 split rule. Different
-    /// entry contexts (body position vs. heritage descent) publish
-    /// distinct `ProjectedMember` values whose
-    /// `declared_in_macro_type_arg` reflects the entry context.
+    /// `from_root_body` is part of the cache identity for
+    /// `PreparedMemberCacheKey`: different entry contexts (body
+    /// position vs. heritage descent) publish distinct
+    /// `ProjectedMember` values whose `declared_in_macro_type_arg`
+    /// reflects the entry context, so the per-member cache MUST be
+    /// keyed on `from_root_body`.
     pub(crate) fn project_prepared_requested_member_from_symbol(
         &mut self,
         scope_canonical_id: &str,
@@ -943,7 +944,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         });
     }
 
-    /// R21-F1 c4: `from_root_body` threading for single-member projection.
+    /// Single-member projection with `from_root_body` threading.
     ///
     /// Mirrors `project_prepared_surface_from_expr`'s rules: intersection
     /// arms classify per their shape, utility-type inner arg descends
@@ -986,10 +987,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     active,
                 )
             }),
-            // R21-F1 c4: a `TypeExpr::Object` literal at this position
-            // is an own-body literal — the member it contributes
-            // declares its name in the consumer's macro T argument iff
-            // the caller's `from_root_body` is `true`.
+            // A `TypeExpr::Object` literal at this position is an
+            // own-body literal — the member it contributes declares
+            // its name in the consumer's macro T argument iff the
+            // caller's `from_root_body` is `true`.
             TypeExpr::Object(object) => object.properties.iter().find_map(|member| match member {
                 ObjectMember::Property(property) if property.name == member_name => {
                     Some(ProjectedMember {
@@ -1381,20 +1382,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     }
 }
 
-/// R21-F1 c4 — classify whether an intersection arm is an own-body
-/// literal (a TS `TSTypeLiteral`, lowered to `TypeExpr::Object`) for
-/// the purpose of threading `from_root_body` through the walker.
-///
-/// Mirrors the parser semantic at decl.rs:1712
-/// (`matches!(ty, TSType::TSTypeLiteral(_))`) — only object literals
-/// preserve the caller's body position; Refs, utility types, and
-/// every other shape are heritage-like descents. `Parenthesized` is
-/// transparent (`(T & X)` stays inspected at the inner shape).
 pub(super) fn arm_is_own_body_literal(expr: &TypeExpr) -> bool {
-    match expr {
-        TypeExpr::Object(_) => true,
-        TypeExpr::Parenthesized(inner) => arm_is_own_body_literal(inner),
-        _ => false,
+    let mut cursor = expr;
+    loop {
+        match cursor {
+            TypeExpr::Object(_) => return true,
+            TypeExpr::Parenthesized(inner) => cursor = inner,
+            _ => return false,
+        }
     }
 }
 
@@ -1407,19 +1402,21 @@ pub(super) fn arm_is_own_body_literal(expr: &TypeExpr) -> bool {
 /// The intersection itself is `Unsupported` only when EVERY arm
 /// fails to resolve (the `saw_resolved_arm == false` case).
 ///
-/// This is the bug locus closed by commit `084aef121` (Phase C). The
-/// pre-fix loop returned `Unsupported` on the first `Unsupported`
-/// arm, which dropped `AuthForm.vue` / `Form.vue` / `Table.vue` body
-/// members on the nuxt-ui bench corpus. The post-fix loop (this
-/// function) preserves sibling Surface arms.
+/// The inverse short-circuit — returning `Unsupported` on the first
+/// `Unsupported` arm — drops body members of `AuthForm.vue` /
+/// `Form.vue` / `Table.vue` on the nuxt-ui bench corpus. The
+/// `// Skip` branch below is the load-bearing invariant; the
+/// discriminating unit test
+/// `merge_prepared_intersection_arms_skips_unsupported_arm_when_sibling_resolves`
+/// guards against re-introduction.
 ///
 /// Extracted into a pure helper so the intersection-merge rule is
 /// unit-testable in isolation — see
-/// `tests::merge_prepared_intersection_arms_*` below. The unit tests
-/// discriminate directly against the saw_resolved_arm logic without
-/// relying on the higher-level component-meta pipeline (which has
-/// multiple rescue paths a synthetic single-component fixture
-/// inadvertently exercises).
+/// `intersection_merge_tests::merge_prepared_intersection_arms_*`.
+/// The unit tests discriminate directly against the
+/// `saw_resolved_arm` logic without relying on the higher-level
+/// component-meta pipeline (which has multiple rescue paths a
+/// synthetic single-component fixture inadvertently exercises).
 pub(super) fn merge_prepared_intersection_arms(
     arms: Vec<PreparedSurfaceProjection>,
 ) -> PreparedSurfaceProjection {
@@ -1447,130 +1444,5 @@ pub(super) fn merge_prepared_intersection_arms(
 }
 
 #[cfg(test)]
-mod intersection_merge_tests {
-    //! F4 discriminating unit tests for the prepared-surface
-    //! intersection merge — the Phase C bug locus.
-    //!
-    //! These tests directly exercise `merge_prepared_intersection_arms`
-    //! with synthesised inputs, bypassing the component-meta
-    //! pipeline's rescue paths. The discriminating property: reverting
-    //! the `PreparedSurfaceProjection::Unsupported => { /* skip */ }`
-    //! arm to the pre-fix `return PreparedSurfaceProjection::Unsupported;`
-    //! short-circuit makes the
-    //! `..._skips_unsupported_arm_when_sibling_resolves` test fail.
-
-    use super::*;
-    use verter_semantic::analysis::type_solver::query_engine::{ProjectedMember, ProjectedSurface};
-    use verter_type_expr::TypeExpr;
-
-    fn surface_with_member(name: &str) -> std::sync::Arc<ProjectedSurface> {
-        std::sync::Arc::new(ProjectedSurface {
-            members: vec![ProjectedMember {
-                name: name.to_string(),
-                ty: TypeExpr::Unknown {
-                    raw: "unknown".to_string(),
-                },
-                optional: false,
-                readonly: false,
-                is_method: false,
-                declared_in_macro_type_arg: false,
-            }],
-            call_signatures: Vec::new(),
-            construct_signatures: Vec::new(),
-            has_index_signature: false,
-        })
-    }
-
-    /// Discriminating test: an intersection with one Unsupported arm
-    /// and one Surface arm must publish the Surface arm's members.
-    ///
-    /// Reverts to the pre-Phase-C short-circuit (changing the
-    /// `// Skip` arm in `merge_prepared_intersection_arms` to
-    /// `return PreparedSurfaceProjection::Unsupported`) would
-    /// drop the `present_member` and fail this assertion. The
-    /// R20-fix2 report captures the empirical RED output observed
-    /// during verification.
-    #[test]
-    fn merge_prepared_intersection_arms_skips_unsupported_arm_when_sibling_resolves() {
-        let arms = vec![
-            PreparedSurfaceProjection::Unsupported,
-            PreparedSurfaceProjection::Surface(surface_with_member("present_member")),
-        ];
-        let merged = merge_prepared_intersection_arms(arms);
-        match merged {
-            PreparedSurfaceProjection::Surface(surface) => {
-                let names: Vec<&str> = surface.members.iter().map(|m| m.name.as_str()).collect();
-                assert!(
-                    names.contains(&"present_member"),
-                    "Phase C discriminating: an Unsupported arm sibling \
-                     to a Surface arm MUST be skipped, NOT short-circuit \
-                     the intersection. Got merged surface members: {names:?}"
-                );
-            }
-            other => panic!(
-                "Phase C discriminating: expected `Surface` with `present_member`, \
-                 got `{other:?}`. The intersection merge short-circuited on the \
-                 Unsupported arm — the pre-Phase-C bug. Restore the `// Skip` \
-                 branch in `merge_prepared_intersection_arms`."
-            ),
-        }
-    }
-
-    /// All-Unsupported intersection collapses to Unsupported.
-    /// This guards the saw_resolved_arm == false branch — without
-    /// it, the intersection would silently return an empty Surface,
-    /// suppressing real resolution failures.
-    #[test]
-    fn merge_prepared_intersection_arms_returns_unsupported_when_every_arm_fails() {
-        let arms = vec![
-            PreparedSurfaceProjection::Unsupported,
-            PreparedSurfaceProjection::Unsupported,
-        ];
-        let merged = merge_prepared_intersection_arms(arms);
-        assert!(
-            matches!(merged, PreparedSurfaceProjection::Unsupported),
-            "intersection with no resolvable arms must collapse to Unsupported"
-        );
-    }
-
-    /// Empty arm counts as resolved (saw_resolved_arm = true) but
-    /// contributes no members. Combined with an Unsupported arm,
-    /// the intersection must NOT be Unsupported; combined alone, it
-    /// stays Empty-or-equivalent — verified here as a Surface with
-    /// no members (the merge canonicalises via
-    /// `projected_surface_from_parts_intersection`).
-    #[test]
-    fn merge_prepared_intersection_arms_treats_empty_arm_as_resolved() {
-        let arms = vec![
-            PreparedSurfaceProjection::Empty,
-            PreparedSurfaceProjection::Unsupported,
-        ];
-        let merged = merge_prepared_intersection_arms(arms);
-        assert!(
-            !matches!(merged, PreparedSurfaceProjection::Unsupported),
-            "Empty + Unsupported must NOT collapse to Unsupported — Empty \
-             arms count as resolved per the saw_resolved_arm contract."
-        );
-    }
-
-    /// Two Surface arms merge into a single surface containing the
-    /// union of member names. Order-stable per
-    /// `projected_surface_from_parts_intersection`'s sort.
-    #[test]
-    fn merge_prepared_intersection_arms_merges_two_surface_arms() {
-        let arms = vec![
-            PreparedSurfaceProjection::Surface(surface_with_member("alpha")),
-            PreparedSurfaceProjection::Surface(surface_with_member("beta")),
-        ];
-        let merged = merge_prepared_intersection_arms(arms);
-        match merged {
-            PreparedSurfaceProjection::Surface(surface) => {
-                let names: std::collections::HashSet<&str> =
-                    surface.members.iter().map(|m| m.name.as_str()).collect();
-                assert!(names.contains("alpha"));
-                assert!(names.contains("beta"));
-            }
-            other => panic!("expected `Surface` with `alpha` and `beta`, got {other:?}"),
-        }
-    }
-}
+#[path = "prepared_surface_tests.rs"]
+mod intersection_merge_tests;
