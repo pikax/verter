@@ -4648,6 +4648,7 @@ fn define_props_macro_shape_reuses_expanded_fields_directly() {
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
                 declared_in_macro_type_arg: false,
+                carrier_provenance: None,
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "icon".to_string(),
@@ -4669,6 +4670,7 @@ fn define_props_macro_shape_reuses_expanded_fields_directly() {
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
                 declared_in_macro_type_arg: false,
+                carrier_provenance: None,
             },
         ],
         ..Default::default()
@@ -4828,6 +4830,7 @@ fn define_props_macro_shape_prefers_resolved_macro_when_expanded_fields_are_inco
             shallow_type_expr: None,
             shallow_type_expr_scope: None,
             declared_in_macro_type_arg: false,
+            carrier_provenance: None,
         }],
         ..Default::default()
     };
@@ -5326,6 +5329,7 @@ defineProps<Props>()
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
                 declared_in_macro_type_arg: false,
+                carrier_provenance: None,
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "count".to_string(),
@@ -5342,6 +5346,7 @@ defineProps<Props>()
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
                 declared_in_macro_type_arg: false,
+                carrier_provenance: None,
             },
         ],
         ..Default::default()
@@ -5530,6 +5535,7 @@ defineModel<boolean>('open')
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
                 declared_in_macro_type_arg: false,
+                carrier_provenance: None,
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "count".to_string(),
@@ -5546,6 +5552,7 @@ defineModel<boolean>('open')
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
                 declared_in_macro_type_arg: false,
+                carrier_provenance: None,
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "open".to_string(),
@@ -5562,6 +5569,7 @@ defineModel<boolean>('open')
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
                 declared_in_macro_type_arg: false,
+                carrier_provenance: None,
             },
         ],
         ..Default::default()
@@ -6406,6 +6414,7 @@ defineEmits<Emits>()
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
                 declared_in_macro_type_arg: false,
+                carrier_provenance: None,
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "update:open".to_string(),
@@ -6422,6 +6431,7 @@ defineEmits<Emits>()
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
                 declared_in_macro_type_arg: false,
+                carrier_provenance: None,
             },
         ],
         ..Default::default()
@@ -6516,6 +6526,7 @@ defineEmits<Emits>()
                                 optional: false,
                                 readonly: false,
                                 declared_in_macro_type_arg: false,
+                                carrier_provenance: None,
                             },
                             verter_semantic::analysis::type_expand::ExpandedProperty {
                                 name: "update:open".to_string(),
@@ -6525,6 +6536,7 @@ defineEmits<Emits>()
                                 optional: false,
                                 readonly: false,
                                 declared_in_macro_type_arg: false,
+                                carrier_provenance: None,
                             },
                         ],
                         index_signatures: Vec::new(),
@@ -6641,6 +6653,7 @@ defineModel<string>('searchTerm')
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
                 declared_in_macro_type_arg: false,
+                carrier_provenance: None,
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "update:open".to_string(),
@@ -6657,6 +6670,7 @@ defineModel<string>('searchTerm')
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
                 declared_in_macro_type_arg: false,
+                carrier_provenance: None,
             },
         ],
         ..Default::default()
@@ -6824,6 +6838,7 @@ defineEmits<Emits>()
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
                 declared_in_macro_type_arg: false,
+                carrier_provenance: None,
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "update:open".to_string(),
@@ -6840,6 +6855,7 @@ defineEmits<Emits>()
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
                 declared_in_macro_type_arg: false,
+                carrier_provenance: None,
             },
         ],
         ..Default::default()

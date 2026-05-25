@@ -136,5 +136,6 @@ pub(crate) fn project_model(
         // author-declared in the macro's type argument by virtue of
         // the `defineModel` syntax itself — set `true`.
         declared_in_macro_type_arg: true,
+        carrier_provenance: None,
     })
 }

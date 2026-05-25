@@ -1084,6 +1084,7 @@ pub(crate) fn publish_merged_bindings(
             // slot's name in `defineSlots<T>`'s T), not the binding
             // level — `false` is the structural truth.
             declared_in_macro_type_arg: false,
+            carrier_provenance: None,
         });
     }
 
@@ -1133,6 +1134,7 @@ pub(crate) fn publish_merged_bindings(
             // T's own body — `false` is the structural truth (see
             // companion comment in `graph_native` push above).
             declared_in_macro_type_arg: false,
+            carrier_provenance: None,
         });
     }
 }

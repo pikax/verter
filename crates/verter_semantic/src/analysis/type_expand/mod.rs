@@ -7,10 +7,11 @@
 mod request;
 
 pub use request::{
-    ExpandedCallSignature, ExpandedComponentTypes, ExpandedField, ExpandedIndexSignature,
-    ExpandedMacroObjectShape, ExpandedMacroProps, ExpandedNormalizedExpr, ExpandedObjectShape,
-    ExpandedParameter, ExpandedProperty, ExpansionDiagnostic, ExpansionExactness,
-    ExpansionExecutionStatus, ExpansionMetadata, ExpansionResult, ExpansionStopReason,
+    CarrierProvenance, CarrierValueNodeId, ExpandedCallSignature, ExpandedComponentTypes,
+    ExpandedField, ExpandedIndexSignature, ExpandedMacroObjectShape, ExpandedMacroProps,
+    ExpandedNormalizedExpr, ExpandedObjectShape, ExpandedParameter, ExpandedProperty,
+    ExpansionDiagnostic, ExpansionExactness, ExpansionExecutionStatus, ExpansionMetadata,
+    ExpansionResult, ExpansionStopReason, PublishedSurfaceKind,
 };
 
 use crate::analysis::type_solver::result::{IncompleteReason, SolverDiagnostic, SolverResult};
@@ -209,6 +210,7 @@ fn object_to_shape(obj: &verter_type_expr::ObjectExpr) -> ExpandedObjectShape {
                 optional: p.optional,
                 readonly: p.readonly,
                 declared_in_macro_type_arg: false,
+                carrier_provenance: None,
             }),
             ObjectMember::IndexSignature(idx) => index_signatures.push(ExpandedIndexSignature {
                 key_type: idx.key_type.clone(),
@@ -241,6 +243,7 @@ fn object_to_shape(obj: &verter_type_expr::ObjectExpr) -> ExpandedObjectShape {
                 optional: method.optional,
                 readonly: false,
                 declared_in_macro_type_arg: false,
+                carrier_provenance: None,
             }),
         }
     }

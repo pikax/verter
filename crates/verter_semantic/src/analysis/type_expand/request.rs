@@ -39,6 +39,17 @@ pub struct ExpandedProperty {
     /// from the upstream `SurfaceMember` / `ProjectedMember` source.
     #[serde(default)]
     pub declared_in_macro_type_arg: bool,
+    /// Block 6.j R22 — provenance sidecar for synthetic carrier
+    /// references mirrored into the `define_props` / `define_emits` /
+    /// `define_slots` shape. `Some(_)` only when the source
+    /// `ExpandedField` carried a `CarrierProvenance`; otherwise
+    /// `None`. Drives downstream universal-cache and registry
+    /// short-circuits without forcing consumers to re-key off the
+    /// bare `TypeExpr::Ref { name }` carrier.
+    /// `#[serde(skip)]` — resolver-internal; never reaches the FFI /
+    /// TS-side meta payload.
+    #[serde(skip)]
+    pub carrier_provenance: Option<CarrierProvenance>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -226,6 +237,73 @@ pub struct ExpandedComponentTypes {
     pub bindings: Vec<ExpandedField>,
 }
 
+/// Opaque graph-node identifier for the slot-binding carrier verdict
+/// cache (Block 6.j R22). `verter_semantic` treats this as an opaque
+/// `u64`; the downstream `verter_session` carrier-verdict cache
+/// projects it back to its own `SemanticNodeId` newtype for cache-key
+/// lookup.
+///
+/// The value is the inner `u64` of the
+/// `verter_session::semantic_query::SemanticNodeId` the producer
+/// minted the symbolic carrier from. Together with the owner scope,
+/// this disambiguates same-named bindings across distinct slots
+/// inside a single component, preventing the name-only cache key
+/// poisoning codex's R22 verdict flagged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CarrierValueNodeId(pub u64);
+
+/// Discriminates which published-surface family a carrier was minted
+/// for so the carrier-verdict cache key can distinguish a
+/// `slot_bindings`-side carrier from a `bindings`-side carrier even
+/// when the slot name and binding name collide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PublishedSurfaceKind {
+    /// `ExpandedComponentTypes::slot_bindings` — positional bindings of
+    /// a slot's function parameter object.
+    SlotBinding,
+    /// `ExpandedComponentTypes::bindings` — defineSlots T's
+    /// `MergedMember` bindings (slot-derived re-publication).
+    Binding,
+}
+
+/// Provenance sidecar attached to the symbolic
+/// `TypeExpr::Ref { name: <binding_name> }` carrier the slot-binding
+/// graph publisher produces when no parser-path `binding_expr` is
+/// available for a graph-native `(slot_name, binding_name)` pair.
+///
+/// Block 6.j R22 cache-identity contract: the carrier-verdict cache
+/// keys on the full identity (scope, surface, slot name, binding
+/// name, value-node) so a synthetic slot parameter named `foo`
+/// cannot poison or be poisoned by:
+///
+/// * a real workspace-owned `type foo = …` alias with the same name,
+/// * a different slot's same-named binding (different `value_node`),
+/// * a different surface family's same-named entry.
+///
+/// `CarrierProvenance` is internal to the resolver pipeline; it is
+/// `#[serde(skip)]`-d on `ExpandedField` / `ExpandedProperty` so it
+/// does not leak through the FFI / TS-side meta payload. Downstream
+/// FFI consumers continue to observe only the bare
+/// `TypeExpr::Ref { name }` carrier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CarrierProvenance {
+    /// Canonical file ID of the component / macro that minted the carrier.
+    pub scope_canonical_id: std::sync::Arc<str>,
+    /// Which published-surface family the carrier lives in.
+    pub surface_kind: PublishedSurfaceKind,
+    /// For `SlotBinding`, the slot name (e.g. `"default"`, `"header"`).
+    /// For `Binding` (defineSlots merged member), the defining slot
+    /// name when known.
+    pub slot_name: Option<std::sync::Arc<str>>,
+    /// The binding's identifier — same string as the synthetic
+    /// `TypeExpr::Ref { name }` carrier's `name`.
+    pub binding_name: std::sync::Arc<str>,
+    /// Stable identity of the graph node the carrier was minted from.
+    /// Together with `scope_canonical_id`, this is the disambiguator
+    /// that name-only keys cannot supply.
+    pub value_node: CarrierValueNodeId,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpandedField {
@@ -268,6 +346,18 @@ pub struct ExpandedField {
     /// macro provenance.
     #[serde(default)]
     pub declared_in_macro_type_arg: bool,
+    /// Block 6.j R22 — provenance sidecar for synthetic
+    /// `TypeExpr::Ref { name }` carriers produced by the slot-binding
+    /// graph publisher when no parser-path `binding_expr` is
+    /// available. `Some(_)` for synthetic carriers; `None` for every
+    /// other published field (real macro props/emits, parser-path slot
+    /// bindings, projected surface members). Drives the
+    /// carrier-verdict cache and `published_reducer` /
+    /// component-meta-registry collection short-circuits.
+    /// `#[serde(skip)]` — resolver-internal; never reaches the FFI /
+    /// TS-side meta payload.
+    #[serde(skip)]
+    pub carrier_provenance: Option<CarrierProvenance>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
