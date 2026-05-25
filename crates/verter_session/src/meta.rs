@@ -1189,3 +1189,7 @@ impl Drop for MetaSession {
 #[cfg(test)]
 #[path = "meta_tests.rs"]
 mod meta_tests;
+
+#[cfg(test)]
+#[path = "prepared_surface_intersection_tests.rs"]
+mod prepared_surface_intersection_tests;
