@@ -582,6 +582,15 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
       ...(prop.defaultValue !== undefined ? { default: prop.defaultValue } : {}),
       ...(prop.description !== undefined ? { description: prop.description } : {}),
       ...(prop.tags?.length ? { tags: prop.tags } : {}),
+      // Forward-compat coerce — see `NativePropMeta.declaredInMacroTypeArg`
+      // JSDoc above. The field is optional on the native sidecar type
+      // because older native builds (predating the R20-fix that added
+      // the producer fact to `PropMeta` proto field 10) emit payloads
+      // without it; missing is correctly `false` (matching the
+      // pre-R20 "drop unless explicitly declared" semantics that the
+      // Refined policy enforces). Audited as category (a) legitimate
+      // forward-compat in R20-fix2 F5 — see
+      // `D:/tmp/round20-fix2-report.md`.
       declaredInMacroTypeArg: Boolean(prop.declaredInMacroTypeArg),
     })),
     events: meta.events.map((event) => ({

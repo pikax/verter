@@ -777,6 +777,16 @@ function decodeProp(prop: ProtoRecord, graph: DecodedTypeGraph): Record<string, 
     ...maybe("defaultValue", graph.getStringMaybe(Number(prop.defaultValueId ?? 0))),
     ...maybe("description", graph.getStringMaybe(Number(prop.descriptionId ?? 0))),
     ...maybeArray("tags", decodeJsdocTags((prop.tags as ProtoRecord[] | undefined) ?? [], graph)),
+    // proto3 wire-level: booleans default to `false` when the field
+    // is absent. Field 10 (`declared_in_macro_type_arg`) was added to
+    // `verter.v1.PropMeta` by R20-fix and is always populated by
+    // current Rust producers, but older native binaries compiled
+    // against the pre-R20 proto definition emit messages without
+    // field 10 — `Boolean(undefined)` is correctly `false`, matching
+    // the pre-R20 "drop unless explicitly declared" semantics the
+    // Refined policy enforces. Audited as category (a) legitimate
+    // forward-compat in R20-fix2 F5 — see
+    // `D:/tmp/round20-fix2-report.md`.
     declaredInMacroTypeArg: Boolean(prop.declaredInMacroTypeArg),
   };
 }
