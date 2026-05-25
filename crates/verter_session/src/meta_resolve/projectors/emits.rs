@@ -82,20 +82,12 @@ pub(crate) fn project_emits(
             .into_iter()
             .filter_map(|member| {
                 let member_cursor = cursor.descend_published_member(member.name.as_ref())?;
-                // Emits never carry Vue intrinsic names — filter is
-                // a no-op here but kept symmetric with `props.rs`
-                // so future emit-name shapes pass through the same
-                // gate.
-                if !crate::meta_resolve::materialize::is_vue_intrinsic_published_name(
-                    member.name.as_ref(),
-                ) {
-                    dispatch.record_published_field_edge(
-                        owner,
-                        surface_node,
-                        member.value,
-                        &member.name,
-                    );
-                }
+                dispatch.record_published_field_edge(
+                    owner,
+                    surface_node,
+                    member.value,
+                    &member.name,
+                );
                 let analyzed = mac
                     .emit_fields
                     .iter()

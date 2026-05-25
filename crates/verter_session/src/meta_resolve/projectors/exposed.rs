@@ -84,18 +84,12 @@ pub(crate) fn project_exposed(
             .into_iter()
             .filter_map(|member| {
                 let member_cursor = cursor.descend_published_member(member.name.as_ref())?;
-                // Exposed names never coincide with Vue intrinsics;
-                // the filter is symmetric with `props.rs`.
-                if !crate::meta_resolve::materialize::is_vue_intrinsic_published_name(
-                    member.name.as_ref(),
-                ) {
-                    dispatch.record_published_field_edge(
-                        owner,
-                        surface_node,
-                        member.value,
-                        &member.name,
-                    );
-                }
+                dispatch.record_published_field_edge(
+                    owner,
+                    surface_node,
+                    member.value,
+                    &member.name,
+                );
                 Some((member, member_cursor))
             })
             .collect()

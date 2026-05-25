@@ -82,14 +82,7 @@ pub(crate) fn project_model(
         // and member value because model is a single-field projection
         // (no wrapping object surface separate from the payload).
         let model_name_arc: std::sync::Arc<str> = std::sync::Arc::from(model_name.as_str());
-        if !crate::meta_resolve::materialize::is_vue_intrinsic_published_name(model_name.as_str()) {
-            dispatch.record_published_field_edge(
-                owner,
-                payload_node,
-                payload_node,
-                &model_name_arc,
-            );
-        }
+        dispatch.record_published_field_edge(owner, payload_node, payload_node, &model_name_arc);
 
         let (raised, raise_failed) = match dispatch.raise_node_to_type_expr(payload_node) {
             Some(expr) => (expr, false),

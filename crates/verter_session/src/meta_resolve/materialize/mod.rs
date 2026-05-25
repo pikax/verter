@@ -35,8 +35,7 @@ pub(crate) use field_types::{
 pub(crate) use field_types::materialize_component_meta_type_expr_until_stable_full;
 
 pub(crate) use macro_shapes::{
-    collect_type_expr_ref_names, is_vue_intrinsic_published_name,
-    produce_macro_object_shapes_for_purpose,
+    collect_type_expr_ref_names, produce_macro_object_shapes_for_purpose,
 };
 // Test-only re-export — exercised by `meta_resolve_tests.rs` via the
 // `meta_resolve.rs` shell's `#[cfg(test)] pub(crate) use materialize::expr_needs_projection_rescue;`
