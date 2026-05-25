@@ -1,0 +1,106 @@
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Option::is_none")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Option::is_none")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Option::is_none")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Option::is_none")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Option::is_none")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Option::is_none")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Option::is_none")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "String::is_empty")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "is_default_f64")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+   Compiling verter_session v0.0.1-beta.1 (D:\dev\personal\verter\crates\verter_session)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.74s
+     Running unittests src\lib.rs (target\debug\deps\verter_session-4154d7ff6c624fe6.exe)
+
+running 4 tests
+test resolver_core::component_meta_query_engine::prepared_surface::intersection_merge_tests::merge_prepared_intersection_arms_returns_unsupported_when_every_arm_fails ... ok
+test resolver_core::component_meta_query_engine::prepared_surface::intersection_merge_tests::merge_prepared_intersection_arms_treats_empty_arm_as_resolved ... FAILED
+test resolver_core::component_meta_query_engine::prepared_surface::intersection_merge_tests::merge_prepared_intersection_arms_skips_unsupported_arm_when_sibling_resolves ... FAILED
+test resolver_core::component_meta_query_engine::prepared_surface::intersection_merge_tests::merge_prepared_intersection_arms_merges_two_surface_arms ... ok
+
+failures:
+
+---- resolver_core::component_meta_query_engine::prepared_surface::intersection_merge_tests::merge_prepared_intersection_arms_treats_empty_arm_as_resolved stdout ----
+
+thread 'resolver_core::component_meta_query_engine::prepared_surface::intersection_merge_tests::merge_prepared_intersection_arms_treats_empty_arm_as_resolved' (64296) panicked at crates\verter_session\src\resolver_core\component_meta_query_engine\prepared_surface.rs:1340:9:
+Empty + Unsupported must NOT collapse to Unsupported — Empty arms count as resolved per the saw_resolved_arm contract.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- resolver_core::component_meta_query_engine::prepared_surface::intersection_merge_tests::merge_prepared_intersection_arms_skips_unsupported_arm_when_sibling_resolves stdout ----
+
+thread 'resolver_core::component_meta_query_engine::prepared_surface::intersection_merge_tests::merge_prepared_intersection_arms_skips_unsupported_arm_when_sibling_resolves' (64752) panicked at crates\verter_session\src\resolver_core\component_meta_query_engine\prepared_surface.rs:1301:22:
+Phase C discriminating: expected `Surface` with `present_member`, got `Unsupported`. The intersection merge short-circuited on the Unsupported arm — the pre-Phase-C bug. Restore the `// Skip` branch in `merge_prepared_intersection_arms`.
+
+
+failures:
+    resolver_core::component_meta_query_engine::prepared_surface::intersection_merge_tests::merge_prepared_intersection_arms_skips_unsupported_arm_when_sibling_resolves
+    resolver_core::component_meta_query_engine::prepared_surface::intersection_merge_tests::merge_prepared_intersection_arms_treats_empty_arm_as_resolved
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 3110 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p verter_session --lib`
