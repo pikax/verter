@@ -1,0 +1,375 @@
+packages/native/npm/darwin-arm64         |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/darwin-x64           |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-arm64-gnu      |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-arm64-musl     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-x64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-x64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+
+> @verter/benchmark@0.0.1 bench:meta:ui D:\dev\personal\verter\packages\benchmark
+> node --expose-gc --import tsx src/meta-ui-bench.ts "--" "--scenarios=repo_first_pass" "--hard-timeout-ms=60000"
+
+Benchmarking 179 nuxt-ui components from edf9af6e03aeea31d1fb5b8a1b8f2aee7cbbcfa3.
+[expected] 1/179 src/runtime/components/Accordion.vue baseline-ready outcome=success latency=2700.91ms
+[expected] 2/179 src/runtime/components/Alert.vue baseline-ready outcome=success latency=2389.55ms
+[expected] 3/179 src/runtime/components/App.vue baseline-ready outcome=success latency=6170.55ms
+[expected] 4/179 src/runtime/components/AuthForm.vue baseline-ready outcome=success latency=2563.10ms
+[expected] 5/179 src/runtime/components/Avatar.vue baseline-ready outcome=success latency=2324.30ms
+[expected] 6/179 src/runtime/components/AvatarGroup.vue baseline-ready outcome=success latency=2298.96ms
+[expected] 7/179 src/runtime/components/Badge.vue baseline-ready outcome=success latency=2355.31ms
+[expected] 8/179 src/runtime/components/Banner.vue baseline-ready outcome=success latency=2420.12ms
+[expected] 9/179 src/runtime/components/BlogPost.vue baseline-ready outcome=success latency=2435.14ms
+[expected] 10/179 src/runtime/components/BlogPosts.vue baseline-ready outcome=success latency=2350.94ms
+[expected] 11/179 src/runtime/components/Breadcrumb.vue baseline-ready outcome=success latency=2299.15ms
+[expected] 12/179 src/runtime/components/Button.vue baseline-ready outcome=success latency=2362.80ms
+[expected] 13/179 src/runtime/components/Calendar.vue baseline-ready outcome=success latency=2435.18ms
+[expected] 14/179 src/runtime/components/Card.vue baseline-ready outcome=success latency=2309.96ms
+[expected] 15/179 src/runtime/components/Carousel.vue baseline-ready outcome=success latency=5929.25ms
+[expected] 16/179 src/runtime/components/ChangelogVersion.vue baseline-ready outcome=success latency=2432.97ms
+[expected] 17/179 src/runtime/components/ChangelogVersions.vue baseline-ready outcome=success latency=5248.08ms
+[expected] 18/179 src/runtime/components/ChatMessage.vue baseline-ready outcome=success latency=2748.47ms
+[expected] 19/179 src/runtime/components/ChatMessages.vue baseline-ready outcome=success latency=2681.60ms
+[expected] 20/179 src/runtime/components/ChatPalette.vue baseline-ready outcome=success latency=2281.01ms
+[expected] 21/179 src/runtime/components/ChatPrompt.vue baseline-ready outcome=success latency=4498.23ms
+[expected] 22/179 src/runtime/components/ChatPromptSubmit.vue baseline-ready outcome=success latency=6172.93ms
+[expected] 23/179 src/runtime/components/ChatReasoning.vue baseline-ready outcome=success latency=2394.63ms
+[expected] 24/179 src/runtime/components/ChatShimmer.vue baseline-ready outcome=success latency=2306.03ms
+[expected] 25/179 src/runtime/components/ChatTool.vue baseline-ready outcome=success latency=2386.24ms
+[expected] 26/179 src/runtime/components/Checkbox.vue baseline-ready outcome=success latency=2329.02ms
+[expected] 27/179 src/runtime/components/CheckboxGroup.vue baseline-ready outcome=success latency=2290.12ms
+[expected] 28/179 src/runtime/components/Chip.vue baseline-ready outcome=success latency=2293.70ms
+[expected] 29/179 src/runtime/components/Collapsible.vue baseline-ready outcome=success latency=2325.82ms
+[expected] 30/179 src/runtime/components/color-mode/ColorModeAvatar.vue baseline-ready outcome=success latency=2383.60ms
+[expected] 31/179 src/runtime/components/color-mode/ColorModeButton.vue baseline-ready outcome=success latency=2348.34ms
+[expected] 32/179 src/runtime/components/color-mode/ColorModeImage.vue baseline-ready outcome=success latency=520.34ms
+[expected] 33/179 src/runtime/components/color-mode/ColorModeSelect.vue baseline-ready outcome=success latency=2421.71ms
+[expected] 34/179 src/runtime/components/color-mode/ColorModeSwitch.vue baseline-ready outcome=success latency=2303.47ms
+[expected] 35/179 src/runtime/components/ColorPicker.vue baseline-ready outcome=success latency=2289.28ms
+[expected] 36/179 src/runtime/components/CommandPalette.vue baseline-ready outcome=success latency=4606.06ms
+[expected] 37/179 src/runtime/components/Container.vue baseline-ready outcome=success latency=2339.39ms
+[expected] 38/179 src/runtime/components/content/ContentNavigation.vue baseline-ready outcome=success latency=2531.00ms
+[expected] 39/179 src/runtime/components/content/ContentSearch.vue baseline-ready outcome=success latency=2690.38ms
+[expected] 40/179 src/runtime/components/content/ContentSearchButton.vue baseline-ready outcome=success latency=2390.99ms
+[expected] 41/179 src/runtime/components/content/ContentSurround.vue baseline-ready outcome=success latency=2408.60ms
+[expected] 42/179 src/runtime/components/content/ContentToc.vue baseline-ready outcome=success latency=2480.68ms
+[expected] 43/179 src/runtime/components/ContextMenu.vue baseline-ready outcome=success latency=4424.34ms
+[expected] 44/179 src/runtime/components/ContextMenuContent.vue baseline-ready outcome=success latency=9147.92ms
+[expected] 45/179 src/runtime/components/DashboardGroup.vue baseline-ready outcome=success latency=2288.46ms
+[expected] 46/179 src/runtime/components/DashboardNavbar.vue baseline-ready outcome=success latency=2418.50ms
+[expected] 47/179 src/runtime/components/DashboardPanel.vue baseline-ready outcome=success latency=2315.99ms
+[expected] 48/179 src/runtime/components/DashboardResizeHandle.vue baseline-ready outcome=success latency=2280.53ms
+[expected] 49/179 src/runtime/components/DashboardSearch.vue baseline-ready outcome=success latency=2616.23ms
+[expected] 50/179 src/runtime/components/DashboardSearchButton.vue baseline-ready outcome=success latency=2369.94ms
+[expected] 51/179 src/runtime/components/DashboardSidebar.vue baseline-ready outcome=success latency=2404.41ms
+[expected] 52/179 src/runtime/components/DashboardSidebarCollapse.vue baseline-ready outcome=success latency=2337.96ms
+[expected] 53/179 src/runtime/components/DashboardSidebarToggle.vue baseline-ready outcome=success latency=2347.15ms
+[expected] 54/179 src/runtime/components/DashboardToolbar.vue baseline-ready outcome=success latency=2292.75ms
+[expected] 55/179 src/runtime/components/Drawer.vue baseline-ready outcome=success latency=4433.37ms
+[expected] 56/179 src/runtime/components/DropdownMenu.vue baseline-ready outcome=success latency=4349.77ms
+[expected] 57/179 src/runtime/components/DropdownMenuContent.vue baseline-ready outcome=success latency=8945.87ms
+[expected] 58/179 src/runtime/components/Editor.vue baseline-ready outcome=success latency=8607.39ms
+[expected] 59/179 src/runtime/components/EditorDragHandle.vue baseline-ready outcome=success latency=2505.02ms
+[expected] 60/179 src/runtime/components/EditorEmojiMenu.vue baseline-ready outcome=success latency=2081.98ms
+[expected] 61/179 src/runtime/components/EditorMentionMenu.vue baseline-ready outcome=success latency=2321.91ms
+[expected] 62/179 src/runtime/components/EditorSuggestionMenu.vue baseline-ready outcome=success latency=2224.27ms
+[expected] 63/179 src/runtime/components/EditorToolbar.vue baseline-ready outcome=success latency=5382.96ms
+[expected] 64/179 src/runtime/components/Empty.vue baseline-ready outcome=success latency=2420.32ms
+[expected] 65/179 src/runtime/components/Error.vue baseline-ready outcome=success latency=2382.16ms
+[expected] 66/179 src/runtime/components/FieldGroup.vue baseline-ready outcome=success latency=2314.20ms
+[expected] 67/179 src/runtime/components/FileUpload.vue baseline-ready outcome=success latency=4372.53ms
+[expected] 68/179 src/runtime/components/Footer.vue baseline-ready outcome=success latency=2318.20ms
+[expected] 69/179 src/runtime/components/FooterColumns.vue baseline-ready outcome=success latency=2291.71ms
+[expected] 70/179 src/runtime/components/Form.vue baseline-ready outcome=success latency=2171.52ms
+[expected] 71/179 src/runtime/components/FormField.vue baseline-ready outcome=success latency=2285.28ms
+[expected] 72/179 src/runtime/components/Header.vue baseline-ready outcome=success latency=2384.35ms
+[expected] 73/179 src/runtime/components/Icon.vue baseline-ready outcome=success latency=2282.77ms
+[expected] 74/179 src/runtime/components/Input.vue baseline-ready outcome=success latency=5913.56ms
+[expected] 75/179 src/runtime/components/InputDate.vue baseline-ready outcome=success latency=7927.20ms
+[expected] 76/179 src/runtime/components/InputMenu.vue baseline-ready outcome=success latency=12011.45ms
+[expected] 77/179 src/runtime/components/InputNumber.vue baseline-ready outcome=success latency=5879.20ms
+[expected] 78/179 src/runtime/components/InputTags.vue baseline-ready outcome=success latency=7363.29ms
+[expected] 79/179 src/runtime/components/InputTime.vue baseline-ready outcome=success latency=7966.03ms
+[expected] 80/179 src/runtime/components/Kbd.vue baseline-ready outcome=success latency=2293.28ms
+[expected] 81/179 src/runtime/components/Link.vue baseline-ready outcome=success latency=2329.73ms
+[expected] 82/179 src/runtime/components/LinkBase.vue baseline-ready outcome=success latency=727.64ms
+[expected] 83/179 src/runtime/components/Listbox.vue baseline-ready outcome=success latency=4375.13ms
+[expected] 84/179 src/runtime/components/locale/LocaleSelect.vue baseline-ready outcome=success latency=2431.60ms
+[expected] 85/179 src/runtime/components/Main.vue baseline-ready outcome=success latency=2301.49ms
+[expected] 86/179 src/runtime/components/Marquee.vue baseline-ready outcome=success latency=2313.20ms
+[expected] 87/179 src/runtime/components/Modal.vue baseline-ready outcome=success latency=4509.68ms
+[expected] 88/179 src/runtime/components/NavigationMenu.vue baseline-ready outcome=success latency=2404.83ms
+[expected] 89/179 src/runtime/components/OverlayProvider.vue baseline-ready outcome=success latency=524.66ms
+[expected] 90/179 src/runtime/components/Page.vue baseline-ready outcome=success latency=2289.09ms
+[expected] 91/179 src/runtime/components/PageAnchors.vue baseline-ready outcome=success latency=2274.58ms
+[expected] 92/179 src/runtime/components/PageAside.vue baseline-ready outcome=success latency=2262.30ms
+[expected] 93/179 src/runtime/components/PageBody.vue baseline-ready outcome=success latency=2281.94ms
+[expected] 94/179 src/runtime/components/PageCard.vue baseline-ready outcome=success latency=2334.08ms
+[expected] 95/179 src/runtime/components/PageColumns.vue baseline-ready outcome=success latency=2276.96ms
+[expected] 96/179 src/runtime/components/PageCTA.vue baseline-ready outcome=success latency=2415.47ms
+[expected] 97/179 src/runtime/components/PageFeature.vue baseline-ready outcome=success latency=2407.55ms
+[expected] 98/179 src/runtime/components/PageGrid.vue baseline-ready outcome=success latency=2280.81ms
+[expected] 99/179 src/runtime/components/PageHeader.vue baseline-ready outcome=success latency=2392.34ms
+[expected] 100/179 src/runtime/components/PageHero.vue baseline-ready outcome=success latency=2459.86ms
+[expected] 101/179 src/runtime/components/PageLinks.vue baseline-ready outcome=success latency=2378.32ms
+[expected] 102/179 src/runtime/components/PageList.vue baseline-ready outcome=success latency=2253.98ms
+[expected] 103/179 src/runtime/components/PageLogos.vue baseline-ready outcome=success latency=2293.03ms
+[expected] 104/179 src/runtime/components/PageSection.vue baseline-ready outcome=success latency=2398.52ms
+[expected] 105/179 src/runtime/components/Pagination.vue baseline-ready outcome=success latency=2436.53ms
+[expected] 106/179 src/runtime/components/PinInput.vue baseline-ready outcome=success latency=5978.63ms
+[expected] 107/179 src/runtime/components/Popover.vue baseline-ready outcome=success latency=7576.72ms
+[expected] 108/179 src/runtime/components/PricingPlan.vue baseline-ready outcome=success latency=2470.22ms
+[expected] 109/179 src/runtime/components/PricingPlans.vue baseline-ready outcome=success latency=2366.82ms
+[expected] 110/179 src/runtime/components/PricingTable.vue baseline-ready outcome=success latency=2369.46ms
+[expected] 111/179 src/runtime/components/Progress.vue baseline-ready outcome=success latency=2287.91ms
+[expected] 112/179 src/runtime/components/prose/A.vue baseline-ready outcome=success latency=2356.98ms
+[expected] 113/179 src/runtime/components/prose/Accordion.vue baseline-ready outcome=success latency=2353.73ms
+[expected] 114/179 src/runtime/components/prose/AccordionItem.vue baseline-ready outcome=success latency=2168.10ms
+[expected] 115/179 src/runtime/components/prose/Badge.vue baseline-ready outcome=success latency=2357.84ms
+[expected] 116/179 src/runtime/components/prose/Blockquote.vue baseline-ready outcome=success latency=2099.62ms
+[expected] 117/179 src/runtime/components/prose/Callout.vue baseline-ready outcome=success latency=2366.59ms
+[expected] 118/179 src/runtime/components/prose/callout/Caution.vue baseline-ready outcome=success latency=2325.52ms
+[expected] 119/179 src/runtime/components/prose/callout/Note.vue baseline-ready outcome=success latency=2347.36ms
+[expected] 120/179 src/runtime/components/prose/callout/Tip.vue baseline-ready outcome=success latency=2348.89ms
+[expected] 121/179 src/runtime/components/prose/callout/Warning.vue baseline-ready outcome=success latency=2348.49ms
+[expected] 122/179 src/runtime/components/prose/Card.vue baseline-ready outcome=success latency=2364.01ms
+[expected] 123/179 src/runtime/components/prose/CardGroup.vue baseline-ready outcome=success latency=2106.02ms
+[expected] 124/179 src/runtime/components/prose/Code.vue baseline-ready outcome=success latency=2113.55ms
+[expected] 125/179 src/runtime/components/prose/CodeCollapse.vue baseline-ready outcome=success latency=2357.06ms
+[expected] 126/179 src/runtime/components/prose/CodeGroup.vue baseline-ready outcome=success latency=2343.25ms
+[expected] 127/179 src/runtime/components/prose/CodeIcon.vue baseline-ready outcome=success latency=2286.80ms
+[expected] 128/179 src/runtime/components/prose/CodePreview.vue baseline-ready outcome=success latency=2117.82ms
+[expected] 129/179 src/runtime/components/prose/CodeTree.vue baseline-ready outcome=success latency=2316.37ms
+[expected] 130/179 src/runtime/components/prose/Collapsible.vue baseline-ready outcome=success latency=2334.53ms
+[expected] 131/179 src/runtime/components/prose/Em.vue baseline-ready outcome=success latency=2130.83ms
+[expected] 132/179 src/runtime/components/prose/Field.vue baseline-ready outcome=success latency=2295.35ms
+[expected] 133/179 src/runtime/components/prose/FieldGroup.vue baseline-ready outcome=success latency=2281.15ms
+[expected] 134/179 src/runtime/components/prose/H1.vue baseline-ready outcome=success latency=2133.68ms
+[expected] 135/179 src/runtime/components/prose/H2.vue baseline-ready outcome=success latency=2287.36ms
+[expected] 136/179 src/runtime/components/prose/H3.vue baseline-ready outcome=success latency=2344.28ms
+[expected] 137/179 src/runtime/components/prose/H4.vue baseline-ready outcome=success latency=2155.73ms
+[expected] 138/179 src/runtime/components/prose/Hr.vue baseline-ready outcome=success latency=2132.87ms
+[expected] 139/179 src/runtime/components/prose/Icon.vue baseline-ready outcome=success latency=2322.20ms
+[expected] 140/179 src/runtime/components/prose/Img.vue baseline-ready outcome=success latency=2545.27ms
+[expected] 141/179 src/runtime/components/prose/Kbd.vue baseline-ready outcome=success latency=2307.01ms
+[expected] 142/179 src/runtime/components/prose/Li.vue baseline-ready outcome=success latency=2132.97ms
+[expected] 143/179 src/runtime/components/prose/Ol.vue baseline-ready outcome=success latency=2075.72ms
+[expected] 144/179 src/runtime/components/prose/P.vue baseline-ready outcome=success latency=2147.25ms
+[expected] 145/179 src/runtime/components/prose/Pre.vue baseline-ready outcome=success latency=2393.53ms
+[expected] 146/179 src/runtime/components/prose/Prompt.vue baseline-ready outcome=success latency=2380.98ms
+[expected] 147/179 src/runtime/components/prose/Script.vue baseline-ready outcome=success latency=545.00ms
+[expected] 148/179 src/runtime/components/prose/Steps.vue baseline-ready outcome=success latency=2146.16ms
+[expected] 149/179 src/runtime/components/prose/Strong.vue baseline-ready outcome=success latency=2123.43ms
+[expected] 150/179 src/runtime/components/prose/Table.vue baseline-ready outcome=success latency=2078.99ms
+[expected] 151/179 src/runtime/components/prose/Tabs.vue baseline-ready outcome=success latency=2391.48ms
+[expected] 152/179 src/runtime/components/prose/TabsItem.vue baseline-ready outcome=success latency=2101.25ms
+[expected] 153/179 src/runtime/components/prose/Tbody.vue baseline-ready outcome=success latency=2129.10ms
+[expected] 154/179 src/runtime/components/prose/Td.vue baseline-ready outcome=success latency=2143.19ms
+[expected] 155/179 src/runtime/components/prose/Th.vue baseline-ready outcome=success latency=2126.46ms
+[expected] 156/179 src/runtime/components/prose/Thead.vue baseline-ready outcome=success latency=2108.75ms
+[expected] 157/179 src/runtime/components/prose/Tr.vue baseline-ready outcome=success latency=2157.21ms
+[expected] 158/179 src/runtime/components/prose/Ul.vue baseline-ready outcome=success latency=2119.65ms
+[expected] 159/179 src/runtime/components/RadioGroup.vue baseline-ready outcome=success latency=2181.42ms
+[expected] 160/179 src/runtime/components/ScrollArea.vue baseline-ready outcome=success latency=7771.91ms
+[expected] 161/179 src/runtime/components/Select.vue baseline-ready outcome=success latency=13913.42ms
+[expected] 162/179 src/runtime/components/SelectMenu.vue baseline-ready outcome=success latency=16425.79ms
+[expected] 163/179 src/runtime/components/Separator.vue baseline-ready outcome=success latency=2468.26ms
+[expected] 164/179 src/runtime/components/Sidebar.vue baseline-ready outcome=success latency=2391.92ms
+[expected] 165/179 src/runtime/components/Skeleton.vue baseline-ready outcome=success latency=2295.07ms
+[expected] 166/179 src/runtime/components/Slideover.vue baseline-ready outcome=success latency=5404.48ms
+[expected] 167/179 src/runtime/components/Slider.vue baseline-ready outcome=success latency=2290.77ms
+[expected] 168/179 src/runtime/components/Stepper.vue baseline-ready outcome=success latency=2295.39ms
+[expected] 169/179 src/runtime/components/Switch.vue baseline-ready outcome=success latency=2247.97ms
+[expected] 170/179 src/runtime/components/Table.vue baseline-ready outcome=success latency=9950.55ms
+[expected] 171/179 src/runtime/components/Tabs.vue baseline-ready outcome=success latency=6052.38ms
+[expected] 172/179 src/runtime/components/Textarea.vue baseline-ready outcome=success latency=7421.83ms
+[expected] 173/179 src/runtime/components/Theme.vue baseline-ready outcome=success latency=525.38ms
+[expected] 174/179 src/runtime/components/Timeline.vue baseline-ready outcome=success latency=2320.54ms
+[expected] 175/179 src/runtime/components/Toast.vue baseline-ready outcome=success latency=14311.97ms
+[expected] 176/179 src/runtime/components/Toaster.vue baseline-ready outcome=success latency=5567.19ms
+[expected] 177/179 src/runtime/components/Tooltip.vue baseline-ready outcome=success latency=7696.25ms
+[expected] 178/179 src/runtime/components/Tree.vue baseline-ready outcome=success latency=9884.49ms
+[expected] 179/179 src/runtime/components/User.vue baseline-ready outcome=success latency=2485.99ms
+Running verter / repo_first_pass...
+[repeat 1] 1/179 src/runtime/components/Accordion.vue repo_first_pass outcome=success latency=612.48ms
+[repeat 1] 2/179 src/runtime/components/Alert.vue repo_first_pass outcome=success latency=169.10ms
+[repeat 1] 3/179 src/runtime/components/App.vue repo_first_pass outcome=success latency=149.29ms
+[repeat 1] 4/179 src/runtime/components/AuthForm.vue repo_first_pass outcome=success latency=353.46ms
+[repeat 1] 5/179 src/runtime/components/Avatar.vue repo_first_pass outcome=success latency=152.97ms
+[repeat 1] 6/179 src/runtime/components/AvatarGroup.vue repo_first_pass outcome=success latency=105.13ms
+[repeat 1] 7/179 src/runtime/components/Badge.vue repo_first_pass outcome=success latency=172.77ms
+[repeat 1] 8/179 src/runtime/components/Banner.vue repo_first_pass outcome=success latency=189.46ms
+[repeat 1] 9/179 src/runtime/components/BlogPost.vue repo_first_pass outcome=success latency=241.41ms
+[repeat 1] 10/179 src/runtime/components/BlogPosts.vue repo_first_pass outcome=success latency=167.78ms
+[repeat 1] 11/179 src/runtime/components/Breadcrumb.vue repo_first_pass outcome=success latency=300.81ms
+[repeat 1] 12/179 src/runtime/components/Button.vue repo_first_pass outcome=success latency=495.99ms
+[repeat 1] 13/179 src/runtime/components/Calendar.vue repo_first_pass outcome=success latency=611.42ms
+[repeat 1] 14/179 src/runtime/components/Card.vue repo_first_pass outcome=success latency=112.97ms
+[repeat 1] 15/179 src/runtime/components/Carousel.vue repo_first_pass outcome=success latency=541.20ms
+[repeat 1] 16/179 src/runtime/components/ChangelogVersion.vue repo_first_pass outcome=success latency=307.66ms
+[repeat 1] 17/179 src/runtime/components/ChangelogVersions.vue repo_first_pass outcome=success latency=1093.00ms
+[repeat 1] 18/179 src/runtime/components/ChatMessage.vue repo_first_pass outcome=success latency=4811.40ms
+[repeat 1] 19/179 src/runtime/components/ChatMessages.vue repo_first_pass outcome=success latency=717.81ms
+[repeat 1] 20/179 src/runtime/components/ChatPalette.vue repo_first_pass outcome=success latency=185.85ms
+[repeat 1] 21/179 src/runtime/components/ChatPrompt.vue repo_first_pass outcome=success latency=352.39ms
+[repeat 1] 22/179 src/runtime/components/ChatPromptSubmit.vue repo_first_pass outcome=success latency=519.53ms
+[repeat 1] 23/179 src/runtime/components/ChatReasoning.vue repo_first_pass outcome=success latency=344.56ms
+[repeat 1] 24/179 src/runtime/components/ChatShimmer.vue repo_first_pass outcome=success latency=184.36ms
+[repeat 1] 25/179 src/runtime/components/ChatTool.vue repo_first_pass outcome=success latency=225.84ms
+[repeat 1] 26/179 src/runtime/components/Checkbox.vue repo_first_pass outcome=success latency=475.98ms
+[repeat 1] 27/179 src/runtime/components/CheckboxGroup.vue repo_first_pass outcome=success latency=474.11ms
+[repeat 1] 28/179 src/runtime/components/Chip.vue repo_first_pass outcome=success latency=232.19ms
+[repeat 1] 29/179 src/runtime/components/Collapsible.vue repo_first_pass outcome=success latency=223.83ms
+[repeat 1] 30/179 src/runtime/components/color-mode/ColorModeAvatar.vue repo_first_pass outcome=success latency=109.61ms
+[repeat 1] 31/179 src/runtime/components/color-mode/ColorModeButton.vue repo_first_pass outcome=success latency=198.28ms
+[repeat 1] 32/179 src/runtime/components/color-mode/ColorModeImage.vue repo_first_pass outcome=success latency=145.29ms
+[repeat 1] 33/179 src/runtime/components/color-mode/ColorModeSelect.vue repo_first_pass outcome=success latency=145.29ms
+[repeat 1] 34/179 src/runtime/components/color-mode/ColorModeSwitch.vue repo_first_pass outcome=success latency=151.97ms
+[repeat 1] 35/179 src/runtime/components/ColorPicker.vue repo_first_pass outcome=success latency=236.91ms
+[repeat 1] 36/179 src/runtime/components/CommandPalette.vue repo_first_pass outcome=success latency=1349.74ms
+[repeat 1] 37/179 src/runtime/components/Container.vue repo_first_pass outcome=success latency=175.92ms
+[repeat 1] 38/179 src/runtime/components/content/ContentNavigation.vue repo_first_pass outcome=success latency=527.55ms
+[repeat 1] 39/179 src/runtime/components/content/ContentSearch.vue repo_first_pass outcome=success latency=738.93ms
+[repeat 1] 40/179 src/runtime/components/content/ContentSearchButton.vue repo_first_pass outcome=success latency=376.59ms
+[repeat 1] 41/179 src/runtime/components/content/ContentSurround.vue repo_first_pass outcome=success latency=308.67ms
+[repeat 1] 42/179 src/runtime/components/content/ContentToc.vue repo_first_pass outcome=success latency=450.57ms
+[repeat 1] 43/179 src/runtime/components/ContextMenu.vue repo_first_pass outcome=success latency=664.02ms
+[repeat 1] 44/179 src/runtime/components/ContextMenuContent.vue repo_first_pass outcome=success latency=588.58ms
+[repeat 1] 45/179 src/runtime/components/DashboardGroup.vue repo_first_pass outcome=success latency=257.16ms
+[repeat 1] 46/179 src/runtime/components/DashboardNavbar.vue repo_first_pass outcome=success latency=303.53ms
+[repeat 1] 47/179 src/runtime/components/DashboardPanel.vue repo_first_pass outcome=success latency=253.01ms
+[repeat 1] 48/179 src/runtime/components/DashboardResizeHandle.vue repo_first_pass outcome=success latency=188.76ms
+[repeat 1] 49/179 src/runtime/components/DashboardSearch.vue repo_first_pass outcome=success latency=674.10ms
+[repeat 1] 50/179 src/runtime/components/DashboardSearchButton.vue repo_first_pass outcome=success latency=367.23ms
+[repeat 1] 51/179 src/runtime/components/DashboardSidebar.vue repo_first_pass outcome=success latency=437.78ms
+[repeat 1] 52/179 src/runtime/components/DashboardSidebarCollapse.vue repo_first_pass outcome=success latency=822.96ms
+[repeat 1] 53/179 src/runtime/components/DashboardSidebarToggle.vue repo_first_pass outcome=success latency=297.23ms
+[repeat 1] 54/179 src/runtime/components/DashboardToolbar.vue repo_first_pass outcome=success latency=197.07ms
+[repeat 1] 55/179 src/runtime/components/Drawer.vue repo_first_pass outcome=success latency=471.57ms
+[repeat 1] 56/179 src/runtime/components/DropdownMenu.vue repo_first_pass outcome=success latency=731.76ms
+[repeat 1] 57/179 src/runtime/components/DropdownMenuContent.vue repo_first_pass outcome=success latency=594.87ms
+[repeat 1] 58/179 src/runtime/components/Editor.vue repo_first_pass outcome=success latency=573.58ms
+[repeat 1] 59/179 src/runtime/components/EditorDragHandle.vue repo_first_pass outcome=success latency=465.22ms
+[repeat 1] 60/179 src/runtime/components/EditorEmojiMenu.vue repo_first_pass outcome=success latency=216.28ms
+[repeat 1] 61/179 src/runtime/components/EditorMentionMenu.vue repo_first_pass outcome=success latency=247.88ms
+[repeat 1] 62/179 src/runtime/components/EditorSuggestionMenu.vue repo_first_pass outcome=success latency=303.74ms
+[repeat 1] 63/179 src/runtime/components/EditorToolbar.vue repo_first_pass outcome=success latency=456.06ms
+[repeat 1] 64/179 src/runtime/components/Empty.vue repo_first_pass outcome=success latency=271.98ms
+[repeat 1] 65/179 src/runtime/components/Error.vue repo_first_pass outcome=success latency=269.91ms
+[repeat 1] 66/179 src/runtime/components/FieldGroup.vue repo_first_pass outcome=success latency=238.33ms
+[repeat 1] 67/179 src/runtime/components/FileUpload.vue repo_first_pass outcome=success latency=839.67ms
+[repeat 1] 68/179 src/runtime/components/Footer.vue repo_first_pass outcome=success latency=210.18ms
+[repeat 1] 69/179 src/runtime/components/FooterColumns.vue repo_first_pass outcome=success latency=310.43ms
+[repeat 1] 70/179 src/runtime/components/Form.vue repo_first_pass outcome=success latency=423.21ms
+[repeat 1] 71/179 src/runtime/components/FormField.vue repo_first_pass outcome=success latency=296.36ms
+[repeat 1] 72/179 src/runtime/components/Header.vue repo_first_pass outcome=success latency=392.01ms
+[repeat 1] 73/179 src/runtime/components/Icon.vue repo_first_pass outcome=success latency=119.60ms
+[repeat 1] 74/179 src/runtime/components/Input.vue repo_first_pass outcome=success latency=628.98ms
+[repeat 1] 75/179 src/runtime/components/InputDate.vue repo_first_pass outcome=success latency=822.89ms
+[repeat 1] 76/179 src/runtime/components/InputMenu.vue repo_first_pass outcome=success latency=2265.32ms
+[repeat 1] 77/179 src/runtime/components/InputNumber.vue repo_first_pass outcome=success latency=666.03ms
+[repeat 1] 78/179 src/runtime/components/InputTags.vue repo_first_pass outcome=success latency=650.11ms
+[repeat 1] 79/179 src/runtime/components/InputTime.vue repo_first_pass outcome=success latency=781.53ms
+[repeat 1] 80/179 src/runtime/components/Kbd.vue repo_first_pass outcome=success latency=256.94ms
+[repeat 1] 81/179 src/runtime/components/Link.vue repo_first_pass outcome=success latency=281.31ms
+[repeat 1] 82/179 src/runtime/components/LinkBase.vue repo_first_pass outcome=success latency=154.44ms
+[repeat 1] 83/179 src/runtime/components/Listbox.vue repo_first_pass outcome=success latency=1098.92ms
+[repeat 1] 84/179 src/runtime/components/locale/LocaleSelect.vue repo_first_pass outcome=success latency=175.44ms
+[repeat 1] 85/179 src/runtime/components/Main.vue repo_first_pass outcome=success latency=201.24ms
+[repeat 1] 86/179 src/runtime/components/Marquee.vue repo_first_pass outcome=success latency=223.61ms
+[repeat 1] 87/179 src/runtime/components/Modal.vue repo_first_pass outcome=success latency=533.23ms
+[repeat 1] 88/179 src/runtime/components/NavigationMenu.vue repo_first_pass outcome=success latency=1314.23ms
+[repeat 1] 89/179 src/runtime/components/OverlayProvider.vue repo_first_pass outcome=success latency=143.61ms
+[repeat 1] 90/179 src/runtime/components/Page.vue repo_first_pass outcome=success latency=228.40ms
+[repeat 1] 91/179 src/runtime/components/PageAnchors.vue repo_first_pass outcome=success latency=311.63ms
+[repeat 1] 92/179 src/runtime/components/PageAside.vue repo_first_pass outcome=success latency=217.08ms
+[repeat 1] 93/179 src/runtime/components/PageBody.vue repo_first_pass outcome=success latency=208.84ms
+[repeat 1] 94/179 src/runtime/components/PageCard.vue repo_first_pass outcome=success latency=380.59ms
+[repeat 1] 95/179 src/runtime/components/PageColumns.vue repo_first_pass outcome=success latency=208.13ms
+[repeat 1] 96/179 src/runtime/components/PageCTA.vue repo_first_pass outcome=success latency=269.39ms
+[repeat 1] 97/179 src/runtime/components/PageFeature.vue repo_first_pass outcome=success latency=326.63ms
+[repeat 1] 98/179 src/runtime/components/PageGrid.vue repo_first_pass outcome=success latency=210.17ms
+[repeat 1] 99/179 src/runtime/components/PageHeader.vue repo_first_pass outcome=success latency=259.34ms
+[repeat 1] 100/179 src/runtime/components/PageHero.vue repo_first_pass outcome=success latency=267.71ms
+[repeat 1] 101/179 src/runtime/components/PageLinks.vue repo_first_pass outcome=success latency=321.82ms
+[repeat 1] 102/179 src/runtime/components/PageList.vue repo_first_pass outcome=success latency=217.08ms
+[repeat 1] 103/179 src/runtime/components/PageLogos.vue repo_first_pass outcome=success latency=277.00ms
+[repeat 1] 104/179 src/runtime/components/PageSection.vue repo_first_pass outcome=success latency=282.94ms
+[repeat 1] 105/179 src/runtime/components/Pagination.vue repo_first_pass outcome=success latency=575.95ms
+[repeat 1] 106/179 src/runtime/components/PinInput.vue repo_first_pass outcome=success latency=402.47ms
+[repeat 1] 107/179 src/runtime/components/Popover.vue repo_first_pass outcome=success latency=532.15ms
+[repeat 1] 108/179 src/runtime/components/PricingPlan.vue repo_first_pass outcome=success latency=321.07ms
+[repeat 1] 109/179 src/runtime/components/PricingPlans.vue repo_first_pass outcome=success latency=287.30ms
+[repeat 1] 110/179 src/runtime/components/PricingTable.vue repo_first_pass outcome=success latency=355.08ms
+[repeat 1] 111/179 src/runtime/components/Progress.vue repo_first_pass outcome=success latency=372.29ms
+[repeat 1] 112/179 src/runtime/components/prose/A.vue repo_first_pass outcome=success latency=431.51ms
+[repeat 1] 113/179 src/runtime/components/prose/Accordion.vue repo_first_pass outcome=success latency=552.48ms
+[repeat 1] 114/179 src/runtime/components/prose/AccordionItem.vue repo_first_pass outcome=success latency=202.02ms
+[repeat 1] 115/179 src/runtime/components/prose/Badge.vue repo_first_pass outcome=success latency=449.87ms
+[repeat 1] 116/179 src/runtime/components/prose/Blockquote.vue repo_first_pass outcome=success latency=212.74ms
+[repeat 1] 117/179 src/runtime/components/prose/Callout.vue repo_first_pass outcome=success latency=268.54ms
+[repeat 1] 118/179 src/runtime/components/prose/callout/Caution.vue repo_first_pass outcome=success latency=283.39ms
+[repeat 1] 119/179 src/runtime/components/prose/callout/Note.vue repo_first_pass outcome=success latency=116.51ms
+[repeat 1] 120/179 src/runtime/components/prose/callout/Tip.vue repo_first_pass outcome=success latency=114.06ms
+[repeat 1] 121/179 src/runtime/components/prose/callout/Warning.vue repo_first_pass outcome=success latency=112.91ms
+[repeat 1] 122/179 src/runtime/components/prose/Card.vue repo_first_pass outcome=success latency=258.19ms
+[repeat 1] 123/179 src/runtime/components/prose/CardGroup.vue repo_first_pass outcome=success latency=217.95ms
+[repeat 1] 124/179 src/runtime/components/prose/Code.vue repo_first_pass outcome=success latency=211.33ms
+[repeat 1] 125/179 src/runtime/components/prose/CodeCollapse.vue repo_first_pass outcome=success latency=295.83ms
+[repeat 1] 126/179 src/runtime/components/prose/CodeGroup.vue repo_first_pass outcome=success latency=258.46ms
+[repeat 1] 127/179 src/runtime/components/prose/CodeIcon.vue repo_first_pass outcome=success latency=255.66ms
+[repeat 1] 128/179 src/runtime/components/prose/CodePreview.vue repo_first_pass outcome=success latency=215.02ms
+[repeat 1] 129/179 src/runtime/components/prose/CodeTree.vue repo_first_pass outcome=success latency=269.45ms
+[repeat 1] 130/179 src/runtime/components/prose/Collapsible.vue repo_first_pass outcome=success latency=507.22ms
+[repeat 1] 131/179 src/runtime/components/prose/Em.vue repo_first_pass outcome=success latency=223.63ms
+[repeat 1] 132/179 src/runtime/components/prose/Field.vue repo_first_pass outcome=success latency=216.32ms
+[repeat 1] 133/179 src/runtime/components/prose/FieldGroup.vue repo_first_pass outcome=success latency=220.72ms
+[repeat 1] 134/179 src/runtime/components/prose/H1.vue repo_first_pass outcome=success latency=230.28ms
+[repeat 1] 135/179 src/runtime/components/prose/H2.vue repo_first_pass outcome=success latency=220.53ms
+[repeat 1] 136/179 src/runtime/components/prose/H3.vue repo_first_pass outcome=success latency=232.92ms
+[repeat 1] 137/179 src/runtime/components/prose/H4.vue repo_first_pass outcome=success latency=223.13ms
+[repeat 1] 138/179 src/runtime/components/prose/Hr.vue repo_first_pass outcome=success latency=234.52ms
+[repeat 1] 139/179 src/runtime/components/prose/Icon.vue repo_first_pass outcome=success latency=280.49ms
+[repeat 1] 140/179 src/runtime/components/prose/Img.vue repo_first_pass outcome=success latency=401.49ms
+[repeat 1] 141/179 src/runtime/components/prose/Kbd.vue repo_first_pass outcome=success latency=417.10ms
+[repeat 1] 142/179 src/runtime/components/prose/Li.vue repo_first_pass outcome=success latency=227.95ms
+[repeat 1] 143/179 src/runtime/components/prose/Ol.vue repo_first_pass outcome=success latency=229.55ms
+[repeat 1] 144/179 src/runtime/components/prose/P.vue repo_first_pass outcome=success latency=229.62ms
+[repeat 1] 145/179 src/runtime/components/prose/Pre.vue repo_first_pass outcome=success latency=308.15ms
+[repeat 1] 146/179 src/runtime/components/prose/Prompt.vue repo_first_pass outcome=success latency=347.48ms
+[repeat 1] 147/179 src/runtime/components/prose/Script.vue repo_first_pass outcome=success latency=127.65ms
+[repeat 1] 148/179 src/runtime/components/prose/Steps.vue repo_first_pass outcome=success latency=237.98ms
+[repeat 1] 149/179 src/runtime/components/prose/Strong.vue repo_first_pass outcome=success latency=226.51ms
+[repeat 1] 150/179 src/runtime/components/prose/Table.vue repo_first_pass outcome=success latency=222.22ms
+[repeat 1] 151/179 src/runtime/components/prose/Tabs.vue repo_first_pass outcome=success latency=640.72ms
+[repeat 1] 152/179 src/runtime/components/prose/TabsItem.vue repo_first_pass outcome=success latency=229.78ms
+[repeat 1] 153/179 src/runtime/components/prose/Tbody.vue repo_first_pass outcome=success latency=229.72ms
+[repeat 1] 154/179 src/runtime/components/prose/Td.vue repo_first_pass outcome=success latency=239.17ms
+[repeat 1] 155/179 src/runtime/components/prose/Th.vue repo_first_pass outcome=success latency=235.15ms
+[repeat 1] 156/179 src/runtime/components/prose/Thead.vue repo_first_pass outcome=success latency=226.80ms
+[repeat 1] 157/179 src/runtime/components/prose/Tr.vue repo_first_pass outcome=success latency=239.43ms
+[repeat 1] 158/179 src/runtime/components/prose/Ul.vue repo_first_pass outcome=success latency=235.86ms
+[repeat 1] 159/179 src/runtime/components/RadioGroup.vue repo_first_pass outcome=success latency=728.34ms
+[repeat 1] 160/179 src/runtime/components/ScrollArea.vue repo_first_pass outcome=success latency=370.41ms
+[repeat 1] 161/179 src/runtime/components/Select.vue repo_first_pass outcome=success latency=2033.35ms
+[repeat 1] 162/179 src/runtime/components/SelectMenu.vue repo_first_pass outcome=success latency=2468.02ms
+[repeat 1] 163/179 src/runtime/components/Separator.vue repo_first_pass outcome=success latency=375.47ms
+[repeat 1] 164/179 src/runtime/components/Sidebar.vue repo_first_pass outcome=success latency=576.09ms
+[repeat 1] 165/179 src/runtime/components/Skeleton.vue repo_first_pass outcome=success latency=233.91ms
+[repeat 1] 166/179 src/runtime/components/Slideover.vue repo_first_pass outcome=success latency=612.64ms
+[repeat 1] 167/179 src/runtime/components/Slider.vue repo_first_pass outcome=success latency=444.23ms
+[repeat 1] 168/179 src/runtime/components/Stepper.vue repo_first_pass outcome=success latency=655.85ms
+[repeat 1] 169/179 src/runtime/components/Switch.vue repo_first_pass outcome=success latency=513.36ms
+[repeat 1] 170/179 src/runtime/components/Table.vue repo_first_pass outcome=success latency=2706.74ms
+[repeat 1] 171/179 src/runtime/components/Tabs.vue repo_first_pass outcome=success latency=625.11ms
+[repeat 1] 172/179 src/runtime/components/Textarea.vue repo_first_pass outcome=success latency=655.48ms
+[repeat 1] 173/179 src/runtime/components/Theme.vue repo_first_pass outcome=success latency=176.58ms
+[repeat 1] 174/179 src/runtime/components/Timeline.vue repo_first_pass outcome=success latency=408.84ms
+[repeat 1] 175/179 src/runtime/components/Toast.vue repo_first_pass outcome=success latency=638.33ms
+[repeat 1] 176/179 src/runtime/components/Toaster.vue repo_first_pass outcome=success latency=410.33ms
+[repeat 1] 177/179 src/runtime/components/Tooltip.vue repo_first_pass outcome=success latency=532.56ms
+[repeat 1] 178/179 src/runtime/components/Tree.vue repo_first_pass outcome=success latency=781.52ms
+[repeat 1] 179/179 src/runtime/components/User.vue repo_first_pass outcome=success latency=323.72ms
+  steady p50=98019.90ms end-to-end p50=98506.40ms
+
