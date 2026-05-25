@@ -3771,6 +3771,10 @@ name = "verter_audit"
 version = "0.0.1-beta.1"
 dependencies = [
  "clap",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "oxc_span",
  "parking_lot",
  "serde",
  "serde_json",
