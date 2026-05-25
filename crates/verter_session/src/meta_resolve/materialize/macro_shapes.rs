@@ -1407,12 +1407,14 @@ pub(crate) fn synthesize_define_emits_shape_from_known_surface(
                 .unwrap_or(verter_type_expr::TypeExpr::Unknown {
                     raw: "unknown".to_string(),
                 });
-            // SAFETY: `AnalyzedEmitField` does not yet carry the
-            // `declared_in_macro_type_arg` fact (R21 c1 added the
-            // field to `AnalyzedPropField` only; `ResolvedEmit` was
-            // not extended). `false` is the structural default
-            // until a follow-up threads the flag through the emit
-            // chain.
+            // `ResolvedEmit` is the upstream type at this layer.
+            // It carries the emit's name and `payload_expr` typed
+            // form — not own-body-vs-heritage provenance. The
+            // published-surface policies (`Refined` etc.) consult
+            // the bit only on the `props` axis; emit shape members
+            // do not gate on it. `false` is the structural truth
+            // at the emit ExpandedProperty layer because the
+            // producer type does not encode the distinction.
             properties.push(ExpandedProperty {
                 name: emit.name.clone(),
                 ty,
@@ -1458,15 +1460,13 @@ pub(crate) fn synthesize_define_slots_shape_from_known_surface(
         return None;
     }
 
-    // SAFETY: `AnalyzedSlotField` does not yet carry the
-    // `declared_in_macro_type_arg` fact (R21 c1 added the field to
-    // `AnalyzedPropField` only; `ResolvedSlot` / shorthand slot props
-    // were not extended). `false` is the structural default until a
-    // follow-up threads the flag through the slot chain. The flag is
-    // primarily semantically meaningful for prop / emit consumers
-    // (Refined policy, fallthrough-attrs root inheritance) — slot
-    // member names are positional in `defineSlots<T>` and the heritage
-    // distinction is rarely consulted.
+    // `ResolvedSlot` is the upstream type at this layer. It carries
+    // the slot's name and binding shape — not own-body-vs-heritage
+    // provenance. The published-surface policies (`Refined` etc.)
+    // consult the bit only on the `props` axis; slot shape members
+    // do not gate on it. `false` is the structural truth at the
+    // slot ExpandedProperty layer because the producer type does
+    // not encode the distinction.
     let properties = resolved_macro
         .slots
         .iter()

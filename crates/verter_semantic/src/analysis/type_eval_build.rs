@@ -1527,12 +1527,15 @@ where
                         diagnostics: expanded.diagnostics,
                         shallow_type_expr,
                         shallow_type_expr_scope,
-                        // SAFETY: `AnalyzedEmitField` does not yet carry the
-                        // `declared_in_macro_type_arg` fact (R21 c1 added the
-                        // field to `AnalyzedPropField` only). `false` is the
-                        // structural default for emit `ExpandedField`s until
-                        // a follow-up extends `AnalyzedEmitField` /
-                        // `ResolvedEmit` to thread the parser-side flag.
+                        // `AnalyzedEmitField` is the upstream type at this
+                        // layer. It carries `name`, `payload_type`, and
+                        // `payload_expr` — not own-body-vs-heritage
+                        // provenance. The published-surface policies
+                        // (`Refined` etc.) consult the bit only on the
+                        // `props` axis; the emit surface does not gate on
+                        // it. `false` is the structural truth at the emit
+                        // ExpandedField layer because the producer type
+                        // does not encode the distinction.
                         declared_in_macro_type_arg: false,
                     });
                 }
