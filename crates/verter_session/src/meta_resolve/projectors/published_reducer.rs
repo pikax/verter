@@ -33,6 +33,32 @@ use super::{reduce_field_type_expr, reduce_field_type_expr_with_mode};
 /// (`IndexedAccess`, finite `Pick`/`Omit`, closed/open conditionals)
 /// still reduces path-precisely because those callers enter the
 /// reducer with a `Published + Expanded` context downstream.
+///
+/// Synthetic slot-binding carriers (the `slot_bindings` / `bindings`
+/// loops) are SHORT-CIRCUITED when both:
+///
+/// * `field.carrier_provenance.is_some()` — the producer flagged this
+///   as a synthetic `Ref { name }` carrier minted by the slot-binding
+///   graph publisher's no-parser-branch, AND
+/// * the host's `CarrierVerdictDb` returns `Some(DoNotDeepen)` for
+///   the carrier's identity (eagerly admitted by the producer at
+///   carrier-mint time).
+///
+/// On a hit we leave `field.r#type` unchanged — the published carrier
+/// flows downstream as-is. This skip is the structural cost driver
+/// codex's R22 verdict identified: `reduce_field_type_expr` on a bare
+/// symbolic `Ref { name }` re-enters the resolver through registry
+/// collection (`resolver_core/component_meta_registry.rs:1806/1870/1947`
+/// → `host_manage/component_meta_methods.rs:2384/2583`), which the
+/// next commit's component-meta-registry refuse-to-enqueue closes at
+/// the source. Skipping the reducer here is the consumer-side half
+/// of that closure.
+///
+/// R21.6's projection-mode flip (`reduce_field_type_expr_with_mode(...,
+/// Navigate)`) was empirically refuted as a fix: walking the carrier
+/// under `Navigate` is still walking it, just along a path-precise
+/// route. The correct fix is to BYPASS the walk entirely when the
+/// verdict says so.
 pub(crate) fn reduce_published_field_types(
     scope_canonical_id: &str,
     evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
@@ -40,6 +66,8 @@ pub(crate) fn reduce_published_field_types(
 ) {
     use crate::meta_resolve::compare_type_expr_improvement;
     use rustc_hash::FxHashMap;
+
+    let carrier_verdicts = query_engine.ctx.project_type_store().carrier_verdicts();
 
     let mut finalized_prop_types: FxHashMap<String, TypeExpr> = FxHashMap::default();
     for field in evaluated_types.props.iter_mut() {
@@ -87,13 +115,51 @@ pub(crate) fn reduce_published_field_types(
         );
     }
     for field in evaluated_types.slot_bindings.iter_mut() {
+        if should_skip_carrier_reduction(field, carrier_verdicts) {
+            continue;
+        }
         let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
         field.r#type = reduce_field_type_expr(query_engine, scope_canonical_id, raised);
     }
     for field in evaluated_types.bindings.iter_mut() {
+        if should_skip_carrier_reduction(field, carrier_verdicts) {
+            continue;
+        }
         let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
         field.r#type = reduce_field_type_expr(query_engine, scope_canonical_id, raised);
     }
+}
+
+/// Returns `true` when a published slot-binding / binding field's
+/// `r#type` is a synthetic `TypeExpr::Ref { name }` carrier whose
+/// `CarrierProvenance` matches a `DoNotDeepen` verdict in the
+/// host-owned cache. Caller is `reduce_published_field_types`'s
+/// slot_bindings / bindings loops.
+fn should_skip_carrier_reduction(
+    field: &verter_semantic::analysis::type_expand::ExpandedField,
+    carrier_verdicts: &crate::carrier_verdict_db::CarrierVerdictDb,
+) -> bool {
+    let Some(provenance) = field.carrier_provenance.as_ref() else {
+        return false;
+    };
+    // Belt-and-braces: provenance presence is the producer's marker
+    // but we still verify the field's `r#type` is the bare
+    // `Ref { name }` carrier shape codex's verdict identifies as the
+    // structural cost driver. A parser-path-only entry with
+    // `provenance: None` never reaches this check; a synthetic
+    // carrier whose downstream re-typing produced something other
+    // than a bare `Ref` (would be a defect) falls through to the
+    // reducer rather than incorrectly short-circuiting.
+    let is_bare_ref_carrier = matches!(
+        &field.r#type,
+        TypeExpr::Ref { name, type_arguments }
+            if name.as_ref() == provenance.binding_name.as_ref() && type_arguments.is_empty()
+    );
+    if !is_bare_ref_carrier {
+        return false;
+    }
+    let key = crate::carrier_verdict_db::CarrierIdentity::from_provenance(provenance);
+    carrier_verdicts.is_do_not_deepen(&key)
 }
 
 /// Does `expr` contain any operator-shape node that the bounded
