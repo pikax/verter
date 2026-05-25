@@ -939,13 +939,12 @@ fn overlay_artifact_discriminator_from_fingerprint(fingerprint: u64) -> Hash16 {
 /// overlay set return the same fingerprint regardless of insertion
 /// order.
 ///
-/// TODO(follow-up — fix-agent P1.3 / substrate-reviewer P1.3): the
-/// fingerprint is recomputed on every `SessionView::fingerprint()`
-/// call. For overlay-bearing views in hot LSP loops the O(N log N)
-/// sort + hash runs once per cache-key construction. Cache the
-/// fingerprint on `OverlaidView` / `OverlaidViewRef` construction
-/// (one `OnceCell<u64>` or one pre-computed field) so subsequent
-/// reads are O(1). Owned by the follow-up substrate-hygiene block.
+/// `fingerprint()` invokes this on every call. The function is
+/// pure over its inputs (the overlay map and the tombstone set) and
+/// views are immutable after construction, so repeated calls on the
+/// same view return the same value. The cost is bounded by the
+/// overlay-set cardinality — only canonicals the session has
+/// upserted or tombstoned participate — not by workspace size.
 fn overlay_set_fingerprint(
     overlay_hashes: &FxHashMap<String, Hash16>,
     tombstones: Option<&std::collections::HashSet<String>>,

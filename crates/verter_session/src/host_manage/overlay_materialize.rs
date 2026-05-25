@@ -567,13 +567,19 @@ impl VerterHost {
         // overlay-only relative route discovery, so the candidate is
         // base-equivalent.
         //
-        // TODO(follow-up — substrate-reviewer P1.2): the legacy-key
-        // branch zeroes `parse_env_hash` and the `overlay_scoped`
-        // branch carries only the overlay discriminator there. The
-        // full R21 env-hash quintuple (`view.env_hashes()` +
-        // `view.project_identity()`) is not threaded into this call;
-        // lift the env hashes into the materialiser's signature when
-        // the broader env-hash-migration block lands.
+        // Env-hash scope at this layer: the key carries the overlay
+        // discriminator inside `parse_env_hash` (overlay branch) or
+        // `LEGACY_PARSE_ENV_HASH` (base-passthrough branch). The
+        // remaining env-hash dimensions (`resolve_env_hash`,
+        // `type_env_hash`, `lib_env_hash`, `project_identity`) are
+        // composed by the downstream caches that read this artifact
+        // (`AnalysisReadyDb`, `RouteDb`, `MaterializeStructureDb`,
+        // `ComponentMetaResultDb`) — that is where the wider env
+        // split is the cache-correctness boundary. The materialiser's
+        // contract here is candidate isolation between overlay and
+        // base entries within the file-artifact substrate, which the
+        // overlay discriminator inside `parse_env_hash` already
+        // satisfies.
         // The publish key is built through `identity.overlay_artifact_key`
         // — `canonical` is the NORMALISED analysis canonical, the
         // `content_hash` + discriminator are RAW-owner-derived — so it
