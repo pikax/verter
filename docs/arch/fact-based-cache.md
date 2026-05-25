@@ -4,6 +4,9 @@ This document is the per-field audit + per-cache-layer key composition
 table for the fact-based cache architecture. The full rule set
 (R1–R29) lives in the `/type-cache-architecture` skill.
 
+For the next-generation cache runtime and performance migration plan, see
+[`cache-runtime-overhaul-plan.md`](cache-runtime-overhaul-plan.md).
+
 > AMENDMENT 2026-05-11-A — the integration branch for this work is
 > `refactor/semantic-db-overhaul` (renamed from the older
 > `fix/cutover-review-findings`). The two share the same baseline; the

@@ -37,6 +37,72 @@ Target end-state rule:
 > **slot** identity (content-free); versioned declaration identity
 > lives inside cached values.
 
+## Cache Runtime Hard Rules
+
+These rules are part of the `Cache Architecture (CRITICAL)` rule in
+`CLAUDE.md`. They are binding for the cache-runtime overhaul and for any
+feature that admits cache entries.
+
+1. Cache correctness is read-side authoritative. A warm hit is correct
+   only after validation against the caller's current `StoreView`.
+2. A cache key must include every deterministic input that changes the
+   value. If that is not possible, the value is not cacheable.
+3. Query-identity keys must not include content hashes, version hashes,
+   or `fact_dep_signature`. Version identity belongs on the cached
+   value.
+4. The five env hash dimensions stay split. `parse_env_hash`,
+   `resolve_env_hash`, `type_env_hash`, `lib_env_hash`, and
+   `project_identity` must not be bundled into a single
+   `project_config_hash`.
+5. Empty and overflowed signatures are different states. Empty means
+   dependency-free. Overflowed means valid result, non-cacheable
+   result.
+6. Tracer overflow, budget exhaustion, cancellation, generation
+   supersession, incomplete self-rooting, and unresolved provenance all
+   route through `ReturnOnly`.
+7. `ReturnOnly` never publishes a cache entry, never registers
+   reverse-index metadata, and never becomes a persistent artifact.
+8. Reverse dependency graphs are not invalidation authority. They may
+   support observability, prefetch, diagnostics, and targeted stale
+   sweeps only.
+9. Same-canonical edits must be caught by strict self-root validation.
+   They must not rely on eager own-canonical drains for correctness.
+10. Cross-file edits invalidate consumers lazily through recorded facts,
+    not through reverse-dependent eviction cascades.
+11. Base cache and overlay cache writes are separate. Overlay/session
+    results must not populate base-only artifacts or persistent cache
+    entries.
+12. Pure artifacts may be persisted only when their keys contain all
+    semantic, compiler, env, profile, plugin, and source-map-policy
+    dimensions.
+13. Fact-validated semantic query results are memory-only until every
+    query family has audited strict self-root validation, complete env
+    keys, and typed non-cacheable admission.
+14. Singleflight is required for every cold cacheable node. Concurrent
+    callers for the same key must produce at most one cold computation
+    per miss window.
+15. Joiners on an in-flight computation must validate the winner's
+    published entry against their own view before returning it.
+16. Cache admission must be typed. Boolean flags, empty arrays, sentinel
+    hashes, or side-channel `RefCell` state must not decide whether a
+    result is cacheable.
+17. Cacheable entries must be immutable after publish. Mutation creates
+    a new versioned value or a new artifact key.
+18. A cache hit must not allocate audit payloads when no request
+    accumulator is active.
+19. Public APIs must expose cache semantics when behavior differs. A
+    single ambiguous compile path must not hide `stateless`, `content`,
+    and `session` behavior.
+20. Benchmarks must report cache mode, source-map policy, batch shape,
+    thread count, hit count, and fallback count. A benchmark without
+    those dimensions is not an architecture signal.
+
+The existing `Cache Architecture` guard cluster covers the current
+production subset of these rules. The cache-runtime overhaul plan in
+`docs/arch/cache-runtime-overhaul-plan.md` names the additional guards and
+discriminating tests that must land with each implementation block before
+the corresponding rule becomes executable policy.
+
 ## Architectural rules (R1–R31)
 
 ### Mutation semantics
