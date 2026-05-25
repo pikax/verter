@@ -1094,7 +1094,6 @@ pub(crate) fn projected_surface_to_expanded_shape(
             optional: member.optional,
             readonly: member.readonly,
             declared_in_macro_type_arg: member.declared_in_macro_type_arg,
-            carrier_provenance: None,
         })
         .collect::<Vec<_>>();
 

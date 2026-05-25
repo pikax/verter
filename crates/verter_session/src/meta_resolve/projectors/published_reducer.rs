@@ -37,8 +37,9 @@ use super::{reduce_field_type_expr, reduce_field_type_expr_with_mode};
 /// Synthetic slot-binding carriers (the `slot_bindings` / `bindings`
 /// loops) are SHORT-CIRCUITED when both:
 ///
-/// * `field.carrier_provenance.is_some()` — the producer flagged this
-///   as a synthetic `Ref { name }` carrier minted by the slot-binding
+/// * `evaluated_types.carrier_provenance_table.get(surface, &field.name)`
+///   returns `Some(provenance)` — the producer recorded this as a
+///   synthetic `Ref { name }` carrier minted by the slot-binding
 ///   graph publisher's no-parser-branch, AND
 /// * the host's `CarrierVerdictDb` returns `Some(DoNotDeepen)` for
 ///   the carrier's identity (eagerly admitted by the producer at
@@ -54,11 +55,10 @@ use super::{reduce_field_type_expr, reduce_field_type_expr_with_mode};
 /// the source. Skipping the reducer here is the consumer-side half
 /// of that closure.
 ///
-/// R21.6's projection-mode flip (`reduce_field_type_expr_with_mode(...,
-/// Navigate)`) was empirically refuted as a fix: walking the carrier
-/// under `Navigate` is still walking it, just along a path-precise
-/// route. The correct fix is to BYPASS the walk entirely when the
-/// verdict says so.
+/// R22-fix sparse-sidecar variant: instead of consulting a per-field
+/// `Option<CarrierProvenance>` on every published field, the table
+/// lookup runs only on `slot_bindings` / `bindings` — props / emits
+/// pay no carrier-aware cost.
 pub(crate) fn reduce_published_field_types(
     scope_canonical_id: &str,
     evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
@@ -66,6 +66,7 @@ pub(crate) fn reduce_published_field_types(
 ) {
     use crate::meta_resolve::compare_type_expr_improvement;
     use rustc_hash::FxHashMap;
+    use verter_semantic::analysis::type_expand::PublishedSurfaceKind;
 
     let carrier_verdicts = query_engine.ctx.project_type_store().carrier_verdicts();
 
@@ -114,15 +115,36 @@ pub(crate) fn reduce_published_field_types(
             ProjectionMode::Navigate,
         );
     }
-    for field in evaluated_types.slot_bindings.iter_mut() {
-        if should_skip_carrier_reduction(field, carrier_verdicts) {
+    // Split-borrow: the carrier-aware loops below need a shared
+    // borrow of `carrier_provenance_table` concurrent with the
+    // mutable borrows of the sibling `slot_bindings` / `bindings`
+    // Vecs. Destructure once so the borrow checker treats the
+    // sub-borrows as disjoint.
+    let verter_semantic::analysis::type_expand::ExpandedComponentTypes {
+        ref carrier_provenance_table,
+        ref mut slot_bindings,
+        ref mut bindings,
+        ..
+    } = *evaluated_types;
+    for field in slot_bindings.iter_mut() {
+        if should_skip_carrier_reduction(
+            PublishedSurfaceKind::SlotBinding,
+            field,
+            carrier_provenance_table,
+            carrier_verdicts,
+        ) {
             continue;
         }
         let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
         field.r#type = reduce_field_type_expr(query_engine, scope_canonical_id, raised);
     }
-    for field in evaluated_types.bindings.iter_mut() {
-        if should_skip_carrier_reduction(field, carrier_verdicts) {
+    for field in bindings.iter_mut() {
+        if should_skip_carrier_reduction(
+            PublishedSurfaceKind::Binding,
+            field,
+            carrier_provenance_table,
+            carrier_verdicts,
+        ) {
             continue;
         }
         let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
@@ -132,24 +154,32 @@ pub(crate) fn reduce_published_field_types(
 
 /// Returns `true` when a published slot-binding / binding field's
 /// `r#type` is a synthetic `TypeExpr::Ref { name }` carrier whose
-/// `CarrierProvenance` matches a `DoNotDeepen` verdict in the
+/// `CarrierProvenance` (looked up in the parent
+/// `ExpandedComponentTypes::carrier_provenance_table` by surface
+/// kind + field name) matches a `DoNotDeepen` verdict in the
 /// host-owned cache. Caller is `reduce_published_field_types`'s
 /// slot_bindings / bindings loops.
+///
+/// The R22-fix sparse-sidecar variant: the table is consulted only
+/// at this carrier-aware site; props/emits never call this helper
+/// and therefore pay no lookup cost.
 fn should_skip_carrier_reduction(
+    surface: verter_semantic::analysis::type_expand::PublishedSurfaceKind,
     field: &verter_semantic::analysis::type_expand::ExpandedField,
+    carrier_provenance_table: &verter_semantic::analysis::type_expand::CarrierProvenanceTable,
     carrier_verdicts: &crate::carrier_verdict_db::CarrierVerdictDb,
 ) -> bool {
-    let Some(provenance) = field.carrier_provenance.as_ref() else {
+    let Some(provenance) = carrier_provenance_table.get(surface, field.name.as_str()) else {
         return false;
     };
     // Belt-and-braces: provenance presence is the producer's marker
     // but we still verify the field's `r#type` is the bare
     // `Ref { name }` carrier shape codex's verdict identifies as the
-    // structural cost driver. A parser-path-only entry with
-    // `provenance: None` never reaches this check; a synthetic
-    // carrier whose downstream re-typing produced something other
-    // than a bare `Ref` (would be a defect) falls through to the
-    // reducer rather than incorrectly short-circuiting.
+    // structural cost driver. A parser-path-only entry has no table
+    // record and is filtered above; a synthetic carrier whose
+    // downstream re-typing produced something other than a bare
+    // `Ref` (would be a defect) falls through to the reducer rather
+    // than incorrectly short-circuiting.
     let is_bare_ref_carrier = matches!(
         &field.r#type,
         TypeExpr::Ref { name, type_arguments }

@@ -1182,7 +1182,6 @@ pub(crate) fn surface_member_to_expanded_field(
         shallow_type_expr,
         shallow_type_expr_scope,
         declared_in_macro_type_arg: member.declared_in_macro_type_arg,
-        carrier_provenance: None,
     }
 }
 

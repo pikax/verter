@@ -137,14 +137,18 @@ fn t1_same_binding_name_in_two_slots_keep_distinct_cache_entries() {
 
     // Both `.foo` bindings must be synthetic carriers (no-parser
     // branch). Without that, this T1 test is not discriminating.
-    let alpha_prov = alpha
-        .carrier_provenance
-        .as_ref()
-        .expect("alphaSlot.foo must carry CarrierProvenance");
-    let beta_prov = beta
-        .carrier_provenance
-        .as_ref()
-        .expect("betaSlot.foo must carry CarrierProvenance");
+    // R22-fix sparse-sidecar variant: the provenance lives in the
+    // parent `ExpandedComponentTypes::carrier_provenance_table`
+    // (keyed by `(surface_kind, field.name)`), not on the
+    // `ExpandedField` itself.
+    use verter_semantic::analysis::type_expand::PublishedSurfaceKind;
+    let table = &expanded.carrier_provenance_table;
+    let alpha_prov = table
+        .get(PublishedSurfaceKind::SlotBinding, alpha.name.as_str())
+        .expect("alphaSlot.foo must carry CarrierProvenance in the table");
+    let beta_prov = table
+        .get(PublishedSurfaceKind::SlotBinding, beta.name.as_str())
+        .expect("betaSlot.foo must carry CarrierProvenance in the table");
 
     // The codex TOP RISK invariant: the same `binding_name` in two
     // slots MUST produce distinct cache identities. Different
@@ -251,10 +255,14 @@ fn t2_real_type_alias_with_same_name_remains_resolvable() {
         .iter()
         .find(|f| f.name == "default.foo")
         .expect("default.foo slot binding must be published");
+    use verter_semantic::analysis::type_expand::PublishedSurfaceKind;
     assert!(
-        default_foo.carrier_provenance.is_some(),
-        "default.foo must be a synthetic carrier (no-parser branch). Without \
-         that, T2 does not exercise the shared-name disambiguation."
+        expanded
+            .carrier_provenance_table
+            .contains(PublishedSurfaceKind::SlotBinding, default_foo.name.as_str(),),
+        "default.foo must be a synthetic carrier (no-parser branch) recorded in the \
+         carrier_provenance_table. Without that, T2 does not exercise the \
+         shared-name disambiguation."
     );
 
     // Critical: the prop `realFoo` (typed as the real `foo` alias)
@@ -350,9 +358,13 @@ fn t3_synthetic_carrier_binding_name_not_enqueued_in_type_registry() {
         .iter()
         .find(|f| f.name == "default.__r22_synthetic_only")
         .expect("default.__r22_synthetic_only must be published");
+    use verter_semantic::analysis::type_expand::PublishedSurfaceKind;
     assert!(
-        synthetic.carrier_provenance.is_some(),
-        "default.__r22_synthetic_only must be a synthetic carrier"
+        expanded
+            .carrier_provenance_table
+            .contains(PublishedSurfaceKind::SlotBinding, synthetic.name.as_str(),),
+        "default.__r22_synthetic_only must be a synthetic carrier recorded in the \
+         carrier_provenance_table"
     );
 
     // The codex-required contract: the synthetic carrier's

@@ -200,19 +200,26 @@ fn synthetic_slot_binding_carrier_emits_provenance_sidecar() {
         .evaluate_types("/GenericPanel.vue")
         .expect("evaluate_types must return for the GenericPanel fixture");
 
+    // R22-fix sparse-sidecar variant: provenance lives in the
+    // parent `ExpandedComponentTypes::carrier_provenance_table`,
+    // not on the `ExpandedField` itself.
     let synthetic_carriers: Vec<_> = expanded
         .slot_bindings
         .iter()
-        .filter(|f| f.carrier_provenance.is_some())
+        .filter(|f| {
+            expanded
+                .carrier_provenance_table
+                .contains(PublishedSurfaceKind::SlotBinding, f.name.as_str())
+        })
         .collect();
 
     assert!(
         !synthetic_carriers.is_empty(),
         "GenericPanel.vue's generic `defineSlots<PanelSlots<...>>()` is the canonical \
-         no-parser-binding fixture. The R22 producer MUST emit at least one \
-         `carrier_provenance: Some(_)` on `expanded.slot_bindings` here. None observed — \
-         the no-parser branch in `publish_merged_bindings` is silently skipping the \
-         sidecar emission. published slot_bindings={:#?}",
+         no-parser-binding fixture. The R22 producer MUST record at least one \
+         synthetic-carrier entry in `expanded.carrier_provenance_table` here. None \
+         observed — the no-parser branch in `publish_merged_bindings` is silently \
+         skipping the table-insert. published slot_bindings={:#?}",
         expanded
             .slot_bindings
             .iter()
@@ -221,9 +228,12 @@ fn synthetic_slot_binding_carrier_emits_provenance_sidecar() {
     );
 
     for field in &synthetic_carriers {
-        let provenance = field.carrier_provenance.as_ref().expect("filtered above");
+        let provenance = expanded
+            .carrier_provenance_table
+            .get(PublishedSurfaceKind::SlotBinding, field.name.as_str())
+            .expect("filtered above");
 
-        // The carrier_provenance.binding_name must match the
+        // The provenance.binding_name must match the
         // `TypeExpr::Ref { name }` shape that gets published. Codex's
         // TOP RISK ("name-only key collision") demands these stay
         // structurally tied — a divergence would let the cache key
@@ -309,11 +319,16 @@ fn synthetic_carrier_admission_populates_carrier_verdict_db() {
         .evaluate_types("/GenericPanel.vue")
         .expect("evaluate_types must return for GenericPanel");
 
+    use verter_semantic::analysis::type_expand::PublishedSurfaceKind;
     let verdicts = host.project_type_store().carrier_verdicts();
     let synthetic_count = expanded
         .slot_bindings
         .iter()
-        .filter(|f| f.carrier_provenance.is_some())
+        .filter(|f| {
+            expanded
+                .carrier_provenance_table
+                .contains(PublishedSurfaceKind::SlotBinding, f.name.as_str())
+        })
         .count();
 
     assert!(
@@ -331,12 +346,15 @@ fn synthetic_carrier_admission_populates_carrier_verdict_db() {
 
     // For each synthetic carrier, build the cache identity exactly the
     // way the producer did and confirm the lookup hits.
-    for field in expanded
-        .slot_bindings
-        .iter()
-        .filter(|f| f.carrier_provenance.is_some())
-    {
-        let provenance = field.carrier_provenance.as_ref().unwrap();
+    for field in expanded.slot_bindings.iter().filter(|f| {
+        expanded
+            .carrier_provenance_table
+            .contains(PublishedSurfaceKind::SlotBinding, f.name.as_str())
+    }) {
+        let provenance = expanded
+            .carrier_provenance_table
+            .get(PublishedSurfaceKind::SlotBinding, field.name.as_str())
+            .expect("filtered above");
         let key = CarrierIdentity::from_provenance(provenance);
         assert!(
             verdicts.is_do_not_deepen(&key),

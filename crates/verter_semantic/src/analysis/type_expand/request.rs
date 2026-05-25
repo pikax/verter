@@ -39,17 +39,6 @@ pub struct ExpandedProperty {
     /// from the upstream `SurfaceMember` / `ProjectedMember` source.
     #[serde(default)]
     pub declared_in_macro_type_arg: bool,
-    /// Provenance sidecar for synthetic carrier
-    /// references mirrored into the `define_props` / `define_emits` /
-    /// `define_slots` shape. `Some(_)` only when the source
-    /// `ExpandedField` carried a `CarrierProvenance`; otherwise
-    /// `None`. Drives downstream universal-cache and registry
-    /// short-circuits without forcing consumers to re-key off the
-    /// bare `TypeExpr::Ref { name }` carrier.
-    /// `#[serde(skip)]` — resolver-internal; never reaches the FFI /
-    /// TS-side meta payload.
-    #[serde(skip)]
-    pub carrier_provenance: Option<CarrierProvenance>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -235,6 +224,17 @@ pub struct ExpandedComponentTypes {
     pub slot_bindings: Vec<ExpandedField>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<ExpandedField>,
+    /// Sparse sidecar table mapping each synthetic carrier published
+    /// onto `slot_bindings` / `bindings` to its `CarrierProvenance`.
+    /// Empty for components that never mint synthetic carriers (the
+    /// vast majority of the corpus). Consulted only at the two
+    /// carrier-aware sites — `should_skip_carrier_reduction` (the
+    /// reducer's bypass) and `collect_component_meta_registry_public_field_refs`
+    /// (the registry's refuse-to-enqueue). Props/emits paths do not
+    /// consult it. `#[serde(skip)]` — resolver-internal; never
+    /// reaches the FFI / TS-side meta payload.
+    #[serde(skip)]
+    pub carrier_provenance_table: CarrierProvenanceTable,
 }
 
 /// Opaque graph-node identifier for the slot-binding carrier verdict
@@ -303,6 +303,105 @@ pub struct CarrierProvenance {
     pub value_node: CarrierValueNodeId,
 }
 
+/// Sparse sidecar table mapping every synthetic carrier published
+/// onto `ExpandedComponentTypes::slot_bindings` / `bindings` back to
+/// its `CarrierProvenance`. Owned by `ExpandedComponentTypes`; never
+/// reaches the FFI / TS-side payload (`#[serde(skip)]`).
+///
+/// The R22 fix-cycle's structural pivot: instead of widening every
+/// `ExpandedField` / `ExpandedProperty` with an `Option<CarrierProvenance>`
+/// (the +18.41 % aggregate regression the original R22 commit
+/// introduced), the table is consulted explicitly at the 2
+/// carrier-aware sites:
+///
+/// 1. `meta_resolve::projectors::published_reducer::should_skip_carrier_reduction`
+///    — reads `(surface_kind, field.name) → CarrierProvenance` to
+///    derive the `CarrierIdentity` cache key for the `DoNotDeepen`
+///    verdict consult.
+/// 2. `resolver_core::component_meta_registry::collect_component_meta_registry_public_field_refs`
+///    — checks `contains(surface_kind, field.name)` to refuse to
+///    enqueue the synthetic carrier's binding name as a public
+///    registry type ref.
+///
+/// Props / Emits paths do NOT consult the table (no synthetic
+/// carriers exist on those surfaces; the table stays empty for them
+/// by construction).
+///
+/// Key shape: the field name (`format!("{slot_name}.{binding_name}")`
+/// for slot bindings) plus the published-surface family
+/// disambiguator. Two slots' same-named bindings (e.g. T1's
+/// `alphaSlot.foo` vs `betaSlot.foo`) carry distinct field names so
+/// they never collide in this table. The CarrierIdentity-level
+/// disambiguation (the value-node-bearing key) still lives on the
+/// stored `CarrierProvenance` value — this table only answers "is
+/// this published field a synthetic carrier, and if so, what is its
+/// provenance?".
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CarrierProvenanceTable {
+    slot_bindings: rustc_hash::FxHashMap<String, CarrierProvenance>,
+    bindings: rustc_hash::FxHashMap<String, CarrierProvenance>,
+}
+
+impl CarrierProvenanceTable {
+    /// Look up a published field's provenance. Returns `None` if the
+    /// field is not a synthetic carrier (the overwhelmingly common
+    /// case across the corpus).
+    #[inline]
+    pub fn get(
+        &self,
+        surface: PublishedSurfaceKind,
+        field_name: &str,
+    ) -> Option<&CarrierProvenance> {
+        match surface {
+            PublishedSurfaceKind::SlotBinding => self.slot_bindings.get(field_name),
+            PublishedSurfaceKind::Binding => self.bindings.get(field_name),
+        }
+    }
+
+    /// Binary lookup — equivalent to `self.get(...).is_some()` but
+    /// preserved as its own method so the registry's refuse-to-enqueue
+    /// site does not allocate the provenance ref it does not need.
+    #[inline]
+    pub fn contains(&self, surface: PublishedSurfaceKind, field_name: &str) -> bool {
+        match surface {
+            PublishedSurfaceKind::SlotBinding => self.slot_bindings.contains_key(field_name),
+            PublishedSurfaceKind::Binding => self.bindings.contains_key(field_name),
+        }
+    }
+
+    /// Producer-side: record a synthetic carrier's provenance. Called
+    /// exactly once per minted carrier at `publish_merged_bindings`'
+    /// no-parser branch.
+    #[inline]
+    pub fn insert(
+        &mut self,
+        surface: PublishedSurfaceKind,
+        field_name: String,
+        provenance: CarrierProvenance,
+    ) {
+        match surface {
+            PublishedSurfaceKind::SlotBinding => {
+                self.slot_bindings.insert(field_name, provenance);
+            }
+            PublishedSurfaceKind::Binding => {
+                self.bindings.insert(field_name, provenance);
+            }
+        }
+    }
+
+    /// Whether the table holds zero entries across all surface
+    /// families. Used by `ExpandedComponentTypes::is_empty`.
+    pub fn is_empty(&self) -> bool {
+        self.slot_bindings.is_empty() && self.bindings.is_empty()
+    }
+
+    /// Total number of synthetic-carrier entries across all surface
+    /// families. Exposed for test assertions; not used on hot paths.
+    pub fn len(&self) -> usize {
+        self.slot_bindings.len() + self.bindings.len()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpandedField {
@@ -345,18 +444,6 @@ pub struct ExpandedField {
     /// macro provenance.
     #[serde(default)]
     pub declared_in_macro_type_arg: bool,
-    /// Provenance sidecar for synthetic
-    /// `TypeExpr::Ref { name }` carriers produced by the slot-binding
-    /// graph publisher when no parser-path `binding_expr` is
-    /// available. `Some(_)` for synthetic carriers; `None` for every
-    /// other published field (real macro props/emits, parser-path slot
-    /// bindings, projected surface members). Drives the
-    /// carrier-verdict cache and `published_reducer` /
-    /// component-meta-registry collection short-circuits.
-    /// `#[serde(skip)]` — resolver-internal; never reaches the FFI /
-    /// TS-side meta payload.
-    #[serde(skip)]
-    pub carrier_provenance: Option<CarrierProvenance>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -382,6 +469,7 @@ impl ExpandedComponentTypes {
             && self.define_slots.is_empty()
             && self.slot_bindings.is_empty()
             && self.bindings.is_empty()
+            && self.carrier_provenance_table.is_empty()
     }
 }
 

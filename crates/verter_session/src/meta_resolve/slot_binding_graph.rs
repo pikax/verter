@@ -1028,18 +1028,16 @@ pub(crate) fn publish_merged_bindings(
     // this shallow carrier and re-resolve named hops through the
     // registry on demand.
     //
-    // `CarrierProvenance` sidecar + `CarrierVerdictDb` admission.
+    // Sparse `CarrierProvenanceTable` + `CarrierVerdictDb` admission.
     // When the no-parser branch publishes a symbolic carrier, the
-    // sidecar tags it with
-    // `(scope_canonical_id, surface_kind, slot_name, binding_name,
-    // value_node)` — the full identity needed so a synthetic slot
-    // binding named `foo` does not poison or get poisoned by a real
-    // workspace-owned `type foo = …` alias. The sidecar is
-    // `#[serde(skip)]` and feeds the resolver-internal
-    // `CarrierVerdictDb`; it never leaks to the FFI / TS-side meta
-    // payload. The producer eagerly admits a `DoNotDeepen` verdict
-    // here so the first downstream `published_reducer` /
-    // `component_meta_registry` consult hits cache.
+    // producer records the provenance in
+    // `expanded.carrier_provenance_table` (keyed by `(surface_kind,
+    // field_name)`) and eagerly admits a `DoNotDeepen` verdict in the
+    // host-owned `CarrierVerdictDb`. The table is the structural
+    // replacement for the per-field `Option<CarrierProvenance>` the
+    // original R22 commit widened `ExpandedField` with — the table is
+    // empty for the vast majority of components that never mint
+    // synthetic carriers, so non-carrier paths pay no layout cost.
     for (key, gb) in graph_native.iter() {
         let (slot_name, binding_name) = key.clone();
         let field_name = format!("{}.{}", slot_name, binding_name);
@@ -1053,7 +1051,7 @@ pub(crate) fn publish_merged_bindings(
         // loop below (which iterates the residual).
         let parser_path = parser_index.remove(&(slot_name.clone(), binding_name.clone()));
 
-        let (r#type, shallow_type_expr, shallow_type_expr_scope, carrier_provenance) =
+        let (r#type, shallow_type_expr, shallow_type_expr_scope, synthetic_provenance) =
             match parser_path
                 .and_then(|pb| pb.binding_expr.as_ref().zip(pb.binding_expr_scope.as_ref()))
             {
@@ -1069,12 +1067,13 @@ pub(crate) fn publish_merged_bindings(
                     )
                 }
                 None => {
-                    // No-parser branch — mint the symbolic carrier and
-                    // emit its provenance sidecar. The carrier name is
-                    // `binding_name`; the scope is the owning macro's
-                    // canonical id; the value-node is `gb.value_node`
-                    // (the `SemanticNodeId` the graph publisher minted
-                    // the carrier from).
+                    // No-parser branch — mint the symbolic carrier,
+                    // record its provenance in the sparse table, and
+                    // admit its `DoNotDeepen` verdict. The carrier
+                    // name is `binding_name`; the scope is the owning
+                    // macro's canonical id; the value-node is
+                    // `gb.value_node` (the `SemanticNodeId` the graph
+                    // publisher minted the carrier from).
                     let scope_canonical: Arc<str> =
                         Arc::from(gb.owner_macro.owner.canonical_id.as_ref());
                     let carrier = TypeExpr::Ref {
@@ -1122,9 +1121,21 @@ pub(crate) fn publish_merged_bindings(
             exactness = ?exactness,
             has_raw_type = raw_type.is_some(),
             has_parser_typed = parser_path.is_some(),
-            has_carrier_provenance = carrier_provenance.is_some(),
+            has_carrier_provenance = synthetic_provenance.is_some(),
             "publish_slot_binding",
         );
+
+        // Record provenance in the sparse table BEFORE pushing the
+        // field — the consumer-side lookups key on `field.name` so
+        // the table entry must exist by the time the field is
+        // visible.
+        if let Some(provenance) = synthetic_provenance {
+            expanded.carrier_provenance_table.insert(
+                PublishedSurfaceKind::SlotBinding,
+                field_name.clone(),
+                provenance,
+            );
+        }
 
         expanded.slot_bindings.push(ExpandedField {
             name: field_name,
@@ -1142,7 +1153,6 @@ pub(crate) fn publish_merged_bindings(
             // slot's name in `defineSlots<T>`'s T), not the binding
             // level — `false` is the structural truth.
             declared_in_macro_type_arg: false,
-            carrier_provenance,
         });
     }
 
@@ -1150,9 +1160,10 @@ pub(crate) fn publish_merged_bindings(
     // counterpart). Parser-path bindings keep `ExactConcrete`
     // exactness — the source-text annotation is the authority.
     //
-    // Parser-path-only bindings NEVER carry a `CarrierProvenance`.
-    // Their `binding_expr` is the OXC-lowered authoritative form, not
-    // a symbolic stand-in. `carrier_provenance: None` is the truth.
+    // Parser-path-only bindings NEVER mint a synthetic carrier —
+    // their `binding_expr` is the OXC-lowered authoritative form, not
+    // a symbolic stand-in. They are therefore absent from
+    // `expanded.carrier_provenance_table`.
     let mut parser_only_keys: Vec<(Arc<str>, Arc<str>)> = parser_index.keys().cloned().collect();
     parser_only_keys.sort();
     for key in parser_only_keys {
@@ -1196,7 +1207,6 @@ pub(crate) fn publish_merged_bindings(
             // T's own body — `false` is the structural truth (see
             // companion comment in `graph_native` push above).
             declared_in_macro_type_arg: false,
-            carrier_provenance: None,
         });
     }
 }

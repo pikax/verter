@@ -1813,37 +1813,6 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
     source_hint: Option<&str>,
 ) {
-    // Refuse-to-enqueue for synthetic slot-binding carriers
-    // (`field.carrier_provenance.is_some()`). The
-    // slot-binding graph publisher's no-parser-branch mints a
-    // symbolic `TypeExpr::Ref { name: <binding_name> }` carrier
-    // whose `name` matches the binding identifier, NOT a real type
-    // alias declared anywhere in the workspace. Treating it as a
-    // public type ref would re-enter the registry through
-    // `can_resolve_registry_symbol` / `resolve_type_declaration`
-    // at `host_manage/component_meta_methods.rs:2384` / `:2583`
-    // looking for a type alias that does not exist, and on cache
-    // miss walk every owner-local prepared decl + every imported
-    // root looking for it. That walk is the structural cost driver
-    // codex's R22 verdict identified.
-    //
-    // Filtering AT THE PRODUCER (this collection site) is the
-    // codex-required pattern. Filtering at the consumer
-    // (`resolve_type_declaration` returning `Miss` on a missing
-    // alias) would still let the registry walk run, just with a
-    // negative cache outcome — the symbolic carrier never reaches
-    // a real type alias so the resolver walk is pure overhead.
-    //
-    // A real type alias with the same identifier name
-    // (`type foo = …`) does NOT have `carrier_provenance: Some(_)`
-    // — only the synthetic carrier producer sets that field. The
-    // refusal is therefore scoped exactly to synthetic carriers
-    // and cannot suppress a legitimate same-named alias's
-    // registration.
-    if field.carrier_provenance.is_some() {
-        return;
-    }
-
     // Typed-IR-Only Resolver Rule: when the post-expansion
     // `field.r#type` carries no actionable route (no `IndexedAccess`,
     // `Pick`, etc. shape the registry can route on), fall back to the

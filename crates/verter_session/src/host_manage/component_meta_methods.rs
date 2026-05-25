@@ -2220,7 +2220,37 @@ impl VerterHost {
                 );
             }
             let define_props_roots = collect_define_props_root_names(snapshot);
+            // Refuse-to-enqueue for synthetic slot-binding carriers
+            // (R22-fix sparse-sidecar variant). The slot-binding
+            // graph publisher's no-parser-branch mints a symbolic
+            // `TypeExpr::Ref { name: <binding_name> }` carrier whose
+            // `name` matches the binding identifier, NOT a real type
+            // alias declared anywhere in the workspace. Treating it
+            // as a public type ref would re-enter the registry
+            // through `can_resolve_registry_symbol` /
+            // `resolve_type_declaration` looking for a type alias
+            // that does not exist, and on cache miss walk every
+            // owner-local prepared decl + every imported root
+            // looking for it. That walk is the structural cost
+            // driver codex's R22 verdict identified.
+            //
+            // The carrier-aware lookup is sparse: the table is
+            // empty for components that never mint synthetic
+            // carriers, and props / emits paths never consult it.
+            // A real type alias with the same identifier name
+            // (`type foo = …`) is NOT recorded in the table — only
+            // the synthetic-carrier producer inserts entries. The
+            // refusal is therefore scoped exactly to synthetic
+            // carriers and cannot suppress a legitimate same-named
+            // alias's registration.
+            let carrier_table = &evaluated_types.carrier_provenance_table;
             for field in &evaluated_types.slot_bindings {
+                if carrier_table.contains(
+                    verter_semantic::analysis::type_expand::PublishedSurfaceKind::SlotBinding,
+                    field.name.as_str(),
+                ) {
+                    continue;
+                }
                 if slot_binding_targets_define_props_root(field, &define_props_roots) {
                     crate::capture_token::with_active_capture(|t| {
                         t.record_counter(

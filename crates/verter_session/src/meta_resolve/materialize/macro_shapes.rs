@@ -1125,7 +1125,6 @@ pub(crate) fn synthesize_define_props_shape_from_known_surface_with_authority(
                 optional: field.optional,
                 readonly: false,
                 declared_in_macro_type_arg: field.declared_in_macro_type_arg,
-                carrier_provenance: None,
             });
         }
     } else if let Some(resolved_macro) = resolved_macro {
@@ -1146,7 +1145,6 @@ pub(crate) fn synthesize_define_props_shape_from_known_surface_with_authority(
                     optional: field.optional,
                     readonly: false,
                     declared_in_macro_type_arg: field.declared_in_macro_type_arg,
-                    carrier_provenance: None,
                 });
                 continue;
             }
@@ -1166,7 +1164,6 @@ pub(crate) fn synthesize_define_props_shape_from_known_surface_with_authority(
                 optional: prop.is_optional,
                 readonly: false,
                 declared_in_macro_type_arg: prop.declared_in_macro_type_arg,
-                carrier_provenance: None,
             });
         }
     } else {
@@ -1346,7 +1343,6 @@ pub(crate) fn synthesize_define_emits_shape_from_known_surface(
                 optional: false,
                 readonly: false,
                 declared_in_macro_type_arg: emit.declared_in_macro_type_arg,
-                carrier_provenance: None,
             });
         }
 
@@ -1397,7 +1393,6 @@ pub(crate) fn synthesize_define_emits_shape_from_known_surface(
                     optional: false,
                     readonly: false,
                     declared_in_macro_type_arg: field.declared_in_macro_type_arg,
-                    carrier_provenance: None,
                 });
                 continue;
             }
@@ -1426,7 +1421,6 @@ pub(crate) fn synthesize_define_emits_shape_from_known_surface(
                 optional: false,
                 readonly: false,
                 declared_in_macro_type_arg: false,
-                carrier_provenance: None,
             });
         }
     } else {
@@ -1482,7 +1476,6 @@ pub(crate) fn synthesize_define_slots_shape_from_known_surface(
             optional: !slot.is_required,
             readonly: false,
             declared_in_macro_type_arg: false,
-            carrier_provenance: None,
         })
         .collect();
 
@@ -1625,7 +1618,6 @@ pub(crate) fn registry_entry_to_expanded_shape(
                 optional: property.optional,
                 readonly: property.readonly,
                 declared_in_macro_type_arg: false,
-                carrier_provenance: None,
             }),
             ObjectMember::Method(method) => call_signatures.push(ExpandedCallSignature {
                 parameters: method

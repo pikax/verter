@@ -1471,7 +1471,6 @@ where
                         shallow_type_expr,
                         shallow_type_expr_scope,
                         declared_in_macro_type_arg: field.declared_in_macro_type_arg,
-                        carrier_provenance: None,
                     });
                 }
             }
@@ -1538,7 +1537,6 @@ where
                         // ExpandedField layer because the producer type
                         // does not encode the distinction.
                         declared_in_macro_type_arg: false,
-                        carrier_provenance: None,
                     });
                 }
             }
@@ -1608,7 +1606,6 @@ where
                                 // `declared_in_macro_type_arg = false` here
                                 // is the structural truth.
                                 declared_in_macro_type_arg: false,
-                                carrier_provenance: None,
                             });
                         }
                     }
@@ -1675,7 +1672,6 @@ where
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
                 declared_in_macro_type_arg: false,
-                carrier_provenance: None,
             });
         }
     }
