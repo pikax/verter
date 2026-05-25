@@ -39,7 +39,7 @@ pub struct ExpandedProperty {
     /// from the upstream `SurfaceMember` / `ProjectedMember` source.
     #[serde(default)]
     pub declared_in_macro_type_arg: bool,
-    /// Block 6.j R22 — provenance sidecar for synthetic carrier
+    /// Provenance sidecar for synthetic carrier
     /// references mirrored into the `define_props` / `define_emits` /
     /// `define_slots` shape. `Some(_)` only when the source
     /// `ExpandedField` carried a `CarrierProvenance`; otherwise
@@ -238,17 +238,16 @@ pub struct ExpandedComponentTypes {
 }
 
 /// Opaque graph-node identifier for the slot-binding carrier verdict
-/// cache (Block 6.j R22). `verter_semantic` treats this as an opaque
-/// `u64`; the downstream `verter_session` carrier-verdict cache
-/// projects it back to its own `SemanticNodeId` newtype for cache-key
-/// lookup.
+/// cache. `verter_semantic` treats this as an opaque `u64`; the
+/// downstream `verter_session` carrier-verdict cache projects it back
+/// to its own `SemanticNodeId` newtype for cache-key lookup.
 ///
 /// The value is the inner `u64` of the
 /// `verter_session::semantic_query::SemanticNodeId` the producer
 /// minted the symbolic carrier from. Together with the owner scope,
 /// this disambiguates same-named bindings across distinct slots
-/// inside a single component, preventing the name-only cache key
-/// poisoning codex's R22 verdict flagged.
+/// inside a single component, preventing the name-only cache-key
+/// poisoning that a same-named real type alias would otherwise cause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CarrierValueNodeId(pub u64);
 
@@ -271,10 +270,10 @@ pub enum PublishedSurfaceKind {
 /// graph publisher produces when no parser-path `binding_expr` is
 /// available for a graph-native `(slot_name, binding_name)` pair.
 ///
-/// Block 6.j R22 cache-identity contract: the carrier-verdict cache
-/// keys on the full identity (scope, surface, slot name, binding
-/// name, value-node) so a synthetic slot parameter named `foo`
-/// cannot poison or be poisoned by:
+/// Cache-identity contract: the carrier-verdict cache keys on the
+/// full identity (scope, surface, slot name, binding name,
+/// value-node) so a synthetic slot parameter named `foo` cannot
+/// poison or be poisoned by:
 ///
 /// * a real workspace-owned `type foo = …` alias with the same name,
 /// * a different slot's same-named binding (different `value_node`),
@@ -346,7 +345,7 @@ pub struct ExpandedField {
     /// macro provenance.
     #[serde(default)]
     pub declared_in_macro_type_arg: bool,
-    /// Block 6.j R22 — provenance sidecar for synthetic
+    /// Provenance sidecar for synthetic
     /// `TypeExpr::Ref { name }` carriers produced by the slot-binding
     /// graph publisher when no parser-path `binding_expr` is
     /// available. `Some(_)` for synthetic carriers; `None` for every

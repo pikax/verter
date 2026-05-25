@@ -168,3 +168,116 @@ fn indexed_access_slot_binding_does_not_expand_nested_callback_payload() {
         binding_json.len(),
     );
 }
+
+/// Block 6.j R22 — producer-side discriminating test.
+///
+/// The slot-binding graph publisher's no-parser-binding branch
+/// (`publish_merged_bindings` in
+/// `crates/verter_session/src/meta_resolve/slot_binding_graph.rs`)
+/// mints a symbolic `TypeExpr::Ref { name }` carrier when the parser
+/// has no `binding_expr` for a graph-native `(slot_name, binding_name)`
+/// pair. R22 requires that branch to ALSO emit a `CarrierProvenance`
+/// sidecar so the downstream verdict cache and registry-collection
+/// short-circuits can identify the synthetic carrier without
+/// reparsing.
+///
+/// Discrimination: reverting the `Some(provenance)` emission (back to
+/// `None` for the no-parser branch) makes this assertion FAIL while
+/// the existing
+/// `indexed_access_slot_binding_does_not_expand_nested_callback_payload`
+/// invariant continues to PASS — proving the provenance is the
+/// distinguishing fact, not the carrier shape.
+#[test]
+fn synthetic_slot_binding_carrier_emits_provenance_sidecar() {
+    use verter_semantic::analysis::type_expand::PublishedSurfaceKind;
+
+    let host = build_host();
+    upsert_ts(&host, "/toolkit.ts", TOOLKIT_TS);
+    upsert_vue(&host, "/GenericPanel.vue", GENERIC_PANEL_VUE);
+
+    let expanded = host
+        .evaluate_types("/GenericPanel.vue")
+        .expect("evaluate_types must return for the GenericPanel fixture");
+
+    let synthetic_carriers: Vec<_> = expanded
+        .slot_bindings
+        .iter()
+        .filter(|f| f.carrier_provenance.is_some())
+        .collect();
+
+    assert!(
+        !synthetic_carriers.is_empty(),
+        "GenericPanel.vue's generic `defineSlots<PanelSlots<...>>()` is the canonical \
+         no-parser-binding fixture. The R22 producer MUST emit at least one \
+         `carrier_provenance: Some(_)` on `expanded.slot_bindings` here. None observed — \
+         the no-parser branch in `publish_merged_bindings` is silently skipping the \
+         sidecar emission. published slot_bindings={:#?}",
+        expanded
+            .slot_bindings
+            .iter()
+            .map(|f| &f.name)
+            .collect::<Vec<_>>()
+    );
+
+    for field in &synthetic_carriers {
+        let provenance = field.carrier_provenance.as_ref().expect("filtered above");
+
+        // The carrier_provenance.binding_name must match the
+        // `TypeExpr::Ref { name }` shape that gets published. Codex's
+        // TOP RISK ("name-only key collision") demands these stay
+        // structurally tied — a divergence would let the cache key
+        // and the published carrier disagree.
+        let ref_name = match &field.r#type {
+            verter_type_expr::TypeExpr::Ref {
+                name,
+                type_arguments,
+            } if type_arguments.is_empty() => Some(name.clone()),
+            _ => None,
+        };
+
+        assert_eq!(
+            ref_name.as_deref(),
+            Some(provenance.binding_name.as_ref()),
+            "synthetic carrier's `Ref` name must match `carrier_provenance.binding_name`. \
+             Field `{}` has type {:?} but provenance says binding_name=`{}`. Without this \
+             invariant the verdict cache cannot correlate published carriers with their \
+             cache keys.",
+            field.name,
+            field.r#type,
+            provenance.binding_name,
+        );
+
+        assert!(
+            matches!(provenance.surface_kind, PublishedSurfaceKind::SlotBinding),
+            "synthetic slot-binding carrier must be tagged SlotBinding; field `{}` got {:?}",
+            field.name,
+            provenance.surface_kind,
+        );
+
+        // The slot name is structurally `<slot>.<binding>`; the
+        // provenance.slot_name MUST point at the `<slot>` half.
+        let (slot_label, binding_label) = field
+            .name
+            .split_once('.')
+            .expect("slot-binding field names are `slot.binding`");
+        assert_eq!(
+            provenance.slot_name.as_deref(),
+            Some(slot_label),
+            "provenance.slot_name must match the field's slot half for `{}`",
+            field.name,
+        );
+        assert_eq!(
+            provenance.binding_name.as_ref(),
+            binding_label,
+            "provenance.binding_name must match the field's binding half for `{}`",
+            field.name,
+        );
+
+        assert!(
+            provenance.scope_canonical_id.contains("GenericPanel.vue"),
+            "provenance scope must point to the publishing component; got `{}` for field `{}`",
+            provenance.scope_canonical_id,
+            field.name,
+        );
+    }
+}
