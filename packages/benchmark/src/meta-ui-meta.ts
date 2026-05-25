@@ -1,19 +1,33 @@
-function camelCase(input: string): string {
-  return input
-    .replace(/^[^a-zA-Z0-9]+/, "")
-    .replace(/[^a-zA-Z0-9]+([a-zA-Z0-9])/g, (_match, char: string) => char.toUpperCase())
-    .replace(/^[A-Z]/, (char) => char.toLowerCase());
-}
+import { refinedPropSurvives } from "@verter/component-meta/published-surface";
 
 export function refineMetaForBenchmark(meta: any) {
-  const eventProps = new Set(
-    (meta?.events ?? []).map((event: any) => camelCase(`on_${event.name}`)),
-  );
-  // Vue built-in attrs that vue-component-meta excludes via global flag
-  const vueBuiltinAttrs = new Set(["class", "style", "key", "ref"]);
+  // Derive props through `PublishedSurfacePolicy::Refined` — the
+  // single architectural source for the structural projection
+  // rules (no name-prefix heuristics, no thresholds). Producer-
+  // flagged `prop.global`, `on{Event}`-shadow-prop, and Vue
+  // intrinsic filtering live in `@verter/component-meta/published-surface`
+  // (TS port of Rust `verter_audit::names_for_policy`).
+  //
+  // Refined treats a prop as undeclared-in-macro-type-arg unless
+  // the producer has tagged it; the bench corpus's existing
+  // `meta?.props[i]` payload does NOT yet carry that fact, so we
+  // pass `declared_in_macro_type_arg: false` for every prop —
+  // matching the bench's prior behaviour (drop `class`/`style`/`onSubmit`
+  // when they appear alongside the corresponding emit). When the
+  // producer threads `declared_in_macro_type_arg` through the FFI
+  // payload, callers automatically benefit from the override
+  // semantics.
+  const eventNames = (meta?.events ?? []).map((event: any) => String(event.name));
   const props = (meta?.props ?? [])
-    .filter(
-      (prop: any) => !prop.global && !eventProps.has(prop.name) && !vueBuiltinAttrs.has(prop.name),
+    .filter((prop: any) =>
+      refinedPropSurvives(
+        {
+          name: prop.name,
+          declared_in_macro_type_arg: false,
+          global: Boolean(prop.global),
+        },
+        eventNames,
+      ),
     )
     .sort((left: any, right: any) => {
       if (!left.required && right.required) {

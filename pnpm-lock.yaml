@@ -145,6 +145,9 @@ importers:
       '@verter/type-ir':
         specifier: workspace:*
         version: link:../type-ir
+      '@verter/types':
+        specifier: workspace:^
+        version: link:../types
       '@verter/wasm':
         specifier: workspace:*
         version: link:../wasm

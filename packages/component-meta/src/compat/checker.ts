@@ -17,6 +17,7 @@ import {
   nativeTypeRegistryToMap,
 } from "../native-component-meta.js";
 import { projectDeclaredOnlyNativeResult } from "./native-projection.js";
+import { compatSlotSurvives } from "../published-surface.js";
 import type { TypeDescriptor } from "@verter/type-ir";
 import type { VerterHostAdapter } from "../host-adapter.js";
 import type {
@@ -56,28 +57,6 @@ import type {
   ProjectSession,
 } from "../runtime/index.js";
 
-const COMPAT_BLOCKED_SLOT_NAMES = new Set([
-  "type",
-  "props",
-  "key",
-  "ref",
-  "scopeId",
-  "children",
-  "component",
-  "dirs",
-  "transition",
-  "el",
-  "placeholder",
-  "anchor",
-  "target",
-  "targetStart",
-  "targetAnchor",
-  "suspense",
-  "shapeFlag",
-  "patchFlag",
-  "appContext",
-]);
-
 /** Maximum depth for recursive registry ref resolution in compat display.
  *  Kept at 1 to preserve the shallow-resolution invariant. */
 const COMPAT_MAX_REGISTRY_DISPLAY_DEPTH = 1;
@@ -99,7 +78,7 @@ let compatBrandedStringObjectSchemaCache:
   | null
   | undefined;
 function isCompatVisibleSlotName(name: string): boolean {
-  return !COMPAT_BLOCKED_SLOT_NAMES.has(name);
+  return compatSlotSurvives(name);
 }
 
 /**
@@ -1314,12 +1293,7 @@ function typeDescriptorToCompatDisplay(
         if (label) {
           return `${label}: ${typeDescriptorToString(type)}`;
         }
-        return typeDescriptorToCompatDisplay(
-          type,
-          typeRegistry,
-          visited,
-          registryResolutionDepth,
-        );
+        return typeDescriptorToCompatDisplay(type, typeRegistry, visited, registryResolutionDepth);
       });
       return `[${rendered.join(", ")}]`;
     }

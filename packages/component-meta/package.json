@@ -64,6 +64,11 @@
       "types": "./dist/compat/index.d.ts",
       "import": "./dist/compat/index.js",
       "default": "./dist/compat/index.js"
+    },
+    "./published-surface": {
+      "types": "./dist/published-surface.d.ts",
+      "import": "./dist/published-surface.js",
+      "default": "./dist/published-surface.js"
     }
   },
   "scripts": {
@@ -77,7 +82,8 @@
     "@verter/language-shared": "workspace:*",
     "@verter/native": "workspace:*",
     "@verter/proto": "workspace:*",
-    "@verter/type-ir": "workspace:*"
+    "@verter/type-ir": "workspace:*",
+    "@verter/types": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",
