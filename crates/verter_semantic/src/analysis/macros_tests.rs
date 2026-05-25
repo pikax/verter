@@ -2534,6 +2534,7 @@ fn build_expanded_type_expr_consumes_type_expr_field_directly_without_reparse() 
         tags: Vec::new(),
         resolution_source: TypeResolutionSource::Rust,
         resolution_error: None,
+        declared_in_macro_type_arg: false,
     }];
 
     let result = super::build_expanded_type_expr(&fields);
@@ -2577,6 +2578,7 @@ fn build_expanded_type_expr_consumes_type_expr_field_directly_without_reparse() 
         tags: Vec::new(),
         resolution_source: TypeResolutionSource::Rust,
         resolution_error: None,
+        declared_in_macro_type_arg: false,
     }];
     let result_no_typed = super::build_expanded_type_expr(&fields_no_typed);
     let expected_no_typed = TypeExpr::Object(Arc::new(ObjectExpr {
@@ -2606,6 +2608,7 @@ fn build_expanded_type_expr_consumes_type_expr_field_directly_without_reparse() 
         tags: Vec::new(),
         resolution_source: TypeResolutionSource::Rust,
         resolution_error: None,
+        declared_in_macro_type_arg: false,
     }];
     let result_none = super::build_expanded_type_expr(&fields_none);
     let expected_none = TypeExpr::Object(Arc::new(ObjectExpr {

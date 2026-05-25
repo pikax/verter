@@ -1017,6 +1017,17 @@ pub struct AnalyzedPropField {
     /// If `resolution_source` is `Unresolved`, explains why.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution_error: Option<String>,
+    /// True iff the SFC author explicitly wrote this prop name as a member of
+    /// the `defineProps<T>()` type argument's own body (inline `TSTypeLiteral`,
+    /// the directly-referenced interface's own body, an explicit Object arm of
+    /// an intersection literal, or the runtime object / array form). False
+    /// when the prop only reaches the surface via heritage (`extends`),
+    /// utility-type expansion (`Omit`, `Pick`, etc.), or intersection arms
+    /// resolved through external references. Consumed by
+    /// `verter_audit::PublishedSurfacePolicy::Refined` to distinguish "author
+    /// asked for this name" from "this name arrived via inheritance".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub declared_in_macro_type_arg: bool,
 }
 
 fn is_rust_resolution(src: &TypeResolutionSource) -> bool {

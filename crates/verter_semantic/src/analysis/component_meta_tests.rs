@@ -83,6 +83,7 @@ fn make_prop(name: &str, type_ann: Option<&str>, optional: bool) -> AnalyzedProp
         resolution_error: None,
         type_expr,
         type_expr_scope,
+        declared_in_macro_type_arg: false,
     }
 }
 

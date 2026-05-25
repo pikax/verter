@@ -311,29 +311,49 @@ fn build_local_type_registry<'a>(program: &'a Program<'a>) -> FxHashMap<String, 
     registry
 }
 
-/// Extract prop fields from an interface body.
+/// Extract prop fields from an interface body. The `declared_in_macro_type_arg`
+/// argument is propagated unchanged — callers know the contextual provenance
+/// of the body being walked.
 fn extract_fields_from_interface_body(
     body: &TSInterfaceBody<'_>,
     source: &str,
     comments: &[Comment],
+    declared_in_macro_type_arg: bool,
 ) -> Vec<AnalyzedPropField> {
-    extract_fields_from_interface_body_like(&body.body, source, comments)
+    extract_fields_from_interface_body_like(
+        &body.body,
+        source,
+        comments,
+        declared_in_macro_type_arg,
+    )
 }
 
 /// Resolve prop fields from a TSType using the local type registry.
 /// Returns `None` if the type cannot be resolved locally (triggers TS fallback).
+///
+/// `declared_in_macro_type_arg` is the provenance fact for every member
+/// extracted from this type's own body. The recursive walk preserves it
+/// through utility-type unwraps (`Partial`, `Required`), inline-literal arms
+/// of intersections, and inline `TSTypeLiteral` direct expansions. When the
+/// walker enters a `TSTypeReference` to a local interface, its heritage
+/// (`extends`) parents are resolved with `declared_in_macro_type_arg = false`
+/// (those names arrive via inheritance), while the referenced interface's own
+/// body inherits the caller's provenance (the author wrote the name in their
+/// declared shape, even if via a local-alias chain).
 fn resolve_type_to_prop_fields(
     ts_type: &TSType<'_>,
     registry: &FxHashMap<String, LocalTypeDecl<'_>>,
     source: &str,
     comments: &[Comment],
     visited: &mut FxHashSet<String>,
+    declared_in_macro_type_arg: bool,
 ) -> Option<Vec<AnalyzedPropField>> {
     match ts_type {
         TSType::TSTypeLiteral(literal) => Some(extract_fields_from_interface_body_like(
             &literal.members,
             source,
             comments,
+            declared_in_macro_type_arg,
         )),
         TSType::TSTypeReference(ref_type) => {
             let name = type_name_to_string(&ref_type.type_name);
@@ -350,7 +370,12 @@ fn resolve_type_to_prop_fields(
                         if let Some(first) = type_args.params.first() {
                             visited.insert(name.clone());
                             let result = resolve_type_to_prop_fields(
-                                first, registry, source, comments, visited,
+                                first,
+                                registry,
+                                source,
+                                comments,
+                                visited,
+                                declared_in_macro_type_arg,
                             );
                             visited.remove(&name);
                             return result.map(|fields| {
@@ -368,7 +393,12 @@ fn resolve_type_to_prop_fields(
                         if let Some(first) = type_args.params.first() {
                             visited.insert(name.clone());
                             let result = resolve_type_to_prop_fields(
-                                first, registry, source, comments, visited,
+                                first,
+                                registry,
+                                source,
+                                comments,
+                                visited,
+                                declared_in_macro_type_arg,
                             );
                             visited.remove(&name);
                             return result.map(|fields| {
@@ -397,7 +427,8 @@ fn resolve_type_to_prop_fields(
                     // Resolve extends chain via direct registry lookup.
                     // Skip unresolvable heritage clauses rather than aborting,
                     // so that successfully-resolved parents and own fields
-                    // are still returned.
+                    // are still returned. Heritage members are NOT declared
+                    // in the macro type arg.
                     let mut all_fields = Vec::new();
                     let mut seen_names = FxHashSet::default();
                     for heritage in *extends {
@@ -414,6 +445,7 @@ fn resolve_type_to_prop_fields(
                             source,
                             comments,
                             visited,
+                            false,
                         ) else {
                             continue;
                         };
@@ -423,8 +455,16 @@ fn resolve_type_to_prop_fields(
                             }
                         }
                     }
-                    // Add own fields (child overrides parent)
-                    let own_fields = extract_fields_from_interface_body(body, source, comments);
+                    // Add own fields (child overrides parent). The interface's own
+                    // body members preserve the caller's provenance — they are
+                    // members the author wrote in the type they referenced from
+                    // the macro's T argument.
+                    let own_fields = extract_fields_from_interface_body(
+                        body,
+                        source,
+                        comments,
+                        declared_in_macro_type_arg,
+                    );
                     for field in own_fields {
                         if seen_names.insert(field.name.clone()) {
                             all_fields.push(field);
@@ -432,9 +472,14 @@ fn resolve_type_to_prop_fields(
                     }
                     Some(all_fields)
                 }
-                Some(LocalTypeDecl::Alias(aliased_type)) => {
-                    resolve_type_to_prop_fields(aliased_type, registry, source, comments, visited)
-                }
+                Some(LocalTypeDecl::Alias(aliased_type)) => resolve_type_to_prop_fields(
+                    aliased_type,
+                    registry,
+                    source,
+                    comments,
+                    visited,
+                    declared_in_macro_type_arg,
+                ),
                 Some(LocalTypeDecl::Class) => None, // Unresolvable
                 None => None,                       // Not found locally
             };
@@ -442,24 +487,37 @@ fn resolve_type_to_prop_fields(
             result
         }
         TSType::TSIntersectionType(intersection) => {
+            // TypeScript intersection semantics: `A & B` publishes the
+            // union of A's and B's members. An arm we cannot resolve
+            // locally (`None`) contributes nothing but MUST NOT
+            // invalidate the contributions of resolvable arms — the
+            // same non-fatal-unsupported merge the prepared-surface
+            // projector applies on the cross-file path.
             let mut all_fields = Vec::new();
             let mut seen_names = FxHashSet::default();
+            let mut any_resolved = false;
             for t in &intersection.types {
-                match resolve_type_to_prop_fields(t, registry, source, comments, visited) {
-                    Some(fields) => {
-                        for field in fields {
-                            if seen_names.insert(field.name.clone()) {
-                                all_fields.push(field);
-                            }
+                if let Some(fields) = resolve_type_to_prop_fields(
+                    t,
+                    registry,
+                    source,
+                    comments,
+                    visited,
+                    declared_in_macro_type_arg,
+                ) {
+                    any_resolved = true;
+                    for field in fields {
+                        if seen_names.insert(field.name.clone()) {
+                            all_fields.push(field);
                         }
-                    }
-                    None => {
-                        // One branch unresolvable — mark the entire intersection as unresolvable
-                        return None;
                     }
                 }
             }
-            Some(all_fields)
+            if any_resolved {
+                Some(all_fields)
+            } else {
+                None
+            }
         }
         TSType::TSUnionType(_) => None, // Union types aren't prop field sources
         _ => None,
@@ -467,10 +525,16 @@ fn resolve_type_to_prop_fields(
 }
 
 /// Extract prop fields from TSSignature members (shared between TSTypeLiteral and interface bodies).
+///
+/// `declared_in_macro_type_arg` is propagated to every constructed
+/// `AnalyzedPropField` — callers know whether the members belong to the SFC
+/// author's own `defineProps<T>()` body shape (`true`) or to inherited /
+/// heritage / utility-expansion code (`false`).
 fn extract_fields_from_interface_body_like(
     members: &[TSSignature<'_>],
     source: &str,
     comments: &[Comment],
+    declared_in_macro_type_arg: bool,
 ) -> Vec<AnalyzedPropField> {
     members
         .iter()
@@ -516,6 +580,7 @@ fn extract_fields_from_interface_body_like(
                     resolution_error: None,
                     type_expr,
                     type_expr_scope,
+                    declared_in_macro_type_arg,
                 })
             } else {
                 None
@@ -628,9 +693,14 @@ fn resolve_local_define_props(
     let mac_start = mac.span.start;
     if let Some(type_param) = type_params.iter().find(|tp| tp.0 == mac_start) {
         let direct_local_root_names = collect_direct_local_macro_root_names(type_param.1);
-        if let Some(fields) =
-            resolve_type_to_prop_fields(type_param.1, registry, source, comments, &mut visited)
-        {
+        if let Some(fields) = resolve_type_to_prop_fields(
+            type_param.1,
+            registry,
+            source,
+            comments,
+            &mut visited,
+            true,
+        ) {
             for type_ref in &direct_local_root_names {
                 if let Some(decl) = registry.get(type_ref.as_str()) {
                     visited.clear();
@@ -641,6 +711,7 @@ fn resolve_local_define_props(
                         source,
                         comments,
                         &mut visited,
+                        true,
                     ) {
                         let expanded = build_expanded_type_text(&ref_fields);
                         let span = match decl {
@@ -671,6 +742,7 @@ fn resolve_local_define_props(
                 source,
                 comments,
                 &mut visited,
+                true,
             ) {
                 mac.prop_fields = fields;
             }
@@ -681,9 +753,15 @@ fn resolve_local_define_props(
         if mac.type_references.len() == 1 {
             let type_ref = &mac.type_references[0];
             if let Some(decl) = registry.get(type_ref.as_str()) {
-                if let Some(fields) =
-                    resolve_interface_decl(type_ref, decl, registry, source, comments, &mut visited)
-                {
+                if let Some(fields) = resolve_interface_decl(
+                    type_ref,
+                    decl,
+                    registry,
+                    source,
+                    comments,
+                    &mut visited,
+                    true,
+                ) {
                     let expanded = build_expanded_type_text(&fields);
                     let span = match decl {
                         LocalTypeDecl::Interface { body, .. } => body.span.into(),
@@ -710,6 +788,7 @@ fn resolve_local_define_props(
                         source,
                         comments,
                         &mut visited,
+                        true,
                     ) {
                         mac.prop_fields = fields;
                     }
@@ -770,14 +849,23 @@ fn resolve_local_decl_own_prop_fields(
     source: &str,
     comments: &[Comment],
     visited: &mut FxHashSet<String>,
+    declared_in_macro_type_arg: bool,
 ) -> Option<Vec<AnalyzedPropField>> {
     match decl {
-        LocalTypeDecl::Interface { body, .. } => {
-            Some(extract_fields_from_interface_body(body, source, comments))
-        }
-        LocalTypeDecl::Alias(aliased_type) => {
-            resolve_type_to_local_own_prop_fields(aliased_type, registry, source, comments, visited)
-        }
+        LocalTypeDecl::Interface { body, .. } => Some(extract_fields_from_interface_body(
+            body,
+            source,
+            comments,
+            declared_in_macro_type_arg,
+        )),
+        LocalTypeDecl::Alias(aliased_type) => resolve_type_to_local_own_prop_fields(
+            aliased_type,
+            registry,
+            source,
+            comments,
+            visited,
+            declared_in_macro_type_arg,
+        ),
         LocalTypeDecl::Class => None,
     }
 }
@@ -788,12 +876,14 @@ fn resolve_type_to_local_own_prop_fields(
     source: &str,
     comments: &[Comment],
     visited: &mut FxHashSet<String>,
+    declared_in_macro_type_arg: bool,
 ) -> Option<Vec<AnalyzedPropField>> {
     match ts_type {
         TSType::TSTypeLiteral(literal) => Some(extract_fields_from_interface_body_like(
             &literal.members,
             source,
             comments,
+            declared_in_macro_type_arg,
         )),
         TSType::TSParenthesizedType(parenthesized) => resolve_type_to_local_own_prop_fields(
             &parenthesized.type_annotation,
@@ -801,6 +891,7 @@ fn resolve_type_to_local_own_prop_fields(
             source,
             comments,
             visited,
+            declared_in_macro_type_arg,
         ),
         TSType::TSTypeReference(type_ref) => {
             let name = type_name_to_string(&type_ref.type_name);
@@ -809,7 +900,12 @@ fn resolve_type_to_local_own_prop_fields(
             }
             let result = match registry.get(&name) {
                 Some(LocalTypeDecl::Interface { body, .. }) => {
-                    Some(extract_fields_from_interface_body(body, source, comments))
+                    Some(extract_fields_from_interface_body(
+                        body,
+                        source,
+                        comments,
+                        declared_in_macro_type_arg,
+                    ))
                 }
                 Some(LocalTypeDecl::Alias(aliased_type)) => resolve_type_to_local_own_prop_fields(
                     aliased_type,
@@ -817,6 +913,7 @@ fn resolve_type_to_local_own_prop_fields(
                     source,
                     comments,
                     visited,
+                    declared_in_macro_type_arg,
                 ),
                 Some(LocalTypeDecl::Class) | None => None,
             };
@@ -827,9 +924,14 @@ fn resolve_type_to_local_own_prop_fields(
             let mut all_fields = Vec::new();
             let mut seen_names = FxHashSet::default();
             for ty in &intersection.types {
-                if let Some(fields) =
-                    resolve_type_to_local_own_prop_fields(ty, registry, source, comments, visited)
-                {
+                if let Some(fields) = resolve_type_to_local_own_prop_fields(
+                    ty,
+                    registry,
+                    source,
+                    comments,
+                    visited,
+                    declared_in_macro_type_arg,
+                ) {
                     for field in fields {
                         if seen_names.insert(field.name.clone()) {
                             all_fields.push(field);
@@ -973,6 +1075,10 @@ fn collect_macro_call_from_expr<'a>(
 }
 
 /// Resolve an interface declaration to prop fields (recursive helper).
+///
+/// `declared_in_macro_type_arg` flows to the interface's own body members.
+/// Heritage (`extends`) parents are always resolved with `false` — their
+/// members arrived via inheritance, not via the SFC author's declared shape.
 fn resolve_interface_decl(
     name: &str,
     decl: &LocalTypeDecl<'_>,
@@ -980,6 +1086,7 @@ fn resolve_interface_decl(
     source: &str,
     comments: &[Comment],
     visited: &mut FxHashSet<String>,
+    declared_in_macro_type_arg: bool,
 ) -> Option<Vec<AnalyzedPropField>> {
     if visited.contains(name) {
         return Some(Vec::new());
@@ -1005,6 +1112,7 @@ fn resolve_interface_decl(
                     source,
                     comments,
                     visited,
+                    false,
                 )?;
                 for field in parent_fields {
                     if seen_names.insert(field.name.clone()) {
@@ -1013,7 +1121,12 @@ fn resolve_interface_decl(
                 }
             }
 
-            let own_fields = extract_fields_from_interface_body(body, source, comments);
+            let own_fields = extract_fields_from_interface_body(
+                body,
+                source,
+                comments,
+                declared_in_macro_type_arg,
+            );
             for field in own_fields {
                 if seen_names.insert(field.name.clone()) {
                     fields.push(field);
@@ -1021,9 +1134,14 @@ fn resolve_interface_decl(
             }
             Some(fields)
         }
-        LocalTypeDecl::Alias(aliased_type) => {
-            resolve_type_to_prop_fields(aliased_type, registry, source, comments, visited)
-        }
+        LocalTypeDecl::Alias(aliased_type) => resolve_type_to_prop_fields(
+            aliased_type,
+            registry,
+            source,
+            comments,
+            visited,
+            declared_in_macro_type_arg,
+        ),
         LocalTypeDecl::Class => None,
     };
     visited.remove(name);
@@ -1508,11 +1626,6 @@ fn try_extract_macro(
     }
 }
 
-/// Extract the type parameter from `defineModel<T>()` as a single `AnalyzedPropField`.
-///
-/// Unlike `defineProps<{ count: number }>()` where the type param is a `TSTypeLiteral`,
-/// `defineModel<string>()` has a single type (e.g., `TSStringKeyword`, `TSTypeReference`).
-/// We extract the source text of the first type param as the `type_annotation`.
 fn extract_define_model_type(
     call: &CallExpression<'_>,
     source: &str,
@@ -1554,6 +1667,9 @@ fn extract_define_model_type(
         resolution_error: None,
         type_expr,
         type_expr_scope,
+        // `defineModel<T>()` declares the model prop name explicitly at the
+        // macro site.
+        declared_in_macro_type_arg: true,
     }]
 }
 
@@ -1683,16 +1799,21 @@ fn extract_prop_fields_from_type(
     match ts_type {
         // Inline `defineProps<{ count: number; ... }>()` — delegate to the
         // shared interface-body-like extractor so every prop carries the
-        // typed `*_expr` form lowered via `lower_ts_type`.
+        // typed `*_expr` form lowered via `lower_ts_type`. Members of an
+        // inline literal at the macro type arg are declared by the author.
         TSType::TSTypeLiteral(literal) => {
-            extract_fields_from_interface_body_like(&literal.members, source, comments)
+            extract_fields_from_interface_body_like(&literal.members, source, comments, true)
         }
         TSType::TSTypeReference(_) => {
             // Interface reference — can't resolve inline, leave empty
             Vec::new()
         }
         TSType::TSIntersectionType(intersection) => {
-            // Merge fields from all branches
+            // Merge fields from all branches. Inline literal arms (`{ ... }`)
+            // contribute author-declared members; reference arms return empty
+            // here and are resolved later by `resolve_macro_type_references`,
+            // where their provenance is preserved based on whether the
+            // referenced declaration is local-author-declared or external.
             intersection
                 .types
                 .iter()
@@ -1899,6 +2020,9 @@ fn extract_prop_fields_from_runtime(
                     resolution_error: None,
                     type_expr,
                     type_expr_scope,
+                    // Runtime object form — the author wrote this prop name
+                    // directly as a key in `defineProps({ ... })`.
+                    declared_in_macro_type_arg: true,
                 });
             }
 
@@ -1926,6 +2050,9 @@ fn extract_prop_fields_from_runtime(
                             resolution_error: None,
                             type_expr: None,
                             type_expr_scope: None,
+                            // Runtime array form — the author wrote the name
+                            // directly as an array entry in `defineProps([...])`.
+                            declared_in_macro_type_arg: true,
                         })
                     } else {
                         None

@@ -1077,6 +1077,7 @@ fn make_synth_typed_prop(name: &str, typed: TypeExpr) -> AnalyzedPropField {
         tags: Vec::new(),
         resolution_source: TypeResolutionSource::Rust,
         resolution_error: None,
+        declared_in_macro_type_arg: false,
     }
 }
 
@@ -1304,6 +1305,7 @@ fn expand_macro_types_skips_field_when_typed_form_is_absent_or_unknown() {
             tags: Vec::new(),
             resolution_source: TypeResolutionSource::Rust,
             resolution_error: None,
+            declared_in_macro_type_arg: false,
         }],
         Vec::new(),
         Vec::new(),

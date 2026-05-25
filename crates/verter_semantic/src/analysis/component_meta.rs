@@ -164,6 +164,15 @@ pub struct PropAnalysis {
     pub default_value: Option<String>,
     pub description: Option<String>,
     pub tags: Vec<JsdocTag>,
+    /// True iff the SFC author explicitly wrote this prop name as a member
+    /// of the `defineProps<T>()` type argument's own body. Propagates the
+    /// per-prop provenance fact carried by [`AnalyzedPropField`] so the
+    /// `verter_audit::PublishedSurfacePolicy::Refined` projection can
+    /// distinguish author-declared names (Vue intrinsics like `class` /
+    /// `style` and `on{Event}` shadows of declared emits the author *kept*
+    /// on purpose) from names that arrived via heritage / utility-type
+    /// expansion (HTMLAttributes inheritance, etc.).
+    pub declared_in_macro_type_arg: bool,
 }
 
 /// Analyzed event from `defineEmits`.
@@ -1449,6 +1458,30 @@ fn extract_props_from_macro(
                     default_value,
                     description,
                     tags,
+                    // The analyzer-side `AnalyzedPropField` carries the
+                    // author-declared fact. When the evaluator produces a
+                    // name the analyzer also saw (the author wrote it in
+                    // the macro T's own body / referenced interface body),
+                    // preserve it. When the name appears ONLY through
+                    // cross-file expansion (heritage / Pick / Omit / etc.),
+                    // the analyzer never saw it so `declared = false`.
+                    //
+                    // TODO(follow-up): for cross-file imported interfaces
+                    // (`import { Props } from './x'; defineProps<Props>()`),
+                    // the analyzer's local registry never sees `Props`, so
+                    // the source-field lookup always misses and the fact
+                    // is forced to `false` for every member. Threading
+                    // provenance through the cross-file resolver
+                    // (`prepared_surface.rs` → `SurfaceMember` →
+                    // `surface_member_to_expanded_field` →
+                    // `ExpandedField.declared_in_macro_type_arg`) is the
+                    // architecturally-correct fix; until that lands the
+                    // `Refined` policy's override semantics only fully
+                    // activate for inline-literal / locally-defined
+                    // interface T arguments.
+                    declared_in_macro_type_arg: source_field
+                        .map(|p| p.declared_in_macro_type_arg)
+                        .unwrap_or(false),
                 });
             }
             // NOTE: We intentionally do NOT fall back to prop_fields here.
@@ -1493,6 +1526,7 @@ fn extract_props_from_macro(
             default_value,
             description: field.description.clone(),
             tags: field.tags.clone(),
+            declared_in_macro_type_arg: field.declared_in_macro_type_arg,
         });
     }
 
@@ -1547,6 +1581,10 @@ fn extract_props_from_macro(
                 default_value,
                 description,
                 tags,
+                // Evaluator-only branch: name was not present in
+                // `prop_fields`, so the analyzer did not observe the
+                // author writing it on the macro T body. `declared = false`.
+                declared_in_macro_type_arg: false,
             });
         }
     }
@@ -3083,6 +3121,9 @@ fn synthesize_model_prop_and_event(
             default_value: None,
             description: None,
             tags: Vec::new(),
+            // `defineModel` declares the prop name explicitly at the macro
+            // call site (the model name is the prop name).
+            declared_in_macro_type_arg: true,
         });
     }
 
@@ -3432,6 +3473,11 @@ fn extract_props_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<PropAnaly
             default_value: prop.default_value.clone(),
             description: prop.description.clone(),
             tags: prop.tags.clone(),
+            // Options API props are explicit author declarations in the
+            // `props: { ... }` object on the component's options block —
+            // structurally equivalent to a runtime `defineProps({...})`
+            // surface (the author wrote the name directly).
+            declared_in_macro_type_arg: true,
         });
     }
 }

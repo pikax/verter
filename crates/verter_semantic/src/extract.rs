@@ -500,6 +500,7 @@ mod tests {
             resolution_error: None,
             type_expr: None,
             type_expr_scope: None,
+            declared_in_macro_type_arg: false,
         }
     }
 
