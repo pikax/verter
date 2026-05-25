@@ -1,4 +1,4 @@
-﻿//! Per-macro projectors for component-meta extraction.
+//! Per-macro projectors for component-meta extraction.
 //!
 //! Each projector resolves a single macro's surface members through
 //! the shared dispatch primitives (`SemanticQueryKey::ResolveMacroPayload`
@@ -1185,9 +1185,9 @@ pub(crate) fn surface_member_to_expanded_field(
     }
 }
 
-/// Drive the shared field-type reduction used by every projector and
-/// by [`reduce_published_field_types`] on slot bindings, model bindings,
-/// and any leftover parser-side fields.
+/// Drive the shared field-type reducer used by every projector and by
+/// [`reduce_published_field_types`] on every published surface
+/// (`props`, `emits`, `slot_bindings`, `bindings`).
 ///
 /// # Shallow-by-default invariant
 ///
@@ -1217,33 +1217,17 @@ pub(crate) fn surface_member_to_expanded_field(
 /// authoritative reduction primitive for the operator case; generic
 /// substitutions, dep-signature accumulation, and fence-validated
 /// publication all flow through it.
-pub(crate) fn reduce_field_type_expr(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-    scope_canonical_id: &str,
-    expr: TypeExpr,
-) -> TypeExpr {
-    // Backward-compatible entry point — defaults to `Expanded`
-    // publication mode (no carrier narrowing). Callers that publish
-    // a macro surface shallow-by-default route through
-    // `reduce_field_type_expr_with_mode` with `Navigate`.
-    reduce_field_type_expr_with_mode(
-        query_engine,
-        scope_canonical_id,
-        expr,
-        ProjectionMode::Expanded,
-    )
-}
-
-/// Carrier-aware variant of [`reduce_field_type_expr`].
+///
+/// # Publication mode
 ///
 /// When `publish_mode` is `Navigate` (the shallow-by-default macro
-/// publication boundary), arbitrary userland generic instantiations
-/// (`Tool<INPUT, OUTPUT>`) are returned AS CARRIERS — the second-
-/// pass reducer does NOT re-expand what the projector pipeline
-/// deliberately kept shallow. Explicit narrowing operators
-/// (`IndexedAccess`, finite `Pick`/`Omit`/other built-in utilities)
-/// STILL reduce path-precisely: those are explicit consumer demand
-/// inside the type expression.
+/// publication boundary used by `props`, `emits`, `slot_bindings`, and
+/// `bindings`), arbitrary userland generic instantiations
+/// (`Tool<INPUT, OUTPUT>`) are returned AS CARRIERS — the second-pass
+/// reducer does NOT re-expand what the projector pipeline deliberately
+/// kept shallow. Explicit narrowing operators (`IndexedAccess`, finite
+/// `Pick`/`Omit`/other built-in utilities) STILL reduce path-precisely:
+/// those are explicit consumer demand inside the type expression.
 pub(crate) fn reduce_field_type_expr_with_mode(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     scope_canonical_id: &str,
@@ -1431,15 +1415,14 @@ pub(crate) fn reduce_field_type_expr_with_mode(
     // `Published(Expanded)` slot — no cache poisoning between
     // per-prop callers and slot/model-binding callers.
     //
-    // Legitimate TypeExpr-start callers that genuinely need
-    // `Expanded` (slot bindings, model bindings, the
-    // `Pick`/`Omit`/`IndexedAccess`/`keyof` paths the existing tests
-    // exercise) enter through
-    // [`reduce_field_type_expr`] (the default-`Expanded` overload)
-    // and pass `Expanded` here — their behaviour is preserved
-    // verbatim. Only callers that explicitly named `Navigate` at the
-    // `reduce_field_type_expr_with_mode` entry see the new shallower
-    // materialisation depth.
+    // Callers entering with `Expanded` (the `Pick`/`Omit`/
+    // `IndexedAccess`/`keyof` paths the existing tests exercise from
+    // inside the reducer itself) preserve the deep materialisation.
+    // Callers entering with `Navigate` (every published surface:
+    // `props`, `emits`, `slot_bindings`, `bindings`) propagate the
+    // shallow-by-default macro publication mode so the second-pass
+    // reducer does not re-expand the carriers the projector pipeline
+    // deliberately kept shallow.
     super::materialize::materialize_component_meta_type_expr_until_stable(
         &expr,
         scope_canonical_id,

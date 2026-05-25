@@ -19,7 +19,7 @@ use verter_type_expr::TypeExpr;
 
 use crate::semantic_query::ProjectionMode;
 
-use super::{reduce_field_type_expr, reduce_field_type_expr_with_mode};
+use super::reduce_field_type_expr_with_mode;
 
 /// Run the shared field-type reducer over every published surface in
 /// `evaluated_types` so consumers see the same finalised shapes the
@@ -88,11 +88,21 @@ pub(crate) fn reduce_published_field_types(
     }
     for field in evaluated_types.slot_bindings.iter_mut() {
         let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
-        field.r#type = reduce_field_type_expr(query_engine, scope_canonical_id, raised);
+        field.r#type = reduce_field_type_expr_with_mode(
+            query_engine,
+            scope_canonical_id,
+            raised,
+            ProjectionMode::Navigate,
+        );
     }
     for field in evaluated_types.bindings.iter_mut() {
         let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
-        field.r#type = reduce_field_type_expr(query_engine, scope_canonical_id, raised);
+        field.r#type = reduce_field_type_expr_with_mode(
+            query_engine,
+            scope_canonical_id,
+            raised,
+            ProjectionMode::Navigate,
+        );
     }
 }
 
