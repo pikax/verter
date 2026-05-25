@@ -4416,3 +4416,88 @@ fn declared_in_macro_type_arg_companion_at_heritage_descent_flips_to_false() {
          (carrier extends Foo); got {by_name:?}",
     );
 }
+
+/// Discriminating producer-side test for the `extract_companion_types`
+/// behavior at `resolve_type/mod.rs`: the producer resolves every
+/// companion type with `from_root_body = true` so own-body literal
+/// members are emitted with `declared_in_macro_type_arg = true`
+/// directly out of the producer, while the heritage-descent boundary
+/// inside `resolve_interface_with_extends_ctx_ref` overrides the
+/// flag to `false` for `extends`-named-target lookups.
+///
+/// The two paired `declared_in_macro_type_arg_companion_*` tests
+/// above synthesise `companion_types` manually with hard-coded
+/// provenance values and therefore discriminate only the consumer-
+/// side restamping at `decl.rs`. This test calls
+/// `extract_companion_types` directly so a regression at the
+/// producer (flipping `from_root_body` back to `false`) is caught
+/// at this layer.
+///
+/// **Discrimination contract**: if `let from_root_body = true;` in
+/// `extract_companion_types` is changed to `false`, the own-body
+/// `y` assertion below FLIPS from `true` to `false` and the test
+/// FAILS. The heritage-injected `kept` assertion is a co-asserted
+/// structural invariant (heritage descent forces `false`
+/// independently of the producer-side flag) and is not the
+/// discriminating signal.
+#[test]
+fn extract_companion_types_resolves_with_root_body_provenance_true() {
+    let allocator = Allocator::default();
+    // Mixed companion: one interface with both an own-body literal
+    // member (`y`) and a heritage-injected member (`kept`, brought in
+    // via `extends Omit<Vendor, 'removed'>`).
+    let source = r#"interface Vendor { kept: number; removed: boolean }
+interface Foo extends Omit<Vendor, 'removed'> { y: string }"#;
+    let source_type = SourceType::ts();
+    let parser = Parser::new(&allocator, source, source_type);
+    let result = parser.parse();
+    assert!(
+        result.errors.is_empty(),
+        "companion source should parse without errors: {:?}",
+        result.errors
+    );
+
+    let companion_types = extract_companion_types(&result.program, source.as_bytes(), 0);
+
+    let foo = companion_types
+        .get("Foo")
+        .expect("`Foo` must be resolved as a companion type");
+
+    let by_name: std::collections::HashMap<&str, bool> = foo
+        .props
+        .iter()
+        .filter_map(|p| {
+            p.key_name
+                .as_deref()
+                .map(|n| (n, p.declared_in_macro_type_arg))
+        })
+        .collect();
+
+    // Discriminating assertion: own-body literal `y` carries
+    // `declared_in_macro_type_arg == true` out of
+    // `extract_companion_types`. Reverting the producer to
+    // `from_root_body = false` flips this to `false` and FAILS the
+    // test.
+    assert_eq!(
+        by_name.get("y").copied(),
+        Some(true),
+        "own-body literal `y` must carry declared_in_macro_type_arg == true \
+         out of `extract_companion_types`; got {by_name:?}",
+    );
+
+    // Co-asserted invariant: the heritage-descent boundary inside
+    // `resolve_interface_with_extends_ctx_ref` forces
+    // `declared_in_macro_type_arg == false` for the heritage-
+    // injected member regardless of the producer-side flag. This
+    // assertion holds in both the fixed and the inverted producer
+    // state and is therefore not the discriminating signal — it
+    // exists to lock the heritage-descent invariant into the
+    // producer-side surface.
+    assert_eq!(
+        by_name.get("kept").copied(),
+        Some(false),
+        "heritage-injected `kept` must carry declared_in_macro_type_arg == false \
+         out of `extract_companion_types` (heritage-descent boundary forces it); \
+         got {by_name:?}",
+    );
+}
