@@ -339,28 +339,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             ),
             TypeExpr::Intersection(parts) => {
                 // TypeScript intersection semantics: `A & B` publishes
-                // the union of A's and B's members. An arm whose
-                // surface cannot be projected (`Unsupported`) is
-                // structurally a "we don't know B's members" signal —
-                // it must NOT poison A's contributions. The previous
-                // behaviour short-circuited the entire intersection
-                // to `Unsupported` on the first such arm, dropping
-                // legitimately-declared members on the explicit
-                // Object arm sibling. Empirically observed on
-                // nuxt-ui `TableProps<T>` (interface extending
-                // `Omit<CoreOptions<T>, ...>` + explicit body
-                // re-declaration of `state`, `onStateChange`,
-                // `renderFallbackValue` — Omit collapsed → entire
-                // intersection collapsed → 3 names dropped) and on
-                // `AuthFormProps` / `FormProps` (heritage to
-                // unresolvable `FormHTMLAttributes` collapsed the
-                // explicit body Object arm carrying `onSubmit`).
-                //
-                // Correct policy: `Unsupported` arms contribute
-                // nothing but do not invalidate sibling arms. Only
-                // when EVERY arm is `Unsupported` (no usable surface
-                // anywhere) does the intersection itself become
-                // `Unsupported`.
+                // the union of A's and B's members. A non-fatal
+                // `Unsupported` arm (a sibling whose members we
+                // cannot resolve — e.g. an unresolvable external
+                // heritage chain) contributes nothing but MUST NOT
+                // invalidate the contributions of other arms. The
+                // intersection itself is `Unsupported` only when
+                // every arm fails to resolve.
                 let mut surfaces = Vec::with_capacity(parts.len());
                 let mut saw_resolved_arm = false;
                 for part in parts.iter() {
