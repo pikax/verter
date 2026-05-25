@@ -720,6 +720,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     substitutions,
                     context,
                 );
+                // SAFETY: `backfill_member_index_surface` adds the
+                // members reached via the prepared decl's heritage
+                // chain (member_index is populated from extends /
+                // implements during prepared-decl construction).
+                // These members did NOT appear in the prepared decl's
+                // own body — they reached the surface via heritage.
+                // `false` is the structural truth.
                 SurfaceMember {
                     name: Arc::from(name.as_str()),
                     value,
@@ -1874,6 +1881,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // the Shallow walker uses, so the two paths produce
             // identical post-remap names.
             let produced_name = self.materialize_mapped_member_name_for_key(mapper, name, context);
+            // SAFETY: mapped-type member synthesis (e.g.,
+            // `Partial<T>` / `Required<T>` / `{ [K in S]: V }`).
+            // Members reach the surface via the mapped construction,
+            // NOT via own-body declaration in any consuming macro's
+            // T body. The construction layer is structurally
+            // heritage-equivalent — `false` is the truth.
             produced.push(SurfaceMember {
                 name: Arc::clone(&produced_name),
                 value,

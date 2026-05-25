@@ -1124,7 +1124,7 @@ pub(crate) fn synthesize_define_props_shape_from_known_surface_with_authority(
                 ty: field.r#type.clone(),
                 optional: field.optional,
                 readonly: false,
-                declared_in_macro_type_arg: false,
+                declared_in_macro_type_arg: field.declared_in_macro_type_arg,
             });
         }
     } else if let Some(resolved_macro) = resolved_macro {
@@ -1144,7 +1144,7 @@ pub(crate) fn synthesize_define_props_shape_from_known_surface_with_authority(
                     ty: field.r#type.clone(),
                     optional: field.optional,
                     readonly: false,
-                    declared_in_macro_type_arg: false,
+                    declared_in_macro_type_arg: field.declared_in_macro_type_arg,
                 });
                 continue;
             }
@@ -1163,7 +1163,7 @@ pub(crate) fn synthesize_define_props_shape_from_known_surface_with_authority(
                 ty,
                 optional: prop.is_optional,
                 readonly: false,
-                declared_in_macro_type_arg: false,
+                declared_in_macro_type_arg: prop.declared_in_macro_type_arg,
             });
         }
     } else {
@@ -1342,7 +1342,7 @@ pub(crate) fn synthesize_define_emits_shape_from_known_surface(
                 ty: emit.r#type.clone(),
                 optional: false,
                 readonly: false,
-                declared_in_macro_type_arg: false,
+                declared_in_macro_type_arg: emit.declared_in_macro_type_arg,
             });
         }
 
@@ -1392,7 +1392,7 @@ pub(crate) fn synthesize_define_emits_shape_from_known_surface(
                     ty: field.r#type.clone(),
                     optional: false,
                     readonly: false,
-                    declared_in_macro_type_arg: false,
+                    declared_in_macro_type_arg: field.declared_in_macro_type_arg,
                 });
                 continue;
             }
@@ -1407,6 +1407,12 @@ pub(crate) fn synthesize_define_emits_shape_from_known_surface(
                 .unwrap_or(verter_type_expr::TypeExpr::Unknown {
                     raw: "unknown".to_string(),
                 });
+            // SAFETY: `AnalyzedEmitField` does not yet carry the
+            // `declared_in_macro_type_arg` fact (R21 c1 added the
+            // field to `AnalyzedPropField` only; `ResolvedEmit` was
+            // not extended). `false` is the structural default
+            // until a follow-up threads the flag through the emit
+            // chain.
             properties.push(ExpandedProperty {
                 name: emit.name.clone(),
                 ty,
@@ -1452,6 +1458,15 @@ pub(crate) fn synthesize_define_slots_shape_from_known_surface(
         return None;
     }
 
+    // SAFETY: `AnalyzedSlotField` does not yet carry the
+    // `declared_in_macro_type_arg` fact (R21 c1 added the field to
+    // `AnalyzedPropField` only; `ResolvedSlot` / shorthand slot props
+    // were not extended). `false` is the structural default until a
+    // follow-up threads the flag through the slot chain. The flag is
+    // primarily semantically meaningful for prop / emit consumers
+    // (Refined policy, fallthrough-attrs root inheritance) — slot
+    // member names are positional in `defineSlots<T>` and the heritage
+    // distinction is rarely consulted.
     let properties = resolved_macro
         .slots
         .iter()
@@ -1590,6 +1605,13 @@ pub(crate) fn registry_entry_to_expanded_shape(
 
     for member in &object.properties {
         match member {
+            // SAFETY: `ObjectMember::Property` from the registry's
+            // raw `TypeExpr::Object` carries no producer-side
+            // `declared_in_macro_type_arg` fact. The registry stores
+            // a synthesized object shape sourced from cross-file
+            // resolution that has already collapsed heritage. The
+            // structural truth at this layer is `false`: there is no
+            // own-body declaration in the consuming macro's T body.
             ObjectMember::Property(property) => properties.push(ExpandedProperty {
                 name: property.name.clone(),
                 ty: property.ty.clone(),

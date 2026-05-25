@@ -80,6 +80,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .or_else(|| {
                 let prepared = query_engine.prepared_type_decl(scope_canonical_id, root_symbol)?;
                 let member = prepared.member(member_name)?;
+                // SAFETY: `PreparedMember` does not carry the
+                // `declared_in_macro_type_arg` fact (prepared decl
+                // flattens own-body and heritage in `member_index`).
+                // The macro-T own-body fact is propagated through
+                // the analyzer surface, not via single-member
+                // prepared lookup. `false` is the structural truth.
                 Some(ProjectedMember {
                     name: member_name.to_string(),
                     ty: projected_expr.clone(),
@@ -371,6 +377,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let TypeExpr::Object(object) = projected_expr else {
             return;
         };
+        // SAFETY: `ObjectMember::Property` / `ObjectMember::Method`
+        // from a `TypeExpr::Object` body carry no
+        // `declared_in_macro_type_arg` fact at the type-expression
+        // layer. The macro-T own-body fact is propagated through
+        // the analyzer surface (`AnalyzedPropField`,
+        // `evaluated_types.props`, `resolved_macro.props`), NOT via
+        // this generic body-projection path. `false` is the
+        // structural truth at this layer.
         for member in &object.properties {
             let projected_member = match member {
                 ObjectMember::Property(property) if requested.contains(property.name.as_str()) => {
@@ -540,6 +554,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 )
             }
         }?;
+        // SAFETY: see same-file companion SAFETY comments on
+        // `prepared.member(...)`-sourced `ProjectedMember`
+        // construction — `PreparedMember` does not carry the
+        // own-body fact.
         Some(ProjectedMember {
             name: member_name.to_string(),
             ty: projected_ty,

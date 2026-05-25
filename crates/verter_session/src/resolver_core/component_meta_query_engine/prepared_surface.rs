@@ -668,6 +668,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .prepared_type_decl(scope_canonical_id, symbol_name)
             .and_then(|prepared| {
                 if let Some(member) = prepared.member(member_name) {
+                    // SAFETY: `PreparedMember` does not carry a
+                    // `declared_in_macro_type_arg` fact — the prepared
+                    // decl's `member_index` flattens own-body and
+                    // heritage-reached members into a single map. This
+                    // layer (single-member projection lookup) has no
+                    // way to discriminate them. `false` is the
+                    // conservative default; consumers of single-member
+                    // projection are not the published-surface
+                    // policy callers.
                     let projected_member = ProjectedMember {
                         name: member_name.to_string(),
                         ty: apply_type_param_substitutions(&member.ty, substitutions),
@@ -807,6 +816,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     active,
                 )
             }),
+            // SAFETY: single-member projection on a prepared decl
+            // body. The walker has no caller context to know whether
+            // this prepared decl is being consumed as the macro T
+            // argument vs as a downstream reference. The macro shape
+            // synthesizers (`synthesize_define_props_shape_*`) drive
+            // their own propagation through `evaluated_types.props`
+            // / `resolved_macro.props` which DO carry the fact.
+            // `false` is the structural default for this generic
+            // member-projection path.
             TypeExpr::Object(object) => object.properties.iter().find_map(|member| match member {
                 ObjectMember::Property(property) if property.name == member_name => {
                     Some(ProjectedMember {

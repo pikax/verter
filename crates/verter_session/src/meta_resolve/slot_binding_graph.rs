@@ -1035,6 +1035,11 @@ pub(crate) fn publish_merged_bindings(
             diagnostics: Vec::new(),
             shallow_type_expr: None,
             shallow_type_expr_scope: None,
+            // Slot bindings are positional parameters of a slot's
+            // function signature, not declared members of the macro
+            // T's own body. The fact applies at the slot level (the
+            // slot's name in `defineSlots<T>`'s T), not the binding
+            // level — `false` is the structural truth.
             declared_in_macro_type_arg: false,
         });
     }
@@ -1080,6 +1085,10 @@ pub(crate) fn publish_merged_bindings(
             diagnostics: Vec::new(),
             shallow_type_expr,
             shallow_type_expr_scope,
+            // Slot bindings are positional parameters of a slot's
+            // function signature, not declared members of the macro
+            // T's own body — `false` is the structural truth (see
+            // companion comment in `graph_native` push above).
             declared_in_macro_type_arg: false,
         });
     }

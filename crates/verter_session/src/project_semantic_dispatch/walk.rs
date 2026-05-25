@@ -2813,6 +2813,12 @@ fn merge_union_surfaces(arm_surfaces: &[Option<ShallowSurface>]) -> Option<Shall
 /// `SemanticNodeData::Object`. `keyspace` and signatures are empty —
 /// the synthesiser produces a one-level merged surface only.
 fn surface_view_from_shallow(surface: &ShallowSurface) -> SurfaceView {
+    // SAFETY: `ShallowSurface` is the walker's intermediate state for
+    // intersection / union arm merging. `ShallowSurfaceMember` does
+    // not carry the `declared_in_macro_type_arg` fact (members
+    // produced by merging arms are heritage-equivalent — they reach
+    // the surface via composition, not via own-body declaration in
+    // any consuming macro's T). `false` is the structural truth.
     let members: Vec<SurfaceMember> = surface
         .members
         .iter()

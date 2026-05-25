@@ -247,7 +247,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         optional: member.optional,
                         readonly: member.readonly,
                         is_method: member.is_method,
-                        declared_in_macro_type_arg: false,
+                        // Type-parameter substitution preserves the
+                        // source member's structural shape — only the
+                        // value's type-param occurrences change.
+                        // Preserve the upstream
+                        // `declared_in_macro_type_arg` fact.
+                        declared_in_macro_type_arg: member.declared_in_macro_type_arg,
                     });
                 }
                 let mut new_call_signatures = Vec::with_capacity(surface.call_signatures.len());

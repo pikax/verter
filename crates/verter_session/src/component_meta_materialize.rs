@@ -1490,7 +1490,10 @@ fn materialize_object_surface(
             optional: member.optional,
             readonly: member.readonly,
             is_method: member.is_method,
-            declared_in_macro_type_arg: false,
+            // Materialisation preserves member structure — only the
+            // value is materialised, the structural fact is carried
+            // through unchanged from the upstream `SurfaceMember`.
+            declared_in_macro_type_arg: member.declared_in_macro_type_arg,
         });
     }
 

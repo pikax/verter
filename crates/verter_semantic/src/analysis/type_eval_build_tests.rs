@@ -1457,3 +1457,77 @@ fn expand_macro_types_emits_publish_shallow_type_expr_from_emit_field_typed_form
         Some("test:fixture")
     );
 }
+
+/// R21-F1 c3 discriminating test for the
+/// `expand_macro_types_impl_with_expander` propagation step
+/// (`AnalyzedPropField → ExpandedField`).
+///
+/// Constructs an `AnalyzedMacro` with two `AnalyzedPropField` entries:
+/// one with `declared_in_macro_type_arg = true` (the parser-side
+/// fact for an own-body member of the macro T) and one with `false`
+/// (a member reached via heritage from outside the macro T body).
+///
+/// Asserts the resulting `ExpandedField` entries carry the SAME
+/// per-field fact through the expander. If the prop-field push site
+/// in `expand_macro_types_impl_with_expander` is reverted to
+/// hardcode `declared_in_macro_type_arg: false`, the own-body field's
+/// flag collapses to `false` and the assertion FAILS — the test
+/// discriminates the c3 fix.
+#[test]
+fn r21_c3_expand_macro_types_propagates_declared_in_macro_type_arg_per_field() {
+    let typed_string = TypeExpr::Primitive(PrimitiveName::String);
+
+    // Build two AnalyzedPropFields differing only in the structural
+    // own-body flag.
+    let mut own_body = make_synth_typed_prop("own_body", typed_string.clone());
+    own_body.declared_in_macro_type_arg = true;
+
+    let mut heritage = make_synth_typed_prop("heritage", typed_string.clone());
+    heritage.declared_in_macro_type_arg = false;
+
+    let macros = vec![make_synth_macro(
+        AnalyzedMacroKind::DefineProps,
+        vec![own_body, heritage],
+        Vec::new(),
+        Vec::new(),
+    )];
+
+    let result = expand_macro_types_impl_with_expander(
+        &macros,
+        None,
+        &[],
+        None,
+        MacroExpansionScope::Full,
+        passthrough_expander(),
+    );
+
+    assert_eq!(
+        result.props.len(),
+        2,
+        "both AnalyzedPropField inputs must reach the ExpandedField output"
+    );
+    let own_body_field = result
+        .props
+        .iter()
+        .find(|f| f.name == "own_body")
+        .expect("own_body ExpandedField present");
+    let heritage_field = result
+        .props
+        .iter()
+        .find(|f| f.name == "heritage")
+        .expect("heritage ExpandedField present");
+
+    assert!(
+        own_body_field.declared_in_macro_type_arg,
+        "own_body's declared_in_macro_type_arg=true MUST propagate from \
+         AnalyzedPropField to ExpandedField. Discriminator: reverting the \
+         prop push in expand_macro_types_impl_with_expander to hardcode \
+         `false` flips this to false."
+    );
+    assert!(
+        !heritage_field.declared_in_macro_type_arg,
+        "heritage's declared_in_macro_type_arg=false MUST propagate \
+         unchanged — the expander must not synthesize true for fields the \
+         analyzer marked as heritage."
+    );
+}

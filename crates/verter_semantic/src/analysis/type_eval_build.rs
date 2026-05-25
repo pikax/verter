@@ -1470,7 +1470,7 @@ where
                         diagnostics: expanded.diagnostics,
                         shallow_type_expr,
                         shallow_type_expr_scope,
-                        declared_in_macro_type_arg: false,
+                        declared_in_macro_type_arg: field.declared_in_macro_type_arg,
                     });
                 }
             }
@@ -1527,6 +1527,12 @@ where
                         diagnostics: expanded.diagnostics,
                         shallow_type_expr,
                         shallow_type_expr_scope,
+                        // SAFETY: `AnalyzedEmitField` does not yet carry the
+                        // `declared_in_macro_type_arg` fact (R21 c1 added the
+                        // field to `AnalyzedPropField` only). `false` is the
+                        // structural default for emit `ExpandedField`s until
+                        // a follow-up extends `AnalyzedEmitField` /
+                        // `ResolvedEmit` to thread the parser-side flag.
                         declared_in_macro_type_arg: false,
                     });
                 }
@@ -1589,6 +1595,13 @@ where
                                 diagnostics: expanded.diagnostics,
                                 shallow_type_expr,
                                 shallow_type_expr_scope,
+                                // SAFETY: slot bindings are positional
+                                // parameters of a slot's function signature
+                                // (not declared members of the macro T's own
+                                // body). The fact is meaningful at the slot
+                                // level, not the binding level — defining
+                                // `declared_in_macro_type_arg = false` here
+                                // is the structural truth.
                                 declared_in_macro_type_arg: false,
                             });
                         }
@@ -1641,6 +1654,10 @@ where
                 "ExpandedField (expose binding) shallow_type_expr/shallow_type_expr_scope pairing violated for binding `{}`",
                 name
             );
+            // `defineExpose` binding entries are top-level value bindings
+            // outside any macro T (no declared/heritage distinction
+            // applies). `declared_in_macro_type_arg = false` is the
+            // structural truth.
             result.bindings.push(ExpandedField {
                 name: name.clone(),
                 r#type: expanded.value.expr,

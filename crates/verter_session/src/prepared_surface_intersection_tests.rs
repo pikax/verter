@@ -405,3 +405,66 @@ defineEmits<{ submit: [event: Event] }>()
 // tests fail with precise diffs — see
 // `bench-evidence/r20fix2-f4-red-discrimination.txt` for the RED
 // output observed during R20-fix2 verification.
+
+/// R21-F1 c3 discriminating test for the `defineModel` projector
+/// path. `defineModel<T>()` synthesizes the model member at the
+/// macro's T position — the member is structurally author-declared
+/// in the macro's type argument by virtue of the `defineModel`
+/// syntax itself.
+///
+/// Asserts the published prop entry for the model name (default
+/// `modelValue`, or the explicit name passed as the first argument)
+/// carries `declared_in_macro_type_arg = true`.
+///
+/// **Discriminating property**: reverting the analyzer-side
+/// `synthesize_model_prop_and_event` push to
+/// `declared_in_macro_type_arg: false` causes both assertions below
+/// to FAIL — that path is the load-bearing producer of `meta.props`
+/// for defineModel. The `model.rs:project_model` projector site
+/// independently sets `declared_in_macro_type_arg: true` on its
+/// `ExpandedField` (R21-F1 c3) so the projector arm of the
+/// publication chain also reports the correct structural fact when
+/// the analyzer's synthesis is bypassed by a downstream consumer.
+#[test]
+fn r21_c3_define_model_props_marked_declared_in_macro_type_arg() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Model.vue",
+            r#"<script setup lang="ts">
+defineModel<string>()
+defineModel<boolean>('open')
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/Model.vue");
+
+    let model_value = meta
+        .props
+        .iter()
+        .find(|p| p.name == "modelValue")
+        .expect("defineModel<string>() must publish `modelValue` prop");
+    assert!(
+        model_value.declared_in_macro_type_arg,
+        "R21-F1 c3: `modelValue` (defineModel<string>() default name) \
+         must be marked declared_in_macro_type_arg = true. The model \
+         member is structurally author-declared at the macro T \
+         position via the `defineModel` syntax itself. Got declared = {}",
+        model_value.declared_in_macro_type_arg
+    );
+
+    let open = meta
+        .props
+        .iter()
+        .find(|p| p.name == "open")
+        .expect("defineModel<boolean>('open') must publish `open` prop");
+    assert!(
+        open.declared_in_macro_type_arg,
+        "R21-F1 c3: `open` (explicit defineModel name) must be marked \
+         declared_in_macro_type_arg = true — the explicit name is \
+         author-declared at the macro call site. Got declared = {}",
+        open.declared_in_macro_type_arg
+    );
+}

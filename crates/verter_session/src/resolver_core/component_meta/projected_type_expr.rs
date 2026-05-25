@@ -179,7 +179,7 @@ pub(crate) fn project_macro_surfaces_from_expanded_shape(
                         resolution_error: None,
                         type_expr,
                         type_expr_scope,
-                        declared_in_macro_type_arg: false,
+                        declared_in_macro_type_arg: property.declared_in_macro_type_arg,
                     }
                 })
                 .collect(),

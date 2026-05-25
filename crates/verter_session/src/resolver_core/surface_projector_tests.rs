@@ -881,3 +881,76 @@ fn project_define_slots_emits_no_bindings_when_prop_lacks_typed_function_form() 
         "no display return type without a typed function form"
     );
 }
+
+/// R21-F1 c3 discriminating test for the surface_projector
+/// `ResolvedProp → AnalyzedPropField` propagation.
+///
+/// Constructs a `ResolvedElements` with two props: one marked as
+/// `declared_in_macro_type_arg = true` (the parser-side fact for an
+/// own-body member of the macro T) and one with `false` (a member
+/// reached via heritage / Omit / intersection from outside the macro
+/// T body).
+///
+/// Asserts the resulting `AnalyzedPropField` entries carry the SAME
+/// per-prop fact through the projector. If the projector site at
+/// `surface_projector::project_macro_surfaces_with_owner` is reverted
+/// to hardcode `declared_in_macro_type_arg: false`, both props collapse
+/// to `false` and the `kept_own_body` assertion FAILS — the test
+/// discriminates the fix.
+#[test]
+fn r21_c3_surface_projector_propagates_declared_in_macro_type_arg_per_prop() {
+    let mut own_body_prop = prop(
+        "own_body",
+        false,
+        ResolvedMemberVisibility::Public,
+        Some("string"),
+        0,
+    );
+    own_body_prop.declared_in_macro_type_arg = true;
+
+    let mut heritage_prop = prop(
+        "heritage",
+        false,
+        ResolvedMemberVisibility::Public,
+        Some("number"),
+        16,
+    );
+    heritage_prop.declared_in_macro_type_arg = false;
+
+    let elements = ResolvedElements {
+        props: vec![own_body_prop, heritage_prop],
+        ..ResolvedElements::default()
+    };
+
+    let projected = project_macro_surfaces(None, AnalyzedMacroKind::DefineProps, &elements);
+
+    assert_eq!(
+        projected.props.len(),
+        2,
+        "both public props must reach the projected surface"
+    );
+    let own_body_field = projected
+        .props
+        .iter()
+        .find(|f| f.name == "own_body")
+        .expect("own_body field present");
+    let heritage_field = projected
+        .props
+        .iter()
+        .find(|f| f.name == "heritage")
+        .expect("heritage field present");
+
+    assert!(
+        own_body_field.declared_in_macro_type_arg,
+        "own_body member's declared_in_macro_type_arg=true MUST propagate \
+         from ResolvedProp through surface_projector to AnalyzedPropField. \
+         Discriminator: reverting surface_projector to hardcode `false` \
+         flips this to false."
+    );
+    assert!(
+        !heritage_field.declared_in_macro_type_arg,
+        "heritage member's declared_in_macro_type_arg=false MUST propagate \
+         unchanged — the projector must not synthesize true for non-own-body \
+         members."
+    );
+}

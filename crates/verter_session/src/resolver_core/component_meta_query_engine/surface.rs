@@ -67,7 +67,7 @@ pub(crate) fn surface_view_to_projected_surface(
             optional: member.optional,
             readonly: member.readonly,
             is_method: member.is_method,
-            declared_in_macro_type_arg: false,
+            declared_in_macro_type_arg: member.declared_in_macro_type_arg,
         })
         .collect();
     let call_signatures = surface
@@ -401,6 +401,12 @@ pub(super) fn projected_surface_from_object_expr(
     let mut construct_signatures = Vec::new();
     let mut has_index_signature = false;
 
+    // SAFETY: generic `TypeExpr::Object` body projection — used for
+    // type-expression interrogation, not for the macro published
+    // surface. `ObjectMember::Property` / `Method` carry no upstream
+    // `declared_in_macro_type_arg` fact at the type-expression
+    // layer (the fact lives on the analyzer surface). `false` is
+    // the structural truth.
     for member in &object.properties {
         match member {
             ObjectMember::Property(property) => members.push(ProjectedMember {
@@ -454,6 +460,10 @@ pub(super) fn projected_surface_from_object_expr_with_substitutions(
     let mut construct_signatures = Vec::new();
     let mut has_index_signature = false;
 
+    // SAFETY: see companion comment on
+    // `projected_surface_from_object_expr` — generic
+    // type-expression projection, no upstream
+    // `declared_in_macro_type_arg` fact at this layer.
     for member in &object.properties {
         match member {
             ObjectMember::Property(property) => members.push(ProjectedMember {
@@ -1076,7 +1086,7 @@ pub(crate) fn projected_surface_to_expanded_shape(
             ty: member.ty.clone(),
             optional: member.optional,
             readonly: member.readonly,
-            declared_in_macro_type_arg: false,
+            declared_in_macro_type_arg: member.declared_in_macro_type_arg,
         })
         .collect::<Vec<_>>();
 

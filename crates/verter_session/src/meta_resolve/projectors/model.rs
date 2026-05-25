@@ -131,6 +131,10 @@ pub(crate) fn project_model(
         diagnostics: Vec::new(),
         shallow_type_expr: None,
         shallow_type_expr_scope: None,
-        declared_in_macro_type_arg: false,
+        // `defineModel<T>()` synthesizes the model member at the
+        // macro's T position. The member is structurally
+        // author-declared in the macro's type argument by virtue of
+        // the `defineModel` syntax itself — set `true`.
+        declared_in_macro_type_arg: true,
     })
 }

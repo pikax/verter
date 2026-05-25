@@ -352,6 +352,12 @@ pub(super) fn infer_props_from_object_literal(
             _ => vec![RuntimeType::Unknown],
         };
 
+        // SAFETY: `infer_props_from_object_literal` is reached only
+        // via `resolve_typeof_object_literal_init` — the `typeof X`
+        // indirection case (`defineProps(typeof X)` where
+        // `const X = { ... }`). Members reach the surface via the
+        // `typeof X` heritage hop, NOT via the author writing them
+        // in the macro's T own body. `false` is the structural truth.
         result.props.push(ResolvedProp {
             span: crate::common::Span::new(key_span.start, key_span.end),
             key: crate::common::Span::new(key_span.start, key_span.end),

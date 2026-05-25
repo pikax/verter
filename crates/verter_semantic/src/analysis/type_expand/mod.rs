@@ -194,6 +194,13 @@ fn object_to_shape(obj: &verter_type_expr::ObjectExpr) -> ExpandedObjectShape {
     let mut index_signatures = Vec::new();
     let mut call_signatures = Vec::new();
 
+    // SAFETY: generic `TypeExpr::Object` → `ExpandedObjectShape`
+    // conversion. `ObjectMember::Property` / `Method` at this layer
+    // carry no `declared_in_macro_type_arg` fact (the type-expression
+    // representation has no owner context). The macro-T own-body
+    // fact is propagated through the analyzer surface and the macro
+    // shape synthesizers, not via this generic shape conversion.
+    // `false` is the structural truth here.
     for member in &obj.properties {
         match member {
             ObjectMember::Property(p) => properties.push(ExpandedProperty {

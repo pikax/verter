@@ -648,6 +648,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 substitutions,
                                 reduction_context,
                             );
+                            // SAFETY: graph-native object expression
+                            // lowering (`TypeExpr::Object` →
+                            // SurfaceView) runs recursively at every
+                            // nesting level. `ObjectMember::Property`
+                            // carries no producer-side
+                            // `declared_in_macro_type_arg` fact. The
+                            // macro-T own-body flag is propagated
+                            // through the parser-side
+                            // `ResolvedProp` chain into the analyzer's
+                            // `AnalyzedPropField` and surfaces in
+                            // `evaluated_types.props` / the macro
+                            // shape synthesizers — NOT through this
+                            // generic graph-native lowering path.
+                            // `false` is the structural truth here.
                             members.push(SurfaceMember {
                                 name: Arc::from(prop.name.as_str()),
                                 value,
@@ -684,6 +698,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 substitutions,
                                 reduction_context,
                             );
+                            // SAFETY: graph-native object method
+                            // lowering. See companion SAFETY comment
+                            // for `ObjectMember::Property` above —
+                            // the macro-T own-body fact is propagated
+                            // through the analyzer surface, not via
+                            // generic object lowering. `false` is the
+                            // structural truth.
                             members.push(SurfaceMember {
                                 name: Arc::from(method.name.as_str()),
                                 value,
