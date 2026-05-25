@@ -300,11 +300,17 @@ pub(super) fn resolve_value_declaration_type<'ctx, 'a: 'ctx>(
                 }
 
                 // 1. Type annotation on the declarator: `const X: { foo: string } = ...`
+                //
+                // Members reached through this `typeof X` path are NOT
+                // the macro T's own body — the user wrote `typeof X`,
+                // not the prop names. The sub-resolution therefore
+                // enters with `from_root_body = false`.
                 if let Some(ref annotation) = declarator.type_annotation {
                     return Some(resolve_type_elements_with_ctx_ref(
                         &annotation.type_annotation,
                         base_offset,
                         ctx,
+                        false,
                     ));
                 }
 

@@ -2383,7 +2383,7 @@ fn budget_exceeded_returns_structured_failure_not_applied_stub() {
     let test_alias = stmt.expect("Test alias must parse");
     let mut ctx =
         verter_parser::utils::oxc::vue::build_type_context(&ret.program, source.as_bytes(), 0);
-    let _resolved = resolve_type_elements_with_ctx(&test_alias.type_annotation, 0, &mut ctx);
+    let _resolved = resolve_type_elements_with_ctx(&test_alias.type_annotation, 0, &mut ctx, true);
 
     let record = take_last_resolution_budget_exceeded()
         .expect("structured ResolutionBudgetExceeded must be recorded on cap-trip");

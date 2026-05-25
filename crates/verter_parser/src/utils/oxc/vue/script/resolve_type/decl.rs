@@ -149,6 +149,7 @@ pub(super) fn resolve_named_local_type_with_ctx_ref<'ctx, 'a: 'ctx>(
     type_args: Option<&'ctx TSTypeParameterInstantiation<'a>>,
     base_offset: u32,
     ctx: &TypeResolutionContext<'ctx, 'a>,
+    from_root_body: bool,
     recursion_guard: &mut Vec<String>,
 ) -> Option<Arc<ResolvedElements>> {
     resolve_named_local_type_with_ctx_ref_inner(
@@ -156,6 +157,7 @@ pub(super) fn resolve_named_local_type_with_ctx_ref<'ctx, 'a: 'ctx>(
         type_args,
         base_offset,
         ctx,
+        from_root_body,
         recursion_guard,
         true,
     )
@@ -166,6 +168,7 @@ pub(super) fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
     type_args: Option<&'ctx TSTypeParameterInstantiation<'a>>,
     base_offset: u32,
     ctx: &TypeResolutionContext<'ctx, 'a>,
+    from_root_body: bool,
     recursion_guard: &mut Vec<String>,
     store_result: bool,
 ) -> Option<Arc<ResolvedElements>> {
@@ -173,14 +176,17 @@ pub(super) fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
 
     if let Some((aliased_type, type_params)) = ctx.find_type_alias(type_name_bytes) {
         let child = instantiate_type_params_ctx(ctx, type_params, type_args);
-        if let Some(cached) = child.cached_named_resolution(type_name_bytes, base_offset) {
+        if let Some(cached) =
+            child.cached_named_resolution(type_name_bytes, base_offset, from_root_body)
+        {
             if component_meta_core_trace_enabled() {
                 component_meta_core_trace_event(
                     "core_named_resolution",
                     format!(
-                        "file={} kind=alias cache=hit name={} bindings={} companions={}",
+                        "file={} kind=alias cache=hit name={} from_root_body={} bindings={} companions={}",
                         child.trace_label.as_deref().unwrap_or("<unknown>"),
                         type_name,
+                        from_root_body,
                         child.type_param_bindings.len(),
                         child.companion_types.len()
                     ),
@@ -192,35 +198,47 @@ pub(super) fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
             component_meta_core_trace_event(
                 "core_named_resolution",
                 format!(
-                    "file={} kind=alias cache=miss name={} bindings={} companions={}",
+                    "file={} kind=alias cache=miss name={} from_root_body={} bindings={} companions={}",
                     child.trace_label.as_deref().unwrap_or("<unknown>"),
                     type_name,
+                    from_root_body,
                     child.type_param_bindings.len(),
                     child.companion_types.len()
                 ),
             );
         }
+        // Type alias body is structurally part of the caller's
+        // expression — propagate the caller's `from_root_body`.
         let resolved = Arc::new(resolve_type_elements_with_ctx_ref(
             aliased_type,
             base_offset,
             &child,
+            from_root_body,
         ));
         if store_result {
-            child.store_named_resolution(type_name_bytes, base_offset, Arc::clone(&resolved));
+            child.store_named_resolution(
+                type_name_bytes,
+                base_offset,
+                from_root_body,
+                Arc::clone(&resolved),
+            );
         }
         return Some(resolved);
     }
 
     if let Some((members, _extends, heritage, type_params)) = ctx.find_interface(type_name_bytes) {
         let child = instantiate_type_params_ctx(ctx, type_params, type_args);
-        if let Some(cached) = child.cached_named_resolution(type_name_bytes, base_offset) {
+        if let Some(cached) =
+            child.cached_named_resolution(type_name_bytes, base_offset, from_root_body)
+        {
             if component_meta_core_trace_enabled() {
                 component_meta_core_trace_event(
                     "core_named_resolution",
                     format!(
-                        "file={} kind=interface cache=hit name={} bindings={} companions={} members={} extends={}",
+                        "file={} kind=interface cache=hit name={} from_root_body={} bindings={} companions={} members={} extends={}",
                         child.trace_label.as_deref().unwrap_or("<unknown>"),
                         type_name,
+                        from_root_body,
                         child.type_param_bindings.len(),
                         child.companion_types.len(),
                         members.len(),
@@ -234,9 +252,10 @@ pub(super) fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
             component_meta_core_trace_event(
                 "core_named_resolution",
                 format!(
-                    "file={} kind=interface cache=miss name={} bindings={} companions={} members={} extends={}",
+                    "file={} kind=interface cache=miss name={} from_root_body={} bindings={} companions={} members={} extends={}",
                     child.trace_label.as_deref().unwrap_or("<unknown>"),
                     type_name,
+                    from_root_body,
                     child.type_param_bindings.len(),
                     child.companion_types.len(),
                     members.len(),
@@ -250,6 +269,7 @@ pub(super) fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
             heritage,
             base_offset,
             &child,
+            from_root_body,
         ));
         let mut resolved = ResolvedElements::default();
         flatten_named_type_plan_with_ctx_ref(
@@ -262,7 +282,12 @@ pub(super) fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
         resolved.root_runtime_types = vec![RuntimeType::Object];
         let resolved = Arc::new(resolved);
         if store_result {
-            child.store_named_resolution(type_name_bytes, base_offset, Arc::clone(&resolved));
+            child.store_named_resolution(
+                type_name_bytes,
+                base_offset,
+                from_root_body,
+                Arc::clone(&resolved),
+            );
         }
         return Some(resolved);
     }
@@ -270,14 +295,17 @@ pub(super) fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
     if let Some(class_decl) = ctx.find_class(type_name_bytes) {
         let type_params = class_decl.type_parameters.as_deref();
         let child = instantiate_type_params_ctx(ctx, type_params, type_args);
-        if let Some(cached) = child.cached_named_resolution(type_name_bytes, base_offset) {
+        if let Some(cached) =
+            child.cached_named_resolution(type_name_bytes, base_offset, from_root_body)
+        {
             if component_meta_core_trace_enabled() {
                 component_meta_core_trace_event(
                     "core_named_resolution",
                     format!(
-                        "file={} kind=class cache=hit name={} bindings={} companions={}",
+                        "file={} kind=class cache=hit name={} from_root_body={} bindings={} companions={}",
                         child.trace_label.as_deref().unwrap_or("<unknown>"),
                         type_name,
+                        from_root_body,
                         child.type_param_bindings.len(),
                         child.companion_types.len()
                     ),
@@ -289,9 +317,10 @@ pub(super) fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
             component_meta_core_trace_event(
                 "core_named_resolution",
                 format!(
-                    "file={} kind=class cache=miss name={} bindings={} companions={}",
+                    "file={} kind=class cache=miss name={} from_root_body={} bindings={} companions={}",
                     child.trace_label.as_deref().unwrap_or("<unknown>"),
                     type_name,
+                    from_root_body,
                     child.type_param_bindings.len(),
                     child.companion_types.len()
                 ),
@@ -301,6 +330,7 @@ pub(super) fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
             class_decl,
             base_offset,
             &child,
+            from_root_body,
         ));
         let mut resolved = ResolvedElements::default();
         flatten_named_type_plan_with_ctx_ref(
@@ -314,7 +344,12 @@ pub(super) fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
         resolved.dedup_props();
         let resolved = Arc::new(resolved);
         if store_result {
-            child.store_named_resolution(type_name_bytes, base_offset, Arc::clone(&resolved));
+            child.store_named_resolution(
+                type_name_bytes,
+                base_offset,
+                from_root_body,
+                Arc::clone(&resolved),
+            );
         }
         return Some(resolved);
     }
@@ -324,13 +359,27 @@ pub(super) fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
             component_meta_core_trace_event(
                 "core_named_resolution",
                 format!(
-                    "file={} kind=companion cache=hit name={} bindings={} companions={}",
+                    "file={} kind=companion cache=hit name={} from_root_body={} bindings={} companions={}",
                     ctx.trace_label.as_deref().unwrap_or("<unknown>"),
                     type_name,
+                    from_root_body,
                     ctx.type_param_bindings.len(),
                     ctx.companion_types.len()
                 ),
             );
+        }
+        // Companion definitions were resolved with `from_root_body
+        // = false` (see `extract_companion_types`). When the caller
+        // is at the macro-T root (`from_root_body = true`), the
+        // companion's body IS the macro T's body — re-stamp the
+        // cloned props' fact. When the caller is at heritage
+        // descent, the cached `false` already matches.
+        if from_root_body {
+            let mut stamped = companion;
+            for prop in &mut stamped.props {
+                prop.declared_in_macro_type_arg = true;
+            }
+            return Some(Arc::new(stamped));
         }
         return Some(Arc::new(companion));
     }
@@ -339,9 +388,10 @@ pub(super) fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
         component_meta_core_trace_event(
             "core_named_resolution",
             format!(
-                "file={} kind=missing cache=miss name={} bindings={} companions={}",
+                "file={} kind=missing cache=miss name={} from_root_body={} bindings={} companions={}",
                 ctx.trace_label.as_deref().unwrap_or("<unknown>"),
                 type_name,
+                from_root_body,
                 ctx.type_param_bindings.len(),
                 ctx.companion_types.len()
             ),
@@ -357,15 +407,32 @@ pub(super) fn is_supported_heritage_utility(name: &str) -> bool {
     )
 }
 
+/// Stamp a `ResolvedProp` with `declared_in_macro_type_arg = true`.
+///
+/// Used when consuming a companion-resolved (and therefore
+/// `from_root_body=false`-cached) named type at a macro-T root: the
+/// user wrote the companion's name in the macro T slot, so the
+/// companion's structural members are the macro T's body.
+#[inline]
+pub(super) fn stamp_prop_in_root_body(mut prop: ResolvedProp) -> ResolvedProp {
+    prop.declared_in_macro_type_arg = true;
+    prop
+}
+
 pub(super) fn build_interface_resolution_plan<'ctx, 'a: 'ctx>(
     members: &[TSSignature],
     extends: &[String],
     heritage: &'ctx [TSInterfaceHeritage<'a>],
     base_offset: u32,
     ctx: &TypeResolutionContext<'ctx, 'a>,
+    from_root_body: bool,
 ) -> InterfaceResolutionPlan<'ctx, 'a> {
     let mut own = ResolvedElements::default();
-    resolve_type_literal_members(members, base_offset, &mut own, ctx.source);
+    // Own members propagate the caller's macro-T own-body flag.
+    // Heritage edges always descend with `from_root_body = false`
+    // inside `apply_named_type_heritage_edge_with_ctx_ref` and
+    // `try_resolve_heritage_utility_type`.
+    resolve_type_literal_members(members, base_offset, &mut own, ctx.source, from_root_body);
 
     let heritage = heritage
         .iter()
@@ -401,9 +468,20 @@ pub(super) fn build_class_resolution_plan<'ctx, 'a: 'ctx>(
     class: &'ctx Class<'a>,
     base_offset: u32,
     ctx: &TypeResolutionContext<'ctx, 'a>,
+    from_root_body: bool,
 ) -> ClassResolutionPlan<'ctx, 'a> {
     let mut own = ResolvedElements::default();
-    resolve_class_members(&class.body.body, base_offset, &mut own, ctx.source);
+    // Own members propagate the caller's macro-T own-body flag.
+    // Heritage edges (super-class, implements) descend with
+    // `from_root_body = false` via
+    // `apply_named_type_heritage_edge_with_ctx_ref`.
+    resolve_class_members(
+        &class.body.body,
+        base_offset,
+        &mut own,
+        ctx.source,
+        from_root_body,
+    );
 
     let mut heritage = Vec::new();
     if let Some(super_class) = &class.super_class {
@@ -486,6 +564,9 @@ pub(super) fn flatten_named_type_plan_with_ctx_ref<'ctx, 'a: 'ctx>(
     }
 }
 
+/// Apply a heritage edge (from `flatten_named_type_plan_with_ctx_ref`)
+/// to the carrier's `result`. Every edge here is a heritage descent —
+/// internally dispatch with `from_root_body = false`.
 pub(super) fn apply_named_type_heritage_edge_with_ctx_ref<'ctx, 'a: 'ctx>(
     edge: &NamedTypeHeritageEdge<'ctx, 'a>,
     base_offset: u32,
@@ -513,6 +594,7 @@ pub(super) fn apply_named_type_heritage_edge_with_ctx_ref<'ctx, 'a: 'ctx>(
                 *type_args,
                 base_offset,
                 ctx,
+                false,
                 recursion_guard,
                 false,
             ) {
@@ -532,33 +614,51 @@ pub(super) fn resolve_type_elements_inner(
     base_offset: u32,
     result: &mut ResolvedElements,
     source: &[u8],
+    from_root_body: bool,
 ) {
     match node {
         // { prop: Type }
         TSType::TSTypeLiteral(lit) => {
-            resolve_type_literal_members(&lit.members, base_offset, result, source);
+            resolve_type_literal_members(&lit.members, base_offset, result, source, from_root_body);
         }
 
         // Parenthesized: (Type)
         TSType::TSParenthesizedType(paren) => {
-            resolve_type_elements_inner(&paren.type_annotation, base_offset, result, source);
+            resolve_type_elements_inner(
+                &paren.type_annotation,
+                base_offset,
+                result,
+                source,
+                from_root_body,
+            );
         }
 
-        // Union: Type1 | Type2
+        // Union: Type1 | Type2 — each arm preserves the caller's
+        // `from_root_body` (unions enumerate options, not heritage).
         TSType::TSUnionType(union) => {
             for ty in &union.types {
-                resolve_type_elements_inner(ty, base_offset, result, source);
+                resolve_type_elements_inner(ty, base_offset, result, source, from_root_body);
             }
             result.dedup_props();
         }
 
-        // Intersection: Type1 & Type2
+        // Intersection: Type1 & Type2 — TSTypeLiteral arms are
+        // own-body literals (preserve `from_root_body`); any
+        // non-literal arm (TSTypeReference, etc.) is a
+        // surface-merging heritage-like construct from the caller's
+        // perspective and descends with `from_root_body = false`.
+        // (This inner is the source-only path with no resolver
+        // context — only TSTypeLiteral arms actually emit members
+        // here, so the distinction is structural rather than
+        // observable, but we honour it for consistency with the
+        // context-aware variants.)
         TSType::TSIntersectionType(intersection) => {
             for ty in &intersection.types {
                 if has_immediate_vue_ignore_comment(source, ty.span().start) {
                     continue;
                 }
-                resolve_type_elements_inner(ty, base_offset, result, source);
+                let arm_from_root_body = matches!(ty, TSType::TSTypeLiteral(_)) && from_root_body;
+                resolve_type_elements_inner(ty, base_offset, result, source, arm_from_root_body);
             }
             result.dedup_props();
         }
@@ -581,6 +681,14 @@ pub(super) fn resolve_type_elements_inner(
 
 /// Resolve an interface including its extends clauses using mutable context.
 /// Recursion guard prevents infinite loops from circular extends.
+///
+/// `from_root_body` is the caller's macro-T own-body flag.
+/// - Own members (the interface's literal body) propagate the
+///   caller's flag.
+/// - `extends` / heritage descent ALWAYS forces `from_root_body =
+///   false` because the user did not type heritage-target member
+///   names in the carrier's own literal body.
+#[allow(clippy::too_many_arguments)] // R21-F1: explicit `from_root_body` threading
 pub(super) fn resolve_interface_with_extends_ctx<'ctx, 'a: 'ctx>(
     members: &[TSSignature],
     extends: &[String],
@@ -588,13 +696,19 @@ pub(super) fn resolve_interface_with_extends_ctx<'ctx, 'a: 'ctx>(
     base_offset: u32,
     result: &mut ResolvedElements,
     ctx: &mut TypeResolutionContext<'ctx, 'a>,
+    from_root_body: bool,
     recursion_guard: &mut Vec<String>,
 ) {
     // Resolve own members
-    resolve_type_literal_members(members, base_offset, result, ctx.source);
+    resolve_type_literal_members(members, base_offset, result, ctx.source, from_root_body);
 
     // Resolve extends — try heritage AST first for utility type support,
     // then fall back to string-based lookup (matches _ctx_ref variant).
+    //
+    // Every descent below crosses a heritage boundary: members reached
+    // through `extends` were not literally typed in this interface's
+    // own body, so their `declared_in_macro_type_arg` fact must be
+    // `false` regardless of the carrier's `from_root_body`.
     for (i, base_name) in extends.iter().enumerate() {
         if recursion_guard.contains(base_name) {
             continue; // Avoid infinite recursion
@@ -626,9 +740,9 @@ pub(super) fn resolve_interface_with_extends_ctx<'ctx, 'a: 'ctx>(
             }
         }
 
-        // Check local type aliases
+        // Check local type aliases — descent is heritage → false.
         if let Some((aliased_type, _)) = ctx.find_type_alias(base_bytes) {
-            resolve_type_elements_inner_with_ctx(aliased_type, base_offset, result, ctx);
+            resolve_type_elements_inner_with_ctx(aliased_type, base_offset, result, ctx, false);
         }
         // Check local interfaces (need to clone extends to avoid borrow conflict)
         else if let Some((iface_members, iface_extends, iface_heritage, _)) =
@@ -642,6 +756,7 @@ pub(super) fn resolve_interface_with_extends_ctx<'ctx, 'a: 'ctx>(
                 base_offset,
                 result,
                 ctx,
+                false,
                 recursion_guard,
             );
         } else if let Some(class_decl) = ctx.find_class(base_bytes) {
@@ -650,10 +765,12 @@ pub(super) fn resolve_interface_with_extends_ctx<'ctx, 'a: 'ctx>(
                 base_offset,
                 result,
                 ctx,
+                false,
                 recursion_guard,
             );
         }
-        // Check companion types
+        // Check companion types — heritage descent, companion's
+        // cached `false` already matches.
         else if let Some(companion) = ctx.companion_types.get(base_name.as_str()) {
             result.props.extend(companion.props.iter().cloned());
             result.emits.extend(companion.emits.iter().cloned());
@@ -667,6 +784,14 @@ pub(super) fn resolve_interface_with_extends_ctx<'ctx, 'a: 'ctx>(
 }
 
 /// Resolve an interface including its extends clauses using immutable context.
+///
+/// `from_root_body` is the caller's macro-T own-body flag.
+/// - Own members (the interface's literal body) propagate the
+///   caller's flag.
+/// - `extends` / heritage descent ALWAYS forces `from_root_body =
+///   false` because the user did not type heritage-target member
+///   names in the carrier's own literal body.
+#[allow(clippy::too_many_arguments)] // R21-F1: explicit `from_root_body` threading
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(super) fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
     members: &[TSSignature],
@@ -675,6 +800,7 @@ pub(super) fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
     base_offset: u32,
     result: &mut ResolvedElements,
     ctx: &TypeResolutionContext<'ctx, 'a>,
+    from_root_body: bool,
     recursion_guard: &mut Vec<String>,
 ) {
     let current_name = recursion_guard
@@ -685,20 +811,26 @@ pub(super) fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
         component_meta_core_trace_event(
             "core_interface_resolution",
             format!(
-                "file={} phase=start name={} depth={} members={} extends={}",
+                "file={} phase=start name={} depth={} members={} extends={} from_root_body={}",
                 ctx.trace_label.as_deref().unwrap_or("<unknown>"),
                 current_name,
                 recursion_guard.len(),
                 members.len(),
-                extends.len()
+                extends.len(),
+                from_root_body,
             ),
         );
     }
-    // Resolve own members
-    resolve_type_literal_members(members, base_offset, result, ctx.source);
+    // Resolve own members — propagate caller flag.
+    resolve_type_literal_members(members, base_offset, result, ctx.source, from_root_body);
 
     // Resolve extends — try heritage AST first for utility type support,
     // then fall back to string-based lookup.
+    //
+    // Every descent below crosses a heritage boundary; named-target
+    // lookups dispatch with `from_root_body = false`. The utility
+    // type dispatch (`try_resolve_heritage_utility_type`) treats its
+    // argument as heritage internally and does not need a flag.
     for (i, base_name) in extends.iter().enumerate() {
         if recursion_guard.contains(base_name) {
             continue;
@@ -716,32 +848,22 @@ pub(super) fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
                 continue;
             }
             if let Some(type_args) = &h.type_arguments {
-                if !type_args.params.is_empty() {
-                    // Resolve each type_argument through the normal pipeline.
-                    // For utility types like Pick<T, K>, the first param is the
-                    // source type; filtering/transformation is handled by the
-                    // utility type branch in resolve_type_elements_inner_with_ctx_ref
-                    // when it encounters the corresponding TSTypeReference node.
-                    //
-                    // We can't construct a synthetic TSTypeReference here (needs arena),
-                    // so we replicate the utility type dispatch inline. This covers the
-                    // most common cases; truly complex types may need the JS-side
-                    // type registry fallback.
-                    if try_resolve_heritage_utility_type(
+                if !type_args.params.is_empty()
+                    && try_resolve_heritage_utility_type(
                         base_name.as_str(),
                         type_args,
                         base_offset,
                         result,
                         ctx,
-                    ) {
-                        if result.has_call_signature {
-                            result.has_call_signature = true;
-                        }
-                        recursion_guard.pop();
-                        continue;
+                    )
+                {
+                    if result.has_call_signature {
+                        result.has_call_signature = true;
                     }
-                    // Not a recognized utility type — fall through to name-based lookup
+                    recursion_guard.pop();
+                    continue;
                 }
+                // Not a recognized utility type — fall through to name-based lookup
             }
         }
 
@@ -751,6 +873,7 @@ pub(super) fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
             type_args,
             base_offset,
             ctx,
+            false,
             recursion_guard,
         ) {
             result.props.extend(resolved.props.iter().cloned());
@@ -778,6 +901,13 @@ pub(super) fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
     }
 }
 
+/// Heritage utility-type dispatch (`extends Pick<T, K>`,
+/// `extends Omit<T, K>`, etc.).
+///
+/// Every internal descent into `T` (the first type argument) is a
+/// heritage-like descent — the user did NOT type the resulting member
+/// names in the carrier's literal body, so each descent enters with
+/// `from_root_body = false`.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(super) fn try_resolve_heritage_utility_type<'ctx, 'a: 'ctx>(
     name: &str,
@@ -794,6 +924,7 @@ pub(super) fn try_resolve_heritage_utility_type<'ctx, 'a: 'ctx>(
                 base_offset,
                 &mut inner,
                 ctx,
+                false,
             );
             let keys = extract_string_literal_keys_with_ctx(&type_args.params[1], Some(ctx));
             inner
@@ -811,6 +942,7 @@ pub(super) fn try_resolve_heritage_utility_type<'ctx, 'a: 'ctx>(
                 base_offset,
                 &mut inner,
                 ctx,
+                false,
             );
             let keys = extract_string_literal_keys_with_ctx(&type_args.params[1], Some(ctx));
             inner
@@ -828,6 +960,7 @@ pub(super) fn try_resolve_heritage_utility_type<'ctx, 'a: 'ctx>(
                 base_offset,
                 &mut inner,
                 ctx,
+                false,
             );
             if name == "Partial" {
                 for p in &mut inner.props {
@@ -850,15 +983,28 @@ pub(super) fn try_resolve_heritage_utility_type<'ctx, 'a: 'ctx>(
     }
 }
 
+/// Resolve a class shape including super-class and implements heritage.
+///
+/// `from_root_body` is the caller's macro-T own-body flag.
+/// - Own members (the class body) propagate the caller's flag.
+/// - Super-class and `implements` descent ALWAYS forces
+///   `from_root_body = false` (heritage boundary).
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(super) fn resolve_class_with_heritage_ctx_ref<'ctx, 'a: 'ctx>(
     class: &'ctx Class<'a>,
     base_offset: u32,
     result: &mut ResolvedElements,
     ctx: &TypeResolutionContext<'ctx, 'a>,
+    from_root_body: bool,
     recursion_guard: &mut Vec<String>,
 ) {
-    resolve_class_members(&class.body.body, base_offset, result, ctx.source);
+    resolve_class_members(
+        &class.body.body,
+        base_offset,
+        result,
+        ctx.source,
+        from_root_body,
+    );
 
     if let Some(super_class) = &class.super_class {
         if let Some(base_name) = get_expression_reference_name(super_class) {
@@ -935,6 +1081,9 @@ pub(super) fn resolve_class_with_heritage_ctx_ref<'ctx, 'a: 'ctx>(
     result.dedup_props();
 }
 
+/// Resolve a named class heritage target (super-class or implements
+/// clause). This is always a heritage descent — internally dispatch
+/// with `from_root_body = false`.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(super) fn resolve_named_class_heritage_target<'ctx, 'a: 'ctx>(
     name: &str,
@@ -944,9 +1093,14 @@ pub(super) fn resolve_named_class_heritage_target<'ctx, 'a: 'ctx>(
     ctx: &TypeResolutionContext<'ctx, 'a>,
     recursion_guard: &mut Vec<String>,
 ) {
-    if let Some(resolved) =
-        resolve_named_local_type_with_ctx_ref(name, type_args, base_offset, ctx, recursion_guard)
-    {
+    if let Some(resolved) = resolve_named_local_type_with_ctx_ref(
+        name,
+        type_args,
+        base_offset,
+        ctx,
+        false,
+        recursion_guard,
+    ) {
         result.props.extend(resolved.props.iter().cloned());
         result.emits.extend(resolved.emits.iter().cloned());
         if resolved.has_call_signature {
@@ -960,23 +1114,28 @@ pub(super) fn resolve_class_members(
     base_offset: u32,
     result: &mut ResolvedElements,
     source: &[u8],
+    from_root_body: bool,
 ) {
     for member in members {
         match member {
             ClassElement::PropertyDefinition(prop) => {
-                if let Some(resolved) = resolve_class_property_definition(prop, base_offset, source)
+                if let Some(resolved) =
+                    resolve_class_property_definition(prop, base_offset, source, from_root_body)
                 {
                     result.props.push(resolved);
                 }
             }
             ClassElement::MethodDefinition(method) => {
-                if let Some(resolved) = resolve_class_method_definition(method, base_offset, source)
+                if let Some(resolved) =
+                    resolve_class_method_definition(method, base_offset, source, from_root_body)
                 {
                     result.props.push(resolved);
                 }
             }
             ClassElement::AccessorProperty(prop) => {
-                if let Some(resolved) = resolve_class_accessor_property(prop, base_offset, source) {
+                if let Some(resolved) =
+                    resolve_class_accessor_property(prop, base_offset, source, from_root_body)
+                {
                     result.props.push(resolved);
                 }
             }
@@ -989,6 +1148,7 @@ pub(super) fn resolve_class_property_definition(
     prop: &PropertyDefinition,
     base_offset: u32,
     source: &[u8],
+    from_root_body: bool,
 ) -> Option<ResolvedProp> {
     if prop.r#static {
         return None;
@@ -1030,7 +1190,7 @@ pub(super) fn resolve_class_property_definition(
         span_is_absolute: base_offset != 0,
         type_expr,
         type_expr_scope: None,
-        declared_in_macro_type_arg: false,
+        declared_in_macro_type_arg: from_root_body,
     })
 }
 
@@ -1038,6 +1198,7 @@ pub(super) fn resolve_class_method_definition(
     method: &MethodDefinition,
     base_offset: u32,
     source: &[u8],
+    from_root_body: bool,
 ) -> Option<ResolvedProp> {
     if method.r#static || method.kind == MethodDefinitionKind::Constructor {
         return None;
@@ -1070,7 +1231,7 @@ pub(super) fn resolve_class_method_definition(
         span_is_absolute: base_offset != 0,
         type_expr: Some(type_expr),
         type_expr_scope: None,
-        declared_in_macro_type_arg: false,
+        declared_in_macro_type_arg: from_root_body,
     })
 }
 
@@ -1078,6 +1239,7 @@ pub(super) fn resolve_class_accessor_property(
     prop: &AccessorProperty,
     base_offset: u32,
     source: &[u8],
+    from_root_body: bool,
 ) -> Option<ResolvedProp> {
     if prop.r#static {
         return None;
@@ -1119,7 +1281,7 @@ pub(super) fn resolve_class_accessor_property(
         span_is_absolute: base_offset != 0,
         type_expr,
         type_expr_scope: None,
-        declared_in_macro_type_arg: false,
+        declared_in_macro_type_arg: from_root_body,
     })
 }
 
@@ -1169,11 +1331,12 @@ pub(super) fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
     base_offset: u32,
     result: &mut ResolvedElements,
     ctx: &mut TypeResolutionContext<'ctx, 'a>,
+    from_root_body: bool,
 ) {
     let Some(_guard) = ResolutionDepthGuard::try_enter() else {
         return;
     };
-    resolve_type_elements_inner_with_ctx_guarded(node, base_offset, result, ctx);
+    resolve_type_elements_inner_with_ctx_guarded(node, base_offset, result, ctx, from_root_body);
 }
 
 pub(super) fn resolve_type_elements_inner_with_ctx_guarded<'ctx, 'a: 'ctx>(
@@ -1181,39 +1344,64 @@ pub(super) fn resolve_type_elements_inner_with_ctx_guarded<'ctx, 'a: 'ctx>(
     base_offset: u32,
     result: &mut ResolvedElements,
     ctx: &mut TypeResolutionContext<'ctx, 'a>,
+    from_root_body: bool,
 ) {
     match node {
-        // { prop: Type }
+        // { prop: Type } — own-body literal, propagate caller flag.
         TSType::TSTypeLiteral(lit) => {
-            resolve_type_literal_members(&lit.members, base_offset, result, ctx.source);
+            resolve_type_literal_members(
+                &lit.members,
+                base_offset,
+                result,
+                ctx.source,
+                from_root_body,
+            );
         }
 
-        // Parenthesized: (Type)
+        // Parenthesized: (Type) — transparent, propagate caller flag.
         TSType::TSParenthesizedType(paren) => {
-            resolve_type_elements_inner_with_ctx(&paren.type_annotation, base_offset, result, ctx);
+            resolve_type_elements_inner_with_ctx(
+                &paren.type_annotation,
+                base_offset,
+                result,
+                ctx,
+                from_root_body,
+            );
         }
 
-        // Union: Type1 | Type2
+        // Union: Type1 | Type2 — each arm preserves the caller's
+        // `from_root_body` (unions enumerate options, not heritage).
         TSType::TSUnionType(union) => {
             for ty in &union.types {
-                resolve_type_elements_inner_with_ctx(ty, base_offset, result, ctx);
+                resolve_type_elements_inner_with_ctx(ty, base_offset, result, ctx, from_root_body);
             }
             result.dedup_props();
         }
 
-        // Intersection: Type1 & Type2
+        // Intersection: Type1 & Type2 — TSTypeLiteral arms are
+        // own-body literals (preserve caller's flag); any non-literal
+        // arm (TSTypeReference, etc.) is a surface-merging
+        // heritage-like construct from the caller's perspective and
+        // descends with `from_root_body = false`.
         TSType::TSIntersectionType(intersection) => {
             for ty in &intersection.types {
                 if has_immediate_vue_ignore_comment(ctx.source, ty.span().start) {
                     continue;
                 }
-                resolve_type_elements_inner_with_ctx(ty, base_offset, result, ctx);
+                let arm_from_root_body = matches!(ty, TSType::TSTypeLiteral(_)) && from_root_body;
+                resolve_type_elements_inner_with_ctx(
+                    ty,
+                    base_offset,
+                    result,
+                    ctx,
+                    arm_from_root_body,
+                );
             }
             result.dedup_props();
         }
 
         TSType::TSMappedType(mapped) => {
-            resolve_mapped_type_with_ctx(mapped, base_offset, result, &*ctx);
+            resolve_mapped_type_with_ctx(mapped, base_offset, result, &*ctx, from_root_body);
         }
 
         // Type reference: SomeType or SomeType<T>
@@ -1227,19 +1415,29 @@ pub(super) fn resolve_type_elements_inner_with_ctx_guarded<'ctx, 'a: 'ctx>(
                 return;
             }
 
-            // 1. Check local type aliases
+            // 1. Check local type aliases — alias body is structurally
+            //    part of the caller's expression; propagate caller flag.
             if let Some((aliased_type, type_params)) = ctx.find_type_alias(type_name_bytes) {
                 let mut child = instantiate_type_params_ctx(
                     ctx,
                     type_params,
                     type_ref.type_arguments.as_deref(),
                 );
-                resolve_type_elements_inner_with_ctx(aliased_type, base_offset, result, &mut child);
+                resolve_type_elements_inner_with_ctx(
+                    aliased_type,
+                    base_offset,
+                    result,
+                    &mut child,
+                    from_root_body,
+                );
                 ctx.diagnostics.append(&mut child.diagnostics);
                 return;
             }
 
-            // 2. Check local interfaces (with extends support)
+            // 2. Check local interfaces (with extends support) —
+            //    `resolve_interface_with_extends_ctx` internally
+            //    distinguishes own-members (caller flag) from
+            //    heritage descent (false).
             if let Some((interface_members, iface_extends, iface_heritage, iface_type_params)) =
                 ctx.find_interface(type_name_bytes)
             {
@@ -1257,13 +1455,14 @@ pub(super) fn resolve_type_elements_inner_with_ctx_guarded<'ctx, 'a: 'ctx>(
                     base_offset,
                     result,
                     &mut child,
+                    from_root_body,
                     &mut guard,
                 );
                 ctx.diagnostics.append(&mut child.diagnostics);
                 return;
             }
 
-            // 3. Check local classes (instance-side shape with heritage)
+            // 3. Check local classes (instance-side shape with heritage).
             if let Some(class_decl) = ctx.find_class(type_name_bytes) {
                 let mut guard = vec![type_name.clone()];
                 let child = instantiate_type_params_ctx(
@@ -1276,20 +1475,45 @@ pub(super) fn resolve_type_elements_inner_with_ctx_guarded<'ctx, 'a: 'ctx>(
                     base_offset,
                     result,
                     &child,
+                    from_root_body,
                     &mut guard,
                 );
                 return;
             }
 
-            // 4. Check generic type parameter constraints
+            // 4. Check generic type parameter constraints — constraint
+            //    body is structurally substituted for the type
+            //    parameter; propagate caller flag.
             if let Some(constraint) = ctx.find_type_param(type_name_bytes) {
-                resolve_type_elements_inner_with_ctx(constraint, base_offset, result, ctx);
+                resolve_type_elements_inner_with_ctx(
+                    constraint,
+                    base_offset,
+                    result,
+                    ctx,
+                    from_root_body,
+                );
                 return;
             }
 
-            // 5. Check companion <script> block's pre-resolved types
+            // 5. Check companion <script> block's pre-resolved types.
+            //    Companion definitions were resolved with
+            //    `from_root_body = false` (see `extract_companion_types`).
+            //    When the macro T directly references one
+            //    (`defineProps<CompanionFoo>()`), the user wrote the
+            //    name in the macro T slot, so the companion's
+            //    structural members are the macro T's body — when the
+            //    caller's `from_root_body` is `true` we re-stamp the
+            //    cloned props' fact to `true`. When the caller is
+            //    `false` (we are already inside heritage descent),
+            //    the cached `false` is correct.
             if let Some(companion) = ctx.companion_types.get(type_name.as_str()) {
-                result.props.extend(companion.props.iter().cloned());
+                if from_root_body {
+                    result
+                        .props
+                        .extend(companion.props.iter().cloned().map(stamp_prop_in_root_body));
+                } else {
+                    result.props.extend(companion.props.iter().cloned());
+                }
                 result.emits.extend(companion.emits.iter().cloned());
                 if companion.has_call_signature {
                     result.has_call_signature = true;
@@ -1297,7 +1521,12 @@ pub(super) fn resolve_type_elements_inner_with_ctx_guarded<'ctx, 'a: 'ctx>(
                 return;
             }
 
-            // 6. Handle built-in TypeScript utility types (Omit, Pick, Partial, etc.)
+            // 6. Handle built-in TypeScript utility types — the first
+            //    type-argument of `Pick`/`Omit`/`Partial`/`Required`/
+            //    `Readonly` is a heritage-like descent: the user did
+            //    NOT type the resulting member NAMES in the macro T's
+            //    own body — the names came from `T`. Descend with
+            //    `from_root_body = false`.
             if let Some(args) = &type_ref.type_arguments {
                 match type_name.as_str() {
                     "Omit" if args.params.len() >= 2 => {
@@ -1308,6 +1537,7 @@ pub(super) fn resolve_type_elements_inner_with_ctx_guarded<'ctx, 'a: 'ctx>(
                             base_offset,
                             &mut inner,
                             ctx,
+                            false,
                         );
                         let keys =
                             extract_string_literal_keys_with_ctx(&args.params[1], Some(&*ctx));
@@ -1330,6 +1560,7 @@ pub(super) fn resolve_type_elements_inner_with_ctx_guarded<'ctx, 'a: 'ctx>(
                             base_offset,
                             &mut inner,
                             ctx,
+                            false,
                         );
                         let keys =
                             extract_string_literal_keys_with_ctx(&args.params[1], Some(&*ctx));
@@ -1351,6 +1582,7 @@ pub(super) fn resolve_type_elements_inner_with_ctx_guarded<'ctx, 'a: 'ctx>(
                             base_offset,
                             result,
                             ctx,
+                            false,
                         );
                         return;
                     }
@@ -1370,7 +1602,11 @@ pub(super) fn resolve_type_elements_inner_with_ctx_guarded<'ctx, 'a: 'ctx>(
             });
         }
 
-        // Type query: typeof X — look up in companion types
+        // Type query: typeof X — look up in companion types. `typeof`
+        // is NOT macro T's body; even when the caller's
+        // `from_root_body` is `true`, the structural members come
+        // from a value declaration the user didn't type names of.
+        // Companion's cached `false` is forwarded unchanged.
         TSType::TSTypeQuery(query) => {
             if let TSTypeQueryExprName::IdentifierReference(ident) = &query.expr_name {
                 let type_name = ident.name.as_str();
@@ -1403,11 +1639,18 @@ pub(super) fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
     base_offset: u32,
     result: &mut ResolvedElements,
     ctx: &TypeResolutionContext<'ctx, 'a>,
+    from_root_body: bool,
 ) {
     let Some(_guard) = ResolutionDepthGuard::try_enter() else {
         return;
     };
-    resolve_type_elements_inner_with_ctx_ref_guarded(node, base_offset, result, ctx);
+    resolve_type_elements_inner_with_ctx_ref_guarded(
+        node,
+        base_offset,
+        result,
+        ctx,
+        from_root_body,
+    );
 }
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
@@ -1416,44 +1659,70 @@ pub(super) fn resolve_type_elements_inner_with_ctx_ref_guarded<'ctx, 'a: 'ctx>(
     base_offset: u32,
     result: &mut ResolvedElements,
     ctx: &TypeResolutionContext<'ctx, 'a>,
+    from_root_body: bool,
 ) {
     match node {
-        // { prop: Type }
+        // { prop: Type } — own-body literal, propagate caller flag.
         TSType::TSTypeLiteral(lit) => {
-            resolve_type_literal_members(&lit.members, base_offset, result, ctx.source);
+            resolve_type_literal_members(
+                &lit.members,
+                base_offset,
+                result,
+                ctx.source,
+                from_root_body,
+            );
         }
 
-        // Parenthesized: (Type)
+        // Parenthesized: (Type) — transparent, propagate caller flag.
         TSType::TSParenthesizedType(paren) => {
             resolve_type_elements_inner_with_ctx_ref(
                 &paren.type_annotation,
                 base_offset,
                 result,
                 ctx,
+                from_root_body,
             );
         }
 
-        // Union: Type1 | Type2
+        // Union: Type1 | Type2 — each arm preserves the caller's
+        // `from_root_body` (unions enumerate options, not heritage).
         TSType::TSUnionType(union) => {
             for ty in &union.types {
-                resolve_type_elements_inner_with_ctx_ref(ty, base_offset, result, ctx);
+                resolve_type_elements_inner_with_ctx_ref(
+                    ty,
+                    base_offset,
+                    result,
+                    ctx,
+                    from_root_body,
+                );
             }
             result.dedup_props();
         }
 
-        // Intersection: Type1 & Type2
+        // Intersection: Type1 & Type2 — TSTypeLiteral arms are
+        // own-body literals (preserve caller's flag); any non-literal
+        // arm (TSTypeReference, etc.) is a surface-merging
+        // heritage-like construct from the caller's perspective and
+        // descends with `from_root_body = false`.
         TSType::TSIntersectionType(intersection) => {
             for ty in &intersection.types {
                 if has_immediate_vue_ignore_comment(ctx.source, ty.span().start) {
                     continue;
                 }
-                resolve_type_elements_inner_with_ctx_ref(ty, base_offset, result, ctx);
+                let arm_from_root_body = matches!(ty, TSType::TSTypeLiteral(_)) && from_root_body;
+                resolve_type_elements_inner_with_ctx_ref(
+                    ty,
+                    base_offset,
+                    result,
+                    ctx,
+                    arm_from_root_body,
+                );
             }
             result.dedup_props();
         }
 
         TSType::TSMappedType(mapped) => {
-            resolve_mapped_type_with_ctx(mapped, base_offset, result, ctx);
+            resolve_mapped_type_with_ctx(mapped, base_offset, result, ctx, from_root_body);
         }
 
         // Type reference: SomeType or SomeType<T>
@@ -1467,12 +1736,18 @@ pub(super) fn resolve_type_elements_inner_with_ctx_ref_guarded<'ctx, 'a: 'ctx>(
                 return;
             }
 
+            // Named local type (alias / interface / class /
+            // companion). The named target's body IS the user's
+            // expression — propagate caller flag; the named
+            // resolver internally distinguishes own-members from
+            // heritage descent.
             let mut guard = vec![type_name.clone()];
             if let Some(resolved) = resolve_named_local_type_with_ctx_ref(
                 type_name.as_str(),
                 type_ref.type_arguments.as_deref(),
                 base_offset,
                 ctx,
+                from_root_body,
                 &mut guard,
             ) {
                 result.props.extend(resolved.props.iter().cloned());
@@ -1483,13 +1758,24 @@ pub(super) fn resolve_type_elements_inner_with_ctx_ref_guarded<'ctx, 'a: 'ctx>(
                 return;
             }
 
-            // 4. Check generic type parameter constraints
+            // 4. Check generic type parameter constraints — propagate
+            //    caller flag (constraint body substitutes the type
+            //    parameter structurally).
             if let Some(constraint) = ctx.find_type_param(type_name_bytes) {
-                resolve_type_elements_inner_with_ctx_ref(constraint, base_offset, result, ctx);
+                resolve_type_elements_inner_with_ctx_ref(
+                    constraint,
+                    base_offset,
+                    result,
+                    ctx,
+                    from_root_body,
+                );
                 return;
             }
 
-            // 6. Handle built-in TypeScript utility types (Omit, Pick, Partial, etc.)
+            // 6. Handle built-in TypeScript utility types — the first
+            //    type-argument of `Pick`/`Omit`/`Partial`/`Required`/
+            //    `Readonly` is a heritage-like descent: descend with
+            //    `from_root_body = false`.
             if let Some(args) = &type_ref.type_arguments {
                 match type_name.as_str() {
                     "Omit" if args.params.len() >= 2 => {
@@ -1499,6 +1785,7 @@ pub(super) fn resolve_type_elements_inner_with_ctx_ref_guarded<'ctx, 'a: 'ctx>(
                             base_offset,
                             &mut inner,
                             ctx,
+                            false,
                         );
                         let keys = extract_string_literal_keys_with_ctx(&args.params[1], Some(ctx));
                         inner
@@ -1518,6 +1805,7 @@ pub(super) fn resolve_type_elements_inner_with_ctx_ref_guarded<'ctx, 'a: 'ctx>(
                             base_offset,
                             &mut inner,
                             ctx,
+                            false,
                         );
                         let keys = extract_string_literal_keys_with_ctx(&args.params[1], Some(ctx));
                         inner
@@ -1536,6 +1824,7 @@ pub(super) fn resolve_type_elements_inner_with_ctx_ref_guarded<'ctx, 'a: 'ctx>(
                             base_offset,
                             result,
                             ctx,
+                            false,
                         );
                     }
                     _ => {}
@@ -1545,7 +1834,9 @@ pub(super) fn resolve_type_elements_inner_with_ctx_ref_guarded<'ctx, 'a: 'ctx>(
             // 6. Couldn't resolve - skip silently (no diagnostics in immutable version)
         }
 
-        // Type query: typeof X — look up in companion types
+        // Type query: typeof X — look up in companion types. `typeof`
+        // is NOT macro T's body; companion's cached `false` is
+        // forwarded unchanged.
         TSType::TSTypeQuery(query) => {
             if let TSTypeQueryExprName::IdentifierReference(ident) = &query.expr_name {
                 let type_name = ident.name.as_str();

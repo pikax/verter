@@ -1558,9 +1558,14 @@ fn resolve_named_external_type<'ctx, 'a: 'ctx>(
         return Some(ResolvedElements::default());
     }
 
+    // External type resolution is reached when a macro T resolves a
+    // cross-file type (`defineProps<Foo>()` where `Foo` is imported).
+    // The macro entry IS the named type's body, so dispatch with
+    // `from_root_body = true`. Heritage descent inside the named
+    // resolution flips to `false` internally.
     let mut guard = vec![type_name.to_string()];
     if let Some(resolved) =
-        resolve_named_local_type_with_ctx_ref(type_name, None, 0, ctx, &mut guard)
+        resolve_named_local_type_with_ctx_ref(type_name, None, 0, ctx, true, &mut guard)
     {
         return Some((*resolved).clone());
     }
@@ -1591,6 +1596,7 @@ fn resolve_default_exported_type<'ctx, 'a: 'ctx>(
                         None,
                         0,
                         ctx,
+                        true,
                         &mut guard,
                     ) {
                         return Some((*resolved).clone());
@@ -1599,7 +1605,14 @@ fn resolve_default_exported_type<'ctx, 'a: 'ctx>(
 
                 let mut resolved = ResolvedElements::default();
                 let mut guard = vec![guard_name];
-                resolve_class_with_heritage_ctx_ref(class_decl, 0, &mut resolved, ctx, &mut guard);
+                resolve_class_with_heritage_ctx_ref(
+                    class_decl,
+                    0,
+                    &mut resolved,
+                    ctx,
+                    true,
+                    &mut guard,
+                );
                 resolved.root_runtime_types = vec![RuntimeType::Object];
                 return Some(resolved);
             }
@@ -1610,6 +1623,7 @@ fn resolve_default_exported_type<'ctx, 'a: 'ctx>(
                     None,
                     0,
                     ctx,
+                    true,
                     &mut guard,
                 ) {
                     return Some((*resolved).clone());
@@ -1625,6 +1639,7 @@ fn resolve_default_exported_type<'ctx, 'a: 'ctx>(
                     0,
                     &mut resolved,
                     ctx,
+                    true,
                     &mut guard,
                 );
                 resolved.root_runtime_types = vec![RuntimeType::Object];

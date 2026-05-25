@@ -101,6 +101,7 @@ pub(super) fn resolve_type_literal_members(
     base_offset: u32,
     result: &mut ResolvedElements,
     source: &[u8],
+    from_root_body: bool,
 ) {
     for member in members {
         match member {
@@ -109,13 +110,16 @@ pub(super) fn resolve_type_literal_members(
                 // Properties with tuple/array type values are treated as emits
                 if let Some(emit) = resolve_property_as_emit(prop, base_offset, source) {
                     result.emits.push(emit);
-                } else if let Some(resolved) = resolve_property_signature(prop, base_offset, source)
+                } else if let Some(resolved) =
+                    resolve_property_signature(prop, base_offset, source, from_root_body)
                 {
                     result.props.push(resolved);
                 }
             }
             TSSignature::TSMethodSignature(method) => {
-                if let Some(resolved) = resolve_method_signature(method, base_offset, source) {
+                if let Some(resolved) =
+                    resolve_method_signature(method, base_offset, source, from_root_body)
+                {
                     result.props.push(resolved);
                 }
             }
@@ -144,6 +148,7 @@ pub(super) fn resolve_mapped_type_with_ctx<'ctx, 'a: 'ctx>(
     base_offset: u32,
     result: &mut ResolvedElements,
     ctx: &TypeResolutionContext<'ctx, 'a>,
+    from_root_body: bool,
 ) {
     // Renamed mapped keys (`as ...`) need a dedicated key-evaluation path.
     // Until that exists, only materialize direct finite key sets.
@@ -196,7 +201,10 @@ pub(super) fn resolve_mapped_type_with_ctx<'ctx, 'a: 'ctx>(
             span_is_absolute: base_offset != 0,
             type_expr: type_expr.clone(),
             type_expr_scope: None,
-            declared_in_macro_type_arg: false,
+            // Mapped-type members are own-body members of the mapped
+            // construction currently being resolved — they reflect the
+            // caller's macro-T own-body / heritage context unchanged.
+            declared_in_macro_type_arg: from_root_body,
         });
     }
 
@@ -219,7 +227,13 @@ pub(super) fn resolve_mapped_type_keys_with_ctx<'ctx, 'a: 'ctx>(
 ) -> Vec<ResolvedMappedKey> {
     match constraint {
         TSType::TSTypeOperatorType(op) if matches!(op.operator, TSTypeOperatorOperator::Keyof) => {
-            let resolved = resolve_type_elements_with_ctx_ref(&op.type_annotation, 0, ctx);
+            // `keyof X` enumerates X's member NAMES; the resulting
+            // ResolvedElements is consumed for `key.key_name` only and
+            // its props are discarded. The `from_root_body` value
+            // therefore does not affect mapped-key output — but we
+            // pass `false` for structural correctness: a `keyof`
+            // operand is NOT the macro T's own body.
+            let resolved = resolve_type_elements_with_ctx_ref(&op.type_annotation, 0, ctx, false);
             resolved
                 .props
                 .into_iter()
@@ -489,10 +503,15 @@ pub(super) fn has_immediate_vue_ignore_comment(source: &[u8], start: u32) -> boo
 }
 
 /// Resolve a property signature to a ResolvedProp.
+///
+/// `from_root_body` is stamped onto the produced `ResolvedProp` as the
+/// `declared_in_macro_type_arg` fact. See [`resolve_type_literal_members`]
+/// for the propagation contract.
 pub(super) fn resolve_property_signature(
     prop: &TSPropertySignature,
     base_offset: u32,
     source: &[u8],
+    from_root_body: bool,
 ) -> Option<ResolvedProp> {
     let key = get_property_key_span(&prop.key, base_offset)?;
     let optional = prop.optional;
@@ -535,15 +554,19 @@ pub(super) fn resolve_property_signature(
         span_is_absolute: base_offset != 0,
         type_expr,
         type_expr_scope: None,
-        declared_in_macro_type_arg: false,
+        declared_in_macro_type_arg: from_root_body,
     })
 }
 
 /// Resolve a method signature to a ResolvedProp (methods are function-typed properties).
+///
+/// `from_root_body` is stamped onto the produced `ResolvedProp` as the
+/// `declared_in_macro_type_arg` fact.
 pub(super) fn resolve_method_signature(
     method: &TSMethodSignature,
     base_offset: u32,
     source: &[u8],
+    from_root_body: bool,
 ) -> Option<ResolvedProp> {
     let key = get_property_key_span(&method.key, base_offset)?;
     let optional = method.optional;
@@ -575,7 +598,7 @@ pub(super) fn resolve_method_signature(
         span_is_absolute: base_offset != 0,
         type_expr: Some(type_expr),
         type_expr_scope: None,
-        declared_in_macro_type_arg: false,
+        declared_in_macro_type_arg: from_root_body,
     })
 }
 

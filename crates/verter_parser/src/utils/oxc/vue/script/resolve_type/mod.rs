@@ -762,11 +762,20 @@ pub mod cache_keys {
     /// Note: `companion_cache_key` and `type_param_bindings` are `Arc<[…]>` so
     /// child contexts produced by `instantiate_type_params_ctx` share the same
     /// underlying slice without deep-cloning.
+    ///
+    /// `from_root_body` is part of the key because resolving the same
+    /// named type from different positions (macro-T own-body vs heritage
+    /// descent) yields structurally different `ResolvedElements` — each
+    /// resolved prop carries a `declared_in_macro_type_arg` fact whose
+    /// value depends on the caller's `from_root_body` position. Without
+    /// this dimension a single cache slot would erroneously serve both
+    /// positions (Codex's "cache-incomplete F1" risk).
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub struct ResolvedNamedTypeCacheKey {
         pub name: Box<[u8]>,
         pub surface: Option<BlockedTypeSurface>,
         pub base_offset: u32,
+        pub from_root_body: bool,
         pub companion_cache_key: Arc<[Box<[u8]>]>,
         pub type_param_bindings: Arc<[ResolvedTypeParamBindingCacheKey]>,
     }
@@ -1036,11 +1045,13 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
         &self,
         name: &[u8],
         base_offset: u32,
+        from_root_body: bool,
     ) -> cache_keys::ResolvedNamedTypeCacheKey {
         cache_keys::ResolvedNamedTypeCacheKey {
             name: name.to_vec().into_boxed_slice(),
             surface: self.current_surface.clone(),
             base_offset,
+            from_root_body,
             companion_cache_key: Arc::clone(&self.companion_cache_key),
             type_param_bindings: Arc::clone(&self.type_param_bindings_cache_key),
         }
@@ -1050,6 +1061,7 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
         &self,
         name: &[u8],
         base_offset: u32,
+        from_root_body: bool,
     ) -> Option<Arc<ResolvedElements>> {
         #[cfg(feature = "parser_cache_audit")]
         {
@@ -1060,16 +1072,17 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
             // and key shape during focused audit runs.
             if let Some(cache) = &self.named_type_cache {
                 if cache
-                    .get(&self.cache_key_for_name(name, base_offset))
+                    .get(&self.cache_key_for_name(name, base_offset, from_root_body))
                     .is_some()
                 {
                     component_meta_core_trace_event(
                         "parser_cache_audit_hit",
                         format!(
-                            "file={} name={} base_offset={} bindings={} companions={}",
+                            "file={} name={} base_offset={} from_root_body={} bindings={} companions={}",
                             self.trace_label.as_deref().unwrap_or("<unknown>"),
                             String::from_utf8_lossy(name),
                             base_offset,
+                            from_root_body,
                             self.type_param_bindings.len(),
                             self.companion_types.len(),
                         ),
@@ -1079,17 +1092,21 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
         }
         self.named_type_cache
             .as_ref()?
-            .get(&self.cache_key_for_name(name, base_offset))
+            .get(&self.cache_key_for_name(name, base_offset, from_root_body))
     }
 
     fn store_named_resolution(
         &self,
         name: &[u8],
         base_offset: u32,
+        from_root_body: bool,
         resolved: Arc<ResolvedElements>,
     ) {
         if let Some(cache) = self.named_type_cache.as_ref() {
-            cache.insert(self.cache_key_for_name(name, base_offset), resolved);
+            cache.insert(
+                self.cache_key_for_name(name, base_offset, from_root_body),
+                resolved,
+            );
         }
     }
     /// Look up a type parameter constraint by comparing spans against source bytes
@@ -1593,6 +1610,14 @@ fn instantiate_type_params_ctx<'ctx, 'a: 'ctx>(
 /// Walks the program's statements and resolves any type aliases and interfaces,
 /// returning a map from type name → resolved elements. This allows the setup
 /// script's type resolver to look up types defined in the companion block.
+///
+/// Companion types are NOT macro-T's own body — they are ambient type
+/// definitions that the setup script's macros may later reference. The
+/// resolver chain is therefore invoked with `from_root_body = false`
+/// so every produced `ResolvedProp.declared_in_macro_type_arg` is
+/// `false`. If a setup-script macro later consumes one of these
+/// companion types (e.g. `defineProps<CompanionProps>()`), the named
+/// resolver re-stamps the cloned props' fact on the macro-root side.
 pub fn extract_companion_types(
     program: &Program<'_>,
     source: &[u8],
@@ -1603,6 +1628,9 @@ pub fn extract_companion_types(
 
     let mut types = rustc_hash::FxHashMap::default();
 
+    // Companion definitions are ambient — see the doc comment above.
+    let from_root_body = false;
+
     for stmt in &program.body {
         match stmt {
             Statement::TSTypeAliasDeclaration(alias) => {
@@ -1611,6 +1639,7 @@ pub fn extract_companion_types(
                     &alias.type_annotation,
                     content_offset,
                     &ctx,
+                    from_root_body,
                 );
                 types.insert(name, resolved);
             }
@@ -1626,6 +1655,7 @@ pub fn extract_companion_types(
                     content_offset,
                     &mut resolved,
                     &ctx,
+                    from_root_body,
                     &mut guard,
                 );
                 resolved.root_runtime_types = vec![RuntimeType::Object];
@@ -1641,6 +1671,7 @@ pub fn extract_companion_types(
                         content_offset,
                         &mut resolved,
                         &ctx,
+                        from_root_body,
                         &mut guard,
                     );
                     resolved.root_runtime_types = vec![RuntimeType::Object];
@@ -1656,6 +1687,7 @@ pub fn extract_companion_types(
                                 &alias.type_annotation,
                                 content_offset,
                                 &ctx,
+                                from_root_body,
                             );
                             types.insert(name, resolved);
                         }
@@ -1671,6 +1703,7 @@ pub fn extract_companion_types(
                                 content_offset,
                                 &mut resolved,
                                 &ctx,
+                                from_root_body,
                                 &mut guard,
                             );
                             resolved.root_runtime_types = vec![RuntimeType::Object];
@@ -1686,6 +1719,7 @@ pub fn extract_companion_types(
                                     content_offset,
                                     &mut resolved,
                                     &ctx,
+                                    from_root_body,
                                     &mut guard,
                                 );
                                 resolved.root_runtime_types = vec![RuntimeType::Object];
@@ -1711,9 +1745,18 @@ pub fn extract_companion_types(
 /// # Arguments
 /// * `node` - The TSType node to resolve
 /// * `base_offset` - The document offset to apply to all spans
-pub fn resolve_type_elements(node: &TSType, base_offset: u32) -> ResolvedElements {
+/// * `from_root_body` - Whether `node` is the macro T's own body
+///   (member-origin fact propagated as `declared_in_macro_type_arg`).
+///   Top-level macro entry points (`defineProps<T>()` /
+///   `defineEmits<T>()` / `defineSlots<T>()`) pass `true`.
+///   `typeof` / companion / heritage-descent contexts pass `false`.
+pub fn resolve_type_elements(
+    node: &TSType,
+    base_offset: u32,
+    from_root_body: bool,
+) -> ResolvedElements {
     let mut result = ResolvedElements::default();
-    resolve_type_elements_inner(node, base_offset, &mut result, b"");
+    resolve_type_elements_inner(node, base_offset, &mut result, b"", from_root_body);
     result.root_runtime_types = infer_runtime_type(node);
     // Standalone (no-ctx) callers have no canonical_id; stamp the empty
     // scope so the pairing invariant holds without requiring callers to
@@ -1738,13 +1781,16 @@ pub fn resolve_type_elements(node: &TSType, base_offset: u32) -> ResolvedElement
 /// * `node` - The TSType node to resolve
 /// * `base_offset` - The document offset to apply to all spans
 /// * `ctx` - Type resolution context with local type definitions
+/// * `from_root_body` - Whether `node` is the macro T's own body. See
+///   [`resolve_type_elements`] for the propagation contract.
 pub fn resolve_type_elements_with_ctx<'ctx, 'a: 'ctx>(
     node: &'ctx TSType<'a>,
     base_offset: u32,
     ctx: &mut TypeResolutionContext<'ctx, 'a>,
+    from_root_body: bool,
 ) -> ResolvedElements {
     let mut result = ResolvedElements::default();
-    resolve_type_elements_inner_with_ctx(node, base_offset, &mut result, ctx);
+    resolve_type_elements_inner_with_ctx(node, base_offset, &mut result, ctx, from_root_body);
     result.root_runtime_types =
         resolve_root_runtime_type_with_ctx(node, ctx).unwrap_or_else(|| infer_runtime_type(node));
     let scope = ctx
@@ -1771,14 +1817,17 @@ pub fn resolve_type_elements_with_ctx<'ctx, 'a: 'ctx>(
 /// * `node` - The TSType node to resolve
 /// * `base_offset` - The document offset to apply to all spans
 /// * `ctx` - Immutable type resolution context with local type definitions
+/// * `from_root_body` - Whether `node` is the macro T's own body. See
+///   [`resolve_type_elements`] for the propagation contract.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn resolve_type_elements_with_ctx_ref<'ctx, 'a: 'ctx>(
     node: &'ctx TSType<'a>,
     base_offset: u32,
     ctx: &TypeResolutionContext<'ctx, 'a>,
+    from_root_body: bool,
 ) -> ResolvedElements {
     let mut result = ResolvedElements::default();
-    resolve_type_elements_inner_with_ctx_ref(node, base_offset, &mut result, ctx);
+    resolve_type_elements_inner_with_ctx_ref(node, base_offset, &mut result, ctx, from_root_body);
     result.root_runtime_types = resolve_root_runtime_type_with_ctx_ref(node, ctx)
         .unwrap_or_else(|| infer_runtime_type(node));
     let scope = ctx

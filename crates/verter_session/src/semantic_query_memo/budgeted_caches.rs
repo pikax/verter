@@ -1072,6 +1072,7 @@ mod tests {
                 name: name.as_bytes().to_vec().into_boxed_slice(),
                 surface: None,
                 base_offset: 0,
+                from_root_body: true,
                 companion_cache_key: StdArc::from(Vec::<Box<[u8]>>::new().into_boxed_slice()),
                 type_param_bindings: StdArc::from(Vec::new().into_boxed_slice()),
             },

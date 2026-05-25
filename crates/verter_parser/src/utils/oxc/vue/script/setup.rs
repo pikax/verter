@@ -800,11 +800,20 @@ fn extract_type_params<'a>(
     let type_span = Span::new(full_span.start + 1 + offset, full_span.end - 1 + offset);
 
     // Resolve the type from the first type parameter using the type context
-    // This enables resolution of SFC-local interfaces and type aliases
+    // This enables resolution of SFC-local interfaces and type aliases.
+    //
+    // Vue setup-script macros that flow through this helper
+    // (`defineProps<T>()`, `defineEmits<T>()`, `defineSlots<T>()`,
+    // `withDefaults`, etc.) are top-level macro entries: `T` IS the
+    // macro T's own body, so members reached through it get
+    // `declared_in_macro_type_arg = true` (subject to the heritage
+    // flip semantics inside the resolver).
     let resolved = tp
         .params
         .first()
-        .map(|ts_type| resolve_type_elements_with_ctx_ref(ts_type, ctx.content_offset, type_ctx))
+        .map(|ts_type| {
+            resolve_type_elements_with_ctx_ref(ts_type, ctx.content_offset, type_ctx, true)
+        })
         .unwrap_or_default();
 
     // Detect unresolvable type references: the first type param is a TSTypeReference

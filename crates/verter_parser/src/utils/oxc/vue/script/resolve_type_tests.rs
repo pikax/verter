@@ -42,7 +42,7 @@ fn parse_type(type_str: &str) -> Option<ParsedType> {
         if let Statement::TSTypeAliasDeclaration(alias) = stmt {
             return Some(ParsedType {
                 source: source.clone(),
-                resolved: resolve_type_elements(&alias.type_annotation, 0),
+                resolved: resolve_type_elements(&alias.type_annotation, 0, true),
             });
         }
     }
@@ -141,7 +141,8 @@ fn resolve_with_ctx(source: &str) -> (ResolvedElements, Vec<ResolutionDiagnostic
     for stmt in &result.program.body {
         if let Statement::TSTypeAliasDeclaration(alias) = stmt {
             if alias.id.name.as_str() == "Test" {
-                let resolved = resolve_type_elements_with_ctx(&alias.type_annotation, 0, &mut ctx);
+                let resolved =
+                    resolve_type_elements_with_ctx(&alias.type_annotation, 0, &mut ctx, true);
                 return (resolved, ctx.diagnostics);
             }
         }
@@ -170,7 +171,8 @@ fn resolve_with_ctx_and_companions(
     for stmt in &result.program.body {
         if let Statement::TSTypeAliasDeclaration(alias) = stmt {
             if alias.id.name.as_str() == "Test" {
-                let resolved = resolve_type_elements_with_ctx(&alias.type_annotation, 0, &mut ctx);
+                let resolved =
+                    resolve_type_elements_with_ctx(&alias.type_annotation, 0, &mut ctx, true);
                 return (resolved, ctx.diagnostics);
             }
         }
@@ -196,7 +198,8 @@ fn resolve_with_ctx_ref(source: &str) -> (ResolvedElements, Vec<ResolutionDiagno
     for stmt in &result.program.body {
         if let Statement::TSTypeAliasDeclaration(alias) = stmt {
             if alias.id.name.as_str() == "Test" {
-                let resolved = resolve_type_elements_with_ctx_ref(&alias.type_annotation, 0, &ctx);
+                let resolved =
+                    resolve_type_elements_with_ctx_ref(&alias.type_annotation, 0, &ctx, true);
                 return (resolved, ctx.diagnostics);
             }
         }
@@ -225,7 +228,8 @@ fn resolve_with_ctx_ref_and_companions(
     for stmt in &result.program.body {
         if let Statement::TSTypeAliasDeclaration(alias) = stmt {
             if alias.id.name.as_str() == "Test" {
-                let resolved = resolve_type_elements_with_ctx_ref(&alias.type_annotation, 0, &ctx);
+                let resolved =
+                    resolve_type_elements_with_ctx_ref(&alias.type_annotation, 0, &ctx, true);
                 return (resolved, ctx.diagnostics);
             }
         }
@@ -523,7 +527,7 @@ interface Props extends Base { bar: number }
     ctx.set_named_type_cache(Some(mock_cache.clone()));
 
     let mut guard = vec!["Props".to_string()];
-    let first = resolve_named_local_type_with_ctx_ref("Props", None, 0, &ctx, &mut guard)
+    let first = resolve_named_local_type_with_ctx_ref("Props", None, 0, &ctx, true, &mut guard)
         .expect("Props should resolve");
     assert_eq!(
         first.props.len(),
@@ -538,8 +542,9 @@ interface Props extends Base { bar: number }
     );
 
     let mut second_guard = vec!["Props".to_string()];
-    let second = resolve_named_local_type_with_ctx_ref("Props", None, 0, &ctx, &mut second_guard)
-        .expect("Props should resolve from cache");
+    let second =
+        resolve_named_local_type_with_ctx_ref("Props", None, 0, &ctx, true, &mut second_guard)
+            .expect("Props should resolve from cache");
     assert_eq!(
         second.props.len(),
         2,
@@ -569,7 +574,7 @@ interface Props extends Mid { baz: boolean }
     ctx.set_named_type_cache(Some(mock_cache.clone()));
 
     let mut guard = vec!["Props".to_string()];
-    let resolved = resolve_named_local_type_with_ctx_ref("Props", None, 0, &ctx, &mut guard)
+    let resolved = resolve_named_local_type_with_ctx_ref("Props", None, 0, &ctx, true, &mut guard)
         .expect("Props should resolve");
     assert_eq!(
         resolved.props.len(),
@@ -630,8 +635,9 @@ type Use = Wrapper<string>
     );
 
     let mut first_guard = vec!["Base".to_string()];
-    let first = resolve_named_local_type_with_ctx_ref("Base", None, 0, &child, &mut first_guard)
-        .expect("Base should resolve");
+    let first =
+        resolve_named_local_type_with_ctx_ref("Base", None, 0, &child, true, &mut first_guard)
+            .expect("Base should resolve");
     assert_eq!(
         first.props.len(),
         1,
@@ -644,8 +650,9 @@ type Use = Wrapper<string>
     );
 
     let mut second_guard = vec!["Base".to_string()];
-    let second = resolve_named_local_type_with_ctx_ref("Base", None, 0, &child, &mut second_guard)
-        .expect("Base should resolve from cache");
+    let second =
+        resolve_named_local_type_with_ctx_ref("Base", None, 0, &child, true, &mut second_guard)
+            .expect("Base should resolve from cache");
     assert_eq!(
         second.props.len(),
         1,
@@ -724,15 +731,16 @@ type UseB = Wrapper<number>
     );
 
     let mut first_guard = vec!["Base".to_string()];
-    let first = resolve_named_local_type_with_ctx_ref("Base", None, 0, &child_a, &mut first_guard)
-        .expect("Base should resolve under Wrapper<string>");
+    let first =
+        resolve_named_local_type_with_ctx_ref("Base", None, 0, &child_a, true, &mut first_guard)
+            .expect("Base should resolve under Wrapper<string>");
     assert_eq!(first.props.len(), 1);
 
     let cached_after_first = mock_cache.len();
 
     let mut second_guard = vec!["Base".to_string()];
     let second =
-        resolve_named_local_type_with_ctx_ref("Base", None, 0, &child_b, &mut second_guard)
+        resolve_named_local_type_with_ctx_ref("Base", None, 0, &child_b, true, &mut second_guard)
             .expect("Base should resolve under Wrapper<number>");
     assert_eq!(second.props.len(), 1);
 
@@ -808,8 +816,8 @@ type B = Base<number>
         base_interface.type_parameters.as_deref(),
         b_ref.type_arguments.as_deref(),
     );
-    let string_key = string_child.cache_key_for_name(b"Base", 0);
-    let number_key = number_child.cache_key_for_name(b"Base", 0);
+    let string_key = string_child.cache_key_for_name(b"Base", 0, true);
+    let number_key = number_child.cache_key_for_name(b"Base", 0, true);
 
     assert_ne!(
         string_key, number_key,
@@ -830,6 +838,7 @@ type B = Base<number>
         a_ref.type_arguments.as_deref(),
         0,
         &ctx,
+        true,
         &mut string_guard,
     )
     .expect("Base<string> should resolve");
@@ -853,6 +862,7 @@ type B = Base<number>
         b_ref.type_arguments.as_deref(),
         0,
         &ctx,
+        true,
         &mut number_guard,
     )
     .expect("Base<number> should resolve");
@@ -940,8 +950,8 @@ type B = Base<string>
         base_interface.type_parameters.as_deref(),
         b_ref.type_arguments.as_deref(),
     );
-    let a_key = a_child.cache_key_for_name(b"Base", 0);
-    let b_key = b_child.cache_key_for_name(b"Base", 0);
+    let a_key = a_child.cache_key_for_name(b"Base", 0, true);
+    let b_key = b_child.cache_key_for_name(b"Base", 0, true);
 
     assert_eq!(
         a_key, b_key,
@@ -954,6 +964,7 @@ type B = Base<string>
         a_ref.type_arguments.as_deref(),
         0,
         &ctx,
+        true,
         &mut first_guard,
     )
     .expect("Base<string> should resolve");
@@ -967,6 +978,7 @@ type B = Base<string>
         b_ref.type_arguments.as_deref(),
         0,
         &ctx,
+        true,
         &mut second_guard,
     )
     .expect("second Base<string> should reuse cache");
@@ -1011,17 +1023,23 @@ interface Props extends Imported {
     with_companion
         .extend_companion_types(&FxHashMap::from_iter([("Imported".to_string(), imported)]));
 
-    let without_key = ctx.cache_key_for_name(b"Props", 0);
-    let with_key = with_companion.cache_key_for_name(b"Props", 0);
+    let without_key = ctx.cache_key_for_name(b"Props", 0, true);
+    let with_key = with_companion.cache_key_for_name(b"Props", 0, true);
     assert_ne!(
         without_key, with_key,
         "named-type cache keys must separate different companion availability sets",
     );
 
     let mut rich_guard = vec!["Props".to_string()];
-    let rich =
-        resolve_named_local_type_with_ctx_ref("Props", None, 0, &with_companion, &mut rich_guard)
-            .expect("Props should resolve with imported companion");
+    let rich = resolve_named_local_type_with_ctx_ref(
+        "Props",
+        None,
+        0,
+        &with_companion,
+        true,
+        &mut rich_guard,
+    )
+    .expect("Props should resolve with imported companion");
     assert_eq!(
         rich.props.len(),
         2,
@@ -1029,7 +1047,7 @@ interface Props extends Imported {
     );
 
     let mut lean_guard = vec!["Props".to_string()];
-    let lean = resolve_named_local_type_with_ctx_ref("Props", None, 0, &ctx, &mut lean_guard)
+    let lean = resolve_named_local_type_with_ctx_ref("Props", None, 0, &ctx, true, &mut lean_guard)
         .expect("Props should still resolve without a companion");
     assert_eq!(
         lean.props.len(),
@@ -2390,7 +2408,7 @@ fn diagnostic_span_with_base_offset() {
     let mut ctx0 = build_type_context(&result.program, source.as_bytes(), 0);
     for stmt in &result.program.body {
         if let Statement::TSTypeAliasDeclaration(alias) = stmt {
-            let _ = resolve_type_elements_with_ctx(&alias.type_annotation, 0, &mut ctx0);
+            let _ = resolve_type_elements_with_ctx(&alias.type_annotation, 0, &mut ctx0, true);
         }
     }
     let span0 = ctx0.diagnostics[0].span;
@@ -2399,7 +2417,7 @@ fn diagnostic_span_with_base_offset() {
     let mut ctx100 = build_type_context(&result.program, source.as_bytes(), 0);
     for stmt in &result.program.body {
         if let Statement::TSTypeAliasDeclaration(alias) = stmt {
-            let _ = resolve_type_elements_with_ctx(&alias.type_annotation, 100, &mut ctx100);
+            let _ = resolve_type_elements_with_ctx(&alias.type_annotation, 100, &mut ctx100, true);
         }
     }
     let span100 = ctx100.diagnostics[0].span;
@@ -2489,7 +2507,7 @@ type Test2 = UnknownB;"#;
     for stmt in &result.program.body {
         if let Statement::TSTypeAliasDeclaration(alias) = stmt {
             if alias.id.name.as_str() == "Test1" {
-                let _ = resolve_type_elements_with_ctx(&alias.type_annotation, 0, &mut ctx);
+                let _ = resolve_type_elements_with_ctx(&alias.type_annotation, 0, &mut ctx, true);
             }
         }
     }
@@ -2503,7 +2521,7 @@ type Test2 = UnknownB;"#;
     for stmt in &result.program.body {
         if let Statement::TSTypeAliasDeclaration(alias) = stmt {
             if alias.id.name.as_str() == "Test2" {
-                let _ = resolve_type_elements_with_ctx(&alias.type_annotation, 0, &mut ctx);
+                let _ = resolve_type_elements_with_ctx(&alias.type_annotation, 0, &mut ctx, true);
             }
         }
     }
@@ -4134,4 +4152,104 @@ fn type_resolution_context_handle_is_send_and_sync() {
     // must itself be `Send + Sync` so it can be shared across requests.
     fn _assert_send_sync<T: Send + Sync + ?Sized>() {}
     _assert_send_sync::<dyn super::cache_keys::NamedTypeCache>();
+}
+
+/// R21-F1 Commit 2 discriminating test: `declared_in_macro_type_arg`
+/// distinguishes own-body literal members from heritage-injected
+/// members reaching the surface via `Omit<Imported, K>`.
+///
+/// The reference shape:
+///
+/// ```text
+/// interface Bar { x: number; kept: number }
+/// interface Foo extends Omit<Bar, 'x'> { y: string }
+/// ```
+///
+/// Expected facts after resolving `Foo` from a macro-T root
+/// (`defineProps<Foo>()` semantics):
+///
+/// - `y.declared_in_macro_type_arg == true`  — `y` is the user's
+///   own literal body in `Foo`.
+/// - `kept.declared_in_macro_type_arg == false` — `kept` enters via
+///   `Omit<Bar, 'x'>` heritage descent; the carrier interface body
+///   never named it literally.
+/// - `x` should NOT appear on the surface — `Omit<Bar, 'x'>` excluded
+///   it.
+///
+/// **Discrimination contract** (per the R21-F1 plan): if the
+/// `from_root_body` threading at
+/// `resolve_interface_with_extends_ctx_ref` is reverted (the
+/// own-body call site stamps `false` instead of propagating the
+/// caller's flag), the `y` assertion below FLIPS to `false` and the
+/// test FAILS.
+#[test]
+fn declared_in_macro_type_arg_true_for_own_body_false_for_omit_heritage() {
+    let alloc = Allocator::default();
+    let dep = r#"
+import type { Bar } from './bar'
+
+export interface Foo extends Omit<Bar, 'x'> {
+  y: string
+}
+"#;
+
+    // Simulate `Bar` resolved from another file: { x: number, kept: number }.
+    // Companion fixture mimics the post-leaf state stamped under
+    // `from_root_body = false` (heritage descent inside `Foo`'s
+    // extends), so the heritage flip is unambiguously the
+    // production code under test rather than the fixture stamp.
+    let mut companion_types = rustc_hash::FxHashMap::default();
+    let mut bar = ResolvedElements::default();
+    for name in ["x", "kept"] {
+        bar.props.push(ResolvedProp {
+            span: Span::new(0, 0),
+            key: Span::new(0, 0),
+            key_name: Some(name.to_string()),
+            optional: false,
+            types: vec![RuntimeType::Number],
+            visibility: ResolvedMemberVisibility::Public,
+            type_span: None,
+            type_text: None,
+            map_local: false,
+            span_is_absolute: false,
+            type_expr: None,
+            type_expr_scope: None,
+            declared_in_macro_type_arg: false,
+        });
+    }
+    companion_types.insert("Bar".to_string(), bar);
+
+    let resolved = resolve_external_type_with_companion("Foo", dep, &companion_types, &alloc)
+        .expect("Foo should resolve");
+
+    let by_name: std::collections::HashMap<&str, bool> = resolved
+        .props
+        .iter()
+        .filter_map(|p| {
+            p.key_name
+                .as_deref()
+                .map(|n| (n, p.declared_in_macro_type_arg))
+        })
+        .collect();
+
+    // Own-body literal member: declared in Foo's literal body — must be `true`.
+    assert_eq!(
+        by_name.get("y").copied(),
+        Some(true),
+        "own-body literal `y` should have declared_in_macro_type_arg == true; got {by_name:?}"
+    );
+
+    // Heritage member surviving Omit: came from Bar via heritage descent —
+    // must remain `false` (Foo's extends body is a heritage boundary).
+    assert_eq!(
+        by_name.get("kept").copied(),
+        Some(false),
+        "heritage `kept` (survives Omit<Bar, 'x'>) must have declared_in_macro_type_arg == false; got {by_name:?}"
+    );
+
+    // 'x' was explicitly excluded by Omit — it should NOT appear at all.
+    assert!(
+        !by_name.contains_key("x"),
+        "Omit<Bar, 'x'> should exclude `x`; got {by_name:?}"
+    );
 }

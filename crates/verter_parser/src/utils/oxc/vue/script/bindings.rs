@@ -368,8 +368,13 @@ fn extract_props_from_type_params<'a>(
     if let Some(first_param) = type_params.params.first() {
         // Use the type resolution infrastructure to resolve all type variants:
         // TSTypeLiteral, TSTypeReference (interfaces/aliases), unions, intersections, etc.
+        //
+        // `defineProps<T>()` is a top-level macro entry: T IS the macro
+        // T's own body, so members reached through it get
+        // `declared_in_macro_type_arg = true` (subject to the
+        // heritage flip semantics inside the resolver).
         let resolved =
-            resolve_type_elements_with_ctx_ref(first_param, ctx.content_offset, type_ctx);
+            resolve_type_elements_with_ctx_ref(first_param, ctx.content_offset, type_ctx, true);
         for prop in &resolved.props {
             entries.push((prop.key, BindingType::Props));
         }

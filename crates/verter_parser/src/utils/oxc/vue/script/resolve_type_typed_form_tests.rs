@@ -46,7 +46,7 @@ fn resolve_local_typed(source: &str, owner_canonical: &str) -> ResolvedElements 
     for stmt in &parsed.program.body {
         if let oxc_ast::ast::Statement::TSTypeAliasDeclaration(alias) = stmt {
             if alias.id.name.as_str() == "ResolveTarget" {
-                return resolve_type_elements_with_ctx_ref(&alias.type_annotation, 0, &ctx);
+                return resolve_type_elements_with_ctx_ref(&alias.type_annotation, 0, &ctx, true);
             }
         }
     }
