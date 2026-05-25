@@ -7,10 +7,15 @@
  * `@verter/benchmark` (which consumes the `Refined` projection's
  * shadow-event-prop + intrinsic + global filters). The Rust
  * registry at `crates/verter_audit/src/published_surface.rs` is the
- * canonical reference implementation; this port mirrors its
- * structural decisions exactly. The architecture guard test
- * `published_surface_constants_match_ts_port` (added in the
- * verter_audit test suite) verifies the constants stay in sync.
+ * canonical source of truth; this port mirrors its structural
+ * decisions exactly. The Rust integration test
+ * `published_surface_constants_match_ts_port` (in
+ * `crates/verter_audit/tests/`) parses this file and fails on
+ * drift in either constant (`COMPAT_BLOCKED_SLOT_NAMES`,
+ * `VUE_INTRINSIC_ATTR_NAMES`), and the companion
+ * `event_name_to_on_prop_name_matches_ts_port_fixed_cases` test
+ * pins the camelCase derivation against the same payload table
+ * `published-surface.spec.ts` asserts on the TS side.
  *
  * No name-string heuristics; no thresholds; no ratios. Every
  * projection decision is driven by per-name structural facts on
