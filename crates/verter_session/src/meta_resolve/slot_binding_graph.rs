@@ -956,13 +956,6 @@ pub(crate) fn compute_bindings_via_graph(
     out
 }
 
-/// Merge graph-native bindings with parser-path bindings and publish
-/// each row to `expanded.slot_bindings`.
-///
-/// `raw_type` policy: graph-native bindings get parser-path `raw_type`
-/// if a parser-path binding with the same `(slot, binding)` name exists;
-/// parser-path-only bindings are published with their parser-path
-/// `raw_type` and `ExactConcrete` exactness.
 pub(crate) fn publish_merged_bindings(
     dispatch: &ProjectSemanticDispatch<'_>,
     graph_native: &[GraphNativeBindingEntry],
@@ -998,6 +991,32 @@ pub(crate) fn publish_merged_bindings(
     // order of the slot's function parameter object. No alphabetic
     // sort here (the previous FxHashMap-keyed iteration needed a sort
     // for determinism; the Vec source is already deterministic).
+    //
+    // Shallow-publication invariant ([[component-meta-shallow-by-default-rule]],
+    // [[shallow-first-class-universal-cache]]): the published `r#type`
+    // MUST be a shallow carrier. `dispatch.raise_node_to_type_expr` is a
+    // structural raise (recursive for
+    // Object/Function/Array/Union/Intersection/Tuple) — calling it at a
+    // publication boundary unfolds the whole structural tree whenever
+    // an upstream `Published(Shallow)` reduction materialised a
+    // binding's value node as a concrete shape (e.g. the IndexedAccess
+    // `OwnProps['actions']` reducing into its underlying array body),
+    // dragging in deeply-nested external members. The discriminating
+    // regression at
+    // `tests/slot_binding_shallow_publication_tests.rs` characterises
+    // the carrier-vs-expansion boundary.
+    //
+    // The producer-shallow contract here mirrors the parser-only branch
+    // below: when a parser-path binding is available, the OXC-lowered
+    // `binding_expr` carries the source-text annotation verbatim (e.g.
+    // `IndexedAccess<Ref(OwnProps), 'actions'>`); when no parser binding
+    // exists for this `(slot, binding)` key, we publish a symbolic
+    // `TypeExpr::Ref { name: <binding_name> }` carrier scoped to the
+    // owning macro's canonical. Downstream consumers
+    // (`reduce_published_field_types` slot-binding path, JS compat
+    // `compatSlotBindingTypeText`, audit footprint miner) drive from
+    // this shallow carrier and re-resolve named hops through the
+    // registry on demand.
     for (key, gb) in graph_native.iter() {
         let (slot_name, binding_name) = key.clone();
         let field_name = format!("{}.{}", slot_name, binding_name);
@@ -1005,23 +1024,47 @@ pub(crate) fn publish_merged_bindings(
             continue;
         }
 
-        let r#type = dispatch
-            .raise_node_to_type_expr(gb.value_node)
-            .unwrap_or(TypeExpr::Unknown {
-                raw: "semanticMiss".to_string(),
-            });
-        let exactness = compute_exactness_for_node(dispatch, gb.value_node);
-
-        // Merge parser-path metadata: ONLY raw_type — description /
-        // tags do not live on `ExpandedField`.
+        // Consult the parser-path index BEFORE deciding publication
+        // shape — the parser-lowered annotation is the syntactic
+        // truth. Removing here also drives the parser-only fallback
+        // loop below (which iterates the residual).
         let parser_path = parser_index.remove(&(slot_name.clone(), binding_name.clone()));
+
+        let (r#type, shallow_type_expr, shallow_type_expr_scope) = match parser_path
+            .and_then(|pb| pb.binding_expr.as_ref().zip(pb.binding_expr_scope.as_ref()))
+        {
+            Some((expr, scope)) => {
+                let expr_owned = expr.clone();
+                (expr_owned.clone(), Some(expr_owned), Some(scope.clone()))
+            }
+            None => {
+                let carrier = TypeExpr::Ref {
+                    name: binding_name.clone(),
+                    type_arguments: verter_type_expr::empty_type_args(),
+                };
+                let scope = verter_type_expr::TypeExprScope::new(
+                    gb.owner_macro.owner.canonical_id.as_ref(),
+                );
+                (carrier.clone(), Some(carrier), Some(scope))
+            }
+        };
+
+        let exactness = compute_exactness_for_node(dispatch, gb.value_node);
         let raw_type = parser_path.and_then(|p| p.type_annotation.clone());
+
+        debug_assert_eq!(
+            shallow_type_expr.is_some(),
+            shallow_type_expr_scope.is_some(),
+            "ExpandedField (graph-native slot binding) shallow_type_expr/shallow_type_expr_scope pairing violated for binding `{}`",
+            field_name
+        );
 
         tracing::trace!(
             target: "verter::meta_resolve::slot_binding",
             field_name = %field_name,
             exactness = ?exactness,
             has_raw_type = raw_type.is_some(),
+            has_parser_typed = parser_path.is_some(),
             "publish_slot_binding",
         );
 
@@ -1033,8 +1076,8 @@ pub(crate) fn publish_merged_bindings(
             exactness,
             execution_status: ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
-            shallow_type_expr: None,
-            shallow_type_expr_scope: None,
+            shallow_type_expr,
+            shallow_type_expr_scope,
             // Slot bindings are positional parameters of a slot's
             // function signature, not declared members of the macro
             // T's own body. The fact applies at the slot level (the
