@@ -1006,6 +1006,7 @@ interface Props extends Imported {
         span_is_absolute: false,
         type_expr: None,
         type_expr_scope: None,
+        declared_in_macro_type_arg: false,
     });
     with_companion
         .extend_companion_types(&FxHashMap::from_iter([("Imported".to_string(), imported)]));
@@ -1340,6 +1341,7 @@ type Test = Local;"#;
         span_is_absolute: false,
         type_expr: None,
         type_expr_scope: None,
+        declared_in_macro_type_arg: false,
     });
     companions.insert("Base".to_string(), base_resolved);
 
@@ -1411,6 +1413,7 @@ export interface Props extends LocalBase {
         span_is_absolute: false,
         type_expr: None,
         type_expr_scope: None,
+        declared_in_macro_type_arg: false,
     });
     companion_types.insert("LocalBase".to_string(), base);
 
@@ -1458,6 +1461,7 @@ export interface Props extends LocalBase {
         span_is_absolute: false,
         type_expr: None,
         type_expr_scope: None,
+        declared_in_macro_type_arg: false,
     });
     companion_types.insert("LocalBase".to_string(), base);
 
@@ -2563,6 +2567,7 @@ fn ctx_ref_companion_fallback() {
         span_is_absolute: false,
         type_expr: None,
         type_expr_scope: None,
+        declared_in_macro_type_arg: false,
     });
     companions.insert("CompanionType".to_string(), comp);
 
@@ -2685,6 +2690,7 @@ fn typeof_query_with_companion() {
         span_is_absolute: false,
         type_expr: None,
         type_expr_scope: None,
+        declared_in_macro_type_arg: false,
     });
     companions.insert("myVar".to_string(), comp);
 
@@ -3193,6 +3199,7 @@ export type Outer = Prettify<Inner>
             span_is_absolute: false,
             type_expr: None,
             type_expr_scope: None,
+            declared_in_macro_type_arg: false,
         });
     }
     companion_types.insert("Base".to_string(), base);
@@ -3706,6 +3713,7 @@ fn companion_extends_omit_preserves_inherited_props() {
             span_is_absolute: false,
             type_expr: None,
             type_expr_scope: None,
+            declared_in_macro_type_arg: false,
         });
     }
 

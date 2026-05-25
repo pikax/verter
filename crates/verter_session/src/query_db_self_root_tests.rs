@@ -655,6 +655,7 @@ fn projected_member(marker: &str) -> ProjectedMember {
         optional: false,
         readonly: false,
         is_method: false,
+        declared_in_macro_type_arg: false,
     }
 }
 

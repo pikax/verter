@@ -201,6 +201,7 @@ fn object_to_shape(obj: &verter_type_expr::ObjectExpr) -> ExpandedObjectShape {
                 ty: p.ty.clone(),
                 optional: p.optional,
                 readonly: p.readonly,
+                declared_in_macro_type_arg: false,
             }),
             ObjectMember::IndexSignature(idx) => index_signatures.push(ExpandedIndexSignature {
                 key_type: idx.key_type.clone(),
@@ -232,6 +233,7 @@ fn object_to_shape(obj: &verter_type_expr::ObjectExpr) -> ExpandedObjectShape {
                 ty: TypeExpr::Function(std::sync::Arc::new(method.function.clone())),
                 optional: method.optional,
                 readonly: false,
+                declared_in_macro_type_arg: false,
             }),
         }
     }

@@ -247,6 +247,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         optional: member.optional,
                         readonly: member.readonly,
                         is_method: member.is_method,
+                        declared_in_macro_type_arg: false,
                     });
                 }
                 let mut new_call_signatures = Vec::with_capacity(surface.call_signatures.len());

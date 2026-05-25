@@ -322,6 +322,7 @@ fn project_member_reads_object_surface() {
                 optional: false,
                 readonly: false,
                 is_method: false,
+                declared_in_macro_type_arg: false,
             }]
             .into_boxed_slice(),
         ),
@@ -383,6 +384,7 @@ fn key_of_object_yields_string_union() {
                     optional: false,
                     readonly: false,
                     is_method: false,
+                    declared_in_macro_type_arg: false,
                 },
                 SurfaceMember {
                     name: Arc::from("b"),
@@ -390,6 +392,7 @@ fn key_of_object_yields_string_union() {
                     optional: false,
                     readonly: false,
                     is_method: false,
+                    declared_in_macro_type_arg: false,
                 },
             ]
             .into_boxed_slice(),
@@ -437,6 +440,7 @@ fn project_path_of_length_one_dedups_with_project_member_at_memo() {
                 optional: false,
                 readonly: false,
                 is_method: false,
+                declared_in_macro_type_arg: false,
             }]
             .into_boxed_slice(),
         ),
@@ -514,6 +518,7 @@ fn indexed_access_canonicalises_to_project_path_before_admission() {
                 optional: false,
                 readonly: false,
                 is_method: false,
+                declared_in_macro_type_arg: false,
             }]
             .into_boxed_slice(),
         ),
@@ -577,6 +582,7 @@ fn surface_view_carries_surface_member_optional_readonly_is_method() {
                     optional: true,
                     readonly: true,
                     is_method: true,
+                    declared_in_macro_type_arg: false,
                 },
                 SurfaceMember {
                     name: Arc::from("plain"),
@@ -584,6 +590,7 @@ fn surface_view_carries_surface_member_optional_readonly_is_method() {
                     optional: false,
                     readonly: false,
                     is_method: false,
+                    declared_in_macro_type_arg: false,
                 },
             ]
             .into_boxed_slice(),
@@ -881,6 +888,7 @@ fn concurrent_sugar_and_canonical_requests_share_in_flight_entry() {
                 optional: false,
                 readonly: false,
                 is_method: false,
+                declared_in_macro_type_arg: false,
             }]
             .into_boxed_slice(),
         ),
@@ -1866,6 +1874,7 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode() {
                 optional: false,
                 readonly: false,
                 is_method: false,
+                declared_in_macro_type_arg: false,
             }]
             .into_boxed_slice(),
         ),
@@ -1883,6 +1892,7 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode() {
                 optional: false,
                 readonly: false,
                 is_method: false,
+                declared_in_macro_type_arg: false,
             }]
             .into_boxed_slice(),
         ),
@@ -1977,6 +1987,7 @@ fn substitute_no_op_short_circuits_intern_preserving_scope() {
                     optional: false,
                     readonly: false,
                     is_method: false,
+                    declared_in_macro_type_arg: false,
                 },
                 SurfaceMember {
                     name: Arc::from("b"),
@@ -1984,6 +1995,7 @@ fn substitute_no_op_short_circuits_intern_preserving_scope() {
                     optional: false,
                     readonly: false,
                     is_method: false,
+                    declared_in_macro_type_arg: false,
                 },
                 SurfaceMember {
                     name: Arc::from("c"),
@@ -1991,6 +2003,7 @@ fn substitute_no_op_short_circuits_intern_preserving_scope() {
                     optional: false,
                     readonly: false,
                     is_method: false,
+                    declared_in_macro_type_arg: false,
                 },
             ]
             .into_boxed_slice(),
@@ -2480,6 +2493,7 @@ fn simple_object(
             optional: false,
             readonly: false,
             is_method: false,
+            declared_in_macro_type_arg: false,
         })
         .collect();
     graph.intern_node(SemanticNodeData::Object(SurfaceView {
@@ -5152,6 +5166,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
                     optional: false,
                     readonly: false,
                     is_method: false,
+                    declared_in_macro_type_arg: false,
                 },
                 SurfaceMember {
                     name: Arc::from("loadingColor"),
@@ -5159,6 +5174,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
                     optional: false,
                     readonly: false,
                     is_method: false,
+                    declared_in_macro_type_arg: false,
                 },
             ]
             .into_boxed_slice(),
@@ -5180,6 +5196,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
                 optional: false,
                 readonly: false,
                 is_method: false,
+                declared_in_macro_type_arg: false,
             }]
             .into_boxed_slice(),
         ),
@@ -6032,6 +6049,7 @@ fn navigate_integrity_project_path_does_not_route_through_macro_payload() {
                 optional: false,
                 readonly: false,
                 is_method: false,
+                declared_in_macro_type_arg: false,
             }]
             .into_boxed_slice(),
         ),
@@ -6271,6 +6289,7 @@ fn execute_pick_dispatches_through_instantiate_pick_builtin() {
                 optional: false,
                 readonly: false,
                 is_method: false,
+                declared_in_macro_type_arg: false,
             }]
             .into_boxed_slice(),
         ),
@@ -6326,6 +6345,7 @@ fn execute_omit_dispatches_through_instantiate_omit_builtin() {
                 optional: false,
                 readonly: false,
                 is_method: false,
+                declared_in_macro_type_arg: false,
             }]
             .into_boxed_slice(),
         ),
@@ -6564,6 +6584,7 @@ fn surface_member(
         optional,
         readonly,
         is_method: false,
+        declared_in_macro_type_arg: false,
     }
 }
 

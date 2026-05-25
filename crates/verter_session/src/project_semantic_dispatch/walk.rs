@@ -2822,6 +2822,7 @@ fn surface_view_from_shallow(surface: &ShallowSurface) -> SurfaceView {
             optional: m.optional,
             readonly: m.readonly,
             is_method: m.is_method,
+            declared_in_macro_type_arg: false,
         })
         .collect();
     SurfaceView {

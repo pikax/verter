@@ -131,5 +131,6 @@ pub(crate) fn project_model(
         diagnostics: Vec::new(),
         shallow_type_expr: None,
         shallow_type_expr_scope: None,
+        declared_in_macro_type_arg: false,
     })
 }

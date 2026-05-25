@@ -1470,6 +1470,7 @@ where
                         diagnostics: expanded.diagnostics,
                         shallow_type_expr,
                         shallow_type_expr_scope,
+                        declared_in_macro_type_arg: false,
                     });
                 }
             }
@@ -1526,6 +1527,7 @@ where
                         diagnostics: expanded.diagnostics,
                         shallow_type_expr,
                         shallow_type_expr_scope,
+                        declared_in_macro_type_arg: false,
                     });
                 }
             }
@@ -1587,6 +1589,7 @@ where
                                 diagnostics: expanded.diagnostics,
                                 shallow_type_expr,
                                 shallow_type_expr_scope,
+                                declared_in_macro_type_arg: false,
                             });
                         }
                     }
@@ -1648,6 +1651,7 @@ where
                 diagnostics: expanded.diagnostics,
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
+                declared_in_macro_type_arg: false,
             });
         }
     }

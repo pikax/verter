@@ -4647,6 +4647,7 @@ fn define_props_macro_shape_reuses_expanded_fields_directly() {
                 ],
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
+                declared_in_macro_type_arg: false,
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "icon".to_string(),
@@ -4667,6 +4668,7 @@ fn define_props_macro_shape_reuses_expanded_fields_directly() {
                 ],
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
+                declared_in_macro_type_arg: false,
             },
         ],
         ..Default::default()
@@ -4825,6 +4827,7 @@ fn define_props_macro_shape_prefers_resolved_macro_when_expanded_fields_are_inco
             diagnostics: Vec::new(),
             shallow_type_expr: None,
             shallow_type_expr_scope: None,
+            declared_in_macro_type_arg: false,
         }],
         ..Default::default()
     };
@@ -5322,6 +5325,7 @@ defineProps<Props>()
                 diagnostics: Vec::new(),
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
+                declared_in_macro_type_arg: false,
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "count".to_string(),
@@ -5337,6 +5341,7 @@ defineProps<Props>()
                 diagnostics: Vec::new(),
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
+                declared_in_macro_type_arg: false,
             },
         ],
         ..Default::default()
@@ -5524,6 +5529,7 @@ defineModel<boolean>('open')
                 diagnostics: Vec::new(),
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
+                declared_in_macro_type_arg: false,
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "count".to_string(),
@@ -5539,6 +5545,7 @@ defineModel<boolean>('open')
                 diagnostics: Vec::new(),
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
+                declared_in_macro_type_arg: false,
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "open".to_string(),
@@ -5554,6 +5561,7 @@ defineModel<boolean>('open')
                 diagnostics: Vec::new(),
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
+                declared_in_macro_type_arg: false,
             },
         ],
         ..Default::default()
@@ -6397,6 +6405,7 @@ defineEmits<Emits>()
                 diagnostics: Vec::new(),
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
+                declared_in_macro_type_arg: false,
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "update:open".to_string(),
@@ -6412,6 +6421,7 @@ defineEmits<Emits>()
                 diagnostics: Vec::new(),
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
+                declared_in_macro_type_arg: false,
             },
         ],
         ..Default::default()
@@ -6505,6 +6515,7 @@ defineEmits<Emits>()
                                 ),
                                 optional: false,
                                 readonly: false,
+                                declared_in_macro_type_arg: false,
                             },
                             verter_semantic::analysis::type_expand::ExpandedProperty {
                                 name: "update:open".to_string(),
@@ -6513,6 +6524,7 @@ defineEmits<Emits>()
                                 ),
                                 optional: false,
                                 readonly: false,
+                                declared_in_macro_type_arg: false,
                             },
                         ],
                         index_signatures: Vec::new(),
@@ -6628,6 +6640,7 @@ defineModel<string>('searchTerm')
                 diagnostics: Vec::new(),
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
+                declared_in_macro_type_arg: false,
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "update:open".to_string(),
@@ -6643,6 +6656,7 @@ defineModel<string>('searchTerm')
                 diagnostics: Vec::new(),
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
+                declared_in_macro_type_arg: false,
             },
         ],
         ..Default::default()
@@ -6809,6 +6823,7 @@ defineEmits<Emits>()
                 diagnostics: Vec::new(),
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
+                declared_in_macro_type_arg: false,
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "update:open".to_string(),
@@ -6824,6 +6839,7 @@ defineEmits<Emits>()
                 diagnostics: Vec::new(),
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
+                declared_in_macro_type_arg: false,
             },
         ],
         ..Default::default()
@@ -10913,6 +10929,7 @@ defineProps<{ value: Foo }>()
                         optional: false,
                         readonly: false,
                         is_method: false,
+                        declared_in_macro_type_arg: false,
                     },
                     SurfaceMember {
                         name: StdArc::from("b"),
@@ -10920,6 +10937,7 @@ defineProps<{ value: Foo }>()
                         optional: false,
                         readonly: false,
                         is_method: false,
+                        declared_in_macro_type_arg: false,
                     },
                     SurfaceMember {
                         name: StdArc::from("c"),
@@ -10927,6 +10945,7 @@ defineProps<{ value: Foo }>()
                         optional: false,
                         readonly: false,
                         is_method: false,
+                        declared_in_macro_type_arg: false,
                     },
                 ]
                 .into_boxed_slice(),
@@ -10953,6 +10972,7 @@ defineProps<{ value: Foo }>()
                         optional: false,
                         readonly: false,
                         is_method: false,
+                        declared_in_macro_type_arg: false,
                     },
                     SurfaceMember {
                         name: StdArc::from("b"),
@@ -10960,6 +10980,7 @@ defineProps<{ value: Foo }>()
                         optional: false,
                         readonly: false,
                         is_method: false,
+                        declared_in_macro_type_arg: false,
                     },
                     SurfaceMember {
                         name: StdArc::from("c"),
@@ -10967,6 +10988,7 @@ defineProps<{ value: Foo }>()
                         optional: false,
                         readonly: false,
                         is_method: false,
+                        declared_in_macro_type_arg: false,
                     },
                 ]
                 .into_boxed_slice(),

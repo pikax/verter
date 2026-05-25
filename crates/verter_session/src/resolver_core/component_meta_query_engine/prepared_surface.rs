@@ -674,6 +674,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         optional: member.optional,
                         readonly: member.readonly,
                         is_method: member.is_method,
+                        declared_in_macro_type_arg: false,
                     };
                     if !type_expr_references_type_params(&member.ty, &prepared.type_parameters) {
                         self.cache_prepared_requested_member(
@@ -814,6 +815,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         optional: property.optional,
                         readonly: property.readonly,
                         is_method: false,
+                        declared_in_macro_type_arg: false,
                     })
                 }
                 ObjectMember::Method(method) if method.name == member_name => {
@@ -825,6 +827,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         optional: method.optional,
                         readonly: false,
                         is_method: true,
+                        declared_in_macro_type_arg: false,
                     })
                 }
                 _ => None,
@@ -1259,6 +1262,7 @@ mod intersection_merge_tests {
                 optional: false,
                 readonly: false,
                 is_method: false,
+                declared_in_macro_type_arg: false,
             }],
             call_signatures: Vec::new(),
             construct_signatures: Vec::new(),

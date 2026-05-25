@@ -196,6 +196,7 @@ pub(super) fn resolve_mapped_type_with_ctx<'ctx, 'a: 'ctx>(
             span_is_absolute: base_offset != 0,
             type_expr: type_expr.clone(),
             type_expr_scope: None,
+            declared_in_macro_type_arg: false,
         });
     }
 
@@ -534,6 +535,7 @@ pub(super) fn resolve_property_signature(
         span_is_absolute: base_offset != 0,
         type_expr,
         type_expr_scope: None,
+        declared_in_macro_type_arg: false,
     })
 }
 
@@ -573,6 +575,7 @@ pub(super) fn resolve_method_signature(
         span_is_absolute: base_offset != 0,
         type_expr: Some(type_expr),
         type_expr_scope: None,
+        declared_in_macro_type_arg: false,
     })
 }
 

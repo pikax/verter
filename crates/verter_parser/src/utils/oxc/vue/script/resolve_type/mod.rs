@@ -268,6 +268,20 @@ pub struct ResolvedProp {
     /// file's canonical_id. Pairing invariant:
     /// `type_expr.is_some() <=> type_expr_scope.is_some()`.
     pub type_expr_scope: Option<TypeExprScope>,
+    /// Whether this member was explicitly declared in the macro's type
+    /// argument's own body (vs reached via heritage / Omit / intersection
+    /// from an external source like an imported interface).
+    ///
+    /// Structural fact, threaded by the resolver chain
+    /// (`resolve_interface_with_extends_ctx_ref`, prepared-surface walker)
+    /// — `true` for members appearing in the macro T's own body (whether
+    /// the T is a local interface, a cross-file imported interface, or an
+    /// inline literal); `false` for members reaching the surface ONLY via
+    /// heritage / Omit / intersection from sources outside the author's
+    /// named structure. Consumers (component-meta `Refined` policy,
+    /// fallthrough-attrs root inheritance) read this fact to preserve
+    /// `class` / `style` / `on{Event}` shadows of declared emits.
+    pub declared_in_macro_type_arg: bool,
 }
 
 /// A resolved emit event from defineEmits type parameter.

@@ -291,6 +291,7 @@ impl ComponentMetaResolverHost for CombinedSurfaceTestHost {
                     span_is_absolute: true,
                     type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
                     type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
+                    declared_in_macro_type_arg: false,
                 }],
                 emits: vec![ResolvedEmit {
                     span: Span::new(0, 24),
@@ -516,6 +517,7 @@ fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_when_eva
                                             },
                                             optional: false,
                                             readonly: false,
+                                            declared_in_macro_type_arg: false,
                                         },
                                     ],
                                     index_signatures: Vec::new(),
@@ -1007,6 +1009,7 @@ type LocalItem = {
                 span_is_absolute: true,
                 type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
                 type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
+                declared_in_macro_type_arg: false,
             }],
             ..ResolvedElements::default()
         },
@@ -1029,6 +1032,7 @@ type LocalItem = {
                     raw: "'href' | 'target'".to_string(),
                 }),
                 type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
+                declared_in_macro_type_arg: false,
             }],
             ..ResolvedElements::default()
         },
@@ -1141,6 +1145,7 @@ type Props = Pick<ImportedBase, 'href'>
                     span_is_absolute: true,
                     type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
                     type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
+                    declared_in_macro_type_arg: false,
                 }],
                 ..ResolvedElements::default()
             },
@@ -1158,6 +1163,7 @@ type Props = Pick<ImportedBase, 'href'>
                                         ty: TypeExpr::Primitive(PrimitiveName::String),
                                         optional: true,
                                         readonly: false,
+                                        declared_in_macro_type_arg: false,
                                     },
                                 ],
                                 index_signatures: Vec::new(),
@@ -1287,6 +1293,7 @@ type Props = Pick<ImportedBase, 'href'>
                     span_is_absolute: true,
                     type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
                     type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
+                    declared_in_macro_type_arg: false,
                 }],
                 ..ResolvedElements::default()
             },
@@ -1420,6 +1427,7 @@ type Props = {
                     span_is_absolute: true,
                     type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
                     type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
+                    declared_in_macro_type_arg: false,
                 }],
                 ..ResolvedElements::default()
             },
@@ -1553,6 +1561,7 @@ type Props = {
                     span_is_absolute: true,
                     type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
                     type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
+                    declared_in_macro_type_arg: false,
                 }],
                 ..ResolvedElements::default()
             },
@@ -1678,6 +1687,7 @@ type Props = Omit<ImportedBase, 'hidden'>
                     span_is_absolute: true,
                     type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
                     type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
+                    declared_in_macro_type_arg: false,
                 }],
                 ..ResolvedElements::default()
             },
@@ -1791,6 +1801,7 @@ type Props = Omit<ImportedBase, 'hidden'>
                     span_is_absolute: true,
                     type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
                     type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
+                    declared_in_macro_type_arg: false,
                 }],
                 ..ResolvedElements::default()
             },
@@ -1903,6 +1914,7 @@ fn resolve_component_meta_parts_keeps_direct_imported_macro_root_seeded() {
                     span_is_absolute: true,
                     type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
                     type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
+                    declared_in_macro_type_arg: false,
                 }],
                 ..ResolvedElements::default()
             },
@@ -2002,6 +2014,7 @@ fn resolve_component_meta_parts_seeds_imported_macro_root_when_graph_metadata_un
                         span_is_absolute: true,
                         type_expr: Some(TypeExpr::Primitive(PrimitiveName::Object)),
                         type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
+                        declared_in_macro_type_arg: false,
                     },
                     ResolvedProp {
                         span: Span::new(0, 0),
@@ -2016,6 +2029,7 @@ fn resolve_component_meta_parts_seeds_imported_macro_root_when_graph_metadata_un
                         span_is_absolute: true,
                         type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
                         type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
+                        declared_in_macro_type_arg: false,
                     },
                 ],
                 ..ResolvedElements::default()

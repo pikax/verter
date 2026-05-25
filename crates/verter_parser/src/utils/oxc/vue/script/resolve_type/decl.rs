@@ -1030,6 +1030,7 @@ pub(super) fn resolve_class_property_definition(
         span_is_absolute: base_offset != 0,
         type_expr,
         type_expr_scope: None,
+        declared_in_macro_type_arg: false,
     })
 }
 
@@ -1069,6 +1070,7 @@ pub(super) fn resolve_class_method_definition(
         span_is_absolute: base_offset != 0,
         type_expr: Some(type_expr),
         type_expr_scope: None,
+        declared_in_macro_type_arg: false,
     })
 }
 
@@ -1117,6 +1119,7 @@ pub(super) fn resolve_class_accessor_property(
         span_is_absolute: base_offset != 0,
         type_expr,
         type_expr_scope: None,
+        declared_in_macro_type_arg: false,
     })
 }
 

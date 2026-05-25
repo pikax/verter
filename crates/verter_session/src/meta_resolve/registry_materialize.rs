@@ -502,6 +502,7 @@ pub(crate) fn preserve_package_backed_symbolic_refs_node(
                         optional: materialised_member.optional,
                         readonly: materialised_member.readonly,
                         is_method: materialised_member.is_method,
+                        declared_in_macro_type_arg: false,
                     });
                     continue;
                 }
@@ -521,6 +522,7 @@ pub(crate) fn preserve_package_backed_symbolic_refs_node(
                     optional: materialised_member.optional,
                     readonly: materialised_member.readonly,
                     is_method: materialised_member.is_method,
+                    declared_in_macro_type_arg: false,
                 });
             }
             if !any_changed {

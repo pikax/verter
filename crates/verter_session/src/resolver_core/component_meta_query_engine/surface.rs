@@ -67,6 +67,7 @@ pub(crate) fn surface_view_to_projected_surface(
             optional: member.optional,
             readonly: member.readonly,
             is_method: member.is_method,
+            declared_in_macro_type_arg: false,
         })
         .collect();
     let call_signatures = surface
@@ -408,6 +409,7 @@ pub(super) fn projected_surface_from_object_expr(
                 optional: property.optional,
                 readonly: property.readonly,
                 is_method: false,
+                declared_in_macro_type_arg: false,
             }),
             ObjectMember::Method(method) => members.push(ProjectedMember {
                 name: method.name.clone(),
@@ -415,6 +417,7 @@ pub(super) fn projected_surface_from_object_expr(
                 optional: method.optional,
                 readonly: false,
                 is_method: true,
+                declared_in_macro_type_arg: false,
             }),
             ObjectMember::CallSignature(function) => {
                 call_signatures.push(TypeExpr::Function(std::sync::Arc::new(function.clone())));
@@ -459,6 +462,7 @@ pub(super) fn projected_surface_from_object_expr_with_substitutions(
                 optional: property.optional,
                 readonly: property.readonly,
                 is_method: false,
+                declared_in_macro_type_arg: false,
             }),
             ObjectMember::Method(method) => members.push(ProjectedMember {
                 name: method.name.clone(),
@@ -469,6 +473,7 @@ pub(super) fn projected_surface_from_object_expr_with_substitutions(
                 optional: method.optional,
                 readonly: false,
                 is_method: true,
+                declared_in_macro_type_arg: false,
             }),
             ObjectMember::CallSignature(function) => call_signatures.push(TypeExpr::Function(
                 std::sync::Arc::new(substitute_function_expr_if_needed(function, substitutions)),
@@ -1071,6 +1076,7 @@ pub(crate) fn projected_surface_to_expanded_shape(
             ty: member.ty.clone(),
             optional: member.optional,
             readonly: member.readonly,
+            declared_in_macro_type_arg: false,
         })
         .collect::<Vec<_>>();
 

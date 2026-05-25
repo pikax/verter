@@ -19,6 +19,12 @@ pub struct ProjectedMember {
     pub optional: bool,
     pub readonly: bool,
     pub is_method: bool,
+    /// Whether this member was explicitly declared in the macro's type
+    /// argument's own body (vs reached via heritage / Omit / intersection
+    /// from an external source). See [`ResolvedProp::declared_in_macro_type_arg`]
+    /// in `verter_parser` for the structural definition. Propagated by
+    /// `surface_projector` and prepared-surface walker.
+    pub declared_in_macro_type_arg: bool,
 }
 
 /// The projected keyspace of a type surface — the set of known member names.

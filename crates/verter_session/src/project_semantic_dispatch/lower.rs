@@ -654,6 +654,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 optional: prop.optional,
                                 readonly: prop.readonly,
                                 is_method: false,
+                                declared_in_macro_type_arg: false,
                             });
                         }
                         ObjectMember::Method(method) => {
@@ -689,6 +690,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 optional: method.optional,
                                 readonly: false,
                                 is_method: true,
+                                declared_in_macro_type_arg: false,
                             });
                         }
                         ObjectMember::CallSignature(func) => {

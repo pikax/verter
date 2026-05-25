@@ -726,6 +726,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     optional: member.optional,
                     readonly: member.readonly,
                     is_method: member.is_method,
+                    declared_in_macro_type_arg: false,
                 }
             })
             .collect::<Vec<_>>();
@@ -1879,6 +1880,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 optional,
                 readonly,
                 is_method: false,
+                declared_in_macro_type_arg: false,
             });
             project_member_edges.push((value, produced_name));
         }

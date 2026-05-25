@@ -17955,6 +17955,7 @@ fn component_meta_budget_error_detects_symbolic_budget_exceeded() {
             }],
                 shallow_type_expr: None,
                 shallow_type_expr_scope: None,
+                declared_in_macro_type_arg: false,
             }],
             ..ExpandedComponentTypes::default()
         };

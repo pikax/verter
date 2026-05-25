@@ -36,6 +36,7 @@ fn prop(
         span_is_absolute: true,
         type_expr: None,
         type_expr_scope: None,
+        declared_in_macro_type_arg: false,
     }
 }
 
@@ -61,6 +62,7 @@ fn prop_with_type_span(
         span_is_absolute: true,
         type_expr: None,
         type_expr_scope: None,
+        declared_in_macro_type_arg: false,
     }
 }
 
@@ -482,6 +484,7 @@ fn typed_prop(
         span_is_absolute: true,
         type_expr: Some(type_expr),
         type_expr_scope: Some(TypeExprScope::new(scope_canonical)),
+        declared_in_macro_type_arg: false,
     }
 }
 
@@ -679,6 +682,7 @@ fn project_macro_surfaces_aggregate_props_expr_is_none_when_any_prop_lacks_typed
         span_is_absolute: true,
         type_expr: None,
         type_expr_scope: None,
+        declared_in_macro_type_arg: false,
     };
     let elements = ResolvedElements {
         props: vec![typed_prop("label", false, prop_a, "/sfc/A.vue"), untyped],

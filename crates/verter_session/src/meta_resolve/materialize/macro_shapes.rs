@@ -1124,6 +1124,7 @@ pub(crate) fn synthesize_define_props_shape_from_known_surface_with_authority(
                 ty: field.r#type.clone(),
                 optional: field.optional,
                 readonly: false,
+                declared_in_macro_type_arg: false,
             });
         }
     } else if let Some(resolved_macro) = resolved_macro {
@@ -1143,6 +1144,7 @@ pub(crate) fn synthesize_define_props_shape_from_known_surface_with_authority(
                     ty: field.r#type.clone(),
                     optional: field.optional,
                     readonly: false,
+                    declared_in_macro_type_arg: false,
                 });
                 continue;
             }
@@ -1161,6 +1163,7 @@ pub(crate) fn synthesize_define_props_shape_from_known_surface_with_authority(
                 ty,
                 optional: prop.is_optional,
                 readonly: false,
+                declared_in_macro_type_arg: false,
             });
         }
     } else {
@@ -1339,6 +1342,7 @@ pub(crate) fn synthesize_define_emits_shape_from_known_surface(
                 ty: emit.r#type.clone(),
                 optional: false,
                 readonly: false,
+                declared_in_macro_type_arg: false,
             });
         }
 
@@ -1388,6 +1392,7 @@ pub(crate) fn synthesize_define_emits_shape_from_known_surface(
                     ty: field.r#type.clone(),
                     optional: false,
                     readonly: false,
+                    declared_in_macro_type_arg: false,
                 });
                 continue;
             }
@@ -1407,6 +1412,7 @@ pub(crate) fn synthesize_define_emits_shape_from_known_surface(
                 ty,
                 optional: false,
                 readonly: false,
+                declared_in_macro_type_arg: false,
             });
         }
     } else {
@@ -1454,6 +1460,7 @@ pub(crate) fn synthesize_define_slots_shape_from_known_surface(
             ty: slot_field_function_type_expr(slot),
             optional: !slot.is_required,
             readonly: false,
+            declared_in_macro_type_arg: false,
         })
         .collect();
 
@@ -1588,6 +1595,7 @@ pub(crate) fn registry_entry_to_expanded_shape(
                 ty: property.ty.clone(),
                 optional: property.optional,
                 readonly: property.readonly,
+                declared_in_macro_type_arg: false,
             }),
             ObjectMember::Method(method) => call_signatures.push(ExpandedCallSignature {
                 parameters: method

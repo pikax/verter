@@ -1035,6 +1035,7 @@ pub(crate) fn publish_merged_bindings(
             diagnostics: Vec::new(),
             shallow_type_expr: None,
             shallow_type_expr_scope: None,
+            declared_in_macro_type_arg: false,
         });
     }
 
@@ -1079,6 +1080,7 @@ pub(crate) fn publish_merged_bindings(
             diagnostics: Vec::new(),
             shallow_type_expr,
             shallow_type_expr_scope,
+            declared_in_macro_type_arg: false,
         });
     }
 }

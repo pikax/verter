@@ -707,6 +707,13 @@ pub struct SurfaceMember {
     pub optional: bool,
     pub readonly: bool,
     pub is_method: bool,
+    /// Whether this member was explicitly declared in the macro's type
+    /// argument's own body (vs reached via heritage / Omit / intersection
+    /// from an external source). See
+    /// [`verter_compiler::utils::oxc::vue::resolve_type::ResolvedProp::declared_in_macro_type_arg`]
+    /// for the structural definition. Propagated through the prepared-surface
+    /// walker and `surface_member_to_expanded_field`.
+    pub declared_in_macro_type_arg: bool,
 }
 
 /// One index signature (`{ [K: K_T]: V_T }` or `{ readonly [K: K_T]: V_T }`)

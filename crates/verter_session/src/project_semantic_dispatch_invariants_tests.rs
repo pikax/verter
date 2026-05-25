@@ -927,6 +927,7 @@ fn required_member(name: &str, value: crate::semantic_query::SemanticNodeId) -> 
         optional: false,
         readonly: false,
         is_method: false,
+        declared_in_macro_type_arg: false,
     }
 }
 
@@ -937,6 +938,7 @@ fn optional_member(name: &str, value: crate::semantic_query::SemanticNodeId) -> 
         optional: true,
         readonly: false,
         is_method: false,
+        declared_in_macro_type_arg: false,
     }
 }
 
@@ -2911,6 +2913,7 @@ fn ax_hybrid_key_of_carrier_stops_under_structural_transit() {
             optional: false,
             readonly: false,
             is_method: false,
+            declared_in_macro_type_arg: false,
         },
         SurfaceMember {
             name: Arc::from("b"),
@@ -2918,6 +2921,7 @@ fn ax_hybrid_key_of_carrier_stops_under_structural_transit() {
             optional: false,
             readonly: false,
             is_method: false,
+            declared_in_macro_type_arg: false,
         },
     ])));
 
@@ -2993,6 +2997,7 @@ fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
             optional: false,
             readonly: false,
             is_method: false,
+            declared_in_macro_type_arg: false,
         },
         SurfaceMember {
             name: Arc::from("b"),
@@ -3000,6 +3005,7 @@ fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
             optional: false,
             readonly: false,
             is_method: false,
+            declared_in_macro_type_arg: false,
         },
     ])));
 
@@ -3109,6 +3115,7 @@ fn ax_hybrid_userland_mypick_follows_same_carrier_stop_as_builtin_pick() {
             optional: false,
             readonly: false,
             is_method: false,
+            declared_in_macro_type_arg: false,
         },
     ])));
 

@@ -86,6 +86,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     optional: member.optional,
                     readonly: member.readonly,
                     is_method: member.is_method,
+                    declared_in_macro_type_arg: false,
                 })
             })
         }
@@ -379,6 +380,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         optional: property.optional,
                         readonly: property.readonly,
                         is_method: false,
+                        declared_in_macro_type_arg: false,
                     })
                 }
                 ObjectMember::Method(method) if requested.contains(method.name.as_str()) => {
@@ -388,6 +390,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         optional: method.optional,
                         readonly: false,
                         is_method: true,
+                        declared_in_macro_type_arg: false,
                     })
                 }
                 _ => None,
@@ -543,6 +546,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             optional: member.optional,
             readonly: member.readonly,
             is_method: member.is_method,
+            declared_in_macro_type_arg: false,
         })
     }
 

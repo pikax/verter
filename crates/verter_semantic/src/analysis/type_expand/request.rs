@@ -30,6 +30,15 @@ pub struct ExpandedProperty {
     pub ty: TypeExpr,
     pub optional: bool,
     pub readonly: bool,
+    /// Whether this member was explicitly declared in the macro's type
+    /// argument's own body (vs reached via heritage / Omit / intersection
+    /// from an external source). See
+    /// [`verter_compiler::utils::oxc::vue::resolve_type::ResolvedProp::declared_in_macro_type_arg`]
+    /// for the structural definition. Propagated by
+    /// `macro_shapes`-side materialisation and the prepared-surface walker
+    /// from the upstream `SurfaceMember` / `ProjectedMember` source.
+    #[serde(default)]
+    pub declared_in_macro_type_arg: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -247,6 +256,18 @@ pub struct ExpandedField {
     /// `shallow_type_expr.is_some() <=> shallow_type_expr_scope.is_some()`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shallow_type_expr_scope: Option<TypeExprScope>,
+    /// Whether this member was explicitly declared in the macro's type
+    /// argument's own body (vs reached via heritage / Omit / intersection
+    /// from an external source). See
+    /// [`verter_compiler::utils::oxc::vue::resolve_type::ResolvedProp::declared_in_macro_type_arg`]
+    /// for the structural definition. Propagated by
+    /// `expand_macro_types_impl_with_expander` and
+    /// `surface_member_to_expanded_field` from the upstream `SurfaceMember`
+    /// / `AnalyzedPropField` source. Consumed by component-meta's
+    /// `extract_props_from_macro` to disambiguate cross-file imported
+    /// macro provenance.
+    #[serde(default)]
+    pub declared_in_macro_type_arg: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
