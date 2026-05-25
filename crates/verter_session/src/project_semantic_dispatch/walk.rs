@@ -228,6 +228,12 @@ pub struct ShallowSurface {
 /// surface-level optionality / readonly bits so intersection/union merges
 /// can implement the TS rules (intersection: required-wins +
 /// readonly-OR; union: members in all arms).
+///
+/// `declared_in_macro_type_arg` propagates the provenance bit from
+/// `SurfaceMember` through the dispatch walker's intermediate state so
+/// `surface_view_from_shallow` can reconstruct an accurate `SurfaceView`.
+/// Intersection / union merges OR the bit across arms: a member that is
+/// own-body in ANY arm reaches the merged surface as own-body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShallowSurfaceMember {
     pub name: Arc<str>,
@@ -235,6 +241,7 @@ pub struct ShallowSurfaceMember {
     pub optional: bool,
     pub readonly: bool,
     pub is_method: bool,
+    pub declared_in_macro_type_arg: bool,
 }
 
 impl ShallowSurface {
@@ -251,7 +258,10 @@ impl ShallowSurface {
 
     /// Build a `ShallowSurface` from a `SurfaceView`. The members are
     /// cloned shallowly — `value` is a `SemanticNodeId` (Copy), so the
-    /// clone cost is one Arc bump for `name`.
+    /// clone cost is one Arc bump for `name`. `declared_in_macro_type_arg`
+    /// propagates from each `SurfaceMember` so the walker's intermediate
+    /// state preserves the own-body-vs-heritage provenance bit through
+    /// intersection / union merges.
     #[must_use]
     pub fn from_object(view: &SurfaceView) -> Self {
         Self {
@@ -264,6 +274,7 @@ impl ShallowSurface {
                     optional: m.optional,
                     readonly: m.readonly,
                     is_method: m.is_method,
+                    declared_in_macro_type_arg: m.declared_in_macro_type_arg,
                 })
                 .collect(),
         }
@@ -2578,6 +2589,12 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     optional,
                     readonly,
                     is_method: false,
+                    // Mapped-type synthesis produces a member from a key
+                    // domain via `[K in keyof T]: ...`. The produced
+                    // member is not literally written in the consuming
+                    // macro's T body — it is reached structurally via
+                    // the mapper. `false` is the structural truth.
+                    declared_in_macro_type_arg: false,
                 }
             })
             .collect();
@@ -2678,6 +2695,11 @@ fn merge_intersection_surfaces_with_graph(
                     existing.optional = existing.optional && member.optional;
                     existing.readonly = existing.readonly || member.readonly;
                     existing.is_method = existing.is_method || member.is_method;
+                    // Own-body in any arm wins on the merged surface
+                    // (TS intersection of `{x: own} & {x: heritage}` is
+                    // observably the own-body `x`).
+                    existing.declared_in_macro_type_arg =
+                        existing.declared_in_macro_type_arg || member.declared_in_macro_type_arg;
                     if !existing.values.contains(&member.value) {
                         existing.values.push(member.value);
                     }
@@ -2691,6 +2713,7 @@ fn merge_intersection_surfaces_with_graph(
                             optional: member.optional,
                             readonly: member.readonly,
                             is_method: member.is_method,
+                            declared_in_macro_type_arg: member.declared_in_macro_type_arg,
                         },
                     );
                 }
@@ -2711,6 +2734,7 @@ fn merge_intersection_surfaces_with_graph(
                 optional: m.optional,
                 readonly: m.readonly,
                 is_method: m.is_method,
+                declared_in_macro_type_arg: m.declared_in_macro_type_arg,
             }
         })
         .collect();
@@ -2720,12 +2744,19 @@ fn merge_intersection_surfaces_with_graph(
 /// Working aggregation for one merged member during intersection
 /// surface synthesis. Tracks all contributing value ids so a follow-up
 /// pass can merge them when they diverge across arms.
+///
+/// `declared_in_macro_type_arg` is OR-ed across arms: a member that
+/// reaches the merged surface as own-body in ANY arm propagates the
+/// own-body bit forward. This mirrors the TS semantic that an
+/// own-body declaration in any intersection arm makes the member
+/// own-body on the merged surface.
 struct MergedMember {
     name: Arc<str>,
     values: Vec<SemanticNodeId>,
     optional: bool,
     readonly: bool,
     is_method: bool,
+    declared_in_macro_type_arg: bool,
 }
 
 /// Merge the contributing value ids into a single semantic node. When
@@ -2809,16 +2840,14 @@ fn merge_union_surfaces(arm_surfaces: &[Option<ShallowSurface>]) -> Option<Shall
     })
 }
 
-/// Lift a `ShallowSurface` into a `SurfaceView` for interning into
-/// `SemanticNodeData::Object`. `keyspace` and signatures are empty —
-/// the synthesiser produces a one-level merged surface only.
 fn surface_view_from_shallow(surface: &ShallowSurface) -> SurfaceView {
-    // SAFETY: `ShallowSurface` is the walker's intermediate state for
-    // intersection / union arm merging. `ShallowSurfaceMember` does
-    // not carry the `declared_in_macro_type_arg` fact (members
-    // produced by merging arms are heritage-equivalent — they reach
-    // the surface via composition, not via own-body declaration in
-    // any consuming macro's T). `false` is the structural truth.
+    // `declared_in_macro_type_arg` is propagated from each
+    // `ShallowSurfaceMember`. The dispatch walker preserves the bit
+    // through intersection / union merges (own-body in any arm wins;
+    // mapped-type synthesis seeds `false` as the structural truth for
+    // composed members; `from_object` clones the bit from
+    // `SurfaceMember`). Round-tripping through `ShallowSurface` is
+    // therefore lossless for the provenance bit.
     let members: Vec<SurfaceMember> = surface
         .members
         .iter()
@@ -2828,7 +2857,7 @@ fn surface_view_from_shallow(surface: &ShallowSurface) -> SurfaceView {
             optional: m.optional,
             readonly: m.readonly,
             is_method: m.is_method,
-            declared_in_macro_type_arg: false,
+            declared_in_macro_type_arg: m.declared_in_macro_type_arg,
         })
         .collect();
     SurfaceView {
