@@ -36,3 +36,15 @@ windows-sys = { version = "0.61", features = [
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1"
+
+# OXC is the established Rust-side TypeScript parser. The
+# `published_surface_constants_match_ts_port` cross-language drift
+# guard uses OXC to extract the TS port's array literal payloads
+# from `packages/component-meta/src/published-surface.ts` — see
+# [[oxc-is-the-ts-parser]]. Dev-only: production audit code has
+# no parser dependency.
+[dev-dependencies]
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_span = { workspace = true }
