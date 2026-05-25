@@ -23,6 +23,7 @@
 use std::sync::Arc;
 
 use verter_session::audited_request::AuditedRequest;
+use verter_session::carrier_verdict_db::CarrierIdentity;
 use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
 
 fn build_host() -> Arc<VerterHost> {
@@ -278,6 +279,72 @@ fn synthetic_slot_binding_carrier_emits_provenance_sidecar() {
             "provenance scope must point to the publishing component; got `{}` for field `{}`",
             provenance.scope_canonical_id,
             field.name,
+        );
+    }
+}
+
+/// Carrier verdict cache eager-admission contract.
+///
+/// The producer (`publish_merged_bindings` no-parser branch) admits a
+/// `DoNotDeepen` verdict into the host-owned `CarrierVerdictDb` for
+/// every synthetic carrier it mints. This test locks down that
+/// contract: after `evaluate_types` runs on the GenericPanel.vue
+/// fixture, the host's `carrier_verdicts` cache MUST contain a
+/// `DoNotDeepen` entry for each synthetic carrier present in
+/// `expanded.slot_bindings`.
+///
+/// Discrimination: removing the `carrier_verdicts.admit_do_not_deepen(...)`
+/// call at the producer makes this assertion FAIL — the cache stays
+/// empty even though the provenance sidecar still gets populated.
+/// The two facts are independent: provenance ≠ cache admission.
+#[test]
+fn synthetic_carrier_admission_populates_carrier_verdict_db() {
+    let host = build_host();
+    upsert_ts(&host, "/toolkit.ts", TOOLKIT_TS);
+    upsert_vue(&host, "/GenericPanel.vue", GENERIC_PANEL_VUE);
+
+    // Drive a getComponentMeta query to exercise the carrier-publishing
+    // pipeline end-to-end (evaluate_types -> publish_merged_bindings).
+    let expanded = host
+        .evaluate_types("/GenericPanel.vue")
+        .expect("evaluate_types must return for GenericPanel");
+
+    let verdicts = host.project_type_store().carrier_verdicts();
+    let synthetic_count = expanded
+        .slot_bindings
+        .iter()
+        .filter(|f| f.carrier_provenance.is_some())
+        .count();
+
+    assert!(
+        synthetic_count > 0,
+        "fixture must mint at least one synthetic carrier for this test to discriminate",
+    );
+    assert!(
+        verdicts.admissions_count() >= synthetic_count as u64,
+        "CarrierVerdictDb admissions ({}) must cover every synthetic carrier ({}). The \
+         producer in `publish_merged_bindings` is not calling \
+         `carrier_verdicts.admit_do_not_deepen(...)` at carrier-mint time.",
+        verdicts.admissions_count(),
+        synthetic_count,
+    );
+
+    // For each synthetic carrier, build the cache identity exactly the
+    // way the producer did and confirm the lookup hits.
+    for field in expanded
+        .slot_bindings
+        .iter()
+        .filter(|f| f.carrier_provenance.is_some())
+    {
+        let provenance = field.carrier_provenance.as_ref().unwrap();
+        let key = CarrierIdentity::from_provenance(provenance);
+        assert!(
+            verdicts.is_do_not_deepen(&key),
+            "carrier_verdicts.get({:?}) returned None — admission must precede first downstream \
+             consult. field `{}` provenance={:#?}",
+            key,
+            field.name,
+            provenance,
         );
     }
 }

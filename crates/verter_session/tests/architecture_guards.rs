@@ -3732,6 +3732,7 @@ mod foundations_guards {
         // the production producer end-to-end via
         // `for_tests::app_config_no_override_proof_get_or_compute_for_tests`.
         "pub mod app_config_proof_db",
+        "pub mod carrier_verdict_db",
         // crates/verter_bench/examples/audit_real_component_meta.rs
         // calls `dump_loop5_instrumentation_counters` to record
         // inner-dispatch counter snapshots alongside the audit JSON.

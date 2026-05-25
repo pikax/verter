@@ -989,6 +989,12 @@ pub(crate) fn publish_merged_bindings(
         }
     }
 
+    // Host-owned `CarrierVerdictDb` handle. The producer eagerly
+    // admits a `DoNotDeepen` sentinel for every synthetic carrier it
+    // mints below so the first downstream `published_reducer` /
+    // component-meta-registry consult hits cache.
+    let carrier_verdicts = dispatch.ctx.project_type_store().carrier_verdicts();
+
     // Publish each graph-native binding in declaration order, merging
     // parser-path metadata when present. The slice walk preserves the
     // insertion order set by `compute_bindings_via_graph` — declaration
@@ -1022,15 +1028,18 @@ pub(crate) fn publish_merged_bindings(
     // this shallow carrier and re-resolve named hops through the
     // registry on demand.
     //
-    // `CarrierProvenance` sidecar. When the no-parser
-    // branch publishes a symbolic carrier, the sidecar tags it with
+    // `CarrierProvenance` sidecar + `CarrierVerdictDb` admission.
+    // When the no-parser branch publishes a symbolic carrier, the
+    // sidecar tags it with
     // `(scope_canonical_id, surface_kind, slot_name, binding_name,
     // value_node)` — the full identity needed so a synthetic slot
     // binding named `foo` does not poison or get poisoned by a real
     // workspace-owned `type foo = …` alias. The sidecar is
     // `#[serde(skip)]` and feeds the resolver-internal
     // `CarrierVerdictDb`; it never leaks to the FFI / TS-side meta
-    // payload.
+    // payload. The producer eagerly admits a `DoNotDeepen` verdict
+    // here so the first downstream `published_reducer` /
+    // `component_meta_registry` consult hits cache.
     for (key, gb) in graph_native.iter() {
         let (slot_name, binding_name) = key.clone();
         let field_name = format!("{}.{}", slot_name, binding_name);
@@ -1080,6 +1089,14 @@ pub(crate) fn publish_merged_bindings(
                         binding_name: binding_name.clone(),
                         value_node: CarrierValueNodeId(gb.value_node.0),
                     };
+                    // Eagerly admit the carrier's `DoNotDeepen`
+                    // verdict so downstream
+                    // `published_reducer` / component-meta-registry
+                    // consults hit cache without re-deriving the
+                    // identity from the published field.
+                    let identity =
+                        crate::carrier_verdict_db::CarrierIdentity::from_provenance(&provenance);
+                    carrier_verdicts.admit_do_not_deepen(identity);
                     (
                         carrier.clone(),
                         Some(carrier),

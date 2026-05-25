@@ -59,6 +59,7 @@ mod audited_request_tests;
 mod block_6c_view_hoist_tests;
 mod cache;
 pub mod cache_schema;
+pub mod carrier_verdict_db;
 mod compile;
 pub mod component_meta_audit;
 #[cfg(test)]
