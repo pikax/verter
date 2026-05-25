@@ -132,6 +132,19 @@ export interface PropMeta {
   tags?: JsdocTag[];
   /** Default value text (from `withDefaults` or Options API `default`). */
   default?: string;
+  /**
+   * Producer fact: did the SFC author write this prop name explicitly as a
+   * member of the `defineProps<T>()` type argument's own body (or its
+   * directly-referenced interface's own body)? Distinguishes author-declared
+   * names from names that arrived via heritage / utility-type expansion.
+   * Consumed by `@verter/component-meta/published-surface`'s `Refined`
+   * policy to preserve Vue intrinsics (`class`/`style`/etc.) and `on{Event}`
+   * shadow-emit props the author kept on purpose.
+   *
+   * Default `false` so older payloads without the field do NOT silently
+   * mark every prop as author-declared.
+   */
+  declaredInMacroTypeArg?: boolean;
 }
 
 /** Metadata for a single component event. */

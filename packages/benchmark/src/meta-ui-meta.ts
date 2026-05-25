@@ -8,22 +8,28 @@ export function refineMetaForBenchmark(meta: any) {
   // intrinsic filtering live in `@verter/component-meta/published-surface`
   // (TS port of Rust `verter_audit::names_for_policy`).
   //
-  // Refined treats a prop as undeclared-in-macro-type-arg unless
-  // the producer has tagged it; the bench corpus's existing
-  // `meta?.props[i]` payload does NOT yet carry that fact, so we
-  // pass `declared_in_macro_type_arg: false` for every prop —
-  // matching the bench's prior behaviour (drop `class`/`style`/`onSubmit`
-  // when they appear alongside the corresponding emit). When the
-  // producer threads `declared_in_macro_type_arg` through the FFI
-  // payload, callers automatically benefit from the override
-  // semantics.
+  // `declared_in_macro_type_arg` is the producer fact threaded
+  // through `FfiPropMeta` → `NativePropMeta` → Verter's `PropMeta`.
+  // The compat-layer `PropertyMeta` (Volar parity shape) deliberately
+  // omits the field, so we look it up on the native sidecar
+  // (`meta._verter.props[i]`) by name. A missing sidecar (e.g.
+  // vue-component-meta side of the parity bench) falls back to
+  // `false` — matching the "drop unless explicitly declared"
+  // refined semantics for upstream that has no producer fact.
   const eventNames = (meta?.events ?? []).map((event: any) => String(event.name));
+  const nativeProps: any[] = Array.isArray(meta?._verter?.props) ? meta._verter.props : [];
+  const declaredByName = new Map<string, boolean>();
+  for (const native of nativeProps) {
+    if (native && typeof native.name === "string") {
+      declaredByName.set(native.name, Boolean(native.declaredInMacroTypeArg));
+    }
+  }
   const props = (meta?.props ?? [])
     .filter((prop: any) =>
       refinedPropSurvives(
         {
           name: prop.name,
-          declared_in_macro_type_arg: false,
+          declared_in_macro_type_arg: declaredByName.get(String(prop.name)) ?? false,
           global: Boolean(prop.global),
         },
         eventNames,

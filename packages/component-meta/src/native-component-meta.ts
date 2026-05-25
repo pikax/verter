@@ -58,6 +58,18 @@ export interface NativePropMeta {
   defaultValue?: string;
   description?: string;
   tags?: NativeJsdocTag[];
+  /**
+   * Producer fact: did the SFC author write this prop name explicitly as a
+   * member of the `defineProps<T>()` type argument's own body (or its
+   * directly-referenced interface's own body)? Distinguishes
+   * author-declared names from names that arrived via heritage / utility-
+   * type expansion. Consumed by
+   * `@verter/component-meta/published-surface`'s `Refined` policy.
+   *
+   * Default `false` so a missing payload field (e.g. from an older
+   * native build) does NOT silently mark every prop as declared.
+   */
+  declaredInMacroTypeArg?: boolean;
 }
 
 export interface NativeEventMeta {
@@ -570,6 +582,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
       ...(prop.defaultValue !== undefined ? { default: prop.defaultValue } : {}),
       ...(prop.description !== undefined ? { description: prop.description } : {}),
       ...(prop.tags?.length ? { tags: prop.tags } : {}),
+      declaredInMacroTypeArg: Boolean(prop.declaredInMacroTypeArg),
     })),
     events: meta.events.map((event) => ({
       name: event.name,

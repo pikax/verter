@@ -777,6 +777,7 @@ function decodeProp(prop: ProtoRecord, graph: DecodedTypeGraph): Record<string, 
     ...maybe("defaultValue", graph.getStringMaybe(Number(prop.defaultValueId ?? 0))),
     ...maybe("description", graph.getStringMaybe(Number(prop.descriptionId ?? 0))),
     ...maybeArray("tags", decodeJsdocTags((prop.tags as ProtoRecord[] | undefined) ?? [], graph)),
+    declaredInMacroTypeArg: Boolean(prop.declaredInMacroTypeArg),
   };
 }
 
