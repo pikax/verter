@@ -798,6 +798,7 @@ fn make_child_with_macro_props(prop_names: &[&str]) -> FileAnalysisSnapshot {
                     resolution_error: None,
                     type_expr: None,
                     type_expr_scope: None,
+                    declared_in_macro_type_arg: false,
                 })
                 .collect(),
             emit_fields: vec![],
@@ -901,6 +902,7 @@ fn macro_fallback_with_defaults_pattern() {
                         resolution_error: None,
                         type_expr: None,
                         type_expr_scope: None,
+                        declared_in_macro_type_arg: false,
                     },
                     AnalyzedPropField {
                         name: "count".to_string(),
@@ -913,6 +915,7 @@ fn macro_fallback_with_defaults_pattern() {
                         resolution_error: None,
                         type_expr: None,
                         type_expr_scope: None,
+                        declared_in_macro_type_arg: false,
                     },
                 ],
                 emit_fields: vec![],

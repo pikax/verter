@@ -995,6 +995,7 @@ fn make_macro(
                 resolution_error: None,
                 type_expr: None,
                 type_expr_scope: None,
+                declared_in_macro_type_arg: false,
             })
             .collect(),
         emit_fields: vec![],

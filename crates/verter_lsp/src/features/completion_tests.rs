@@ -2341,6 +2341,7 @@ fn test_component_prop_completions_from_macros() {
                         resolution_error: None,
                         type_expr: None,
                         type_expr_scope: None,
+                        declared_in_macro_type_arg: false,
                     },
                     verter_semantic::analysis::AnalyzedPropField {
                         name: "barBaz".to_string(),
@@ -2353,6 +2354,7 @@ fn test_component_prop_completions_from_macros() {
                         resolution_error: None,
                         type_expr: None,
                         type_expr_scope: None,
+                        declared_in_macro_type_arg: false,
                     },
                 ],
                 emit_fields: vec![],

@@ -3651,6 +3651,7 @@ const count = ref(0)
                         resolution_error: None,
                         type_expr: None,
                         type_expr_scope: None,
+                        declared_in_macro_type_arg: false,
                     },
                     verter_semantic::analysis::types::AnalyzedPropField {
                         name: "b".into(),
@@ -3663,6 +3664,7 @@ const count = ref(0)
                         resolution_error: None,
                         type_expr: None,
                         type_expr_scope: None,
+                        declared_in_macro_type_arg: false,
                     },
                     verter_semantic::analysis::types::AnalyzedPropField {
                         name: "c".into(),
@@ -3675,6 +3677,7 @@ const count = ref(0)
                         resolution_error: None,
                         type_expr: None,
                         type_expr_scope: None,
+                        declared_in_macro_type_arg: false,
                     },
                 ],
                 emit_fields: vec![],
