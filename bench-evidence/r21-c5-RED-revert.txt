@@ -1,0 +1,107 @@
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Option::is_none")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Option::is_none")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Option::is_none")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Option::is_none")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Option::is_none")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Option::is_none")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Option::is_none")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "String::is_empty")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "is_default_f64")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+   Compiling verter_semantic v0.0.1-beta.1 (D:\dev\personal\verter\crates\verter_semantic)
+   Compiling verter_protocol v0.0.1-beta.1 (D:\dev\personal\verter\crates\verter_protocol)
+   Compiling verter_session v0.0.1-beta.1 (D:\dev\personal\verter\crates\verter_session)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.20s
+     Running tests\r21_c5_cross_file_provenance.rs (target\debug\deps\r21_c5_cross_file_provenance-4e7faa22d6b2af6d.exe)
+
+running 3 tests
+test cross_file_simple_imported_interface_own_body_members_carry_declared_true ... ok
+test cross_file_omit_then_reintroduce_own_body_members_carry_declared_true ... FAILED
+test cross_file_no_own_body_name_heritage_reached_member_carries_declared_false ... FAILED
+
+failures:
+
+---- cross_file_omit_then_reintroduce_own_body_members_carry_declared_true stdout ----
+
+thread 'cross_file_omit_then_reintroduce_own_body_members_carry_declared_true' (69364) panicked at crates\verter_session\tests\r21_c5_cross_file_provenance.rs:227:5:
+cross-file-omit-then-reintroduce: heritage-only member `other` MUST carry declared_in_macro_type_arg=false. Got declared=true. A `true` here means the c4 walker incorrectly propagated `from_root_body=true` into the `Omit` first argument's descent, OR c2's heritage-descent stamping is broken in the parser.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- cross_file_no_own_body_name_heritage_reached_member_carries_declared_false stdout ----
+
+thread 'cross_file_no_own_body_name_heritage_reached_member_carries_declared_false' (74616) panicked at crates\verter_session\tests\r21_c5_cross_file_provenance.rs:294:5:
+cross-file-no-own-body-name: `contested` reaches Carrier's surface ONLY through `extends Vendor`. It MUST carry declared_in_macro_type_arg=false. Got declared=true. A `true` here is a P0 break — c2 parser is leaking the body flag into heritage descent, OR c5 component_meta.rs is reading a wrong source. Reverting c5 to the pre-c5 `source_field.unwrap_or(false)` form would PASS this assertion BY ACCIDENT (the analyzer never saw `contested`, so source_field is None, and the old code defaults to `false`). The cross-file-simple test discriminates that accident: pre-c5 returns false for own-body members too.
+
+
+failures:
+    cross_file_no_own_body_name_heritage_reached_member_carries_declared_false
+    cross_file_omit_then_reintroduce_own_body_members_carry_declared_true
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `-p verter_session --test r21_c5_cross_file_provenance`

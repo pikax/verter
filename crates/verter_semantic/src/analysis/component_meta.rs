@@ -1458,34 +1458,41 @@ fn extract_props_from_macro(
                     default_value,
                     description,
                     tags,
-                    // The analyzer-side `AnalyzedPropField` carries the
-                    // author-declared fact. When the evaluator produces a
-                    // name the analyzer also saw (the author wrote it in
-                    // the macro T's own body / referenced interface body),
-                    // preserve it. When the name appears ONLY through
-                    // cross-file expansion (heritage / Pick / Omit / etc.),
-                    // the analyzer never saw it so `declared = false`.
+                    // R21-F1 c5: structural-fact read from the
+                    // expanded field. `ExpandedField` carries
+                    // `declared_in_macro_type_arg` propagated
+                    // end-to-end through the resolver stack:
                     //
-                    // R20-fix2 F1 STOP: for cross-file imported
-                    // interfaces (`import { Props } from './x';
-                    // defineProps<Props>()`), the analyzer's local
-                    // registry never sees `Props`, so the source-field
-                    // lookup always misses and this branch reaches
-                    // `unwrap_or(false)`. The architecturally-correct
-                    // fix threads `declared_in_macro_type_arg` through
-                    // five types (`ResolvedProp`, `ProjectedMember`,
-                    // `SurfaceMember`, `ExpandedField`, `ExpandedProperty`)
-                    // across three crates plus the prepared-surface
-                    // walker's heritage tracking plus FFI / proto
-                    // re-wire — a dedicated architectural cycle,
-                    // escalated via STOP-and-escalate per the R20-fix2
-                    // brief. The bench corpus does not currently
-                    // exercise this branch (0/179 components per
-                    // codex#2's measurement). See
-                    // `D:/tmp/round20-fix2-report.md` STATUS section.
-                    declared_in_macro_type_arg: source_field
-                        .map(|p| p.declared_in_macro_type_arg)
-                        .unwrap_or(false),
+                    // - Parser (c2): `resolve_interface_with_extends`
+                    //   stamps own-body interface members with `true`
+                    //   and heritage-descent members (`extends`,
+                    //   `Omit<...>` source, intersection non-literal
+                    //   arms) with `false`.
+                    // - Semantic propagation (c3):
+                    //   `expand_macro_types_impl_with_expander` and
+                    //   `surface_member_to_expanded_field` thread the
+                    //   fact through `AnalyzedPropField` ->
+                    //   `ProjectedMember` -> `SurfaceMember` ->
+                    //   `ExpandedField`.
+                    // - Session prepared-surface walker (c4):
+                    //   `project_prepared_surface_from_expr` threads
+                    //   `from_root_body` through every recursion arm
+                    //   and gates `PreparedSurfaceCacheKey` /
+                    //   `PreparedMemberCacheKey` on it, so two
+                    //   distinct entry contexts publish two distinct
+                    //   cache slots (closes codex's BINDING TOP RISK
+                    //   on partial / cache-incomplete F1 landings).
+                    //
+                    // For ALL of the brief's reference shapes -
+                    // fully-local (`defineProps<LocalProps>()`),
+                    // cross-file simple (`import type { Props } from
+                    // './x'; defineProps<Props>()`), cross-file
+                    // heritage (`interface Carrier extends
+                    // Omit<V,'k'> { k: T }`), and inline-literal
+                    // (`defineProps<{ k: T }>()`) -
+                    // `field.declared_in_macro_type_arg` is the
+                    // structurally-correct value.
+                    declared_in_macro_type_arg: field.declared_in_macro_type_arg,
                 });
             }
             // NOTE: We intentionally do NOT fall back to prop_fields here.
