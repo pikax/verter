@@ -585,6 +585,10 @@ fn prepared_surface_key(canonical: &str) -> PreparedSurfaceCacheKey {
         canonical_id: Arc::from(canonical),
         symbol_name: Arc::from("Probe"),
         substitutions: PreparedSubstitutionKey::Empty,
+        // R21-F1 c4: top-level synthetic probe enters at body
+        // position. Tests that exercise the heritage-descent path
+        // construct their own key explicitly.
+        from_root_body: true,
     }
 }
 
@@ -643,6 +647,10 @@ fn prepared_member_key(canonical: &str) -> PreparedMemberCacheKey {
         member_name: Arc::from("field"),
         kind: PreparedMemberCacheKind::Requested,
         substitutions: PreparedSubstitutionKey::Empty,
+        // R21-F1 c4: top-level synthetic probe enters at body
+        // position. Heritage-descent-keyed tests construct their key
+        // explicitly with `from_root_body: false`.
+        from_root_body: true,
     }
 }
 
@@ -3871,6 +3879,7 @@ fn prepared_member_db_producer_overlay_discrimination() {
             "Probe",
             "shared",
             &FxHashMap::default(),
+            true,
             &mut active,
         )
         .expect("the overlay producer projects Probe.shared");
@@ -3893,6 +3902,7 @@ fn prepared_member_db_producer_overlay_discrimination() {
             "Probe",
             "shared",
             &FxHashMap::default(),
+            true,
             &mut base_active,
         )
         .expect("the base producer projects Probe.shared");
@@ -6644,6 +6654,7 @@ fn prepared_member_peek_rejects_entry_from_superseded_generation() {
         member_name: Arc::from("value"),
         kind: PreparedMemberCacheKind::Requested,
         substitutions: PreparedSubstitutionKey::Empty,
+        from_root_body: true,
     };
 
     // Prime the cache through the production cold path — the cold
@@ -7075,6 +7086,7 @@ fn prepared_surface_failed_revalidation_does_not_leak_live_counter() {
         canonical_id: Arc::from(c),
         symbol_name: Arc::from("Probe"),
         substitutions: PreparedSubstitutionKey::Empty,
+        from_root_body: true,
     };
 
     let counter_before = component_meta_cache_live(&host);
@@ -7118,6 +7130,7 @@ fn prepared_member_failed_revalidation_does_not_leak_live_counter() {
         member_name: Arc::from("value"),
         kind: PreparedMemberCacheKind::Requested,
         substitutions: PreparedSubstitutionKey::Empty,
+        from_root_body: true,
     };
 
     let counter_before = component_meta_cache_live(&host);
@@ -7298,6 +7311,7 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
             canonical_id: Arc::from("/lc_total/psurface.ts"),
             symbol_name: Arc::from("P"),
             substitutions: PreparedSubstitutionKey::Empty,
+            from_root_body: true,
         },
         ctx,
         || {
@@ -7312,6 +7326,7 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
             member_name: Arc::from("v"),
             kind: PreparedMemberCacheKind::Requested,
             substitutions: PreparedSubstitutionKey::Empty,
+            from_root_body: true,
         },
         ctx,
         || {

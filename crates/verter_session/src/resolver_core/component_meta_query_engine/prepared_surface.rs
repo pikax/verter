@@ -88,6 +88,43 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         result
     }
 
+    /// R21-F1 c4 test-only escape hatch.
+    ///
+    /// Drives `project_prepared_surface_from_symbol` with an explicit
+    /// `from_root_body` flag so the discriminating cache-identity
+    /// tests in `crate::r21_c4_cache_identity_tests` can exercise BOTH
+    /// entry contexts (`true` = body position;
+    /// `false` = heritage descent). The public
+    /// `cached_prepared_root_surface` only enters at body position.
+    #[cfg(test)]
+    pub(crate) fn r21_c4_project_prepared_surface_from_symbol_with_flag(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+        from_root_body: bool,
+    ) -> Option<std::sync::Arc<ProjectedSurface>> {
+        let previous_root = self
+            .current_prepared_request_root
+            .replace(scope_canonical_id.to_string());
+        let mut active = FxHashSet::default();
+        let result = match self.project_prepared_surface_from_symbol(
+            scope_canonical_id,
+            symbol_name,
+            &FxHashMap::default(),
+            from_root_body,
+            &mut active,
+        ) {
+            PreparedSurfaceProjection::Surface(surface)
+                if !projected_surface_is_empty(&surface) =>
+            {
+                Some(surface)
+            }
+            _ => None,
+        };
+        self.current_prepared_request_root = previous_root;
+        result
+    }
+
     #[allow(dead_code)]
     fn project_prepared_root_surface_inner(
         &mut self,
@@ -99,10 +136,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             self.prepared_root_surface_projection_count += 1;
         }
         let mut active = FxHashSet::default();
+        // R21-F1 c4: top-level entry through `cached_prepared_root_surface`
+        // enters the requested symbol AT THE BODY POSITION of the macro
+        // T argument — `from_root_body = true`. Recursive descents
+        // inside the walker thread their own arm-specific flag.
         match self.project_prepared_surface_from_symbol(
             scope_canonical_id,
             symbol_name,
             &FxHashMap::default(),
+            true,
             &mut active,
         ) {
             PreparedSurfaceProjection::Surface(surface)
@@ -120,12 +162,20 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         symbol_name: &str,
         substitutions: &FxHashMap<String, TypeExpr>,
+        from_root_body: bool,
         active: &mut FxHashSet<(String, String)>,
     ) -> PreparedSurfaceProjection {
+        // R21-F1 c4: `from_root_body` is the caller's macro-T own-body
+        // flag. It is part of the cache identity per the R21 split rule:
+        // the cached `ProjectedSurface`'s per-member
+        // `declared_in_macro_type_arg` reflects whether the symbol was
+        // entered at a body position vs. a heritage descent, so two
+        // distinct entry contexts publish two distinct cache slots.
         let cache_key = PreparedSurfaceCacheKey {
             canonical_id: scope_canonical_id.to_string(),
             symbol_name: symbol_name.to_string(),
             substitutions: prepared_substitution_key(substitutions),
+            from_root_body,
         };
         #[cfg(test)]
         crate::spike_instrumentation::record_cache_read("prepared_surface_cache");
@@ -143,8 +193,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // get_or_compute. Cold-compute writes back through
         // `cache_prepared_surface_projection` and the local view.
         {
-            let arc_key =
-                arc_prepared_surface_cache_key(scope_canonical_id, symbol_name, substitutions);
+            let arc_key = arc_prepared_surface_cache_key(
+                scope_canonical_id,
+                symbol_name,
+                substitutions,
+                from_root_body,
+            );
             let host_db = self.ctx.project_type_store().prepared_surface_db();
             if let Some(payload) = host_db.peek(&arc_key, self.ctx) {
                 let projection = match payload {
@@ -186,12 +240,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             scope_canonical_id,
                             symbol_name,
                             &default_substitutions,
+                            from_root_body,
                             active,
                         );
                         self.publish_prepared_surface_to_host_db(
                             scope_canonical_id,
                             symbol_name,
                             substitutions,
+                            from_root_body,
                             &result,
                             observed_keyed_hash,
                         );
@@ -212,6 +268,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 scope_canonical_id,
                 symbol_name,
                 substitutions,
+                from_root_body,
                 &cached,
                 observed_keyed_hash,
             );
@@ -234,6 +291,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     prepared.as_ref(),
                     &prepared.body,
                     substitutions,
+                    from_root_body,
                     active,
                 )
             })
@@ -250,6 +308,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             scope_canonical_id,
             symbol_name,
             substitutions,
+            from_root_body,
             &result,
             observed_keyed_hash,
         );
@@ -275,11 +334,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         symbol_name: &str,
         substitutions: &FxHashMap<String, TypeExpr>,
+        from_root_body: bool,
         result: &PreparedSurfaceProjection,
         observed_keyed_hash: Option<crate::resolver_core::ResolverHash16>,
     ) {
-        let arc_key =
-            arc_prepared_surface_cache_key(scope_canonical_id, symbol_name, substitutions);
+        let arc_key = arc_prepared_surface_cache_key(
+            scope_canonical_id,
+            symbol_name,
+            substitutions,
+            from_root_body,
+        );
         let payload = match result {
             PreparedSurfaceProjection::Surface(s) => {
                 crate::component_meta_caches::PreparedSurfacePayload::Surface(s.clone())
@@ -306,6 +370,28 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         });
     }
 
+    /// R21-F1 c4: `from_root_body` threading.
+    ///
+    /// `from_root_body` is the caller's macro-T own-body flag. The walker
+    /// mirrors the parser's `resolve_type_elements_inner_with_ctx_ref_guarded`
+    /// semantics:
+    ///
+    /// - `TypeExpr::Object` (a TS `TSTypeLiteral`) → an own-body literal
+    ///   that stamps its members with the caller's `from_root_body`.
+    /// - `TypeExpr::Parenthesized` → transparent, propagates the flag.
+    /// - `TypeExpr::Union` arms → propagate the flag (unions enumerate
+    ///   options, not heritage).
+    /// - `TypeExpr::Intersection` arms → an arm is own-body iff it is
+    ///   itself a `TypeExpr::Object` AND the caller is at body position
+    ///   (`from_root_body=true`); every other arm shape (Ref, utility
+    ///   types, etc.) is a heritage-like descent and recurses with
+    ///   `from_root_body=false`.
+    /// - `TypeExpr::Ref` → delegated to `project_prepared_surface_from_ref`,
+    ///   which routes utility types (`Pick`/`Omit`/`Partial`/`Required`/
+    ///   `Readonly`/`NonNullable`) at `from_root_body=false` (their first
+    ///   type-argument is a heritage descent) and named-type references
+    ///   at the caller's flag (`MyProps` at body position propagates
+    ///   `from_root_body=true` into MyProps's own body).
     #[allow(dead_code)]
     fn project_prepared_surface_from_expr(
         &mut self,
@@ -313,6 +399,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         prepared: &verter_semantic::analysis::type_solver::PreparedTypeDecl,
         expr: &TypeExpr,
         substitutions: &FxHashMap<String, TypeExpr>,
+        from_root_body: bool,
         active: &mut FxHashSet<(String, String)>,
     ) -> PreparedSurfaceProjection {
         match expr {
@@ -321,6 +408,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 prepared,
                 inner,
                 substitutions,
+                from_root_body,
                 active,
             ),
             TypeExpr::Object(object) => PreparedSurfaceProjection::Surface(std::sync::Arc::new(
@@ -328,6 +416,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     object,
                     &prepared.type_parameters,
                     substitutions,
+                    from_root_body,
                 ),
             )),
             TypeExpr::Function(function) => PreparedSurfaceProjection::Surface(
@@ -341,11 +430,22 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 let arms: Vec<PreparedSurfaceProjection> = parts
                     .iter()
                     .map(|part| {
+                        // Mirror parser semantic (decl.rs:1712):
+                        // `arm_from_root_body = matches!(ty,
+                        // TSType::TSTypeLiteral(_)) && from_root_body`.
+                        // A literal arm of the intersection is own-body
+                        // iff the carrier is at body position; every
+                        // other arm shape is heritage-like and descends
+                        // with `from_root_body=false`. We unwrap
+                        // `Parenthesized` first so `(X & Y) & { foo }`
+                        // shapes still detect the literal arm.
+                        let arm_from_root_body = arm_is_own_body_literal(part) && from_root_body;
                         self.project_prepared_surface_from_expr(
                             scope_canonical_id,
                             prepared,
                             part,
                             substitutions,
+                            arm_from_root_body,
                             active,
                         )
                     })
@@ -360,6 +460,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         prepared,
                         part,
                         substitutions,
+                        from_root_body,
                         active,
                     ) {
                         PreparedSurfaceProjection::Surface(surface) => surfaces.push(surface),
@@ -383,6 +484,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         prepared,
                         &substituted,
                         &FxHashMap::default(),
+                        from_root_body,
                         active,
                     );
                 }
@@ -391,6 +493,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     prepared,
                     name.as_ref(),
                     type_arguments.as_ref(),
+                    from_root_body,
                     active,
                 )
             }
@@ -412,6 +515,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
+    /// R21-F1 c4: `from_root_body` threading for the Ref dispatch.
+    ///
+    /// Mirrors the parser's utility-type handling (decl.rs:1779+ +
+    /// `try_resolve_heritage_utility_type`): the FIRST type-argument of
+    /// `Pick`/`Omit`/`Partial`/`Required`/`Readonly`/`NonNullable` is a
+    /// heritage-like descent that descends with `from_root_body=false`.
+    /// For a non-utility, non-builtin named reference (the `_ => ` arm
+    /// below), the walker recurses into the target symbol AT THE
+    /// CALLER's `from_root_body` — `defineProps<MyProps>()` where
+    /// `MyProps` is a named interface enters `MyProps`'s body at body
+    /// position; `extends MyProps` enters at heritage position.
     #[allow(dead_code)]
     fn project_prepared_surface_from_ref(
         &mut self,
@@ -419,8 +533,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         prepared: &verter_semantic::analysis::type_solver::PreparedTypeDecl,
         name: &str,
         type_arguments: &[TypeExpr],
+        from_root_body: bool,
         active: &mut FxHashSet<(String, String)>,
     ) -> PreparedSurfaceProjection {
+        // Utility types descend into their first argument as a
+        // heritage-like step — `from_root_body = false` matches the
+        // parser semantic in `try_resolve_heritage_utility_type`.
+        // For a non-utility named reference the `_ =>` arm propagates
+        // `from_root_body` into the target symbol's body resolution.
         match (name, type_arguments) {
             ("Partial", [inner]) => apply_surface_member_modifier(
                 self.project_prepared_surface_from_expr(
@@ -428,6 +548,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     prepared,
                     inner,
                     &FxHashMap::default(),
+                    false,
                     active,
                 ),
                 |member| member.optional = true,
@@ -438,6 +559,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     prepared,
                     inner,
                     &FxHashMap::default(),
+                    false,
                     active,
                 ),
                 |member| member.optional = false,
@@ -448,6 +570,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     prepared,
                     inner,
                     &FxHashMap::default(),
+                    false,
                     active,
                 ),
                 |member| member.readonly = true,
@@ -457,6 +580,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 prepared,
                 inner,
                 &FxHashMap::default(),
+                false,
                 active,
             ),
             ("Pick", [target, keys]) => {
@@ -486,6 +610,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         prepared,
                         target,
                         &FxHashMap::default(),
+                        false,
                         active,
                     ),
                     move |member_name| !omitted.iter().any(|candidate| candidate == member_name),
@@ -512,10 +637,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 ) else {
                     return PreparedSurfaceProjection::Unsupported;
                 };
+                // Named-type reference: the parser's
+                // `resolve_named_local_type_with_ctx_ref` propagates
+                // the caller's `from_root_body` into the target's
+                // own-body resolution (`MyProps` at body position
+                // ⇒ MyProps's own body members get
+                // `declared_in_macro_type_arg=true`).
                 self.project_prepared_surface_from_symbol(
                     &target_canonical_id,
                     &target_symbol_name,
                     &target_substitutions,
+                    from_root_body,
                     active,
                 )
             }
@@ -534,12 +666,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> PreparedSurfaceProjection {
         let mut members = Vec::with_capacity(requested.len());
         for member_name in requested {
+            // Pick selects members FROM the target — the resulting
+            // members did NOT appear in the consuming macro T's own
+            // body literal, so they enter member-projection at
+            // `from_root_body=false`.
             let Some(projected_member) = self.project_prepared_requested_member_from_expr(
                 scope_canonical_id,
                 prepared,
                 expr,
                 member_name,
                 substitutions,
+                false,
                 active,
             ) else {
                 return PreparedSurfaceProjection::Unsupported;
@@ -555,12 +692,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }))
     }
 
+    /// R21-F1 c4: `from_root_body` is part of the cache identity for
+    /// `PreparedMemberCacheKey` per the R21 split rule. Different
+    /// entry contexts (body position vs. heritage descent) publish
+    /// distinct `ProjectedMember` values whose
+    /// `declared_in_macro_type_arg` reflects the entry context.
     pub(crate) fn project_prepared_requested_member_from_symbol(
         &mut self,
         scope_canonical_id: &str,
         symbol_name: &str,
         member_name: &str,
         substitutions: &FxHashMap<String, TypeExpr>,
+        from_root_body: bool,
         active: &mut FxHashSet<(String, String)>,
     ) -> Option<ProjectedMember> {
         let cache_key = PreparedMemberCacheKey {
@@ -569,6 +712,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             member_name: member_name.to_string(),
             kind: PreparedMemberCacheKind::Requested,
             substitutions: prepared_substitution_key(substitutions),
+            from_root_body,
         };
         #[cfg(test)]
         crate::spike_instrumentation::record_cache_read("prepared_member_cache");
@@ -583,6 +727,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 member_name,
                 crate::resolver_core::cache_keys::PreparedMemberCacheKind::Requested,
                 substitutions,
+                from_root_body,
             );
             let host_db = self.ctx.project_type_store().prepared_member_db();
             if let Some(opt_arc) = host_db.peek(&arc_key, self.ctx) {
@@ -618,6 +763,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             symbol_name,
                             member_name,
                             &default_substitutions,
+                            from_root_body,
                             active,
                         );
                         self.publish_prepared_member_to_host_db(
@@ -626,6 +772,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             member_name,
                             crate::resolver_core::cache_keys::PreparedMemberCacheKind::Requested,
                             substitutions,
+                            from_root_body,
                             &result,
                             observed_keyed_hash,
                         );
@@ -650,6 +797,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 member_name,
                 crate::resolver_core::cache_keys::PreparedMemberCacheKind::Requested,
                 substitutions,
+                from_root_body,
                 &Some(cached.clone()),
                 observed_keyed_hash,
             );
@@ -668,22 +816,27 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .prepared_type_decl(scope_canonical_id, symbol_name)
             .and_then(|prepared| {
                 if let Some(member) = prepared.member(member_name) {
-                    // SAFETY: `PreparedMember` does not carry a
-                    // `declared_in_macro_type_arg` fact — the prepared
-                    // decl's `member_index` flattens own-body and
-                    // heritage-reached members into a single map. This
-                    // layer (single-member projection lookup) has no
-                    // way to discriminate them. `false` is the
-                    // conservative default; consumers of single-member
-                    // projection are not the published-surface
-                    // policy callers.
+                    // SAFETY: `PreparedMember` flattens own-body and
+                    // heritage-reached members into a single
+                    // `member_index` — single-member projection lookup
+                    // CANNOT discriminate them at this leaf. The
+                    // caller's `from_root_body` is the best evidence
+                    // available: at body position the caller wants to
+                    // treat the member as own-body unless the member
+                    // is structurally heritage-reached (which the
+                    // recursive `from_expr` path classifies precisely
+                    // for object literals + heritage-utility cases).
+                    // The leaf path retains the conservative default
+                    // of `from_root_body && true_when_provable` —
+                    // simplified here to the caller's flag because
+                    // the member-index does not provide the discriminator.
                     let projected_member = ProjectedMember {
                         name: member_name.to_string(),
                         ty: apply_type_param_substitutions(&member.ty, substitutions),
                         optional: member.optional,
                         readonly: member.readonly,
                         is_method: member.is_method,
-                        declared_in_macro_type_arg: false,
+                        declared_in_macro_type_arg: from_root_body,
                     };
                     if !type_expr_references_type_params(&member.ty, &prepared.type_parameters) {
                         self.cache_prepared_requested_member(
@@ -702,6 +855,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     &prepared.body,
                     member_name,
                     substitutions,
+                    from_root_body,
                     active,
                 )
             });
@@ -713,6 +867,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             member_name,
             crate::resolver_core::cache_keys::PreparedMemberCacheKind::Requested,
             substitutions,
+            from_root_body,
             &result,
             observed_keyed_hash,
         );
@@ -751,6 +906,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         member_name: &str,
         kind: crate::resolver_core::cache_keys::PreparedMemberCacheKind,
         substitutions: &FxHashMap<String, TypeExpr>,
+        from_root_body: bool,
         result: &Option<ProjectedMember>,
         observed_keyed_hash: Option<crate::resolver_core::ResolverHash16>,
     ) {
@@ -760,6 +916,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             member_name,
             kind,
             substitutions,
+            from_root_body,
         );
         let ctx = self.ctx;
         let host_db = ctx.project_type_store().prepared_member_db();
@@ -786,6 +943,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         });
     }
 
+    /// R21-F1 c4: `from_root_body` threading for single-member projection.
+    ///
+    /// Mirrors `project_prepared_surface_from_expr`'s rules: intersection
+    /// arms classify per their shape, utility-type inner arg descends
+    /// at `from_root_body=false`, named Ref propagates the caller's
+    /// flag into the target symbol's body resolution.
     fn project_prepared_requested_member_from_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -793,6 +956,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         expr: &TypeExpr,
         member_name: &str,
         substitutions: &FxHashMap<String, TypeExpr>,
+        from_root_body: bool,
         active: &mut FxHashSet<(String, String)>,
     ) -> Option<ProjectedMember> {
         use verter_type_expr::ObjectMember;
@@ -804,27 +968,28 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 inner,
                 member_name,
                 substitutions,
+                from_root_body,
                 active,
             ),
             TypeExpr::Intersection(parts) => parts.iter().rev().find_map(|part| {
+                // Mirror the surface-walker classification: an
+                // intersection arm is own-body iff it is a literal
+                // object AND the carrier is at body position.
+                let arm_from_root_body = arm_is_own_body_literal(part) && from_root_body;
                 self.project_prepared_requested_member_from_expr(
                     scope_canonical_id,
                     prepared,
                     part,
                     member_name,
                     substitutions,
+                    arm_from_root_body,
                     active,
                 )
             }),
-            // SAFETY: single-member projection on a prepared decl
-            // body. The walker has no caller context to know whether
-            // this prepared decl is being consumed as the macro T
-            // argument vs as a downstream reference. The macro shape
-            // synthesizers (`synthesize_define_props_shape_*`) drive
-            // their own propagation through `evaluated_types.props`
-            // / `resolved_macro.props` which DO carry the fact.
-            // `false` is the structural default for this generic
-            // member-projection path.
+            // R21-F1 c4: a `TypeExpr::Object` literal at this position
+            // is an own-body literal — the member it contributes
+            // declares its name in the consumer's macro T argument iff
+            // the caller's `from_root_body` is `true`.
             TypeExpr::Object(object) => object.properties.iter().find_map(|member| match member {
                 ObjectMember::Property(property) if property.name == member_name => {
                     Some(ProjectedMember {
@@ -833,7 +998,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         optional: property.optional,
                         readonly: property.readonly,
                         is_method: false,
-                        declared_in_macro_type_arg: false,
+                        declared_in_macro_type_arg: from_root_body,
                     })
                 }
                 ObjectMember::Method(method) if method.name == member_name => {
@@ -845,7 +1010,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         optional: method.optional,
                         readonly: false,
                         is_method: true,
-                        declared_in_macro_type_arg: false,
+                        declared_in_macro_type_arg: from_root_body,
                     })
                 }
                 _ => None,
@@ -863,6 +1028,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         &substituted,
                         member_name,
                         &FxHashMap::default(),
+                        from_root_body,
                         active,
                     );
                 }
@@ -874,6 +1040,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             inner,
                             member_name,
                             substitutions,
+                            false,
                             active,
                         )
                         .map(|mut member| {
@@ -887,6 +1054,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             inner,
                             member_name,
                             substitutions,
+                            false,
                             active,
                         )
                         .map(|mut member| {
@@ -900,6 +1068,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             inner,
                             member_name,
                             substitutions,
+                            false,
                             active,
                         )
                         .map(|mut member| {
@@ -912,6 +1081,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         inner,
                         member_name,
                         substitutions,
+                        false,
                         active,
                     ),
                     ("Pick", [target, keys]) => {
@@ -930,6 +1100,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             target,
                             member_name,
                             substitutions,
+                            false,
                             active,
                         )
                     }
@@ -949,6 +1120,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             target,
                             member_name,
                             substitutions,
+                            false,
                             active,
                         )
                     }
@@ -967,11 +1139,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             target_prepared.as_ref(),
                             type_arguments.as_ref(),
                         )?;
+                        // Named-type ref: propagates the caller's
+                        // `from_root_body` into the target symbol's
+                        // body resolution.
                         self.project_prepared_requested_member_from_symbol(
                             &target_canonical_id,
                             &target_symbol_name,
                             member_name,
                             &target_substitutions,
+                            from_root_body,
                             active,
                         )
                     }
@@ -1202,6 +1378,23 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .borrow_mut()
             .insert(cache_key, resolved_pair.clone());
         resolved_pair
+    }
+}
+
+/// R21-F1 c4 — classify whether an intersection arm is an own-body
+/// literal (a TS `TSTypeLiteral`, lowered to `TypeExpr::Object`) for
+/// the purpose of threading `from_root_body` through the walker.
+///
+/// Mirrors the parser semantic at decl.rs:1712
+/// (`matches!(ty, TSType::TSTypeLiteral(_))`) — only object literals
+/// preserve the caller's body position; Refs, utility types, and
+/// every other shape are heritage-like descents. `Parenthesized` is
+/// transparent (`(T & X)` stays inspected at the inner shape).
+pub(super) fn arm_is_own_body_literal(expr: &TypeExpr) -> bool {
+    match expr {
+        TypeExpr::Object(_) => true,
+        TypeExpr::Parenthesized(inner) => arm_is_own_body_literal(inner),
+        _ => false,
     }
 }
 

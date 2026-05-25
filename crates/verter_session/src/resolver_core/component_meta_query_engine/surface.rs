@@ -314,11 +314,13 @@ pub(crate) fn arc_prepared_surface_cache_key(
     canonical_id: &str,
     symbol_name: &str,
     substitutions: &FxHashMap<String, TypeExpr>,
+    from_root_body: bool,
 ) -> crate::resolver_core::cache_keys::PreparedSurfaceCacheKey {
     crate::resolver_core::cache_keys::PreparedSurfaceCacheKey {
         canonical_id: std::sync::Arc::from(canonical_id),
         symbol_name: std::sync::Arc::from(symbol_name),
         substitutions: arc_prepared_substitution_key(substitutions),
+        from_root_body,
     }
 }
 
@@ -330,6 +332,7 @@ pub(crate) fn arc_prepared_member_cache_key(
     member_name: &str,
     kind: crate::resolver_core::cache_keys::PreparedMemberCacheKind,
     substitutions: &FxHashMap<String, TypeExpr>,
+    from_root_body: bool,
 ) -> crate::resolver_core::cache_keys::PreparedMemberCacheKey {
     crate::resolver_core::cache_keys::PreparedMemberCacheKey {
         canonical_id: std::sync::Arc::from(canonical_id),
@@ -337,6 +340,7 @@ pub(crate) fn arc_prepared_member_cache_key(
         member_name: std::sync::Arc::from(member_name),
         kind,
         substitutions: arc_prepared_substitution_key(substitutions),
+        from_root_body,
     }
 }
 
@@ -393,6 +397,7 @@ pub(super) fn projected_surface_is_empty(surface: &ProjectedSurface) -> bool {
 
 pub(super) fn projected_surface_from_object_expr(
     object: &verter_type_expr::ObjectExpr,
+    from_root_body: bool,
 ) -> ProjectedSurface {
     use verter_type_expr::ObjectMember;
 
@@ -401,12 +406,13 @@ pub(super) fn projected_surface_from_object_expr(
     let mut construct_signatures = Vec::new();
     let mut has_index_signature = false;
 
-    // SAFETY: generic `TypeExpr::Object` body projection — used for
-    // type-expression interrogation, not for the macro published
-    // surface. `ObjectMember::Property` / `Method` carry no upstream
-    // `declared_in_macro_type_arg` fact at the type-expression
-    // layer (the fact lives on the analyzer surface). `false` is
-    // the structural truth.
+    // R21-F1 c4: `from_root_body` is the caller's macro-T own-body flag
+    // threaded through the walker. A `TypeExpr::Object` reached at a
+    // body position (`from_root_body=true`) declares its members in
+    // the consumer's macro T argument; the same object reached via a
+    // heritage-like descent (`from_root_body=false`) does not. The
+    // parser mirror is `resolve_type_literal_members` which propagates
+    // the caller's `from_root_body` to each member.
     for member in &object.properties {
         match member {
             ObjectMember::Property(property) => members.push(ProjectedMember {
@@ -415,7 +421,7 @@ pub(super) fn projected_surface_from_object_expr(
                 optional: property.optional,
                 readonly: property.readonly,
                 is_method: false,
-                declared_in_macro_type_arg: false,
+                declared_in_macro_type_arg: from_root_body,
             }),
             ObjectMember::Method(method) => members.push(ProjectedMember {
                 name: method.name.clone(),
@@ -423,7 +429,7 @@ pub(super) fn projected_surface_from_object_expr(
                 optional: method.optional,
                 readonly: false,
                 is_method: true,
-                declared_in_macro_type_arg: false,
+                declared_in_macro_type_arg: from_root_body,
             }),
             ObjectMember::CallSignature(function) => {
                 call_signatures.push(TypeExpr::Function(std::sync::Arc::new(function.clone())));
@@ -448,11 +454,12 @@ pub(super) fn projected_surface_from_object_expr_with_substitutions(
     object: &verter_type_expr::ObjectExpr,
     _type_params: &[verter_type_expr::TypeParam],
     substitutions: &FxHashMap<String, TypeExpr>,
+    from_root_body: bool,
 ) -> ProjectedSurface {
     use verter_type_expr::ObjectMember;
 
     if substitutions.is_empty() {
-        return projected_surface_from_object_expr(object);
+        return projected_surface_from_object_expr(object, from_root_body);
     }
 
     let mut members = Vec::new();
@@ -460,10 +467,10 @@ pub(super) fn projected_surface_from_object_expr_with_substitutions(
     let mut construct_signatures = Vec::new();
     let mut has_index_signature = false;
 
-    // SAFETY: see companion comment on
-    // `projected_surface_from_object_expr` — generic
-    // type-expression projection, no upstream
-    // `declared_in_macro_type_arg` fact at this layer.
+    // R21-F1 c4: `from_root_body` is the caller's macro-T own-body
+    // flag threaded through the walker — see companion comment on
+    // `projected_surface_from_object_expr`. Generic instantiation
+    // does not change the body/heritage status of the object literal.
     for member in &object.properties {
         match member {
             ObjectMember::Property(property) => members.push(ProjectedMember {
@@ -472,7 +479,7 @@ pub(super) fn projected_surface_from_object_expr_with_substitutions(
                 optional: property.optional,
                 readonly: property.readonly,
                 is_method: false,
-                declared_in_macro_type_arg: false,
+                declared_in_macro_type_arg: from_root_body,
             }),
             ObjectMember::Method(method) => members.push(ProjectedMember {
                 name: method.name.clone(),
@@ -483,7 +490,7 @@ pub(super) fn projected_surface_from_object_expr_with_substitutions(
                 optional: method.optional,
                 readonly: false,
                 is_method: true,
-                declared_in_macro_type_arg: false,
+                declared_in_macro_type_arg: from_root_body,
             }),
             ObjectMember::CallSignature(function) => call_signatures.push(TypeExpr::Function(
                 std::sync::Arc::new(substitute_function_expr_if_needed(function, substitutions)),

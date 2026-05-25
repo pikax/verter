@@ -559,6 +559,12 @@ struct PreparedSurfaceCacheKey {
     canonical_id: String,
     symbol_name: String,
     substitutions: PreparedSubstitutionKey,
+    /// R21-F1 c4: see
+    /// [`crate::resolver_core::cache_keys::PreparedSurfaceCacheKey::from_root_body`].
+    /// The engine-internal `RefCell`-backed read-through view mirrors
+    /// the ctx-owned key shape exactly, so two distinct entry contexts
+    /// share NO scratch state inside one request.
+    from_root_body: bool,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -568,6 +574,9 @@ struct PreparedMemberCacheKey {
     member_name: String,
     kind: PreparedMemberCacheKind,
     substitutions: PreparedSubstitutionKey,
+    /// R21-F1 c4: see
+    /// [`crate::resolver_core::cache_keys::PreparedMemberCacheKey::from_root_body`].
+    from_root_body: bool,
 }
 
 // `InheritedRoute` is no longer
@@ -1253,11 +1262,19 @@ fn dispatch_member_for_root_symbol(
         .dispatch_projected_member(scope_canonical_id, symbol_name, member_name)
         .or_else(|| {
             let mut active = FxHashSet::default();
+            // R21-F1 c4: top-level dispatch fallback for a route's
+            // single-member projection. The route was constructed at
+            // the consumer's macro-T position, so the member is
+            // queried AS A BODY MEMBER of the rooted symbol —
+            // `from_root_body = true`. The recursive `from_expr` path
+            // narrows the flag (e.g. heritage utility-type descent)
+            // and the leaf branch carries it on the projected member.
             engine.project_prepared_requested_member_from_symbol(
                 scope_canonical_id,
                 symbol_name,
                 member_name,
                 &FxHashMap::default(),
+                true,
                 &mut active,
             )
         })

@@ -41,6 +41,14 @@ pub struct PreparedSurfaceCacheKey {
     pub canonical_id: Arc<str>,
     pub symbol_name: Arc<str>,
     pub substitutions: PreparedSubstitutionKey,
+    /// R21-F1 c4: the caller's macro-T own-body flag (whether the
+    /// recursion entered the symbol at a body position or a heritage
+    /// descent). Two distinct entry contexts publish two distinct
+    /// `ProjectedSurface` values (per-member `declared_in_macro_type_arg`
+    /// reflects the entry context), so the dimension MUST be in the key
+    /// per the R21 split rule. Codex's BINDING TOP RISK for R21
+    /// (partial / cache-incomplete F1 landing) closes here.
+    pub from_root_body: bool,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -50,6 +58,11 @@ pub struct PreparedMemberCacheKey {
     pub member_name: Arc<str>,
     pub kind: PreparedMemberCacheKind,
     pub substitutions: PreparedSubstitutionKey,
+    /// R21-F1 c4: see [`PreparedSurfaceCacheKey::from_root_body`]. The
+    /// per-member projection's `ProjectedMember.declared_in_macro_type_arg`
+    /// depends on whether the symbol was entered at a body position vs.
+    /// heritage descent, so the dimension MUST be in the key.
+    pub from_root_body: bool,
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]

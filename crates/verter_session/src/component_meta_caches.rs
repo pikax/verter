@@ -2000,6 +2000,7 @@ impl PreparedSurfaceDb {
             canonical_id: Arc::from(marker),
             symbol_name: Arc::from("Synthetic"),
             substitutions: PreparedSubstitutionKey::Empty,
+            from_root_body: true,
         };
         let entry = Arc::new(PreparedSurfaceEntry {
             value: PreparedSurfacePayload::Empty,
@@ -2258,6 +2259,7 @@ impl PreparedMemberDb {
             member_name: Arc::from("synthetic"),
             kind: PreparedMemberCacheKind::Requested,
             substitutions: PreparedSubstitutionKey::Empty,
+            from_root_body: true,
         };
         let entry = Arc::new(PreparedMemberEntry {
             value: None,

@@ -1392,12 +1392,22 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         member_name: &str,
         visited: &mut FxHashSet<(String, String)>,
     ) -> Option<ProjectedMember> {
+        // R21-F1 c4: the inherited-route projection path follows
+        // members that reach the surface via the prepared decl's
+        // heritage chain — by construction, `from_root_body = false`.
+        // The cache key carries the flag to keep the inherited-route
+        // entries separate from any same-`(canonical, symbol, member)`
+        // requested-route entries (different `PreparedMemberCacheKind`
+        // already discriminates them; threading `from_root_body`
+        // through preserves the R21 split-rule key shape).
+        let inherited_from_root_body = false;
         let cache_key = PreparedMemberCacheKey {
             canonical_id: scope_canonical_id.to_string(),
             symbol_name: symbol_name.to_string(),
             member_name: member_name.to_string(),
             kind: PreparedMemberCacheKind::InheritedRoute,
             substitutions: PreparedSubstitutionKey::Empty,
+            from_root_body: inherited_from_root_body,
         };
         #[cfg(test)]
         crate::spike_instrumentation::record_cache_read("prepared_member_cache");
@@ -1412,6 +1422,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 member_name,
                 crate::resolver_core::cache_keys::PreparedMemberCacheKind::InheritedRoute,
                 &FxHashMap::default(),
+                inherited_from_root_body,
             );
             let host_db = self.ctx.project_type_store().prepared_member_db();
             if let Some(opt_arc) = host_db.peek(&arc_key, self.ctx) {
@@ -1467,6 +1478,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             member_name,
             crate::resolver_core::cache_keys::PreparedMemberCacheKind::InheritedRoute,
             &FxHashMap::default(),
+            inherited_from_root_body,
             &result,
             observed_keyed_hash,
         );
