@@ -1,0 +1,95 @@
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Option::is_none")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Option::is_none")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Option::is_none")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Option::is_none")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Option::is_none")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Option::is_none")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "Option::is_none")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "String::is_empty")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "is_default_f64")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+   Compiling verter_session v0.0.1-beta.1 (D:\dev\personal\verter\crates\verter_session)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.68s
+     Running tests\slot_binding_shallow_publication_tests.rs (target\debug\deps\slot_binding_shallow_publication_tests-df964ea8ebd60b92.exe)
+
+running 1 test
+[verter-rust-audit] request_id=1 canonical=/GenericPanel.vue total_ms=13.91 solver_ms=0.78 solver_steps=0 solve_count=0 capture_inputs_ms=2.14 store_read_ms=2.08 store_merge_ms=0.06 direct_import_proof_ms=0.02 imported_root_proof_ms=0.86 materialize_ms=9.74 serialize_ms=0.00 rss_before=17711104B rss_after=22413312B rss_delta=4702208B host_cache_before=0B host_cache_after=3516B workspace_before=1854B workspace_after=1854B store_view_hits=0 store_view_misses=1 structural_merges=0 imported_dep_entries=2 imported_dep_bytes=3516 prepared_type_decls=8 prepared_value_decls=1 footprint_present=true
+
+thread 'indexed_access_slot_binding_does_not_expand_nested_callback_payload' (26808) panicked at crates\verter_session\tests\slot_binding_shallow_publication_tests.rs:155:5:
+indexed-access slot binding must stay shallow. The binding should preserve the `PanelProps<...>['controls']`/callback-envelope carrier instead of expanding the nested `Envelope` tool body. Serialized binding bytes=3643 json={"element":{"kind":"intersection","types":[{"kind":"object","properties":[{"memberKind":"property","name":"label","optional":true,"readonly":false,"ty":{"kind":"primitive","name":"string"}}]},{"kind":"object","properties":[{"memberKind":"property","name":"activate","optional":true,"readonly":false,"ty":{"kind":"function","parameters":[{"name":"event","optional":false,"rest":false,"ty":{"kind":"object","properties":[{"memberKind":"property","name":"type","optional":false,"readonly":false,"ty":{"kind":"literal","literalKind":"string","value":"trigger"}}]}},{"name":"envelope","optional":false,"rest":false,"ty":{"kind":"object","properties":[{"memberKind":"property","name":"id","optional":false,"readonly":false,"ty":{"kind":"primitive","name":"string"}},{"memberKind":"property","name":"meta","optional":true,"readonly":false,"ty":{"kind":"typeParameter","name":"TMeta"}},{"memberKind":"property","name":"entries","optional":false,"readonly":false,"ty":{"element":{"kind":"union","types":[{"kind":"object","properties":[{"memberKind":"property","name":"type","optional":false,"readonly":false,"ty":{"kind":"literal","literalKind":"string","value":"text"}},{"memberKind":"property","name":"text","optional":false,"readonly":false,"ty":{"kind":"primitive","name":"string"}}]},{"kind":"mapped","nameType":null,"optional":"none","parameter":"K","readonly":"none","source":{"kind":"keyOf","operand":{"constraint":{"kind":"ref","name":"ToolRegistry","typeArguments":[]},"kind":"typeParameter","name":"TTools"}},"value":{"kind":"object","properties":[{"memberKind":"property","name":"type","optional":false,"readonly":false,"ty":{"kind":"typeParameter","name":"K"}},{"memberKind":"property","name":"input","optional":false,"readonly":false,"ty":{"check":{"index":{"kind":"typeParameter","name":"K"},"kind":"indexedAccess","object":{"constraint":{"kind":"ref","name":"ToolRegistry","typeArguments":[]},"kind":"typeParameter","name":"TTools"}},"extends":{"kind":"object","properties":[{"memberKind":"property","name":"inputSchema","optional":false,"readonly":false,"ty":{"kind":"infer","name":"I"}}]},"falseType":{"kind":"primitive","name":"never"},"kind":"conditional","trueType":{"kind":"infer","name":"I"}}},{"memberKind":"property","name":"output","optional":false,"readonly":false,"ty":{"check":{"index":{"kind":"typeParameter","name":"K"},"kind":"indexedAccess","object":{"constraint":{"kind":"ref","name":"ToolRegistry","typeArguments":[]},"kind":"typeParameter","name":"TTools"}},"extends":{"kind":"object","properties":[{"memberKind":"property","name":"outputSchema","optional":false,"readonly":false,"ty":{"kind":"infer","name":"O"}}]},"falseType":{"kind":"primitive","name":"never"},"kind":"conditional","trueType":{"kind":"infer","name":"O"}}},{"memberKind":"property","name":"run","optional":false,"readonly":false,"ty":{"check":{"index":{"kind":"typeParameter","name":"K"},"kind":"indexedAccess","object":{"constraint":{"kind":"ref","name":"ToolRegistry","typeArguments":[]},"kind":"typeParameter","name":"TTools"}},"extends":{"kind":"object","properties":[{"memberKind":"property","name":"execute","optional":false,"readonly":false,"ty":{"kind":"infer","name":"E"}}]},"falseType":{"kind":"primitive","name":"never"},"kind":"conditional","trueType":{"kind":"infer","name":"E"}}}]}}]},"kind":"array","readonly":false}},{"memberKind":"property","name":"status","optional":false,"readonly":false,"ty":{"kind":"union","types":[{"kind":"literal","literalKind":"string","value":"idle"},{"kind":"literal","literalKind":"string","value":"active"}]}}]}}],"returnType":{"kind":"primitive","name":"void"}}}]}]},"kind":"array","readonly":false}
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test indexed_access_slot_binding_does_not_expand_nested_callback_payload ... FAILED
+
+failures:
+
+failures:
+    indexed_access_slot_binding_does_not_expand_nested_callback_payload
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `-p verter_session --test slot_binding_shallow_publication_tests`
