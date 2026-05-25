@@ -237,6 +237,7 @@ fn prop_meta_to_proto(builder: &mut GraphBuilder, prop: &FfiPropMeta) -> PropMet
             .iter()
             .map(|tag| jsdoc_tag_to_proto(builder, tag))
             .collect(),
+        declared_in_macro_type_arg: prop.declared_in_macro_type_arg,
     }
 }
 
@@ -1465,6 +1466,7 @@ fn build_test_meta() -> FfiComponentMeta {
             default_value: None,
             description: None,
             tags: Vec::new(),
+            declared_in_macro_type_arg: false,
         }],
         events: Vec::new(),
         slots: vec![FfiSlotMeta {

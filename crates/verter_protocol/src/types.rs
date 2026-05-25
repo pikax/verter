@@ -584,6 +584,15 @@ pub struct FfiPropMeta {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<FfiJsdocTag>,
+    /// Producer fact: did the SFC author write this prop name explicitly as
+    /// a member of the `defineProps<T>()` type argument's own body (or its
+    /// directly-referenced interface's own body)? Distinguishes
+    /// author-declared names from names that arrived via heritage / utility-
+    /// type expansion. Consumed by
+    /// `@verter/component-meta/published-surface`'s `Refined` policy to
+    /// preserve Vue intrinsics (`class`/`style`/etc.) and `on{Event}`
+    /// shadow-emit props when the author kept them on purpose.
+    pub declared_in_macro_type_arg: bool,
 }
 
 #[derive(Serialize, Clone)]

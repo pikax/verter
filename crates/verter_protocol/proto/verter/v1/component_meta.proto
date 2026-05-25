@@ -273,6 +273,13 @@ message PropMeta {
   uint32 default_value_id = 7;
   uint32 description_id = 8;
   repeated JsdocTag tags = 9;
+  // Producer fact: did the SFC author write this prop name explicitly as a
+  // member of the `defineProps<T>()` type argument's own body (or the
+  // directly-referenced interface's own body)? Distinguishes author-
+  // declared names from names that arrived via heritage / utility-type
+  // expansion. Consumed by
+  // `@verter/component-meta/published-surface`'s `Refined` policy.
+  bool declared_in_macro_type_arg = 10;
 }
 
 message EventMeta {

@@ -62,6 +62,7 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
                 default_value: p.default_value,
                 description: p.description,
                 tags: p.tags.into_iter().map(jsdoc_to_ffi).collect(),
+                declared_in_macro_type_arg: p.declared_in_macro_type_arg,
             })
             .collect(),
         events: analysis
