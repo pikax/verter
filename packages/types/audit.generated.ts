@@ -26,6 +26,67 @@ result: NodeId,
 alias_name: string, };
 
 /**
+ * Structural view of a SFC's published macro surface, fed to
+ * [`names_for_policy`] for projection.
+ *
+ * One [`AnalyzedSurfaceItem`] per published member per surface.
+ * The order of the items inside each vector is preserved by
+ * projection — callers wanting deterministic ordering should sort
+ * upstream.
+ */
+export type AnalyzedSurface = { 
+/**
+ * Props published by `defineProps` (+ `withDefaults` /
+ * `defineModel` contributions).
+ */
+props: Array<AnalyzedSurfaceItem>, 
+/**
+ * Events published by `defineEmits`.
+ */
+events: Array<AnalyzedSurfaceItem>, 
+/**
+ * Slots published by `defineSlots` (and template-side
+ * `<slot>` usage).
+ */
+slots: Array<AnalyzedSurfaceItem>, 
+/**
+ * Members published by `defineExpose`.
+ */
+exposed: Array<AnalyzedSurfaceItem>, };
+
+/**
+ * Per-name structural facts attached to a member of the
+ * published macro surface. Consumed by [`names_for_policy`] to
+ * produce structural projections (no name-string heuristics).
+ */
+export type AnalyzedSurfaceItem = { 
+/**
+ * Member name as published by the producer.
+ */
+name: string, 
+/**
+ * True if the SFC author explicitly declared this member name
+ * in the macro's type argument (inline `defineProps<{ class?:
+ * any }>()` or its referenced generic helper's own body
+ * member). Distinguishes "this name is on the surface because
+ * the author wanted it" from "this name reaches the surface
+ * through heritage / HTMLAttributes intersection /
+ * utility-type expansion". `Refined` filters Vue intrinsics
+ * and `onX`-shadows-emit only when this is `false`.
+ */
+declared_in_macro_type_arg: boolean, 
+/**
+ * True if the producer flagged this prop as "global" — i.e.
+ * reaching the surface from a globally-declared
+ * HTMLAttributes-flavoured ancestor that the
+ * `@verter/component-meta/compat` and `vue-component-meta`
+ * projections never publish. Consulted only by `Refined`.
+ * Always `false` for non-prop surfaces (events / slots /
+ * exposed).
+ */
+global: boolean, };
+
+/**
  * One audited diagnostic entry. Audit-substrate mirror of
  * `verter_semantic::analysis::component_meta::ExpansionDiagnostic`
  * scoped to the macro-expansion pass — projected at the session
@@ -187,7 +248,7 @@ export type BundlerKindTag = "Vite" | "Webpack" | "Rollup" | "Esbuild" | "Rolldo
 export type BypassDiagnostics = { 
 /**
  * `HostStoreView::from_host` invocation count on this request.
- * Per-request hoist (Block 6.c) expects this to drop to a
+ * The per-request hoist expects this to drop to a
  * small constant; counts >1 reveal carriers that still build
  * their own owned view.
  */
@@ -1081,6 +1142,28 @@ winner_request_id: string,
 winner_audited: boolean, } };
 
 /**
+ * Result of applying a [`PublishedSurfacePolicy`] to an
+ * [`AnalyzedSurface`]. One name list per surface.
+ */
+export type PolicyNamesResult = { 
+/**
+ * Prop names retained by the policy.
+ */
+props: Array<string>, 
+/**
+ * Event names retained by the policy.
+ */
+events: Array<string>, 
+/**
+ * Slot names retained by the policy.
+ */
+slots: Array<string>, 
+/**
+ * Exposed member names retained by the policy.
+ */
+exposed: Array<string>, };
+
+/**
  * Editor position carried by LSP-method payloads. Producers
  * populate from the LSP request.
  */
@@ -1194,6 +1277,16 @@ node_label: string,
  * edges against the source audit.
  */
 edge: DerivationEdgeRecord, };
+
+/**
+ * One of three projection views of the published macro surface.
+ *
+ * `PublishedField` audit edges are emitted in `Native` truth; the
+ * `Compat` and `Refined` projections are downstream views
+ * consumed by `@verter/component-meta/compat` and the benchmark
+ * refiner respectively.
+ */
+export type PublishedSurfacePolicy = "Native" | "Compat" | "Refined";
 
 /**
  * Top-level audit record for one logical request — the envelope every

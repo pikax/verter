@@ -119,6 +119,17 @@ fn audit_ts_bindings_are_in_sync() {
     // committed file stays in sync.
     verter_audit::DerivationEdgeRaw::export_all_to(tempdir.path())
         .expect("regenerate DerivationEdgeRaw graph via ts-rs export_all_to");
+    // R20 Phase D `PublishedSurfacePolicy` registry — the three
+    // projection-policy surface types are leaf roots (not reachable
+    // from `RequestAuditRecord`), so they need their own
+    // `export_all_to` calls. `AnalyzedSurface` transitively pulls
+    // `AnalyzedSurfaceItem`.
+    verter_audit::PublishedSurfacePolicy::export_all_to(tempdir.path())
+        .expect("regenerate PublishedSurfacePolicy graph via ts-rs export_all_to");
+    verter_audit::AnalyzedSurface::export_all_to(tempdir.path())
+        .expect("regenerate AnalyzedSurface graph via ts-rs export_all_to");
+    verter_audit::PolicyNamesResult::export_all_to(tempdir.path())
+        .expect("regenerate PolicyNamesResult graph via ts-rs export_all_to");
 
     let generated_path = tempdir.path().join("audit.generated.ts");
     let generated_raw = fs::read_to_string(&generated_path)
@@ -168,6 +179,12 @@ fn regenerate_audit_bindings_into_tempdir() -> String {
     RequestPhaseAudit::export_all_to(tempdir.path()).expect("regenerate RequestPhaseAudit graph");
     verter_audit::DerivationEdgeRaw::export_all_to(tempdir.path())
         .expect("regenerate DerivationEdgeRaw graph");
+    verter_audit::PublishedSurfacePolicy::export_all_to(tempdir.path())
+        .expect("regenerate PublishedSurfacePolicy graph");
+    verter_audit::AnalyzedSurface::export_all_to(tempdir.path())
+        .expect("regenerate AnalyzedSurface graph");
+    verter_audit::PolicyNamesResult::export_all_to(tempdir.path())
+        .expect("regenerate PolicyNamesResult graph");
     let path = tempdir.path().join("audit.generated.ts");
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read regenerated `{path:?}`: {e}"))
 }
@@ -324,6 +341,12 @@ fn audit_ts_bindings_are_in_sync_actually_regenerates_and_diffs() {
     ChainTermination::export_all_to(tempdir.path()).expect("regenerate ChainTermination");
     ProvenanceStep::export_all_to(tempdir.path()).expect("regenerate ProvenanceStep");
     RequestPhaseAudit::export_all_to(tempdir.path()).expect("regenerate RequestPhaseAudit");
+    verter_audit::PublishedSurfacePolicy::export_all_to(tempdir.path())
+        .expect("regenerate PublishedSurfacePolicy");
+    verter_audit::AnalyzedSurface::export_all_to(tempdir.path())
+        .expect("regenerate AnalyzedSurface");
+    verter_audit::PolicyNamesResult::export_all_to(tempdir.path())
+        .expect("regenerate PolicyNamesResult");
     let regenerated_raw =
         fs::read_to_string(tempdir.path().join("audit.generated.ts")).expect("read regenerated");
     let regenerated = normalize_lf(&regenerated_raw);

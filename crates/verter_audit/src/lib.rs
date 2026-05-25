@@ -55,6 +55,9 @@ pub mod noop;
 pub mod observer;
 pub mod origin_graph;
 pub mod payloads;
+pub mod published_surface;
+#[cfg(test)]
+mod published_surface_tests;
 pub mod record;
 pub mod scheduler;
 pub mod store;
@@ -83,6 +86,11 @@ pub use origin_graph::{
     OriginEdgeKind, OriginEdgeMetaDto, ProjectPathSegment, ProjectionModeAudit, SemanticNodeKind,
     VfsLayer,
 };
+pub use published_surface::{
+    event_name_to_on_prop_name, names_for_policy, AnalyzedSurface, AnalyzedSurfaceItem,
+    PolicyNamesResult, PublishedSurfacePolicy, COMPAT_BLOCKED_SLOT_NAMES, VUE_INTRINSIC_ATTR_NAMES,
+};
+
 pub use payloads::cache_outcomes::CacheOutcomeKind;
 pub use payloads::tags::{
     AdmissionRefusalReason, AugmentationTargetKindTag, BundlerKindTag, CompileTargetTag,
