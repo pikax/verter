@@ -285,6 +285,17 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "audit_publishes_member_edge_with_published_field_provenance_at_macro_boundaries",
         ],
     ),
+    (
+        "Synthetic Carrier Typed-IR Rule",
+        &[
+            // Pins R22 carrier-verdict + carrier-provenance substrate
+            // deletion (Block 6.j R22-final, commit S4). The typed-IR
+            // `TypeExpr::SyntheticSlotBinding` variant is the sole
+            // carrier identity at the projector / registry / reducer
+            // surface; re-introducing the R22 substrate is forbidden.
+            "no_carrier_verdict_db",
+        ],
+    ),
 ];
 
 fn workspace_root() -> PathBuf {

@@ -963,10 +963,6 @@ pub(crate) fn publish_merged_bindings(
     expanded: &mut ExpandedComponentTypes,
     existing_names: &mut FxHashSet<String>,
 ) {
-    use verter_semantic::analysis::type_expand::{
-        CarrierProvenance, CarrierValueNodeId, PublishedSurfaceKind,
-    };
-
     // Index parser-path bindings by `(slot_name, binding_name)`.
     let mut parser_index: FxHashMap<
         (Arc<str>, Arc<str>),
@@ -988,12 +984,6 @@ pub(crate) fn publish_merged_bindings(
             }
         }
     }
-
-    // Host-owned `CarrierVerdictDb` handle. The producer eagerly
-    // admits a `DoNotDeepen` sentinel for every synthetic carrier it
-    // mints below so the first downstream `published_reducer` /
-    // component-meta-registry consult hits cache.
-    let carrier_verdicts = dispatch.ctx.project_type_store().carrier_verdicts();
 
     // Publish each graph-native binding in declaration order, merging
     // parser-path metadata when present. The slice walk preserves the
@@ -1028,16 +1018,13 @@ pub(crate) fn publish_merged_bindings(
     // this shallow carrier and re-resolve named hops through the
     // registry on demand.
     //
-    // Sparse `CarrierProvenanceTable` + `CarrierVerdictDb` admission.
-    // When the no-parser branch publishes a symbolic carrier, the
-    // producer records the provenance in
-    // `expanded.carrier_provenance_table` (keyed by `(surface_kind,
-    // field_name)`) and eagerly admits a `DoNotDeepen` verdict in the
-    // host-owned `CarrierVerdictDb`. The table is the structural
-    // replacement for the per-field `Option<CarrierProvenance>` the
-    // original R22 commit widened `ExpandedField` with — the table is
-    // empty for the vast majority of components that never mint
-    // synthetic carriers, so non-carrier paths pay no layout cost.
+    // The no-parser branch publishes a `TypeExpr::SyntheticSlotBinding`
+    // carrier whose typed-IR variant identity carries the full
+    // `(scope_canonical_id, surface_kind, slot_name, binding_name,
+    //  value_node)` tuple. Downstream consumers
+    // (`reduce_published_field_types`, `collect_component_meta_registry_public_field_refs`)
+    // pre-empt on the variant identity directly — there is no
+    // sidecar table or verdict cache to maintain.
     for (key, gb) in graph_native.iter() {
         let (slot_name, binding_name) = key.clone();
         let field_name = format!("{}.{}", slot_name, binding_name);
@@ -1051,77 +1038,44 @@ pub(crate) fn publish_merged_bindings(
         // loop below (which iterates the residual).
         let parser_path = parser_index.remove(&(slot_name.clone(), binding_name.clone()));
 
-        let (r#type, shallow_type_expr, shallow_type_expr_scope, synthetic_provenance) =
-            match parser_path
-                .and_then(|pb| pb.binding_expr.as_ref().zip(pb.binding_expr_scope.as_ref()))
-            {
-                Some((expr, scope)) => {
-                    // Parser-path branch — the OXC-lowered annotation
-                    // is concrete; no synthetic carrier minted.
-                    let expr_owned = expr.clone();
-                    (
-                        expr_owned.clone(),
-                        Some(expr_owned),
-                        Some(scope.clone()),
-                        None,
-                    )
-                }
-                None => {
-                    // No-parser branch — mint the typed-IR synthetic
-                    // carrier variant. The carrier's identity is the
-                    // FULL `(scope_canonical_id, surface_kind,
-                    // slot_name, binding_name, value_node)` tuple —
-                    // intrinsic and structurally distinct from any
-                    // real workspace alias. The scope is the owning
-                    // macro's canonical id; the value-node is
-                    // `gb.value_node` (the `SemanticNodeId` the graph
-                    // publisher minted the carrier from).
-                    //
-                    // S3 atomic-window state: the producer also still
-                    // records the R22 `CarrierProvenance` in
-                    // `expanded.carrier_provenance_table` and admits
-                    // a `DoNotDeepen` verdict in the host-owned
-                    // `CarrierVerdictDb`. Those R22 sidecars are
-                    // deleted in S4 once every consumer migrates
-                    // fully to the typed-IR variant identity. The
-                    // sidecars are NOT a dual-emit of the carrier
-                    // itself — only one carrier shape is minted
-                    // (the `SyntheticSlotBinding` variant).
-                    let scope_canonical: Arc<str> =
-                        Arc::from(gb.owner_macro.owner.canonical_id.as_ref());
-                    let carrier_key = Arc::new(verter_type_expr::SyntheticCarrierKey {
-                        scope_canonical_id: scope_canonical.clone(),
-                        surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
-                        slot_name: Some(slot_name.clone()),
-                        binding_name: binding_name.clone(),
-                        value_node: gb.value_node.0,
-                    });
-                    let carrier = TypeExpr::SyntheticSlotBinding(carrier_key);
-                    let scope = verter_type_expr::TypeExprScope::new(scope_canonical.as_ref());
-                    let provenance = CarrierProvenance {
-                        scope_canonical_id: scope_canonical,
-                        surface_kind: PublishedSurfaceKind::SlotBinding,
-                        slot_name: Some(slot_name.clone()),
-                        binding_name: binding_name.clone(),
-                        value_node: CarrierValueNodeId(gb.value_node.0),
-                    };
-                    // Eagerly admit the carrier's `DoNotDeepen`
-                    // verdict so downstream
-                    // `published_reducer` / component-meta-registry
-                    // consults hit cache without re-deriving the
-                    // identity from the published field. (R22
-                    // sidecar; removed in S4.)
-                    let identity =
-                        crate::carrier_verdict_db::CarrierIdentity::from_provenance(&provenance);
-                    carrier_verdicts.admit_do_not_deepen(identity);
-                    (
-                        carrier.clone(),
-                        Some(carrier),
-                        Some(scope),
-                        Some(provenance),
-                    )
-                }
-            };
+        let (r#type, shallow_type_expr, shallow_type_expr_scope, is_synthetic) = match parser_path
+            .and_then(|pb| pb.binding_expr.as_ref().zip(pb.binding_expr_scope.as_ref()))
+        {
+            Some((expr, scope)) => {
+                // Parser-path branch — the OXC-lowered annotation
+                // is concrete; no synthetic carrier minted.
+                let expr_owned = expr.clone();
+                (
+                    expr_owned.clone(),
+                    Some(expr_owned),
+                    Some(scope.clone()),
+                    false,
+                )
+            }
+            None => {
+                // No-parser branch — mint the typed-IR synthetic
+                // carrier variant. The carrier's identity is the
+                // FULL `(scope_canonical_id, surface_kind,
+                // slot_name, binding_name, value_node)` tuple —
+                // intrinsic and structurally distinct from any
+                // real workspace alias. The scope is the owning
+                // macro's canonical id; the value-node is
+                // `gb.value_node` (the `SemanticNodeId` the graph
+                // publisher minted the carrier from).
+                let scope_canonical: Arc<str> =
+                    Arc::from(gb.owner_macro.owner.canonical_id.as_ref());
+                let carrier_key = Arc::new(verter_type_expr::SyntheticCarrierKey {
+                    scope_canonical_id: scope_canonical.clone(),
+                    surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
+                    slot_name: Some(slot_name.clone()),
+                    binding_name: binding_name.clone(),
+                    value_node: gb.value_node.0,
+                });
+                let carrier = TypeExpr::SyntheticSlotBinding(carrier_key);
+                let scope = verter_type_expr::TypeExprScope::new(scope_canonical.as_ref());
+                (carrier.clone(), Some(carrier), Some(scope), true)
+            }
+        };
 
         let exactness = compute_exactness_for_node(dispatch, gb.value_node);
         let raw_type = parser_path.and_then(|p| p.type_annotation.clone());
@@ -1139,21 +1093,9 @@ pub(crate) fn publish_merged_bindings(
             exactness = ?exactness,
             has_raw_type = raw_type.is_some(),
             has_parser_typed = parser_path.is_some(),
-            has_carrier_provenance = synthetic_provenance.is_some(),
+            is_synthetic_carrier = is_synthetic,
             "publish_slot_binding",
         );
-
-        // Record provenance in the sparse table BEFORE pushing the
-        // field — the consumer-side lookups key on `field.name` so
-        // the table entry must exist by the time the field is
-        // visible.
-        if let Some(provenance) = synthetic_provenance {
-            expanded.carrier_provenance_table.insert(
-                PublishedSurfaceKind::SlotBinding,
-                field_name.clone(),
-                provenance,
-            );
-        }
 
         expanded.slot_bindings.push(ExpandedField {
             name: field_name,
@@ -1180,8 +1122,8 @@ pub(crate) fn publish_merged_bindings(
     //
     // Parser-path-only bindings NEVER mint a synthetic carrier —
     // their `binding_expr` is the OXC-lowered authoritative form, not
-    // a symbolic stand-in. They are therefore absent from
-    // `expanded.carrier_provenance_table`.
+    // a symbolic stand-in. Their published `r#type` is therefore
+    // never a `TypeExpr::SyntheticSlotBinding` variant.
     let mut parser_only_keys: Vec<(Arc<str>, Arc<str>)> = parser_index.keys().cloned().collect();
     parser_only_keys.sort();
     for key in parser_only_keys {

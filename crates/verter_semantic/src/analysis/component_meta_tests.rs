@@ -153,7 +153,6 @@ fn props_use_evaluated_type_when_available() {
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -206,7 +205,6 @@ fn props_preserve_expansion_metadata_when_available() {
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -255,7 +253,6 @@ fn evaluated_types_are_used_when_supplied() {
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -324,7 +321,6 @@ fn define_props_eval_supplements_missing_prop_fields() {
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -636,7 +632,6 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -763,7 +758,6 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -887,7 +881,6 @@ fn define_slots_eval_extracts_bindings_from_optional_function_types() {
         }],
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -998,8 +991,7 @@ fn huge_partial_slot_binding_expansions_fall_back_to_symbolic_source_type() {
         }],
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-            carrier_provenance_table: Default::default(),
-};
+    };
 
     let mut input = empty_input(&macros);
     input.evaluated_types = Some(&evaluated);
@@ -1088,7 +1080,6 @@ fn small_partial_helper_slot_binding_expansions_fall_back_to_symbolic_indexed_ac
             declared_in_macro_type_arg: false,
         }],
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -1208,7 +1199,6 @@ fn define_slots_prefer_concrete_evaluated_slot_bindings_over_symbolic_direct_bin
             declared_in_macro_type_arg: false,
         }],
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -1304,7 +1294,6 @@ fn define_slots_keep_source_bindings_when_expanded_slot_bindings_are_empty() {
         }],
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -1428,7 +1417,6 @@ fn define_slots_extract_bindings_from_call_signature_object_types() {
         }],
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -1496,7 +1484,6 @@ fn source_prop_raw_type_beats_expanded_backend_display_when_it_preserves_macro_c
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -1567,7 +1554,6 @@ fn optional_prop_raw_type_prefers_source_annotation_without_adding_undefined() {
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -1646,7 +1632,6 @@ fn placeholder_evaluated_prop_raw_type_falls_back_to_meaningful_source_annotatio
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -1745,7 +1730,6 @@ fn small_partial_placeholder_prop_expansions_fall_back_to_symbolic_source_type()
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -1832,7 +1816,6 @@ fn suspicious_partial_identifier_props_fall_back_to_source_any() {
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -1921,7 +1904,6 @@ fn small_partial_undefined_object_props_fall_back_to_symbolic_source_type() {
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -2054,7 +2036,6 @@ fn huge_partial_prop_expansions_fall_back_to_symbolic_source_type() {
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -2140,7 +2121,6 @@ fn source_event_raw_signature_beats_backend_when_backend_widens_macro_payload() 
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -2257,7 +2237,6 @@ fn source_backed_update_events_keep_their_raw_emit_payloads() {
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -2321,7 +2300,6 @@ fn evaluated_tuple_event_raw_type_is_not_double_wrapped() {
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -2444,7 +2422,6 @@ fn expanded_slot_bindings_preserve_source_binding_order() {
         }],
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -2733,7 +2710,6 @@ fn define_model_reconciles_existing_model_value_prop_from_define_props() {
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -4321,7 +4297,6 @@ fn macro_wide_diagnostics_split_from_per_field_diagnostics() {
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);
@@ -4476,7 +4451,6 @@ fn define_emits_call_signature_events_get_empty_diagnostics_not_global_clones() 
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
-        carrier_provenance_table: Default::default(),
     };
 
     let mut input = empty_input(&macros);

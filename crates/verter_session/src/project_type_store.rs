@@ -1729,17 +1729,6 @@ pub struct ProjectTypeStore {
     /// value directly. See
     /// [`crate::app_config_proof_db::AppConfigNoOverrideProofDb`].
     app_config_no_override_proof: crate::app_config_proof_db::AppConfigNoOverrideProofDb,
-    /// Host-owned verdict cache for synthetic slot-binding carriers
-    /// minted by the slot-binding graph publisher's no-parser-branch.
-    /// Populated eagerly at carrier-mint time with `DoNotDeepen`
-    /// sentinels keyed by the carrier's
-    /// `(project_identity, env-hashes, scope, surface_kind, slot_name,
-    ///  binding_name, value_node, projection_mode)` identity.
-    /// Consulted by `published_reducer` and component-meta-registry
-    /// collection short-circuits to bypass walking the symbolic
-    /// carrier through the resolver. See
-    /// [`crate::carrier_verdict_db::CarrierVerdictDb`].
-    carrier_verdicts: crate::carrier_verdict_db::CarrierVerdictDb,
     /// Tier 1A — Host-owned typed DB for [`crate::owned_artifacts::OwnedTypeResolutionContext`].
     /// Empty in 1A; populated in 1C-α (replaces `HOST_PARSED_TYPE_CONTEXT_CACHE`
     /// thread-local).
@@ -1905,7 +1894,6 @@ impl ProjectTypeStore {
             routed_expr_surface_db,
             route_owned_shallow,
             app_config_no_override_proof,
-            carrier_verdicts: crate::carrier_verdict_db::CarrierVerdictDb::new(),
             type_resolution_context_db: TypeResolutionContextDb::new(),
             eval_env_cache_db: EvalEnvCacheDb::new(),
             compile_cache_db: CompileCacheDb::new(),
@@ -2198,16 +2186,6 @@ impl ProjectTypeStore {
         &self.app_config_no_override_proof
     }
 
-    /// Accessor for the synthetic-slot-binding carrier verdict cache.
-    /// Producer (`publish_merged_bindings` no-parser branch) eagerly
-    /// populates `DoNotDeepen` entries here at carrier-mint time;
-    /// `reduce_published_field_types` and
-    /// `collect_component_meta_registry_public_field_refs` consult it
-    /// to bypass walking the symbolic carrier through the resolver.
-    pub fn carrier_verdicts(&self) -> &crate::carrier_verdict_db::CarrierVerdictDb {
-        &self.carrier_verdicts
-    }
-
     /// Build a `(project_generation, whole_hash)` dep-signature pair that
     /// downstream callers fold into their dependency-fact set for the
     /// publish-side completion-fence revalidation.
@@ -2476,12 +2454,6 @@ impl ProjectTypeStore {
         // proof entry; the proof's dep signature includes routes and
         // workspace-level interface-merging state.
         self.app_config_no_override_proof.invalidate_all();
-        // Synthetic slot-binding carrier verdicts. `value_node`
-        // identities are scoped to one project generation by
-        // construction (the semantic graph interner), so a
-        // project-generation bump invalidates every admitted
-        // `DoNotDeepen` sentinel.
-        self.carrier_verdicts.invalidate_all();
         // Rehomed off-store caches join the unified project-generation
         // cascade (host-cache-rehoming.md §3.4). Routes / intrinsics
         // drive each of these caches' freshness, so a tsconfig-style

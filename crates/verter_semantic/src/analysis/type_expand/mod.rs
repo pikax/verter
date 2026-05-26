@@ -7,11 +7,10 @@
 mod request;
 
 pub use request::{
-    CarrierProvenance, CarrierProvenanceTable, CarrierValueNodeId, ExpandedCallSignature,
-    ExpandedComponentTypes, ExpandedField, ExpandedIndexSignature, ExpandedMacroObjectShape,
-    ExpandedMacroProps, ExpandedNormalizedExpr, ExpandedObjectShape, ExpandedParameter,
-    ExpandedProperty, ExpansionDiagnostic, ExpansionExactness, ExpansionExecutionStatus,
-    ExpansionMetadata, ExpansionResult, ExpansionStopReason, PublishedSurfaceKind,
+    ExpandedCallSignature, ExpandedComponentTypes, ExpandedField, ExpandedIndexSignature,
+    ExpandedMacroObjectShape, ExpandedMacroProps, ExpandedNormalizedExpr, ExpandedObjectShape,
+    ExpandedParameter, ExpandedProperty, ExpansionDiagnostic, ExpansionExactness,
+    ExpansionExecutionStatus, ExpansionMetadata, ExpansionResult, ExpansionStopReason,
 };
 
 use crate::analysis::type_solver::result::{IncompleteReason, SolverDiagnostic, SolverResult};

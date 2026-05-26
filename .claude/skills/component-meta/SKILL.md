@@ -250,6 +250,19 @@ The projector pipeline is the sole post-projection authority for finalising publ
 - `omit_excludes_named_keys_others_materialise`
 - `nested_indexed_access_publishes_only_terminal_path`
 
+## Synthetic Carrier Typed-IR Rule (CRITICAL)
+
+**Architectural rule:** synthetic slot-binding / `defineSlots` binding carriers are minted exclusively as the typed-IR variant `TypeExpr::SyntheticSlotBinding(Arc<SyntheticCarrierKey>)`. The variant's identity is the FULL `(scope_canonical_id, surface_kind, slot_name, binding_name, value_node)` tuple — intrinsic and structurally distinct from any real workspace alias of the same name. There is NO sidecar provenance table, NO host-owned verdict cache, and NO name-only short-circuit. The variant identity IS the carrier-skip signal at every consumer.
+
+Concrete contract:
+
+- The slot-binding graph publisher's no-parser branch (`publish_merged_bindings` in `crates/verter_session/src/meta_resolve/slot_binding_graph.rs`) mints exactly one shape: `TypeExpr::SyntheticSlotBinding(Arc<SyntheticCarrierKey>)`. Parser-path bindings publish the OXC-lowered `binding_expr` and NEVER mint a synthetic carrier.
+- Consumers MUST NOT resolve a synthetic carrier's `binding_name` through `TypeRegistry` — the name is intrinsic, not a workspace alias. Reducing through the resolver would re-enter registry collection looking for a type that does not exist (the "same-name poisoning" risk).
+- Explicit deepening of a synthetic carrier routes through `ShapeCacheKey::semantic_node_whole(scope, value_node, mode)` — the same identity used for any regular member-shape route. The carrier itself stays shallow; the value-node hops are reachable via the normal graph identity.
+- The retired R22 substrate — `CarrierVerdictDb`, `CarrierVerdictSlot`, `CarrierIdentity`, `CarrierVerdict`, `CarrierProvenance`, `CarrierProvenanceTable`, `CarrierValueNodeId`, the `carrier_provenance_table` field, the `carrier_verdicts` accessor on `ProjectTypeStore`, and the `crate::carrier_verdict_db` module — MUST NOT be reintroduced. The static guard at `crates/verter_session/tests/no_carrier_verdict_db.rs` enforces this.
+
+**Architecture guard:** `no_carrier_verdict_db` (file basename) at `crates/verter_session/tests/no_carrier_verdict_db.rs`. The guard walks `crates/*/src/**` and asserts every retired R22 identifier is absent from production source; a paired self-test proves the scanner discriminates.
+
 ## Component-Meta Resolver Rules
 
 These are the canonical component-meta resolver rules. They govern how the shared cross-file resolver operates when serving component-meta queries.
