@@ -9,6 +9,7 @@
 //! Also hosts `normalized_index_key_node` which belongs to the
 //! evaluation surface.
 
+use std::cell::Cell;
 use std::sync::Arc;
 
 use super::ProjectSemanticDispatch;
@@ -16,6 +17,74 @@ use crate::semantic_query::{
     DeclIdentity, IndexKey, LiteralValue, PathSegment, ProjectionMode, ProjectionReductionContext,
     QueryError, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
 };
+
+/// Hard ceiling on recursive `evaluate_deferred_semantic_node_with_context`
+/// depth. The evaluator's fix-point walk usually terminates within a few
+/// hops (Alias → KeyOf → IndexedAccess → leaf). Pathological mapped-type
+/// patterns that combine generic instantiation with nested conditionals
+/// over keyspace-derived literals (e.g.
+/// `ChatMessagesSlots<T>`'s per-K loop) can fan out unboundedly through
+/// the operator re-dispatch chain. The cap prevents the per-K loop from
+/// running away even when the substitute hash-cons + evaluate memo
+/// cannot collapse the work (every K's substituted body produces a new
+/// node id whose recursive evaluator chain re-enters).
+///
+/// On exhaustion the evaluator returns the current node — a structural-
+/// transit carrier-stop equivalent. The downstream materialiser's
+/// Opaque-fallback contract keeps the surface addressable by re-dispatch
+/// without leaking torn / partial results into shared caches.
+///
+/// **Sizing rationale.** Default thread stacks on Windows are 1 MB and
+/// the evaluator frame is large (~30-50 KB of locals + temporaries with
+/// debug info). 256 stack frames at 50 KB = 12 MB, which fits within
+/// the workspace-test `RUST_MIN_STACK=134_217_728` (128 MB) budget while
+/// staying well under the OS default thread-stack limit's worst case.
+/// The ceiling is high enough to never fire on well-formed corpus
+/// components (Theme / ChatMessage / Table all run within a few dozen
+/// recursive entries); it fires on the pathological tail (e.g.
+/// `ChatMessagesSlots<T>`'s thousand-recursive-entry chain) where work
+/// would otherwise grow exponentially.
+const EVALUATE_DEFERRED_DEPTH_CEILING: u32 = 256;
+
+thread_local! {
+    /// Per-thread recursive-depth counter for
+    /// `evaluate_deferred_semantic_node_with_context`. The counter is
+    /// bumped at the entry of every (potentially recursive) call and
+    /// decremented at exit via an RAII guard. When the counter
+    /// crosses [`EVALUATE_DEFERRED_DEPTH_CEILING`] the inner call
+    /// returns the carrier-stop sentinel (the input `node` itself)
+    /// instead of recursing further.
+    static EVALUATE_DEFERRED_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// RAII guard for [`EVALUATE_DEFERRED_DEPTH`]. Increments on `enter`,
+/// decrements on `Drop`. The guard's `over_ceiling` flag captures
+/// whether the entry exceeded the ceiling — callers consult it to
+/// fast-return without recursing.
+struct DepthGuard {
+    over_ceiling: bool,
+}
+
+impl DepthGuard {
+    fn enter() -> Self {
+        EVALUATE_DEFERRED_DEPTH.with(|cell| {
+            let depth = cell.get();
+            cell.set(depth.saturating_add(1));
+            DepthGuard {
+                over_ceiling: depth >= EVALUATE_DEFERRED_DEPTH_CEILING,
+            }
+        })
+    }
+}
+
+impl Drop for DepthGuard {
+    fn drop(&mut self) {
+        EVALUATE_DEFERRED_DEPTH.with(|cell| {
+            let depth = cell.get();
+            cell.set(depth.saturating_sub(1));
+        });
+    }
+}
 
 impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn normalized_index_key_node(&self, node: SemanticNodeId) -> IndexKey {
@@ -82,6 +151,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .evaluate_deferred_memo_get(entry_node, reduction_context)
         {
             return cached;
+        }
+        // Cooperative fail-fast rail: pathological mapped-type per-K
+        // loops (e.g. `ChatMessagesSlots<T>` whose per-K body produces
+        // a new substituted node id per K, defeating the entry-node
+        // memo) can drive `evaluate_deferred_*` into arbitrarily deep
+        // recursive operator re-dispatch. The TLS depth guard caps
+        // recursion at `EVALUATE_DEFERRED_DEPTH_CEILING`; on
+        // exhaustion we return the input node (carrier-stop) WITHOUT
+        // publishing into the memo (no torn / budget-exhausted results
+        // ever populate shared caches — `ComputeAdmission::ReturnOnly`
+        // policy applied at this layer).
+        let _depth_guard = DepthGuard::enter();
+        if _depth_guard.over_ceiling {
+            return entry_node;
         }
         let mut visited = rustc_hash::FxHashSet::default();
         visited.insert(node);
