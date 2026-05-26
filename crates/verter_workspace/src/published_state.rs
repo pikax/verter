@@ -121,30 +121,6 @@ impl PublishedRoot {
         }
     }
 
-    /// Create a published root without a consumer extension but with
-    /// `ownership_ready: true`.
-    ///
-    /// Use this when a non-LSP consumer (NAPI, MCP, bench harness) has
-    /// already built a complete `WorkspaceSnapshot` via
-    /// `build_workspace_snapshot` and wants to publish it as an
-    /// authoritative ownership state. The difference from `new_vfs_only`
-    /// is `ownership_ready: true`: callers signal that the project graph
-    /// is fully materialized, not a bootstrap placeholder.
-    ///
-    /// Env-hash tables default to empty — populated by the engine on its
-    /// own rebuild path. NAPI consumers that don't go through that path
-    /// accept empty tables; downstream caches treat empty as "compute
-    /// per request" rather than "cache hit".
-    pub fn with_snapshot_ready(snapshot: Arc<WorkspaceSnapshot>) -> Self {
-        Self {
-            snapshot,
-            consumer_ext: None,
-            ownership_ready: true,
-            env_hashes_by_project: FxHashMap::default(),
-            project_identity_hashes: FxHashMap::default(),
-        }
-    }
-
     /// Construct a `PublishedRoot` for an in-progress rebuild that carries
     /// pre-computed env-hash tables alongside the snapshot.
     ///

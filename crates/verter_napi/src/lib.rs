@@ -1091,59 +1091,20 @@ impl NapiWorkspace {
     pub(crate) fn workspace(&self) -> std::sync::Arc<dyn verter_workspace::WorkspaceAccess> {
         std::sync::Arc::clone(&self.inner) as std::sync::Arc<dyn verter_workspace::WorkspaceAccess>
     }
-
-    /// Test-only access to the underlying `FilesystemWorkspace`.
-    ///
-    /// Used by the architecture-guard integration tests under
-    /// `tests/` to assert that `NapiWorkspace::new` eagerly publishes
-    /// a non-empty `WorkspaceSnapshot`. Not part of the JS-facing
-    /// surface — `#[napi(js_name = "Workspace")]` only exports the
-    /// methods inside the `#[napi] impl` block.
-    #[doc(hidden)]
-    pub fn filesystem_workspace_for_tests(
-        &self,
-    ) -> std::sync::Arc<verter_workspace::FilesystemWorkspace> {
-        std::sync::Arc::clone(&self.inner)
-    }
 }
 
 #[napi]
 impl NapiWorkspace {
     /// Create a new workspace rooted at the given directories.
     ///
-    /// Eagerly discovers tsconfigs in each root, materializes the
-    /// configured + fallback projects, and publishes a real
-    /// `WorkspaceSnapshot` (with `ownership_ready: true`) before the
-    /// constructor returns. Subsequent calls to `Engine::resolve_import`
-    /// hit the pnpm-aware resolver immediately — no `configureProjects`
-    /// call is required for tsconfig'd roots.
-    ///
-    /// A later `configureProjects(...)` call still replaces the
-    /// auto-discovered graph (the existing "replaces, not merges"
-    /// semantic on `configure_projects`), so consumers that derive
-    /// alias maps from Nuxt/Vite virtual tsconfigs continue to work
-    /// unchanged.
+    /// The workspace auto-discovers tsconfigs, builds the project graph,
+    /// and populates the resolver.
     #[napi(constructor)]
     pub fn new(roots: Vec<String>) -> Self {
         let ws = verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions {
-            roots: roots.clone(),
+            roots,
             eager_preload: false,
         });
-        // Mirror `verter_lsp::background_init::build_published_workspace`
-        // so any JS consumer of `new native.Workspace([root])` receives a
-        // populated project graph by default. Per the
-        // shared-optimized-codebase rule, this lives in the lowest
-        // reusable owner crate (`verter_napi`) and reuses
-        // `verter_workspace::build_workspace_snapshot` verbatim.
-        let build = verter_workspace::build_workspace_snapshot(
-            &ws,
-            &roots,
-            verter_workspace::SnapshotGeneration(0),
-            &verter_workspace::ViteConfigOptions::default(),
-        );
-        ws.publish_snapshot(verter_workspace::PublishedRoot::with_snapshot_ready(
-            std::sync::Arc::new(build.snapshot),
-        ));
         Self {
             inner: std::sync::Arc::new(ws),
         }

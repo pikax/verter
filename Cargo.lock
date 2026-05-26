@@ -3956,7 +3956,6 @@ dependencies = [
  "prost",
  "serde",
  "serde_json",
- "tempfile",
  "tokio",
  "verter_actions",
  "verter_audit",
