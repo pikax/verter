@@ -150,6 +150,29 @@ fn indexed_access_slot_binding_does_not_expand_nested_callback_payload() {
         })
         .expect("toolbar slot must publish a controls binding");
 
+    // S3 typed-IR cutover: the producer mints `SyntheticSlotBinding`
+    // at the no-parser branch of `publish_merged_bindings`. The
+    // variant carries the FULL identity tuple (scope + surface_kind +
+    // slot_name + binding_name + value_node) as a typed-IR primitive
+    // — no nominal collision with a real workspace alias is
+    // structurally possible because the carrier lives on a distinct
+    // `TypeExpr` variant.
+    let carrier = match &controls_binding.type_expr {
+        verter_type_expr::TypeExpr::SyntheticSlotBinding(key) => key,
+        other => panic!(
+            "toolbar.controls must publish the SyntheticSlotBinding carrier after S3; got {other:?}"
+        ),
+    };
+    assert_eq!(carrier.binding_name.as_ref(), "controls");
+    assert_eq!(carrier.slot_name.as_deref(), Some("toolbar"));
+    assert_eq!(
+        carrier.surface_kind,
+        verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
+    );
+    // PRESERVED: discriminates against deep-expansion regression on
+    // EITHER shape. The substring assertions catch a producer revert
+    // to `raise_node_to_type_expr`-style deep expansion (payload
+    // contains the nested callback shape).
     let binding_json =
         serde_json::to_string(&controls_binding.type_expr).expect("serialize binding type expr");
 
@@ -233,26 +256,25 @@ fn synthetic_slot_binding_carrier_emits_provenance_sidecar() {
             .get(PublishedSurfaceKind::SlotBinding, field.name.as_str())
             .expect("filtered above");
 
-        // The provenance.binding_name must match the
-        // `TypeExpr::Ref { name }` shape that gets published. Codex's
-        // TOP RISK ("name-only key collision") demands these stay
-        // structurally tied — a divergence would let the cache key
-        // and the published carrier disagree.
-        let ref_name = match &field.r#type {
-            verter_type_expr::TypeExpr::Ref {
-                name,
-                type_arguments,
-            } if type_arguments.is_empty() => Some(name.clone()),
+        // S3 typed-IR cutover: the producer mints a
+        // `TypeExpr::SyntheticSlotBinding(SyntheticCarrierKey)` for
+        // every no-parser-branch carrier. The provenance.binding_name
+        // must match the variant's `binding_name`. Codex's TOP RISK
+        // ("name-only key collision") demands these stay structurally
+        // tied — a divergence would let the verdict cache and the
+        // published carrier disagree.
+        let carrier_binding_name = match &field.r#type {
+            verter_type_expr::TypeExpr::SyntheticSlotBinding(key) => Some(key.binding_name.clone()),
             _ => None,
         };
 
         assert_eq!(
-            ref_name.as_deref(),
+            carrier_binding_name.as_deref(),
             Some(provenance.binding_name.as_ref()),
-            "synthetic carrier's `Ref` name must match `carrier_provenance.binding_name`. \
-             Field `{}` has type {:?} but provenance says binding_name=`{}`. Without this \
-             invariant the verdict cache cannot correlate published carriers with their \
-             cache keys.",
+            "synthetic carrier's variant `binding_name` must match \
+             `carrier_provenance.binding_name`. Field `{}` has type {:?} but provenance says \
+             binding_name=`{}`. Without this invariant the verdict cache cannot correlate \
+             published carriers with their cache keys.",
             field.name,
             field.r#type,
             provenance.binding_name,

@@ -1067,19 +1067,36 @@ pub(crate) fn publish_merged_bindings(
                     )
                 }
                 None => {
-                    // No-parser branch — mint the symbolic carrier,
-                    // record its provenance in the sparse table, and
-                    // admit its `DoNotDeepen` verdict. The carrier
-                    // name is `binding_name`; the scope is the owning
+                    // No-parser branch — mint the typed-IR synthetic
+                    // carrier variant. The carrier's identity is the
+                    // FULL `(scope_canonical_id, surface_kind,
+                    // slot_name, binding_name, value_node)` tuple —
+                    // intrinsic and structurally distinct from any
+                    // real workspace alias. The scope is the owning
                     // macro's canonical id; the value-node is
                     // `gb.value_node` (the `SemanticNodeId` the graph
                     // publisher minted the carrier from).
+                    //
+                    // S3 atomic-window state: the producer also still
+                    // records the R22 `CarrierProvenance` in
+                    // `expanded.carrier_provenance_table` and admits
+                    // a `DoNotDeepen` verdict in the host-owned
+                    // `CarrierVerdictDb`. Those R22 sidecars are
+                    // deleted in S4 once every consumer migrates
+                    // fully to the typed-IR variant identity. The
+                    // sidecars are NOT a dual-emit of the carrier
+                    // itself — only one carrier shape is minted
+                    // (the `SyntheticSlotBinding` variant).
                     let scope_canonical: Arc<str> =
                         Arc::from(gb.owner_macro.owner.canonical_id.as_ref());
-                    let carrier = TypeExpr::Ref {
-                        name: binding_name.clone(),
-                        type_arguments: verter_type_expr::empty_type_args(),
-                    };
+                    let carrier_key = Arc::new(verter_type_expr::SyntheticCarrierKey {
+                        scope_canonical_id: scope_canonical.clone(),
+                        surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
+                        slot_name: Some(slot_name.clone()),
+                        binding_name: binding_name.clone(),
+                        value_node: gb.value_node.0,
+                    });
+                    let carrier = TypeExpr::SyntheticSlotBinding(carrier_key);
                     let scope = verter_type_expr::TypeExprScope::new(scope_canonical.as_ref());
                     let provenance = CarrierProvenance {
                         scope_canonical_id: scope_canonical,
@@ -1092,7 +1109,8 @@ pub(crate) fn publish_merged_bindings(
                     // verdict so downstream
                     // `published_reducer` / component-meta-registry
                     // consults hit cache without re-deriving the
-                    // identity from the published field.
+                    // identity from the published field. (R22
+                    // sidecar; removed in S4.)
                     let identity =
                         crate::carrier_verdict_db::CarrierIdentity::from_provenance(&provenance);
                     carrier_verdicts.admit_do_not_deepen(identity);

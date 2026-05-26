@@ -169,6 +169,16 @@ fn should_skip_carrier_reduction(
     carrier_provenance_table: &verter_semantic::analysis::type_expand::CarrierProvenanceTable,
     carrier_verdicts: &crate::carrier_verdict_db::CarrierVerdictDb,
 ) -> bool {
+    // Typed-IR fast path: the producer mints synthetic carriers as
+    // `TypeExpr::SyntheticSlotBinding(_)` — the variant identity IS
+    // the carrier-skip signal. Pre-empt the R22 sidecar lookup so
+    // the projector pipeline never re-derives the carrier identity
+    // from a separate provenance table. (The R22 sidecar still
+    // publishes through this S3 window; S4 deletes the sidecar
+    // entirely and removes the table parameter from this helper.)
+    if matches!(&field.r#type, TypeExpr::SyntheticSlotBinding(_)) {
+        return true;
+    }
     let Some(provenance) = carrier_provenance_table.get(surface, field.name.as_str()) else {
         return false;
     };
