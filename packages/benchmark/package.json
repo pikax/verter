@@ -22,7 +22,7 @@
     "bench:meta:ui:stress": "node --expose-gc --import tsx src/meta-ui-stress.ts",
     "bench:meta:ui:report": "node --import tsx src/meta-ui-report.ts",
     "bench:meta:ui:setup": "node ../../scripts/benchmark/setup-meta-ui.mjs",
-    "test": "vitest run src/audit-validator.spec.ts src/corpus-trace-runner.spec.ts src/workspace-invariants.spec.ts"
+    "test": "vitest run src/audit-validator.spec.ts src/corpus-trace-runner.spec.ts src/workspace-invariants.spec.ts src/audit-harness-bootstrap.spec.ts"
   },
   "dependencies": {
     "@verter/component-meta": "workspace:*",

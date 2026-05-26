@@ -78,14 +78,23 @@ try {
   process.exit(2);
 }
 
-const canonical = "/" + relative(uiRoot, componentFile).replace(/\\/g, "/");
+// Use the absolute forward-slash path as the canonical id — the same
+// shape the benchmark and LSP both produce (see
+// `meta-ui-bench.ts:componentSnapshots.absolutePath` and the LSP's
+// `uri_to_canonical_id_from_str`). The earlier root-relative form
+// (`"/" + relative(uiRoot, componentFile)`) does not match the
+// absolute project roots configured anywhere else in Verter and
+// short-circuited `Engine::resolve_import` against an unrelated
+// canonical, producing a degenerate empty-topology audit.
+const canonical = componentFile;
 
-// Workspace-backed host: auto-discovers tsconfig + builds project
-// graph, so cross-file imports resolve against the real dependency
-// tree. `ensureLoaded` pulls the target file through the workspace
-// before the audit request; if the workspace misses (rare — e.g.
-// the fixture has no matching tsconfig), we fall back to a direct
-// source upsert so the worker still produces an audit record.
+// Workspace-backed host: `new native.Workspace([uiRoot])` eagerly
+// discovers tsconfigs and publishes a real `WorkspaceSnapshot` so
+// cross-file imports resolve against the real dependency tree the
+// instant the host is constructed. `ensureLoaded` pulls the absolute
+// target through that snapshot. The `upsertBase` branch only fires
+// when the workspace lacks a matching tsconfig (rare in real
+// fixtures) so the worker still produces an audit record.
 const workspace = new native.Workspace([uiRoot]);
 const project = native.ComponentMetaHost.withWorkspace(
   { auditEnabled: true, footprintCapture: true },
