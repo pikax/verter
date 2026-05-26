@@ -53,6 +53,8 @@ mod single_file_generic;
 // until callsite migrations land in 5d/5e/5f. Each seed must FAIL on
 // the pre-Phase-5b tree — if any passes, STOP (gap is not real or
 // closed elsewhere).
+#[path = "component_meta_audit/resolver_coverage_cross_package_wildcard_reexport.rs"]
+mod resolver_coverage_cross_package_wildcard_reexport;
 #[path = "component_meta_audit/resolver_coverage_indexed_paths.rs"]
 mod resolver_coverage_indexed_paths;
 #[path = "component_meta_audit/resolver_coverage_inherited_emits.rs"]
