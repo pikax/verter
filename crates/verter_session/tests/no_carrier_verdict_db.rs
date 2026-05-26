@@ -417,3 +417,215 @@ fn no_carrier_verdict_db_self_test() {
          prevent this."
     );
 }
+
+// ---------------------------------------------------------------------
+// Architecture guard: explicit deepening of a `SyntheticSlotBinding`
+// carrier MUST route through `ShapeCacheKey::semantic_node_whole`.
+//
+// Contract (per `[[component-meta-shallow-by-default-rule]]` and the
+// `TypeExpr::SyntheticSlotBinding` rustdoc):
+//   The synthetic carrier variant is a shallow terminal — projectors,
+//   reducers, and the registry all refuse to resolve its `binding_name`
+//   through `TypeRegistry`. The ONLY legitimate way to deepen a carrier
+//   into its underlying member shape is to construct a
+//   `ShapeCacheKey::semantic_node_whole(scope, SemanticNodeId(key.value_node), mode)`
+//   key and consult `ShapeCacheDb` — the same identity used for any
+//   regular member-shape route.
+//
+//   A consumer that wants to drill down by directly reading
+//   `SyntheticCarrierKey::value_node` and wrapping it in a fresh
+//   `SemanticNodeId(...)` is BYPASSING the cache route. That is the
+//   defect class this guard prevents: such a consumer would (a) miss
+//   the shared `ShapeCacheDb` warm-hit path, (b) escape the
+//   cache's self-root + dep-signature validation, and (c) drift from
+//   the rest of the projector / member-shape pipeline.
+//
+//   Currently zero consumers exercise the explicit-deepen route — the
+//   carrier is always shallow in every production path. This guard
+//   captures the architectural intent so any future consumer that
+//   does need to deepen the carrier is forced onto the cache route.
+
+/// Identifier-boundary token-stream check: does `line` contain the
+/// regex `SemanticNodeId\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*value_node`?
+///
+/// This is the canonical shape of "construct a `SemanticNodeId` from
+/// the `value_node` field of some struct value". It catches the
+/// suspicious pattern without depending on the binding's name. False
+/// positives are possible only if some future unrelated type also
+/// names a field `value_node` — in that case the false-positive site
+/// must be explicitly allowlisted below.
+fn line_constructs_semantic_node_id_from_value_node(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let needle = b"SemanticNodeId";
+    let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut i = 0usize;
+    while i + needle.len() <= bytes.len() {
+        if &bytes[i..i + needle.len()] != needle {
+            i += 1;
+            continue;
+        }
+        let after_ident = i + needle.len();
+        // Identifier-boundary on the right side of `SemanticNodeId` —
+        // reject `SemanticNodeIdSomething` (longer identifier).
+        if after_ident < bytes.len() && is_ident_char(bytes[after_ident]) {
+            i += 1;
+            continue;
+        }
+        // Identifier-boundary on the left side of `SemanticNodeId` —
+        // reject `_SemanticNodeId` (e.g. a member-named version).
+        if i > 0 && is_ident_char(bytes[i - 1]) {
+            i += 1;
+            continue;
+        }
+        // Skip whitespace.
+        let mut j = after_ident;
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        // Require an open paren for "constructor call" shape.
+        if j >= bytes.len() || bytes[j] != b'(' {
+            i += 1;
+            continue;
+        }
+        j += 1;
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        // Match an identifier `[A-Za-z_][A-Za-z0-9_]*`.
+        let id_start = j;
+        if id_start >= bytes.len()
+            || !(bytes[id_start].is_ascii_alphabetic() || bytes[id_start] == b'_')
+        {
+            i += 1;
+            continue;
+        }
+        let mut id_end = id_start + 1;
+        while id_end < bytes.len() && is_ident_char(bytes[id_end]) {
+            id_end += 1;
+        }
+        // Skip whitespace, then expect `.`.
+        let mut k = id_end;
+        while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+            k += 1;
+        }
+        if k >= bytes.len() || bytes[k] != b'.' {
+            i += 1;
+            continue;
+        }
+        k += 1;
+        while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+            k += 1;
+        }
+        // Expect literal field name `value_node`.
+        let field = b"value_node";
+        if k + field.len() > bytes.len() || &bytes[k..k + field.len()] != field {
+            i += 1;
+            continue;
+        }
+        // Identifier-boundary on the right side of `value_node` — must
+        // not extend into a longer identifier like `value_nodes`.
+        let after_field = k + field.len();
+        if after_field < bytes.len() && is_ident_char(bytes[after_field]) {
+            i += 1;
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+/// The architecture guard test: no production source file may
+/// construct a `SemanticNodeId` from any struct's `value_node` field.
+/// The cache route in `ShapeCacheKey::semantic_node_whole*` is the only
+/// permitted way to express a synthetic-carrier-derived semantic-node
+/// identity.
+#[test]
+fn synthetic_carrier_explicit_deepen_routes_through_shape_cache_key() {
+    let files = collect_production_sources();
+
+    let mut violations: Vec<(PathBuf, Vec<usize>)> = Vec::new();
+    for file in &files {
+        let Ok(text) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        let processed = preprocess(&text);
+        let lines: Vec<usize> = processed
+            .lines()
+            .enumerate()
+            .filter_map(|(i, l)| {
+                if line_constructs_semantic_node_id_from_value_node(l) {
+                    Some(i + 1)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !lines.is_empty() {
+            violations.push((file.clone(), lines));
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Architecture rule violation: production source constructs a \
+         `SemanticNodeId` directly from a struct's `value_node` field. \
+         The synthetic-carrier explicit-deepen route MUST go through \
+         `ShapeCacheKey::semantic_node_whole(scope, node, mode)` (and \
+         its `_with_context` variant). Direct `SemanticNodeId(_.value_node)` \
+         construction bypasses the shared `ShapeCacheDb` warm-hit path \
+         AND escapes self-root + dep-signature validation. See \
+         `[[component-meta-shallow-by-default-rule]]` in \
+         `.claude/skills/component-meta/SKILL.md`.\n\nViolations:\n{violations:#?}"
+    );
+}
+
+/// Self-test for the explicit-deepen guard: the scanner discriminates
+/// against a synthetic violation and does NOT false-positive on the
+/// legitimate cache-route call shape.
+#[test]
+fn synthetic_carrier_explicit_deepen_guard_self_test() {
+    // The forbidden shape — constructs `SemanticNodeId` from any
+    // struct's `value_node` field.
+    let violation_a = "let id = SemanticNodeId(key.value_node);";
+    let violation_b = "    SemanticNodeId(carrier.value_node)";
+    let violation_c = "SemanticNodeId ( binding . value_node ) // whitespace tolerance";
+
+    assert!(
+        line_constructs_semantic_node_id_from_value_node(violation_a),
+        "self-test: scanner missed `SemanticNodeId(key.value_node);` — \
+         the canonical shape of a forbidden direct construction"
+    );
+    assert!(
+        line_constructs_semantic_node_id_from_value_node(violation_b),
+        "self-test: scanner missed `SemanticNodeId(carrier.value_node)`"
+    );
+    assert!(
+        line_constructs_semantic_node_id_from_value_node(violation_c),
+        "self-test: scanner missed whitespace-tolerant `SemanticNodeId ( binding . value_node )`"
+    );
+
+    // Legitimate call shapes — must NOT trip the scanner.
+    let legit_cache_route =
+        "let key = ShapeCacheKey::semantic_node_whole(scope, member_value, mode);";
+    let legit_field_decl = "pub value_node: u64,";
+    let legit_struct_constr =
+        "SyntheticCarrierKey { scope_canonical_id: s, surface_kind: k, slot_name: n, binding_name: b, value_node: 7 }";
+    let legit_serialize = "key.value_node.to_string()";
+    let legit_semantic_node_id_from_const = "let id = SemanticNodeId(0);";
+    let legit_semantic_node_id_from_field_no_value_node =
+        "let id = SemanticNodeId(member.id_field);";
+
+    for legit in [
+        legit_cache_route,
+        legit_field_decl,
+        legit_struct_constr,
+        legit_serialize,
+        legit_semantic_node_id_from_const,
+        legit_semantic_node_id_from_field_no_value_node,
+    ] {
+        assert!(
+            !line_constructs_semantic_node_id_from_value_node(legit),
+            "self-test: scanner false-positives on a legitimate line: `{legit}`"
+        );
+    }
+}
