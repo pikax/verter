@@ -5,12 +5,10 @@ resolver = "2"
 [workspace.package]
 version = "0.0.1-beta.1"
 edition = "2021"
-# Phase 6b sub-plan §6b.D2b — `Arc<dyn WorkspaceAccess>` →
-# `Arc<dyn WorkspaceRead>` trait upcasting was stabilised in Rust 1.86
-# (March 2025). The `WorkspaceAccess: WorkspaceRead` split (closing the
-# `host.workspace().<mutator>()` bypass) requires this MSRV. Authorised
-# in §6b.5 entry conditions.
-rust-version = "1.86"
+# Floor pinned by transitive deps in `[workspace.dependencies]`:
+# `oxc_*` 0.126 requires rustc 1.92. `rust-toolchain.toml` selects
+# the stable channel, which is currently 1.92.
+rust-version = "1.92"
 license = "MIT"
 authors = ["pikax"]
 repository = "https://github.com/pikax/verter"
