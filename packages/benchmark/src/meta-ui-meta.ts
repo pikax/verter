@@ -127,6 +127,11 @@ function benchmarkTypeDescriptorToString(type: any): string {
       return String(type.name ?? "unknown");
     case "unknown":
       return typeof type.rawType === "string" ? type.rawType : "unknown";
+    case "syntheticSlotBinding":
+      // Synthetic slot-binding carriers are opaque terminals — surface the
+      // user-visible `bindingName`. The bench refiner MUST NOT attempt to
+      // resolve the carrier through any registry.
+      return String(type.bindingName ?? "unknown");
     default:
       return String(type.name ?? type.kind ?? "unknown");
   }

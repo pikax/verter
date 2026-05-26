@@ -25,6 +25,8 @@ export type {
   RefType,
   RecursiveRefConditionalFrame,
   RecursiveRefType,
+  SyntheticSlotBindingType,
+  IndexedAccessType,
   UnknownType,
   TypeDescriptor,
 } from "@verter/type-ir";
@@ -41,5 +43,7 @@ export {
   func,
   ref,
   recursiveRef,
+  syntheticSlotBinding,
+  indexedAccess,
   unknown,
 } from "@verter/type-ir";

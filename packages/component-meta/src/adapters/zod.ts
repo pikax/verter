@@ -120,6 +120,11 @@ export function typeToZodString(type: TypeDescriptor): string {
       // to materialise the member type; fall back to unknown.
       return "z.unknown()";
 
+    case "syntheticSlotBinding":
+      // Synthetic slot-binding carriers are opaque terminals — render as
+      // an unknown shape annotated with the user-visible `bindingName`.
+      return `z.unknown().describe(${JSON.stringify(`synthetic slot binding ${type.bindingName}`)})`;
+
     case "enum": {
       if (type.members.length === 0) return "z.never()";
       const vals = type.members.map((m) =>
@@ -288,6 +293,11 @@ function buildZodSchema(z: typeof import("zod"), type: TypeDescriptor): unknown 
 
     case "indexedAccess":
       return z.unknown();
+
+    case "syntheticSlotBinding":
+      // Synthetic slot-binding carriers are opaque terminals — surface as
+      // an unknown-shape, annotated with the user-visible `bindingName`.
+      return (z.unknown() as any).describe(`synthetic slot binding ${type.bindingName}`);
 
     case "enum": {
       if (type.members.length === 0) return z.never();

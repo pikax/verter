@@ -20,6 +20,7 @@ import {
   recursiveRef,
   indexedAccess,
   unknown,
+  syntheticSlotBinding,
 } from "@verter/type-ir";
 import {
   createGraphTypeExprRef,
@@ -49,8 +50,11 @@ import {
   NODE_RECURSIVE_REF,
   NODE_REF,
   NODE_REST,
+  NODE_SYNTHETIC_SLOT_BINDING,
   NODE_TEMPLATE_LITERAL,
   NODE_TUPLE,
+  SYNTHETIC_CARRIER_SURFACE_BINDING,
+  SYNTHETIC_CARRIER_SURFACE_SLOT_BINDING,
   NODE_TYPE_OF,
   NODE_TYPE_PARAMETER,
   NODE_UNION,
@@ -193,7 +197,15 @@ export type NativeTypeExpr =
   | { kind: "parenthesized"; inner: NativeTypeExpr }
   | { kind: "unknown"; raw: string }
   | { kind: "infer"; name: string }
-  | { kind: "rest"; inner: NativeTypeExpr };
+  | { kind: "rest"; inner: NativeTypeExpr }
+  | {
+      kind: "syntheticSlotBinding";
+      scopeCanonicalId: string;
+      surfaceKind: "slotBinding" | "binding";
+      slotName?: string;
+      bindingName: string;
+      valueNode: string;
+    };
 
 export type NativeTypeExprLike = NativeTypeExpr | GraphTypeExprRef;
 
@@ -471,6 +483,15 @@ export function typeExprToDescriptor(
 
     case "unknown":
       return unknown(expr.raw);
+
+    case "syntheticSlotBinding":
+      return syntheticSlotBinding(
+        expr.scopeCanonicalId,
+        expr.surfaceKind,
+        expr.bindingName,
+        expr.valueNode,
+        expr.slotName,
+      );
 
     default:
       return unknown("unrecognized");
@@ -899,6 +920,10 @@ function substituteDescriptorTypeParameters(
         substituteDescriptorTypeParameters(descriptor.objectType, bindings),
         substituteDescriptorTypeParameters(descriptor.indexType, bindings),
       );
+    case "syntheticSlotBinding":
+      // Synthetic carriers are inert terminals — no type-parameter bindings
+      // can apply through them.
+      return descriptor;
   }
 }
 
@@ -2236,6 +2261,18 @@ function graphNodeToDescriptor(
     }
     case NODE_UNKNOWN:
       return unknown(expr.graph.getString(node.rawId));
+    case NODE_SYNTHETIC_SLOT_BINDING: {
+      const surfaceKind: "slotBinding" | "binding" =
+        node.surfaceKind === SYNTHETIC_CARRIER_SURFACE_BINDING ? "binding" : "slotBinding";
+      const slotName = node.slotNameId ? expr.graph.getString(node.slotNameId) : undefined;
+      return syntheticSlotBinding(
+        expr.graph.getString(node.scopeCanonicalId),
+        surfaceKind,
+        expr.graph.getString(node.bindingNameId),
+        node.valueNode,
+        slotName,
+      );
+    }
     default:
       return unknown("unrecognized");
   }
@@ -2373,6 +2410,10 @@ function graphTypeExprToString(expr: GraphTypeExprRef): string {
       return expr.graph.getString(node.nameId);
     case NODE_UNKNOWN:
       return expr.graph.getString(node.rawId);
+    case NODE_SYNTHETIC_SLOT_BINDING:
+      // Synthetic carriers display as their `bindingName` (the user-visible
+      // identity) — they MUST NOT resolve through `TypeRegistry`.
+      return expr.graph.getString(node.bindingNameId);
     default: {
       const _exhaustive: never = node;
       throw new Error(
@@ -2416,6 +2457,10 @@ function nativeTypeExprToString(expr: NativeTypeExpr): string {
       return `typeof ${expr.path.join(".")}`;
     case "unknown":
       return expr.raw;
+    case "syntheticSlotBinding":
+      // Synthetic carriers render as their user-visible `bindingName` — they
+      // MUST NOT route through `TypeRegistry` for display.
+      return expr.bindingName;
     default:
       return expr.kind;
   }

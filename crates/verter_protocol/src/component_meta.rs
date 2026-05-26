@@ -32,7 +32,7 @@ use crate::verter::v1::{
     VueApiCallMeta,
 };
 
-pub const COMPONENT_META_SCHEMA_VERSION: u32 = 1;
+pub const COMPONENT_META_SCHEMA_VERSION: u32 = 2;
 
 pub fn component_meta_payload(meta: &FfiComponentMeta) -> ComponentMetaPayload {
     let mut builder = GraphBuilder::new();

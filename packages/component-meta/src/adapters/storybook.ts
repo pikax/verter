@@ -138,6 +138,10 @@ function typeToStorybookName(type: TypeDescriptor): string {
       return type.name;
     case "ref":
       return type.name;
+    case "syntheticSlotBinding":
+      // Synthetic slot-binding carriers render as their `bindingName` —
+      // no runtime resolution.
+      return type.bindingName;
     default:
       return "other";
   }
@@ -183,5 +187,9 @@ function typeToSummary(type: TypeDescriptor): string {
       return type.name;
     case "unknown":
       return type.rawType || "unknown";
+    case "syntheticSlotBinding":
+      // Synthetic slot-binding carriers summarise as the user-visible
+      // `bindingName` — no runtime resolution.
+      return type.bindingName;
   }
 }

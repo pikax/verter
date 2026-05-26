@@ -50,6 +50,7 @@ import {
   NODE_RECURSIVE_REF,
   NODE_REF,
   NODE_REST,
+  NODE_SYNTHETIC_SLOT_BINDING,
   NODE_TEMPLATE_LITERAL,
   NODE_TUPLE,
   NODE_TYPE_OF,
@@ -350,6 +351,15 @@ function decodeTypeNode(node: ProtoTypeNode): GraphNodeRecord {
           }),
         ) as GraphConditionalFrameRecord[],
       };
+    case "syntheticSlotBinding":
+      return {
+        kind: NODE_SYNTHETIC_SLOT_BINDING,
+        valueNode: String(value?.valueNode ?? ""),
+        scopeCanonicalId: Number(value?.scopeCanonicalId ?? 0),
+        surfaceKind: Number(value?.surfaceKind ?? 0),
+        slotNameId: Number(value?.slotNameId ?? 0),
+        bindingNameId: Number(value?.bindingNameId ?? 0),
+      };
     default:
       throw graphError("component-meta graph payload has unknown node kind 0");
   }
@@ -481,6 +491,16 @@ function validateNodeTable(graph: DecodedTypeGraph): void {
           graph.getNode(frame.checkNodeId);
           graph.getNode(frame.extendsNodeId);
         });
+        break;
+      case NODE_SYNTHETIC_SLOT_BINDING:
+        // Synthetic carriers are inert: no node references, only interned
+        // string ids. Validate that the required string-table indices resolve;
+        // `slotNameId === 0` is a sentinel meaning "absent".
+        graph.getString(node.scopeCanonicalId);
+        graph.getString(node.bindingNameId);
+        if (node.slotNameId) {
+          graph.getString(node.slotNameId);
+        }
         break;
       default:
         break;

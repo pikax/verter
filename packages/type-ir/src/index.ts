@@ -33,6 +33,7 @@ export type {
   RefType,
   RecursiveRefConditionalFrame,
   RecursiveRefType,
+  SyntheticSlotBindingType,
   IndexedAccessType,
   UnknownType,
   TypeDescriptor,
@@ -50,6 +51,7 @@ export {
   func,
   ref,
   recursiveRef,
+  syntheticSlotBinding,
   indexedAccess,
   unknown,
 } from "./type-ir.js";

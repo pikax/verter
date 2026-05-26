@@ -1303,6 +1303,13 @@ function typeDescriptorToCompatDisplay(
       return compatObjectTypeToString(descriptor, typeRegistry, visited, registryResolutionDepth);
     case "typeParameter":
       return descriptor.name;
+    case "syntheticSlotBinding":
+      // Synthetic slot-binding carriers render as their user-visible
+      // `bindingName`. They MUST NOT route through `typeRegistry` — that
+      // would risk same-name poisoning (a user-declared type alias whose
+      // name happens to match a binding identifier would shadow the
+      // carrier's intended identity).
+      return descriptor.bindingName;
     case "ref": {
       if (
         typeRegistry &&

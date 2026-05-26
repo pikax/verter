@@ -35,6 +35,14 @@ export type TestTypeExpr =
         check: TestTypeExpr;
         extends: TestTypeExpr;
       }>;
+    }
+  | {
+      kind: "syntheticSlotBinding";
+      scopeCanonicalId: string;
+      surfaceKind: "slotBinding" | "binding";
+      slotName?: string;
+      bindingName: string;
+      valueNode: string;
     };
 
 export interface TestTypeRegistryEntry {
@@ -99,7 +107,7 @@ export interface TestComponentMetaPayload {
   typeRegistry?: TestTypeRegistryEntry[];
 }
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const NODE_PRIMITIVE = 1;
 const NODE_UNION = 3;
@@ -239,6 +247,15 @@ class TestGraphBuilder {
           },
         } as Record<string, unknown>;
         break;
+      case "syntheticSlotBinding":
+        proto = typeNode("syntheticSlotBinding", {
+          valueNode: expr.valueNode,
+          scopeCanonicalId: this.stringId(expr.scopeCanonicalId),
+          surfaceKind: expr.surfaceKind === "binding" ? 1 : 0,
+          slotNameId: expr.slotName === undefined ? 0 : this.stringId(expr.slotName),
+          bindingNameId: this.stringId(expr.bindingName),
+        });
+        break;
     }
 
     const id = this.nodes.length + 1;
@@ -257,7 +274,15 @@ class TestGraphBuilder {
 }
 
 function typeNode(
-  caseName: "primitive" | "literal" | "ref" | "union" | "indexedAccess" | "object" | "recursiveRef",
+  caseName:
+    | "primitive"
+    | "literal"
+    | "ref"
+    | "union"
+    | "indexedAccess"
+    | "object"
+    | "recursiveRef"
+    | "syntheticSlotBinding",
   value: Record<string, unknown>,
 ): TypeNodeInit {
   return {

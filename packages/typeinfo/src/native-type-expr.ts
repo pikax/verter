@@ -66,7 +66,15 @@ export type NativeTypeExpr =
   | { kind: "parenthesized"; inner: NativeTypeExpr }
   | { kind: "unknown"; raw: string }
   | { kind: "infer"; name: string }
-  | { kind: "rest"; inner: NativeTypeExpr };
+  | { kind: "rest"; inner: NativeTypeExpr }
+  | {
+      kind: "syntheticSlotBinding";
+      scopeCanonicalId: string;
+      surfaceKind: "slotBinding" | "binding";
+      slotName?: string;
+      bindingName: string;
+      valueNode: string;
+    };
 
 export type NativePrimitiveName =
   | "string"

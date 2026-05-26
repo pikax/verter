@@ -1,6 +1,6 @@
 import type { TypeDescriptor } from "@verter/type-ir";
 
-export const GRAPH_FORMAT_VERSION = 1;
+export const GRAPH_FORMAT_VERSION = 2;
 
 export const NODE_PRIMITIVE = 1;
 export const NODE_LITERAL = 2;
@@ -23,6 +23,10 @@ export const NODE_UNKNOWN = 18;
 export const NODE_INFER = 19;
 export const NODE_REST = 20;
 export const NODE_RECURSIVE_REF = 21;
+export const NODE_SYNTHETIC_SLOT_BINDING = 22;
+
+export const SYNTHETIC_CARRIER_SURFACE_SLOT_BINDING = 0;
+export const SYNTHETIC_CARRIER_SURFACE_BINDING = 1;
 
 export const LITERAL_STRING = 1;
 export const LITERAL_NUMBER = 2;
@@ -173,6 +177,14 @@ export type GraphNodeRecord =
       nameId: number;
       typeArgumentNodeIds: number[];
       conditionalContext: GraphConditionalFrameRecord[];
+    }
+  | {
+      kind: typeof NODE_SYNTHETIC_SLOT_BINDING;
+      valueNode: string;
+      scopeCanonicalId: number;
+      surfaceKind: number;
+      slotNameId: number;
+      bindingNameId: number;
     };
 
 export class DecodedTypeGraph {

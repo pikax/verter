@@ -104,6 +104,17 @@ export function descriptorToNative(d: TypeDescriptor): NativeTypeExpr {
       };
     case "unknown":
       return { kind: "unknown", raw: d.rawType };
+    case "syntheticSlotBinding":
+      // Synthetic slot-binding carriers are opaque terminals — pass them
+      // through structurally with their identity intact.
+      return {
+        kind: "syntheticSlotBinding",
+        scopeCanonicalId: d.scopeCanonicalId,
+        surfaceKind: d.surfaceKind,
+        slotName: d.slotName,
+        bindingName: d.bindingName,
+        valueNode: d.valueNode,
+      };
     default:
       // `enum` and any future descriptor variant collapse to a raw
       // unknown shell. The Rust resolver will treat this as a hard

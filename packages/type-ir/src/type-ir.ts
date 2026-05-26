@@ -154,6 +154,26 @@ export interface RecursiveRefType {
   conditionalContext: RecursiveRefConditionalFrame[];
 }
 
+/**
+ * Synthetic slot-binding carrier published by `defineSlots` / slot-binding
+ * graph resolution when no parser-side binding expression is available.
+ *
+ * The carrier is shallow by construction: consumers MUST NOT resolve
+ * `bindingName` through `TypeRegistry` (same-name poisoning risk). The
+ * compat/checker / schema / adapter layers render it via `bindingName`.
+ *
+ * `valueNode` is a decimal STRING (Rust `u64` `SemanticNodeId`) — kept as
+ * string to avoid JS Number precision loss.
+ */
+export interface SyntheticSlotBindingType {
+  kind: "syntheticSlotBinding";
+  scopeCanonicalId: string;
+  surfaceKind: "slotBinding" | "binding";
+  slotName?: string;
+  bindingName: string;
+  valueNode: string;
+}
+
 // ── IndexedAccess ────────────────────────────────────────────────
 
 /**
@@ -196,6 +216,7 @@ export type TypeDescriptor =
   | EnumType
   | RefType
   | RecursiveRefType
+  | SyntheticSlotBindingType
   | IndexedAccessType
   | UnknownType;
 
@@ -286,6 +307,25 @@ export function recursiveRef(
   conditionalContext: RecursiveRefConditionalFrame[],
 ): RecursiveRefType {
   return { kind: "recursiveRef", name, typeArguments, conditionalContext };
+}
+
+export function syntheticSlotBinding(
+  scopeCanonicalId: string,
+  surfaceKind: "slotBinding" | "binding",
+  bindingName: string,
+  valueNode: string,
+  slotName?: string,
+): SyntheticSlotBindingType {
+  return slotName === undefined
+    ? { kind: "syntheticSlotBinding", scopeCanonicalId, surfaceKind, bindingName, valueNode }
+    : {
+        kind: "syntheticSlotBinding",
+        scopeCanonicalId,
+        surfaceKind,
+        slotName,
+        bindingName,
+        valueNode,
+      };
 }
 
 export function indexedAccess(

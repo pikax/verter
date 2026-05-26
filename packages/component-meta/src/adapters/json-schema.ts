@@ -114,6 +114,15 @@ export function typeToJsonSchema(type: TypeDescriptor): JSONSchema {
       // their host registry; surface a description placeholder.
       return {};
 
+    case "syntheticSlotBinding":
+      // Synthetic slot-binding carriers are opaque terminals. Emit a
+      // descriptive object schema labelled with the user-visible
+      // `bindingName`; do NOT resolve through any registry.
+      return {
+        type: "object",
+        description: `synthetic slot binding ${type.bindingName}`,
+      };
+
     case "enum": {
       const values = type.members.map((m) => m.value ?? m.name);
       return { enum: values };

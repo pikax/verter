@@ -227,6 +227,14 @@ function convertType(
       // used for refs).
       return { kind: "object" as const, type: typeDescriptorToString(td), schema: {} };
 
+    case "syntheticSlotBinding":
+      // Synthetic slot-binding carriers are opaque terminals. They MUST
+      // NOT route through `typeRegistry` (same-name poisoning risk).
+      // Surface the `bindingName` as the structural type label with an
+      // empty schema (matches the Volar "unresolved compound type"
+      // behaviour for refs).
+      return { kind: "object" as const, type: td.bindingName, schema: {} };
+
     case "unknown":
       return td.rawType || "unknown";
   }
@@ -311,6 +319,10 @@ function schemaDescriptorToString(
       return typeDescriptorToString(td);
     case "typeParameter":
       return td.name;
+    case "syntheticSlotBinding":
+      // Synthetic carriers render as `bindingName` — they MUST NOT route
+      // through `typeRegistry`.
+      return td.bindingName;
     case "ref": {
       if (
         typeRegistry &&
@@ -418,6 +430,10 @@ export function typeDescriptorToString(td: TypeDescriptor): string {
       return td.name;
     case "unknown":
       return td.rawType || "unknown";
+    case "syntheticSlotBinding":
+      // Synthetic carriers display as their user-visible `bindingName`. They
+      // MUST NOT route through `TypeRegistry`.
+      return td.bindingName;
   }
 }
 

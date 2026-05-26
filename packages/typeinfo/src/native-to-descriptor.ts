@@ -27,6 +27,7 @@ import {
   typeParameter,
   indexedAccess,
   unknown,
+  syntheticSlotBinding,
   type ObjectIndexSignature,
   type ObjectProperty,
   type FunctionParameter,
@@ -154,6 +155,14 @@ export function nativeToDescriptor(expr: NativeTypeExpr): TypeDescriptor {
       return unknown(`infer ${expr.name}`);
     case "rest":
       return unknown(`...${describeBrief(expr.inner)}`);
+    case "syntheticSlotBinding":
+      return syntheticSlotBinding(
+        expr.scopeCanonicalId,
+        expr.surfaceKind,
+        expr.bindingName,
+        expr.valueNode,
+        expr.slotName,
+      );
   }
 }
 

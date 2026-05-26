@@ -61,7 +61,22 @@ message TypeNode {
     InferNode infer = 19;
     RestNode rest = 20;
     RecursiveRefNode recursive_ref = 21;
+    SyntheticSlotBindingNode synthetic_slot_binding = 22;
   }
+}
+
+// Intrinsic, leaf carrier minted by `publish_merged_bindings` when a slot
+// binding (or `defineSlots` binding) has no parser-side binding expression.
+// Carrier identity is the full (scope, surface_kind, slot_name, binding_name,
+// value_node) tuple; consumers MUST NOT resolve `binding_name_id` as a type
+// alias through `TypeRegistry`. `value_node` is serialized as a decimal
+// STRING to avoid JS Number precision loss on `u64` semantic-node ids.
+message SyntheticSlotBindingNode {
+  string value_node = 1;
+  uint32 scope_canonical_id = 2;
+  uint32 surface_kind = 3;
+  uint32 slot_name_id = 4;
+  uint32 binding_name_id = 5;
 }
 
 message PrimitiveNode {
