@@ -30,7 +30,15 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 serde-wasm-bindgen = "0.6.5"
 console_error_panic_hook = { version = "0.1.7", optional = true }
+# Two getrandom versions reach the wasm graph: 0.4 directly, and 0.3
+# transitively via lightningcss -> ahash. The wasm32-unknown-unknown
+# backend selection in `.cargo/config.toml` (`getrandom_backend="wasm_js"`)
+# requires the `wasm_js` cargo feature to also be enabled. We declare
+# both versions here so feature unification activates `wasm_js` on the
+# transitive 0.3 chain too (different majors are distinct crates so we
+# rename the second via `package =`).
 getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom_legacy = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.72"

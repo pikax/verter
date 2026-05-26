@@ -2,7 +2,12 @@
 xtask = "run --package xtask --"
 
 [target.wasm32-unknown-unknown]
-rustflags = ["--cfg", "getrandom_wasm_js"]
+# getrandom 0.3.4+ accepts the `getrandom_backend="wasm_js"` cfg form
+# for selecting the wasm32-unknown-unknown random backend. The
+# previous `getrandom_wasm_js` cfg was specific to a much older
+# getrandom 0.3 release. Lightningcss → ahash → getrandom 0.3
+# requires this for wasm builds.
+rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]
 
 # ts-rs writes audit record TS bindings here (relative to this config
 # file's location, i.e. the workspace root). All `#[ts(export_to = "...")]`
