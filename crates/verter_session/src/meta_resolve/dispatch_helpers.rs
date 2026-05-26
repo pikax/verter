@@ -360,6 +360,66 @@ fn walk_type_expr_to_root_conditional(
     }
 }
 
+/// Extract the OUTER utility/identifier name from a route-bearing
+/// `TypeExpr` and return `true` iff the owner scope shadows that name
+/// with a userland declaration.
+///
+/// Background: the route extractors recognise
+/// `Pick<…>` / `Omit<…>` / `Foo['a']['b']` syntactically. They do NOT
+/// consult the owner scope. The "user shadowing wins" rule for the
+/// route fast-path is: if the owner's same-file scope declares a
+/// userland type whose name collides with the OUTER utility (e.g.
+/// `type Pick<T, _K> = T`), the registry route MUST be suppressed so
+/// the dispatch's standard `ResolveDecl` path resolves the userland
+/// declaration instead.
+///
+/// The route's `root_symbol` is the route's INNER root identity (for
+/// `Pick<Foo, K>` that is `Foo`, for `Foo['a']` that is `Foo`). The
+/// shadow check MUST run on the OUTER identifier the userland alias
+/// would shadow:
+///
+/// - `Pick<Foo, K>` → outer = `"Pick"` (the wrapping utility).
+/// - `Omit<Foo, K>` → outer = `"Omit"`.
+/// - `Foo['a']['b']` → outer = `"Foo"` (the indexed-access chain has
+///   no wrapping utility; the chain root IS the outer identifier).
+///
+/// Returns `true` iff the extracted outer name appears in the
+/// owner-scope shadow set per
+/// [`ScopeShadowing::is_shadowing_lib`](crate::resolver_core::scope_shadowing::ScopeShadowing::is_shadowing_lib).
+///
+/// `Parenthesized` wrappers are stripped at every layer. Refs whose
+/// shape does not match a known route pattern return `false`
+/// (no shadowing — the registry route extractor would also have
+/// returned `None`, so the filter would still drop the entry; the
+/// helper's return value is therefore irrelevant outside the
+/// registry-recognised shape set).
+fn route_outer_utility_is_shadowed(
+    expr: &verter_type_expr::TypeExpr,
+    shadowing: &crate::resolver_core::scope_shadowing::ScopeShadowing,
+) -> bool {
+    use verter_type_expr::TypeExpr;
+
+    match expr {
+        TypeExpr::Parenthesized(inner) => route_outer_utility_is_shadowed(inner, shadowing),
+        // Utility-route shapes — the outer utility name (`Pick`,
+        // `Omit`, …) is the wrapping `Ref`'s name. The route
+        // extractor only matches when the type-argument arity is
+        // exactly 2, but the shadow check is independent of that —
+        // any Ref whose name shadows the lib utility suppresses the
+        // route regardless of args.
+        TypeExpr::Ref { name, .. } => shadowing.is_shadowing_lib(name.as_ref()),
+        // Indexed-access chain — descend to the chain root. The
+        // shadow check applies to the root identifier (the chain has
+        // no wrapping utility name).
+        TypeExpr::IndexedAccess { object, .. } => {
+            route_outer_utility_is_shadowed(object, shadowing)
+        }
+        // Any other shape — the route extractors return `None` for
+        // these; the shadow check is moot.
+        _ => false,
+    }
+}
+
 /// Class A surface projection — dispatch-equivalent
 /// of `ComponentMetaQueryEngine::project_expr_surface_expr`.
 ///
@@ -445,9 +505,19 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
         ctx,
         scope_canonical_id,
     );
+    // r15/F11 shadow gate — check the OUTER utility / chain-root
+    // identifier the userland alias would shadow (e.g. `Pick` /
+    // `Omit` / the chain root for indexed-access). The route's
+    // `root_symbol` is the route's INNER root identity (for
+    // `Pick<Source, K>` that is `Source`, NOT the outer `Pick`).
+    // Checking shadowing on `root_symbol` mis-suppressed the route
+    // whenever the source was a locally-declared interface — the
+    // common case — because `ScopeShadowing.shadowed_type_names`
+    // contains ALL locally-declared type names. The helper extracts
+    // the outer identifier via a structural walk of `expr`.
     let route = component_meta_registry_public_indexed_access_route(expr)
         .or_else(|| component_meta_registry_public_utility_route(expr))
-        .filter(|(root_symbol, _)| !shadowing.is_shadowing_lib(root_symbol));
+        .filter(|_| !route_outer_utility_is_shadowed(expr, &shadowing));
     if let Some((root_symbol, route)) = route {
         let mut transient_engine: Option<ComponentMetaQueryEngine<'_>> = None;
         let engine_ref: &mut ComponentMetaQueryEngine<'_> = match engine {
@@ -650,9 +720,19 @@ pub(crate) fn project_expr_class_a_via_dispatch_transit_shallow_threaded<'ctx>(
         ctx,
         scope_canonical_id,
     );
+    // r15/F11 shadow gate — check the OUTER utility / chain-root
+    // identifier the userland alias would shadow (e.g. `Pick` /
+    // `Omit` / the chain root for indexed-access). The route's
+    // `root_symbol` is the route's INNER root identity (for
+    // `Pick<Source, K>` that is `Source`, NOT the outer `Pick`).
+    // Checking shadowing on `root_symbol` mis-suppressed the route
+    // whenever the source was a locally-declared interface — the
+    // common case — because `ScopeShadowing.shadowed_type_names`
+    // contains ALL locally-declared type names. The helper extracts
+    // the outer identifier via a structural walk of `expr`.
     let route = component_meta_registry_public_indexed_access_route(expr)
         .or_else(|| component_meta_registry_public_utility_route(expr))
-        .filter(|(root_symbol, _)| !shadowing.is_shadowing_lib(root_symbol));
+        .filter(|_| !route_outer_utility_is_shadowed(expr, &shadowing));
     if let Some((root_symbol, route)) = route {
         let mut transient_engine: Option<ComponentMetaQueryEngine<'_>> = None;
         let engine_ref: &mut ComponentMetaQueryEngine<'_> = match engine {
