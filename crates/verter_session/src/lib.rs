@@ -445,6 +445,22 @@ pub mod for_tests {
         dispatch.substitute_semantic_type_param_for_tests(node, parameter_node, arg)
     }
 
+    /// Drive
+    /// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::evaluate_deferred_semantic_node_with_context`]
+    /// from integration tests. The evaluator is `pub(super)` and
+    /// unreachable from integration test crates; this shim
+    /// instantiates a `ProjectSemanticDispatch` and forwards the
+    /// call so PE4 evaluate-memo discriminator tests can verify
+    /// cache behaviour with controlled `(node, context)` pairs.
+    pub fn dispatch_evaluate_deferred_for_tests(
+        host: &crate::VerterHost,
+        node: crate::semantic_query::SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> crate::semantic_query::SemanticNodeId {
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        dispatch.evaluate_deferred_semantic_node_with_context_for_tests(node, context)
+    }
+
     /// Returns `true` iff `host.active_session_view()` returns `None`.
     ///
     /// This shim is needed because `ResolverContext` is sealed — integration

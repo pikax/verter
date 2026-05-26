@@ -65,11 +65,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
         mut node: SemanticNodeId,
         reduction_context: ProjectionReductionContext,
     ) -> SemanticNodeId {
+        // Hash-cons memo. The store-owned `evaluate_deferred_memo`
+        // collapses repeated `(node, context)` evaluations across
+        // call sites. The evaluator's fix-point walk is a pure
+        // function of `(node, context)` because every recursive call
+        // and operator re-dispatch consumes the SAME context and
+        // routes through `execute_cooperative` (which is itself
+        // content-keyed). The dominant per-K mapped-type loop win:
+        // a K-independent subtree like `MessageBase<T>` embedded
+        // inside a K-dependent value expression evaluates once per
+        // K through the recursive walk pre-memo; post-memo every
+        // subsequent visit collapses to one `DashMap::get`.
+        let entry_node = node;
+        if let Some(cached) = self
+            .graph()
+            .evaluate_deferred_memo_get(entry_node, reduction_context)
+        {
+            return cached;
+        }
         let mut visited = rustc_hash::FxHashSet::default();
         visited.insert(node);
-        loop {
+        let result = loop {
             let Some(data) = self.graph().node_data(node) else {
-                return self.opaque(QueryError::Miss);
+                break self.opaque(QueryError::Miss);
             };
             let next = match data.as_ref() {
                 SemanticNodeData::Alias(target) => *target,
@@ -81,7 +99,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         context: reduction_context,
                     }) {
                         QueryResult::Value(id) => id,
-                        _ => return self.opaque(QueryError::Miss),
+                        _ => break self.opaque(QueryError::Miss),
                     }
                 }
                 SemanticNodeData::IndexedAccess { object, index } => {
@@ -98,7 +116,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         mode: ProjectionMode::Navigate,
                     }) {
                         QueryResult::Value(id) => id,
-                        _ => return self.opaque(QueryError::Miss),
+                        _ => break self.opaque(QueryError::Miss),
                     }
                 }
                 SemanticNodeData::Mapped { source, mapper } => {
@@ -108,7 +126,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         context: reduction_context,
                     }) {
                         QueryResult::Value(id) => id,
-                        _ => return self.opaque(QueryError::Miss),
+                        _ => break self.opaque(QueryError::Miss),
                     }
                 }
                 SemanticNodeData::TypeOf { value_root, path } => {
@@ -116,7 +134,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         value_root: value_root.clone(),
                     }) {
                         QueryResult::Value(id) => id,
-                        _ => return self.opaque(QueryError::Miss),
+                        _ => break self.opaque(QueryError::Miss),
                     };
                     if path.is_empty() {
                         root
@@ -135,7 +153,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             ),
                         }) {
                             QueryResult::Value(id) => id,
-                            _ => return self.opaque(QueryError::Miss),
+                            _ => break self.opaque(QueryError::Miss),
                         }
                     }
                 }
@@ -153,7 +171,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     distributive: *distributive,
                 }) {
                     QueryResult::Value(id) => id,
-                    _ => return self.opaque(QueryError::Miss),
+                    _ => break self.opaque(QueryError::Miss),
                 },
                 SemanticNodeData::TemplateLiteral {
                     quasis,
@@ -191,7 +209,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         }
                     }
                     if !all_literal {
-                        return node;
+                        break node;
                     }
                     let mut buf = String::new();
                     for (idx, quasi) in quasis.iter().enumerate() {
@@ -227,7 +245,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         context: reduction_context,
                     }) {
                         QueryResult::Value(id) => id,
-                        _ => return self.opaque(QueryError::Miss),
+                        _ => break self.opaque(QueryError::Miss),
                     }
                 }
                 // `DeclRef`/`InstantiationRef`
@@ -245,17 +263,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // The brief's conditional "if they are on the
                 // macro-shape enumeration path" scopes this symmetry
                 // to the enumeration path only.
-                _ => return node,
+                _ => break node,
             };
             if next == node {
-                return node;
+                break node;
             }
             // Cyclic re-entry detected (self-referential evaluation) — return
             // current node as fix-point per guard contract row.
             if !visited.insert(next) {
-                return node;
+                break node;
             }
             node = next;
-        }
+        };
+        // Publish the entry-node → result mapping. Concurrent
+        // publishers for the same `(entry_node, context)` resolve to
+        // structurally identical results (the evaluator is pure on
+        // those two inputs), so first-writer-wins is correct.
+        self.graph()
+            .evaluate_deferred_memo_publish(entry_node, reduction_context, result);
+        result
     }
 }

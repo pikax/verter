@@ -35,10 +35,11 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
+#[cfg(test)]
+use crate::semantic_query::SemanticGraphStats;
 use crate::semantic_query::{
     CacheRead, DepSignature, HostResolvedNamedTypeKey, NodeScopeId, OriginEdge, OriginEdgeKind,
-    QueryError, QueryResult, SemanticGraphRead, SemanticGraphStats, SemanticNodeData,
-    SemanticNodeId, SemanticQueryKey,
+    QueryError, QueryResult, SemanticGraphRead, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
 #[cfg(test)]
 use crate::semantic_query::{PathSegment, ProjectionMode};
@@ -49,6 +50,7 @@ mod derivation;
 mod family;
 mod inflight;
 mod interner;
+mod pe4_memos;
 mod stats;
 #[cfg(any(test, debug_assertions))]
 mod test_gates;
@@ -62,7 +64,7 @@ use arena::NodeArena;
 #[cfg(test)]
 use arena::{shard_index_for, NUM_SHARDS};
 use budgeted_caches::{BudgetedNamedTypeIndex, BudgetedRelationMemo};
-use derivation::{sorted_percentile, DerivationStore};
+use derivation::DerivationStore;
 pub use family::AuditEagerKeyRow;
 use family::{
     carrier_facts_reference_canonical, family_and_slot, FamilyKey, FamilySlots, MemoEntry, ModeSlot,
@@ -179,10 +181,10 @@ pub struct SemanticGraphStore {
     /// snapshots share allocations. Origin edges are bounded best-effort
     /// provenance for the audit origin-graph trace, NOT an invalidation
     /// source — see the `derivation` module docs.
-    derivation: Mutex<DerivationStore>,
+    pub(super) derivation: Mutex<DerivationStore>,
     /// Lock-free telemetry counters. Read via [`Self::stats_snapshot`]
     /// into the public [`SemanticGraphStats`] surface.
-    stats: AtomicSemanticGraphStats,
+    pub(super) stats: AtomicSemanticGraphStats,
     /// Path C C1 contention instrumentation. Mirrors the arena's
     /// `provenance` field: `Some` for stores wired up by the host, `None`
     /// for the test-default stores constructed via `Default`. Used by
@@ -391,25 +393,16 @@ pub struct SemanticGraphStore {
     /// with no registration. The `entries → canonical_to_entries shards`
     /// lock order permits taking a shard mutex while `entries` is held.
     memo_budget: crate::bounded_query_retention::GlobalRetentionBudget<FamilyKey>,
-    /// Hash-cons memo for [`crate::project_semantic_dispatch::ProjectSemanticDispatch::substitute_semantic_type_param`].
-    /// Maps `(value_expr, parameter_node, arg)` triples to the
-    /// substituted node id. The store IS the arena and the arena is
-    /// already scoped by `(project_identity, parse_env_hash,
-    /// resolve_env_hash, type_env_hash, lib_env_hash)` — semantic-node
-    /// ids inside one store are content-addressed integers, so a
-    /// triple of ids is a complete identity for the substitution
-    /// result. No fact-signature validation is required because
-    /// substitution is a pure function of its three inputs.
-    ///
-    /// Entries are immutable after publish and never carry per-request
-    /// state. `invalidate_all` clears the map alongside the family
-    /// memo so a workspace-content-generation bump never leaves a
-    /// stale substitution behind. The map collapses identical
-    /// `(value_expr, parameter_node, arg)` triples that surface from
-    /// different call paths (same mapped-type instance reduced from
-    /// multiple components, repeated indexed-access projections, etc.)
-    /// to a single result, amortising the recursive walk.
-    substitute_memo: DashMap<(SemanticNodeId, SemanticNodeId, SemanticNodeId), SemanticNodeId>,
+    // PE4 hash-cons memos — accessors / docs live in `pe4_memos.rs`.
+    pub(super) substitute_memo:
+        DashMap<(SemanticNodeId, SemanticNodeId, SemanticNodeId), SemanticNodeId>,
+    pub(super) evaluate_deferred_memo: DashMap<
+        (
+            SemanticNodeId,
+            crate::semantic_query::ProjectionReductionContext,
+        ),
+        SemanticNodeId,
+    >,
 }
 
 /// Γ.B reverse-index type alias. See
@@ -1307,14 +1300,9 @@ impl SemanticGraphStore {
         self.named_type_index.clear_and_bump_generation();
         self.relation_memo.clear();
         self.derivation.lock().clear();
-        // Drop the substitute hash-cons memo on a project-generation
-        // bump alongside the other content-derived caches. The arena
-        // itself is append-only so semantic-node ids remain valid,
-        // but the structural-id-keyed substitute memo would otherwise
-        // serve cached results derived from now-stale value
-        // expressions whose underlying files have moved. Clear in
-        // lockstep with the family memo and the relation memo.
-        self.substitute_memo.clear();
+        // PE4 hash-cons memos (substitute, evaluate-deferred) — see
+        // `pe4_memos.rs` for the invalidation contract.
+        self.clear_pe4_memos();
         removed
     }
 
@@ -1782,81 +1770,6 @@ impl SemanticGraphStore {
     // Telemetry — public stats snapshot
     // ──────────────────────────────────────────────────────────────────
 
-    /// Read an immutable snapshot of every counter the store maintains.
-    /// Safe to call mid-request; counters are atomic and percentile
-    /// computation locks-and-clones the sample reservoir so no torn
-    /// reads.
-    #[must_use]
-    pub fn stats_snapshot(&self) -> SemanticGraphStats {
-        let derivation = self.derivation.lock();
-        let origin_edge_count = derivation.edge_count() as u64;
-        // origin_edges_per_node percentiles are derived from the
-        // derivation store directly (no separate sample reservoir
-        // needed — the store already records the full edge layout).
-        let mut by_node: FxHashMap<SemanticNodeId, u32> = FxHashMap::default();
-        for (node, _kind, edges) in derivation.iter_edges() {
-            let cell = by_node.entry(*node).or_insert(0);
-            *cell = cell.saturating_add(edges.len() as u32);
-        }
-        drop(derivation);
-        let mut per_node_counts: Vec<u32> = by_node.into_values().collect();
-        per_node_counts.sort_unstable();
-        let origin_edges_per_node_p50 = sorted_percentile(&per_node_counts, 0.5);
-        let origin_edges_per_node_p95 = sorted_percentile(&per_node_counts, 0.95);
-
-        let path_samples = self.stats.path_length_samples.lock();
-        let path_length_p50 = path_samples.percentile(0.5);
-        let path_length_p95 = path_samples.percentile(0.95);
-        drop(path_samples);
-        let proj_samples = self.stats.projection_depth_samples.lock();
-        let projection_depth_p50 = proj_samples.percentile(0.5);
-        let projection_depth_p95 = proj_samples.percentile(0.95);
-        drop(proj_samples);
-
-        SemanticGraphStats {
-            hits: self.stats.hits.load(Ordering::Relaxed),
-            misses: self.stats.misses.load(Ordering::Relaxed),
-            same_path_sentinel_returns: self
-                .stats
-                .same_path_sentinel_returns
-                .load(Ordering::Relaxed),
-            in_flight_peak: self.stats.in_flight_peak.load(Ordering::Relaxed),
-            waits_ms: self.stats.waits_ms.load(Ordering::Relaxed),
-            memo_entry_count: self.memo_entry_count() as u64,
-            joined_waits: self.stats.joined_waits.load(Ordering::Relaxed),
-            inflight_aborted_retries: self.stats.inflight_aborted_retries.load(Ordering::Relaxed),
-            cold_aborts_swept: self.stats.cold_aborts_swept.load(Ordering::Relaxed),
-            origin_edge_count,
-            origin_edges_emitted: self.stats.origin_edges_emitted.load(Ordering::Relaxed),
-            origin_edges_per_node_p50,
-            origin_edges_per_node_p95,
-            instantiate_count: self.stats.instantiate_count.load(Ordering::Relaxed),
-            conditional_decided_count: self.stats.conditional_decided_count.load(Ordering::Relaxed),
-            conditional_deferred_count: self
-                .stats
-                .conditional_deferred_count
-                .load(Ordering::Relaxed),
-            branch_selections_true: self.stats.branch_selections_true.load(Ordering::Relaxed),
-            branch_selections_false: self.stats.branch_selections_false.load(Ordering::Relaxed),
-            budget_fallback_count: self.stats.budget_fallback_count.load(Ordering::Relaxed),
-            path_length_p50,
-            path_length_p95,
-            projection_depth_p50,
-            projection_depth_p95,
-            decl_subexpression_lowering_count: self
-                .stats
-                .decl_subexpression_lowering_count
-                .load(Ordering::Relaxed),
-            relation_check_count: self.stats.relation_check_count.load(Ordering::Relaxed),
-            mapped_per_k_materializations: self
-                .stats
-                .mapped_per_k_materializations
-                .load(Ordering::Relaxed),
-            substitute_memo_hits: self.stats.substitute_memo_hits.load(Ordering::Relaxed),
-            substitute_memo_misses: self.stats.substitute_memo_misses.load(Ordering::Relaxed),
-        }
-    }
-
     /// Builder-side counter helpers. Builders increment these as they emit
     /// reusable work; the per-builder semantics are documented in plan
     /// §3 Phase C (where the real builders land).
@@ -1910,70 +1823,13 @@ impl SemanticGraphStore {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Bump the per-K mapped-type materialiser counter. Called once
-    /// at the entrypoint of each per-K materialiser
-    /// (`materialize_mapped_member_value_for_key`,
-    /// `materialize_selected_key_mapped_value`) so the
-    /// key-space-independent value hoist's effect is empirically
-    /// observable: hoist-eligible mapped types short-circuit before
-    /// the per-K loop and never bump this counter, while K-dependent
-    /// mapped types bump it once per enumerated key.
+    /// Bump the per-K mapped-type materialiser counter (PE4 hoist
+    /// discriminator). Hoist-eligible mapped types short-circuit
+    /// before the per-K loop and never bump this counter.
     pub fn record_mapped_per_k_materialization(&self) {
         self.stats
             .mapped_per_k_materializations
             .fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Hash-cons memo lookup for
-    /// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::substitute_semantic_type_param`].
-    /// Returns the cached result for `(value_expr, parameter_node, arg)`,
-    /// or `None` on miss. Reads are lock-free `DashMap::get` plus
-    /// `Arc::clone` of the entry's value. The cache key is a triple
-    /// of in-arena semantic-node ids; because the arena is scoped to
-    /// this store (per project_identity + env hashes) the ids alone
-    /// are sufficient identity — no further validation is required.
-    ///
-    /// Bumps `substitute_memo_hits` on hit, `substitute_memo_misses`
-    /// on miss.
-    pub fn substitute_memo_get(
-        &self,
-        value_expr: SemanticNodeId,
-        parameter_node: SemanticNodeId,
-        arg: SemanticNodeId,
-    ) -> Option<SemanticNodeId> {
-        let hit = self
-            .substitute_memo
-            .get(&(value_expr, parameter_node, arg))
-            .map(|entry| *entry.value());
-        if hit.is_some() {
-            self.stats
-                .substitute_memo_hits
-                .fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.stats
-                .substitute_memo_misses
-                .fetch_add(1, Ordering::Relaxed);
-        }
-        hit
-    }
-
-    /// Publish a hash-cons memo entry for
-    /// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::substitute_semantic_type_param`].
-    /// Entries are immutable after publish; concurrent writes for
-    /// the same triple must resolve to the same result (substitution
-    /// is a pure function), so the `entry`-API's first-writer-wins
-    /// semantics is correct — a later writer's value would be
-    /// structurally identical to the first writer's.
-    pub fn substitute_memo_publish(
-        &self,
-        value_expr: SemanticNodeId,
-        parameter_node: SemanticNodeId,
-        arg: SemanticNodeId,
-        result: SemanticNodeId,
-    ) {
-        self.substitute_memo
-            .entry((value_expr, parameter_node, arg))
-            .or_insert(result);
     }
 
     /// Warm-lookup a key **without `ReadSetSignature` validation**.

@@ -1007,6 +1007,16 @@ pub struct SemanticGraphStats {
     /// no entry for the queried triple and a fresh recursive walk
     /// runs.
     pub substitute_memo_misses: u64,
+    /// Hash-cons memo hits on
+    /// `evaluate_deferred_semantic_node_with_context`. Bumped when
+    /// a `(node, context)` pair is served from the memo, skipping
+    /// the recursive fix-point walk.
+    pub evaluate_deferred_memo_hits: u64,
+    /// Hash-cons memo misses on
+    /// `evaluate_deferred_semantic_node_with_context`. Bumped when
+    /// the cache has no entry for the queried pair and a fresh
+    /// fix-point walk runs.
+    pub evaluate_deferred_memo_misses: u64,
 }
 
 /// Structured query-level failure. Distinct from panics — callers decide
@@ -2116,7 +2126,8 @@ mod tests {
     ///   origin_edges_per_node_p50, origin_edges_per_node_p95,
     ///   decl_subexpression_lowering_count, relation_check_count,
     ///   mapped_per_k_materializations, substitute_memo_hits,
-    ///   substitute_memo_misses.
+    ///   substitute_memo_misses, evaluate_deferred_memo_hits,
+    ///   evaluate_deferred_memo_misses.
     /// - Exceptional-path: budget_fallback_count, same_path_sentinel_returns,
     ///   joined_waits, inflight_aborted_retries, cold_aborts_swept.
     #[test]
@@ -2149,6 +2160,8 @@ mod tests {
             "mapped_per_k_materializations",
             "substitute_memo_hits",
             "substitute_memo_misses",
+            "evaluate_deferred_memo_hits",
+            "evaluate_deferred_memo_misses",
         ];
         for field in expected_to_fire {
             assert!(

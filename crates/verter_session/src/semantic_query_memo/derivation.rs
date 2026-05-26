@@ -118,7 +118,7 @@ pub(super) const DERIVATION_EDGES_PER_BUCKET_CAP: usize = 64;
 /// `signature_pool` holds [`Weak`] values so its reclamation is tied to
 /// edge lifetime — see the module docs. Both maps are dropped wholesale
 /// by [`DerivationStore::clear`] on a project-generation reset.
-pub(super) struct DerivationStore {
+pub(crate) struct DerivationStore {
     edges: FxHashMap<(SemanticNodeId, OriginEdgeKind), Vec<OriginEdge>>,
     /// Dep-signature interner. Maps a signature value to a [`Weak`]
     /// reference to the canonical `Arc<DepSignature>` handed to edges.

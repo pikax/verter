@@ -11,8 +11,12 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use parking_lot::Mutex;
+use rustc_hash::FxHashMap;
 
+use super::derivation::sorted_percentile;
+use super::SemanticGraphStore;
 use crate::instant::Instant;
+use crate::semantic_query::{SemanticGraphStats, SemanticNodeId};
 
 /// Bounded sample reservoir for histogram-style metrics (path length /
 /// projection depth). Cap = 8192 samples per metric; once full, new
@@ -63,7 +67,7 @@ pub(super) const SAMPLE_RESERVOIR_CAP: usize = 8192;
 /// Lock-free counter set updated on the hot path. Read into the immutable
 /// [`SemanticGraphStats`](crate::semantic_query::SemanticGraphStats)
 /// snapshot via [`super::SemanticGraphStore::stats_snapshot`].
-pub(super) struct AtomicSemanticGraphStats {
+pub(crate) struct AtomicSemanticGraphStats {
     pub(super) hits: AtomicU64,
     pub(super) misses: AtomicU64,
     pub(super) same_path_sentinel_returns: AtomicU64,
@@ -128,6 +132,16 @@ pub(super) struct AtomicSemanticGraphStats {
     /// has no entry for the queried triple — the recursive walk
     /// runs and the result is published into the memo.
     pub(super) substitute_memo_misses: AtomicU64,
+    /// Hash-cons memo hits on
+    /// `evaluate_deferred_semantic_node_with_context`. Bumped when
+    /// a `(node, context)` pair is served from the memo, skipping
+    /// the recursive fix-point walk.
+    pub(super) evaluate_deferred_memo_hits: AtomicU64,
+    /// Hash-cons memo misses on
+    /// `evaluate_deferred_semantic_node_with_context`. Bumped when
+    /// the cache has no entry for the queried pair and a fresh
+    /// fix-point walk runs.
+    pub(super) evaluate_deferred_memo_misses: AtomicU64,
 }
 
 impl Default for AtomicSemanticGraphStats {
@@ -158,6 +172,8 @@ impl Default for AtomicSemanticGraphStats {
             mapped_per_k_materializations: AtomicU64::new(0),
             substitute_memo_hits: AtomicU64::new(0),
             substitute_memo_misses: AtomicU64::new(0),
+            evaluate_deferred_memo_hits: AtomicU64::new(0),
+            evaluate_deferred_memo_misses: AtomicU64::new(0),
         }
     }
 }
@@ -251,5 +267,76 @@ impl<'a, T> Drop for EntriesLockGuard<'a, T> {
         crate::capture_token::with_active_capture(|t| {
             t.record_entries_mutex_timing(wait_ns, hold_ns);
         });
+    }
+}
+
+impl SemanticGraphStore {
+    /// Read an immutable snapshot of every counter the store maintains.
+    /// Safe to call mid-request; counters are atomic and percentile
+    /// computation locks-and-clones the sample reservoir so no torn
+    /// reads.
+    #[must_use]
+    pub fn stats_snapshot(&self) -> SemanticGraphStats {
+        let derivation = self.derivation.lock();
+        let origin_edge_count = derivation.edge_count() as u64;
+        let mut by_node: FxHashMap<SemanticNodeId, u32> = FxHashMap::default();
+        for (node, _kind, edges) in derivation.iter_edges() {
+            let cell = by_node.entry(*node).or_insert(0);
+            *cell = cell.saturating_add(edges.len() as u32);
+        }
+        drop(derivation);
+        let mut per_node_counts: Vec<u32> = by_node.into_values().collect();
+        per_node_counts.sort_unstable();
+        let origin_edges_per_node_p50 = sorted_percentile(&per_node_counts, 0.5);
+        let origin_edges_per_node_p95 = sorted_percentile(&per_node_counts, 0.95);
+
+        let stats = &self.stats;
+        let path_samples = stats.path_length_samples.lock();
+        let path_length_p50 = path_samples.percentile(0.5);
+        let path_length_p95 = path_samples.percentile(0.95);
+        drop(path_samples);
+        let proj_samples = stats.projection_depth_samples.lock();
+        let projection_depth_p50 = proj_samples.percentile(0.5);
+        let projection_depth_p95 = proj_samples.percentile(0.95);
+        drop(proj_samples);
+
+        SemanticGraphStats {
+            hits: stats.hits.load(Ordering::Relaxed),
+            misses: stats.misses.load(Ordering::Relaxed),
+            same_path_sentinel_returns: stats.same_path_sentinel_returns.load(Ordering::Relaxed),
+            in_flight_peak: stats.in_flight_peak.load(Ordering::Relaxed),
+            waits_ms: stats.waits_ms.load(Ordering::Relaxed),
+            memo_entry_count: self.memo_entry_count() as u64,
+            joined_waits: stats.joined_waits.load(Ordering::Relaxed),
+            inflight_aborted_retries: stats.inflight_aborted_retries.load(Ordering::Relaxed),
+            cold_aborts_swept: stats.cold_aborts_swept.load(Ordering::Relaxed),
+            origin_edge_count,
+            origin_edges_emitted: stats.origin_edges_emitted.load(Ordering::Relaxed),
+            origin_edges_per_node_p50,
+            origin_edges_per_node_p95,
+            instantiate_count: stats.instantiate_count.load(Ordering::Relaxed),
+            conditional_decided_count: stats.conditional_decided_count.load(Ordering::Relaxed),
+            conditional_deferred_count: stats.conditional_deferred_count.load(Ordering::Relaxed),
+            branch_selections_true: stats.branch_selections_true.load(Ordering::Relaxed),
+            branch_selections_false: stats.branch_selections_false.load(Ordering::Relaxed),
+            budget_fallback_count: stats.budget_fallback_count.load(Ordering::Relaxed),
+            path_length_p50,
+            path_length_p95,
+            projection_depth_p50,
+            projection_depth_p95,
+            decl_subexpression_lowering_count: stats
+                .decl_subexpression_lowering_count
+                .load(Ordering::Relaxed),
+            relation_check_count: stats.relation_check_count.load(Ordering::Relaxed),
+            mapped_per_k_materializations: stats
+                .mapped_per_k_materializations
+                .load(Ordering::Relaxed),
+            substitute_memo_hits: stats.substitute_memo_hits.load(Ordering::Relaxed),
+            substitute_memo_misses: stats.substitute_memo_misses.load(Ordering::Relaxed),
+            evaluate_deferred_memo_hits: stats.evaluate_deferred_memo_hits.load(Ordering::Relaxed),
+            evaluate_deferred_memo_misses: stats
+                .evaluate_deferred_memo_misses
+                .load(Ordering::Relaxed),
+        }
     }
 }

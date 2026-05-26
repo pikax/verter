@@ -227,6 +227,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.substitute_semantic_type_param(node, parameter_node, arg)
     }
 
+    /// Integration-test shim for
+    /// [`Self::evaluate_deferred_semantic_node_with_context`]. Same
+    /// rationale as `substitute_semantic_type_param_for_tests`:
+    /// the helper is `pub(super)` and unreachable from integration
+    /// test crates.
+    pub(crate) fn evaluate_deferred_semantic_node_with_context_for_tests(
+        &self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        self.evaluate_deferred_semantic_node_with_context(node, context)
+    }
+
     /// Intern an opaque node carrying the supplied query error. Used as the
     /// fallback when a semantic subquery cannot be satisfied but the caller
     /// wants a node id rather than a top-level error.
