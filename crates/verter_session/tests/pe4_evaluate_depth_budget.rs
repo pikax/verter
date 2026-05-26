@@ -11,29 +11,31 @@
 //! new id as the cache key, defeating the entry-node hash-cons memo.
 //!
 //! The TLS depth guard caps recursion at
-//! `EVALUATE_DEFERRED_DEPTH_CEILING` (2048). On exhaustion the
+//! `EVALUATE_DEFERRED_DEPTH_CEILING` (256). On exhaustion the
 //! evaluator returns the input node — a structural-transit
 //! carrier-stop equivalent — and DOES NOT publish into the memo
 //! (`ComputeAdmission::ReturnOnly` policy at the evaluator layer).
 //!
-//! This test discriminates the guard by:
+//! The truncation signal is sticky across the recursive call chain:
+//! once any recursive frame on the current thread fires
+//! `over_ceiling`, every parent frame on its unwinding path also
+//! suppresses its publish AND returns its own entry node carrier-
+//! stop, so a parent's downstream-operator reduction over a
+//! truncated child's carrier never enters the warm memo as a
+//! budget-tainted entry.
 //!
-//! 1. Constructing a synthetic alias chain `A0 → A1 → ... → AN` of
-//!    length 3000 (well above the 2048 ceiling). Each alias is an
-//!    `Alias(next)` node, so the evaluator recurses linearly through
-//!    the chain (every `Alias` arm advances `node = target`).
+//! These tests DISCRIMINATE:
 //!
-//! 2. Driving the evaluator on `A0` under `published(Expanded)`.
+//! 1. **Short alias chain** — a 10-deep chain (well under the 256
+//!    ceiling) completes without the guard firing.
 //!
-//! 3. Asserting that the evaluator returns WITHOUT panic / OOM and
-//!    that the result is a well-defined node (either the chain's
-//!    terminal leaf if the loop completed under the ceiling, or a
-//!    mid-chain carrier-stop if the budget fired).
-//!
-//! Pre-guard the evaluator would either complete or stack-overflow
-//! depending on the chain length and stack depth. The guard makes
-//! the behaviour deterministic and bounded regardless of chain
-//! length.
+//! 2. **Deep KeyOf chain** — a 10_000-deep `KeyOf(KeyOf(...))` chain
+//!    (well above the 256 ceiling) triggers the guard. The call
+//!    returns WITHOUT panic / OOM, AND the returned node id equals
+//!    the INPUT node id (the carrier-stop contract), AND zero
+//!    budget-tainted entries are published into
+//!    `evaluate_deferred_memo` for the post-truncation parent
+//!    frames on the unwinding path.
 
 #![allow(clippy::too_many_lines, dead_code, unused_imports)]
 
@@ -122,7 +124,7 @@ fn short_alias_chain_completes_without_hitting_budget_guard() {
 #[test]
 fn budget_guard_returns_input_node_on_deep_recursion() {
     // Build a structurally-synthetic recursive carrier chain:
-    // `KeyOf(KeyOf(...))` nested 4096 deep. Each `KeyOf` arm in
+    // `KeyOf(KeyOf(...))` nested 10_000 deep. Each `KeyOf` arm in
     // `evaluate_deferred_semantic_node_with_context` performs ONE
     // RECURSIVE CALL on the inner `base` before re-dispatching the
     // outer `KeyOf` query. So the chain forces N actual recursive
@@ -142,8 +144,8 @@ fn budget_guard_returns_input_node_on_deep_recursion() {
     ));
 
     // Build a `KeyOf` chain wrapping the leaf at depth well above
-    // the ceiling (2048). 3000 is enough to discriminate the
-    // budget — pre-guard 3000 recursive frames overrun even the
+    // the ceiling (256). 10_000 is enough to discriminate the
+    // budget — pre-guard 10_000 recursive frames overrun even the
     // 134_217_728-byte RUST_MIN_STACK that the workspace test
     // harness sets; post-guard the chain stops at the ceiling and
     // unwinds cleanly.
@@ -155,24 +157,119 @@ fn budget_guard_returns_input_node_on_deep_recursion() {
 
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
 
+    let graph = host.project_type_store().semantic_graph();
+    let baseline = graph.stats_snapshot();
+
     // Drive the evaluator. The depth guard caps recursive entry at
-    // 2048; the inner call returns the input node, the outer
+    // 256; the inner call returns the input node, the outer
     // unwinds the operator dispatch chain (every KeyOf above the
     // ceiling sees the inner call's input-node carrier, opens its
     // own SemanticQueryKey::KeyOf dispatch, and yields whatever
     // that returns — most likely Opaque(Miss) because the underlying
     // input is a Primitive(string) that has no `keyof`).
-    //
-    // The DISCRIMINATING assertion: the call MUST return (no panic,
-    // no stack overflow) and yield a well-defined node. Pre-guard
-    // this could stack-overflow at this depth (4096 recursive
-    // frames). Post-guard the budget caps recursion at 2048.
     let resolved = for_tests::dispatch_evaluate_deferred_for_tests(&host, chain_head, context);
 
-    let graph = host.project_type_store().semantic_graph();
     assert!(
         graph.node_data(resolved).is_some(),
         "resolved node MUST have valid semantic data — got None, which means the guard \
          returned a sentinel rather than a real node id"
+    );
+
+    // ── Discriminator 1 — carrier-stop contract: the top-level
+    // call MUST return the INPUT node. The TLS truncated flag is
+    // sticky from the moment the deepest frame fires the ceiling;
+    // every parent frame on the unwinding path observes the flag
+    // and returns its own `entry_node`. The chain_head is the
+    // top-level entry, so the carrier-stop reaches the outermost
+    // caller unchanged. ──
+    assert_eq!(
+        resolved, chain_head,
+        "post-truncation the top-level call MUST return the input node (carrier-stop \
+         contract). Got {resolved:?}, expected the chain_head {chain_head:?}. A non-input \
+         return id means the truncation signal did not propagate to the top-level publish \
+         site — the parent frame published a budget-tainted result instead of yielding the \
+         carrier-stop."
+    );
+
+    // ── Discriminator 2 — no budget-tainted publish: re-issue the
+    // same `(chain_head, context)` call. If the prior call had
+    // published a stale entry into `evaluate_deferred_memo`, this
+    // second call would HIT the memo and the miss-counter would
+    // NOT advance. Under the correct contract no publish landed,
+    // so the second call MUST miss again. ──
+    let after_first = graph.stats_snapshot();
+    let _ = for_tests::dispatch_evaluate_deferred_for_tests(&host, chain_head, context);
+    let after_second = graph.stats_snapshot();
+    let second_miss_delta =
+        after_second.evaluate_deferred_memo_misses - after_first.evaluate_deferred_memo_misses;
+    assert!(
+        second_miss_delta >= 1,
+        "second call on `(chain_head, context)` MUST miss the memo (no budget-tainted \
+         publish from the truncated first call). Observed miss delta = {second_miss_delta}. \
+         A zero delta means the truncated first call published into the memo and the \
+         second call hit a stale entry — violating ComputeAdmission::ReturnOnly at the \
+         evaluator layer."
+    );
+    let baseline_to_after_first_miss_delta =
+        after_first.evaluate_deferred_memo_misses - baseline.evaluate_deferred_memo_misses;
+    let _ = baseline_to_after_first_miss_delta;
+}
+
+#[test]
+fn budget_guard_skips_parent_frame_publish_under_ceiling() {
+    // Discriminator for the cooperative-cascade contract: when the
+    // depth guard fires inside a recursive sub-evaluation, the
+    // PARENT frame (still under the ceiling) must ALSO skip its
+    // publish into `evaluate_deferred_memo`, because the parent
+    // consumed a truncated child's input-node carrier and any
+    // downstream operator the parent dispatched against that
+    // carrier produced a budget-tainted result.
+    //
+    // Setup: build a 10_000-deep `KeyOf` chain over a Primitive
+    // leaf. The OUTERMOST `KeyOf` is the top-level entry node; its
+    // recursive sub-call walks the inner chain — which trips the
+    // guard at depth 256 — and the outer arm receives the truncated
+    // inner result. If the suppression cascade is wired correctly,
+    // the OUTERMOST node MUST NOT appear in the memo after the call.
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let store = host.project_type_store().semantic_graph();
+    let leaf = store.intern_node(SemanticNodeData::Primitive(
+        verter_session::semantic_query::PrimitiveKind::String,
+    ));
+    let mut current = leaf;
+    for _ in 0..10_000 {
+        current = store.intern_node(SemanticNodeData::KeyOf { base: current });
+    }
+    let outermost = current;
+
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+    let graph = host.project_type_store().semantic_graph();
+
+    let before = graph.stats_snapshot();
+    let _ = for_tests::dispatch_evaluate_deferred_for_tests(&host, outermost, context);
+    let after_one = graph.stats_snapshot();
+    // Confirm the call actually ran the recursive walk: at least
+    // one miss must have been recorded (the first cold lookup).
+    let one_miss_delta =
+        after_one.evaluate_deferred_memo_misses - before.evaluate_deferred_memo_misses;
+    assert!(
+        one_miss_delta >= 1,
+        "first call MUST miss the memo on the cold outermost key (delta={one_miss_delta})"
+    );
+
+    // Re-evaluate. If the parent published a budget-tainted entry,
+    // this call hits — miss-counter does NOT advance. Under the
+    // correct contract, the parent suppressed its publish, so the
+    // second call misses again.
+    let _ = for_tests::dispatch_evaluate_deferred_for_tests(&host, outermost, context);
+    let after_two = graph.stats_snapshot();
+    let two_miss_delta =
+        after_two.evaluate_deferred_memo_misses - after_one.evaluate_deferred_memo_misses;
+    assert!(
+        two_miss_delta >= 1,
+        "second call on the outermost truncated key MUST miss the memo again (parent \
+         frame suppressed its publish under truncation). Observed delta = {two_miss_delta}. \
+         A zero delta means a budget-tainted result survived in the warm memo — the \
+         parent-frame publish-suppression cascade is broken."
     );
 }
