@@ -211,6 +211,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.ctx.project_type_store().semantic_graph()
     }
 
+    /// Integration-test shim for
+    /// [`Self::substitute_semantic_type_param`]. The substitute
+    /// helper is `pub(super)` and unreachable from integration
+    /// test crates; this method forwards the call so PE4 hash-cons
+    /// discriminator tests can verify the memo with controlled
+    /// input triples. Crate-public to keep the visibility scope as
+    /// narrow as possible.
+    pub(crate) fn substitute_semantic_type_param_for_tests(
+        &self,
+        node: SemanticNodeId,
+        parameter_node: SemanticNodeId,
+        arg: SemanticNodeId,
+    ) -> SemanticNodeId {
+        self.substitute_semantic_type_param(node, parameter_node, arg)
+    }
+
     /// Intern an opaque node carrying the supplied query error. Used as the
     /// fallback when a semantic subquery cannot be satisfied but the caller
     /// wants a node id rather than a top-level error.

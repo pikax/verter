@@ -996,6 +996,17 @@ pub struct SemanticGraphStats {
     /// `0` for hoist-eligible mapped types; `N = key_count` for
     /// K-dependent mapped types whose per-K materialiser must run.
     pub mapped_per_k_materializations: u64,
+    /// Hash-cons memo hits on
+    /// `substitute_semantic_type_param`. Discriminates the
+    /// substitute cache: a second call with the same
+    /// `(value_expr, parameter_node, arg)` triple bumps this
+    /// counter and skips the recursive walk.
+    pub substitute_memo_hits: u64,
+    /// Hash-cons memo misses on
+    /// `substitute_semantic_type_param`. Bumped when the cache has
+    /// no entry for the queried triple and a fresh recursive walk
+    /// runs.
+    pub substitute_memo_misses: u64,
 }
 
 /// Structured query-level failure. Distinct from panics — callers decide
@@ -2104,7 +2115,8 @@ mod tests {
     ///   projection_depth_p50, projection_depth_p95,
     ///   origin_edges_per_node_p50, origin_edges_per_node_p95,
     ///   decl_subexpression_lowering_count, relation_check_count,
-    ///   mapped_per_k_materializations.
+    ///   mapped_per_k_materializations, substitute_memo_hits,
+    ///   substitute_memo_misses.
     /// - Exceptional-path: budget_fallback_count, same_path_sentinel_returns,
     ///   joined_waits, inflight_aborted_retries, cold_aborts_swept.
     #[test]
@@ -2135,6 +2147,8 @@ mod tests {
             "decl_subexpression_lowering_count",
             "relation_check_count",
             "mapped_per_k_materializations",
+            "substitute_memo_hits",
+            "substitute_memo_misses",
         ];
         for field in expected_to_fire {
             assert!(

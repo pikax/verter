@@ -117,6 +117,17 @@ pub(super) struct AtomicSemanticGraphStats {
     /// `0` for hoist-eligible mapped types and `N = key_count` for
     /// K-dependent mapped types.
     pub(super) mapped_per_k_materializations: AtomicU64,
+    /// Hash-cons memo hits on
+    /// `substitute_semantic_type_param`. Discriminating signal for
+    /// the substitute hash-cons: a second call with the same
+    /// `(value_expr, parameter_node, arg)` triple short-circuits
+    /// the recursive walk and bumps this counter.
+    pub(super) substitute_memo_hits: AtomicU64,
+    /// Hash-cons memo misses on
+    /// `substitute_semantic_type_param`. Increments when the cache
+    /// has no entry for the queried triple — the recursive walk
+    /// runs and the result is published into the memo.
+    pub(super) substitute_memo_misses: AtomicU64,
 }
 
 impl Default for AtomicSemanticGraphStats {
@@ -145,6 +156,8 @@ impl Default for AtomicSemanticGraphStats {
             relation_check_count: AtomicU64::new(0),
             intern_preserving_scope_calls: AtomicU64::new(0),
             mapped_per_k_materializations: AtomicU64::new(0),
+            substitute_memo_hits: AtomicU64::new(0),
+            substitute_memo_misses: AtomicU64::new(0),
         }
     }
 }

@@ -391,6 +391,25 @@ pub struct SemanticGraphStore {
     /// with no registration. The `entries → canonical_to_entries shards`
     /// lock order permits taking a shard mutex while `entries` is held.
     memo_budget: crate::bounded_query_retention::GlobalRetentionBudget<FamilyKey>,
+    /// Hash-cons memo for [`crate::project_semantic_dispatch::ProjectSemanticDispatch::substitute_semantic_type_param`].
+    /// Maps `(value_expr, parameter_node, arg)` triples to the
+    /// substituted node id. The store IS the arena and the arena is
+    /// already scoped by `(project_identity, parse_env_hash,
+    /// resolve_env_hash, type_env_hash, lib_env_hash)` — semantic-node
+    /// ids inside one store are content-addressed integers, so a
+    /// triple of ids is a complete identity for the substitution
+    /// result. No fact-signature validation is required because
+    /// substitution is a pure function of its three inputs.
+    ///
+    /// Entries are immutable after publish and never carry per-request
+    /// state. `invalidate_all` clears the map alongside the family
+    /// memo so a workspace-content-generation bump never leaves a
+    /// stale substitution behind. The map collapses identical
+    /// `(value_expr, parameter_node, arg)` triples that surface from
+    /// different call paths (same mapped-type instance reduced from
+    /// multiple components, repeated indexed-access projections, etc.)
+    /// to a single result, amortising the recursive walk.
+    substitute_memo: DashMap<(SemanticNodeId, SemanticNodeId, SemanticNodeId), SemanticNodeId>,
 }
 
 /// Γ.B reverse-index type alias. See
@@ -1288,6 +1307,14 @@ impl SemanticGraphStore {
         self.named_type_index.clear_and_bump_generation();
         self.relation_memo.clear();
         self.derivation.lock().clear();
+        // Drop the substitute hash-cons memo on a project-generation
+        // bump alongside the other content-derived caches. The arena
+        // itself is append-only so semantic-node ids remain valid,
+        // but the structural-id-keyed substitute memo would otherwise
+        // serve cached results derived from now-stale value
+        // expressions whose underlying files have moved. Clear in
+        // lockstep with the family memo and the relation memo.
+        self.substitute_memo.clear();
         removed
     }
 
@@ -1825,6 +1852,8 @@ impl SemanticGraphStore {
                 .stats
                 .mapped_per_k_materializations
                 .load(Ordering::Relaxed),
+            substitute_memo_hits: self.stats.substitute_memo_hits.load(Ordering::Relaxed),
+            substitute_memo_misses: self.stats.substitute_memo_misses.load(Ordering::Relaxed),
         }
     }
 
@@ -1893,6 +1922,58 @@ impl SemanticGraphStore {
         self.stats
             .mapped_per_k_materializations
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Hash-cons memo lookup for
+    /// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::substitute_semantic_type_param`].
+    /// Returns the cached result for `(value_expr, parameter_node, arg)`,
+    /// or `None` on miss. Reads are lock-free `DashMap::get` plus
+    /// `Arc::clone` of the entry's value. The cache key is a triple
+    /// of in-arena semantic-node ids; because the arena is scoped to
+    /// this store (per project_identity + env hashes) the ids alone
+    /// are sufficient identity — no further validation is required.
+    ///
+    /// Bumps `substitute_memo_hits` on hit, `substitute_memo_misses`
+    /// on miss.
+    pub fn substitute_memo_get(
+        &self,
+        value_expr: SemanticNodeId,
+        parameter_node: SemanticNodeId,
+        arg: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        let hit = self
+            .substitute_memo
+            .get(&(value_expr, parameter_node, arg))
+            .map(|entry| *entry.value());
+        if hit.is_some() {
+            self.stats
+                .substitute_memo_hits
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.stats
+                .substitute_memo_misses
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        hit
+    }
+
+    /// Publish a hash-cons memo entry for
+    /// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::substitute_semantic_type_param`].
+    /// Entries are immutable after publish; concurrent writes for
+    /// the same triple must resolve to the same result (substitution
+    /// is a pure function), so the `entry`-API's first-writer-wins
+    /// semantics is correct — a later writer's value would be
+    /// structurally identical to the first writer's.
+    pub fn substitute_memo_publish(
+        &self,
+        value_expr: SemanticNodeId,
+        parameter_node: SemanticNodeId,
+        arg: SemanticNodeId,
+        result: SemanticNodeId,
+    ) {
+        self.substitute_memo
+            .entry((value_expr, parameter_node, arg))
+            .or_insert(result);
     }
 
     /// Warm-lookup a key **without `ReadSetSignature` validation**.

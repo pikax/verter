@@ -428,6 +428,23 @@ pub mod for_tests {
             .lower_type_expr_in_scope_with_context(scope_canonical_id, expr, context)
     }
 
+    /// Drive
+    /// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::substitute_semantic_type_param`]
+    /// from integration tests. The substitute helper is
+    /// `pub(super)` so integration tests cannot reach it directly;
+    /// this shim instantiates a `ProjectSemanticDispatch` and
+    /// forwards the call so PE4 hash-cons discriminator tests can
+    /// verify cache behaviour with controlled input triples.
+    pub fn dispatch_substitute_for_tests(
+        host: &crate::VerterHost,
+        node: crate::semantic_query::SemanticNodeId,
+        parameter_node: crate::semantic_query::SemanticNodeId,
+        arg: crate::semantic_query::SemanticNodeId,
+    ) -> crate::semantic_query::SemanticNodeId {
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        dispatch.substitute_semantic_type_param_for_tests(node, parameter_node, arg)
+    }
+
     /// Returns `true` iff `host.active_session_view()` returns `None`.
     ///
     /// This shim is needed because `ResolverContext` is sealed — integration

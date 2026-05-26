@@ -41,13 +41,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
         parameter_node: SemanticNodeId,
         arg: SemanticNodeId,
     ) -> SemanticNodeId {
-        // Change-tracking through
-        // recursion. The internal helper returns (result, changed)
-        // so each branch can short-circuit the rebuild path when no
-        // descendant produced a different node id. The public
-        // signature is unchanged; callers see only the result id.
-        self.substitute_with_change_tracking(node, parameter_node, arg)
-            .0
+        // Hash-cons memo. The store-owned `substitute_memo` collapses
+        // identical `(value_expr, parameter_node, arg)` triples that
+        // reach this entry-point from different call paths (per-K
+        // materialiser loops on the SAME mapped-type instance reduced
+        // from multiple components, repeated `Pick<T, K>` projections
+        // across the corpus, etc.) to a single result. The store is
+        // arena-scoped, and semantic-node ids inside one arena are
+        // content-addressed integers — so a triple of ids is a
+        // complete identity for the substitution result. Substitution
+        // is a pure function of its three inputs, so the cache needs
+        // no fact-signature validation.
+        if let Some(cached) = self.graph().substitute_memo_get(node, parameter_node, arg) {
+            return cached;
+        }
+        // Change-tracking through recursion. The internal helper
+        // returns (result, changed) so each branch can short-circuit
+        // the rebuild path when no descendant produced a different
+        // node id. The public signature is unchanged; callers see only
+        // the result id.
+        let result = self
+            .substitute_with_change_tracking(node, parameter_node, arg)
+            .0;
+        self.graph()
+            .substitute_memo_publish(node, parameter_node, arg, result);
+        result
     }
 
     /// / Fix D internal helper. Returns `(result, changed)`
