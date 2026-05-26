@@ -1097,8 +1097,21 @@ impl NapiWorkspace {
 impl NapiWorkspace {
     /// Create a new workspace rooted at the given directories.
     ///
-    /// The workspace auto-discovers tsconfigs, builds the project graph,
-    /// and populates the resolver.
+    /// **Lazy by design.** The constructor stores the roots and the
+    /// backing `FilesystemWorkspace` only — it does NOT auto-discover
+    /// tsconfigs or build a project graph. Until a caller invokes
+    /// [`Self::configure_projects`] (`workspace.configureProjects(...)`
+    /// in JS), `Engine::resolve_import` walks an empty `ProjectGraph`
+    /// and falls through to the bare-VFS resolver.
+    ///
+    /// JS consumers that need a configured workspace MUST call
+    /// `configureProjects` after construction, supplying the alias map
+    /// derived from the project's tsconfig chain. The canonical pattern
+    /// lives in `packages/component-meta/src/compat/checker.ts`:
+    /// `extractPathAliases(parsedTsconfig, projectRoot)` produces the
+    /// `NapiIdeProjectConfig` shape, which is passed to
+    /// `workspace.configureProjects([aliases])`. Bench and audit
+    /// harnesses mirror the same shape.
     #[napi(constructor)]
     pub fn new(roots: Vec<String>) -> Self {
         let ws = verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions {

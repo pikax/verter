@@ -11,13 +11,19 @@
  * ## Multi-file dependency handling
  *
  * The worker backs the `ComponentMetaHost` with a `Workspace` rooted
- * at the fixture's `uiRoot`. The workspace auto-discovers `tsconfig`
- * files, builds the project graph, and resolves imports against the
- * real dependency tree — so components that import types from other
- * files (the majority of real nuxt-ui components) get a full audit
- * bundle instead of a degenerate single-file view. `ensureLoaded()`
- * pulls the target canonical through the workspace path before the
- * audit call.
+ * at the fixture's `uiRoot`. `NapiWorkspace::new` is lazy by design
+ * (auto-discovering tsconfigs on construction was tried in 9ae1171b8
+ * and reverted after a 3.6x bench regression on `repo_first_pass`).
+ * The harness therefore explicitly mirrors the
+ * `@verter/component-meta/compat/checker.ts:2265` pattern: parse the
+ * project's tsconfig chain into an alias map and install it via
+ * `workspace.configureProjects(...)` BEFORE any `ensureLoaded` /
+ * `upsertBase` / `getComponentMetaWithAudit` call. With the alias map
+ * installed, `Engine::resolve_import` walks the populated
+ * `ProjectGraph` and reaches the pnpm-aware resolver — components
+ * that import types from other files (the majority of real nuxt-ui
+ * components) get a full audit bundle instead of a degenerate
+ * single-file view.
  *
  * ## Env contract
  *
@@ -35,8 +41,8 @@
  * `parseStdoutFields()` in the runner classifies the run.
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
-import { relative } from "node:path";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { relative, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 
 import {
@@ -68,6 +74,96 @@ const { createRequire } = await import("node:module");
 const requireFromHere = createRequire(import.meta.url);
 const native = requireFromHere("@verter/native");
 
+/**
+ * Read a tsconfig file and return its parsed compilerOptions
+ * (best-effort; tolerates JSONC comments). Returns `null` when the
+ * file does not exist or cannot be parsed.
+ */
+function readTsconfigCompilerOptions(
+  tsconfigPath: string,
+): { baseUrl?: string; paths?: Record<string, string[]> } | null {
+  if (!existsSync(tsconfigPath)) {
+    return null;
+  }
+  let raw: string;
+  try {
+    raw = readFileSync(tsconfigPath, "utf8");
+  } catch {
+    return null;
+  }
+  try {
+    const stripped = raw.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+    const parsed = JSON.parse(stripped) as { compilerOptions?: Record<string, unknown> };
+    const opts = (parsed.compilerOptions ?? {}) as Record<string, unknown>;
+    return {
+      baseUrl: typeof opts.baseUrl === "string" ? opts.baseUrl : undefined,
+      paths: (opts.paths ?? undefined) as Record<string, string[]> | undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Install the project's path-alias map on the workspace so
+ * `Engine::resolve_import` can route through the pnpm-aware resolver.
+ *
+ * Mirrors `@verter/component-meta/compat/checker.ts:2265`
+ * (`extractPathAliases` + `workspace.configureProjects([aliases])`)
+ * but reads the tsconfig directly so the audit harness has no compat
+ * dependency. For Nuxt projects, prefers the generated
+ * `.nuxt/tsconfig.app.json` + `.nuxt/tsconfig.shared.json` (where the
+ * real alias map lives); falls back to a top-level `tsconfig.json`
+ * for non-Nuxt fixtures (e.g. the discriminator spec).
+ */
+function configureWorkspaceProjects(
+  workspace: { configureProjects: (configs: unknown[]) => void },
+  uiRoot: string,
+): void {
+  // 1) Prefer the Nuxt-generated tsconfigs — they carry the real
+  //    pnpm-aware alias maps. The bench's `readNuxtCompilerOptions`
+  //    in `meta-ui-bench.ts` uses the same pair.
+  const nuxtAppTsconfig = resolve(uiRoot, ".nuxt", "tsconfig.app.json");
+  const nuxtSharedTsconfig = resolve(uiRoot, ".nuxt", "tsconfig.shared.json");
+  const appOpts = readTsconfigCompilerOptions(nuxtAppTsconfig);
+  const sharedOpts = readTsconfigCompilerOptions(nuxtSharedTsconfig);
+
+  let baseUrl: string | undefined;
+  let mergedPaths: Record<string, string[]> = {};
+  if (appOpts || sharedOpts) {
+    baseUrl = resolve(uiRoot, ".nuxt").replace(/\\/g, "/");
+    mergedPaths = {
+      ...(appOpts?.paths ?? {}),
+      ...(sharedOpts?.paths ?? {}),
+    };
+  } else {
+    // 2) Fall back to the top-level tsconfig.json for non-Nuxt fixtures.
+    const topTsconfig = resolve(uiRoot, "tsconfig.json");
+    const opts = readTsconfigCompilerOptions(topTsconfig);
+    if (opts) {
+      baseUrl = opts.baseUrl;
+      mergedPaths = opts.paths ?? {};
+    }
+  }
+
+  const pathsArray = Object.entries(mergedPaths).map(([pattern, targets]) => ({
+    pattern,
+    targets,
+  }));
+
+  const normalizedRoot = uiRoot.replace(/\\/g, "/");
+  workspace.configureProjects([
+    {
+      root: normalizedRoot,
+      workspaceRoot: normalizedRoot,
+      compilerOptions: {
+        baseUrl,
+        paths: pathsArray.length > 0 ? pathsArray : undefined,
+      },
+    },
+  ]);
+}
+
 const uiRoot = getDefaultUiRoot(import.meta.dirname);
 let componentFile: string;
 try {
@@ -88,14 +184,16 @@ try {
 // canonical, producing a degenerate empty-topology audit.
 const canonical = componentFile;
 
-// Workspace-backed host: `new native.Workspace([uiRoot])` eagerly
-// discovers tsconfigs and publishes a real `WorkspaceSnapshot` so
-// cross-file imports resolve against the real dependency tree the
-// instant the host is constructed. `ensureLoaded` pulls the absolute
-// target through that snapshot. The `upsertBase` branch only fires
-// when the workspace lacks a matching tsconfig (rare in real
-// fixtures) so the worker still produces an audit record.
+// Workspace-backed host: `new native.Workspace([uiRoot])` is lazy by
+// design (eager auto-discovery was reverted from 9ae1171b8 after a
+// 3.6x bench regression). Mirror `compat/checker.ts:2265` exactly:
+// build an alias map from the project's tsconfig chain and install
+// it via `workspace.configureProjects(...)` BEFORE the first
+// `ensureLoaded` / `upsertBase` / `getComponentMetaWithAudit` call.
+// With the alias map installed, `Engine::resolve_import` walks the
+// populated `ProjectGraph` and reaches the pnpm-aware resolver.
 const workspace = new native.Workspace([uiRoot]);
+configureWorkspaceProjects(workspace, uiRoot);
 const project = native.ComponentMetaHost.withWorkspace(
   { auditEnabled: true, footprintCapture: true },
   workspace,

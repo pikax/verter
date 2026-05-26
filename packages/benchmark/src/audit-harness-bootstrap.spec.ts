@@ -5,29 +5,31 @@
  * misleading 19/45 semanticMiss result on `Table.vue` to two
  * independent bootstrap errors in `_audit-component.ts`:
  *
- *  1. `new native.Workspace([root])` historically did NOT publish a
- *     `WorkspaceSnapshot`, so `Engine::resolve_import` walked an empty
+ *  1. The audit harness did NOT install an alias map on the
+ *     workspace, so `Engine::resolve_import` walked an empty
  *     `ProjectGraph` and short-circuited before reaching the
- *     pnpm-aware resolver.
+ *     pnpm-aware resolver. `NapiWorkspace::new` is lazy by design
+ *     (eager auto-discovery was reverted from 9ae1171b8 after a 3.6x
+ *     bench regression) — consumers MUST explicitly call
+ *     `workspace.configureProjects(...)` to install path aliases,
+ *     mirroring `compat/checker.ts:2265`.
  *  2. The audit harness used a root-relative canonical
  *     (`"/" + relative(uiRoot, componentFile)`) that did not match the
  *     absolute project root configured anywhere else in Verter's
  *     host-backed pipeline.
  *
- * This file pairs an architecture guard for each half:
+ * Discrimination strategy: run the audit query with BOTH canonical
+ * forms on the same explicitly-configured workspace and assert that
+ * the absolute form publishes a richer topology than the
+ * root-relative form. The post-fix harness uses the absolute form
+ * AND explicitly configures the project graph; the pre-fix harness
+ * used the root-relative form OR skipped the configureProjects call.
+ * The assertion fails RED iff:
  *
- *  - `napi_workspace_new_*` in `crates/verter_napi/tests/` discriminates
- *    on the S1 Rust-side eager bootstrap.
- *  - The `audit_component_*absolute_canonical` test below discriminates
- *    on the S2 JS-side canonical-id fix.
- *
- * Discrimination strategy for the S2 fix: run the audit query with
- * BOTH canonical forms on the same eager-bootstrap workspace and
- * assert that the absolute form publishes a richer topology than the
- * root-relative form. The post-fix harness uses the absolute form;
- * the pre-fix harness used the root-relative form. The assertion
- * fails RED iff the canonical-id fix is reverted (the absolute path
- * stops outperforming the root-relative one).
+ *  - the canonical-id fix is reverted (absolute stops outperforming
+ *    root-relative on the same configured workspace), OR
+ *  - a future change skips `configureProjects` (both forms regress
+ *    symmetrically and `imported_dependency_entries` drops to 1).
  *
  * The fixture is fully hermetic per the testing-hermeticity rule: a
  * self-contained tempdir with one Vue component, one TS dep, and one
@@ -142,6 +144,33 @@ function buildFixture(): {
 }
 
 /**
+ * Install a minimal alias map on the workspace mirroring
+ * `_audit-component.ts::configureWorkspaceProjects` and
+ * `compat/checker.ts:2265`. The fixture's tsconfig has no
+ * `compilerOptions.paths`, so the installed config carries an empty
+ * paths array — but the mere act of `configureProjects` populates the
+ * `ProjectGraph` with an Explicit-rank entry, which lets
+ * `Engine::resolve_import` route through the pnpm-aware resolver
+ * instead of short-circuiting on an empty graph.
+ */
+function configureWorkspaceForFixture(
+  workspace: { configureProjects: (configs: unknown[]) => void },
+  uiRoot: string,
+): void {
+  const normalizedRoot = uiRoot.replace(/\\/g, "/");
+  workspace.configureProjects([
+    {
+      root: normalizedRoot,
+      workspaceRoot: normalizedRoot,
+      compilerOptions: {
+        baseUrl: undefined,
+        paths: undefined,
+      },
+    },
+  ]);
+}
+
+/**
  * Run the audit harness flow against a given canonical id, returning
  * the parsed bundle for assertion. Mirrors the post-fix
  * `_audit-component.ts` exactly except for the canonical-id form,
@@ -159,6 +188,7 @@ function runAudit(
       : "/" + relative(uiRoot, componentFile).replace(/\\/g, "/");
 
   const workspace = new native.Workspace([uiRoot]);
+  configureWorkspaceForFixture(workspace, uiRoot);
   const project = native.ComponentMetaHost.withWorkspace(
     { auditEnabled: true, footprintCapture: true },
     workspace,
