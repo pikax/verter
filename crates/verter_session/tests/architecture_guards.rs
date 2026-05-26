@@ -4404,6 +4404,75 @@ mod foundations_guards {
                 search_from = abs + prefix.len();
             }
         }
+        // `PE\d+\b` — orchestrator's per-block phase-extraction
+        // marker (e.g. `PE4`, `PE12`). The numeric suffix is
+        // unique to PE-prefixed block identifiers and does not
+        // appear in legitimate code prose. Case-sensitive on the
+        // leading `PE` to avoid flagging ordinary uses of the
+        // bigram (peripherals, peer-to-peer literals etc.).
+        {
+            let mut search_from = 0usize;
+            let bytes = line.as_bytes();
+            while let Some(rel) = line[search_from..].find("PE") {
+                let abs = search_from + rel;
+                // Must be at start of token: preceding char is NOT
+                // ASCII alphanumeric / underscore.
+                let is_word_start =
+                    abs == 0 || !(bytes[abs - 1].is_ascii_alphanumeric() || bytes[abs - 1] == b'_');
+                if is_word_start {
+                    let mut after = abs + 2;
+                    let digit_start = after;
+                    while after < bytes.len() && bytes[after].is_ascii_digit() {
+                        after += 1;
+                    }
+                    if after > digit_start {
+                        // Must be word boundary at the end too: the
+                        // following char is NOT ASCII alphanumeric /
+                        // underscore.
+                        let is_word_end = after >= bytes.len()
+                            || !(bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_');
+                        if is_word_end {
+                            return true;
+                        }
+                    }
+                }
+                search_from = abs + 2;
+            }
+        }
+        // `/ Fix [A-Z]\b` — orchestrator's per-fix alpha marker
+        // (e.g. `/ Fix D`, `/ Fix AX`). The leading slash + space
+        // disambiguates from legitimate "Fix" prose. Case-sensitive
+        // on the leading `Fix` to avoid flagging the verb
+        // ("fix the bug"). The trailing letter MUST be uppercase
+        // and at a word boundary to avoid flagging "Fix Definition"
+        // / "Fix Each" prose.
+        {
+            let needle = "/ Fix ";
+            let bytes = line.as_bytes();
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(needle) {
+                let abs = search_from + rel;
+                let after = abs + needle.len();
+                if after < bytes.len() && bytes[after].is_ascii_uppercase() {
+                    // After the uppercase letter, accept either an
+                    // additional uppercase (e.g. `AX`), end-of-line,
+                    // or non-alphabetic (space, punctuation). Reject
+                    // lowercase trailing because that's a real word
+                    // ("/ Fix Definition" type prose, though unlikely).
+                    if after + 1 >= bytes.len() {
+                        return true;
+                    }
+                    let trailing = bytes[after + 1];
+                    if trailing.is_ascii_uppercase()
+                        || trailing.is_ascii_digit()
+                        || !trailing.is_ascii_alphabetic()
+                    {
+                        return true;
+                    }
+                }
+                search_from = abs + needle.len();
+            }
+        }
         false
     }
 
@@ -4508,6 +4577,15 @@ mod foundations_guards {
             // Commit XY — alpha-suffixed commit markers.
             "// Commit AX (codex-hybrid): the call-site provides the cursor.",
             "// see Commit BX for the carrier-stop closure.",
+            // PE\d+ — orchestrator's per-block phase-extraction
+            // marker (e.g. `PE4`, `PE12`).
+            "// PE4 hash-cons memo discriminator shim.",
+            "/// (PE4 hoist discriminator).",
+            "// PE12 substrate cleanup follow-up.",
+            // / Fix [A-Z]\b — orchestrator's per-fix alpha marker
+            // (`/ Fix D`, `/ Fix AX`).
+            "//! / Fix D wraps the public substitute in change-tracking.",
+            "/// / Fix AX companion of the substitute helper.",
         ];
         for line in cases {
             assert!(
@@ -4542,6 +4620,17 @@ mod foundations_guards {
             // Commit prose that is NOT an orchestrator marker.
             "// On commit, flush the buffered writes.",
             "/// Commit the in-flight transaction.", // sentence-initial verb, no alphanumeric suffix
+            // PE prose that is NOT an orchestrator marker:
+            // `PE` appearing inside a longer identifier or as a word
+            // not followed by digits must NOT flag.
+            "// Use the SPEC document to look up the contract.",
+            "// PE prose with no digits.",
+            "// `peephole_optimization` is a downstream pass.",
+            "// Type 'PE-1234' marker has lowercase-after-prefix - not orchestrator.",
+            // / Fix prose that is NOT an orchestrator marker:
+            // the trailing token must be uppercase to flag.
+            "// Documentation: /Fix the documentation.",
+            "// Run with `/Fix mode` to enable fixes.",
         ];
         for line in allowed {
             assert!(

@@ -1,6 +1,8 @@
-//! Hash-cons memo accessors for the substitute / evaluate-deferred
-//! caches. Extracted from `mod.rs` to keep the Tier-2 split-target
-//! module under the 4000-LOC architecture-guard budget.
+//! Hash-cons memo accessors for the
+//! `substitute_semantic_type_param` and
+//! `evaluate_deferred_semantic_node_with_context` caches. Extracted
+//! from `mod.rs` to keep the split-target module under the
+//! architecture-guard line ceiling.
 //!
 //! Both memos collapse identical structural keys reaching the
 //! underlying helpers
@@ -132,7 +134,7 @@ impl SemanticGraphStore {
     /// stale `(node_id, ctx) → result_id` mapping computed by walking
     /// through now-invalidated content would otherwise survive the
     /// edit and poison every subsequent caller for the same key.
-    pub(super) fn clear_pe4_memos(&self) {
+    pub(super) fn clear_hash_cons_memos(&self) {
         self.substitute_memo.clear();
         self.evaluate_deferred_memo.clear();
     }

@@ -214,10 +214,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Integration-test shim for
     /// [`Self::substitute_semantic_type_param`]. The substitute
     /// helper is `pub(super)` and unreachable from integration
-    /// test crates; this method forwards the call so PE4 hash-cons
+    /// test crates; this method forwards the call so the hash-cons
     /// discriminator tests can verify the memo with controlled
     /// input triples. Crate-public to keep the visibility scope as
     /// narrow as possible.
+    ///
+    /// `cfg`-gated to `test` / `debug_assertions`: the method is
+    /// absent from release builds, so the production crate surface
+    /// is unchanged.
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn substitute_semantic_type_param_for_tests(
         &self,
         node: SemanticNodeId,
@@ -232,6 +237,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// rationale as `substitute_semantic_type_param_for_tests`:
     /// the helper is `pub(super)` and unreachable from integration
     /// test crates.
+    ///
+    /// `cfg`-gated to `test` / `debug_assertions`: the method is
+    /// absent from release builds, so the production crate surface
+    /// is unchanged.
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn evaluate_deferred_semantic_node_with_context_for_tests(
         &self,
         node: SemanticNodeId,

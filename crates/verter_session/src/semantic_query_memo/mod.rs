@@ -48,9 +48,9 @@ mod arena;
 mod budgeted_caches;
 mod derivation;
 mod family;
+mod hash_cons_memos;
 mod inflight;
 mod interner;
-mod pe4_memos;
 mod stats;
 #[cfg(any(test, debug_assertions))]
 mod test_gates;
@@ -393,7 +393,13 @@ pub struct SemanticGraphStore {
     /// with no registration. The `entries → canonical_to_entries shards`
     /// lock order permits taking a shard mutex while `entries` is held.
     memo_budget: crate::bounded_query_retention::GlobalRetentionBudget<FamilyKey>,
-    // PE4 hash-cons memos — accessors / docs live in `pe4_memos.rs`.
+    // Hash-cons substitution + evaluation result memos — accessors
+    // and invalidation contract live in `hash_cons_memos.rs`. Both
+    // dedupe identical structural keys reaching
+    // `substitute_semantic_type_param` and
+    // `evaluate_deferred_semantic_node_with_context` so the mapped-
+    // type per-K materialiser does not recompute K-independent
+    // subtrees on every iteration.
     pub(super) substitute_memo:
         DashMap<(SemanticNodeId, SemanticNodeId, SemanticNodeId), SemanticNodeId>,
     pub(super) evaluate_deferred_memo: DashMap<
@@ -1062,8 +1068,8 @@ impl SemanticGraphStore {
         // by construction: no stale derivative survives a content
         // edit. The structural plumbing for a reverse-indexed
         // per-canonical clear is documented as future work in
-        // pe4_memos.rs.
-        self.clear_pe4_memos();
+        // hash_cons_memos.rs.
+        self.clear_hash_cons_memos();
 
         evicted
     }
@@ -1315,9 +1321,9 @@ impl SemanticGraphStore {
         self.named_type_index.clear_and_bump_generation();
         self.relation_memo.clear();
         self.derivation.lock().clear();
-        // PE4 hash-cons memos (substitute, evaluate-deferred) — see
-        // `pe4_memos.rs` for the invalidation contract.
-        self.clear_pe4_memos();
+        // Hash-cons memos (substitute, evaluate-deferred) — see
+        // `hash_cons_memos.rs` for the invalidation contract.
+        self.clear_hash_cons_memos();
         removed
     }
 
@@ -1838,9 +1844,11 @@ impl SemanticGraphStore {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Bump the per-K mapped-type materialiser counter (PE4 hoist
-    /// discriminator). Hoist-eligible mapped types short-circuit
-    /// before the per-K loop and never bump this counter.
+    /// Bump the per-K mapped-type materialiser counter. Used by the
+    /// key-independent-value hoist discriminator to distinguish the
+    /// short-circuit fast path (hoist-eligible mapped types never
+    /// reach the per-K materialiser and never bump this counter)
+    /// from the fully-instantiated per-K loop.
     pub fn record_mapped_per_k_materialization(&self) {
         self.stats
             .mapped_per_k_materializations

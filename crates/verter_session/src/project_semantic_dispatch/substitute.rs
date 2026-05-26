@@ -1,30 +1,30 @@
 //! `substitute_semantic_type_param` — generic type-parameter
-//! substitution into the semantic graph ( Change Split + §2
-//! guard contract row for `substitute_semantic_type_param`).
+//! substitution into the semantic graph.
 //!
-//! / Fix D wraps the public substitute in
+//! The public substitute delegates to
 //! `substitute_with_change_tracking`, which returns `(result,
 //! changed)`. Each match arm short-circuits the rebuild when no
 //! descendant produced a different `SemanticNodeId`, skipping
 //! `intern_preserving_scope` and the per-arm `Vec<>` allocations.
-//! The output is identical to the pre-Fix-D path (the existing
+//! The output is identical to the all-rebuild path (the existing
 //! shard dedup collapses identical rebuilds back to the same id);
-//! the optimization avoids the wasted recursive walk and allocations.
+//! the change-tracking avoids the wasted recursive walk and
+//! allocations on the hot substitute path.
 //!
 //! Both helpers operate on immutable `SemanticNodeData` and publish
 //! new shell identity via [`SemanticGraphStore::intern_preserving_scope`]
-//! (Path C C6a items 4-5) so the rebuilt shell's scope is preserved
-//! from the origin shell. The caller's completion fence observes the
-//! new dep-signature through the shared memo once the substituted
-//! result enters a build flow.
+//! so the rebuilt shell's scope is preserved from the origin shell.
+//! The caller's completion fence observes the new dep-signature
+//! through the shared memo once the substituted result enters a
+//! build flow.
 //!
-//! **Path C C6a items 6-8.** Binder matching is done by `SemanticNodeId`
-//! equality (the binder's interned `TypeParam` node id) rather than
-//! by `display_name` string equality. This makes substitution
-//! correct even when two binders in the same file share a display
-//! name (`K`) but are otherwise distinct identities — the substitute
-//! only touches the binder whose node id matches the caller's
-//! `parameter_node` argument.
+//! **Binder identity contract.** Binder matching is done by
+//! `SemanticNodeId` equality (the binder's interned `TypeParam`
+//! node id) rather than by `display_name` string equality. This
+//! makes substitution correct even when two binders in the same
+//! file share a display name (`K`) but are otherwise distinct
+//! identities — the substitute only touches the binder whose node
+//! id matches the caller's `parameter_node` argument.
 
 use std::sync::Arc;
 
@@ -68,31 +68,32 @@ impl<'a> ProjectSemanticDispatch<'a> {
         result
     }
 
-    /// / Fix D internal helper. Returns `(result, changed)`
-    /// where `changed` is `true` if any descendant produced a
-    /// different `SemanticNodeId` from its input. When `changed` is
-    /// `false`, every recursive arm returns `(node, false)` directly
-    /// so the rebuild + `intern_preserving_scope` allocations are
-    /// skipped entirely.
+    /// Change-tracking internal helper for
+    /// [`Self::substitute_semantic_type_param`]. Returns
+    /// `(result, changed)` where `changed` is `true` if any
+    /// descendant produced a different `SemanticNodeId` from its
+    /// input. When `changed` is `false`, every recursive arm
+    /// returns `(node, false)` directly so the rebuild +
+    /// `intern_preserving_scope` allocations are skipped entirely.
     ///
     /// Identity preservation: the existing
     /// `intern_preserving_scope` shard dedup also collapses
     /// rebuilt-but-identical structures back to the same
     /// `SemanticNodeId`, so the OUTPUT is identical between the
-    /// pre-Fix-D and post-Fix-D paths. The change-tracking
-    /// optimization avoids the wasted recursive walk + Vec<>
-    /// allocations on the hot substitute path.
+    /// change-tracking fast path and the unconditional rebuild
+    /// path. The optimization removes the wasted recursive walk +
+    /// `Vec<>` allocations on the hot substitute path.
     fn substitute_with_change_tracking(
         &self,
         node: SemanticNodeId,
         parameter_node: SemanticNodeId,
         arg: SemanticNodeId,
     ) -> (SemanticNodeId, bool) {
-        // Path C C6a item 8 — node-id equality match BEFORE
-        // destructuring. The pre-C6a string-match arm
+        // Node-id equality match BEFORE destructuring. A string-
+        // match arm
         // (`TypeParam { display_name, .. } if display_name == parameter`)
         // would substitute every binder sharing the parameter's
-        // display_name; under C6a's complete identity model, only the
+        // display_name; under the complete identity model, only the
         // binder whose `SemanticNodeId` matches gets substituted.
         if node == parameter_node {
             return (arg, true);
@@ -100,17 +101,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(data) = self.graph().node_data(node) else {
             return (self.opaque(QueryError::Miss), true);
         };
-        // Path C C6a item 8 footnote — cross-variant name fallback.
-        // `parameter_node` may be a `TypeParam` (the post-C6a
-        // primary path) OR an `Infer` (the build.rs:1432 Infer-arm
-        // cross-variant consumer that interns an Infer node and
-        // calls substitute). Extract the binder's "name" from
-        // either variant so the Infer arm matches Infer references
-        // AND any TypeParam references in `node` whose display_name
-        // matches the binder's name. The latter handles cases where
-        // a TypeScript `infer X` is referenced in the true_branch
-        // as a regular TypeParam (lowered from a name-only
-        // reference), not as a literal Infer node.
+        // Cross-variant name fallback. `parameter_node` may be a
+        // `TypeParam` (the primary path) OR an `Infer` (the
+        // build.rs:1432 Infer-arm cross-variant consumer that
+        // interns an Infer node and calls substitute). Extract the
+        // binder's "name" from either variant so the Infer arm
+        // matches Infer references AND any TypeParam references in
+        // `node` whose display_name matches the binder's name. The
+        // latter handles cases where a TypeScript `infer X` is
+        // referenced in the true_branch as a regular TypeParam
+        // (lowered from a name-only reference), not as a literal
+        // Infer node.
         //
         // Item 8's "leave Infer string-match alone" is
         // preserved; the addition is purely cross-variant
@@ -392,10 +393,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             }
             SemanticNodeData::Mapped { source, mapper } => {
-                // Path C C6a item 9b: shadowing check by node-id
-                // equality. Pre-C6a this compared `mapper.parameter`
-                // (Arc<str>) to `parameter` (&str); post-C6a both are
-                // `SemanticNodeId`s, so the comparison is direct.
+                // Shadowing check by node-id equality. Both
+                // `mapper.parameter` and `parameter` are
+                // `SemanticNodeId`s, so the comparison is direct
+                // and distinguishes a mapper that binds the same
+                // node-id as the caller's `parameter_node` from one
+                // that binds a structurally-equivalent but distinct
+                // binder identity.
                 let shadowed = mapper.parameter_node == parameter_node;
                 let (sub_source, source_changed) =
                     self.substitute_with_change_tracking(*source, parameter_node, arg);
@@ -804,8 +808,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         false
     }
 
-    /// / Fix D companion of `substitute_index_key`. Returns
-    /// `(result, changed)`.
+    /// Change-tracking companion of `substitute_index_key`.
+    /// Returns `(result, changed)` where `changed` is `true` iff
+    /// the underlying typed-node substitution actually rewrote the
+    /// key. The string / number key arms always return `false`
+    /// because their content is invariant under type-parameter
+    /// substitution.
     fn substitute_index_key_with_change_tracking(
         &self,
         index: &IndexKey,

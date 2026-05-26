@@ -428,8 +428,11 @@ pub mod for_tests {
             .lower_type_expr_in_scope_with_context(scope_canonical_id, expr, context)
     }
 
-    /// PE4 hash-cons memo discriminator shim for
-    /// `substitute_semantic_type_param`.
+    /// Integration-test shim that drives the
+    /// `substitute_semantic_type_param` helper so its hash-cons
+    /// discriminator tests can exercise the memo with controlled
+    /// input triples without reaching through the entire query
+    /// pipeline.
     pub fn dispatch_substitute_for_tests(
         host: &crate::VerterHost,
         node: crate::semantic_query::SemanticNodeId,
@@ -440,8 +443,11 @@ pub mod for_tests {
         dispatch.substitute_semantic_type_param_for_tests(node, parameter_node, arg)
     }
 
-    /// PE4 hash-cons memo discriminator shim for
-    /// `evaluate_deferred_semantic_node_with_context`.
+    /// Integration-test shim that drives the
+    /// `evaluate_deferred_semantic_node_with_context` helper so its
+    /// hash-cons + depth-budget discriminator tests can exercise
+    /// the evaluator with controlled (node, context) inputs
+    /// without reaching through the full query pipeline.
     pub fn dispatch_evaluate_deferred_for_tests(
         host: &crate::VerterHost,
         node: crate::semantic_query::SemanticNodeId,
