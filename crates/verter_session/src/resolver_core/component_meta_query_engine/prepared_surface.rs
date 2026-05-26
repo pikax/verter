@@ -506,6 +506,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             | TypeExpr::KeyOf(_)
             | TypeExpr::Rest(_)
             | TypeExpr::RecursiveRef { .. }
+            // Synthetic carriers contribute no own-body surface — they
+            // are intrinsic terminal leaves, equivalent to `Empty` here.
+            | TypeExpr::SyntheticSlotBinding(_)
             | TypeExpr::Infer { .. } => PreparedSurfaceProjection::Empty,
             TypeExpr::IndexedAccess { .. }
             | TypeExpr::Conditional { .. }

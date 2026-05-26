@@ -1517,6 +1517,9 @@ pub(crate) fn collect_type_expr_symbol_refs(
         | TypeExpr::TypeParameter(_)
         | TypeExpr::TypeOf(_)
         | TypeExpr::Infer { .. }
+        // Synthetic carriers carry no workspace symbol references — the
+        // binding_name is intrinsic, not a workspace alias name.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Unknown { .. } => {}
     }
 }

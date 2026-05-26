@@ -1367,6 +1367,9 @@ impl ShallowFileState {
             | TypeExpr::TypeParameter(_)
             | TypeExpr::Infer { .. }
             | TypeExpr::RecursiveRef { .. }
+            // Synthetic carriers contribute no whole-route refs — they
+            // are intrinsic terminal leaves.
+            | TypeExpr::SyntheticSlotBinding(_)
             | TypeExpr::Unknown { .. } => true,
         }
     }
@@ -1982,6 +1985,8 @@ fn collect_type_refs(expr: &TypeExpr, out: &mut Vec<String>) {
         | TypeExpr::TemplateLiteral { .. }
         | TypeExpr::Unknown { .. }
         | TypeExpr::RecursiveRef { .. }
+        // Synthetic carriers reference no type aliases — terminal leaves.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Infer { .. } => {}
     }
 }
@@ -2153,6 +2158,8 @@ fn collect_typeof_roots(expr: &TypeExpr, out: &mut FxHashSet<String>) {
         | TypeExpr::TypeParameter(_)
         | TypeExpr::Infer { .. }
         | TypeExpr::RecursiveRef { .. }
+        // Synthetic carriers carry no `typeof` operand — terminal leaves.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Unknown { .. } => {}
     }
 }

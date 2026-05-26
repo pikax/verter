@@ -101,6 +101,9 @@ fn contains_free_type_parameter(expr: &TypeExpr) -> bool {
         TypeExpr::TypeParameter(_) => true,
         TypeExpr::Primitive(_) | TypeExpr::Literal(_) => false,
         TypeExpr::Unknown { .. } | TypeExpr::Infer { .. } => false,
+        // Synthetic carriers carry no embedded type parameter — closed
+        // intrinsic identity.
+        TypeExpr::SyntheticSlotBinding(_) => false,
         TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
             types.iter().any(contains_free_type_parameter)
         }
@@ -253,6 +256,9 @@ fn walk(expr: &TypeExpr, path: &str, out: &mut Vec<String>) {
         TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
         | TypeExpr::TypeParameter(_)
+        // Synthetic carriers are closed terminal leaves with no
+        // operator descendants.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Unknown { .. } => {}
         // Exception class (b): RecursiveRef's payload is allowed to
         // retain operator forms (they encode the cycle).

@@ -1934,6 +1934,8 @@ fn type_expr_exceeds_node_limit(type_expr: &TypeExpr, limit: usize) -> bool {
             | TypeExpr::TypeOf(_)
             | TypeExpr::Unknown { .. }
             | TypeExpr::RecursiveRef { .. }
+            // Synthetic carrier is a 1-node terminal; never exceeds limit.
+            | TypeExpr::SyntheticSlotBinding(_)
             | TypeExpr::TypeParameter(_) => false,
             TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
                 types.iter().any(|inner| visit(inner, seen, limit))

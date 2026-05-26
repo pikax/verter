@@ -124,7 +124,10 @@ fn visit_expr(
         | TypeExpr::Unknown { .. }
         | TypeExpr::RecursiveRef { .. }
         | TypeExpr::TypeOf(_)
-        | TypeExpr::Infer { .. } => false,
+        | TypeExpr::Infer { .. }
+        // Synthetic carriers carry no embedded type-parameter references
+        // (their identity is the closed scope/slot/binding tuple).
+        | TypeExpr::SyntheticSlotBinding(_) => false,
         TypeExpr::Ref {
             name,
             type_arguments,

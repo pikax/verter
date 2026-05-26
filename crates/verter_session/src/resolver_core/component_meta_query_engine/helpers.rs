@@ -84,6 +84,9 @@ pub(super) fn prepared_member_body_stays_shallow(expr: &TypeExpr) -> bool {
         | TypeExpr::Literal(_)
         | TypeExpr::Unknown { .. }
         | TypeExpr::Infer { .. }
+        // Synthetic carriers are shallow by construction — they ARE the
+        // published leaf and never deepen further.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::TypeOf(_) => true,
         TypeExpr::Parenthesized(inner) | TypeExpr::KeyOf(inner) | TypeExpr::Rest(inner) => {
             prepared_member_body_stays_shallow(inner)
@@ -138,6 +141,9 @@ pub(super) fn prepared_decl_keeps_raw_symbolic_non_object_alias(
         | TypeExpr::Unknown { .. }
         | TypeExpr::RecursiveRef { .. }
         | TypeExpr::TypeParameter(_)
+        // Synthetic carriers are intrinsic closed terminals; the prepared
+        // decl keeps the raw symbolic shape verbatim.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Infer { .. } => true,
         TypeExpr::Ref {
             name,

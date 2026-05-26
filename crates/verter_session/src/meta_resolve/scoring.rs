@@ -114,6 +114,9 @@ pub(crate) fn count_symbolic_carriers_in_expr(expr: &verter_type_expr::TypeExpr)
             TypeExpr::TypeOf(_)
             | TypeExpr::Unknown { .. }
             | TypeExpr::TypeParameter(_)
+            // Synthetic slot-binding carrier IS itself a symbolic
+            // carrier (an unresolved binding identity); count it as one.
+            | TypeExpr::SyntheticSlotBinding(_)
             | TypeExpr::Infer { .. } => {
                 score += 1;
             }
@@ -259,6 +262,8 @@ fn count_generic_detail_in_expr(expr: &verter_type_expr::TypeExpr) -> usize {
             | TypeExpr::Literal(_)
             | TypeExpr::TypeOf(_)
             | TypeExpr::Unknown { .. }
+            // Synthetic carriers carry no generic detail.
+            | TypeExpr::SyntheticSlotBinding(_)
             | TypeExpr::Infer { .. } => {}
         }
     }
@@ -278,6 +283,9 @@ fn type_expr_has_structural_top_level(expr: &verter_type_expr::TypeExpr) -> bool
         | TypeExpr::TypeOf(_)
         | TypeExpr::TypeParameter(_)
         | TypeExpr::Unknown { .. }
+        // Synthetic carriers are intrinsic terminal carriers, not a
+        // concrete structural shape — treat as non-structural.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Infer { .. } => false,
         TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
@@ -346,6 +354,9 @@ pub(crate) fn component_meta_registry_prefers_structural_materialization(
         | TypeExpr::RecursiveRef { .. }
         | TypeExpr::TypeOf(_)
         | TypeExpr::TypeParameter(_)
+        // Synthetic carriers are intrinsic terminals — already final at
+        // the projector surface; no structural materialisation needed.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Infer { .. } => false,
     }
 }

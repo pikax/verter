@@ -1238,6 +1238,21 @@ fn graph_node_to_proto(node: &GraphNode) -> TypeNode {
                 })
                 .collect(),
         }),
+        GraphNode::SyntheticSlotBinding {
+            value_node,
+            scope_canonical_id_id,
+            surface_kind,
+            slot_name_id,
+            binding_name_id,
+        } => type_node::Kind::SyntheticSlotBinding(proto::SyntheticSlotBindingNode {
+            // `value_node` is encoded as a decimal STRING on the wire so
+            // JS Number precision cannot truncate the u64.
+            value_node: value_node.to_string(),
+            scope_canonical_id: *scope_canonical_id_id,
+            surface_kind: *surface_kind,
+            slot_name_id: *slot_name_id,
+            binding_name_id: *binding_name_id,
+        }),
     };
     TypeNode { kind: Some(kind) }
 }

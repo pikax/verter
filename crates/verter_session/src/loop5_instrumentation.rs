@@ -227,6 +227,9 @@ pub fn count_operator_nodes(expr: &verter_type_expr::TypeExpr) -> u64 {
             | TypeExpr::Literal(_)
             | TypeExpr::TypeParameter(_)
             | TypeExpr::RecursiveRef { .. }
+            // Synthetic carriers are intrinsic terminal leaves with no
+            // operator-bearing dispatch.
+            | TypeExpr::SyntheticSlotBinding(_)
             | TypeExpr::Unknown { .. } => {}
         }
     }

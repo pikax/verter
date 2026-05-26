@@ -178,7 +178,10 @@ fn type_expr_contains_imported_ref(expr: &TypeExpr, ctx: &mut PolicyCtx<'_, '_>)
         | TypeExpr::TypeParameter(_)
         | TypeExpr::Infer { .. }
         | TypeExpr::Unknown { .. }
-        | TypeExpr::RecursiveRef { .. } => false,
+        | TypeExpr::RecursiveRef { .. }
+        // Synthetic carriers are intrinsic terminals with no imported
+        // declaration reference.
+        | TypeExpr::SyntheticSlotBinding(_) => false,
     }
 }
 

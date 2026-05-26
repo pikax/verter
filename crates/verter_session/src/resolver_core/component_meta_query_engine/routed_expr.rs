@@ -723,6 +723,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             | TypeExpr::Literal(_)
             | TypeExpr::TypeOf(_)
             | TypeExpr::Infer { .. }
+            // Synthetic carriers reference no prepared scope symbol —
+            // their identity is intrinsic to the scope itself, not a
+            // declaration name within it.
+            | TypeExpr::SyntheticSlotBinding(_)
             | TypeExpr::Unknown { .. } => false,
         }
     }
@@ -1364,6 +1368,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             TypeExpr::Function(_)
             | TypeExpr::Primitive(_)
             | TypeExpr::Literal(_)
+            // Synthetic carriers are intrinsic terminals — no member
+            // path through the carrier is reachable (the carrier IS
+            // the published leaf).
+            | TypeExpr::SyntheticSlotBinding(_)
             | TypeExpr::Unknown { .. } => None,
         }
     }

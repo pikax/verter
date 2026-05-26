@@ -264,6 +264,9 @@ pub(crate) fn type_expr_contains_reducible_operator(expr: &TypeExpr) -> bool {
         | TypeExpr::Literal(_)
         | TypeExpr::TypeParameter(_)
         | TypeExpr::RecursiveRef { .. }
+        // Synthetic carriers carry no reducible operators — they are
+        // intrinsic terminal leaves.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Unknown { .. } => false,
     }
 }

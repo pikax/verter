@@ -382,6 +382,9 @@ pub(super) fn rewrite_expr(expr: &TypeExpr, ctx: &mut PolicyCtx<'_, '_>) -> Opti
         | TypeExpr::TemplateLiteral { .. }
         | TypeExpr::Infer { .. }
         | TypeExpr::RecursiveRef { .. }
+        // Synthetic carriers are intrinsic terminals — never rewritten
+        // by the resolution policy (carrier identity is closed).
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Unknown { .. } => None,
     }
 }
@@ -656,6 +659,10 @@ pub(super) fn body_is_resolvable(body: &TypeExpr, ctx: &PolicyCtx<'_, '_>) -> bo
             !indexed_access_targets_macro_participating(object, ctx)
         }
         TypeExpr::Unknown { .. } | TypeExpr::Infer { .. } | TypeExpr::TypeParameter(_) => false,
+        // Synthetic carriers are intrinsic terminals — they are NOT a
+        // type alias body to resolve; the projector/registry treat them
+        // as the published leaf.
+        TypeExpr::SyntheticSlotBinding(_) => false,
         TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
         | TypeExpr::Union(_)

@@ -1854,6 +1854,9 @@ pub(crate) fn type_expr_has_non_object_top_level_surface(
         | TypeExpr::Unknown { .. }
         | TypeExpr::RecursiveRef { .. }
         | TypeExpr::TypeParameter(_)
+        // Synthetic carriers are intrinsic terminal leaves, not a
+        // non-object top-level surface.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Infer { .. } => false,
     }
 }
@@ -2628,6 +2631,10 @@ pub(crate) fn type_expr_symbolic_penalty(expr: &verter_type_expr::TypeExpr) -> u
         TypeExpr::Unknown { .. }
         | TypeExpr::TypeParameter(_)
         | TypeExpr::RecursiveRef { .. }
+        // Synthetic carriers are intrinsic symbolic terminals; treat
+        // them with the same penalty as RecursiveRef/Unknown — fully
+        // closed but unresolved at the projector surface.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Infer { .. } => 2,
         TypeExpr::Ref { type_arguments, .. } => {
             1 + type_arguments

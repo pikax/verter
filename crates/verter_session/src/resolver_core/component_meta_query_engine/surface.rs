@@ -207,6 +207,9 @@ pub(super) fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
         | TypeExpr::TypeOf(_)
         | TypeExpr::TemplateLiteral { .. }
         | TypeExpr::Infer { .. }
+        // Synthetic carriers are fully materialised at the projector
+        // surface — they ARE the published leaf, not a deferred token.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::RecursiveRef { .. } => true,
     }
 }
@@ -941,6 +944,8 @@ fn substitute_type_expr(expr: &TypeExpr, substitutions: &FxHashMap<String, TypeE
         | TypeExpr::Unknown { .. }
         | TypeExpr::TypeOf(_)
         | TypeExpr::RecursiveRef { .. }
+        // Synthetic carriers carry no embedded type parameters; passthrough.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Infer { .. } => expr.clone(),
     }
 }
@@ -1166,6 +1171,10 @@ pub(super) fn type_expr_references_names(
             | TypeExpr::Unknown { .. }
             | TypeExpr::RecursiveRef { .. }
             | TypeExpr::TypeOf(_)
+            // Synthetic carriers reference no substitutable names —
+            // their identity is closed and intrinsic to the carrier
+            // tuple.
+            | TypeExpr::SyntheticSlotBinding(_)
             | TypeExpr::Infer { .. } => false,
             TypeExpr::Ref {
                 name,

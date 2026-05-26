@@ -403,6 +403,10 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
                 | TypeExpr::RecursiveRef { .. }
                 | TypeExpr::TypeOf(_)
                 | TypeExpr::TypeParameter(_)
+                // Synthetic carriers are intrinsic terminal leaves —
+                // the structural materialiser passes them through
+                // unchanged.
+                | TypeExpr::SyntheticSlotBinding(_)
                 | TypeExpr::Infer { .. } => expr.clone(),
             }
         };
@@ -813,6 +817,9 @@ pub(crate) fn type_expr_contains_public_member_route(expr: &verter_type_expr::Ty
         | TypeExpr::RecursiveRef { .. }
         | TypeExpr::TypeOf(_)
         | TypeExpr::TypeParameter(_)
+        // Synthetic carriers carry no public member route — they are
+        // intrinsic terminal leaves.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Infer { .. } => false,
     }
 }
@@ -900,6 +907,9 @@ pub(crate) fn type_expr_needs_nested_symbolic_route_preservation(
         | TypeExpr::RecursiveRef { .. }
         | TypeExpr::TypeOf(_)
         | TypeExpr::TypeParameter(_)
+        // Synthetic carriers carry no public member route — they are
+        // intrinsic terminal leaves.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Infer { .. } => false,
     }
 }
@@ -1063,6 +1073,10 @@ pub(crate) fn component_meta_registry_should_keep_raw_symbolic_non_object_alias(
         | TypeExpr::Unknown { .. }
         | TypeExpr::RecursiveRef { .. }
         | TypeExpr::TypeParameter(_)
+        // Synthetic carriers are intrinsic closed terminals — the
+        // registry keeps them verbatim (they are never resolved as a
+        // type alias).
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Infer { .. } => true,
         TypeExpr::Ref {
             name,

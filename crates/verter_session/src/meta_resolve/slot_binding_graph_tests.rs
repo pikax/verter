@@ -109,6 +109,8 @@ fn count_type_expr_nodes(ty: &TypeExpr) -> usize {
             | TypeExpr::TypeParameter(_)
             | TypeExpr::Infer { .. }
             | TypeExpr::Unknown { .. }
+            // Synthetic carriers are 1-node terminal leaves.
+            | TypeExpr::SyntheticSlotBinding(_)
             | TypeExpr::TypeOf(_) => {}
             TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
                 for arm in arms.iter() {

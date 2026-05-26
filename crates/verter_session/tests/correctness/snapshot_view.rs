@@ -574,6 +574,12 @@ fn write_type_expr(buf: &mut String, expr: &TypeExpr) {
                 buf.push('>');
             }
         }
+        TypeExpr::SyntheticSlotBinding(key) => {
+            // Snapshot rendering for the synthetic slot-binding carrier:
+            // display as the binding name (parser-equivalent surface),
+            // matching the TS bridge's display contract.
+            buf.push_str(key.binding_name.as_ref());
+        }
         TypeExpr::Unknown { raw } => {
             // For Unknown, fall back to the raw source so the gate
             // can still distinguish "Verter could not lower X" from

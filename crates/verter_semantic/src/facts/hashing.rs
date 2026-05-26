@@ -476,6 +476,38 @@ impl<'a> Walker<'a> {
                 self.buf
                     .extend_from_slice(&(conditional_context.len() as u32).to_le_bytes());
             }
+            TypeExpr::SyntheticSlotBinding(key) => {
+                // Distinct discriminator from `Ref` (which routes through
+                // `walk_ref` and emits 0x40+ on type-param hit, or the
+                // ref-name body otherwise). The carrier is NEVER resolved
+                // as a type alias via the type registry — its identity is
+                // intrinsic: (scope_canonical_id, surface_kind, slot_name,
+                // binding_name, value_node).
+                //
+                // value_node discriminates two same-named carriers in
+                // different slots of the same component, so two carriers
+                // with the same binding_name but different value_node
+                // hash differently.
+                self.buf.push(0x39);
+                self.buf
+                    .extend_from_slice(key.scope_canonical_id.as_bytes());
+                self.buf.push(0xFF);
+                self.buf.push(match key.surface_kind {
+                    verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding => 0,
+                    verter_type_expr::SyntheticCarrierSurfaceKind::Binding => 1,
+                });
+                match &key.slot_name {
+                    Some(name) => {
+                        self.buf.push(1);
+                        self.buf.extend_from_slice(name.as_bytes());
+                        self.buf.push(0xFF);
+                    }
+                    None => self.buf.push(0),
+                }
+                self.buf.extend_from_slice(key.binding_name.as_bytes());
+                self.buf.push(0xFF);
+                self.buf.extend_from_slice(&key.value_node.to_le_bytes());
+            }
             TypeExpr::Unknown { raw } => {
                 self.buf.push(0x3F);
                 self.buf.extend_from_slice(raw.as_bytes());
@@ -882,6 +914,15 @@ impl<'a> Walker<'a> {
                 key.push(0xFF);
                 key.extend_from_slice(&(type_arguments.as_ptr() as usize).to_le_bytes());
             }
+            TypeExpr::SyntheticSlotBinding(arc_key) => {
+                // The carrier identity is the full (scope, surface_kind,
+                // slot_name, binding_name, value_node) tuple. Use the
+                // `Arc<SyntheticCarrierKey>` pointer for cheap identity
+                // discrimination — physically distinct Arcs are distinct
+                // carriers (the cycle-detection key never recurses).
+                key.push(0xB4);
+                key.extend_from_slice(&(Arc::as_ptr(arc_key) as usize).to_le_bytes());
+            }
             TypeExpr::Unknown { raw } => {
                 key.push(0xBF);
                 key.extend_from_slice(raw.as_bytes());
@@ -1135,6 +1176,57 @@ mod tests {
         assert_eq!(
             p_a_before, p_a_after,
             "MemberPresence(a) MUST be unchanged when sibling added"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // S1 discrimination tests for the `TypeExpr::SyntheticSlotBinding`
+    // variant (Block 6.j R22-final substrate removal). The fact-hash
+    // walker must use a DISTINCT discriminator tag from `Ref` so that
+    // a synthetic carrier with `binding_name = "x"` does NOT collide
+    // with a workspace `TypeExpr::Ref { name: "x", type_arguments: [] }`.
+    // ------------------------------------------------------------------
+
+    fn synthetic_carrier(scope: &str, binding_name: &str, value_node: u64) -> TypeExpr {
+        use verter_type_expr::{SyntheticCarrierKey, SyntheticCarrierSurfaceKind};
+        TypeExpr::synthetic_slot_binding(SyntheticCarrierKey {
+            scope_canonical_id: Arc::from(scope),
+            surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
+            slot_name: Some(Arc::from("default")),
+            binding_name: Arc::from(binding_name),
+            value_node,
+        })
+    }
+
+    #[test]
+    fn synthetic_carrier_fact_hash_differs_from_ref_with_same_name() {
+        let carrier = synthetic_carrier("/abs/Foo.vue", "controls", 42);
+        let plain_ref = name_ref("controls");
+
+        let carrier_hash = compute_semantic_hash(&carrier, SymbolSpace::Type, &UnresolvedLens).hash;
+        let ref_hash = compute_semantic_hash(&plain_ref, SymbolSpace::Type, &UnresolvedLens).hash;
+
+        assert_ne!(
+            carrier_hash, ref_hash,
+            "synthetic carrier and workspace Ref with the same `name` MUST hash distinctly"
+        );
+    }
+
+    #[test]
+    fn synthetic_carrier_fact_hash_value_node_discriminates() {
+        // Same scope + binding_name, different value_node => distinct
+        // hashes. Guards the rule that two same-binding-name carriers
+        // in different slots of the same component are distinct
+        // identities.
+        let a = synthetic_carrier("/abs/Foo.vue", "controls", 1);
+        let b = synthetic_carrier("/abs/Foo.vue", "controls", 2);
+
+        let a_hash = compute_semantic_hash(&a, SymbolSpace::Type, &UnresolvedLens).hash;
+        let b_hash = compute_semantic_hash(&b, SymbolSpace::Type, &UnresolvedLens).hash;
+
+        assert_ne!(
+            a_hash, b_hash,
+            "synthetic carriers differing only in value_node MUST hash distinctly"
         );
     }
 }

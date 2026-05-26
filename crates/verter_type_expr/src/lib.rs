@@ -58,6 +58,42 @@ impl TypeExprScope {
 // Core AST
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// SyntheticSlotBinding carrier — typed-IR variant minted by
+// `publish_merged_bindings` at the no-parser branch
+// ---------------------------------------------------------------------------
+
+/// Surface kind for a synthetic carrier minted at slot-binding or
+/// `defineSlots` binding publication when no parser-side binding
+/// expression is available. Used to distinguish the two surfaces on
+/// the typed-IR variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SyntheticCarrierSurfaceKind {
+    SlotBinding,
+    Binding,
+}
+
+/// Intrinsic, shallow-by-construction identity for a synthetic carrier
+/// minted by `publish_merged_bindings`. Identity is the FULL
+/// (scope_canonical_id, surface_kind, slot_name, binding_name, value_node)
+/// tuple — `value_node` discriminates two same-named carriers in
+/// different slots of the same component. The carrier is NEVER
+/// resolved as a type alias via the type registry; same-name
+/// poisoning of a real workspace alias is structurally impossible
+/// because it lives on a distinct `TypeExpr` variant.
+///
+/// `value_node` is stored as `u64` because `verter_type_expr` cannot
+/// depend on `verter_session`. FFI / JSON serialise `value_node` as a
+/// decimal STRING to avoid JS Number precision loss.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SyntheticCarrierKey {
+    pub scope_canonical_id: Arc<str>,
+    pub surface_kind: SyntheticCarrierSurfaceKind,
+    pub slot_name: Option<Arc<str>>,
+    pub binding_name: Arc<str>,
+    pub value_node: u64,
+}
+
 /// Internal type expression node.
 ///
 /// Syntax-preserving — captures TypeScript type annotation structure
@@ -166,6 +202,14 @@ pub enum TypeExpr {
         type_arguments: Arc<[TypeExpr]>,
         conditional_context: Arc<[RecursiveConditionalFrame]>,
     },
+
+    /// Synthetic slot-binding / `defineSlots` binding carrier. Minted only
+    /// at the no-parser branch of `publish_merged_bindings`. The
+    /// projector pipeline and component-meta registry treat this variant
+    /// as a shallow terminal — explicit deep materialisation routes
+    /// through `ShapeCacheKey::semantic_node_whole(scope, value_node,
+    /// mode)`. See `[[component-meta-shallow-by-default-rule]]`.
+    SyntheticSlotBinding(Arc<SyntheticCarrierKey>),
 
     /// A type the lowering could not represent.
     /// Carries the raw source text for diagnostics.
@@ -399,6 +443,34 @@ pub fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
                 type_arguments: Arc::from(args),
                 conditional_context: Arc::from(ctx),
             })
+        }
+        "syntheticSlotBinding" => {
+            let scope_canonical_id = v.get("scopeCanonicalId")?.as_str()?;
+            let surface_kind = match v.get("surfaceKind")?.as_str()? {
+                "slotBinding" => SyntheticCarrierSurfaceKind::SlotBinding,
+                "binding" => SyntheticCarrierSurfaceKind::Binding,
+                _ => return None,
+            };
+            let slot_name = v.get("slotName").and_then(|s| {
+                if s.is_null() {
+                    None
+                } else {
+                    s.as_str().map(Arc::<str>::from)
+                }
+            });
+            let binding_name = v.get("bindingName")?.as_str()?;
+            // valueNode is serialised as a decimal STRING to avoid JS
+            // Number precision loss; decode it back to u64 here.
+            let value_node = v.get("valueNode")?.as_str()?.parse::<u64>().ok()?;
+            Some(TypeExpr::SyntheticSlotBinding(Arc::new(
+                SyntheticCarrierKey {
+                    scope_canonical_id: Arc::from(scope_canonical_id),
+                    surface_kind,
+                    slot_name,
+                    binding_name: Arc::from(binding_name),
+                    value_node,
+                },
+            )))
         }
         "unknown" => {
             let raw = v.get("raw")?.as_str()?.to_string();
@@ -841,6 +913,12 @@ impl TypeExpr {
         }
     }
 
+    /// Create a synthetic slot-binding / `defineSlots` binding carrier.
+    /// See [`SyntheticCarrierKey`] for identity semantics.
+    pub fn synthetic_slot_binding(key: SyntheticCarrierKey) -> Self {
+        Self::SyntheticSlotBinding(Arc::new(key))
+    }
+
     /// Returns `true` if this is a `RecursiveRef` node.
     pub fn is_recursive_ref(&self) -> bool {
         matches!(self, Self::RecursiveRef { .. })
@@ -1016,6 +1094,17 @@ impl TypeExpr {
                     "check": f.check.to_json_value(),
                     "extends": f.extends.to_json_value()
                 })).collect::<Vec<_>>()
+            }),
+            Self::SyntheticSlotBinding(key) => json!({
+                "kind": "syntheticSlotBinding",
+                "scopeCanonicalId": key.scope_canonical_id.as_ref(),
+                "surfaceKind": match key.surface_kind {
+                    SyntheticCarrierSurfaceKind::SlotBinding => "slotBinding",
+                    SyntheticCarrierSurfaceKind::Binding => "binding",
+                },
+                "slotName": key.slot_name.as_deref(),
+                "bindingName": key.binding_name.as_ref(),
+                "valueNode": key.value_node.to_string(),
             }),
             Self::Unknown { raw } => json!({ "kind": "unknown", "raw": raw }),
         }

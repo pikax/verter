@@ -169,6 +169,9 @@ fn type_expr_has_direct_macro_reference(expr: &TypeExpr, needle: &str) -> bool {
         TypeExpr::Object(_)
         | TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
+        // Synthetic carriers are intrinsic terminals; they reference no
+        // workspace macro symbol.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Unknown { .. } => false,
     }
 }

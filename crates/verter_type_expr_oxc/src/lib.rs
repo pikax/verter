@@ -726,12 +726,16 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
         TypeExpr::Parenthesized(inner) => TypeExpr::Parenthesized(Arc::new(
             normalize_type_parameter_refs(inner.as_ref(), scope),
         )),
+        // Synthetic slot-binding carrier is a TERMINAL leaf. The carrier
+        // is shallow-by-construction and is never resolved as a type
+        // alias via the type registry — return it unchanged.
         TypeExpr::TypeParameter(_)
         | TypeExpr::TypeOf(_)
         | TypeExpr::Infer { .. }
         | TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
         | TypeExpr::RecursiveRef { .. }
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Unknown { .. } => expr.clone(),
     }
 }
@@ -836,5 +840,52 @@ fn span_text(source: &str, span: oxc_span::Span) -> String {
         source[start..end].to_string()
     } else {
         String::new()
+    }
+}
+
+#[cfg(test)]
+mod synthetic_carrier_tests {
+    //! S1 discrimination tests for the `TypeExpr::SyntheticSlotBinding`
+    //! variant's traversal through OXC normalisation helpers.
+    //!
+    //! Contract: synthetic carrier is a TERMINAL leaf — the
+    //! type-parameter normalisation walk must return it unchanged
+    //! (cheap Arc clone; pointer equality holds).
+    use super::*;
+    use verter_type_expr::{SyntheticCarrierKey, SyntheticCarrierSurfaceKind, TypeExpr};
+
+    fn make_carrier() -> TypeExpr {
+        TypeExpr::synthetic_slot_binding(SyntheticCarrierKey {
+            scope_canonical_id: Arc::from("/abs/Foo.vue"),
+            surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
+            slot_name: Some(Arc::from("default")),
+            binding_name: Arc::from("controls"),
+            value_node: 42,
+        })
+    }
+
+    #[test]
+    fn synthetic_carrier_oxc_normalize_terminal() {
+        let carrier = make_carrier();
+        let normalised = normalize_type_parameter_refs(&carrier, &[]);
+        // Structural equality holds.
+        assert_eq!(carrier, normalised);
+        // The walk took the terminal branch — the returned Arc is the
+        // SAME Arc as the input (cheap clone), not a freshly minted one.
+        if let (
+            TypeExpr::SyntheticSlotBinding(input_key),
+            TypeExpr::SyntheticSlotBinding(out_key),
+        ) = (&carrier, &normalised)
+        {
+            assert!(
+                Arc::ptr_eq(input_key, out_key),
+                "synthetic carrier traversed through normalize_type_parameter_refs must reuse the input Arc"
+            );
+        } else {
+            panic!(
+                "expected SyntheticSlotBinding on both sides; got input={:?} output={:?}",
+                carrier, normalised
+            );
+        }
     }
 }

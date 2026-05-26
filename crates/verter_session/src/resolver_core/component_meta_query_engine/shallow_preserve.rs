@@ -961,6 +961,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             | TypeExpr::Infer { .. }
             | TypeExpr::RecursiveRef { .. }
             | TypeExpr::Unknown { .. }
+            // Synthetic carriers are intrinsic terminals — they are NOT
+            // a parent-shell Ref and pass through verbatim from the fast
+            // shallow-alias rewriter (the carrier is never resolved as a
+            // type alias).
+            | TypeExpr::SyntheticSlotBinding(_)
             | TypeExpr::TypeParameter(_) => Some(expr.clone()),
             TypeExpr::Parenthesized(inner) => Some(TypeExpr::Parenthesized(std::sync::Arc::new(
                 self.rewrite_fast_shallow_alias_body(scope_canonical_id, inner, active_aliases)?,

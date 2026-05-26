@@ -572,6 +572,9 @@ fn contains_nested_resolution_targets(expr: &TypeExpr) -> bool {
         | TypeExpr::Literal(_)
         | TypeExpr::Unknown { .. }
         | TypeExpr::RecursiveRef { .. }
+        // Synthetic carriers are intrinsic terminal leaves; no nested
+        // resolution targets reach through them.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::TypeParameter(_) => false,
         TypeExpr::Ref { .. }
         | TypeExpr::TypeOf(_)
@@ -704,6 +707,8 @@ fn method_surface_specificity_score(expr: &TypeExpr) -> usize {
         | TypeExpr::Ref { .. }
         | TypeExpr::TypeOf(_)
         | TypeExpr::TypeParameter(_)
+        // Synthetic carriers carry no method surface — score 0.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Infer { .. } => 0,
     }
 }
@@ -714,6 +719,8 @@ fn bound_generic_ref_penalty(expr: &TypeExpr) -> usize {
         | TypeExpr::Literal(_)
         | TypeExpr::Unknown { .. }
         | TypeExpr::RecursiveRef { .. }
+        // Synthetic carriers reference no bound generic; no penalty.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Infer { .. } => 0,
         TypeExpr::TypeOf(_) => 1,
         TypeExpr::TypeParameter(param) => {
@@ -1034,6 +1041,9 @@ fn imported_type_body_specificity_score(expr: &TypeExpr) -> usize {
         }
         TypeExpr::Infer { .. } => SPECIFICITY_TYPEOF,
         TypeExpr::RecursiveRef { .. } => SPECIFICITY_REF_BASE,
+        // Synthetic carrier — intrinsic terminal leaf, same specificity
+        // as primitive / literal terminals.
+        TypeExpr::SyntheticSlotBinding(_) => SPECIFICITY_TERMINAL,
     }
 }
 
@@ -1259,6 +1269,10 @@ pub(crate) fn component_meta_registry_expr_references_name(
         | TypeExpr::Unknown { .. }
         | TypeExpr::TypeOf(_)
         | TypeExpr::TypeParameter(_)
+        // Synthetic carriers reference no public type name — their
+        // identity is closed (the binding_name is intrinsic, not a
+        // registry-lookup target).
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Infer { .. } => false,
     }
 }
@@ -1371,6 +1385,8 @@ pub(crate) fn component_meta_registry_indexed_ref_penalty(
         | TypeExpr::Ref { .. }
         | TypeExpr::TypeOf(_)
         | TypeExpr::TypeParameter(_)
+        // Synthetic carriers carry no indexed-ref penalty.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Infer { .. } => 0,
     }
 }
@@ -1770,6 +1786,10 @@ pub(crate) fn collect_component_meta_registry_refs(
         | TypeExpr::Unknown { .. }
         | TypeExpr::RecursiveRef { .. }
         | TypeExpr::TypeOf(_)
+        // Synthetic carrier — never enqueues as a public type
+        // reference; its `binding_name` is intrinsic, not a workspace
+        // alias.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Infer { .. } => {}
     }
 }
@@ -2134,6 +2154,8 @@ pub(crate) fn collect_component_meta_registry_public_surface_refs(
         | TypeExpr::RecursiveRef { .. }
         | TypeExpr::TypeOf(_)
         | TypeExpr::TypeParameter(_)
+        // Synthetic carrier — never enqueues as a public surface ref.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Infer { .. } => {}
     }
 }
@@ -2406,6 +2428,8 @@ pub(crate) fn collect_component_meta_registry_member_surface_refs(
         | TypeExpr::RecursiveRef { .. }
         | TypeExpr::TypeOf(_)
         | TypeExpr::Infer { .. }
+        // Synthetic carrier — never enqueues as a member surface ref.
+        | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Ref { .. } => {}
     }
 }

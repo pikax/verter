@@ -186,6 +186,7 @@ fn typeexpr_kind(ty: &TypeExpr) -> &'static str {
         TypeExpr::Infer { .. } => "Infer",
         TypeExpr::Parenthesized(_) => "Parenthesized",
         TypeExpr::Rest(_) => "Rest",
+        TypeExpr::SyntheticSlotBinding(_) => "SyntheticSlotBinding",
         TypeExpr::Unknown { .. } => "Unknown",
     }
 }

@@ -101,6 +101,25 @@ pub enum GraphNode {
         type_arguments: Vec<u32>,
         conditional_context: Vec<GraphConditionalFrame>,
     },
+    /// Synthetic slot-binding / `defineSlots` binding carrier — leaf node
+    /// minted by `publish_merged_bindings`. Carrier identity is the full
+    /// `(scope, surface_kind, slot_name, binding_name, value_node)` tuple.
+    /// Consumers MUST NOT resolve `binding_name_id` as a type alias via
+    /// `TypeRegistry` — this is a closed terminal.
+    SyntheticSlotBinding {
+        /// Semantic-node id of the binding-value node; serialised to FFI as
+        /// a decimal STRING to avoid JS Number precision loss.
+        value_node: u64,
+        /// String-table id of the scope's canonical file id.
+        scope_canonical_id_id: u32,
+        /// 0 = `SlotBinding`, 1 = `Binding` (matches TS
+        /// `SYNTHETIC_CARRIER_SURFACE_*` constants).
+        surface_kind: u32,
+        /// String-table id of the slot name; 0 = absent.
+        slot_name_id: u32,
+        /// String-table id of the binding name (always present).
+        binding_name_id: u32,
+    },
 }
 
 /// A conditional branch frame in the graph transport.
@@ -218,6 +237,13 @@ enum ExprMemoKey {
         conditional_context_ptr: usize,
         conditional_context_len: usize,
     },
+    /// Synthetic slot-binding carrier — full structural identity. Two
+    /// physically distinct `Arc<SyntheticCarrierKey>` values that hold
+    /// the same logical key SHOULD share a memo entry, matching the
+    /// `PartialEq + Eq + Hash` derive on `SyntheticCarrierKey`.
+    SyntheticSlotBinding {
+        key: Arc<verter_type_expr::SyntheticCarrierKey>,
+    },
     Unknown {
         raw: String,
     },
@@ -319,6 +345,9 @@ impl ExprMemoKey {
                 type_arguments_len: type_arguments.len(),
                 conditional_context_ptr: conditional_context.as_ptr() as usize,
                 conditional_context_len: conditional_context.len(),
+            },
+            TypeExpr::SyntheticSlotBinding(key) => Self::SyntheticSlotBinding {
+                key: Arc::clone(key),
             },
             TypeExpr::Unknown { raw } => Self::Unknown { raw: raw.clone() },
         }
@@ -489,6 +518,20 @@ impl ExprPtrKey {
                 p2: type_arguments.len(),
                 p3: conditional_context.as_ptr() as usize,
                 extra: conditional_context.len(),
+            },
+            // Synthetic slot-binding carrier — pointer-only identity. Two
+            // physically identical Arcs are the same carrier (and share a
+            // graph-node id); structurally identical carriers held in
+            // distinct Arcs intentionally miss this fast path and fall
+            // through to the full `ExprMemoKey` (which deduplicates by
+            // structural equality on the `SyntheticCarrierKey` content).
+            TypeExpr::SyntheticSlotBinding(key) => Self {
+                tag: 14,
+                p0: arc_ptr_id(key),
+                p1: 0,
+                p2: 0,
+                p3: 0,
+                extra: 0,
             },
             // Value-based variants that require cloning — fall through to full ExprMemoKey.
             TypeExpr::Literal(_)
@@ -728,6 +771,30 @@ impl GraphBuilder {
                     })
                     .collect(),
             },
+            TypeExpr::SyntheticSlotBinding(key) => {
+                // Intern the carrier's string fields once through the
+                // shared graph string table. The slot name is optional —
+                // map `None` to id 0 (matching the proto `slot_name_id`
+                // contract: 0 = absent).
+                let scope_canonical_id_id = self.string_id(key.scope_canonical_id.as_ref());
+                let surface_kind = match key.surface_kind {
+                    verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding => 0,
+                    verter_type_expr::SyntheticCarrierSurfaceKind::Binding => 1,
+                };
+                let slot_name_id = key
+                    .slot_name
+                    .as_deref()
+                    .map(|name| self.string_id(name))
+                    .unwrap_or(0);
+                let binding_name_id = self.string_id(key.binding_name.as_ref());
+                GraphNode::SyntheticSlotBinding {
+                    value_node: key.value_node,
+                    scope_canonical_id_id,
+                    surface_kind,
+                    slot_name_id,
+                    binding_name_id,
+                }
+            }
         }
     }
 
