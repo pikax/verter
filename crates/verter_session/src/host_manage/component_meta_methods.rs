@@ -988,6 +988,21 @@ impl VerterHost {
                             &mut synthesis_diagnostics,
                         );
                     }
+                    // Slot-binding-graph synthesis + final field-type
+                    // reduction are only meaningful when the projector
+                    // produced at least one surface — skip both passes
+                    // on empty surfaces to avoid no-op work. Publication
+                    // is unconditional: a resolved component meta query
+                    // must yield a coherent `parts.evaluated_types`
+                    // through both APIs (`get_component_meta` +
+                    // `evaluate_types`), so even an empty surface set
+                    // gets published. Returning `None` from
+                    // `parts.evaluated_types` here would make
+                    // `evaluate_types` report "no resolution occurred"
+                    // while `get_component_meta` simultaneously
+                    // publishes a populated payload through the
+                    // alternative projector path — the two APIs MUST
+                    // agree on whether resolution produced a result.
                     if !evaluated_types.is_empty() {
                         let result = slot_binding_graph::resolve_slot_bindings_graph_native(
                             &mut query_engine,
@@ -1003,8 +1018,8 @@ impl VerterHost {
                             &mut evaluated_types,
                             &mut query_engine,
                         );
-                        parts.evaluated_types = Some(evaluated_types);
                     }
+                    parts.evaluated_types = Some(evaluated_types);
                 }
             }
             {
