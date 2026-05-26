@@ -989,6 +989,13 @@ pub struct SemanticGraphStats {
     // ── F2 navigation-once + relation invariants ────────────────────
     pub decl_subexpression_lowering_count: u64,
     pub relation_check_count: u64,
+    /// Per-K mapped-type materialiser invocations observed by the
+    /// store — discriminating signal for the key-space-independent
+    /// value hoist (`build_mapped_type`'s and
+    /// `synthesise_mapped_surface`'s per-K loop short-circuit).
+    /// `0` for hoist-eligible mapped types; `N = key_count` for
+    /// K-dependent mapped types whose per-K materialiser must run.
+    pub mapped_per_k_materializations: u64,
 }
 
 /// Structured query-level failure. Distinct from panics — callers decide
@@ -2096,7 +2103,8 @@ mod tests {
     ///   origin_edges_emitted, path_length_p50, path_length_p95,
     ///   projection_depth_p50, projection_depth_p95,
     ///   origin_edges_per_node_p50, origin_edges_per_node_p95,
-    ///   decl_subexpression_lowering_count, relation_check_count.
+    ///   decl_subexpression_lowering_count, relation_check_count,
+    ///   mapped_per_k_materializations.
     /// - Exceptional-path: budget_fallback_count, same_path_sentinel_returns,
     ///   joined_waits, inflight_aborted_retries, cold_aborts_swept.
     #[test]
@@ -2126,6 +2134,7 @@ mod tests {
             "origin_edges_per_node_p95",
             "decl_subexpression_lowering_count",
             "relation_check_count",
+            "mapped_per_k_materializations",
         ];
         for field in expected_to_fire {
             assert!(

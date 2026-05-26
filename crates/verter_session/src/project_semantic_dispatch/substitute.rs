@@ -581,6 +581,211 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Read-only walker that returns `true` iff `target` is structurally
+    /// reachable from `root` through the same recursion edges that
+    /// [`Self::substitute_with_change_tracking`] descends into. Mirrors
+    /// the substitute helper's structural recursion so the two stay in
+    /// lock-step: a `false` return here means an identical
+    /// `substitute_with_change_tracking(root, target, _)` would return
+    /// `(root, false)` — i.e. no descendant references `target` so
+    /// substitution is the identity on the entire subtree.
+    ///
+    /// Used by [`Self::build_mapped_type`] to hoist key-independent
+    /// `value_expr` reduction out of the per-K materialisation loop:
+    /// when the mapper's binder is not reachable inside `value_expr`,
+    /// the per-K substituted carrier collapses to `value_expr` itself
+    /// for every K, so the downstream evaluation is shared across the
+    /// entire key space and the materialiser runs ONCE per mapped type
+    /// rather than ONCE per enumerated key.
+    ///
+    /// **Recursion mirrors substitute exactly.** Every arm of
+    /// `substitute_with_change_tracking` that descends into child
+    /// `SemanticNodeId`s descends here too; arms that return
+    /// `(node, false)` without recursion (TypeOf, leaf TypeParam /
+    /// Primitive / Literal / Opaque / DeclRef / Never / Unknown / Any /
+    /// VueMacroElements) terminate here too. Cyclic graphs are guarded
+    /// by a `visited` set.
+    ///
+    /// **`Mapped` shadowing** is honoured: when a nested mapped binder
+    /// shadows the same `target` (`nested_mapper.parameter_node ==
+    /// target`), the walker does NOT recurse into the shadowed
+    /// `value_expr` / `name_remap` arms, matching substitute's
+    /// `shadowed` short-circuit.
+    ///
+    /// **Cross-variant `Infer { name }` fallback** mirrors substitute's
+    /// name-based bridge at line 131 of `substitute_with_change_tracking`:
+    /// when the descendant is an `Infer { name }` and `name` equals the
+    /// `target` binder's display name (extracted from either `TypeParam`
+    /// or `Infer`), substitute treats it as a reference. The walker
+    /// returns `true` for that case so the hoist correctly declines on
+    /// `infer`-bearing value expressions whose `infer`-name shadows the
+    /// outer binder.
+    pub(super) fn subtree_references_node(
+        &self,
+        root: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> bool {
+        let target_name: Option<Arc<str>> =
+            self.graph()
+                .node_data(target)
+                .and_then(|d| match d.as_ref() {
+                    SemanticNodeData::TypeParam { display_name, .. } => {
+                        Some(Arc::clone(display_name))
+                    }
+                    SemanticNodeData::Infer { name } => Some(Arc::clone(name)),
+                    _ => None,
+                });
+
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack: Vec<SemanticNodeId> = Vec::new();
+        stack.push(root);
+        while let Some(node) = stack.pop() {
+            if node == target {
+                return true;
+            }
+            if !visited.insert(node) {
+                continue;
+            }
+            let Some(data) = self.graph().node_data(node) else {
+                continue;
+            };
+            match data.as_ref() {
+                // Cross-variant name fallback: an `Infer { name }`
+                // whose `name` matches the binder's display name is a
+                // structural reference, per
+                // `substitute_with_change_tracking`'s `Infer` arm.
+                SemanticNodeData::Infer { name } => {
+                    if let Some(t) = target_name.as_ref() {
+                        if t.as_ref() == name.as_ref() {
+                            return true;
+                        }
+                    }
+                }
+                // A `TypeParam` reference whose `display_name` matches
+                // the binder's name is ALSO a structural reference when
+                // the binder itself is `Infer` (substitute's lines 120–
+                // 130 cross-variant bridge). Under the `build_mapped_type`
+                // hoist contract the binder is always a `TypeParam`, so
+                // this branch is a no-op for the hoist caller; including
+                // it keeps the walker symmetric with substitute and
+                // robust against future callers passing an `Infer` target.
+                SemanticNodeData::TypeParam { display_name, .. } => {
+                    if matches!(
+                        self.graph().node_data(target).as_deref(),
+                        Some(SemanticNodeData::Infer { .. })
+                    ) {
+                        if let Some(t) = target_name.as_ref() {
+                            if t.as_ref() == display_name.as_ref() {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                SemanticNodeData::Alias(t) => {
+                    stack.push(*t);
+                }
+                SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+                    for member in members.iter() {
+                        stack.push(*member);
+                    }
+                }
+                SemanticNodeData::Array { element, .. } => {
+                    stack.push(*element);
+                }
+                SemanticNodeData::Tuple { elements, .. } => {
+                    for element in elements.iter() {
+                        stack.push(element.value);
+                    }
+                }
+                SemanticNodeData::Object(surface) => {
+                    for member in surface.members.iter() {
+                        stack.push(member.value);
+                    }
+                    for signature in surface.call_signatures.iter() {
+                        stack.push(*signature);
+                    }
+                    for signature in surface.construct_signatures.iter() {
+                        stack.push(*signature);
+                    }
+                    for signature in surface.index_signatures.iter() {
+                        stack.push(signature.key_type);
+                        stack.push(signature.value_type);
+                    }
+                    if let Some(k) = surface.keyspace {
+                        stack.push(k);
+                    }
+                }
+                SemanticNodeData::TemplateLiteral { expressions, .. } => {
+                    for expr in expressions.iter() {
+                        stack.push(*expr);
+                    }
+                }
+                SemanticNodeData::KeyOf { base } => {
+                    stack.push(*base);
+                }
+                SemanticNodeData::IndexedAccess { object, index } => {
+                    stack.push(*object);
+                    if let IndexKey::TypeNode(idx_node) = index {
+                        stack.push(*idx_node);
+                    }
+                }
+                SemanticNodeData::Mapped { source, mapper } => {
+                    let shadowed = mapper.parameter_node == target;
+                    stack.push(*source);
+                    stack.push(mapper.key_space);
+                    if !shadowed {
+                        stack.push(mapper.value_expr);
+                        if let Some(remap) = mapper.name_remap {
+                            stack.push(remap);
+                        }
+                    }
+                }
+                SemanticNodeData::Conditional {
+                    check,
+                    extends,
+                    true_branch_ref,
+                    false_branch_ref,
+                    ..
+                } => {
+                    stack.push(*check);
+                    stack.push(*extends);
+                    stack.push(*true_branch_ref);
+                    stack.push(*false_branch_ref);
+                }
+                SemanticNodeData::InstantiationRef { args, .. } => {
+                    for arg in args.iter() {
+                        stack.push(*arg);
+                    }
+                }
+                SemanticNodeData::Function {
+                    params,
+                    return_type,
+                    type_parameters,
+                } => {
+                    for param in params.iter() {
+                        stack.push(param.ty);
+                    }
+                    stack.push(*return_type);
+                    for tp in type_parameters.iter() {
+                        if let Some(c) = tp.constraint {
+                            stack.push(c);
+                        }
+                        if let Some(d) = tp.default {
+                            stack.push(d);
+                        }
+                    }
+                }
+                // Substitute's catch-all `_ => (node, false)` covers
+                // TypeOf, Primitive, Literal, Opaque, DeclRef, Never,
+                // Unknown, Any, VueMacroElements. None of these have
+                // child semantic-node references that substitute would
+                // recurse into, so neither does the walker.
+                _ => {}
+            }
+        }
+        false
+    }
+
     /// / Fix D companion of `substitute_index_key`. Returns
     /// `(result, changed)`.
     fn substitute_index_key_with_change_tracking(

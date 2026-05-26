@@ -1821,6 +1821,10 @@ impl SemanticGraphStore {
                 .decl_subexpression_lowering_count
                 .load(Ordering::Relaxed),
             relation_check_count: self.stats.relation_check_count.load(Ordering::Relaxed),
+            mapped_per_k_materializations: self
+                .stats
+                .mapped_per_k_materializations
+                .load(Ordering::Relaxed),
         }
     }
 
@@ -1874,6 +1878,20 @@ impl SemanticGraphStore {
     pub fn record_relation_check(&self) {
         self.stats
             .relation_check_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Bump the per-K mapped-type materialiser counter. Called once
+    /// at the entrypoint of each per-K materialiser
+    /// (`materialize_mapped_member_value_for_key`,
+    /// `materialize_selected_key_mapped_value`) so the
+    /// key-space-independent value hoist's effect is empirically
+    /// observable: hoist-eligible mapped types short-circuit before
+    /// the per-K loop and never bump this counter, while K-dependent
+    /// mapped types bump it once per enumerated key.
+    pub fn record_mapped_per_k_materialization(&self) {
+        self.stats
+            .mapped_per_k_materializations
             .fetch_add(1, Ordering::Relaxed);
     }
 

@@ -2523,6 +2523,37 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         // reserved for the Computed mapper case (e.g.
         // `ExtendSlotWithPlan<TPlan, K>`-style Conditional bodies).
         let value_is_identity = matches!(mapper.kind, crate::semantic_query::MapperKind::Identity);
+        // Key-space-independent value hoist — Shallow walker mirror of
+        // the `build_mapped_type` hoist. When `mapper.value_expr` does
+        // not reference the binder, the per-K substitution is the
+        // identity, so the materialised value collapses to a single
+        // shared evaluation. Run it ONCE here and reuse for every
+        // enumerated key instead of dispatching the
+        // selected-key materialiser N times for identical inputs.
+        //
+        // Identity-mapper fast path (`source_member.value` direct
+        // read) is reserved for `MapperKind::Identity`; the hoist
+        // only fires on `Computed` mappers, where the per-K
+        // substituted body would otherwise diverge by the K argument.
+        // Cross-variant `infer`-name matches are treated as references
+        // (see `subtree_references_node`'s contract), preventing
+        // over-aggressive hoisting on `infer`-bearing value
+        // expressions.
+        let value_expr_is_k_independent = !value_is_identity
+            && !self
+                .dispatch
+                .subtree_references_node(mapper.value_expr, mapper.parameter_node);
+        let shared_value: Option<SemanticNodeId> = if value_expr_is_k_independent {
+            Some(
+                self.dispatch
+                    .materialize_selected_key_mapped_value_k_independent(
+                        mapper,
+                        materialise_context,
+                    ),
+            )
+        } else {
+            None
+        };
         let members = keys
             .into_iter()
             .map(|name| {
@@ -2568,6 +2599,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // (round-6 STOP Defect 1).
                 let value = if let (Some(sm), true) = (source_member, value_is_identity) {
                     sm.value
+                } else if let Some(shared) = shared_value {
+                    shared
                 } else {
                     self.dispatch.materialize_selected_key_mapped_value(
                         mapper,

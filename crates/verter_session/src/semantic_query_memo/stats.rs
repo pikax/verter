@@ -102,6 +102,21 @@ pub(super) struct AtomicSemanticGraphStats {
     /// branches short-circuit and skip the call entirely.
     /// Discriminating signal for the change-tracking optimization.
     pub(super) intern_preserving_scope_calls: AtomicU64,
+    /// Per-K mapped-type materialiser invocations observed by the
+    /// store. Increments once per call to either
+    /// `materialize_mapped_member_value_for_key` (the
+    /// `build_mapped_type` per-K path) or
+    /// `materialize_selected_key_mapped_value` (the Shallow walker's
+    /// `synthesise_mapped_surface` per-K path).
+    ///
+    /// Discriminating signal for the key-space-independent value
+    /// hoist: a K-independent value expression collapses the per-K
+    /// loop to ONE shared evaluation (not registered here because the
+    /// hoist routes through evaluate_deferred + Instantiate directly,
+    /// bypassing the per-K materialiser), so the counter should be
+    /// `0` for hoist-eligible mapped types and `N = key_count` for
+    /// K-dependent mapped types.
+    pub(super) mapped_per_k_materializations: AtomicU64,
 }
 
 impl Default for AtomicSemanticGraphStats {
@@ -129,6 +144,7 @@ impl Default for AtomicSemanticGraphStats {
             decl_subexpression_lowering_count: AtomicU64::new(0),
             relation_check_count: AtomicU64::new(0),
             intern_preserving_scope_calls: AtomicU64::new(0),
+            mapped_per_k_materializations: AtomicU64::new(0),
         }
     }
 }

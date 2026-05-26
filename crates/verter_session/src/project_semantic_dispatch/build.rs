@@ -1836,6 +1836,77 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // pre-C5 runtime helper `mapper_value_is_identity_t_of_k`
         // is retired.
         let value_is_identity = matches!(mapper.kind, crate::semantic_query::MapperKind::Identity);
+        // Key-space-independent value hoist. When the mapper's binder
+        // (`mapper.parameter_node`) is not structurally reachable
+        // inside `mapper.value_expr`, the per-K substitution collapses
+        // to the identity (`substitute_with_change_tracking` returns
+        // `(node, false)` for the whole subtree), so every K's
+        // substituted carrier IS `value_expr` itself. Reduce
+        // `value_expr` ONCE under the caller's context and reuse the
+        // result for every enumerated key. Skipping this hoist is
+        // correct but wasteful: each K otherwise re-walks the same
+        // `evaluate_deferred_*` chain (Conditional / IndexedAccess /
+        // Mapped re-dispatch + any nested cross-package import
+        // resolution embedded in the body) even though the underlying
+        // dispatch sees identical inputs across K.
+        //
+        // The hoist is gated on `!value_is_identity` because the
+        // identity fast-path reads `source_member.value` directly and
+        // never enters the materialiser. The check declines on any
+        // structural reference to the binder so the per-K materialiser
+        // remains the authority for K-dependent value expressions
+        // (`T[K]`-style, `K`-keyed `IndexedAccess`, conditional checks
+        // on `K`, etc.). Cross-variant `infer`-name matches are also
+        // counted as references (see `subtree_references_node`'s
+        // contract), preventing over-aggressive hoisting on
+        // `infer`-bearing value expressions.
+        //
+        // Correctness mirror: when the hoist applies the substitution
+        // for the K-independent case IS the identity, so the per-K
+        // materialiser would compute exactly the same evaluation we
+        // perform here. The `InstantiationRef` redispatch and
+        // `Opaque` fallback below mirror
+        // `materialize_mapped_member_value_for_key` exactly so both
+        // paths produce the same surface member value.
+        let value_expr_is_k_independent = !value_is_identity
+            && !self.subtree_references_node(mapper.value_expr, mapper.parameter_node);
+        let shared_value: Option<SemanticNodeId> = if value_expr_is_k_independent {
+            let evaluated =
+                self.evaluate_deferred_semantic_node_with_context(mapper.value_expr, context);
+            let resolved = match graph.node_data(evaluated).as_deref() {
+                Some(SemanticNodeData::InstantiationRef { base, args }) => {
+                    let base = base.clone();
+                    let args = Arc::clone(args);
+                    match self.execute(SemanticQueryKey::Instantiate {
+                        base,
+                        args,
+                        context,
+                    }) {
+                        QueryResult::Value(id) => id,
+                        _ => evaluated,
+                    }
+                }
+                _ => evaluated,
+            };
+            let final_value = if matches!(
+                graph.node_data(resolved).as_deref(),
+                Some(SemanticNodeData::Opaque(_))
+            ) {
+                // Mirror the materialiser's `Opaque` fallback. For the
+                // K-independent case the substituted carrier IS
+                // `value_expr` itself (substitution is the identity),
+                // so reusing `value_expr` here matches the per-K
+                // materialiser exactly: the free binder cannot leak
+                // because there is no reference to leak in the first
+                // place.
+                mapper.value_expr
+            } else {
+                resolved
+            };
+            Some(final_value)
+        } else {
+            None
+        };
         let mut produced: Vec<SurfaceMember> = Vec::with_capacity(key_names.len());
         let mut project_member_edges: Vec<(SemanticNodeId, Arc<str>)> = Vec::new();
         for name in &key_names {
@@ -1859,9 +1930,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // - `source_members` matches this key AND `value_expr` IS
             //   structurally `T[K]` → use the member value directly
             //   (Partial/Required/Readonly-style mapped types).
-            // - Otherwise (`value_expr` is not `T[K]`, or the source
-            //   has no matching member) → defer to the shared per-key
-            //   materialiser [`Self::materialize_mapped_member_value_for_key`].
+            // - `value_expr` does NOT reference `mapper.parameter_node`
+            //   → reuse `shared_value` (the once-per-mapped-type
+            //   evaluation hoisted above the loop). Both correctness
+            //   and the substituted-carrier fallback collapse to the
+            //   identical surface member value the per-K materialiser
+            //   would produce.
+            // - Otherwise (`value_expr` is not `T[K]` and IS K-dependent,
+            //   or the source has no matching member) → defer to the
+            //   shared per-key materialiser
+            //   [`Self::materialize_mapped_member_value_for_key`].
             //   That helper substitutes the binder, evaluates under the
             //   caller's `context` (publication callers reify; transit
             //   callers carrier-stop), and falls back to the substituted
@@ -1872,6 +1950,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             //   paths converge on identical per-key semantics.
             let value = if let (Some(source_member), true) = (source_member, value_is_identity) {
                 source_member.value
+            } else if let Some(shared) = shared_value {
+                shared
             } else {
                 self.materialize_mapped_member_value_for_key(mapper, name.as_ref(), context)
             };
@@ -1980,6 +2060,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         key_name: &str,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
+        self.graph().record_mapped_per_k_materialization();
         let key_arg = self
             .graph()
             .intern_node(SemanticNodeData::Literal(LiteralValue::String(
@@ -2104,6 +2185,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         key_arg: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
+        self.graph().record_mapped_per_k_materialization();
         let substituted =
             self.substitute_semantic_type_param(mapper.value_expr, mapper.parameter_node, key_arg);
         let evaluated = self.evaluate_deferred_semantic_node_with_context(substituted, context);
@@ -2152,6 +2234,59 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Some(SemanticNodeData::Opaque(_))
             ) {
                 substituted
+            } else {
+                resolved
+            }
+        } else {
+            realized
+        }
+    }
+
+    /// K-independent variant of
+    /// [`Self::materialize_selected_key_mapped_value`] — used by the
+    /// Shallow walker's `synthesise_mapped_surface` hoist path when
+    /// `mapper.value_expr` contains no structural reference to the
+    /// binder. Substitution would be the identity, so the helper skips
+    /// substitution entirely and dispatches the same evaluate →
+    /// Instantiate → trailing Conditional reduction chain on
+    /// `mapper.value_expr` directly. The Opaque fallback returns the
+    /// original `mapper.value_expr` (the per-K materialiser's
+    /// "substituted carrier" reduces to `value_expr` for the
+    /// K-independent case), keeping the surface value addressable by
+    /// re-dispatch without leaking the free binder — which cannot
+    /// leak because there is no reference to leak in the first place.
+    pub(super) fn materialize_selected_key_mapped_value_k_independent(
+        &self,
+        mapper: &crate::semantic_query::MapperKey,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let evaluated =
+            self.evaluate_deferred_semantic_node_with_context(mapper.value_expr, context);
+        let resolved = match self.graph().node_data(evaluated).as_deref() {
+            Some(SemanticNodeData::InstantiationRef { base, args }) => {
+                let base = base.clone();
+                let args = Arc::clone(args);
+                match self.execute(SemanticQueryKey::Instantiate {
+                    base,
+                    args,
+                    context,
+                }) {
+                    QueryResult::Value(id) => id,
+                    _ => evaluated,
+                }
+            }
+            _ => evaluated,
+        };
+        let realized = self.evaluate_deferred_semantic_node_with_context(resolved, context);
+        if matches!(
+            self.graph().node_data(realized).as_deref(),
+            Some(SemanticNodeData::Opaque(_))
+        ) {
+            if matches!(
+                self.graph().node_data(resolved).as_deref(),
+                Some(SemanticNodeData::Opaque(_))
+            ) {
+                mapper.value_expr
             } else {
                 resolved
             }
