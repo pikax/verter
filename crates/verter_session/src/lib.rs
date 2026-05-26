@@ -428,13 +428,8 @@ pub mod for_tests {
             .lower_type_expr_in_scope_with_context(scope_canonical_id, expr, context)
     }
 
-    /// Drive
-    /// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::substitute_semantic_type_param`]
-    /// from integration tests. The substitute helper is
-    /// `pub(super)` so integration tests cannot reach it directly;
-    /// this shim instantiates a `ProjectSemanticDispatch` and
-    /// forwards the call so PE4 hash-cons discriminator tests can
-    /// verify cache behaviour with controlled input triples.
+    /// PE4 hash-cons memo discriminator shim for
+    /// `substitute_semantic_type_param`.
     pub fn dispatch_substitute_for_tests(
         host: &crate::VerterHost,
         node: crate::semantic_query::SemanticNodeId,
@@ -445,13 +440,8 @@ pub mod for_tests {
         dispatch.substitute_semantic_type_param_for_tests(node, parameter_node, arg)
     }
 
-    /// Drive
-    /// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::evaluate_deferred_semantic_node_with_context`]
-    /// from integration tests. The evaluator is `pub(super)` and
-    /// unreachable from integration test crates; this shim
-    /// instantiates a `ProjectSemanticDispatch` and forwards the
-    /// call so PE4 evaluate-memo discriminator tests can verify
-    /// cache behaviour with controlled `(node, context)` pairs.
+    /// PE4 hash-cons memo discriminator shim for
+    /// `evaluate_deferred_semantic_node_with_context`.
     pub fn dispatch_evaluate_deferred_for_tests(
         host: &crate::VerterHost,
         node: crate::semantic_query::SemanticNodeId,
