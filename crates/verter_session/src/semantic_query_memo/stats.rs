@@ -67,6 +67,15 @@ pub(super) const SAMPLE_RESERVOIR_CAP: usize = 8192;
 /// Lock-free counter set updated on the hot path. Read into the immutable
 /// [`SemanticGraphStats`](crate::semantic_query::SemanticGraphStats)
 /// snapshot via [`super::SemanticGraphStore::stats_snapshot`].
+///
+/// Visibility: `pub(crate)` is the narrowest workable level. The
+/// type is reachable at `pub(crate)` through the public
+/// `SemanticGraphStore::stats` field's signature (`SemanticGraphStore`
+/// itself is `pub`); narrowing the type to `pub(super)` triggers
+/// the `private_interfaces` warning. Production callers outside
+/// `semantic_query_memo` do not name the type — only the parent
+/// module reaches it — so the broader visibility is documentation-
+/// only in practice.
 pub(crate) struct AtomicSemanticGraphStats {
     pub(super) hits: AtomicU64,
     pub(super) misses: AtomicU64,

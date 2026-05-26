@@ -48,9 +48,9 @@ use verter_session::semantic_query::{
 use verter_session::{for_tests, FileKind, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::TypeExpr;
 
-/// A 50-deep alias chain via `type` aliases. The Alias-arm in the
+/// A 10-deep alias chain via `type` aliases. The Alias-arm in the
 /// evaluator advances `node = target` on every iteration of the
-/// fix-point loop, so 50 hops fits well under the 2048 ceiling.
+/// fix-point loop, so 10 hops fits well under the 256 ceiling.
 const SHORT_CHAIN_TS: &str = r#"
 export type L0 = string;
 export type L1 = L0;
@@ -95,7 +95,7 @@ fn short_alias_chain_completes_without_hitting_budget_guard() {
     .expect("lowering must succeed");
 
     // Drive the evaluator on the deepest alias. Under the budget the
-    // 10-hop chain completes (10 << 2048) and resolves to the
+    // 10-hop chain completes (10 << 256) and resolves to the
     // terminal `string` primitive. Pre-guard the same path would
     // also complete — this test guards against the guard FIRING
     // too aggressively on benign deep chains.

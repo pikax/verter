@@ -4,6 +4,17 @@
 //! from `mod.rs` to keep the split-target module under the
 //! architecture-guard line ceiling.
 //!
+//! Retention budget: both memos are bounded by
+//! [`HASH_CONS_MEMO_RETENTION_CAP`]. Each publish pushes the key
+//! into a FIFO sidecar `VecDeque`; once the deque exceeds the cap
+//! the oldest entry is popped and removed from the underlying
+//! `DashMap`. The cap is intentionally generous so the corpus's
+//! hot working set (per-K materialiser loops, repeated `Pick<T, K>`
+//! projections across components) fits well within the budget.
+//! Eviction is FIFO rather than LRU to keep the bookkeeping
+//! lock-free on the hot read path — only publishes pay the FIFO
+//! lock cost.
+//!
 //! Both memos collapse identical structural keys reaching the
 //! underlying helpers
 //! (`substitute_semantic_type_param`,
@@ -43,8 +54,21 @@
 
 use std::sync::atomic::Ordering;
 
+use dashmap::mapref::entry::Entry;
+
 use super::SemanticGraphStore;
 use crate::semantic_query::{ProjectionReductionContext, SemanticNodeId};
+
+/// FIFO retention cap for the substitute / evaluate-deferred memos.
+///
+/// Each memo's FIFO sidecar deque is bounded at this size; once
+/// exceeded the oldest entry is popped and removed from the
+/// underlying `DashMap`. The cap is sized for the empirically
+/// observed working set on the bench corpus (per-K materialiser
+/// loops, repeated `Pick<T, K>` projections) plus headroom for
+/// long-running LSP sessions. 100_000 entries at ~32 bytes each
+/// caps each memo at ~3 MB of resident memory.
+pub(super) const HASH_CONS_MEMO_RETENTION_CAP: usize = 100_000;
 
 impl SemanticGraphStore {
     /// Hash-cons memo lookup for
@@ -73,7 +97,12 @@ impl SemanticGraphStore {
         hit
     }
 
-    /// First-writer-wins publish for `substitute_memo`.
+    /// First-writer-wins publish for `substitute_memo`. Tracks the
+    /// inserted key in the FIFO sidecar so the deque can evict the
+    /// oldest entry once the retention cap is exceeded; an
+    /// `Entry::Occupied` collision (a concurrent publisher already
+    /// landed an identical-result write) does NOT push into the
+    /// FIFO since the key is already tracked.
     pub fn substitute_memo_publish(
         &self,
         value_expr: SemanticNodeId,
@@ -81,9 +110,33 @@ impl SemanticGraphStore {
         arg: SemanticNodeId,
         result: SemanticNodeId,
     ) {
-        self.substitute_memo
-            .entry((value_expr, parameter_node, arg))
-            .or_insert(result);
+        let key = (value_expr, parameter_node, arg);
+        match self.substitute_memo.entry(key) {
+            Entry::Occupied(_) => {
+                // First-writer-wins: another thread already
+                // published. No FIFO bookkeeping required.
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(result);
+                let mut fifo = self.substitute_memo_fifo.lock();
+                fifo.push_back(key);
+                while fifo.len() > HASH_CONS_MEMO_RETENTION_CAP {
+                    if let Some(victim) = fifo.pop_front() {
+                        // Drop the FIFO lock BEFORE touching
+                        // `substitute_memo` to avoid blocking
+                        // concurrent publishers while DashMap's
+                        // shard lock is taken; re-acquire on the
+                        // next loop iteration if we still need
+                        // to evict.
+                        drop(fifo);
+                        self.substitute_memo.remove(&victim);
+                        fifo = self.substitute_memo_fifo.lock();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     /// Hash-cons memo lookup for
@@ -112,15 +165,36 @@ impl SemanticGraphStore {
     }
 
     /// First-writer-wins publish for `evaluate_deferred_memo`.
+    /// Tracks the inserted key in the FIFO sidecar; an
+    /// `Entry::Occupied` collision does NOT push (the key is
+    /// already tracked).
     pub fn evaluate_deferred_memo_publish(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
         result: SemanticNodeId,
     ) {
-        self.evaluate_deferred_memo
-            .entry((node, context))
-            .or_insert(result);
+        let key = (node, context);
+        match self.evaluate_deferred_memo.entry(key) {
+            Entry::Occupied(_) => {
+                // First-writer-wins: another thread already
+                // published. No FIFO bookkeeping required.
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(result);
+                let mut fifo = self.evaluate_deferred_memo_fifo.lock();
+                fifo.push_back(key);
+                while fifo.len() > HASH_CONS_MEMO_RETENTION_CAP {
+                    if let Some(victim) = fifo.pop_front() {
+                        drop(fifo);
+                        self.evaluate_deferred_memo.remove(&victim);
+                        fifo = self.evaluate_deferred_memo_fifo.lock();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     /// Internal: drop both hash-cons memos on a workspace-content-
@@ -136,6 +210,8 @@ impl SemanticGraphStore {
     /// edit and poison every subsequent caller for the same key.
     pub(super) fn clear_hash_cons_memos(&self) {
         self.substitute_memo.clear();
+        self.substitute_memo_fifo.lock().clear();
         self.evaluate_deferred_memo.clear();
+        self.evaluate_deferred_memo_fifo.lock().clear();
     }
 }

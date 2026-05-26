@@ -399,15 +399,28 @@ pub struct SemanticGraphStore {
     // `substitute_semantic_type_param` and
     // `evaluate_deferred_semantic_node_with_context` so the mapped-
     // type per-K materialiser does not recompute K-independent
-    // subtrees on every iteration.
+    // subtrees on every iteration. Both are bounded by
+    // `HASH_CONS_MEMO_RETENTION_CAP` (FIFO eviction via the
+    // sidecar deque) so a long-running workspace cannot grow either
+    // memo without bound; see `hash_cons_memos.rs` for the
+    // eviction contract.
     pub(super) substitute_memo:
         DashMap<(SemanticNodeId, SemanticNodeId, SemanticNodeId), SemanticNodeId>,
+    pub(super) substitute_memo_fifo: parking_lot::Mutex<
+        std::collections::VecDeque<(SemanticNodeId, SemanticNodeId, SemanticNodeId)>,
+    >,
     pub(super) evaluate_deferred_memo: DashMap<
         (
             SemanticNodeId,
             crate::semantic_query::ProjectionReductionContext,
         ),
         SemanticNodeId,
+    >,
+    pub(super) evaluate_deferred_memo_fifo: parking_lot::Mutex<
+        std::collections::VecDeque<(
+            SemanticNodeId,
+            crate::semantic_query::ProjectionReductionContext,
+        )>,
     >,
 }
 
