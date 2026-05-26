@@ -91,6 +91,11 @@ function createVirtualProgram(
     esModuleInterop: true,
     allowSyntheticDefaultImports: true,
     types: [],
+    // TS 6.0 deprecated node10 module resolution; the deprecation
+    // surface as a diagnostic when the option is set explicitly.
+    // The barrel-export tests deliberately exercise the node10
+    // resolver so we silence the deprecation here.
+    ignoreDeprecations: "6.0",
   };
 
   const host = ts.createCompilerHost(options);

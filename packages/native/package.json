@@ -44,11 +44,11 @@
     "test": "vitest run"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.5.1",
-    "@types/node": "^25.4.0",
+    "@napi-rs/cli": "^3.6.2",
+    "@types/node": "^25.9.1",
     "@verter/types": "workspace:^",
-    "typescript": "^5.9.3",
-    "vitest": "^4.1.0"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.7"
   },
   "optionalDependencies": {
     "@verter/native-darwin-arm64": "workspace:*",

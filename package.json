@@ -55,22 +55,22 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
-    "@vue/compiler-core": "^3.5.30",
-    "@vue/compiler-sfc": "^3.5.30",
-    "oxfmt": "^0.38.0"
+    "@vue/compiler-core": "^3.5.34",
+    "@vue/compiler-sfc": "^3.5.34",
+    "oxfmt": "^0.52.0"
   },
   "devDependencies": {
-    "@bufbuild/protoc-gen-es": "2.11.0",
+    "@bufbuild/protoc-gen-es": "2.12.0",
     "@hyrious/esbuild-plugin-commonjs": "^0.2.6",
     "@typescript/native-preview": "latest",
-    "@vscode/vsce": "^3.7.1",
-    "esbuild": "^0.27.3",
+    "@vscode/vsce": "^3.9.1",
+    "esbuild": "^0.28.0",
     "esbuild-plugin-alias": "^0.2.1",
     "esbuild-plugin-alias-path": "^2.0.2",
     "glob": "^13.0.6",
     "husky": "^9.1.7",
     "json-diff": "^1.0.6",
-    "vitest": "^4.1.0"
+    "vitest": "^4.1.7"
   },
   "lint-staged": {
     "*.rs": "cargo fmt --check --",
