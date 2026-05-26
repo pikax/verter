@@ -12,9 +12,9 @@
 //!
 //! * `audit_ts_bindings_are_in_sync` — the **discriminating** sync
 //!   guard. Regenerates every audit record type into a tempdir via
-//!   `TS::export_all_to`, reads the committed file, and fails with a
-//!   unified diff if the two differ. A genuine mismatch means the
-//!   Rust source changed and the TS file has not yet been
+//!   `TS::export_all(&ts_rs::Config)`, reads the committed file, and
+//!   fails with a unified diff if the two differ. A genuine mismatch
+//!   means the Rust source changed and the TS file has not yet been
 //!   regenerated; the test output instructs the dev how to refresh.
 //!
 //! Plan §3 Commit 3 + §3.A Commit 6.C.
@@ -86,31 +86,31 @@ fn audit_ts_bindings_are_in_sync() {
             .unwrap_or_default(),
     );
 
-    // Regenerate into a tempdir. `export_all_to` explicitly disregards
-    // `TS_RS_EXPORT_DIR` (per ts-rs docs) and uses the given path.
-    // Because every audit record shares
+    // Regenerate into a tempdir. `export_all(&Config::new().with_out_dir(...))`
+    // explicitly disregards `TS_RS_EXPORT_DIR` (per ts-rs docs) and
+    // uses the given path. Because every audit record shares
     // `#[ts(export_to = "audit.generated.ts")]`, every type merges
     // into the single file `<tempdir>/audit.generated.ts`.
     //
-    // `export_all_to` walks the dependency graph reachable from the
-    // root type. Types not transitively reachable from
+    // `export_all(&Config)` walks the dependency graph reachable from
+    // the root type. Types not transitively reachable from
     // `RequestAuditRecord` (the walker types in `assertions.rs`,
     // `StructuredAuditEvent`, `RequestPhaseAudit`) need their
-    // own export_all_to call. All four calls write into the SAME
-    // `audit.generated.ts` (ts-rs merges by file path).
+    // own `export_all(&Config)` call. All four calls write into the
+    // SAME `audit.generated.ts` (ts-rs merges by file path).
     let tempdir = tempfile::tempdir().expect("create tempdir for ts-rs regeneration");
     RequestAuditRecord::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate RequestAuditRecord graph via ts-rs export_all_to");
+        .expect("regenerate RequestAuditRecord graph via ts-rs export_all");
     StructuredAuditEvent::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate StructuredAuditEvent graph via ts-rs export_all_to");
+        .expect("regenerate StructuredAuditEvent graph via ts-rs export_all");
     ProvenanceChain::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate ProvenanceChain graph via ts-rs export_all_to");
+        .expect("regenerate ProvenanceChain graph via ts-rs export_all");
     ChainTermination::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate ChainTermination graph via ts-rs export_all_to");
+        .expect("regenerate ChainTermination graph via ts-rs export_all");
     ProvenanceStep::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate ProvenanceStep graph via ts-rs export_all_to");
+        .expect("regenerate ProvenanceStep graph via ts-rs export_all");
     RequestPhaseAudit::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate RequestPhaseAudit graph via ts-rs export_all_to");
+        .expect("regenerate RequestPhaseAudit graph via ts-rs export_all");
     // `DerivationEdgeRaw` is the accumulator-side mirror of the
     // canonicalised `DerivationEdgeRecord`; it is exported by the
     // substrate but not transitively reachable from
@@ -118,20 +118,20 @@ fn audit_ts_bindings_are_in_sync() {
     // `DerivationEdgeRecord` only). Pull it in explicitly so the
     // committed file stays in sync.
     verter_audit::DerivationEdgeRaw::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate DerivationEdgeRaw graph via ts-rs export_all_to");
+        .expect("regenerate DerivationEdgeRaw graph via ts-rs export_all");
     // R20 Phase D `PublishedSurfacePolicy` registry — the three
     // projection-policy surface types are leaf roots (not reachable
     // from `RequestAuditRecord`), so they need their own
-    // `export_all_to` calls. `AnalyzedSurface` transitively pulls
-    // `AnalyzedSurfaceItem`.
+    // `export_all(&Config)` calls. `AnalyzedSurface` transitively
+    // pulls `AnalyzedSurfaceItem`.
     verter_audit::PublishedSurfacePolicy::export_all(
         &ts_rs::Config::new().with_out_dir(tempdir.path()),
     )
-    .expect("regenerate PublishedSurfacePolicy graph via ts-rs export_all_to");
+    .expect("regenerate PublishedSurfacePolicy graph via ts-rs export_all");
     verter_audit::AnalyzedSurface::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate AnalyzedSurface graph via ts-rs export_all_to");
+        .expect("regenerate AnalyzedSurface graph via ts-rs export_all");
     verter_audit::PolicyNamesResult::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate PolicyNamesResult graph via ts-rs export_all_to");
+        .expect("regenerate PolicyNamesResult graph via ts-rs export_all");
 
     let generated_path = tempdir.path().join("audit.generated.ts");
     let generated_raw = fs::read_to_string(&generated_path)
