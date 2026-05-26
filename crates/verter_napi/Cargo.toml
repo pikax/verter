@@ -27,15 +27,15 @@ verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-beta.1" 
 verter_semantic = { path = "../verter_semantic" }
 verter_type_expr = { workspace = true }
 verter_protocol = { path = "../verter_protocol", version = "0.0.1-beta.1" }
-prost = "0.14.1"
+prost = "0.14.3"
 verter_span = { path = "../verter_span" }
 verter_scheduler = { path = "../verter_scheduler" }
-napi = { version = "2", default-features = false, features = ["napi8", "serde-json", "async"] }
-napi-derive = "2"
+napi = { version = "3", default-features = false, features = ["napi8", "serde-json", "async"] }
+napi-derive = "3"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 oxc_allocator = { workspace = true }
-tokio = { version = "1", features = ["io-util", "process", "sync", "time", "rt", "macros"] }
+tokio = { version = "1.52", features = ["io-util", "process", "sync", "time", "rt", "macros"] }
 
 [build-dependencies]
-napi-build = "2"
+napi-build = "2.3"

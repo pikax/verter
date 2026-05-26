@@ -24,31 +24,31 @@ parser_cache_audit = ["verter_parser/parser_cache_audit"]
 verter_audit = { path = "../verter_audit" }
 verter_parser = { path = "../verter_parser" }
 verter_span = { path = "../verter_span", version = "0.0.1-beta.1" }
-hotpath = { version = "0.13", optional = true }
-bitflags = "2"
-memchr = "2.7.6"
+hotpath = { version = "0.16", optional = true }
+bitflags = "2.11"
+memchr = "2.8.0"
 rustc-hash = { workspace = true }
-smallvec = "1.13"
-lazy_static = "1.5"
+smallvec = "1.15"
+lazy_static = "1.5.0"
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_span = { workspace = true }
-oxc_diagnostics = "0.117.0"
-bumpalo = { version = "3.15.0", features = ["collections"] }
+oxc_diagnostics = "0.126.0"
+bumpalo = { version = "3.20.3", features = ["collections"] }
 serde = { workspace = true }
-serde_repr = "0.1"
+serde_repr = "0.1.20"
 serde_json = { workspace = true }
 allocator-api2 = "0.4.0"
-oxc_sourcemap = "6.0.2"
-base64 = "0.22"
+oxc_sourcemap = "7.0.0"
+base64 = "0.22.1"
 sha2 = { workspace = true }
-hex = "0.4"
+hex = "0.4.3"
 lightningcss = { workspace = true }
-phf = { version = "0.13", features = ["macros"] }
+phf = { version = "0.13.1", features = ["macros"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-web-time = "1"
+web-time = "1.1"
 
 [dev-dependencies]
-dhat = "0.3"
+dhat = "0.3.3"

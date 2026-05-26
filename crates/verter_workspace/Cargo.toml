@@ -13,26 +13,26 @@ publish = false
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
 
 [dependencies]
-arc-swap = "1"
+arc-swap = "1.9"
 rustc-hash = { workspace = true }
-hotpath = { version = "0.13", optional = true }
+hotpath = { version = "0.16", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-glob = "0.3"
-parking_lot = "0.12"
-smallvec = "1.13"
-thiserror = "2"
+glob = "0.3.3"
+parking_lot = "0.12.5"
+smallvec = "1.15"
+thiserror = "2.0"
 verter_audit = { path = "../verter_audit" }
 verter_scheduler = { path = "../verter_scheduler" }
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 oxc_allocator = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_span = { workspace = true }
-tracing = "0.1"
-walkdir = "2"
+tracing = "0.1.44"
+walkdir = "2.5"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = "3.27"

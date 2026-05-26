@@ -17,16 +17,16 @@ repository = "https://github.com/pikax/verter"
 homepage = "https://verterjs.dev/"
 
 [workspace.dependencies]
-oxc_allocator = "0.117.0"
-oxc_ast = "0.117.0"
-oxc_parser = "0.117.0"
-oxc_span = "0.117.0"
-rayon = "1.8"
-rustc-hash = "2.1"
+oxc_allocator = "0.126.0"
+oxc_ast = "0.126.0"
+oxc_parser = "0.126.0"
+oxc_span = "0.126.0"
+rayon = "1.12"
+rustc-hash = "2.1.2"
 self_cell = "1.2.2"
-serde = { version = "1.0", features = ["derive", "rc"] }
-serde_json = "1.0"
-sha2 = "0.10"
+serde = { version = "1.0.228", features = ["derive", "rc"] }
+serde_json = "1.0.150"
+sha2 = "0.11"
 lightningcss = { version = "1.0.0-alpha.71", features = ["visitor"] }
 verter_type_expr = { path = "crates/verter_type_expr" }
 verter_type_expr_oxc = { path = "crates/verter_type_expr_oxc" }

@@ -147,7 +147,7 @@ fn is_word_boundary(text: &str, pos: usize, len: usize) -> bool {
 // ── Core assertion helpers ─────────────────────────────────────────
 
 /// Build a lookup table from a SourceMap for use with `lookup_token`.
-fn build_lookup_table(sm: &oxc_sourcemap::SourceMap) -> Vec<&[oxc_sourcemap::Token]> {
+fn build_lookup_table(sm: &oxc_sourcemap::OwnedSourceMap) -> Vec<&[oxc_sourcemap::Token]> {
     sm.generate_lookup_table()
 }
 
@@ -157,7 +157,7 @@ fn build_lookup_table(sm: &oxc_sourcemap::SourceMap) -> Vec<&[oxc_sourcemap::Tok
 /// `tsx_occurrence` selects which occurrence of `target` in the generated code to check
 /// (0-based). Only word-boundary matches are considered.
 fn assert_maps_to_source(
-    sm: &oxc_sourcemap::SourceMap,
+    sm: &oxc_sourcemap::OwnedSourceMap,
     lookup: &[&[oxc_sourcemap::Token]],
     generated_code: &str,
     vue_source: &str,
@@ -258,7 +258,7 @@ fn assert_maps_to_source(
 /// column. Use this for script-region tests where the sourcemap maps at
 /// statement/line level rather than per-identifier.
 fn assert_maps_to_source_line(
-    sm: &oxc_sourcemap::SourceMap,
+    sm: &oxc_sourcemap::OwnedSourceMap,
     lookup: &[&[oxc_sourcemap::Token]],
     generated_code: &str,
     vue_source: &str,
@@ -343,7 +343,7 @@ fn assert_maps_to_source_line(
 ///
 /// Skips `___VERTER___` synthetic regions and unmapped tokens.
 fn assert_identifiers_map_to_source(
-    sm: &oxc_sourcemap::SourceMap,
+    sm: &oxc_sourcemap::OwnedSourceMap,
     lookup: &[&[oxc_sourcemap::Token]],
     generated_code: &str,
     vue_source: &str,
@@ -408,7 +408,7 @@ fn assert_identifiers_map_to_source(
 /// the text span in the generated code and verifies the source text matches.
 /// Skips unmapped tokens (no source_id) and synthetic prefixes.
 fn assert_all_mapped_tokens_match(
-    sm: &oxc_sourcemap::SourceMap,
+    sm: &oxc_sourcemap::OwnedSourceMap,
     generated_code: &str,
     vue_source: &str,
 ) {
@@ -628,7 +628,7 @@ const count = ref(0)
         let script = result.script.as_ref().expect("script block");
         assert!(!script.source_map.is_empty(), "script source map is empty");
 
-        let sm = oxc_sourcemap::SourceMap::from_json_string(&script.source_map)
+        let sm = oxc_sourcemap::OwnedSourceMap::from_json_string(&script.source_map)
             .expect("valid source map JSON");
         let lookup = build_lookup_table(&sm);
 
@@ -655,7 +655,7 @@ function handleClick() {
         let script = result.script.as_ref().expect("script block");
         assert!(!script.source_map.is_empty(), "script source map is empty");
 
-        let sm = oxc_sourcemap::SourceMap::from_json_string(&script.source_map)
+        let sm = oxc_sourcemap::OwnedSourceMap::from_json_string(&script.source_map)
             .expect("valid source map JSON");
         let lookup = build_lookup_table(&sm);
 
@@ -680,7 +680,7 @@ const count = ref(0)
         let script = result.script.as_ref().expect("script block");
         assert!(!script.source_map.is_empty(), "script source map is empty");
 
-        let sm = oxc_sourcemap::SourceMap::from_json_string(&script.source_map)
+        let sm = oxc_sourcemap::OwnedSourceMap::from_json_string(&script.source_map)
             .expect("valid source map JSON");
         let lookup = build_lookup_table(&sm);
 
@@ -712,7 +712,7 @@ const show = true
         let tpl = result.template.as_ref().expect("template block");
         assert!(!tpl.source_map.is_empty(), "template source map is empty");
 
-        let sm = oxc_sourcemap::SourceMap::from_json_string(&tpl.source_map)
+        let sm = oxc_sourcemap::OwnedSourceMap::from_json_string(&tpl.source_map)
             .expect("valid source map JSON");
 
         // The template sourcemap operates on the full SFC input, so source lines
@@ -763,7 +763,7 @@ const show = true
         let tpl = result.template.as_ref().expect("template block");
         assert!(!tpl.source_map.is_empty(), "template source map is empty");
 
-        let sm = oxc_sourcemap::SourceMap::from_json_string(&tpl.source_map)
+        let sm = oxc_sourcemap::OwnedSourceMap::from_json_string(&tpl.source_map)
             .expect("valid source map JSON");
 
         let tpl_line_count = tpl.code.lines().count();
@@ -807,7 +807,7 @@ const show = true
         let tpl = result.template.as_ref().expect("template block");
         assert!(!tpl.source_map.is_empty(), "template source map is empty");
 
-        let sm = oxc_sourcemap::SourceMap::from_json_string(&tpl.source_map)
+        let sm = oxc_sourcemap::OwnedSourceMap::from_json_string(&tpl.source_map)
             .expect("valid source map JSON");
         let lookup = build_lookup_table(&sm);
 
@@ -822,11 +822,11 @@ mod tsx_tests {
     use super::*;
 
     /// Helper: compile TSX and return (sm, lookup, code) tuple.
-    fn compile_and_parse_tsx(source: &str) -> (String, oxc_sourcemap::SourceMap) {
+    fn compile_and_parse_tsx(source: &str) -> (String, oxc_sourcemap::OwnedSourceMap) {
         let result = compile_tsx_with_sourcemap(source);
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let tsx = result.tsx.expect("tsx block");
-        let sm = oxc_sourcemap::SourceMap::from_json_string(&tsx.source_map)
+        let sm = oxc_sourcemap::OwnedSourceMap::from_json_string(&tsx.source_map)
             .expect("valid source map JSON");
         (tsx.code, sm)
     }
@@ -1400,7 +1400,7 @@ mod hoist_mapping_tests {
 
     /// Helper: verify a target string in TSX output has a mapped sourcemap token
     /// (source_id is Some) at its position.
-    fn assert_token_is_mapped(sm: &oxc_sourcemap::SourceMap, tsx_code: &str, target: &str) {
+    fn assert_token_is_mapped(sm: &oxc_sourcemap::OwnedSourceMap, tsx_code: &str, target: &str) {
         let lookup = build_lookup_table(sm);
         let pos = tsx_code.find(target).unwrap_or_else(|| {
             panic!("'{}' not found in TSX output:\n{}", target, tsx_code);
@@ -1427,7 +1427,7 @@ mod hoist_mapping_tests {
     /// Helper: verify a target string maps back to source text that starts with
     /// the same content.
     fn assert_hoisted_maps_to_source(
-        sm: &oxc_sourcemap::SourceMap,
+        sm: &oxc_sourcemap::OwnedSourceMap,
         tsx_code: &str,
         vue_source: &str,
         target: &str,
@@ -1485,7 +1485,7 @@ const props = defineProps<Props>()
 
         let result = compile_tsx_with_sourcemap(source);
         let tsx = result.tsx.as_ref().unwrap();
-        let sm = oxc_sourcemap::SourceMap::from_json_string(&tsx.source_map).unwrap();
+        let sm = oxc_sourcemap::OwnedSourceMap::from_json_string(&tsx.source_map).unwrap();
 
         // The interface should be hoisted to top of TSX and MAPPED
         assert!(
@@ -1512,7 +1512,7 @@ const props = defineProps<Props>()
 
         let result = compile_tsx_with_sourcemap(source);
         let tsx = result.tsx.as_ref().unwrap();
-        let sm = oxc_sourcemap::SourceMap::from_json_string(&tsx.source_map).unwrap();
+        let sm = oxc_sourcemap::OwnedSourceMap::from_json_string(&tsx.source_map).unwrap();
 
         // Each line of the interface should map back to its original SFC position
         assert_hoisted_maps_to_source(&sm, &tsx.code, source, "interface Props {");
@@ -1532,7 +1532,7 @@ const status = ref<Status>("active")
 
         let result = compile_tsx_with_sourcemap(source);
         let tsx = result.tsx.as_ref().unwrap();
-        let sm = oxc_sourcemap::SourceMap::from_json_string(&tsx.source_map).unwrap();
+        let sm = oxc_sourcemap::OwnedSourceMap::from_json_string(&tsx.source_map).unwrap();
 
         assert_hoisted_maps_to_source(
             &sm,
@@ -1554,7 +1554,7 @@ const count = ref(0)
 
         let result = compile_tsx_with_sourcemap(source);
         let tsx = result.tsx.as_ref().unwrap();
-        let sm = oxc_sourcemap::SourceMap::from_json_string(&tsx.source_map).unwrap();
+        let sm = oxc_sourcemap::OwnedSourceMap::from_json_string(&tsx.source_map).unwrap();
 
         // User import should be hoisted and mapped back to SFC
         assert_hoisted_maps_to_source(
@@ -1577,7 +1577,7 @@ const count: Ref<number> = ref(0)
 
         let result = compile_tsx_with_sourcemap(source);
         let tsx = result.tsx.as_ref().unwrap();
-        let sm = oxc_sourcemap::SourceMap::from_json_string(&tsx.source_map).unwrap();
+        let sm = oxc_sourcemap::OwnedSourceMap::from_json_string(&tsx.source_map).unwrap();
 
         assert_hoisted_maps_to_source(&sm, &tsx.code, source, "import type { Ref } from 'vue'");
     }
@@ -1602,7 +1602,7 @@ const emit = defineEmits<Emits>()
 
         let result = compile_tsx_with_sourcemap(source);
         let tsx = result.tsx.as_ref().unwrap();
-        let sm = oxc_sourcemap::SourceMap::from_json_string(&tsx.source_map).unwrap();
+        let sm = oxc_sourcemap::OwnedSourceMap::from_json_string(&tsx.source_map).unwrap();
 
         // Both type declarations should be mapped
         assert_hoisted_maps_to_source(&sm, &tsx.code, source, "interface Props {");
@@ -1626,7 +1626,7 @@ const dir = ref(Direction.Up)
 
         let result = compile_tsx_with_sourcemap(source);
         let tsx = result.tsx.as_ref().unwrap();
-        let sm = oxc_sourcemap::SourceMap::from_json_string(&tsx.source_map).unwrap();
+        let sm = oxc_sourcemap::OwnedSourceMap::from_json_string(&tsx.source_map).unwrap();
 
         // const enum should be hoisted and mapped
         assert_token_is_mapped(&sm, &tsx.code, "const enum Direction {");

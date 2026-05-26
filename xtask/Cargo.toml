@@ -20,4 +20,4 @@ path = "src/bin/cutover_state.rs"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
+toml = "1.1"

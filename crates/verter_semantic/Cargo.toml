@@ -21,17 +21,17 @@ verter_type_expr_oxc = { workspace = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-smallvec = "1.13"
-hotpath = { version = "0.13", optional = true }
+smallvec = "1.15"
+hotpath = { version = "0.16", optional = true }
 oxc_allocator = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_span = { workspace = true }
 sha2 = { workspace = true }
-bitflags = "2"
+bitflags = "2.11"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-web-time = "1"
+web-time = "1.1"
 
 [dev-dependencies]
-criterion = { version = "0.8", features = ["html_reports"] }
+criterion = { version = "0.8.2", features = ["html_reports"] }

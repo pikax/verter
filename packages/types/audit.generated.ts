@@ -108,12 +108,12 @@ message: string,
  * session-side projector could not attribute the diagnostic to a
  * concrete source range.
  */
-span: { start: number; end: number } | null, 
+span?: { start: number; end: number } | null, 
 /**
  * Macro index within the script-analysis macro list, if the
  * diagnostic was attributable to a specific macro invocation.
  */
-macro_index: number | null, };
+macro_index?: number | null, };
 
 /**
  * Discriminator naming the audited diagnostic class. Mirror of the
@@ -522,7 +522,7 @@ dep_signature_intern_hits: string,
  * converter. Empty when the request did not surface diagnostics
  * (warm cache hits and clean cold runs).
  */
-diagnostics: Array<AuditDiagnosticEntry>, 
+diagnostics?: Array<AuditDiagnosticEntry>, 
 /**
  * `true` when a fatal `QueryError` (`BudgetExceeded`,
  * `UnstableState`) propagated through the resolver during the
@@ -530,7 +530,7 @@ diagnostics: Array<AuditDiagnosticEntry>,
  * this flag — partially-populated results never warm the shared
  * final-result cache.
  */
-should_suppress: boolean, 
+should_suppress?: boolean, 
 /**
  * Per-request count of `Instantiate { body_mode: Expanded }`
  * dispatches observed against this request. Mirror of the
@@ -765,19 +765,19 @@ triggered_by_this_request: boolean,
  * `Some(value)` only when this request triggered the read; `None`
  * for warm-cache entries (read-once invariant).
  */
-read_ms: number | null, 
+read_ms?: number | null, 
 /**
  * Wall-clock milliseconds the request spent parsing the file.
  * `Some(value)` only when this request triggered the parse;
  * `None` for warm-cache entries.
  */
-parse_ms: number | null, 
+parse_ms?: number | null, 
 /**
  * Wall-clock milliseconds the request spent lowering the parsed
  * AST into `IndexedReady`. `Some(value)` only when this request
  * triggered the lower; `None` otherwise.
  */
-lower_ms: number | null, };
+lower_ms?: number | null, };
 
 /**
  * Why a file was visible to the audited request. Producers attach
@@ -1324,7 +1324,7 @@ parent_request_id: string | null,
  * this `false`. Serde-default for back-compat with payloads
  * emitted before this field landed.
  */
-from_cache: boolean, 
+from_cache?: boolean, 
 /**
  * Per-phase wall-clock timings (ms).
  */
@@ -1353,7 +1353,7 @@ footprint: RequestFootprintAudit | null,
  * Serde-default for back-compat with payloads emitted before
  * this field landed.
  */
-scheduler: SchedulerAudit | null, 
+scheduler?: SchedulerAudit | null, 
 /**
  * Per-file attribution for every file the request observed.
  * Deduplicated by `canonical_id` — one entry per canonical file.
@@ -1364,7 +1364,7 @@ scheduler: SchedulerAudit | null,
  * Serde-default for back-compat with audit payloads written
  * before this field landed.
  */
-files: Array<FileAudit>, 
+files?: Array<FileAudit>, 
 /**
  * Optional lock + queue contention attribution. Populated only
  * when `HostConfig::audit_timing_capture = true`. Always `None`
@@ -1373,7 +1373,7 @@ files: Array<FileAudit>,
  * Serde-default for back-compat with payloads emitted before
  * this field landed.
  */
-waits: WaitAudit | null, 
+waits?: WaitAudit | null, 
 /**
  * Per-`RequestKind` strongly-typed payload. The variant tag
  * MUST match [`Self::kind`].
@@ -1388,7 +1388,7 @@ kind_payload: RequestKindPayload,
  * Serde-default empty string for back-compat with payloads
  * emitted before this field landed.
  */
-trace_id: string, };
+trace_id?: string, };
 
 /**
  * Semantic footprint attached to an audited request.
@@ -1667,7 +1667,7 @@ serialize_ms: number,
  * per-file [`crate::footprint::RequestFootprintAudit`] vector.
  * Defaults to `0.0` when no producer has populated it.
  */
-request_critical_path_ms: number, };
+request_critical_path_ms?: number, };
 
 /**
  * Scheduler-side attribution captured at first dispatch of an audited
@@ -2293,7 +2293,7 @@ recursion_limit_reached: boolean,
  * that emit records without this field deserialize cleanly into
  * an empty vec.
  */
-walker_diagnostics: Array<AuditDiagnosticEntry>, 
+walker_diagnostics?: Array<AuditDiagnosticEntry>, 
 /**
  * `true` when the request was driven through a synthesis path that
  * landed with `cache_suppress=true` and therefore made no
@@ -2304,7 +2304,7 @@ walker_diagnostics: Array<AuditDiagnosticEntry>,
  * Marked `#[serde(default)]` for the same compatibility reason as
  * `walker_diagnostics`.
  */
-cache_suppress: boolean, };
+cache_suppress?: boolean, };
 
 /**
  * Which VFS layer served the read — mirrored from the workspace's

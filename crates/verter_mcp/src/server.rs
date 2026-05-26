@@ -200,6 +200,8 @@ pub struct VerterMcpServer {
     pub project_root: Option<PathBuf>,
     #[allow(dead_code)]
     pub config: McpServerConfig,
+    // Used implicitly by rmcp's `#[tool_router]` / `#[tool_handler]` macros.
+    #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
 

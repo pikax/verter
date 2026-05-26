@@ -13,12 +13,12 @@ publish = false
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
 
 [dependencies]
-arc-swap = "1"
-hotpath = { version = "0.13", optional = true }
-parking_lot = "0.12"
+arc-swap = "1.9"
+hotpath = { version = "0.16", optional = true }
+parking_lot = "0.12.5"
 rustc-hash = { workspace = true }
-dashmap = "6"
-crossbeam-channel = "0.5"
+dashmap = "6.2"
+crossbeam-channel = "0.5.15"
 verter_audit = { path = "../verter_audit" }
 verter_span = { path = "../verter_span" }
 
@@ -26,6 +26,6 @@ verter_span = { path = "../verter_span" }
 rayon = "1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-web-time = "1"
+web-time = "1.1"
 
 [dev-dependencies]

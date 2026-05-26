@@ -16,7 +16,7 @@ fn test_source_map_generation() {
     // The source map should be valid
     let sources: Vec<_> = map.get_sources().collect();
     assert_eq!(sources.len(), 1);
-    assert_eq!(sources[0].as_ref(), "input.js");
+    assert_eq!(sources[0], "input.js");
 }
 
 #[test]
@@ -35,7 +35,7 @@ fn test_source_map_with_content() {
     // Should include source content
     let content = map.get_source_content(0);
     assert!(content.is_some());
-    assert_eq!(content.unwrap().as_ref(), source);
+    assert_eq!(content.unwrap(), source);
 }
 
 /// Verify PositionResolver-based line/column calculation (0-indexed for source maps)
@@ -326,7 +326,7 @@ fn test_source_map_include_content_false() {
     let content = map.get_source_content(0);
     assert!(content.is_some(), "source content entry should exist");
     assert_eq!(
-        content.unwrap().as_ref(),
+        content.unwrap(),
         "",
         "content should be empty string when include_content is false"
     );

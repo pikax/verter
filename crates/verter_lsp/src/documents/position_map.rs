@@ -1,8 +1,8 @@
-use oxc_sourcemap::SourceMap;
+use oxc_sourcemap::OwnedSourceMap;
 
 /// Bidirectional position mapper between Vue source positions and generated IDE positions.
 ///
-/// Consumes an `oxc_sourcemap::SourceMap` (from `verter_session.get_ide()`) and provides
+/// Consumes an `oxc_sourcemap::OwnedSourceMap` (from `verter_session.get_ide()`) and provides
 /// lookups in both directions:
 /// - `tsx_to_vue`: Generated TSX position -> Original Vue position (via `lookup_token`)
 /// - `vue_to_tsx`: Original Vue position -> Generated TSX position (via sorted token scan)
@@ -10,7 +10,7 @@ use oxc_sourcemap::SourceMap;
 /// All positions use 0-indexed lines and UTF-16 columns (matching LSP `Position`).
 #[derive(Clone)]
 pub struct PositionMapper {
-    map: SourceMap,
+    map: OwnedSourceMap,
 }
 
 /// A mapped position result.
@@ -25,8 +25,8 @@ pub struct MappedPosition {
 impl PositionMapper {
     /// Create a position mapper from a source map JSON string.
     pub fn from_json(json: &str) -> Result<Self, String> {
-        let map =
-            SourceMap::from_json_string(json).map_err(|e| format!("invalid source map: {e}"))?;
+        let map = OwnedSourceMap::from_json_string(json)
+            .map_err(|e| format!("invalid source map: {e}"))?;
         Ok(Self { map })
     }
 
@@ -161,7 +161,7 @@ impl PositionMapper {
     }
 
     /// Get the underlying source map (for advanced queries).
-    pub fn source_map(&self) -> &SourceMap {
+    pub fn source_map(&self) -> &OwnedSourceMap {
         &self.map
     }
 }

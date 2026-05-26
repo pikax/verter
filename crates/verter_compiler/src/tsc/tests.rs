@@ -2605,10 +2605,7 @@ defineEmits<{ (e: 'my-event', value: string): void }>()
     let expected_offset = sfc.find("'my-event'").expect("source event literal");
     let (expected_line, expected_col) = offset_to_zero_based_line_col(sfc, expected_offset);
 
-    assert_eq!(
-        token.get_source().map(|s| s.as_ref()),
-        Some("/test/TestComp.vue")
-    );
+    assert_eq!(token.get_source(), Some("/test/TestComp.vue"));
     assert_eq!(token.get_src_line(), expected_line);
     assert_eq!(token.get_src_col(), expected_col);
 }
@@ -2630,10 +2627,7 @@ defineProps<{ title: string; count?: number }>()
     let expected_offset = sfc.find("title: string").expect("source prop");
     let (expected_line, expected_col) = offset_to_zero_based_line_col(sfc, expected_offset);
 
-    assert_eq!(
-        token.get_source().map(|s| s.as_ref()),
-        Some("/test/TestComp.vue")
-    );
+    assert_eq!(token.get_source(), Some("/test/TestComp.vue"));
     assert_eq!(token.get_src_line(), expected_line);
     assert_eq!(token.get_src_col(), expected_col);
 }
@@ -2658,10 +2652,7 @@ const title = defineModel<string>('title')
     let expected_offset = sfc.find("'title'").expect("source model name");
     let (expected_line, expected_col) = offset_to_zero_based_line_col(sfc, expected_offset);
 
-    assert_eq!(
-        token.get_source().map(|s| s.as_ref()),
-        Some("/test/TestComp.vue")
-    );
+    assert_eq!(token.get_source(), Some("/test/TestComp.vue"));
     assert_eq!(token.get_src_line(), expected_line);
     assert_eq!(token.get_src_col(), expected_col);
 }

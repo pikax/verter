@@ -14,7 +14,7 @@ hotpath = ["dep:hotpath", "hotpath/hotpath", "verter_session/hotpath", "verter_d
 
 [dependencies]
 verter_session = { path = "../verter_session", features = ["session_metrics"] }
-hotpath = { version = "0.13", optional = true }
+hotpath = { version = "0.16", optional = true }
 verter_audit = { path = "../verter_audit" }
 verter_scheduler = { path = "../verter_scheduler" }
 verter_workspace = { path = "../verter_workspace" }
@@ -28,12 +28,12 @@ oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_span = { workspace = true }
-oxc_sourcemap = "6.0.2"
+oxc_sourcemap = "7.0.0"
 tower-lsp-server = "0.23"
-schemars = "1"
+schemars = "1.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { version = "1", features = [
+tokio = { version = "1.52", features = [
   "rt",
   "rt-multi-thread",
   "macros",
@@ -45,18 +45,18 @@ tokio = { version = "1", features = [
   "net",
   "signal",
 ] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-dashmap = "6"
-glob = "0.3"
-lru = "0.16"
-parking_lot = "0.12"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+dashmap = "6.2"
+glob = "0.3.3"
+lru = "0.18"
+parking_lot = "0.12.5"
 
 [[bin]]
 name = "verter-lsp"
 path = "src/main.rs"
 
 [dev-dependencies]
-futures-util = "0.3"
-paste = "1"
-tempfile = "3.26.0"
+futures-util = "0.3.32"
+paste = "1.0.15"
+tempfile = "3.27"

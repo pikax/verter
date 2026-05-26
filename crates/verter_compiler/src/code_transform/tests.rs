@@ -286,7 +286,7 @@ fn test_generate_map_basic() {
 
     let sources: Vec<_> = map.get_sources().collect();
     assert_eq!(sources.len(), 1);
-    assert_eq!(sources[0].as_ref(), "input.js");
+    assert_eq!(sources[0], "input.js");
 }
 
 #[test]
@@ -382,7 +382,7 @@ fn test_source_map_after_multiple_edits() {
 
     // Verify original content is preserved
     let content = map.get_source_content(0);
-    assert_eq!(content.unwrap().as_ref(), source);
+    assert_eq!(content.unwrap(), source);
 }
 
 // ============================================================================
@@ -1084,7 +1084,7 @@ fn test_source_map_moved_chunk_produces_valid_map() {
     let map = ct.generate_map(options);
     let sources: Vec<_> = map.get_sources().collect();
     assert_eq!(sources.len(), 1);
-    assert_eq!(map.get_source_content(0).unwrap().as_ref(), source);
+    assert_eq!(map.get_source_content(0).unwrap(), source);
 }
 
 #[test]
@@ -1119,8 +1119,8 @@ fn test_source_map_complex_scenario() {
     let map = ct.generate_map(options);
     let sources: Vec<_> = map.get_sources().collect();
     assert_eq!(sources.len(), 1);
-    assert_eq!(sources[0].as_ref(), "test.vue");
-    assert_eq!(map.get_source_content(0).unwrap().as_ref(), source);
+    assert_eq!(sources[0], "test.vue");
+    assert_eq!(map.get_source_content(0).unwrap(), source);
 }
 
 // ============================================================================

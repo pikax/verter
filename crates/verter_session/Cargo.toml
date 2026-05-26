@@ -46,40 +46,40 @@ hotpath = [
 verter_audit = { path = "../verter_audit" }
 verter_compiler = { path = "../verter_compiler" }
 verter_protocol = { path = "../verter_protocol" }
-prost = "0.14.1"
+prost = "0.14.3"
 verter_semantic = { path = "../verter_semantic" }
 verter_type_expr = { workspace = true }
 verter_type_expr_oxc = { workspace = true }
 verter_span = { path = "../verter_span" }
 verter_workspace = { path = "../verter_workspace" }
 verter_scheduler = { path = "../verter_scheduler" }
-bitflags = "2"
-dashmap = "6"
-hotpath = { version = "0.13", optional = true }
+bitflags = "2.11"
+dashmap = "6.2"
+hotpath = { version = "0.16", optional = true }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_span = { workspace = true }
 rustc-hash = { workspace = true }
 self_cell = { workspace = true }
-smallvec = "1.13"
-uuid = { version = "1", features = ["v4"] }
+smallvec = "1.15"
+uuid = { version = "1.23", features = ["v4"] }
 sha2 = { workspace = true }
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 serde = { workspace = true }
-tracing = "0.1"
+tracing = "0.1.44"
 serde_json = { workspace = true }
-sourcemap = "9"
-thiserror = "2"
-arc-swap = "1"
-parking_lot = "0.12"
-indexmap = "2"
-similar = "2"
+sourcemap = "9.3"
+thiserror = "2.0"
+arc-swap = "1.9"
+parking_lot = "0.12.5"
+indexmap = "2.14"
+similar = "3"
 # ts-rs is a REGULAR dependency (not dev) so derives compile into production
 # builds — the audit record types export their TS equivalents via a normal
 # #[test], not a feature gate. Binary-size overhead (~50KB on WASM worst
 # case) is documented in plan §1.4.
-ts-rs = "10"
+ts-rs = "12"
 # Phase 10a — compile-time `assert_obj_safe!(ResolverContext)` lives in
 # the production `src/resolver_core/resolver_context.rs` module so the
 # dyn-compatibility check fails the build at any future trait edit that
@@ -87,13 +87,13 @@ ts-rs = "10"
 # dependency, not a dev-dependency. Zero-cost: the macro expands to
 # trait-object construction inside an inert const, so no runtime code is
 # emitted.
-static_assertions = "1"
+static_assertions = "1.1.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-web-time = "1"
+web-time = "1.1"
 # uuid 1.22 split RNG into explicit features. On wasm32-unknown-unknown
 # the `js` feature routes through wasm-bindgen + WebCrypto.
-uuid = { version = "1", features = ["js"] }
+uuid = { version = "1.23", features = ["js"] }
 
 # Windows process-RSS reporting in `component_meta_audit::current_process_rss`.
 # Requires `K32GetProcessMemoryInfo` (kernel32.dll, exposed by
@@ -102,7 +102,7 @@ uuid = { version = "1", features = ["js"] }
 # `windows-sys = 0.61` via transitive deps, so we pin the same major to
 # avoid a second copy in the dependency graph.
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61", features = [
+windows-sys = { version = "0.61.2", features = [
   "Win32_System_ProcessStatus",
   "Win32_System_Threading",
 ] }
@@ -113,24 +113,24 @@ windows-sys = { version = "0.61", features = [
 rayon = { workspace = true }
 # uuid 1.22 split RNG into explicit features. Native targets use
 # `rng-getrandom` for v4 generation.
-uuid = { version = "1", features = ["rng-getrandom"] }
+uuid = { version = "1.23", features = ["rng-getrandom"] }
 
 [dev-dependencies]
-criterion = { version = "0.8", features = ["html_reports"] }
-toml = "1"
+criterion = { version = "0.8.2", features = ["html_reports"] }
+toml = "1.1"
 verter_parser = { path = "../verter_parser" }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_span = { workspace = true }
-tempfile = "3"
-walkdir = "2"
-regex = "1"
+tempfile = "3.27"
+walkdir = "2.5"
+regex = "1.12"
 # Phase 6b sub-plan §6b.D2b — T11 compile-fail trybuild target verifies
 # that `VerterHost::workspace()` is gated behind `pub(crate)` and is not
 # callable from external compilation units.
-trybuild = "1"
-tracing-test = "0.2"
+trybuild = "1.0"
+tracing-test = "0.2.6"
 # Phase 8 — `no_off_store_host_caches` static guard parses
 # `crates/verter_session/src/lib.rs` via syn::parse_file to enumerate
 # `VerterHost` fields and assert each cache-shaped field is either
@@ -139,8 +139,8 @@ tracing-test = "0.2"
 # every file under the resolver-tier seal scope via `syn::Visit`,
 # requiring the `visit` and `parsing` features in addition to the
 # original `full`+`extra-traits` set.
-syn = { version = "2", features = ["full", "extra-traits", "visit", "parsing"] }
-quote = "1"
+syn = { version = "2.0", features = ["full", "extra-traits", "visit", "parsing"] }
+quote = "1.0.45"
 
 [[bench]]
 name = "host_bench"

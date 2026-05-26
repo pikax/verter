@@ -19,14 +19,14 @@ verter_diagnostics = { path = "../verter_diagnostics" }
 verter_session = { path = "../verter_session" }
 verter_semantic = { path = "../verter_semantic" }
 verter_workspace = { path = "../verter_workspace" }
-rmcp = { version = "1", features = [
+rmcp = { version = "1.7", features = [
   "server",
   "macros",
   "transport-io",
   "transport-streamable-http-server",
 ] }
-tokio = { version = "1", features = ["full"] }
-clap = { version = "4", features = ["derive"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-axum = "0.8"
+tokio = { version = "1.52", features = ["full"] }
+clap = { version = "4.6", features = ["derive"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+axum = "0.8.9"

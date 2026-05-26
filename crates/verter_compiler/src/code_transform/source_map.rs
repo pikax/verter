@@ -68,7 +68,7 @@ impl<'a> CodeTransform<'a> {
     #[must_use]
     #[allow(unused_assignments)] // generated_line/column updated in outro but intentionally not read after
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub fn generate_map(&self, options: SourceMapOptions) -> SourceMap {
+    pub fn generate_map(&self, options: SourceMapOptions) -> SourceMap<'static> {
         let mut builder = SourceMapBuilder::default();
 
         // Set up source file

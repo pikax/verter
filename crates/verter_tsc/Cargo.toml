@@ -16,12 +16,12 @@ path = "src/main.rs"
 verter_compiler = { path = "../verter_compiler" }
 verter_session = { path = "../verter_session" }
 verter_workspace = { path = "../verter_workspace" }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4.6", features = ["derive"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rayon = "1"
-tempfile = "3"
-base64 = "0.22"
+tempfile = "3.27"
+base64 = "0.22.1"
 oxc_allocator = { workspace = true }
-oxc_sourcemap = "6.0.2"
-walkdir = "2"
+oxc_sourcemap = "7.0.0"
+walkdir = "2.5"

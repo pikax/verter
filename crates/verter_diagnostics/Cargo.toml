@@ -13,7 +13,7 @@ hotpath = ["dep:hotpath", "hotpath/hotpath"]
 
 [dependencies]
 verter_span = { path = "../verter_span" }
-hotpath = { version = "0.13", optional = true }
+hotpath = { version = "0.16", optional = true }
 verter_semantic = { path = "../verter_semantic" }
 verter_workspace = { path = "../verter_workspace" }
 rustc-hash.workspace = true
