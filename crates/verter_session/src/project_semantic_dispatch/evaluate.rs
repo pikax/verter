@@ -55,14 +55,38 @@ thread_local! {
     /// returns the carrier-stop sentinel (the input `node` itself)
     /// instead of recursing further.
     static EVALUATE_DEFERRED_DEPTH: Cell<u32> = const { Cell::new(0) };
+    /// Per-thread sticky truncation flag. Set when the depth guard
+    /// fires (any recursive frame on the current thread's evaluator
+    /// call chain hit `over_ceiling`). Every publish site consults
+    /// this flag and SKIPS publishing into
+    /// `evaluate_deferred_memo` when it is set — a parent frame that
+    /// consumed a truncated child's input-node carrier must not
+    /// publish its derived result as a warm entry, because that
+    /// result is budget-tainted (downstream operators reduced
+    /// against a carrier-stop, not a fully-resolved sub-evaluation).
+    ///
+    /// The flag is reset to `false` only when the top-level entry
+    /// frame (depth was 0 at enter) exits — every nested frame
+    /// preserves the sticky state up the call chain. This routes
+    /// budget-exhaustion through `ComputeAdmission::ReturnOnly`
+    /// semantics at the evaluator layer: no torn / budget-exhausted
+    /// result ever populates the shared memo.
+    static EVALUATE_DEFERRED_TRUNCATED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// RAII guard for [`EVALUATE_DEFERRED_DEPTH`]. Increments on `enter`,
 /// decrements on `Drop`. The guard's `over_ceiling` flag captures
 /// whether the entry exceeded the ceiling — callers consult it to
 /// fast-return without recursing.
+///
+/// The guard's `is_top_level` flag records whether the depth at
+/// `enter` was 0 — only the top-level frame may reset the sticky
+/// `EVALUATE_DEFERRED_TRUNCATED` flag on `Drop`, so a nested
+/// recursive frame's exit never clears a child's truncation signal
+/// before the parent has a chance to honour it.
 struct DepthGuard {
     over_ceiling: bool,
+    is_top_level: bool,
 }
 
 impl DepthGuard {
@@ -70,8 +94,13 @@ impl DepthGuard {
         EVALUATE_DEFERRED_DEPTH.with(|cell| {
             let depth = cell.get();
             cell.set(depth.saturating_add(1));
+            let over_ceiling = depth >= EVALUATE_DEFERRED_DEPTH_CEILING;
+            if over_ceiling {
+                EVALUATE_DEFERRED_TRUNCATED.with(|flag| flag.set(true));
+            }
             DepthGuard {
-                over_ceiling: depth >= EVALUATE_DEFERRED_DEPTH_CEILING,
+                over_ceiling,
+                is_top_level: depth == 0,
             }
         })
     }
@@ -83,7 +112,21 @@ impl Drop for DepthGuard {
             let depth = cell.get();
             cell.set(depth.saturating_sub(1));
         });
+        if self.is_top_level {
+            EVALUATE_DEFERRED_TRUNCATED.with(|flag| flag.set(false));
+        }
     }
+}
+
+/// Returns `true` iff the depth guard has fired anywhere on the
+/// current thread's evaluator call chain since the top-level entry.
+/// Publish sites consult this flag to gate writes into
+/// `evaluate_deferred_memo` — a `true` reading means at least one
+/// recursive sub-evaluation returned its input-node carrier-stop,
+/// and any derived result the current frame produced is
+/// budget-tainted.
+fn evaluator_truncated() -> bool {
+    EVALUATE_DEFERRED_TRUNCATED.with(|flag| flag.get())
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
@@ -358,6 +401,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             node = next;
         };
+        // Budget-tainted-publish gate. If the depth guard fired
+        // anywhere on the current call chain (even in a transitive
+        // sub-evaluation), every publish along the unwinding path
+        // is suppressed. A parent frame that consumed a truncated
+        // child's input-node carrier may have dispatched downstream
+        // operators that returned `Opaque(Miss)` or a partial
+        // reduction; admitting that derivative into the warm memo
+        // would let a stale, budget-exhausted answer survive across
+        // queries. The carrier-stop contract from the over-ceiling
+        // arm extends here: on truncation we also return the
+        // ENTRY node (a structural-transit carrier-stop) rather
+        // than the partially-reduced `result`, so downstream
+        // re-dispatch starts from the same surface the cache would
+        // observe on a future cold call (Opaque-fallback contract
+        // applied consistently across the call chain).
+        if evaluator_truncated() {
+            return entry_node;
+        }
         // Publish the entry-node → result mapping. Concurrent
         // publishers for the same `(entry_node, context)` resolve to
         // structurally identical results (the evaluator is pure on
