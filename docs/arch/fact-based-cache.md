@@ -78,6 +78,7 @@ corpus fingerprint).
 | `EnvHashInputs.lib_names` | per-call | `lib_env` | Selected TS `lib*.d.ts` set (e.g., `lib.dom.d.ts`, `lib.es2022.d.ts`). |
 | `EnvHashInputs.type_roots` | per-call | `lib_env` | `typeRoots` directory list for ambient `@types`. |
 | `EnvHashInputs.ambient_corpus_fingerprint` | per-call | `lib_env` | Identity of the resolved ambient library corpus (registered globals, module-augmentation declarations). |
+| `WorldSnapshot` (request identity) | `crates/verter_session/src/cache_runtime/world_snapshot.rs` | n/a — request-concurrency identity | Carries all five env hashes plus `compat_token`, `compiler_version`, `plugin_versions`, source-map / public-API policy hashes, `overlay_identity`, and `generation`. Exposes per-layer dim accessors (`parse_dims`, `resolve_dims`, `type_dims`, `compile_dims`); NEVER enters a cache key as a whole (R21 — the static guard `tests/world_snapshot_is_not_a_cache_key.rs` rejects any cache-layer struct field of type `WorldSnapshot`). |
 
 ### R21 scoping rule (the dimension that does NOT enter every key)
 

@@ -549,10 +549,11 @@ impl SemanticGraphStore {
     /// Public read accessor for the shared
     /// [`crate::types::MetaProvenance`] handle the store was constructed
     /// with. Returns `None` for `Default`-built stores (test-default
-    /// path); host-built stores always return `Some`. Block 1.C uses
-    /// this to bump `slot_binding_graph_*` counters from the
-    /// `meta_resolve::slot_binding_graph` module without threading a
-    /// `&VerterHost` reference through every helper signature.
+    /// path); host-built stores always return `Some`.
+    /// `meta_resolve::slot_binding_graph` reaches the
+    /// `slot_binding_graph_*` counters through this accessor without
+    /// threading a `&VerterHost` reference through every helper
+    /// signature.
     #[must_use]
     pub fn provenance(&self) -> Option<&Arc<crate::types::MetaProvenance>> {
         self.provenance.as_ref()

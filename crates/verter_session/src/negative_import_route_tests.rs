@@ -1,9 +1,9 @@
-//! Block 1.J.1 item 2 — negative import-route reopens on new file.
+//! Negative import-route reopens on new file.
 //!
-//! Codex Block 1.J diagnosis: "`IndexedReady.import_routes` can retain
-//! a stale negative snapshot with no equivalent generation/fact
-//! validation. After a new file appears, `authoritative_import_route`
-//! can still observe the stale miss through `IndexedReady`."
+//! Root diagnosis: `IndexedReady.import_routes` can retain a stale
+//! negative snapshot with no equivalent generation/fact validation.
+//! After a new file appears, `authoritative_import_route` can still
+//! observe the stale miss through `IndexedReady`.
 //!
 //! `authoritative_import_route` has two route sources:
 //!  1. `cached_import_route_resolution` — reads

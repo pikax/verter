@@ -129,8 +129,8 @@ impl AppConfigNoOverrideProofDb {
     /// Look up a proof entry. Returns `None` on miss; the fast-path
     /// caller declines and the slow path runs.
     ///
-    /// **Block 1.H:** validation is path-precise only. Each warm-hit
-    /// read calls [`crate::fact_signature_helpers::validate_fact_signature`]
+    /// Validation is path-precise only. Each warm-hit read calls
+    /// [`crate::fact_signature_helpers::validate_fact_signature`]
     /// against the live store view through `ctx`. A single
     /// mismatched fact returns `None` and the caller cold-recomputes.
     /// On a successful warm hit, the path-precise observation set

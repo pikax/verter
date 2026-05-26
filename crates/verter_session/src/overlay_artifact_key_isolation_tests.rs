@@ -6,8 +6,9 @@
 //! A session "overlays" every opened-but-unmodified file in an LSP
 //! session with content byte-identical to disk. The overlay's content
 //! hash therefore equals the base file's content hash. Before the
-//! Block 2.S-F fix, the view-aware overlay materialiser published its
-//! `IndexedReady` candidate under `FileArtifactKey::legacy(canonical,
+//! view-aware key-isolation fix, the view-aware overlay materialiser
+//! published its `IndexedReady` candidate under
+//! `FileArtifactKey::legacy(canonical,
 //! hash)` — the *same* key the base `ensure_indexed_ready` uses. Two
 //! distinct artifacts then occupy one slot.
 //!

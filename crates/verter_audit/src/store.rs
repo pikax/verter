@@ -73,13 +73,12 @@ pub struct CacheLayerBreakdown {
     pub prepared_member: CacheLayerHitMiss,
 }
 
-/// Block 7.5 rule-compliance diagnostic counters. Empirical
-/// instrumentation that quantifies the bypass surfaces the 3-way
-/// consult identified as the residual +19% perf-gap suspects:
-/// per-request `HostStoreView::from_host` builds, bare-host
-/// `ComponentMetaQueryEngine::new(...)` constructions, and
-/// `ResolverContext::resolver_store_view()` warm-hit validator
-/// rebuilds. Snapshotted from the session-side
+/// Rule-compliance diagnostic counters. Empirical instrumentation
+/// that quantifies the bypass surfaces identified as residual
+/// perf-gap suspects: per-request `HostStoreView::from_host`
+/// builds, bare-host `ComponentMetaQueryEngine::new(...)`
+/// constructions, and `ResolverContext::resolver_store_view()`
+/// warm-hit validator rebuilds. Snapshotted from the session-side
 /// `RequestContext::cache_counters.bypass_diagnostics` field at
 /// request finalisation, so the values are exact deltas for THIS
 /// request only (no host-global accumulation).
@@ -96,14 +95,16 @@ pub struct BypassDiagnostics {
     /// `ComponentMetaQueryEngine::new(ctx)` constructions on this
     /// request where `ctx.is_request_bound()` returned `false` —
     /// i.e. the engine was bound to a bare `&VerterHost` rather
-    /// than a request-bound context. Post-Block-7.5 invariant: `0`.
+    /// than a request-bound context. Final-state invariant: `0`.
     #[serde(with = "u64_as_decimal_string")]
     #[ts(type = "string")]
     pub bare_engine_constructions: u64,
     /// `ResolverContext::resolver_store_view()` call count on this
     /// request. Each call rebuilds a full owned `HostStoreView`;
-    /// warm-hit validator paths in `fact_signature_helpers` rebuild
-    /// on EVERY cache lookup pre-Bug-2.
+    /// warm-hit validator paths in `fact_signature_helpers`
+    /// previously rebuilt on every cache lookup until the
+    /// per-request hoist landed — this counter quantifies the
+    /// residual rebuild surface.
     #[serde(with = "u64_as_decimal_string")]
     #[ts(type = "string")]
     pub resolver_store_view_calls: u64,
@@ -135,7 +136,7 @@ pub struct RequestStoreAudit {
     /// this-request-only delta.
     #[serde(default)]
     pub cache_layers: CacheLayerBreakdown,
-    /// Block 7.5 rule-compliance diagnostic counters. See
+    /// Rule-compliance diagnostic counters. See
     /// [`BypassDiagnostics`] for the per-counter contract.
     #[serde(default)]
     pub bypass_diagnostics: BypassDiagnostics,

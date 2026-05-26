@@ -587,6 +587,58 @@ allocate (asserted via test-allocator counter).
 active on cold-compute and write-admission paths only. Warm hits
 validate stored signatures directly without instantiating a tracer.
 
+### Cache substrate
+
+**`WorldSnapshot`** is the deterministic identity carrier for ONE
+in-flight request. It is the lane identity that
+`cooperative_get_or_insert` coalesces on; it is NOT a cache key.
+Cache layers project the snapshot down to scoped dimensions via
+the `*_dims()` accessors (`parse_dims`, `resolve_dims`, `type_dims`,
+`compile_dims`). Embedding the full snapshot as a single key field
+on any cache layer violates R21 (the five env-hash dimensions must
+remain split — bundling them into a single `project_config_hash` is
+forbidden).
+
+Fields:
+
+- `compat_token: StoreViewCompatToken` — singleflight lane identity
+  (epoch + optional session); read through `ctx.store_view().compat_token()`.
+- `project_identity, parse_env_hash, resolve_env_hash, type_env_hash,
+  lib_env_hash: Hash16` — the five env-hash dimensions.
+- `source_map_policy_hash, public_api_mode_hash: Hash16` — typed
+  policy identities (typed `SourceMapPolicy` / `CompileCacheMode`
+  enums introduced by a later block lower into these `Hash16`s
+  through their `stable_hash()` conversions).
+- `compiler_version, plugin_versions: Hash16` — host-side identity
+  dimensions.
+- `overlay_identity: Option<OverlayIdentity>` — base view is `None`,
+  session overlay is `Some(OverlayIdentity(session_id))`.
+- `generation: u64` — world generation under which the snapshot was
+  constructed (stamped onto `CacheEntry.validated_at_generation` at
+  admission).
+
+`WorldSnapshot` lives at `crates/verter_session/src/cache_runtime/world_snapshot.rs`.
+The struct is `pub(crate)`; it is exercised internally by
+`#[cfg(test)] mod tests` in the owning module — there is no
+`for_tests` re-export and no parallel `for_tests_from_raw`
+constructor on the production type. Construction-discriminator
+tests drive `from_request` through the bare-host
+`impl ResolverContext for VerterHost` rail directly.
+
+Architecture guard: `tests/world_snapshot_is_not_a_cache_key.rs`
+parses every production `.rs` file under
+`crates/verter_session/src/` with `syn::parse_file`, walks every
+`ItemStruct` whose name ends `Key` or `Identity`, and rejects any
+field whose `syn::Type` mentions `WorldSnapshot` at a Rust-identifier
+path segment — REGARDLESS of the field's name. The AST walk
+descends through wrapper constructors (`Arc<>`, `Option<>`,
+`Box<>`, `Rc<>`, `RefCell<>`, references, raw pointers), tuple-struct
+positions, tuple-element compounds (`(WorldSnapshot, u64)`), and
+multi-line wrapped field declarations — none of these launder the
+rejection. A synthetic discriminator suite proves the predicate
+fires across every shape and does NOT fire on prefix/suffix lookalikes
+like `WorldSnapshotShim`.
+
 ### Substrate, stack-safety, granularity
 
 **R26.** `ValidatedFactCache<K, V>` is the substrate. Multi-candidate
@@ -1012,6 +1064,28 @@ The discrimination matrix:
   named-currency-oracle closure: `file_artifact_store_defines_no_unpinned_currency_oracle`
   (definition-shape guard) + `no_named_currency_oracle_calls_in_production`
   (call-site ban) + a discriminating self-test.
+
+## Block-vocabulary ban (CRITICAL)
+
+Source comments under `crates/*/src/**` must not contain plan
+vocabulary specific to the cache-runtime overhaul. The banned
+patterns are `\bblock \d+\b`, `cache-runtime overhaul`, and
+`runtime cutover`. Production source must read as final-state once
+the work lands; plan-management vocabulary leaks once-relevant
+project context into the durable code base.
+
+The guard is
+`architecture_guards::guard7_predicate_rejects_block_vocabulary`,
+which sits inside the broader
+`no_phase_archaeology_in_production_code` walker at
+`crates/verter_session/tests/architecture_guards.rs`. The walker
+scans every production `.rs` file under `crates/*/src/` (excluding
+`_tests.rs`, `tests.rs`, `tests/`, `benches/`, `examples/`, and
+`target/`).
+
+Durable architectural insights belong here in
+`.claude/skills/type-cache-architecture/SKILL.md` or in
+`docs/arch/` — not in source comments referencing plan blocks.
 
 ## Related skills
 

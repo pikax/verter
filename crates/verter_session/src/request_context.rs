@@ -232,10 +232,10 @@ pub struct PerRequestCacheCounters {
     pub prepared_surface: HitMiss,
     /// `PreparedMemberDb` — prepared-member cache.
     pub prepared_member: HitMiss,
-    /// Block 7.5 rule-compliance diagnostic counters. Empirical
-    /// instrumentation that quantifies the bypass surfaces the 3-way
-    /// consult identified as the residual +19% perf gap suspects:
-    /// per-request `HostStoreView::from_host` builds, bare-host
+    /// Rule-compliance diagnostic counters. Empirical instrumentation
+    /// that quantifies the bypass surfaces identified as the
+    /// residual perf-gap suspects: per-request
+    /// `HostStoreView::from_host` builds, bare-host
     /// `ComponentMetaQueryEngine::new(...)` constructions, and
     /// `ResolverContext::resolver_store_view()` warm-hit validator
     /// rebuilds. These counters are production-on (atomic, ~ns of
@@ -244,12 +244,12 @@ pub struct PerRequestCacheCounters {
     pub bypass_diagnostics: BypassDiagnosticCounters,
 }
 
-/// Block 7.5 diagnostic counters that quantify the rule-compliance
-/// bypass surfaces. Bumped from the production code paths the
-/// 3-way consult identified as the residual +19% perf-gap suspects;
-/// snapshotted into [`verter_audit::store::BypassDiagnostics`] at
-/// request close so each component-meta request emits its own
-/// delta (no host-global accumulation, no cross-request leakage).
+/// Diagnostic counters that quantify the rule-compliance bypass
+/// surfaces. Bumped from the production code paths identified as the
+/// residual perf-gap suspects; snapshotted into
+/// [`verter_audit::store::BypassDiagnostics`] at request close so
+/// each component-meta request emits its own delta (no host-global
+/// accumulation, no cross-request leakage).
 ///
 /// Atomic increments are negligible (~ns) compared with the µs–ms
 /// of work each bump observes, so the counters stay on in production
@@ -267,15 +267,15 @@ pub struct BypassDiagnosticCounters {
     /// on the current request where `ctx.is_request_bound()` returned
     /// `false` (i.e. the engine was bound to a bare `&VerterHost`
     /// rather than a `HostResolverContext` / `SessionResolverContext`).
-    /// The 17 Class B sites enumerated in the bypass-audit-v2 are
-    /// the surviving sources; the post-Block-7.5 invariant is `0`.
+    /// Final-state invariant: `0` — every production engine is bound
+    /// to a request-bound ctx.
     pub bare_engine_constructions: AtomicU64,
     /// Number of `ResolverContext::resolver_store_view()` calls on
     /// the current request. Each call rebuilds a full owned
     /// `HostStoreView` via `HostStoreView::from_host`; warm-hit
-    /// validator paths in `fact_signature_helpers` rebuild on EVERY
-    /// cache lookup. Bug 2 switches those helpers to the borrowed
-    /// `store_view()`, dropping this counter toward 0 in production.
+    /// validator paths in `fact_signature_helpers` now consult the
+    /// borrowed `store_view()` directly, so this counter trends to 0
+    /// in production.
     pub resolver_store_view_calls: AtomicU64,
 }
 
@@ -294,13 +294,14 @@ impl BypassDiagnosticCounters {
     }
 }
 
-/// Bump the per-request `resolver_store_view_calls` Block 7.5
-/// diagnostic counter when a request context is installed. The bump
-/// is a noop outside an audited request (synthesised tests,
-/// non-audited callers). Called from every
+/// Bump the per-request `resolver_store_view_calls` diagnostic
+/// counter when a request context is installed. The bump is a noop
+/// outside an audited request (synthesised tests, non-audited
+/// callers). Called from every
 /// `impl ResolverContext::resolver_store_view()` so the counter
 /// observes all trait-dispatched owned-view rebuilds — the
-/// warm-hit validator path is the dominant consumer pre-Bug-2.
+/// warm-hit validator path was the dominant consumer until the
+/// borrowed-view substitution landed.
 #[inline]
 pub fn bump_resolver_store_view_call() {
     if let Some(ctx) = current_request_context() {
@@ -311,9 +312,9 @@ pub fn bump_resolver_store_view_call() {
     }
 }
 
-/// Bump the per-request `bare_engine_constructions` Block 7.5
-/// diagnostic counter when a request context is installed. Called
-/// from `ComponentMetaQueryEngine::new` whenever the ctx fails the
+/// Bump the per-request `bare_engine_constructions` diagnostic
+/// counter when a request context is installed. Called from
+/// `ComponentMetaQueryEngine::new` whenever the ctx fails the
 /// `is_request_bound()` predicate (i.e. the engine is being bound
 /// to the bare `impl ResolverContext for VerterHost` rail).
 #[inline]

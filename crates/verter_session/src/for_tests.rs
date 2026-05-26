@@ -9,6 +9,15 @@
 //! All entries here are thin re-exports or one-call wrappers that route
 //! test-only access through a single grep-able name. Internal production
 //! callers continue to reach the underlying symbols directly.
+//!
+//! `WorldSnapshot` and its companions (`OverlayIdentity`,
+//! `WorldSnapshotDims`, and the per-dimension `*Dims` carriers) are
+//! intentionally NOT re-exported here: they are `pub(crate)` and must
+//! not be reachable from outside `verter_session`, even in debug
+//! builds. The construction contract is exercised by
+//! `#[cfg(test)] mod tests` inline in
+//! `src/cache_runtime/world_snapshot.rs`, which can struct-init the
+//! type directly without a parallel constructor.
 
 pub use crate::capture_token::{
     assert_no_stack_overflow, with_active_capture, with_active_capture_returning, CacheId,

@@ -143,14 +143,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// VerterHost` is registered in `resolver_core/resolver_context.rs`.
     #[must_use]
     pub(crate) fn new(ctx: &'a dyn ResolverContext) -> Self {
-        // Block 7.5 diagnostic counter: bump
-        // `bare_engine_constructions` when this dispatcher is bound
-        // to a non-request-bound ctx. The 3 nested ProjectSemanticDispatch
-        // ctors at eval_env.rs:801/:854/:1060 inherit their ctx from
-        // the enclosing `ComponentMetaQueryEngine`, so they typically
-        // do NOT bump (the engine's ctx flows through); but a
-        // bare-host direct `ProjectSemanticDispatch::new(host)`
-        // construction (e.g. a future cold entry-point regression)
+        // Bump `bare_engine_constructions` when this dispatcher is
+        // bound to a non-request-bound ctx. Nested
+        // `ProjectSemanticDispatch` ctors inherit their ctx from the
+        // enclosing `ComponentMetaQueryEngine`, so they typically do
+        // NOT bump (the engine's ctx flows through); but a bare-host
+        // direct `ProjectSemanticDispatch::new(host)` construction
+        // (e.g. a future cold entry-point regression)
         // would bump here.
         if !ctx.is_request_bound() {
             crate::request_context::bump_bare_engine_construction();

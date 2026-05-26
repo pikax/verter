@@ -2066,11 +2066,11 @@ impl VerterHost {
     ///
     /// Validates the cached surface against the supplied request-bound
     /// view instead of building a fresh one — eliminating the per-call
-    /// full-workspace snapshot the pre-6.c rail performed at this site.
+    /// full-workspace snapshot the legacy rail performed at this site.
     /// Same correctness contract: R3/R26/R28 fact-validation rejects a
     /// stale entry on the next read; the producer's
-    /// `validated_at_generation` ProjectGeneration fencing
-    /// (Block 6.B-fix `987a3ce6d`) is preserved.
+    /// `validated_at_generation` ProjectGeneration fencing is
+    /// preserved.
     pub(crate) fn owner_import_surface_with_store_view(
         &self,
         view: &dyn crate::resolver_core::StoreView,
@@ -2108,13 +2108,13 @@ impl VerterHost {
         // rejects on warm read when the live generation differs.
         let validated_at_generation = self.project_type_store().current_project_generation();
 
-        // Block 1.H: wrap the cold body with `install_fact_tracer` so
-        // the surface's `fact_dep_signature` reflects every fact the
+        // Wrap the cold body with `install_fact_tracer` so the
+        // surface's `fact_dep_signature` reflects every fact the
         // chain walks observed via the resolver's TLS-installed
         // tracer fan-out. The producer ALSO accumulates `chain_facts`
-        // explicitly for direct-API fan-in (legacy bookkeeping that
-        // the post-Block-1.H build retains). On
-        // `FactReadSetFinalise::Overflow` we refuse to admit the
+        // explicitly for direct-API fan-in (a legacy bookkeeping
+        // path the producer-install observability surface retains).
+        // On `FactReadSetFinalise::Overflow` we refuse to admit the
         // entry — the next request cold-recomputes.
         let cold_body = || {
             // (local_name, final_canonical, final_exported_name, target_whole_hash)

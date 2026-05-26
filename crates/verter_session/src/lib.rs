@@ -67,6 +67,7 @@ pub mod host_audit_runtime;
 // tests/invalidation_perf.rs — InvalidationByCanonical impl on
 // ImportedRegistryDb is exercised by the §12.A12 perf gate.
 pub(crate) mod bounded_query_retention;
+pub(crate) mod cache_runtime;
 pub(crate) mod compile_fact_emission;
 pub mod component_meta_caches;
 #[cfg(test)]
@@ -123,7 +124,7 @@ pub mod resolved_import_facts_producer;
 // single-file `upsert` + `get_virtual_file`.
 #[cfg(test)]
 mod cache_identity_invariants_tests;
-// Block 1.J.1 item 1 — content-pinned artifact-read discriminators.
+// Content-pinned artifact-read discriminators.
 #[cfg(test)]
 mod artifact_reads_pinned_tests;
 // `SessionView::content_hash_for` is a view-authoritative current-
@@ -163,7 +164,7 @@ mod r21_c4_cache_identity_tests;
 // same-canonical-edit rejection.
 #[cfg(test)]
 mod semantic_graph_self_root_tests;
-// Block 1.J.1 item 2 — negative import-route reopen discriminators.
+// Negative import-route reopen discriminators.
 /// Selective component-meta surface API types and BFS bridge support
 /// (Tier 1B / D102 / D125).
 pub mod component_meta_payload;

@@ -159,8 +159,8 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// request entry boundary. `false` for the bare-host
     /// `impl ResolverContext for VerterHost` rail, which rebuilds an
     /// owned view on every `resolver_store_view()` / `store_view()`
-    /// call (and which the Block 7.5 cleanup retires from production
-    /// resolver-tier code).
+    /// call (retired from production resolver-tier code — only the
+    /// request-bound rails remain as live entry points).
     ///
     /// Used by `ComponentMetaQueryEngine::new` to bump the
     /// `bare_engine_constructions` diagnostic counter whenever the
@@ -590,9 +590,9 @@ pub(crate) trait ResolverContext: sealed::Sealed {
 
     /// Reach the concrete `VerterHost` underneath this context.
     ///
-    /// Used by Block 1.H Family B/C/D producers
-    /// (`MaterializeStructureDb`, `RefCycleResultDb`,
-    /// `AppConfigNoOverrideProofDb`, `OwnerImportSurfaceDb`) to call
+    /// Used by Family B/C/D producers (`MaterializeStructureDb`,
+    /// `RefCycleResultDb`, `AppConfigNoOverrideProofDb`,
+    /// `OwnerImportSurfaceDb`) to call
     /// [`crate::VerterHost::with_fact_tracer`] from inside their
     /// cooperative-admission cold-compute closures. The seal trait
     /// itself cannot expose `with_fact_tracer` directly because

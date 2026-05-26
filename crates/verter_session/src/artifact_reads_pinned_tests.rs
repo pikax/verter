@@ -1,15 +1,15 @@
-//! Block 1.J.1 item 1 — content-pinned artifact reads discriminator.
+//! Content-pinned artifact-read discriminators.
 //!
-//! Codex Block 1.J diagnosis: "some production reads use permissive
+//! Root diagnosis: some production reads used the permissive
 //! `get_any` instead of a current-content-pinned lookup. Fact
 //! validation cannot work if the validator reads a stale artifact as
-//! 'current.'"
+//! 'current.'
 //!
 //! `current_derived_fact_hash(Route)` / `current_cached_import_route_hash`
 //! are the Route / ImportRoute fact-validation oracles. Pre-fix they
 //! read `FileArtifactStore::get_any` — which returns ANY cached
 //! `IndexedReady` for a canonical regardless of content hash. Once
-//! eager `evict_canonical` is retired (Block 2) a stale `IndexedReady`
+//! eager `evict_canonical` is retired a stale `IndexedReady`
 //! can linger past a content change, and the oracle would surface its
 //! stale `route_hash` / `import_route_hash` as the "current" derived
 //! fact — confirming a stale dependent cache entry as valid.
@@ -65,7 +65,7 @@ fn host_with_materialized_ts(path: &str, source: &str) -> (VerterHost, [u8; 16])
 /// real content produces. `FileArtifactStore::insert` drains prior
 /// versions, so afterwards the store holds ONLY the stale entry while
 /// the scheduler still reports the real `whole_hash` — exactly the
-/// lingering-stale state Block 2's eviction removal would create.
+/// lingering-stale state that removing eager eviction would create.
 fn plant_stale_indexed(host: &VerterHost, canonical: &str) {
     let real = host
         .project_type_store()

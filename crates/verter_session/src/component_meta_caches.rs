@@ -4682,7 +4682,7 @@ fn ref_cycle_read_set(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// AppConfigNoOverrideProofDb production producer (Block 1.H Track 2.4)
+// AppConfigNoOverrideProofDb production producer
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Production producer for [`crate::app_config_proof_db::AppConfigNoOverrideProofDb`].
@@ -4758,9 +4758,9 @@ pub(crate) fn app_config_no_override_proof_get_or_compute(
             canonical_id: decl_canonical_for_compute.as_ref().to_string(),
             hash: whole_hash,
         });
-        // Block 1.H Track 2.4: the "no override" determination is a
-        // structural query into the interface members. For the
-        // producer's substrate-correctness contract, the
+        // The "no override" determination is a structural query
+        // into the interface members. For the producer's
+        // substrate-correctness contract, the
         // `declares_interface_app_config` flag short-circuits the
         // walk: a file without `interface AppConfig` cannot
         // contribute an override.

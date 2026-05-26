@@ -162,11 +162,11 @@ impl VerterHost {
         // snapshotted generation; `ComponentMetaResultDb::get_with_view`
         // rejects on warm read when the live generation differs.
         let validated_at_generation = self.project_type_store.current_project_generation();
-        // Block 7.5 audit-v2 Class B fix: construct a
-        // `HostResolverContext` BEFORE the `with_fact_tracer` opens so
-        // the extract step (which runs under the tracer) binds its
-        // engine constructions to the same overlay-aware ctx that the
-        // inner `resolve_component_meta_with_view` builds for its own
+        // Construct a `HostResolverContext` BEFORE the
+        // `with_fact_tracer` opens so the extract step (which runs
+        // under the tracer) binds its engine constructions to the
+        // same overlay-aware ctx that the inner
+        // `resolve_component_meta_with_view` builds for its own
         // compute. Without this, the extract path's
         // `apply_component_meta_resolution_policy` /
         // `compute_fallthrough_surface_from_resolved_state` would
@@ -306,8 +306,8 @@ impl VerterHost {
         // strand a stale-by-project-generation entry whose carrier
         // still validates on file-content terms.
         let validated_at_generation = self.project_type_store.current_project_generation();
-        // Block 7.5 audit-v2 Class B fix: see `get_component_meta`
-        // above for the construction rationale.
+        // See `get_component_meta` above for the
+        // request-bound-ctx construction rationale.
         let store_view = self.resolver_store_view();
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
@@ -737,7 +737,8 @@ impl VerterHost {
         // `ComponentMetaResultDb::get_with_view` rejects on warm read
         // when the live generation differs.
         let validated_at_generation = self.project_type_store.current_project_generation();
-        // Block 7.5 audit-v2 Class B fix: see `get_component_meta`.
+        // See `get_component_meta` above for the request-bound-ctx
+        // construction rationale.
         let store_view = self.resolver_store_view();
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
@@ -856,10 +857,9 @@ impl VerterHost {
             view,
         )?;
         resolved.request_id = self.next_request_id();
-        // Block 7.5 audit-v2 Class B fix: build a HostResolverContext
-        // before extract so engine constructions inside the policy /
-        // fallthrough path bind to the request-bound ctx rather than
-        // a bare-host.
+        // Build a HostResolverContext before extract so engine
+        // constructions inside the policy / fallthrough path bind
+        // to the request-bound ctx rather than a bare-host.
         let store_view = self.resolver_store_view();
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);

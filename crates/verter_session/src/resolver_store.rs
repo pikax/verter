@@ -294,11 +294,11 @@ impl HostStoreView {
         record_from_host_call(Location::caller());
         #[cfg(test)]
         HOST_STORE_VIEW_FROM_HOST_BUILDS.with(|c| c.set(c.get().saturating_add(1)));
-        // Block 7.5 diagnostic counter: bump the per-request
-        // `host_store_view_from_host_builds` counter so the bench
-        // surfaces how many owned-view rebuilds the request paid for.
-        // The bump is a noop when no `RequestContext` is installed
-        // (synthesised tests, non-audited callers).
+        // Bump the per-request `host_store_view_from_host_builds`
+        // diagnostic counter so the bench surfaces how many
+        // owned-view rebuilds the request paid for. The bump is a
+        // noop when no `RequestContext` is installed (synthesised
+        // tests, non-audited callers).
         if let Some(ctx) = crate::request_context::current_request_context() {
             ctx.cache_counters
                 .bypass_diagnostics

@@ -744,8 +744,9 @@ impl MetaSession {
                     canonical.as_str(),
                     crate::types::ProjectionMode::Expanded,
                 )?;
-                // Block 7.5 audit-v2 Class B fix: bind a HostResolverContext
-                // around extract so engine ctors inherit the overlay-aware ctx.
+                // Bind a HostResolverContext around extract so engine
+                // ctors inherit the overlay-aware ctx (avoids the bare-host
+                // workspace-sweep rebuild on every call).
                 let store_view = host.resolver_store_view();
                 let overlay =
                     std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
@@ -854,8 +855,9 @@ impl MetaSession {
                 return Ok(None);
             };
 
-            // Block 7.5 audit-v2 Class B fix: bind a HostResolverContext
-            // around extract so engine ctors inherit the overlay-aware ctx.
+            // Bind a HostResolverContext around extract so engine
+            // ctors inherit the overlay-aware ctx (avoids the bare-host
+            // workspace-sweep rebuild on every call).
             let store_view = host.resolver_store_view();
             let overlay =
                 std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());

@@ -4,8 +4,8 @@
 //!
 //! ## What is under test
 //!
-//! Block 1.J.2 made the component-meta cache signature tracer-owned
-//! and deleted the route-fact filter, on the premise that the
+//! An earlier change made the component-meta cache signature
+//! tracer-owned and deleted the route-fact filter, on the premise that the
 //! finalised tracer read set never observes the owner's own
 //! `DerivedFactHash{Route}` fact. That premise is false: the cold
 //! compute's macro-root route walk observes the owner's Route fact

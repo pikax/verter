@@ -79,12 +79,13 @@ fn emit_slot_binding_graph_dispatch_facts(
             .fetch_add(1, Relaxed);
     }
 
-    // New: fan into the `ACTIVE_TRACERS` stack so the outer
+    // Fan into the `ACTIVE_TRACERS` stack so the outer
     // `with_fact_tracer` captures the same facts. The bridge helper
-    // converts `DepSignature` → `Vec<FactVersionRef>` (Block 0
-    // helper #5); only `DepVersion::WholeHash` survives the
-    // conversion — route-generation / project-generation entries are
-    // R20-only signals and have no `FactVersionRef` equivalent.
+    // `dep_signature_to_fact_signature` converts
+    // `DepSignature` → `Vec<FactVersionRef>`; only
+    // `DepVersion::WholeHash` survives the conversion —
+    // route-generation / project-generation entries are R20-only
+    // signals and have no `FactVersionRef` equivalent.
     let bridged = crate::fact_signature_helpers::dep_signature_to_fact_signature(sig);
     crate::fact_signature_helpers::observe_fact_signature(&bridged);
     if let Some(prov) = ctx.project_type_store().semantic_graph().provenance() {

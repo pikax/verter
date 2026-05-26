@@ -1889,10 +1889,11 @@ pub struct MetaProvenance {
     pub node_arena_pushes_per_discriminant:
         [std::sync::atomic::AtomicU64; SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT],
 
-    // ── Block 1.H: Family B/C/D producer-install observability ───────────
+    // ── Family B/C/D producer-install observability ───────────
     //
     // `install_fact_tracer` substrate counters for the 5 caches wired
-    // by Block 1.H. Each cache exposes two counters:
+    // through the producer-install observability surface. Each cache
+    // exposes two counters:
     //
     // - `<cache>_fact_tracer_installs` — number of cold-compute calls
     //   wrapped in `install_fact_tracer` (advances once per cold
@@ -2440,7 +2441,7 @@ pub struct MetaProvenanceSnapshot {
     /// Per-`SemanticNodeData` discriminant push count.
     pub node_arena_pushes_per_discriminant: [u64; SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT],
 
-    // ── Block 1.H: Family B/C/D producer-install observability ───────────
+    // ── Family B/C/D producer-install observability ───────────
     /// `install_fact_tracer` wrap count for `MaterializeStructureDb`.
     pub materialize_structure_fact_tracer_installs: u64,
     /// `install_fact_tracer` overflow-refusal count for `MaterializeStructureDb`.

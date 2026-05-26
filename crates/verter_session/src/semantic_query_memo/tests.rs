@@ -2685,9 +2685,9 @@ fn budget_eviction_prunes_reverse_index_under_entries_lock() {
 ///
 /// DISCRIMINATES: the assertion `canonical_to_entries_count("<project>")
 /// == 0` after FIFO eviction FAILS pre-fix (registration survives) and
-/// PASSES post-fix (registration pruned). The same shape Block 2.M
-/// fix-19 enforced for the cooperative-admission caches' register /
-/// cleanup symmetry rule.
+/// PASSES post-fix (registration pruned). The same shape the
+/// register / cleanup symmetry rule enforces for the
+/// cooperative-admission caches.
 #[test]
 fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
     use crate::resolver_core::FactVersionRef;
@@ -2827,8 +2827,8 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
          budget. The prune path must walk the SAME union as \
          `register_reverse_index` — `canonical_ids()` PLUS \
          dispatch-fence canonicals — so register/cleanup are symmetric \
-         on every path (the rule Block 2.M fix-19 enforces for the \
-         cooperative-admission caches).",
+         on every path (the register/cleanup symmetry rule the \
+         cooperative-admission caches enforce).",
     );
     assert_eq!(
         store.canonical_to_entries_count("/w/b.ts"),

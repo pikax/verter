@@ -127,9 +127,10 @@ impl VerterHost {
         let content_hash = hd.parse.whole_hash;
         drop(source_snap);
 
-        // 2. Compose the cache key from real env-hashes (Block 1.6
-        //    substrate). `content_hash` is the scheduler-cached
-        //    `parse.whole_hash` captured above.
+        // 2. Compose the cache key from real env-hashes — the
+        //    fact-validated import-facts substrate. `content_hash`
+        //    is the scheduler-cached `parse.whole_hash` captured
+        //    above.
         //
         //    `known_miss_generation` (Codex P2.2 fix)
         //    is a stable tag over the owner's

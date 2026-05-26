@@ -1099,12 +1099,10 @@ pub(crate) fn await_imported_registry_post_peek_barrier_for_tests(canonical_id: 
 
 impl<'a> ComponentMetaQueryEngine<'a> {
     pub(crate) fn new(ctx: &'a dyn ResolverContext) -> Self {
-        // Block 7.5 diagnostic counter: bump
-        // `bare_engine_constructions` whenever the engine is bound to
-        // a non-request-bound ctx. The 17 Class B bypass sites
-        // enumerated in the bypass-audit-v2 are the surviving
-        // sources of bare-host engine constructions; the
-        // post-Block-7.5 invariant is `0`.
+        // Bump `bare_engine_constructions` whenever the engine is
+        // bound to a non-request-bound ctx. Final-state invariant:
+        // `0` — every production engine binds to a request-bound
+        // ctx (`HostResolverContext` / `SessionResolverContext`).
         if !ctx.is_request_bound() {
             crate::request_context::bump_bare_engine_construction();
         }

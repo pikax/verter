@@ -17,9 +17,10 @@ twelve implementation blocks that together land:
   conversion to `WorldSnapshot` env-hash inputs;
 - `compile_many` as a transactional batch on a host-owned CPU pool;
 - a scheduler integration that introduces typed `TaskKind` routing,
-  per-call CPU-concurrency semaphores, dependency-DAG submission, and a
-  generic dedupe-hook trait — with `verter_scheduler` strictly free of
-  any `verter_session` dependency (H20);
+  per-call CPU-concurrency semaphores, dependency-DAG submission,
+  driver-safe nonblocking pool submission, and a generic dedupe-hook
+  trait — with `verter_scheduler` strictly free of any `verter_session`
+  dependency (H20);
 - removal of every bespoke per-call cache-invalidation list on
   `VerterHost`;
 - a persistent pure-artifact cache gated by a sealed `BaseWriteToken`
@@ -66,7 +67,7 @@ coupled:
 - `SemanticQueryKey::Instantiate { base: DeclIdentity { whole_hash, .. } }`
   (`crates/verter_session/src/semantic_query.rs:1143`) and
   `ResolveMacroPayload { owner: DeclIdentity { whole_hash, .. } }`
-  (`:1282`) embed `whole_hash` directly in the query key, violating R6
+  (`:1282`) embed `whole_hash` directly in the query key, violating skill R6
   (query-identity keys never include content/version hashes).
 - The scheduler exposes only a single-request `submit_request` and a
   loop-based `submit_batch`
@@ -96,13 +97,13 @@ storage is restricted to pure artifacts gated by a sealed capability
 witness, and native flow-return targets the same artifact-node trait
 surface.
 
-## Hard cache rules (H1–H20)
+## Hard cache rules (H1–H23)
 
 The thirty-one architectural cache rules `R1–R31` live in
 `.claude/skills/type-cache-architecture/SKILL.md` lines 110–810. That
 skill is the owning surface. This overhaul does NOT modify the text of
 any `R<n>` rule. The plan introduces its own per-block tightenings and
-new rules under the `H1–H20` namespace, with an explicit `H ↔ R`
+new rules under the `H1–H23` namespace, with an explicit `H ↔ R`
 cross-reference table below.
 
 **Numbering reservation (CRITICAL).** `R1–R31` are reserved for the
@@ -146,6 +147,34 @@ in the same block that introduces them):
 - `H19` block-vocabulary ban (Block 1).
 - `H20` `verter_scheduler` does NOT depend on `verter_session`
   (Block 7).
+- `H21` single readiness authority — file stages AND cache nodes share
+  one driver-owned `SchedulerDag`; the dispatch path performs NO linear
+  job scan (Block 7, DECISION 1). Guards:
+  `scheduler_has_single_readiness_authority`,
+  `scheduler_dispatch_path_no_linear_job_scan`.
+- `H22` backpressure is typed at DAG admission, never a submitter-side
+  ready-queue push/spin; the driver is the only readiness mutator
+  (Block 7, DECISION 2). Guards:
+  `submit_dag_backpressure_is_typed_before_readiness_mutation`,
+  `scheduler_submission_paths_do_not_call_yield_now`.
+- `H23` driver dispatch never blocks on worker-pool submission. DAG
+  admission reserves CPU/I/O capacity before readiness mutation; driver
+  code may call only nonblocking pool submit APIs. Exhausted admitted
+  capacity fails at admission; unexpected nonblocking submit failure
+  returns the borrowed permit and parks the node in a driver-owned
+  deferred lane. Guards:
+  `driver_never_blocks_on_io_pool_send`,
+  `driver_never_blocks_on_cpu_pool_submit`,
+  `pool_capacity_reserved_before_ready_seed`,
+  `dag_capacity_reservation_is_single_accounting_source`,
+  `capacity_reservation_releases_exactly_once_on_completion_cancel_panic_shutdown`,
+  `pool_permit_and_dag_budget_cannot_double_release`,
+  `deferred_lane_is_bounded_by_admitted_capacity`,
+  `deferred_lane_eventually_runs_under_sustained_cpu_saturation`,
+  `critical_ready_work_not_starved_by_deferred_background_work`,
+  `scheduler_model_random_dags_preserve_readiness_invariants`,
+  `scheduler_model_capacity_returns_to_zero_at_quiescence`,
+  `scheduler_model_driver_never_blocks_under_seeded_pool_failures`.
 
 **Full `H ↔ R` cross-reference table** (preserved verbatim from the
 prior plan — every reviewer concurred this mapping is sound; entries
@@ -173,6 +202,9 @@ without a skill correspondence are new):
 | H18 | (new) | sealed `PersistentArtifactNode` trait (query nodes cannot persist) |
 | H19 | (new) | source comments must not contain plan vocabulary (`block <n>`, `cache-runtime overhaul`, `runtime cutover`) |
 | H20 | (new) | `verter_scheduler` crate must not depend on `verter_session`; cache-runtime dedupe runs in `verter_session` via the generic `DedupeHook` trait |
+| H21 | (new) | single driver-owned `SchedulerDag` readiness authority for all work; dispatch reads four priority lanes, never a linear job scan; `JobIndex` / `BlockerRegistry` deleted |
+| H22 | (new) | backpressure is typed at DAG admission (`SubmissionResult<T>` + `DagAdmissionBudget` + condvar); no submitter-side ready-queue push, spin, or `yield_now`; driver is sole readiness mutator |
+| H23 | (new) | worker-pool submission is nonblocking on the driver path; CPU/I/O capacity is reserved by one `DagCapacityReservation`, released exactly once, and deferred lanes are bounded/fair |
 
 ## Inter-block dependency DAG
 
@@ -321,10 +353,11 @@ this table.
 | `FileArtifactKey`, `ResolvedImportFactsKey`, `CompileOutputKey`, `CompileOutputSlotKey`, `AugmentationTargetKey`, `AnalysisSlotKey`, `AnalysisCandidate`, `ResolvedDeclSlotIdentity` | B4 | per-row in `Block 4` table |
 | `CompileCacheMode`, `SourceMapPolicy`, `DowngradeReason`, `CompileResult`, `CompileRequest`, `CompileBatchOptions`, `CompileBatchInput`, `CompileBatchEntry` | B5 | `crates/verter_session/src/host_compile_types.rs` |
 | `HostCpuPool` | B6 / B7 | `crates/verter_scheduler/src/host_cpu_pool.rs` |
-| `SchedulerCpuPool`, `CpuConcurrencySemaphore`, `CpuConcurrencyPermit` | B7 | `crates/verter_scheduler/src/{pool,cpu_concurrency}.rs` |
+| `SchedulerCpuPool`, `SchedulerIoPool`, `PoolSubmitError`, `CpuConcurrencySemaphore`, `CpuConcurrencyPermit` | B7 | `crates/verter_scheduler/src/{pool,cpu_concurrency}.rs` |
 | `TaskKind` variants (new shape), `Priority`, `TargetStage` (Hash bumped) | B7 | `crates/verter_scheduler/src/stage.rs` |
+| `WorkKind`, `WorkNodeKey`, `WorkKindKey`, `SchedulerDag`, `SchedulerDagNode`, `SchedulerDagEdge`, `NodeId` (unified readiness substrate — §7.0; `CacheNodeDag*` are the cache-node specialization) | B7 | `crates/verter_scheduler/src/node.rs` |
 | `KeyedJob`, `DedupKey`, `DagHandle`, `DagState`, `CacheNodeId` | B7 | `crates/verter_scheduler/src/job.rs` |
-| `MAX_READY_QUEUE_DEPTH`, `SubmissionResult` | B7 | `crates/verter_scheduler/src/queue.rs` |
+| `MAX_READY_QUEUE_DEPTH`, `SubmissionResult<T>` (generic), `DagAdmissionBudget` | B7 | `crates/verter_scheduler/src/queue.rs` |
 | `CacheNodeDag`, `CacheNodeDagNode`, `CacheNodeDagEdge`, `EdgeGate`, `CacheNodeDispatchCtx`, `CacheNodeOutcome`, `CacheNodeValue`, `AdmissionDisposition`, `DagCompletionAggregator`, `CacheNodeCompletionSender` | B7 | `crates/verter_scheduler/src/node.rs` |
 | `SchedulerCacheId` | B7 | `crates/verter_scheduler/src/cache_id.rs` |
 | `DedupeHook`, `DedupeJoiner` | B7 | `crates/verter_scheduler/src/dedupe_hook.rs` |
@@ -347,6 +380,17 @@ alias: `SchedulerJobKind` discriminates non-staged jobs at the
 component-meta batch entry point; `TaskKind` discriminates staged
 file-progression work AND cache-node work at the per-task dispatch
 site.
+
+**Substrate types DELETED by B7** (DECISION 1 — the staged-ordering /
+blocker substrate is replaced by the single driver-owned
+`SchedulerDag`; none of these may survive on a non-test scheduler
+path): `JobIndex`, `QueueEntry`, `EffectiveKey`, `AgingConfig` (and the
+`SchedulerConfig.aging` field), `BlockerRegistry`, `BlockerRef`,
+`UnblockedJob`, `has_pending_blockers`, `Submission::BlockerResolved`,
+the `Scheduler.job_index` / `Scheduler.deferred_blocker_ids` fields, and
+file-stage ordering through `FileNode.pending_requests`. The
+non-generic `SubmissionResult` is replaced by the generic
+`SubmissionResult<T>`.
 
 ## Changes
 
@@ -569,15 +613,26 @@ pnpm install --frozen-lockfile
 
 - `crates/verter_session/tests/world_snapshot_is_not_a_cache_key.rs::no_cache_layer_keys_on_world_snapshot_as_a_whole`
   — walks `crates/verter_session/src/**` for struct definitions whose
-  name ends `Key` / `Identity`; asserts no field named
-  `world_snapshot: WorldSnapshot`. Positive: every R21-scoped key
-  embeds its scoped dimensions only. Negative: synthetic regression
-  with a `world_snapshot: WorldSnapshot` field is detected via a
-  fixture string.
-- `crates/verter_session/tests/world_snapshot_construction.rs::world_snapshot_from_request_matches_all_request_identity_dimensions`
-  — builds two requests with identical env dims but different
-  `overlay_identity`; asserts the resulting `WorldSnapshot`s differ;
-  builds two identical-input snapshots and asserts they hash equal.
+  name ends `Key` / `Identity`; asserts no field of type
+  `WorldSnapshot` regardless of name. Field names are not load-bearing:
+  the scanner strips common wrapper constructors (`Arc<>`, `Option<>`,
+  `Box<>`, references, raw pointers), inspects every named field and
+  every tuple-struct positional element, and rejects any field whose
+  type mentions `WorldSnapshot` at a word boundary. Positive: every
+  R21-scoped key embeds its scoped dimensions only. Negative: synthetic
+  regressions covering arbitrary field names, `Arc`-wrapped fields, and
+  tuple-position fields are all detected via fixture strings.
+- `crates/verter_session/src/cache_runtime/world_snapshot.rs::tests::world_snapshot_from_request_matches_all_request_identity_dimensions`
+  — inline `#[cfg(test)] mod tests` inside the owning module (no
+  test-only constructor on the production type, no `for_tests`
+  re-export — `WorldSnapshot` stays truly `pub(crate)`). Builds two
+  requests with identical env dims but different `overlay_identity`;
+  asserts the resulting `WorldSnapshot`s differ; builds two
+  identical-input snapshots and asserts they hash equal. The same
+  module hosts `world_snapshot_diverges_on_every_identity_dimension`
+  and a `from_request`-rail test that drives the production
+  `WorldSnapshot::from_request` constructor through the bare-host
+  `impl ResolverContext for VerterHost` rail.
 - `crates/verter_session/tests/architecture_guards.rs::guard7_predicate_rejects_block_vocabulary`
   — fabricated lines `// block 5: rehome the compile cache`,
   `// cache-runtime overhaul wiring`, `// runtime cutover landing step`
@@ -589,7 +644,7 @@ pnpm install --frozen-lockfile
   the rule text contains the keyword set the H entry declares. Pinned
   keyword fixture inside the test (e.g. `H5` requires
   `{overflow, NonCacheable, BudgetExceeded}`; a synthetic remapping of
-  `H5` to `R5 + R28` fails because R5/R28's keywords differ). Updating
+  `H5` to skill `R5 + R28` fails because skill `R5`/`R28`'s keywords differ). Updating
   the fixture requires touching the test alongside the mapping.
 - `crates/verter_session/tests/plan_rule_namespace.rs::plan_rule_namespace_uses_h_not_r`
   — walks the plan markdown, enumerates every `\bR(20|14|17|26|19|6|5|11|28)\b`
@@ -639,7 +694,7 @@ exposed on any binding surface.
 `cooperative_admission.rs` already encodes the three-way typed
 admission contract at
 `crates/verter_session/src/cooperative_admission.rs:152`
-(`ComputeAdmission<V, Entry>`). Skill R26 says `ValidatedFactCache<K, V>`
+(`ComputeAdmission<V, Entry>`). Skill rule `R26` says `ValidatedFactCache<K, V>`
 at `crates/verter_session/src/resolver_core/mod.rs:576` is the
 substrate. The new cache runtime is a typed wrapper layer on top of
 the existing primitives, not a parallel substrate.
@@ -774,7 +829,7 @@ pub struct ComputeCtx<'a> {
     pub deadline: Option<std::time::Instant>,
 }
 
-/// Artifact node: content-addressed cache (R5/R6 content hash in key).
+/// Artifact node: content-addressed cache (skill `R5`/`R6` content hash in key).
 ///
 /// NO `'static` bound on the trait itself — nodes are constructed
 /// per-request and may borrow short-lived host references (e.g.
@@ -916,7 +971,7 @@ pub trait QueryNode: Send + Sync {
 }
 
 /// Per-candidate record stored inside `QuerySlot`. Multi-candidate
-/// storage isolates concurrent overlay variants (R20).
+/// storage isolates concurrent overlay variants (skill `R20`).
 pub struct Candidate<V> {
     pub value: std::sync::Arc<V>,
     pub fact_dep_signature: ReadSetSignature,
@@ -1521,13 +1576,13 @@ pnpm install --frozen-lockfile
 
 #### Context
 
-The plan touches both content-addressed artifact caches (R5/R6
-content/version hash in key) and query-identity caches (R20
+The plan touches both content-addressed artifact caches (skill `R5`/`R6`
+content/version hash in key) and query-identity caches (skill `R20`
 multi-candidate, version-free key). Block 4 enumerates every one,
-names its `ArtifactNode` / `QueryNode` implementation, names its R20
-candidate discriminant where multi-candidate, names the R30/R31
-exact-policy-identity audit, enforces R29 module augmentation runtime
-semantics, preserves R28 `MemberPresence` / `Member` two-fact
+names its `ArtifactNode` / `QueryNode` implementation, names its skill `R20`
+candidate discriminant where multi-candidate, names the skill `R30`/`R31`
+exact-policy-identity audit, enforces skill `R29` module augmentation runtime
+semantics, preserves skill `R28` `MemberPresence` / `Member` two-fact
 granularity, and lands the
 `SemanticQueryKey::Instantiate { base: DeclIdentity }` →
 `SemanticQueryKey::Instantiate { base: ResolvedDeclSlotIdentity }`
@@ -1537,16 +1592,16 @@ migration.
 
 Per-row, one `ArtifactNode` or `QueryNode` impl is created.
 
-**Content-addressed artifact nodes (R5/R6 — key carries content/version):**
+**Content-addressed artifact nodes (skill `R5`/`R6` — key carries content/version):**
 
 | Cache | Key | Value | Dim audit |
 |---|---|---|---|
 | `FileArtifactStore` (`IndexedReady`+facts+edges+`parse_stable_hash`+augmentations) | `FileArtifactKey { canonical, content_hash, parse_env_hash, parser_version }` | `FileArtifacts` | parse env, parser_version, content_hash |
 | `ResolvedImportFacts` | `ResolvedImportFactsKey { canonical, content_hash, parse_env_hash, resolve_env_hash, parser_version }` | `ResolvedImportFacts` | parse, resolve; does NOT carry `lib_env_hash` |
 | Typed-IR resolve (`ResolvedLocalType`) | `(canonical, parse_stable_hash, parse_env_hash, resolve_env_hash, type_env_hash, lib_env_hash)` | `ResolvedLocalType` | parse, resolve, type, lib |
-| `MemberSemanticFactStore` | `(canonical, parse_stable_hash, parse_env_hash, exporter, member_name, symbol_space)` | `MemberSemanticFact` | parse, parse_stable_hash (cosmetic-invariant); R28 `Member` fact |
-| `MemberDisplayFactStore` | `(canonical, content_hash, parse_env_hash, exporter, member_name, symbol_space)` | `MemberDisplayFact` | parse, content_hash (cosmetic-sensitive); R28 `Member` display |
-| `ModuleAugmentationIndex` | `AugmentationTargetKey { project_identity, resolve_env_hash, lib_env_hash, target }` | `AugmenterSet` (fingerprinted `ModuleAugmentationIndexShape`) | resolve, lib (R29 base-only) |
+| `MemberSemanticFactStore` | `(canonical, parse_stable_hash, parse_env_hash, exporter, member_name, symbol_space)` | `MemberSemanticFact` | parse, parse_stable_hash (cosmetic-invariant); skill `R28` `Member` fact |
+| `MemberDisplayFactStore` | `(canonical, content_hash, parse_env_hash, exporter, member_name, symbol_space)` | `MemberDisplayFact` | parse, content_hash (cosmetic-sensitive); skill `R28` `Member` display |
+| `ModuleAugmentationIndex` | `AugmentationTargetKey { project_identity, resolve_env_hash, lib_env_hash, target }` | `AugmenterSet` (fingerprinted `ModuleAugmentationIndexShape`) | resolve, lib (skill `R29` base-only) |
 | `CompileOutputNode_PureContent` (`content` mode) | `CompileOutputKey { canonical, source_hash, parse_env_hash, resolve_env_hash, type_env_hash, lib_env_hash, compile_profile_hash, compiler_version, source_map_policy_hash }` | `CompileOutput` | full env + profile + source-map policy; persistable via Block 9 |
 | `RouteOwnedShallowDb` | `(canonical, parse_stable_hash, parse_env_hash, resolve_env_hash, lib_env_hash, resolver_version)` | `RouteOwnedShallow` | parse, resolve, lib |
 | `TypeResolutionContextDb` | `(canonical, content_hash, parse_env_hash, resolve_env_hash, type_env_hash, lib_env_hash, parser_version)` | `TypeResolutionContext` | full env + parser_version |
@@ -1555,11 +1610,11 @@ Per-row, one `ArtifactNode` or `QueryNode` impl is created.
 | `FlowBodyHashNode` (Block 11) | `FlowBodyHashKey { canonical, function_symbol, parse_stable_hash, parser_version }` | `FlowBodyHashOutcome` (fail-closed enum — Block 11) | parse_stable_hash; body-hash production split from body lowering. `BudgetExceeded` routes via `CacheAdmission::ReturnOnly`; `Hash(_)` via `Cacheable`. |
 | `FlowLoweredBodyNode` (Block 11) | `FlowLoweredBodyKey { canonical, function_symbol, parse_stable_hash, body_semantic_hash, parser_version }` | `FlowLoweredBody` | parse_stable_hash + `body_semantic_hash` (the latter produced UPSTREAM by `FlowBodyHashNode`). `FlowLoweredBodyNode::compute` does NOT call `compute_body_semantic_hash`. |
 
-**Query-identity nodes (R20 multi-candidate — key carries NO content/version/`fact_dep_signature`):**
+**Query-identity nodes (skill `R20` multi-candidate — key carries NO content/version/`fact_dep_signature`):**
 
-| Cache | Slot key (R6/H3) | Candidate discriminant | Notes |
+| Cache | Slot key (skill `R6`/H3) | Candidate discriminant | Notes |
 |---|---|---|---|
-| `RouteDb` (per-name) | `(scope, name_token, resolve_env_hash, lib_env_hash, project_identity)` | source canonical's `whole_hash` + observed facts | R29 base-only |
+| `RouteDb` (per-name) | `(scope, name_token, resolve_env_hash, lib_env_hash, project_identity)` | source canonical's `whole_hash` + observed facts | skill `R29` base-only |
 | `RouteDb` (effective barrel surface) | `(barrel_canonical, resolve_env_hash, lib_env_hash, project_identity)` | barrel `whole_hash` + facts | session-view fail-closed |
 | `RouteDb` (effective export set) | `(canonical, resolve_env_hash, lib_env_hash, project_identity)` | own `whole_hash` + facts | base-only |
 | `MaterializeStructureDb` | `(slot_identity, projection_mode, type_env_hash, lib_env_hash, project_identity)` | source `VersionedDeclIdentity` + facts | structural materialiser |
@@ -1567,12 +1622,12 @@ Per-row, one `ArtifactNode` or `QueryNode` impl is created.
 | `SemanticGraphStore` (family + relation + named-type) | `SemanticQueryKey` (post-migration — no `whole_hash` in `Instantiate` or `ResolveMacroPayload`) | per-candidate `VersionedDeclIdentity` + facts | migration |
 | `ComponentMetaResultDb` | `(owner_slot_identity, options_fingerprint, type_env_hash, lib_env_hash, project_identity)` | owner `VersionedDeclIdentity` + facts | final-result cache |
 | `MemberShapeCacheDb` | `(scope, member_semantic_node_id, projection_mode, type_env_hash, lib_env_hash, project_identity)` | observation `validated_at_generation` + facts | strict self-root |
-| `AnalysisReadyDb` (slot) | `AnalysisSlotKey { canonical_id, project_identity }` | `AnalysisCandidate { whole_hash, scope, validated_at_generation, facts }` (bitflag-containment match) | R20 multi-candidate |
+| `AnalysisReadyDb` (slot) | `AnalysisSlotKey { canonical_id, project_identity }` | `AnalysisCandidate { whole_hash, scope, validated_at_generation, facts }` (bitflag-containment match) | skill `R20` multi-candidate |
 | `OwnerImportSurfaceDb` | `(owner_slot_identity, resolve_env_hash, lib_env_hash, project_identity)` | owner `VersionedDeclIdentity` + facts | direct-owner-import surface |
 | `ImportedRootDb` | `(scope, resolve_env_hash, lib_env_hash, project_identity)` | scope `VersionedDeclIdentity` + facts | imported-root projection |
 | `AppConfigNoOverrideProofDb` | `(scope, parse_env_hash, project_identity)` | scope `VersionedDeclIdentity` + facts | no-override proof |
-| `ResolvedTypeCacheDb` | `(slot_identity, type_env_hash, lib_env_hash, project_identity)` | `VersionedDeclIdentity` + facts | explicit R20 multi-candidate (distinct from typed-IR resolve which is file-identity domain) |
-| `CompileOutputNode_FactValidatedSession` (`session` mode) | `CompileOutputSlotKey { canonical, parse_env_hash, resolve_env_hash, type_env_hash, lib_env_hash, compile_profile_hash, compiler_version, source_map_policy_hash, project_identity }` | `CompileOutputCandidate { source_hash, versioned_decl: VersionedDeclIdentity, facts: ReadSetSignature, validated_at_generation, self_root_canonicals, value: Arc<CompileOutput> }` | full env + profile + source-map policy; slot key carries NO `source_hash` (R6/H3); memory-only (NOT persisted). |
+| `ResolvedTypeCacheDb` | `(slot_identity, type_env_hash, lib_env_hash, project_identity)` | `VersionedDeclIdentity` + facts | explicit skill `R20` multi-candidate (distinct from typed-IR resolve which is file-identity domain) |
+| `CompileOutputNode_FactValidatedSession` (`session` mode) | `CompileOutputSlotKey { canonical, parse_env_hash, resolve_env_hash, type_env_hash, lib_env_hash, compile_profile_hash, compiler_version, source_map_policy_hash, project_identity }` | `CompileOutputCandidate { source_hash, versioned_decl: VersionedDeclIdentity, facts: ReadSetSignature, validated_at_generation, self_root_canonicals, value: Arc<CompileOutput> }` | full env + profile + source-map policy; slot key carries NO `source_hash` (skill `R6`/H3); memory-only (NOT persisted). |
 
 **`AnalysisReadyDb` bitflag-containment invariant.** The slot key
 `AnalysisSlotKey { canonical_id, project_identity }` carries NO
@@ -1642,7 +1697,7 @@ base-only `EffectiveExportSet`. `CacheAdmission::ReturnOnly` is the
 WRONG shape here because it would return a valid base computation to
 the session caller.
 
-**R28 two-fact model.** `MemberPresence` (key exists) and `Member`
+**Skill `R28` two-fact model.** `MemberPresence` (key exists) and `Member`
 (key's body identity) are SEPARATE facts. Adding `Foo.b` invalidates
 only consumers that observed `MemberPresence("b")` or
 `Member("b", _)`; consumers that observed only `Member("a", _)` stay
@@ -2301,14 +2356,152 @@ pnpm install --frozen-lockfile
 
 ### 7. Scheduler ↔ cache-runtime integration
 
+> **Revised per architectural decision (codex): unified scheduler DAG +
+> admission-time backpressure.** Block 7 no longer introduces a separate
+> cache-node ordering substrate that coexists with the staged
+> `JobIndex` / blocker path. There is ONE driver-owned `SchedulerDag`
+> readiness authority for all work — file stages AND cache nodes — and
+> backpressure lives at DAG admission, not at a submitter-side
+> ready-queue push. See §7.0 below for the authoritative substrate
+> design; the remaining §7 prose is the cache-node specialization of
+> that one substrate.
+
+#### 7.0 Unified scheduler DAG (single readiness authority)
+
+**Decision (codex, authoritative).** Delete `JobIndex` and
+`BlockerRegistry`. Model file stages (`Load → Parse → Analysis →
+Artifact`) AND cache-runtime nodes in ONE driver-owned `SchedulerDag`
+readiness substrate. The current staged path scans `JobIndex.entries`
+for `len()` / `dequeue()` (substrate `queue.rs:180`) and scans blocker
+state through `has_pending_blockers` (substrate `edges.rs:230`); a
+separate cache DAG would preserve TWO ordering authorities, which
+violates the project's single-substrate law. The end-state has exactly
+one readiness mutator (the driver) and one node-identity dedup key
+(`WorkNodeKey`).
+
+**Generic substrate types** (these REPLACE the cache-only
+`CacheNodeDag*` types — every `CacheNodeDag*` symbol named later in §7
+is the cache-node specialization of the corresponding generic type
+below, NOT a parallel authority):
+
+```rust
+// crates/verter_scheduler/src/node.rs (generic substrate)
+pub enum WorkKind {
+    Load { canonical: Arc<str> },
+    Parse { canonical: Arc<str>, source: Arc<str>, file_kind: FileKind },
+    Analysis { canonical: Arc<str> },
+    Artifact { canonical: Arc<str>, profile_hash: u64 },
+    CacheNode { cache_id: SchedulerCacheId, key_hash: u64 },
+}
+
+pub struct WorkNodeKey {
+    pub canonical: Option<Arc<str>>,
+    pub generation: u64,
+    pub content_hash: Option<Hash16>,
+    pub kind_key: WorkKindKey,
+}
+
+pub struct SchedulerDagNode {
+    pub id: NodeId,
+    pub key: WorkNodeKey,
+    pub work: WorkKind,
+    pub priority: Priority,
+    pub request_context: Option<OpaqueRequestContext>,
+    pub waiters: SmallVec<[CompletionSender<RequestResult>; 2]>,
+}
+
+pub struct SchedulerDagEdge {
+    pub from: NodeId,
+    pub to: NodeId,
+    pub gate: EdgeGate,
+}
+```
+
+**File progression becomes nodes.** `Load → Parse → Analysis →
+Artifact(profile)`. `TargetStage::Source` is satisfied by `Parse`,
+because parse publishes the `SourceSnapshot` / `IndexedReady`. File
+stages are no longer ordered through `FileNode.pending_requests`; they
+are `SchedulerDagNode`s with `WorkKind::Load` / `Parse` / `Analysis` /
+`Artifact` and `SchedulerDagEdge`s between them, in the same
+`SchedulerDag` that carries `WorkKind::CacheNode` nodes.
+
+**Dynamic imports → driver-owned incremental DAG expansion.** `Parse`
+completion is an expansion barrier. Before the `Parse → Analysis` edge
+is released, the driver reads parsed/import facts, creates the required
+dependency nodes, and adds edges such as `B.Parse → A.Analysis` or
+`B.Analysis → A.Artifact(profile)` depending on the required fact. If an
+upstream node already completed in the same generation, the new edge is
+satisfied immediately; otherwise `remaining_upstream` is incremented
+BEFORE downstream readiness is opened. The driver never releases a
+downstream stage before the dynamically discovered upstream edges for
+that stage have been added — this is the
+`dynamic_import_edges_added_before_downstream_dispatch` guarantee.
+
+**Generation invalidation.** A generation bump marks all nodes under
+`(canonical, old_generation)` superseded through
+`nodes_by_file_generation`. Ready lanes skip stale nodes by a generation
+fence on dispatch; worker completions are ignored unless
+`FileNode.generation() == node.key.generation`. There is no separate
+`supersede_old_generations` `TaskKind`-scan — supersession is a
+generation-keyed node sweep.
+
+**Scan-free priority fairness (replaces priority aging).** Priority
+aging is DELETED. Dispatch reads four driver-owned `VecDeque<NodeId>`
+lanes (one per `Priority`) plus a small fixed deficit/credit policy.
+Dispatch checks ONLY the four lanes, never the job set — there is no
+linear scan of pending jobs on the dispatch path. `Critical` remains
+first-class; `Background` / `Maintenance` receive bounded service
+through the deficit/credit counters without any per-entry aging scan.
+This is the `scheduler_dispatch_path_no_linear_job_scan` guarantee.
+
+**Dedup identity is `WorkNodeKey`.** File-stage keys are `(canonical,
+generation, stage, profile_hash?)`; cache keys are `(SchedulerCacheId,
+typed_key_hash, snapshot_pin_id / view_epoch)`. Multiple request waiters
+attach to the SAME node via `SchedulerDagNode.waiters` — same-stage
+requests join one work node rather than spawning duplicate stage work.
+This subsumes the substrate's old `pending_requests` dedupe rail for
+file-stage ordering (the cache-node `DedupKey` inflight collapse that
+the rest of §7 describes is the cache-node specialization of this same
+join).
+
+**STOP-gate (codex).** Block 7 MUST NOT land while `job_index` or
+`BlockerRegistry` remain production ordering authorities. The guard
+`scheduler_has_single_readiness_authority` fails the gate if either
+type, or any `Mutex<JobIndex>` field / `has_pending_blockers` call,
+survives on a non-test scheduler path.
+
+**Decision-1 guards (registered in the §7 Discriminating tests and the
+cross-block Verification):** `scheduler_has_single_readiness_authority`,
+`scheduler_dispatch_path_no_linear_job_scan`,
+`blocker_resolution_touches_only_out_edges`,
+`dynamic_import_edges_added_before_downstream_dispatch`,
+`stale_generation_nodes_never_dispatch_after_bump`,
+`same_stage_requests_join_one_work_node`.
+
+**Pool capacity is part of admission (H23).** Driver dispatch MUST NOT
+call a worker-pool API that can block on a bounded queue. The old
+`IoPool::execute` path uses a bounded channel and `sender.send(...)`;
+when called by the driver during source dispatch it can stall readiness
+processing behind disk or queue pressure. Block 7 replaces every
+driver-facing worker submission with nonblocking, permit-backed APIs:
+admission reserves the required CPU and I/O node budget before any
+ready lane is seeded, and the driver calls only `try_submit_*` methods.
+If a nonblocking pool submission unexpectedly fails at dispatch time,
+the borrowed permit is returned to the `DagCapacityReservation`, the
+node is parked in a driver-owned deferred lane, and the driver retries
+when a completion or pool-health event makes progress possible. The
+driver never waits on a channel send, condvar, or worker-pool install
+call.
+
 #### Context
 
 `crates/verter_scheduler/src/scheduler.rs:273` exposes
 `submit_request`; `:312` exposes `submit_batch` (a loop). There is no
 dependency-DAG submission API and no in-flight dedupe before
-scheduling for cache nodes. CPU and I/O work share a single rayon
-pool today; source-parse jobs can land on the I/O pool (parse is CPU
-work). Block 7 formalises the diff per-file.
+scheduling for cache nodes. CPU and I/O work share submission pressure
+today: source-parse jobs can land on the I/O pool (parse is CPU work),
+and bounded I/O submission can block the scheduler driver. Block 7
+formalises the diff per-file.
 
 **Crate dependency invariant (H20, BLOCKING).** `verter_scheduler`
 MUST NOT depend on `verter_session`. The dependency direction is
@@ -2325,9 +2518,9 @@ unaware of it. Cache-runtime callers in `verter_session` perform their
 in-flight dedupe BEFORE constructing a scheduler submission. The
 scheduler exposes a generic `DedupeHook` trait in
 `crates/verter_scheduler/src/dedupe_hook.rs` that the calling crate
-may pass into `submit_request` / `submit_dag` so the scheduler can
-collapse joiners — but the scheduler does not import or depend on the
-cache-runtime substrate.
+may pass into `submit_request` / `try_submit_dag` /
+`submit_dag_blocking` so the scheduler can collapse joiners — but the
+scheduler does not import or depend on the cache-runtime substrate.
 
 #### Changes
 
@@ -2336,8 +2529,9 @@ cache-runtime substrate.
 | Method | Today | Post-cutover |
 |---|---|---|
 | `submit_request(req)` | inbox + per-request `CompletionHandle` | unchanged signature; gains optional `&dyn DedupeHook` arg |
-| `submit_batch(reqs)` | loop over `submit_request` | replaced by no-edge-DAG bridge over `submit_dag` |
-| `submit_dag(dag: CacheNodeDag) -> DagHandle` | absent | NEW |
+| `submit_batch(reqs)` | loop over `submit_request` | replaced by no-edge-DAG bridge over `try_submit_dag` |
+| `try_submit_dag(dag) -> SubmissionResult<DagHandle>` | absent | NEW (DECISION 2 — typed admission; `Backpressure` without readiness mutation) |
+| `submit_dag_blocking(dag) -> DagHandle` | absent | NEW (DECISION 2 — parks on `admission_budget_available` condvar) |
 | `dedup_key_for(req) -> DedupKey` | absent | NEW (probe surface for callers) |
 | `cpu_concurrency_semaphore(n) -> Arc<CpuConcurrencySemaphore>` | absent | NEW |
 | `ready_queue_depth() -> usize` | absent | NEW (observability) |
@@ -2349,8 +2543,15 @@ The substrate already has two adjacent envelope concepts. To avoid
 the collision the synthesis flagged:
 
 - `driver::Submission` (`crates/verter_scheduler/src/driver.rs:13`) is
-  the INBOX-level enum (`Wake | NewRequest {…} | StageComplete {…} |
-  BlockerResolved {…}`). Block 7 does NOT rename or shadow it.
+  the INBOX-level enum. Block 7 does NOT rename or shadow it, but it
+  DOES change the variant set: the `BlockerResolved {…}` variant is
+  DELETED (blocker resolution is now an `out_edge` decrement inside the
+  driver-owned `SchedulerDag`, never an inbox message — see
+  `blocker_resolution_touches_only_out_edges`), and a new
+  `DagSubmitted { dag_id }` variant is ADDED (the only thing a submitter
+  sends after it has acquired a typed admission budget — see §7.0 +
+  DECISION 2). Post-cutover the enum is
+  `Wake | NewRequest {…} | StageComplete {…} | DagSubmitted { dag_id }`.
 - `job::CompletionSender<T: Clone>`
   (`crates/verter_scheduler/src/job.rs:104`) is the substrate's
   condvar-backed handle used by top-level `submit_request`. Block 7
@@ -2373,11 +2574,15 @@ node must live on both the ready queue and `DagState.nodes`, and
 `CacheNodeCompletionSender` wraps a single-use `oneshot::Sender`).
 The top-level inbox continues to enqueue
 `driver::Submission::NewRequest` for single-request callers
-(`submit_request`); `submit_dag` wraps every incoming
-`CacheNodeDagNode` in `Arc` at the submission boundary, stores the
-`Arc<CacheNodeDagNode>` vector on `DagState.nodes`, and pushes
-`Arc::clone(&state.nodes[idx])` into the bounded ready queue once
-each node's upstream gates fire.
+(`submit_request`); the DAG admission tail (`admit_dag`, reached via
+`try_submit_dag` / `submit_dag_blocking`) wraps every incoming
+`CacheNodeDagNode` in `Arc`, stores the `Arc<CacheNodeDagNode>` vector
+on `DagState.nodes`, and sends `Submission::DagSubmitted { dag_id }`.
+The DRIVER (the sole readiness mutator — DECISION 2) then seeds
+`Arc::clone(&state.nodes[idx])` into the ready lanes for every
+zero-upstream root and, thereafter, pushes each downstream node once
+its upstream gates fire. The submitter never pushes into the ready
+queue.
 
 **`CacheNodeDag` envelope (verbatim — single source of truth).**
 
@@ -2567,7 +2772,15 @@ pub struct CacheNodeDag {
     pub completion_aggregator: std::sync::Arc<DagCompletionAggregator>,
 }
 
-pub struct DagCompletionAggregator { /* internal — wraps Arc<Mutex<Vec<CacheNodeOutcome>>> */ }
+/// Collects per-node `CacheNodeOutcome`s and, on the DAG's terminal
+/// transition (completion / cancellation / shutdown), releases the
+/// admitted node/edge/CPU/I/O budget back to
+/// `Scheduler.admission_budget` through the single
+/// `DagCapacityReservation` and calls
+/// `admission_budget_available.notify_all()` (DECISION 2) so a parked
+/// `submit_dag_blocking` can proceed. Holds the admitted
+/// `(nodes, edges, cpu_work, io_work)` counts it must return.
+pub struct DagCompletionAggregator { /* internal — wraps Arc<Mutex<Vec<CacheNodeOutcome>>> + admitted budget counts */ }
 
 /// Cache-node-only completion channel. Wraps a
 /// `tokio::sync::oneshot::Sender<CacheNodeOutcome>` in
@@ -2718,7 +2931,7 @@ use std::sync::Arc;
 ///   `Vec<TaskKind>` with linear scan in the same Block 7 commit.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TaskKind {
-    /// Pure I/O — read bytes off disk. Routed to `IoPool`.
+    /// Pure I/O — read bytes off disk. Routed to `SchedulerIoPool`.
     Load { canonical: Arc<str> },
     /// Pure CPU — tokenize/parse. Routed to `SchedulerCpuPool`.
     Parse {
@@ -2805,27 +3018,87 @@ replacing it.
 // crates/verter_scheduler/src/queue.rs (additions)
 pub const MAX_READY_QUEUE_DEPTH: usize = 64;
 
-pub enum SubmissionResult {
-    Admitted,
-    /// Queue is full; caller chooses to block or back off.
-    Backpressure,
+/// Typed submission result. Backpressure is reported at DAG
+/// ADMISSION (before any readiness mutation), not at a
+/// ready-queue push. The `T` is the success payload —
+/// `DagHandle` for `try_submit_dag`, `()` for single-request
+/// admission probes.
+pub enum SubmissionResult<T> {
+    Admitted(T),
+    /// Admission budget exhausted; caller chooses to block
+    /// (`submit_dag_blocking`) or back off. Carries the typed
+    /// capacity accounting so the caller can log / retry intelligently.
+    Backpressure {
+        requested: DagCapacityDemand,
+        available: DagCapacityDemand,
+    },
+}
+
+pub struct DagCapacityDemand {
+    pub nodes: u32,
+    pub edges: u32,
+    pub cpu_work: u32,
+    pub io_work: u32,
 }
 ```
 
-The bounded `crossbeam_queue::ArrayQueue<Arc<CacheNodeDagNode>>` is
-the ready queue — `Arc<CacheNodeDagNode>` because
+**Backpressure lives at DAG admission, not at a ready-queue push
+(DECISION 2, codex).** The driver is the ONLY readiness mutator. A
+submitter never holds `DagState.readiness.lock()` and never spins on a
+ready-queue `push`. Admission is gated by a typed node/edge/CPU/I/O budget:
+
+```rust
+// crates/verter_scheduler/src/queue.rs (additions)
+pub struct DagAdmissionBudget {
+    pub max_nodes: u32,
+    pub max_edges: u32,
+    pub max_cpu_work: u32,
+    pub max_io_work: u32,
+    pub in_flight_nodes: u32,
+    pub in_flight_edges: u32,
+    pub in_flight_cpu_work: u32,
+    pub in_flight_io_work: u32,
+}
+
+pub struct DagCapacityReservation {
+    pub nodes: u32,
+    pub edges: u32,
+    pub cpu_work: u32,
+    pub io_work: u32,
+    cpu_permits: smallvec::SmallVec<[PoolPermit; 8]>,
+    io_permits: smallvec::SmallVec<[PoolPermit; 8]>,
+}
+```
+
+`try_submit_dag` checks `DagAdmissionBudget` under a small mutex; if
+capacity is unavailable it returns
+`Backpressure { requested: DagCapacityDemand, available: DagCapacityDemand }`
+WITHOUT touching readiness.
+`submit_dag_blocking` waits on a `parking_lot::Condvar` attached to that
+budget mutex until capacity frees. After admission succeeds, the
+submitter sends `Submission::DagSubmitted { dag_id }` to the inbox; the
+driver owns `DagReadiness` and seeds the ready priority lanes
+internally. `DagCompletionAggregator` releases the admitted node/edge
+and CPU/I/O work budget through the single `DagCapacityReservation` on
+completion / cancellation / shutdown and notifies the
+`admission_budget_available` condvar. Worker pools do not own a second
+capacity counter; driver dispatch borrows a `PoolPermit` from the
+reservation and returns it through the same terminal path if dispatch
+fails before the work starts.
+
+The bounded `crossbeam_queue::ArrayQueue<Arc<CacheNodeDagNode>>` is the
+DRIVER-INTERNAL ready queue — `Arc<CacheNodeDagNode>` because
 `CacheNodeDagNode` is intentionally not `Clone` (its
 `CacheNodeCompletionSender` wraps a single-use `oneshot::Sender` in
 `Mutex<Option<...>>` so the worker can `take()` it out of a shared
-borrow). The submitter wraps every node in `Arc` at the
-`submit_dag` boundary; the ready queue and `DagState.nodes` share
-the same `Arc<CacheNodeDagNode>` element, and the driver pops an
-`Arc<CacheNodeDagNode>` and dispatches it by deref'ing into the
-`dispatch_cpu_task(&CacheNodeDagNode, ...)` signature.
-Producers observe `Err(Arc<CacheNodeDagNode>)` on overflow and
-surface `SubmissionResult::Backpressure` per the A48 backpressure
-contract. The existing `driver::Submission` enum at `driver.rs:13`
-remains the inbox discriminator and is a different type.
+borrow). The driver pops an `Arc<CacheNodeDagNode>` and dispatches it by
+deref'ing into the `dispatch_cpu_task(&CacheNodeDagNode, ...)` signature.
+Because admission already bounded the in-flight node count, the driver's
+internal seeding cannot overflow the ready queue — there is no
+submitter-visible `Err(Arc<CacheNodeDagNode>)` overflow path and no
+`yield_now()` spin anywhere on a submission path. The existing
+`driver::Submission` enum at `driver.rs:13` remains the inbox
+discriminator and is a different type.
 
 **Per-call CPU concurrency semaphore:**
 
@@ -2940,7 +3213,7 @@ pub enum SchedulerCacheId {
 **`SchedulerCpuPool` (the second of the two pools):**
 
 ```rust
-// crates/verter_scheduler/src/pool.rs (additions alongside the existing IoPool)
+// crates/verter_scheduler/src/pool.rs (replacement pool surface)
 pub struct SchedulerCpuPool {
     pool: rayon::ThreadPool,
 }
@@ -2954,18 +3227,84 @@ impl SchedulerCpuPool {
             .expect("SchedulerCpuPool::new failed to build rayon ThreadPool");
         Self { pool }
     }
-    pub fn submit<R: Send>(&self, f: impl FnOnce() -> R + Send) -> R {
+
+    /// Driver-safe submission. Never blocks on worker availability.
+    /// The queued closure owns the admission permit until completion.
+    pub fn try_submit(
+        &self,
+        permit: PoolPermit,
+        f: impl FnOnce() + Send + 'static,
+    ) -> Result<(), PoolSubmissionFailed> {
+        self.pool.spawn_fifo(move || {
+            let _permit = permit;
+            f();
+        });
+        Ok(())
+    }
+
+    /// Non-driver helper for call sites that intentionally run work
+    /// inline on the scheduler pool. Static guards reject this from
+    /// driver dispatch paths.
+    pub fn install_non_driver<R: Send>(&self, f: impl FnOnce() -> R + Send) -> R {
         self.pool.install(f)
     }
+}
+
+pub struct SchedulerIoPool {
+    sender: crossbeam_channel::Sender<IoWork>,
+}
+
+impl SchedulerIoPool {
+    pub fn new(num_threads: usize, queue_bound: usize) -> Self { /* ... */ }
+
+    /// Driver-safe submission. Never blocks. The queued work owns the
+    /// admission permit until completion/drop.
+    pub fn try_submit(
+        &self,
+        permit: PoolPermit,
+        work: IoWork,
+    ) -> Result<(), PoolSubmissionFailed> {
+        self.sender
+            .try_send(work.with_permit(permit))
+            .map_err(|err| match err {
+                crossbeam_channel::TrySendError::Full(work) => {
+                    PoolSubmissionFailed::no_capacity(work.into_permit())
+                }
+                crossbeam_channel::TrySendError::Disconnected(work) => {
+                    PoolSubmissionFailed::shutdown(work.into_permit())
+                }
+            })
+    }
+}
+
+/// Capability minted only by `DagCapacityReservation`.
+pub struct PoolPermit { _private: () }
+
+pub struct PoolSubmissionFailed {
+    pub kind: PoolSubmitError,
+    pub permit: PoolPermit,
+}
+
+pub enum PoolSubmitError {
+    NoCapacity,
+    Shutdown,
 }
 ```
 
 The legacy `cpu_pool: rayon::ThreadPool` field on `Scheduler` (at
 `scheduler.rs:135`) is replaced with `scheduler_cpu_pool: Arc<SchedulerCpuPool>`.
 Every internal call site that previously installed work on
-`self.cpu_pool` now calls `self.scheduler_cpu_pool.submit(...)`. The
-existing `IoPool` at `pool.rs:17` is preserved verbatim and wrapped in
-`Arc<IoPool>` at the scheduler.
+`self.cpu_pool` now calls `self.scheduler_cpu_pool.try_submit(...)` from
+driver dispatch or `install_non_driver(...)` from explicitly non-driver
+helpers. The
+existing blocking `IoPool::execute` surface at `pool.rs:17` is deleted
+from every driver path and replaced with `scheduler_io_pool:
+Arc<SchedulerIoPool>`. Any helper that keeps a blocking I/O submission
+method is marked test-only or non-driver-only; the static guard
+`driver_never_blocks_on_io_pool_send` rejects `send(...)`, blocking
+`recv(...)`, `Condvar::wait`, or `install(...)` calls in
+`driver.rs`, `scheduler.rs` dispatch tails, and any `dispatch_*`
+function reachable from the driver.
 
 **`StageExecutor` trait extension:**
 
@@ -3154,7 +3493,7 @@ pub fn dispatch_cpu_task(
             let _ = node.completion.send(crate::node::CacheNodeOutcome::from_artifact(result));
         }
         crate::stage::TaskKind::Load { .. } => unreachable!(
-            "TaskKind::Load routes through IoPool, not dispatch_cpu_task"
+            "TaskKind::Load routes through SchedulerIoPool, not dispatch_cpu_task"
         ),
     }
     // `_permit_guard` drops here — increments the semaphore counter
@@ -3182,10 +3521,11 @@ pub trait DedupeHook: Send + Sync {
 pub struct DedupeJoiner { _opaque: () }
 ```
 
-`Scheduler::submit_request` and `Scheduler::submit_dag` accept an
-optional `&dyn DedupeHook` argument. `verter_session::cache_runtime`
-implements `DedupeHook` over its `InflightTable`; the scheduler crate
-stays unaware of the cache-runtime substrate.
+`Scheduler::submit_request`, `Scheduler::try_submit_dag`, and
+`Scheduler::submit_dag_blocking` accept an optional `&dyn DedupeHook`
+argument. `verter_session::cache_runtime` implements `DedupeHook` over
+its `InflightTable`; the scheduler crate stays unaware of the
+cache-runtime substrate.
 
 **`Scheduler` constructor:**
 
@@ -3198,6 +3538,17 @@ stays unaware of the cache-runtime substrate.
 // as `Arc<...>` (not borrows — `HostCpuPool` and `SchedulerCpuPool`
 // are not `Clone`). Return type stays `Arc<Self>` because the driver
 // lifecycle holds `Weak<Scheduler>`.
+//
+// `SchedulerConfig` (substrate type) is retyped by Block 7: the
+// `aging: AgingConfig` field is DELETED (DECISION 1 — priority aging
+// is replaced by the driver's scan-free deficit/credit lanes, so
+// there is nothing to configure), and two DECISION-2 admission knobs
+// are ADDED — `max_dag_nodes: u32` and `max_dag_edges: u32` (the
+// `DagAdmissionBudget` ceilings). `SchedulerConfig::default()`
+// populates both with the substrate's prior queue-depth heuristics.
+// H23 adds `max_cpu_in_flight: u32` and `max_io_in_flight: u32`; the
+// DAG admission path reserves both through one `DagCapacityReservation`
+// before seeding readiness.
 impl Scheduler {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new(
@@ -3205,7 +3556,7 @@ impl Scheduler {
         source_loader: Arc<dyn SourceLoader>,
         host_cpu_pool: Arc<crate::host_cpu_pool::HostCpuPool>,
         scheduler_cpu_pool: Arc<crate::pool::SchedulerCpuPool>,
-        io_pool: Arc<crate::pool::IoPool>,
+        scheduler_io_pool: Arc<crate::pool::SchedulerIoPool>,
     ) -> Arc<Self> {
         Self::with_executor(
             config,
@@ -3213,7 +3564,7 @@ impl Scheduler {
             Arc::new(DefaultExecutor),
             host_cpu_pool,
             scheduler_cpu_pool,
-            io_pool,
+            scheduler_io_pool,
         )
     }
 
@@ -3224,21 +3575,25 @@ impl Scheduler {
         executor: Arc<dyn StageExecutor>,
         host_cpu_pool: Arc<crate::host_cpu_pool::HostCpuPool>,
         scheduler_cpu_pool: Arc<crate::pool::SchedulerCpuPool>,
-        io_pool: Arc<crate::pool::IoPool>,
+        scheduler_io_pool: Arc<crate::pool::SchedulerIoPool>,
     ) -> Arc<Self> {
         let scheduler = Arc::new(Self {
-            // Existing fields preserved verbatim from substrate
-            // `scheduler.rs:115-163`:
+            // Existing fields preserved from substrate
+            // `scheduler.rs:115-163`. NOTE (DECISION 1): the
+            // `job_index: Mutex<JobIndex>` field — which seeded
+            // `JobIndex::new(config.aging)` and was scanned for
+            // `len()` / `dequeue()` — is DELETED. So is the
+            // `deferred_blocker_ids` map (BlockerRegistry-adjacent
+            // state). Readiness for ALL work (file stages + cache
+            // nodes) now lives in the driver-owned `SchedulerDag`.
             nodes: DashMap::new(),
             edges: EdgeManager::new(),
-            job_index: Mutex::new(JobIndex::new(config.aging.clone())),
             inbox: SubmissionInbox::new(),
             overlay: Arc::new(OverlayMap::new()),
             source_loader,
             executor,
             tombstones: DashMap::new(),
             generation_floors: DashMap::new(),
-            deferred_blocker_ids: DashMap::new(),
             removal_epoch: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
             driver_handle: Mutex::new(None),
@@ -3246,11 +3601,29 @@ impl Scheduler {
             // NEW fields:
             host_cpu_pool,
             scheduler_cpu_pool,
-            io_pool,
+            scheduler_io_pool,
             ready_queue: Arc::new(
                 crossbeam_queue::ArrayQueue::new(crate::queue::MAX_READY_QUEUE_DEPTH),
             ),
+            // Cache-node inflight dedupe rail, keyed on `DedupKey`
+            // (distinct from the deleted file-stage
+            // `FileNode.pending_requests` ordering path — DECISION 1).
             pending_requests: Arc::new(DashMap::new()),
+            // DECISION 2: typed DAG admission budget + condvar. The
+            // submitter reserves node/edge/CPU/I/O budget here (a small
+            // mutex), NOT the readiness lock; `submit_dag_blocking`
+            // parks on `admission_budget_available`.
+            admission_budget: parking_lot::Mutex::new(crate::queue::DagAdmissionBudget {
+                max_nodes: config.max_dag_nodes,
+                max_edges: config.max_dag_edges,
+                max_cpu_work: config.max_cpu_in_flight,
+                max_io_work: config.max_io_in_flight,
+                in_flight_nodes: 0,
+                in_flight_edges: 0,
+                in_flight_cpu_work: 0,
+                in_flight_io_work: 0,
+            }),
+            admission_budget_available: parking_lot::Condvar::new(),
             dags: DashMap::new(),
             config,
         });
@@ -3268,7 +3641,106 @@ impl Scheduler {
         scheduler
     }
 
-    pub fn submit_dag(&self, dag: crate::node::CacheNodeDag) -> crate::job::DagHandle {
+    /// Typed admission (DECISION 2 + H23). Acquires node/edge/CPU/I/O
+    /// budget under the admission mutex; on success constructs the `DagState`,
+    /// registers it, and sends `Submission::DagSubmitted { dag_id }`
+    /// so the DRIVER seeds the ready lanes. The submitter never touches
+    /// `DagState.readiness.lock()` and never spins on a ready-queue
+    /// push. On budget exhaustion it returns `Backpressure` WITHOUT
+    /// mutating readiness.
+    pub fn try_submit_dag(
+        &self,
+        dag: crate::node::CacheNodeDag,
+    ) -> crate::queue::SubmissionResult<crate::job::DagHandle> {
+        let requested_nodes = dag.nodes.len() as u32;
+        let requested_edges = dag.edges.len() as u32;
+        let requested_cpu_work = dag.count_cpu_work() as u32;
+        let requested_io_work = dag.count_io_work() as u32;
+        let requested = crate::queue::DagCapacityDemand {
+            nodes: requested_nodes,
+            edges: requested_edges,
+            cpu_work: requested_cpu_work,
+            io_work: requested_io_work,
+        };
+        // Single small mutex around the admission budget — NOT the
+        // readiness lock. Either we reserve the full
+        // node/edge/CPU/I/O budget and mint one `DagCapacityReservation`
+        // here, or we report typed backpressure and leave the DAG
+        // un-admitted (no readiness mutation, no partial seeding).
+        {
+            let mut budget = self.admission_budget.lock();
+            let available_nodes = budget.max_nodes - budget.in_flight_nodes;
+            let available_edges = budget.max_edges - budget.in_flight_edges;
+            let available_cpu_work = budget.max_cpu_work - budget.in_flight_cpu_work;
+            let available_io_work = budget.max_io_work - budget.in_flight_io_work;
+            let available = crate::queue::DagCapacityDemand {
+                nodes: available_nodes,
+                edges: available_edges,
+                cpu_work: available_cpu_work,
+                io_work: available_io_work,
+            };
+            if requested_nodes > available_nodes
+                || requested_edges > available_edges
+                || requested_cpu_work > available_cpu_work
+                || requested_io_work > available_io_work
+            {
+                return crate::queue::SubmissionResult::Backpressure {
+                    requested,
+                    available,
+                };
+            }
+            budget.in_flight_nodes += requested_nodes;
+            budget.in_flight_edges += requested_edges;
+            budget.in_flight_cpu_work += requested_cpu_work;
+            budget.in_flight_io_work += requested_io_work;
+        }
+        let handle = self.admit_dag(dag);
+        crate::queue::SubmissionResult::Admitted(handle)
+    }
+
+    /// Blocking admission (DECISION 2). Parks on the
+    /// `admission_budget_available` condvar attached to the admission
+    /// budget mutex until capacity frees, then admits. No DAG readiness
+    /// lock exists on this path; the wait is a condvar park, never a
+    /// `yield_now()` spin.
+    pub fn submit_dag_blocking(&self, dag: crate::node::CacheNodeDag) -> crate::job::DagHandle {
+        let requested_nodes = dag.nodes.len() as u32;
+        let requested_edges = dag.edges.len() as u32;
+        let requested_cpu_work = dag.count_cpu_work() as u32;
+        let requested_io_work = dag.count_io_work() as u32;
+        {
+            let mut budget = self.admission_budget.lock();
+            loop {
+                let available_nodes = budget.max_nodes - budget.in_flight_nodes;
+                let available_edges = budget.max_edges - budget.in_flight_edges;
+                let available_cpu_work = budget.max_cpu_work - budget.in_flight_cpu_work;
+                let available_io_work = budget.max_io_work - budget.in_flight_io_work;
+                if requested_nodes <= available_nodes
+                    && requested_edges <= available_edges
+                    && requested_cpu_work <= available_cpu_work
+                    && requested_io_work <= available_io_work
+                {
+                    budget.in_flight_nodes += requested_nodes;
+                    budget.in_flight_edges += requested_edges;
+                    budget.in_flight_cpu_work += requested_cpu_work;
+                    budget.in_flight_io_work += requested_io_work;
+                    break;
+                }
+                // Park on the condvar — releases the budget mutex while
+                // waiting and is woken by `DagCompletionAggregator`'s
+                // `admission_budget_available.notify_all()` on
+                // completion / cancellation / shutdown.
+                self.admission_budget_available.wait(&mut budget);
+            }
+        }
+        self.admit_dag(dag)
+    }
+
+    /// Internal admission tail shared by `try_submit_dag` /
+    /// `submit_dag_blocking`. Constructs the `DagState`, registers it,
+    /// and signals the driver to seed the ready lanes. Called ONLY
+    /// after the node/edge/CPU/I/O budget is already reserved.
+    fn admit_dag(&self, dag: crate::node::CacheNodeDag) -> crate::job::DagHandle {
         let dag_id = self.allocate_dag_id();
         let node_count = dag.nodes.len();
         let mut remaining_upstream = smallvec::SmallVec::with_capacity(node_count);
@@ -3284,8 +3756,8 @@ impl Scheduler {
         let cancellation = crate::cancellation::CancellationToken::new();
         // Wrap each `CacheNodeDagNode` (which is intentionally NOT
         // `Clone` — see the `CacheNodeCompletionSender` doc comment)
-        // in an `Arc` at the submission boundary. The ready queue
-        // and `DagState.nodes` share the same `Arc<CacheNodeDagNode>`
+        // in an `Arc`. The driver-internal ready queue and
+        // `DagState.nodes` share the same `Arc<CacheNodeDagNode>`
         // element; the driver pops an `Arc<CacheNodeDagNode>` and
         // dispatches it by deref'ing into the
         // `dispatch_cpu_task(&CacheNodeDagNode, ...)` signature.
@@ -3304,48 +3776,17 @@ impl Scheduler {
             }),
             cancellation: cancellation.clone(),
         });
-        // Seed the ready queue with every zero-upstream root, gated
-        // by `MAX_READY_QUEUE_DEPTH` (overflow surfaces as
-        // SubmissionResult::Backpressure to the caller). The
-        // ready-queue element is `Arc<CacheNodeDagNode>` — no
-        // node-clone is performed (and none is possible:
-        // `CacheNodeDagNode` is not `Clone` by design).
-        // Honor the bounded ready-queue contract: on
-        // `ArrayQueue::push` failure we MUST NOT drop the node.
-        // `submit_dag` is a blocking-on-backpressure surface; the
-        // typed `SubmissionResult::Backpressure` signal is owned by
-        // the inbox-level submission path (see `submit_request`).
-        // For DAG submission we busy-yield with the backpressure
-        // counter incremented per retry, since the ready queue is
-        // sized at `MAX_READY_QUEUE_DEPTH` and overflow is rare in
-        // production.
-        {
-            let readiness = state.readiness.lock();
-            for (idx, &remaining) in readiness.remaining_upstream.iter().enumerate() {
-                if remaining == 0 {
-                    let mut to_push = std::sync::Arc::clone(&state.nodes[idx]);
-                    loop {
-                        match self.ready_queue.push(to_push) {
-                            Ok(()) => break,
-                            Err(returned) => {
-                                self.counters
-                                    .backpressure
-                                    .fetch_add(1, Ordering::Relaxed);
-                                std::thread::yield_now();
-                                to_push = returned;
-                            }
-                        }
-                    }
-                }
-            }
-        }
         self.dags.insert(dag_id, std::sync::Arc::clone(&state));
-        // Each downstream node will be admitted by the driver loop
-        // when its `EdgeGate` evaluates on the upstream's recorded
-        // `AdmissionDisposition` (decrement `remaining_upstream`;
-        // when zero AND the gate is satisfied, push
-        // `Arc::clone(&state.nodes[downstream_idx])` to the ready
-        // queue).
+        // Hand the DAG to the DRIVER. The driver is the ONLY readiness
+        // mutator: on receiving `DagSubmitted { dag_id }` it reads
+        // `DagState.readiness`, seeds every zero-upstream root into the
+        // priority lanes, and thereafter decrements `remaining_upstream`
+        // on each upstream completion (admitting a downstream when its
+        // count hits zero AND its `EdgeGate` is satisfied). The
+        // submitter performs NO readiness lock and NO ready-queue push —
+        // admission already bounded the in-flight node count, so the
+        // driver's seeding cannot overflow.
+        self.inbox.send(crate::driver::Submission::DagSubmitted { dag_id });
         crate::job::DagHandle::new(dag_id, state, cancellation)
     }
 
@@ -3392,17 +3833,21 @@ impl Scheduler {
 }
 
 pub struct Scheduler {
-    // Existing fields (unchanged from substrate):
+    // Existing fields (from substrate). DECISION 1 deletes the
+    // `job_index: Mutex<JobIndex>` field (the linear-scanned staged
+    // ordering authority) and the `deferred_blocker_ids` map
+    // (BlockerRegistry-adjacent state). The single readiness authority
+    // for ALL work is the driver-owned `SchedulerDag` (see §7.0); the
+    // four priority lanes + deficit/credit policy live on the driver,
+    // not on a scanned `JobIndex`.
     pub(crate) nodes: DashMap<String, Arc<FileNode>>,
     pub(crate) edges: EdgeManager,
-    pub(crate) job_index: Mutex<JobIndex>,
     pub(crate) inbox: SubmissionInbox,
     pub(crate) overlay: Arc<OverlayMap>,
     pub(crate) source_loader: Arc<dyn SourceLoader>,
     pub(crate) executor: Arc<dyn StageExecutor>,
     pub tombstones: DashMap<String, u64>,
     pub generation_floors: DashMap<String, u64>,
-    pub deferred_blocker_ids: DashMap<String, Vec<String>>,
     pub(crate) removal_epoch: AtomicU64,
     pub(crate) shutdown: AtomicBool,
     #[cfg(not(target_arch = "wasm32"))]
@@ -3411,9 +3856,15 @@ pub struct Scheduler {
     // NEW fields:
     pub(crate) host_cpu_pool: Arc<crate::host_cpu_pool::HostCpuPool>,
     pub(crate) scheduler_cpu_pool: Arc<crate::pool::SchedulerCpuPool>,
-    pub(crate) io_pool: Arc<crate::pool::IoPool>,
+    pub(crate) scheduler_io_pool: Arc<crate::pool::SchedulerIoPool>,
     pub(crate) ready_queue: Arc<crossbeam_queue::ArrayQueue<std::sync::Arc<crate::node::CacheNodeDagNode>>>,
     pub(crate) pending_requests: Arc<DashMap<crate::job::DedupKey, Vec<CompletionSender<RequestResult>>>>,
+    // DECISION 2: typed DAG admission budget guarded by a small mutex
+    // (NOT the readiness lock) + a condvar `submit_dag_blocking` parks
+    // on. Released by `DagCompletionAggregator` on completion /
+    // cancellation / shutdown.
+    pub(crate) admission_budget: parking_lot::Mutex<crate::queue::DagAdmissionBudget>,
+    pub(crate) admission_budget_available: parking_lot::Condvar,
     pub(crate) dags: DashMap<u64, Arc<crate::job::DagState>>,
     pub(crate) config: SchedulerConfig,
 }
@@ -3423,12 +3874,16 @@ The legacy `cpu_pool: rayon::ThreadPool` field (substrate
 `scheduler.rs:135`) is REMOVED. Every internal use of `self.cpu_pool`
 (verified: `dispatch_meta_jobs` at `:381` and any driver-internal
 parse closures) migrates to
-`self.scheduler_cpu_pool.submit(...)`. The legacy `io_pool: IoPool`
-field is rewrapped as `Arc<IoPool>`.
+`self.scheduler_cpu_pool.try_submit(...)` on driver paths and
+`self.scheduler_cpu_pool.install_non_driver(...)` only on non-driver
+helpers. The legacy `io_pool: IoPool`
+field is replaced by `scheduler_io_pool: Arc<SchedulerIoPool>` and the
+driver dispatch path uses only `SchedulerIoPool::try_submit(...)`.
 
 `Scheduler::dispatch_meta_jobs` (the existing component-meta batch
 fan-out at `:360`) is preserved verbatim with the one-line change
-`self.cpu_pool.install(...)` → `self.scheduler_cpu_pool.submit(...)`.
+`self.cpu_pool.install(...)` →
+`self.scheduler_cpu_pool.install_non_driver(...)`.
 Behavior, counters, and the existing tests stay green.
 
 **`verter_session::host_construction.rs`:**
@@ -3439,14 +3894,15 @@ let host_cpu_pool: Arc<HostCpuPool> =
     Arc::new(HostCpuPool::new(num_threads_outer));
 let scheduler_cpu_pool: Arc<SchedulerCpuPool> =
     Arc::new(SchedulerCpuPool::new(num_threads_scheduler));
-let io_pool: Arc<IoPool> = Arc::new(IoPool::new(io_threads));
+let scheduler_io_pool: Arc<SchedulerIoPool> =
+    Arc::new(SchedulerIoPool::new(io_threads, scheduler_config.max_io_in_flight));
 
 let scheduler: Arc<Scheduler> = Scheduler::new(
     scheduler_config,
     source_loader,
     Arc::clone(&host_cpu_pool),
     scheduler_cpu_pool,
-    io_pool,
+    scheduler_io_pool,
 );
 
 let host = VerterHost {
@@ -3607,11 +4063,15 @@ pub use job::{CacheNodeId, DagHandle, DedupKey, KeyedJob, RequestResult, Schedul
 pub use node::{
     AdmissionDisposition, AnalysisSnapshot, ArtifactSnapshot, CacheNodeCompletionSender,
     CacheNodeDag, CacheNodeDagEdge, CacheNodeDagNode, CacheNodeOutcome, CacheNodeValue,
-    DagCompletionAggregator, EdgeGate, FileKind, FileNode, SourceSnapshot,
+    DagCompletionAggregator, EdgeGate, FileKind, FileNode, NodeId, SchedulerDag,
+    SchedulerDagEdge, SchedulerDagNode, SourceSnapshot, WorkKind, WorkKindKey, WorkNodeKey,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use pool::{IoPool, SchedulerCpuPool};
-pub use queue::{MAX_READY_QUEUE_DEPTH, SubmissionResult};
+pub use pool::{SchedulerCpuPool, SchedulerIoPool};
+pub use queue::{DagAdmissionBudget, MAX_READY_QUEUE_DEPTH, SubmissionResult};
+// `try_submit_dag` / `submit_dag_blocking` are inherent `Scheduler`
+// methods (DECISION 2), reached via the `Scheduler` re-export — not
+// free functions, so they are not named here.
 pub use scheduler::{dispatch_cpu_task, BatchHandle, Request, Scheduler, SchedulerConfig};
 pub use stage::{Priority, SchedulerJobKind, TargetStage, TaskKind};
 ```
@@ -3663,7 +4123,7 @@ impl Scheduler {
     pub fn new_for_test() -> Arc<Self> {
         let host_cpu_pool = Arc::new(crate::host_cpu_pool::HostCpuPool::new(1));
         let scheduler_cpu_pool = Arc::new(crate::pool::SchedulerCpuPool::new(1));
-        let io_pool = Arc::new(crate::pool::IoPool::new(1));
+        let scheduler_io_pool = Arc::new(crate::pool::SchedulerIoPool::new(1, 8));
         let executor: Arc<dyn StageExecutor> = Arc::new(LastDispatchedTaskRecorder::new());
         let source_loader: Arc<dyn crate::source_loader::SourceLoader> =
             Arc::new(crate::source_loader::NoopSourceLoader);
@@ -3673,7 +4133,7 @@ impl Scheduler {
             executor,
             host_cpu_pool,
             scheduler_cpu_pool,
-            io_pool,
+            scheduler_io_pool,
         )
     }
 
@@ -3849,9 +4309,49 @@ impl OpaqueRequestContext {
 
 #### Legacy Deletions
 
+**STOP-gate (DECISION 1, codex).** Block 7 MUST NOT land while
+`job_index` or `BlockerRegistry` remain production ordering
+authorities. The guard `scheduler_has_single_readiness_authority`
+fails the gate if either type survives on a non-test scheduler path.
+
+DECISION-1 deletions (the staged-ordering / blocker substrate is
+replaced by the one driver-owned `SchedulerDag` — see §7.0):
+
+- DELETE `JobIndex` (`crates/verter_scheduler/src/queue.rs`) — the
+  linear-scanned (`len()` / `dequeue()` at `queue.rs:180`) staged
+  ordering authority.
+- DELETE `QueueEntry` and `EffectiveKey` (`JobIndex`'s entry / key
+  types).
+- DELETE `AgingConfig` and the `aging: AgingConfig` field on
+  `SchedulerConfig` — priority aging is replaced by the driver's
+  scan-free four-lane deficit/credit policy.
+- DELETE the `job_index: Mutex<JobIndex>` field on `Scheduler`.
+- DELETE `BlockerRegistry`, `BlockerRef`, `UnblockedJob`, and
+  `has_pending_blockers` (`crates/verter_scheduler/src/edges.rs:230`)
+  — blocker readiness is now an `out_edge` decrement inside
+  `SchedulerDag`.
+- DELETE the `Submission::BlockerResolved` inbox variant
+  (`driver.rs:13`) and the `deferred_blocker_ids` map on `Scheduler`.
+- DELETE file-stage ordering through `FileNode.pending_requests`;
+  same-stage requests now attach as `waiters` on one
+  `SchedulerDagNode` (`same_stage_requests_join_one_work_node`).
+
+DECISION-2 deletions (backpressure moves to typed DAG admission — see
+the `try_submit_dag` / `submit_dag_blocking` design):
+
+- DELETE the `ArrayQueue::push` retry loop in `submit_dag` (the
+  submitter-side ready-queue seeding loop). The driver is the only
+  readiness mutator.
+- DELETE every `std::thread::yield_now()` call on a scheduler
+  submission path.
+- DELETE the submitter-held `DagState.readiness.lock()` — no DAG
+  readiness lock exists on any submission path.
+
+Pre-existing Block 7 deletions:
+
 - DELETE the loop body of `Scheduler::submit_batch`
   (`scheduler.rs:312`) and replace with a no-edge-DAG bridge over
-  `submit_dag`.
+  `try_submit_dag`.
 - DELETE the `cpu_pool: rayon::ThreadPool` field on `Scheduler`
   (`scheduler.rs:135`); replaced by `scheduler_cpu_pool: Arc<SchedulerCpuPool>`.
 - DELETE per-call CPU pool construction inside
@@ -3896,7 +4396,8 @@ pnpm install --frozen-lockfile
   — walks `node.rs` and `job.rs` via `syn::parse_file`; asserts:
   - `CacheNodeDag` exposes `nodes: Vec<CacheNodeDagNode>` (the
     producer-side input shape — callers build the bare node vector;
-    the scheduler wraps each into `Arc` at the `submit_dag` boundary),
+    the scheduler wraps each into `Arc` in the `admit_dag` admission
+    tail reached via `try_submit_dag` / `submit_dag_blocking`),
     `edges: Vec<CacheNodeDagEdge>`,
     `completion_aggregator: Arc<DagCompletionAggregator>`;
   - `DagState` (in `job.rs`) exposes
@@ -3927,12 +4428,12 @@ pnpm install --frozen-lockfile
 - `crates/verter_scheduler/tests/pool_isolation.rs::source_parse_runs_on_cpu_pool_not_io_pool`
   — instruments both pools with submit counters. A `TaskKind::Parse`
   increments `SchedulerCpuPool::submit_count` and not
-  `IoPool::submit_count`; a `TaskKind::Load` increments
-  `IoPool::submit_count`.
+  `SchedulerIoPool::submit_count`; a `TaskKind::Load` increments
+  `SchedulerIoPool::submit_count`.
 - `crates/verter_scheduler/tests/parse_runs_on_cpu_not_io.rs::parse_task_routes_through_scheduler_cpu_pool`
   — submits `TaskKind::Parse { canonical, source, file_kind }` with
   a recording executor wrapping both pools.
-  `SchedulerCpuPool::submit_count == 1`, `IoPool::submit_count == 0`.
+  `SchedulerCpuPool::submit_count == 1`, `SchedulerIoPool::submit_count == 0`.
 - `crates/verter_scheduler/tests/scheduler_cpu_pool_distinct_from_host_cpu_pool.rs::scheduler_cpu_pool_is_not_the_same_instance_as_host_cpu_pool`
   — constructs the scheduler with both pools; submits a
   `TaskKind::CacheNode`; asserts the task ran on `SchedulerCpuPool`
@@ -3962,7 +4463,7 @@ pnpm install --frozen-lockfile
   `tests/trybuild/parking_lot_semaphore_does_not_exist.rs` asserts
   `use parking_lot::Semaphore;` fails to compile.
 - `crates/verter_scheduler/tests/scheduler_new_accepts_arc_host_cpu_pool.rs::scheduler_new_accepts_arc_host_cpu_pool_without_lifetime_or_clone_violation`
-  — `let scheduler: Arc<Scheduler> = Scheduler::new(config, source_loader, Arc::clone(&host_cpu_pool), Arc::new(SchedulerCpuPool::new(2)), Arc::new(IoPool::new(2)))`.
+  — `let scheduler: Arc<Scheduler> = Scheduler::new(config, source_loader, Arc::clone(&host_cpu_pool), Arc::new(SchedulerCpuPool::new(2)), Arc::new(SchedulerIoPool::new(2, 64)))`.
   Compiles without any `Clone` bound on `HostCpuPool`;
   `Arc::strong_count(&host_cpu_pool) >= 2`; dropping the returned
   `Arc<Scheduler>` joins the driver. Sibling trybuild fail-tests:
@@ -3979,15 +4480,22 @@ pnpm install --frozen-lockfile
   — two submitters with identical `dedup_key`; the scheduler runs
   exactly one compute job (`compute_run_count == 1`); both submitters
   receive equal results.
-- `crates/verter_scheduler/tests/cache_node_dag_backpressure.rs::dag_submission_blocks_or_rejects_when_ready_queue_exceeds_budget`
-  — scheduler constructed with `MAX_READY_QUEUE_DEPTH = 64`. Submits
-  a DAG of 128 independent cache-node jobs targeting unique key
-  hashes. Compute completion held behind a test latch. While the
-  latch is held: `scheduler.ready_queue_depth() == 64`; submissions
-  65–128 either return `SubmissionResult::Backpressure` synchronously
-  OR block the submitter. After the latch releases, all 128 jobs
-  complete with each `compute_run_count == 1`. An unbounded-queue
-  implementation observes `ready_queue_depth() == 128` and fails.
+- `crates/verter_scheduler/tests/cache_node_dag_backpressure.rs::dag_submission_blocks_or_rejects_when_admission_budget_exceeds`
+  — scheduler constructed with a `DagAdmissionBudget` of
+  `max_nodes = 64`. Compute completion held behind a test latch.
+  `try_submit_dag` of a 64-node DAG returns
+  `SubmissionResult::Admitted(_)`; a second `try_submit_dag` of any
+  further node returns `SubmissionResult::Backpressure { requested,
+  available }` with `available.nodes == 0` SYNCHRONOUSLY and WITHOUT
+  mutating readiness (asserted: `scheduler.ready_queue_depth()`
+  observed by the driver never exceeds 64, and the backpressured
+  submit performed no `DagState.readiness.lock()`). A concurrent
+  `submit_dag_blocking` of the overflow DAG parks on
+  `admission_budget_available`. After the latch releases and the
+  first DAG drains, the parked `submit_dag_blocking` wakes, admits,
+  and all jobs complete with each `compute_run_count == 1`. A
+  submitter-side ready-queue push loop observes a 128-deep ready
+  queue (or a wedged driver) and fails.
 - `crates/verter_scheduler/tests/scheduler_new_spawns_driver_thread.rs::scheduler_new_spawns_driver_with_weak_handle`
   — `scheduler.driver_handle.lock().is_some() == true` immediately
   after construction; the JoinHandle has name
@@ -4077,6 +4585,134 @@ pnpm install --frozen-lockfile
   A regression switching to deep cloning of the 1 MiB source would
   observe ≫ 100ns and fail.
 
+**DECISION-1 guards (single readiness authority — §7.0):**
+
+- `crates/verter_scheduler/tests/single_readiness_authority.rs::scheduler_has_single_readiness_authority`
+  — walks `crates/verter_scheduler/src/**` via `syn::parse_file`;
+  asserts NO `JobIndex`, `QueueEntry`, `EffectiveKey`, `AgingConfig`,
+  `BlockerRegistry`, `BlockerRef`, `UnblockedJob` type definition
+  survives; NO `job_index` / `deferred_blocker_ids` field on
+  `Scheduler`; NO `has_pending_blockers` fn; NO
+  `Submission::BlockerResolved` variant. A synthetic re-introduction of
+  a `job_index: Mutex<JobIndex>` field trips the guard. This is the
+  STOP-gate enforcement.
+- `crates/verter_scheduler/tests/dispatch_path_no_linear_scan.rs::scheduler_dispatch_path_no_linear_job_scan`
+  — instruments the driver's dispatch step; asserts dispatch reads only
+  the four `VecDeque<NodeId>` priority lanes (probe counts lane pops)
+  and never iterates the full node/job set. A regression scanning all
+  pending nodes increments the full-scan probe and fails.
+- `crates/verter_scheduler/tests/blocker_resolution_out_edges_only.rs::blocker_resolution_touches_only_out_edges`
+  — a 3-node DAG `A → B`, `A → C`; on `A` completion the driver
+  decrements only `B` and `C` `remaining_upstream` (the out-edges of
+  `A`); asserts no unrelated node's count is read or mutated.
+- `crates/verter_scheduler/tests/dynamic_import_expansion.rs::dynamic_import_edges_added_before_downstream_dispatch`
+  — a `Parse` node whose parsed facts reveal a dynamic import. Asserts
+  the driver adds the discovered `B.Parse → A.Analysis` edge and
+  increments `A.Analysis.remaining_upstream` BEFORE the `A.Parse →
+  A.Analysis` edge is released — i.e. `A.Analysis` is never dispatched
+  before the dynamically discovered upstream completes. A regression
+  releasing `Analysis` at `Parse` completion (before expansion) lets
+  `Analysis` run early and fails.
+- `crates/verter_scheduler/tests/stale_generation_fence.rs::stale_generation_nodes_never_dispatch_after_bump`
+  — submits work under generation N, bumps the file generation to N+1
+  mid-flight; asserts every `(canonical, N)` node is skipped by the
+  ready-lane generation fence and no worker completion for a generation
+  N node is accepted (`FileNode.generation() == node.key.generation`
+  gate). A regression dispatching the stale node fails.
+- `crates/verter_scheduler/tests/same_stage_requests_join.rs::same_stage_requests_join_one_work_node`
+  — two `submit_request` callers for the same `(canonical, stage,
+  content_hash)` `WorkNodeKey`; asserts exactly one
+  `SchedulerDagNode` is created, both completion senders attach to its
+  `waiters`, and the stage executes once (`compute_run_count == 1`).
+
+**DECISION-2 guards (admission-time backpressure):**
+
+- `crates/verter_scheduler/tests/admission_backpressure_typed.rs::submit_dag_backpressure_is_typed_before_readiness_mutation`
+  — fills the `DagAdmissionBudget`; asserts the next `try_submit_dag`
+  returns `SubmissionResult::Backpressure { .. }` and that NO
+  `DagState` was constructed and NO `DagState.readiness.lock()` was
+  taken on the backpressured path (readiness-lock acquisition probe ==
+  0 for the rejected submit).
+- `crates/verter_scheduler/tests/submission_never_spins.rs::dag_submission_never_spins_or_holds_readiness_lock`
+  — a recording lock-wrapper around `DagState.readiness`; asserts a
+  submitter thread never acquires it and the submit path performs no
+  busy-retry on the ready queue (push-attempt probe on the submit path
+  == 0; all pushes happen on the driver thread).
+- `crates/verter_scheduler/tests/no_yield_now_on_submission_paths.rs::scheduler_submission_paths_do_not_call_yield_now`
+  — static guard: walks `scheduler.rs` / `queue.rs` / `driver.rs` via
+  `syn::parse_file`; asserts no `std::thread::yield_now` (or
+  `thread::yield_now`) call expression exists in any `submit_*` fn body
+  or admission-tail (`admit_dag`). A re-introduced spin trips the
+  guard.
+- `crates/verter_scheduler/tests/blocking_submission_parks.rs::blocking_submission_parks_on_admission_condvar`
+  — capacity-1 budget held by an admitted DAG behind a latch; a second
+  thread calls `submit_dag_blocking` and is observed PARKED (not
+  spinning — CPU-time probe ≈ 0 while waiting) on
+  `admission_budget_available`; releasing the latch wakes it and it
+  admits. A spin-loop implementation observes nonzero CPU time while
+  waiting and fails.
+
+**H23 guards (driver-safe worker-pool submission):**
+
+- `crates/verter_scheduler/tests/driver_pool_submission.rs::driver_never_blocks_on_io_pool_send`
+  — static guard: walks `driver.rs`, `scheduler.rs`, `pool.rs`, and
+  every `dispatch_*` helper reachable from the driver; rejects
+  `Sender::send`, blocking `Receiver::recv`, `Condvar::wait`,
+  `ThreadPool::install`, or any blocking wrapper inside driver
+  dispatch. `SchedulerCpuPool::install_non_driver` is whitelisted only
+  inside its own definition and call sites proven unreachable from
+  driver dispatch. The only allowed I/O submission call from driver code
+  is `SchedulerIoPool::try_submit`.
+- `crates/verter_scheduler/tests/driver_pool_submission.rs::driver_never_blocks_on_cpu_pool_submit`
+  — instruments a saturated `SchedulerCpuPool` and dispatches a ready
+  CPU node. Submission returns immediately via `spawn_fifo` while all
+  workers are busy, and the driver continues processing an unrelated
+  ready node. A regression that calls `ThreadPool::install` or otherwise
+  waits for worker availability blocks the unrelated node and fails.
+- `crates/verter_scheduler/tests/driver_pool_submission.rs::pool_capacity_reserved_before_ready_seed`
+  — submits a DAG containing `Load`, `Parse`, and `CacheNode` work with
+  an admission budget smaller than the DAG's CPU/I/O demand. The
+  backpressured submit returns before any ready lane is seeded, and
+  `ready_queue_depth()` remains unchanged. A regression that seeds
+  readiness first and blocks on pool submission fails.
+
+**Critical implementation risks (blocking):**
+
+- **Single accounting source for DAG budget and pool permits.** Block 7
+  must introduce one `DagCapacityReservation` value created during
+  `try_submit_dag` / `submit_dag_blocking` admission. It owns the
+  reserved node count, edge count, CPU work count, and I/O work count,
+  and is moved into `DagState` / `DagCompletionAggregator`. No worker
+  pool may maintain an independent "truth" that can drift from
+  `DagAdmissionBudget`; worker permits are borrowed from the reservation
+  and released through the same terminal path. Completion,
+  cancellation, panic, supersession, and shutdown all release exactly
+  once. Guards:
+  `dag_capacity_reservation_is_single_accounting_source`,
+  `capacity_reservation_releases_exactly_once_on_completion_cancel_panic_shutdown`,
+  `pool_permit_and_dag_budget_cannot_double_release`.
+- **Deferred lanes must be bounded and fair.** H23 parks nodes when
+  pool capacity is unexpectedly unavailable. Those deferred lanes are
+  driver-owned, bounded by the same admitted capacity, and scheduled by
+  the same priority/deficit policy as ordinary ready lanes. A saturated
+  stream of new critical work must not permanently starve an admitted
+  deferred background node; a flood of background deferred work must not
+  delay critical ready work beyond the configured deficit bound. Guards:
+  `deferred_lane_is_bounded_by_admitted_capacity`,
+  `deferred_lane_eventually_runs_under_sustained_cpu_saturation`,
+  `critical_ready_work_not_starved_by_deferred_background_work`.
+- **Concurrency-sensitive scheduler behavior needs deterministic model
+  coverage.** In addition to integration tests, Block 7 adds a seeded
+  model/stress suite that generates random DAGs, priorities, dynamic
+  import expansions, cancellations, generation bumps, pool-capacity
+  failures, and shutdowns. The model asserts: no node runs before all
+  satisfied gates; stale generations never commit; each waiter completes
+  once; admitted capacity returns to zero at quiescence; and no driver
+  path blocks. Guards:
+  `scheduler_model_random_dags_preserve_readiness_invariants`,
+  `scheduler_model_capacity_returns_to_zero_at_quiescence`,
+  `scheduler_model_driver_never_blocks_under_seeded_pool_failures`.
+
 #### Owning-doc updates
 
 - `.claude/skills/scheduler/SKILL.md` — REWRITTEN to derive from this
@@ -4101,7 +4737,7 @@ pnpm install --frozen-lockfile
   - the `ready_queue_depth()` observability accessor;
   - the `CacheNodeDag` executable API (with `EdgeGate` on each edge);
   - the `Scheduler` storage shape (`Arc<HostCpuPool>` /
-    `Arc<SchedulerCpuPool>` / `Arc<IoPool>`);
+    `Arc<SchedulerCpuPool>` / `Arc<SchedulerIoPool>`);
   - the `Scheduler::new(...) -> Arc<Self>` constructor signature
     matching this block;
   - the `dispatch_cpu_task` 4-param signature.
@@ -4112,9 +4748,11 @@ pnpm install --frozen-lockfile
 
 #### Public API mirrors
 
-- Rust crate: `pub` `submit_dag` + `CacheNodeDag` from
-  `verter_scheduler::scheduler`; `pub` re-exports per the lib.rs
-  diff above.
+- Rust crate: `pub` `try_submit_dag` + `submit_dag_blocking` +
+  `CacheNodeDag` from `verter_scheduler::scheduler`; `pub`
+  `SubmissionResult<T>` + `DagAdmissionBudget` from
+  `verter_scheduler::queue`; `pub` re-exports per the lib.rs diff
+  above.
 - NAPI / WASM / protocol DTO / TS types / JS wrappers / compat: no
   exposure.
 
@@ -4122,7 +4760,8 @@ pnpm install --frozen-lockfile
 
 - B6 (`compile_many` consumes B7's `CpuConcurrencySemaphore` and
   `CacheNodeDagNode` types in its DAG submission path).
-- B12 (DAG bench scenarios depend on `submit_dag`).
+- B12 (DAG bench scenarios depend on `try_submit_dag` /
+  `submit_dag_blocking`).
 
 ### 8. Rehome remaining host caches + delete bespoke invalidation
 
@@ -4148,7 +4787,7 @@ Per-file deletion + migration list:
 |---|---|---|---|
 | `crates/verter_session/src/host_lifecycle.rs` | `269` (`pub fn clear_compile_cache(&self)`) | Per-canonical compile cache eviction | Lazy fact-revalidation through B4 query-identity nodes |
 | `crates/verter_session/src/host_lifecycle.rs` | `410` (`pub fn notify_close(&self, canonical_id: &str)`) | Bespoke per-close invalidation | Snapshot-pin release; entries age out via B10 memory policy |
-| `crates/verter_session/src/host_lifecycle.rs` | `358` (`pub fn configure_projects(...)`) | Bulk reset on project reconfigure | Project generation increment invalidates all caches lazily (R26-style) |
+| `crates/verter_session/src/host_lifecycle.rs` | `358` (`pub fn configure_projects(...)`) | Bulk reset on project reconfigure | Project generation increment invalidates all caches lazily (skill `R26`-style) |
 | `crates/verter_session/src/host_lifecycle.rs` | `44` (`pub fn set_workspace(&self, workspace: Arc<dyn WorkspaceAccess>)`) | Bulk reset on workspace change | Workspace generation increment; same lazy revalidation |
 | `crates/verter_session/src/host_upsert.rs` | per-canonical cache-clear in upsert | Same | `parse_stable_hash` change invalidates artifact nodes; nothing else |
 | `crates/verter_session/src/semantic_query.rs:1143,1282` | `DeclIdentity` in `Instantiate.base` and `ResolveMacroPayload.owner` | Block 4 migration | `ResolvedDeclSlotIdentity` |
@@ -4404,7 +5043,7 @@ File creation:
   strict self-root validation.
 - DELETE legacy `FileArtifactKey::legacy` / `overlay_scoped` sentinel
   patterns wherever they appear. The typed `BaseWriteToken` capability
-  witness and the multi-candidate substrate (R20) replace every use
+  witness and the multi-candidate substrate (skill `R20`) replace every use
   case.
 - DELETE any overlay-write path that targets a base CAS namespace.
 
@@ -5394,7 +6033,22 @@ implementer verifies against after the cutover lands:
 - Per-call CPU pool construction inside
   `Scheduler::with_executor` (substrate `:183-187`) — B7.
 - `Scheduler::submit_batch`'s loop body (substrate `:312`) — replaced
-  by no-edge-DAG bridge over `submit_dag` — B7.
+  by no-edge-DAG bridge over `try_submit_dag` — B7.
+- `JobIndex`, `QueueEntry`, `EffectiveKey`, `AgingConfig` (+ the
+  `SchedulerConfig.aging` field), and the `Scheduler.job_index:
+  Mutex<JobIndex>` field — replaced by the driver-owned `SchedulerDag`
+  + scan-free priority lanes (DECISION 1) — B7.
+- `BlockerRegistry`, `BlockerRef`, `UnblockedJob`,
+  `has_pending_blockers`, `Submission::BlockerResolved`, and the
+  `Scheduler.deferred_blocker_ids` map — replaced by `SchedulerDag`
+  out-edge resolution (DECISION 1) — B7.
+- File-stage ordering through `FileNode.pending_requests` — replaced
+  by `SchedulerDagNode.waiters` join (DECISION 1) — B7.
+- The non-generic `SubmissionResult` enum and the submitter-side
+  `ArrayQueue::push` retry loop + `std::thread::yield_now()` spin +
+  submitter-held `DagState.readiness.lock()` in `submit_dag` —
+  replaced by typed `SubmissionResult<T>` admission + condvar
+  (DECISION 2) — B7.
 - Direct host-owned result maps for compile, resolved type, eval
   env, and semantic DB cache state — B8.
 - `clear_compile_cache`, `notify_close`, `set_workspace`,
@@ -5455,6 +6109,36 @@ Expected outcomes:
 
 - All workspace Rust tests pass.
 - No architecture guard reports an unguarded critical cache rule.
+- Scheduler single-readiness-authority guards pass (DECISION 1):
+  `scheduler_has_single_readiness_authority`,
+  `scheduler_dispatch_path_no_linear_job_scan`,
+  `blocker_resolution_touches_only_out_edges`,
+  `dynamic_import_edges_added_before_downstream_dispatch`,
+  `stale_generation_nodes_never_dispatch_after_bump`,
+  `same_stage_requests_join_one_work_node`. `JobIndex` /
+  `BlockerRegistry` are absent from every non-test scheduler path
+  (STOP-gate).
+- Scheduler admission-backpressure guards pass (DECISION 2):
+  `submit_dag_backpressure_is_typed_before_readiness_mutation`,
+  `dag_submission_never_spins_or_holds_readiness_lock`,
+  `scheduler_submission_paths_do_not_call_yield_now`,
+  `blocking_submission_parks_on_admission_condvar`. No
+  `std::thread::yield_now()` exists on any submission path.
+- Scheduler pool-submission guards pass (H23):
+  `driver_never_blocks_on_io_pool_send`,
+  `driver_never_blocks_on_cpu_pool_submit`,
+  `pool_capacity_reserved_before_ready_seed`. No driver path can block
+  on worker-pool queue pressure.
+- Scheduler critical-risk guards pass:
+  `dag_capacity_reservation_is_single_accounting_source`,
+  `capacity_reservation_releases_exactly_once_on_completion_cancel_panic_shutdown`,
+  `pool_permit_and_dag_budget_cannot_double_release`,
+  `deferred_lane_is_bounded_by_admitted_capacity`,
+  `deferred_lane_eventually_runs_under_sustained_cpu_saturation`,
+  `critical_ready_work_not_starved_by_deferred_background_work`,
+  `scheduler_model_random_dags_preserve_readiness_invariants`,
+  `scheduler_model_capacity_returns_to_zero_at_quiescence`,
+  `scheduler_model_driver_never_blocks_under_seeded_pool_failures`.
 - `cache-runtime-bench.spec.ts::every_row_reports_required_cache_discriminators`
   passes for every emitted row.
 - Cache-mode output equivalence holds for stateless/content/session

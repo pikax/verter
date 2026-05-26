@@ -208,8 +208,8 @@ fn eval_env_cache_db_stores_owned_eval_program_arc() {
     );
 }
 
-/// Block 1.J.3 discriminator — the legacy `Arc<EvalEnv>` storage is
-/// keyed by the full R21 `FileArtifactKey` (`canonical`,
+/// Eval-env key-dimension discriminator — the legacy `Arc<EvalEnv>`
+/// storage is keyed by the full R21 `FileArtifactKey` (`canonical`,
 /// `content_hash`, `parse_env_hash`, `parser_version`), NOT by
 /// `canonical_id` with `whole_hash` validated post-lookup.
 ///

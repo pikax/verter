@@ -289,7 +289,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
         "Synthetic Carrier Typed-IR Rule",
         &[
             // Pins R22 carrier-verdict + carrier-provenance substrate
-            // deletion (Block 6.j R22-final, commit S4). The typed-IR
+            // deletion. The typed-IR
             // `TypeExpr::SyntheticSlotBinding` variant is the sole
             // carrier identity at the projector / registry / reducer
             // surface; re-introducing the R22 substrate is forbidden.
@@ -302,6 +302,20 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // discriminates RED-on-revert if the cache route stops
             // routing through `carrier.value_node`.
             "synthetic_carrier_explicit_deepen_proof",
+        ],
+    ),
+    (
+        "Block-vocabulary ban",
+        &[
+            // H19 (cache-runtime overhaul): production source under
+            // `crates/*/src/**` must not contain plan vocabulary
+            // (`\bblock \d+\b`, `cache-runtime overhaul`,
+            // `runtime cutover`). The discriminator is the H19 test
+            // inside `architecture_guards.rs`; the broader walker
+            // (`no_phase_archaeology_in_production_code`) consumes
+            // the same predicate and fails the build on any
+            // production-source violation.
+            "guard7_predicate_rejects_block_vocabulary",
         ],
     ),
 ];

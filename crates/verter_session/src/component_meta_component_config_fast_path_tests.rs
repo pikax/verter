@@ -235,7 +235,7 @@ export type Button = ComponentConfig<typeof theme, AppConfig, 'variants'>
     assert!(
         proof_cold.is_none(),
         "fixture's AppConfig file declares the interface — the producer must decline \
-         publication (the proof requires a member-set walk that Block 1.H does not \
+         publication (the proof requires a member-set walk the producer does not \
          implement; the substrate-correctness contract is the counter delta + the \
          deterministic decline outcome)"
     );

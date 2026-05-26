@@ -30,7 +30,7 @@ verter_protocol = { path = "../verter_protocol", version = "0.0.1-beta.1" }
 prost = "0.14.3"
 verter_span = { path = "../verter_span" }
 verter_scheduler = { path = "../verter_scheduler" }
-napi = { version = "3", default-features = false, features = ["napi8", "serde-json", "async"] }
+napi = { version = "3", default-features = false, features = ["napi8", "serde-json", "async", "dyn-symbols"] }
 napi-derive = "3"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

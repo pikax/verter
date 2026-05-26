@@ -3,8 +3,8 @@
 //!
 //! ## Why
 //!
-//! Block 6.B made [`crate::resolver_core::ReadSetSignature`].`facts` the
-//! sole cache-validity rail. Fact validation requires a live
+//! [`crate::resolver_core::ReadSetSignature`].`facts` is the sole
+//! cache-validity rail. Fact validation requires a live
 //! [`HostStoreView`]; that view is an immutable snapshot of the
 //! workspace's per-canonical facts at request-entry time.
 //!

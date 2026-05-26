@@ -3768,6 +3768,15 @@ mod foundations_guards {
         // `component_meta_caches`, and `semantic_query_memo` within this
         // crate; no downstream consumer reaches it directly.
         "pub(crate) mod bounded_query_retention",
+        // Cache-runtime substrate — the `WorldSnapshot` carrier +
+        // scoped `*Dims` accessors that later blocks wire through
+        // every cache-runtime entry-point. `pub(crate)` so the
+        // type / accessors do not enter the production binding
+        // surface. There is NO `for_tests` re-export for these
+        // types; the construction contract is exercised by
+        // `#[cfg(test)] mod tests` inline in
+        // `cache_runtime/world_snapshot.rs`.
+        "pub(crate) mod cache_runtime",
         "pub mod cooperative_admission",
         // R3/R26/R28 — fact-validation helpers shared by the inner
         // component-meta caches (Family A/B). Carries
@@ -4230,6 +4239,14 @@ mod foundations_guards {
             // never appear in legitimate final-state prose.
             "audit infrastructure plan",
             "audit-infrastructure-plan",
+            // Cache-runtime overhaul plan archaeology — these
+            // phrases unambiguously reference the cache-runtime
+            // plan document and never appear in legitimate
+            // final-state prose. The `\bblock \d+\b` word-boundary
+            // scan lives below; these two are the fixed-needle
+            // half (H19).
+            "cache-runtime overhaul",
+            "runtime cutover",
         ];
         for needle in FIXED_NEEDLES {
             if line.contains(needle) {
@@ -4371,13 +4388,61 @@ mod foundations_guards {
                 search_from = abs + prefix.len();
             }
         }
+        // `\bblock \d+\b` — cache-runtime overhaul's plan-vocabulary
+        // ban (H19). `Block 5`, `block 6`, `Block 12.a`, `Block 1.J`,
+        // `Block 7.5` all match the broader word-boundary form; the
+        // numeric run is followed by a non-word byte (period,
+        // space, EOL, etc.). Distinguished from the legitimate
+        // prose "the request loop blocks once per flight": the
+        // plural verb `blocks` does not match the singular noun
+        // followed by an ASCII digit.
+        //
+        // Case-insensitive on the noun, because both `Block 5` and
+        // `block 5` appear in orchestrator comments. The leading
+        // word boundary is implicit: the prefix is `block ` /
+        // `Block `, which is preceded either by start-of-line or
+        // by a non-word byte in every observed violation, and the
+        // ordinary noun `block` followed by a digit is already
+        // archaeology (a sentence does not start "block 5 ...").
+        for prefix in ["block ", "Block "] {
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(prefix) {
+                let abs = search_from + rel;
+                let after = abs + prefix.len();
+                let bytes = line.as_bytes();
+                // Leading word-boundary: the byte before `block ` is
+                // either start-of-line or a non-word byte.
+                let leading_ok =
+                    abs == 0 || !(bytes[abs - 1].is_ascii_alphanumeric() || bytes[abs - 1] == b'_');
+                if leading_ok && after < bytes.len() && bytes[after].is_ascii_digit() {
+                    // Consume the digit run.
+                    let mut end = after;
+                    while end < bytes.len() && bytes[end].is_ascii_digit() {
+                        end += 1;
+                    }
+                    // Trailing word-boundary: the byte after the
+                    // digit run is either EOL or a non-word byte.
+                    let trailing_ok = end == bytes.len()
+                        || !(bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_');
+                    if trailing_ok {
+                        return true;
+                    }
+                }
+                search_from = abs + prefix.len();
+            }
+        }
         // `Block \d+\.[a-z]` — orchestrator's project-management
         // vocabulary (e.g. `Block 6.i`, `Block 6.j`, `Block 12.a`).
         // The decimal+letter suffix is unique to orchestrator block
         // references and does not appear in legitimate code prose
         // (a basic block, allocator block, etc. never carries that
         // shape). Case-sensitive on the leading B to avoid flagging
-        // ordinary uses of the noun "block".
+        // ordinary uses of the noun "block". This stays as a
+        // narrower discriminator even though `\bblock \d+\b` above
+        // already catches `Block 12` itself — the decimal+letter
+        // form (`Block 12.a`) is what the orchestrator emits and is
+        // listed explicitly so the deliberate-violation test cases
+        // continue to characterise the original surface.
         for prefix in ["Block "] {
             let mut search_from = 0usize;
             while let Some(rel) = line[search_from..].find(prefix) {
@@ -4877,6 +4942,12 @@ mod foundations_guards {
             "// Counterpart deleted in Plan §6.15 / N — entry stored.",
             "// Five-phase materialiser entry per plan §10.",
             "// `phase-archaeology` is a sweep target.",
+            // Cache-runtime plan vocabulary (H19) — the three
+            // block-vocabulary patterns: the `\bblock \d+\b`
+            // word-boundary scan and the two fixed needles.
+            "// block 5: rehome the compile cache",
+            "// cache-runtime overhaul wiring",
+            "// runtime cutover landing step",
         ];
         for line in cases {
             assert!(
@@ -4966,11 +5037,73 @@ mod foundations_guards {
             "// Cluster affinity score weighting.",
             "// `cluster_id` selects the assigned worker pool.",
             "// Cluster Allocator owns the per-shard pool.",
+            // Block-vocabulary ban (H19) — benign prose that uses
+            // the plural verb `blocks` (not the singular noun
+            // followed by a digit). The `\bblock \d+\b` scan must
+            // not flag this.
+            "// the request loop blocks once per flight",
+            "// `block_until_idle` blocks the worker until drained.",
         ];
         for line in allowed {
             assert!(
                 !line_has_phase_archaeology(line),
                 "guard 7 predicate must NOT flag legitimate line: {line:?}",
+            );
+        }
+    }
+
+    /// Cache-runtime overhaul plan-vocabulary ban (H19).
+    ///
+    /// The three new patterns added under the H19 rule must:
+    ///   - flag every fabricated violation line, and
+    ///   - leave benign prose alone (the `\bblock \d+\b` scan must
+    ///     not match the plural verb `blocks` or compound tokens
+    ///     like `block_until_idle`).
+    ///
+    /// This is the discriminating test for the new patterns. It is
+    /// independent from the broader `_rejects_deliberate_violations`
+    /// case bag so a regression that loses the new patterns surfaces
+    /// here even when the older fixed-needle / Phase / Stage scans
+    /// keep passing.
+    #[test]
+    fn guard7_predicate_rejects_block_vocabulary() {
+        // Each fabricated line models a single H19 surface: the
+        // `\bblock \d+\b` word-boundary scan, the `cache-runtime
+        // overhaul` fixed needle, and the `runtime cutover` fixed
+        // needle.
+        let violations = [
+            "// block 5: rehome the compile cache",
+            "// cache-runtime overhaul wiring",
+            "// runtime cutover landing step",
+            // Capitalisation variant the scan must also catch.
+            "// Block 5: rehome the compile cache",
+            // Multi-digit form (`block 12`) covered by the
+            // word-boundary scan.
+            "// block 12 lands the cache-runtime overhaul",
+        ];
+        for line in violations {
+            assert!(
+                line_has_phase_archaeology(line),
+                "guard 7 H19 predicate must reject deliberate-violation line: {line:?}",
+            );
+        }
+
+        // Benign prose that superficially looks like a `block N`
+        // match but is NOT plan vocabulary. The verb form `blocks`
+        // (plural / 3rd-person-singular) and compound tokens
+        // (`block_until_idle`) must not trip the scan.
+        let benign = [
+            "// the request loop blocks once per flight",
+            "// `block_until_idle` waits until the queue drains.",
+            // Sentence with "block" followed by something other
+            // than a digit — must not match.
+            "// the basic block reuses the allocator slot.",
+            "// allocator block size = 64",
+        ];
+        for line in benign {
+            assert!(
+                !line_has_phase_archaeology(line),
+                "guard 7 H19 predicate must NOT flag legitimate line: {line:?}",
             );
         }
     }

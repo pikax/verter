@@ -119,10 +119,10 @@ impl VerterHost {
         // `verter_audit::NoOpObserver` so emit sites still see
         // `Some(observer)` without paying downstream cost.
         //
-        // Block 7.5 audit-v2 Class B fix: bind the dispatch ctor to a
-        // request-scoped `HostResolverContext` so cache validators
-        // inside the dispatch chain inherit the overlay-aware view
-        // instead of paying a fresh workspace-sweep cost per call.
+        // Bind the dispatch ctor to a request-scoped
+        // `HostResolverContext` so cache validators inside the
+        // dispatch chain inherit the overlay-aware view instead of
+        // paying a fresh workspace-sweep cost per call.
         let store_view = self.resolver_store_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
