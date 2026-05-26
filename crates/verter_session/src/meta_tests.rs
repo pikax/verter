@@ -5415,9 +5415,10 @@ defineProps<Omit<SelectMenuProps<SelectMenuItem[]>, 'items'>>()
     // (non-Conditional `Omit<SelectMenuProps<SelectMenuItem[]>, 'items'>`
     // rides transit-shallow at the macro-shape boundary and produces
     // no member enumeration at publication time — the rescue
-    // projection's eager widening was retired in block-6.i round-9).
-    // The `evaluate_types` API contract here is "resolution ran and
-    // produced a coherent payload", witnessed by the `Some(_)` return.
+    // projection's eager widening was retired by the shallow-by-default
+    // cutover). The `evaluate_types` API contract here is "resolution
+    // ran and produced a coherent payload", witnessed by the `Some(_)`
+    // return.
     let _ = &evaluated;
 
     // Authoritative `label` assertion routes through

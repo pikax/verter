@@ -2053,7 +2053,24 @@ pub(crate) fn component_meta_registry_public_utility_route(
             name,
             type_arguments,
         } if type_arguments.len() == 2 && matches!(name.as_ref(), "Pick" | "Omit") => {
-            let root_name = component_meta_registry_ref_name(&type_arguments[0])?.to_string();
+            // Allow `Pick`/`Omit` over BOTH bare Refs (`Pick<Foo, K>`)
+            // and INSTANTIATED generic Refs (`Pick<Foo<T>, K>`). The
+            // route consumer surfaces the inner ref's declared
+            // members under `symbol_name` — for bare and instantiated
+            // forms alike, the published prop NAMES come from the
+            // declaration body. Type-parameter substitutions affect
+            // member VALUES (e.g. `items?: T` body shape), not member
+            // names, and the route applies a name-set filter (Pick /
+            // Omit). Allowing the inner Ref to carry `type_arguments`
+            // closes the cross-package + instantiated-generic gap
+            // (CP1) — pre-fix `component_meta_registry_ref_name`
+            // required `type_arguments.is_empty()` and the route
+            // extractor returned `None` for every utility wrap over
+            // an instantiated generic, falling through to a path
+            // that flattened the inner generic's body without
+            // applying the Pick/Omit filter.
+            let root_name =
+                component_meta_registry_utility_inner_ref_name(&type_arguments[0])?.to_string();
             let members = component_meta_registry_string_literal_keys(&type_arguments[1])?;
             if members.is_empty() {
                 return None;
@@ -2066,6 +2083,38 @@ pub(crate) fn component_meta_registry_public_utility_route(
             Some((root_name, route))
         }
         _ => None,
+    }
+}
+
+/// Extract the inner Ref's name for `Pick<X, K>` / `Omit<X, K>` route
+/// extraction. Mirrors [`component_meta_registry_ref_name`] but
+/// permits the Ref to carry `type_arguments` — the route consumer
+/// dispatches the inner ref's declared members under `symbol_name`,
+/// and the Pick/Omit filter operates on member NAMES (not member
+/// types), so the type arguments do not affect route discriminability.
+/// Used exclusively by the public utility route extractor (above).
+/// Other callers of `component_meta_registry_ref_name` enforce the
+/// `type_arguments.is_empty()` invariant for different reasons —
+/// e.g. indexed-access chain roots that MUST be bare; those
+/// constraints stay verbatim.
+///
+/// Iterative walk through `Parenthesized` shells — the loop is bounded
+/// by the number of nested parentheses (a structural property of the
+/// caller-supplied AST). No self-recursion, so the
+/// `no_unbounded_recursion_in_resolver_core` architecture guard does
+/// not need an entry for this helper.
+fn component_meta_registry_utility_inner_ref_name(
+    expr: &verter_type_expr::TypeExpr,
+) -> Option<&str> {
+    use verter_type_expr::TypeExpr;
+
+    let mut cursor = expr;
+    loop {
+        match cursor {
+            TypeExpr::Ref { name, .. } => return Some(name.as_ref()),
+            TypeExpr::Parenthesized(inner) => cursor = inner.as_ref(),
+            _ => return None,
+        }
     }
 }
 
