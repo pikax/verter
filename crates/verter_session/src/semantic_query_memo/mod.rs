@@ -1050,6 +1050,21 @@ impl SemanticGraphStore {
         // nodes already published into the arena are unaffected.
         self.arena.invalidate_for_canonical(canonical_id);
 
+        // Hash-cons memos (substitute, evaluate-deferred) — drop in
+        // full on any per-canonical edit. The memo VALUE may be a
+        // SemanticNodeId whose structural meaning depended on the
+        // edited canonical's content (TypeOf walks through
+        // ValueRootKey, generic instantiations referencing imported
+        // type-decl bodies, etc.). Even though the cache KEY is a
+        // node-id tuple, the cached (key → result_id) mapping is
+        // computed by a walk that may transitively reach the
+        // invalidated canonical. The sledgehammer clear is correct
+        // by construction: no stale derivative survives a content
+        // edit. The structural plumbing for a reverse-indexed
+        // per-canonical clear is documented as future work in
+        // pe4_memos.rs.
+        self.clear_pe4_memos();
+
         evicted
     }
 

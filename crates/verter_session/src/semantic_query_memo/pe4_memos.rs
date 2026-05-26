@@ -1,4 +1,4 @@
-//! Hash-cons memo accessors for the PE4 substitute / evaluate-deferred
+//! Hash-cons memo accessors for the substitute / evaluate-deferred
 //! caches. Extracted from `mod.rs` to keep the Tier-2 split-target
 //! module under the 4000-LOC architecture-guard budget.
 //!
@@ -14,15 +14,30 @@
 //! Cache scoping: the store is per `(project_identity, parse_env_hash,
 //! resolve_env_hash, type_env_hash, lib_env_hash)`. Semantic-node ids
 //! inside one store's arena are content-addressed integers, so a
-//! tuple of ids is a complete identity for the cached result. No
-//! fact-signature validation is required because the helpers are
-//! pure on those inputs.
+//! tuple of ids is a complete identity for the cached RESULT shape,
+//! but the cached id's structural meaning may transitively depend
+//! on file content the helpers walked through during their compute
+//! (e.g. `TypeOf` evaluation routes through a `ValueRootKey` whose
+//! resolved structure depends on the owning file). A canonical-
+//! content edit therefore invalidates not only the structural data
+//! but any cached `(key → result_id)` mapping that was computed by
+//! walking through that canonical.
 //!
-//! Invalidation: both memos are cleared in lockstep with the family
-//! memo and the relation memo on `invalidate_all` (project-content-
-//! generation bump). The arena itself is append-only, so a per-
-//! canonical content edit does not require clearing these memos —
-//! stale entries become unreachable through new queries.
+//! Invalidation: both memos are cleared on `invalidate_all` (project-
+//! content-generation bump) AND on every `invalidate_canonical`
+//! (per-canonical edit). The per-canonical clear is currently a
+//! sledgehammer: any single file edit drops both memos in full
+//! rather than tracking a reverse-index from canonical → memo
+//! entry. The trade-off is admission correctness over routine
+//! warm-hit rate: a stale `(node_id, ctx) → result_id` mapping
+//! produced by a now-invalidated cross-file walk would survive
+//! under the previous `invalidate_all`-only clear policy and
+//! poison every subsequent caller asking for the same key. A
+//! future refinement may install a reverse-index (canonical →
+//! memo entries) so per-canonical edits invalidate only the memo
+//! entries whose compute touched that canonical; the structural
+//! plumbing for that is plan-level follow-up work and is not
+//! required for correctness.
 
 use std::sync::atomic::Ordering;
 
@@ -106,8 +121,17 @@ impl SemanticGraphStore {
             .or_insert(result);
     }
 
-    /// Internal: drop both PE4 memos on a workspace-content-generation
-    /// bump. Called from `invalidate_all` in `mod.rs`.
+    /// Internal: drop both hash-cons memos on a workspace-content-
+    /// generation bump (called from `invalidate_all`) and on every
+    /// per-canonical edit (called from `invalidate_canonical`).
+    ///
+    /// The per-canonical clear is currently a sledgehammer: any single
+    /// file edit drops both memos in full rather than walking a
+    /// reverse-index from canonical → memo entry to remove only the
+    /// affected entries. This is the correctness-first choice — a
+    /// stale `(node_id, ctx) → result_id` mapping computed by walking
+    /// through now-invalidated content would otherwise survive the
+    /// edit and poison every subsequent caller for the same key.
     pub(super) fn clear_pe4_memos(&self) {
         self.substitute_memo.clear();
         self.evaluate_deferred_memo.clear();
