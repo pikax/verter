@@ -115,13 +115,32 @@ fn chain_y_routed_surface_demand_split_does_not_leak_inherited_library_members()
         "onElementDragStart",
     ];
 
+    // Block 6.j R18 — scope leak counter to intermediate provenances.
+    // `MemberEdgeProvenance::PublishedField` is the producer-side
+    // declaration of the user-visible surface and is OUT of the leak
+    // domain: a `defineProps<EditorDragHandleProps>()` publication
+    // legitimately names every inherited `DragHandleProps` key as a
+    // published prop, so a `PublishedField`-tagged edge for `editor`
+    // is not a leak. The leak this test pins is intermediate enumeration
+    // via Mapped / KeyOf / Path reduction (`MappedKeyEnumerated` /
+    // `KeyOfEnumerated` / `PathProjection`).
     let mut leak_edge_count = 0usize;
     let mut leak_edge_names: Vec<String> = Vec::new();
     for edge in footprint.derivation_subgraph.edges.iter() {
         if !matches!(edge.kind, OriginEdgeKind::ProjectMember) {
             continue;
         }
-        if let OriginEdgeMetaDto::ProjectMember { member_name, .. } = &edge.meta {
+        if let OriginEdgeMetaDto::ProjectMember {
+            member_name,
+            provenance,
+        } = &edge.meta
+        {
+            if matches!(
+                provenance,
+                verter_audit::MemberEdgeProvenance::PublishedField
+            ) {
+                continue;
+            }
             if LEAK_MEMBERS.contains(&member_name.as_ref()) {
                 leak_edge_count += 1;
                 leak_edge_names.push(member_name.to_string());
