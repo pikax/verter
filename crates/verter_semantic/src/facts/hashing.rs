@@ -1180,11 +1180,11 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // S1 discrimination tests for the `TypeExpr::SyntheticSlotBinding`
-    // variant (Block 6.j R22-final substrate removal). The fact-hash
-    // walker must use a DISTINCT discriminator tag from `Ref` so that
-    // a synthetic carrier with `binding_name = "x"` does NOT collide
-    // with a workspace `TypeExpr::Ref { name: "x", type_arguments: [] }`.
+    // Discrimination tests for the `TypeExpr::SyntheticSlotBinding`
+    // variant. The fact-hash walker must use a DISTINCT discriminator
+    // tag from `Ref` so that a synthetic carrier with
+    // `binding_name = "x"` does NOT collide with a workspace
+    // `TypeExpr::Ref { name: "x", type_arguments: [] }`.
     // ------------------------------------------------------------------
 
     fn synthetic_carrier(scope: &str, binding_name: &str, value_node: u64) -> TypeExpr {
