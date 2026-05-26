@@ -1006,25 +1006,35 @@ pub(crate) fn publish_merged_bindings(
     // `tests/slot_binding_shallow_publication_tests.rs` characterises
     // the carrier-vs-expansion boundary.
     //
-    // The producer-shallow contract here mirrors the parser-only branch
-    // below: when a parser-path binding is available, the OXC-lowered
-    // `binding_expr` carries the source-text annotation verbatim (e.g.
-    // `IndexedAccess<Ref(OwnProps), 'actions'>`); when no parser binding
-    // exists for this `(slot, binding)` key, we publish a symbolic
-    // `TypeExpr::Ref { name: <binding_name> }` carrier scoped to the
-    // owning macro's canonical. Downstream consumers
-    // (`reduce_published_field_types` slot-binding path, JS compat
-    // `compatSlotBindingTypeText`, audit footprint miner) drive from
-    // this shallow carrier and re-resolve named hops through the
-    // registry on demand.
+    // The producer-shallow contract here is variant-dispatched on the
+    // availability of a parser-path binding for the `(slot, binding)`
+    // key:
     //
-    // The no-parser branch publishes a `TypeExpr::SyntheticSlotBinding`
-    // carrier whose typed-IR variant identity carries the full
-    // `(scope_canonical_id, surface_kind, slot_name, binding_name,
-    //  value_node)` tuple. Downstream consumers
-    // (`reduce_published_field_types`, `collect_component_meta_registry_public_field_refs`)
-    // pre-empt on the variant identity directly — there is no
-    // sidecar table or verdict cache to maintain.
+    //   - Parser path available: the OXC-lowered `binding_expr` is
+    //     the syntactic authority, carrying the source-text annotation
+    //     verbatim (e.g. `IndexedAccess<Ref(OwnProps), 'actions'>`).
+    //     The published `r#type` is that lowered expression unchanged;
+    //     NO synthetic carrier is minted.
+    //
+    //   - No parser path: publish a
+    //     `TypeExpr::SyntheticSlotBinding(Arc::new(SyntheticCarrierKey {
+    //       scope_canonical_id, surface_kind, slot_name, binding_name,
+    //       value_node }))` carrier. The variant identity is the full
+    //     tuple — intrinsic and structurally distinct from any real
+    //     workspace alias. The carrier is shallow by construction; the
+    //     `binding_name` is NOT a registry-lookup target.
+    //
+    // Downstream consumers (`reduce_published_field_types`,
+    // `collect_component_meta_registry_public_field_refs`,
+    // JS compat `compatSlotBindingTypeText`, audit footprint miner)
+    // pre-empt on the variant identity directly — no sidecar table or
+    // verdict cache exists. A consumer that needs to deepen the
+    // carrier into its underlying member shape routes through
+    // `ShapeCacheKey::semantic_node_whole(scope, SemanticNodeId(key.value_node), mode)`
+    // — the same identity used by any regular member-shape route, and
+    // the only legitimate explicit-deepen path (enforced by the
+    // `synthetic_carrier_explicit_deepen_routes_through_shape_cache_key`
+    // architecture guard).
     for (key, gb) in graph_native.iter() {
         let (slot_name, binding_name) = key.clone();
         let field_name = format!("{}.{}", slot_name, binding_name);
