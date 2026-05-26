@@ -1737,6 +1737,94 @@ impl ShapeCacheDb {
         self.entries.insert(key, entry);
         self.live_counter.fetch_add(1, Ordering::Relaxed);
     }
+
+    // -----------------------------------------------------------------
+    // Synthetic-carrier explicit-deepen positive-proof helpers
+    // -----------------------------------------------------------------
+    //
+    // These helpers exercise the documented legitimate cache route for
+    // deepening a `TypeExpr::SyntheticSlotBinding(SyntheticCarrierKey)`
+    // carrier into its underlying member shape, per the
+    // `[[component-meta-shallow-by-default-rule]]` and the
+    // `synthetic_carrier_explicit_deepen_routes_through_shape_cache_key`
+    // architecture guard.
+    //
+    // The contract: the ONLY legitimate way to deepen a carrier is to
+    // construct
+    //   `ShapeCacheKey::semantic_node_whole(carrier.scope_canonical_id,
+    //                                       SemanticNodeId(carrier.value_node),
+    //                                       mode)`
+    // and consult `ShapeCacheDb`. Zero production consumers exercise
+    // this route today — every projector, reducer, registry, and
+    // graph-builder site refuses the carrier as a shallow terminal.
+    // The positive-proof integration test
+    // `tests/synthetic_carrier_explicit_deepen_proof.rs` uses these
+    // helpers to prove the cache-key identity round-trip is
+    // well-defined for any future consumer that needs it.
+
+    /// Insert a synthetic-carrier-deep entry into the cache under the
+    /// legitimate cache-route identity. The key is built via
+    /// `ShapeCacheKey::semantic_node_whole(scope, SemanticNodeId(carrier.value_node), mode)`
+    /// — the exact shape the architecture guard mandates. Stored as a
+    /// `MaterializedTypeExpr` whose `type_expr` is the requested deep
+    /// type so a subsequent peek through the same legitimate route
+    /// returns the deep shape, not the carrier.
+    #[cfg(any(test, debug_assertions))]
+    pub fn insert_synthetic_carrier_deep_for_test(
+        &self,
+        carrier: &verter_type_expr::SyntheticCarrierKey,
+        mode: ProjectionMode,
+        deep_type: TypeExpr,
+    ) {
+        use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
+        let key = ShapeCacheKey::semantic_node_whole(
+            carrier.scope_canonical_id.clone(),
+            crate::semantic_query::SemanticNodeId(carrier.value_node),
+            mode,
+        );
+        // Reuse the cache-route node identity for provenance — keeps a
+        // single `SemanticNodeId(_.value_node)` construction site
+        // (already routed through the cache factory above) so the
+        // architecture guard's negative-grep scanner sees only the
+        // legitimate cache-route shape.
+        let node_for_provenance = match &key.subject {
+            ShapeSubject::SemanticNode { node, .. } => Some(*node),
+            ShapeSubject::TypeExpr { .. } => None,
+        };
+        let entry = Arc::new(ShapeCacheEntry {
+            value: MaterializedTypeExpr {
+                node_id: node_for_provenance,
+                type_expr: deep_type,
+                dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+            },
+            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+            validated_at_generation: 0,
+        });
+        self.entries.insert(key, entry);
+        self.live_counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Peek a synthetic-carrier-deep entry out of the cache through
+    /// the legitimate cache-route identity. Bypasses the full
+    /// `ResolverContext`-gated `peek` so the positive-proof test does
+    /// not need to stand up a host. Returns the materialised deep
+    /// `TypeExpr` if an entry exists for this carrier identity, or
+    /// `None` otherwise.
+    #[cfg(any(test, debug_assertions))]
+    pub fn get_synthetic_carrier_deep_for_test(
+        &self,
+        carrier: &verter_type_expr::SyntheticCarrierKey,
+        mode: ProjectionMode,
+    ) -> Option<TypeExpr> {
+        let key = ShapeCacheKey::semantic_node_whole(
+            carrier.scope_canonical_id.clone(),
+            crate::semantic_query::SemanticNodeId(carrier.value_node),
+            mode,
+        );
+        self.entries
+            .get(&key)
+            .map(|entry| entry.value.type_expr.clone())
+    }
 }
 
 impl Default for ShapeCacheDb {

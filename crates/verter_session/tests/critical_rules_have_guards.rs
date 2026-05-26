@@ -294,6 +294,14 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // carrier identity at the projector / registry / reducer
             // surface; re-introducing the R22 substrate is forbidden.
             "no_carrier_verdict_db",
+            // Pins the legitimate explicit-deepen cache route through
+            // `ShapeCacheKey::semantic_node_whole(scope,
+            // SemanticNodeId(carrier.value_node), mode)`. Positive
+            // executable proof of the cache-key identity round-trip
+            // (insert + lookup + scope/mode/value_node discrimination);
+            // discriminates RED-on-revert if the cache route stops
+            // routing through `carrier.value_node`.
+            "synthetic_carrier_explicit_deepen_proof",
         ],
     ),
 ];
