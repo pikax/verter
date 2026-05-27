@@ -153,6 +153,30 @@ fn symbol_exists_in_facts(
         || entry.shallow_state.value_symbol(symbol_name).is_some()
 }
 
+/// Resolve a local import binding for `local_name` declared in
+/// `canonical_id` through three fall-through layers (shallow facts →
+/// scope payload → prepared-decl bundle).
+///
+/// # Macro Type Traversal Rule — unresolved imports
+///
+/// When `local_name` cannot be resolved (no shallow import target,
+/// no scope-payload binding, no prepared-decl entry), every layer
+/// returns `None` and the caller short-circuits to a miss / opaque
+/// sentinel via the dispatch layer. **No synthetic placeholder root
+/// is invented for the unresolved specifier.** This is the explicit
+/// `CRITICAL` Macro Type Traversal contract from `CLAUDE.md`: only
+/// follow the import graph reachable from the requested type's
+/// declaration graph; never treat plain imports as implicit exports
+/// or synthesise an external root for an absent specifier.
+///
+/// Concretely: a fixture importing `import type { Foo } from
+/// './types'` where `./types` is not in the workspace produces a
+/// `None` here, the lowering pipeline encodes the absence as an
+/// `Opaque(QueryError::Miss)` sentinel, and downstream projection
+/// publishes the partial without inventing a stub for `Foo`. The
+/// component-meta result remains well-formed (other props
+/// resolve), but any field whose type transitively depended on
+/// `Foo` carries the opaque sentinel.
 fn resolve_import_binding_from_facts(
     ctx: &dyn ResolverContext,
     canonical_id: &str,

@@ -16,6 +16,39 @@ use std::sync::Arc;
 /// and projection recursion before the call stack exhausts. The cap is
 /// constructor-time on `HostConfig::projection_op_budget`; a value of
 /// `0` preserves the legacy default of 2000.
+///
+/// # Default rationale
+///
+/// The default `2000` is a **fuse threshold**, not a correctness
+/// boundary. It is sized so legitimate component-meta resolutions on
+/// representative corpora (nuxt-ui, element-plus, primevue, etc.)
+/// complete well under the cap with substantial headroom, while
+/// pathological projections — recursive `Pick<...>` chains over
+/// untyped barrels, deep `Surface[K1][K2]...[Kn]` walks with missing
+/// types, generic-helper instantiation storms — exhaust within a
+/// few seconds and surface a partial.
+///
+/// **Semantic contract on exhaustion**: a request that trips the cap
+/// returns a *partial* `ComponentMeta` with the same structural
+/// invariants as a complete one (well-formed `props` / `emits` /
+/// `slots` lists, opaque sentinels for unresolved members) — NOT a
+/// malformed payload. The dispatch return carries
+/// `cache_suppress=true`, which propagates through the
+/// reducer/materializer pipeline (see
+/// `MaterializedTypeExpr.cache_suppress` and
+/// `RequestContext::materialization_cache_suppress`) into
+/// `ResolvedComponentMetaState.synthesis_should_suppress`. The
+/// `ComponentMetaResultDb` admission gate refuses to warm the
+/// partial, so a subsequent identical request re-runs the cold
+/// compute against fresh budget rather than warm-hitting a
+/// poisoned entry.
+///
+/// **Raising the cap is safe** for users who profile-confirm a
+/// legitimate request needs more headroom; lowering it is a way to
+/// surface partials earlier on known-pathological inputs. Either
+/// direction preserves correctness — the cap only controls when the
+/// reducer bails to a partial, not whether the partial is admitted
+/// to caches.
 #[derive(Debug)]
 pub struct RequestBudget {
     /// Projection-operation budget for the request.

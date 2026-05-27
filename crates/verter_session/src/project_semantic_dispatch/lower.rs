@@ -442,6 +442,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } else {
                     None
                 };
+                // Macro Type Traversal Rule (CRITICAL) — unresolved
+                // imports short-circuit to `Opaque(QueryError::Miss)`.
+                // When a bare type name cannot be resolved through
+                // EITHER the prepared-decl `name_resolution` map NOR
+                // the bare-name resolver fall-through chain in
+                // `resolver_core::bare_name_resolve` (shallow facts →
+                // scope payload → prepared-decl bundle), the lowering
+                // emits an opaque sentinel. **No synthetic placeholder
+                // root is invented for the unresolved specifier.**
+                // Downstream projection observes the sentinel,
+                // publishes a partial result for the field whose type
+                // transitively depended on the unresolved name, and
+                // other fields continue to resolve normally — the
+                // component-meta payload stays well-formed.
+                //
+                // This is the explicit Macro Type Traversal contract
+                // from `CLAUDE.md`: only follow the import graph
+                // reachable from the requested type's declaration
+                // graph; never treat plain imports as implicit exports
+                // or synthesise external roots for absent specifiers.
                 let Some((resolved_canonical, resolved_name)) = resolved_root else {
                     return self.opaque(QueryError::Miss);
                 };
