@@ -471,7 +471,7 @@ impl VerterHost {
             return None;
         }
 
-        let (dep_edges, import_route_hash) =
+        let (dep_edges, _legacy_import_route_hash) =
             self.prepared_decl_bundle_route_dep_edges(canonical_id, state.as_ref());
         let bundle = std::sync::Arc::new(
             crate::resolver_core::prepared_decl::build_prepared_decl_bundle(
@@ -482,11 +482,30 @@ impl VerterHost {
             ),
         );
 
+        // ImportRoute fact MUST match the view's snapshot. The
+        // [`crate::resolver_store::HostStoreView::build`] /
+        // `snapshot_tracked_import_route_hashes` route delegates to
+        // [`crate::host_manage::component_meta_methods::VerterHost::generation_current_import_route_hash`]
+        // which reads the canonical's `IndexedReady.import_routes`
+        // or the `DerivedRawState.import_routes` map. The
+        // route-owned-shallow path admits bundles for declaration
+        // files (`.d.ts` / `.d.mts` / `.d.cts`) where neither layer
+        // may be populated; in that case the view inserts the
+        // canonical with the `empty_import_route_hash` sentinel via
+        // `unwrap_or(empty_import_route_hash)`. Using the live
+        // generation hash here keeps the bundle's stored fact
+        // identical to the view's snapshot, eliminating the
+        // perpetual `PreparedDeclBundleRejectImportRouteMismatch` /
+        // `PreparedDeclBundleRejectImportRouteAbsent` warm-read
+        // rejection loop the pre-fix
+        // `prepared_decl_bundle_route_dep_edges` shape produced.
+        let live_import_route_hash = self.generation_current_import_route_hash(canonical_id);
+
         let mut facts = vec![crate::resolver_core::FactVersionRef::FileWholeHash {
             canonical_id: canonical_id.to_string(),
             hash: state.whole_hash,
         }];
-        if let Some(import_route_hash) = import_route_hash {
+        if let Some(import_route_hash) = live_import_route_hash {
             facts.push(crate::resolver_core::FactVersionRef::DerivedFactHash {
                 canonical_id: canonical_id.to_string(),
                 kind: crate::resolver_core::DerivedFactKind::ImportRoute,
@@ -539,7 +558,7 @@ impl VerterHost {
         {
             return None;
         }
-        let (dep_edges, import_route_hash) =
+        let (dep_edges, _legacy_import_route_hash) =
             self.prepared_decl_bundle_route_dep_edges(canonical_id, state.as_ref());
 
         // 4. Build script-setup type bindings for Vue SFCs (once per bundle).
@@ -561,17 +580,32 @@ impl VerterHost {
         );
 
         // 6. Compute fact versions.
-        // Always include ImportRoute when present — all prepared bundles
-        // embed resolved cross-file canonical IDs (dep_edges, import_bindings,
-        // name_resolution, external_deps) and must be invalidated when the
-        // import graph changes, regardless of whether the file is tracked.
+        // The ImportRoute fact hash MUST match what the live
+        // `HostStoreView` snapshots via
+        // [`crate::host_manage::component_meta_methods::VerterHost::generation_current_import_route_hash`].
+        // That method reads the canonical's `IndexedReady.import_routes`
+        // (always populated by `ensure_indexed_ready` — includes BOTH
+        // resolved and unresolved/known-miss specifiers) and hashes
+        // them via `hash_import_route_targets`. The
+        // `prepared_decl_bundle_route_dep_edges` helper above iterates
+        // `state.import_targets` and SKIPS unresolved entries, so its
+        // hash necessarily diverges from the view's whenever the file
+        // has any unresolved imports — every warm-read validator
+        // rejection in that case routed through
+        // `PreparedDeclBundleRejectImportRouteMismatch` /
+        // `PreparedDeclBundleRejectImportRouteAbsent` before this fix.
+        //
+        // Use the IndexedReady's `import_route_hash` directly — it is
+        // the exact `hash_import_route_targets(&import_routes)` the
+        // view re-derives, so the fact validates on every subsequent
+        // call without ever round-tripping through a re-resolve.
         let whole_hash = facts.whole_hash;
-        let mut facts = vec![crate::resolver_core::FactVersionRef::FileWholeHash {
+        let mut fact_versions = vec![crate::resolver_core::FactVersionRef::FileWholeHash {
             canonical_id: canonical_id.to_string(),
             hash: whole_hash,
         }];
-        if let Some(import_route_hash) = import_route_hash {
-            facts.push(crate::resolver_core::FactVersionRef::DerivedFactHash {
+        if let Some(import_route_hash) = facts.import_route_hash {
+            fact_versions.push(crate::resolver_core::FactVersionRef::DerivedFactHash {
                 canonical_id: canonical_id.to_string(),
                 kind: crate::resolver_core::DerivedFactKind::ImportRoute,
                 hash: import_route_hash,
@@ -585,7 +619,7 @@ impl VerterHost {
             .insert_arc_with_kind(
                 canonical_id.to_string(),
                 std::sync::Arc::clone(&bundle),
-                facts,
+                fact_versions,
                 "prepared_decl_bundles",
             );
 
