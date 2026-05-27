@@ -477,6 +477,34 @@ impl CanonicalCompletionOverlay {
         drop(whole);
     }
 
+    /// Test-only: directly insert a `(canonical, kind, hash)` derived-hash
+    /// entry into the overlay's `derived_hashes` map and toggle the
+    /// `_nonempty` flag. Same bypass rationale as
+    /// [`Self::insert_whole_hash_for_tests`]: lets a test stage the
+    /// exact overlay-only derived-hash shape (no base-view snapshot)
+    /// without driving `complete_canonical`. Used by the discriminating
+    /// test for `RequestStoreView::derived_hash_for` overlay coverage.
+    #[cfg(test)]
+    pub(crate) fn insert_derived_hash_for_tests(
+        &self,
+        canonical: &str,
+        kind: DerivedFactKind,
+        hash: Hash16,
+    ) {
+        let mut derived = self.derived_hashes.write();
+        let entry = derived.entry(canonical.to_owned()).or_default();
+        match kind {
+            DerivedFactKind::Route => entry.route = Some(hash),
+            DerivedFactKind::ImportRoute => entry.import_route = Some(hash),
+            // `DirectSource` is handled by the whole-hash arm; the
+            // overlay never records a derived hash for it (matches the
+            // `RouteDerivedHashes::get` contract).
+            DerivedFactKind::DirectSource => {}
+        }
+        self.derived_hashes_nonempty.store(true, Ordering::Release);
+        drop(derived);
+    }
+
     /// Whether the overlay tracks `canonical_id` (any per-canonical
     /// entry).
     fn tracks_file(&self, canonical_id: &str) -> bool {
@@ -605,6 +633,28 @@ impl<'a> StoreView for RequestStoreView<'a> {
     fn tracks_file(&self, canonical_id: &str) -> bool {
         // Per-request overlay or base view tracks the canonical.
         self.overlay.tracks_file(canonical_id) || self.base.tracks_file(canonical_id)
+    }
+
+    fn derived_hash_for(
+        &self,
+        canonical_id: &str,
+        kind: DerivedFactKind,
+    ) -> Option<ResolverHash16> {
+        // Mirror the overlay-shadowing pattern used by `validates` for
+        // `DerivedFactHash`: the overlay's `derived_hashes` (populated
+        // by mid-request `complete_canonical`) is authoritative; if the
+        // overlay has no entry for the pair, fall through to the base
+        // view's snapshotted derived hashes.
+        //
+        // Without this override, per-rejection attribution helpers
+        // (`attribute_prepared_decl_bundle_rejection`) call this on a
+        // `RequestStoreView` and hit the default `None` arm — every
+        // real `ImportRoute` hash mismatch then reclassifies as
+        // `_absent` and the discriminating counter loses its meaning.
+        if let Some(overlay_hash) = self.overlay.lookup_derived_hash(canonical_id, kind) {
+            return Some(overlay_hash);
+        }
+        self.base.derived_hash_for(canonical_id, kind)
     }
 
     fn validates_self_root_whole_hash(&self, canonical_id: &str, hash: &ResolverHash16) -> bool {
