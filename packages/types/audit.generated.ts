@@ -2432,8 +2432,8 @@ substituted_with: NodeId, };
  * surfaces the first `cap` items in order.
  *
  * Every `u64` field is transported as a decimal string via
- * [`u64_as_decimal_string`] / `#[ts(type = "string")]` to satisfy
- * the audit schema's wide-int transport guard (Plan §3.B Commit 7.A).
+ * [`u64_as_decimal_string`] / `#[ts(type = "string")]` so JS-side
+ * consumers can carry values above 2^53 without precision loss.
  */
 export type TruncationCounters = { 
 /**
