@@ -983,13 +983,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             substitutions,
                             reduction_context,
                         );
-                        let key_space = match self.execute(SemanticQueryKey::KeyOf {
-                            base: inner_id,
-                            context: reduction_context,
-                        }) {
-                            QueryResult::Value(id) => id,
-                            _ => self.opaque(QueryError::Miss),
-                        };
+                        let key_space =
+                            if crate::semantic_query::may_reduce_operator(reduction_context) {
+                                match self.execute(SemanticQueryKey::KeyOf {
+                                    base: inner_id,
+                                    context: reduction_context,
+                                }) {
+                                    QueryResult::Value(id) => id,
+                                    _ => self.opaque(QueryError::Miss),
+                                }
+                            } else {
+                                match graph.node_data(inner_id).as_deref() {
+                                    Some(SemanticNodeData::Opaque(_)) | None => {
+                                        self.opaque(QueryError::Miss)
+                                    }
+                                    _ => graph.intern_node_with_scope(
+                                        SemanticNodeData::KeyOf { base: inner_id },
+                                        scope.clone(),
+                                    ),
+                                }
+                            };
                         (inner_id, key_space)
                     }
                     // Fallback: the source shape IS the key space.
@@ -1091,21 +1104,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     substitutions,
                     reduction_context,
                 );
-                match graph.node_data(base_id).as_deref() {
-                    Some(SemanticNodeData::Object(_)) => {
-                        match self.execute(SemanticQueryKey::KeyOf {
-                            base: base_id,
-                            context: reduction_context,
-                        }) {
-                            QueryResult::Value(id) => id,
-                            _ => self.opaque(QueryError::Miss),
-                        }
+                if crate::semantic_query::may_reduce_operator(reduction_context) {
+                    match self.execute(SemanticQueryKey::KeyOf {
+                        base: base_id,
+                        context: reduction_context,
+                    }) {
+                        QueryResult::Value(id) => id,
+                        _ => self.opaque(QueryError::Miss),
                     }
-                    Some(SemanticNodeData::Opaque(_)) | None => self.opaque(QueryError::Miss),
-                    _ => graph.intern_node_with_scope(
-                        SemanticNodeData::KeyOf { base: base_id },
-                        scope.clone(),
-                    ),
+                } else {
+                    match graph.node_data(base_id).as_deref() {
+                        Some(SemanticNodeData::Opaque(_)) | None => self.opaque(QueryError::Miss),
+                        _ => graph.intern_node_with_scope(
+                            SemanticNodeData::KeyOf { base: base_id },
+                            scope.clone(),
+                        ),
+                    }
                 }
             }
             // Indexed access at shell level routes through the IndexedAccess
@@ -1228,11 +1242,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 true_type,
                 false_type,
             } => {
-                // Lower `check` under the caller's outer
-                // `reduction_context` first. `check` lowers to a
-                // graph-node identity (`TypeParameter` / `Ref`-
-                // substituted generics resolve via the env without
-                // dispatching operators on their surface).
+                // Conditional relation targets are structural
+                // consumers unless the check side is already an
+                // object-like relation subject. Deferred / primitive
+                // checks cannot decide an Object-vs-Record relation,
+                // so their `extends` arm must carrier-stop and avoid
+                // publishing nested `Partial<T>` / `keyof T` /
+                // mapped-type keyspaces. Object-like checks such as
+                // `A extends Record<U, Record<K, any>>` need the
+                // target lowered under the outer demand so the
+                // relation engine sees the concrete Record shape.
+                //
+                // The selected true/false branch keeps the outer
+                // demand because that branch is the conditional's
+                // published result.
+                let relation_input_context =
+                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                        reduction_context.mode,
+                    );
                 let check_id = self.shallow_lower_type_expr_with_context(
                     check,
                     env,
@@ -1243,74 +1270,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     substitutions,
                     reduction_context,
                 );
-                // Decide the `extends`-arm reduction context based
-                // on the lowered `check`'s structural form. When
-                // `check` resolves to a SHELL whose shape the
-                // relation engine cannot decide structurally —
-                // `TypeParam` (unbound generic), `IndexedAccess`
-                // (deferred projection), `KeyOf` / `Mapped`
-                // (deferred operator), `Conditional` (deferred sub-
-                // conditional), `Opaque` (resolution miss) — the
-                // conditional is guaranteed to defer at relation
-                // time (the relation engine returns `Unknown` for
-                // these check shapes against any non-trivial
-                // target). In that case the `extends` shape is
-                // consumed only for the deferred shell's identity
-                // — it is never published. Lower it under
-                // `StructuralTransit` so any nested `Mapped` /
-                // `KeyOf` / built-in utility along the relation-
-                // input lowering frame carrier-stops
-                // (`may_reduce_operator(StructuralTransit(_)) ==
-                // false`) without reifying per-member keyspace
-                // edges. The mode axis is preserved so navigation
-                // depth still matches the outer demand; only the
-                // publication-emission axis flips to transit.
-                //
-                // When `check` resolves to a concrete shape (Object,
-                // Union, primitive, alias-backed shell, etc.), the
-                // relation engine may decide the conditional
-                // eagerly — the `extends` MUST be lowered under the
-                // caller's outer demand so the relation engine sees
-                // its concrete shape (e.g. `Record<primitive, V>`
-                // reducing to an Object surface with one index
-                // signature, the literal-key Object form, etc.).
-                // The augmentation pattern `A extends Record<U,
-                // Record<K, any>> ? A[U][K] : {}` falls in this
-                // branch: `check = AppConfig` is a concrete Object,
-                // the conditional decides True, and the augmenting
-                // intersection arm contributes its overlay keys.
-                // `Opaque(DeclPlaceholder)` is EXCLUDED because the
-                // relation engine has a Cluster-C arm that navigates
-                // through DeclPlaceholders via
-                // `evaluate_deferred_semantic_node` — keeping
-                // `extends` at the outer demand lets that
-                // normalisation see a concrete target shape (the
-                // augmentation pattern's `A extends Record<U,
-                // Record<K, any>>` flattens to a literal-key Object).
-                // The other `Opaque` variants (`Miss`,
-                // `RecursiveRef`, `BudgetExceeded`, etc.) have no
-                // navigation path so the conditional defers — flip
-                // them to transit to stop nested keyspace edges.
-                let check_is_deferred_for_relation = matches!(
+                let check_is_object_relation_subject = matches!(
                     graph.node_data(check_id).as_deref(),
                     Some(
-                        SemanticNodeData::TypeParam { .. }
-                            | SemanticNodeData::IndexedAccess { .. }
-                            | SemanticNodeData::KeyOf { .. }
-                            | SemanticNodeData::Mapped { .. }
-                            | SemanticNodeData::Conditional { .. }
+                        SemanticNodeData::Object(_)
+                            | SemanticNodeData::Intersection(_)
+                            | SemanticNodeData::Alias(_)
+                            | SemanticNodeData::DeclRef { .. }
+                            | SemanticNodeData::InstantiationRef { .. }
+                            | SemanticNodeData::Opaque(
+                                crate::semantic_query::QueryError::DeclPlaceholder { .. }
+                            )
                     )
-                ) || matches!(
-                    graph.node_data(check_id).as_deref(),
-                    Some(SemanticNodeData::Opaque(err))
-                        if !matches!(err, crate::semantic_query::QueryError::DeclPlaceholder { .. })
                 );
-                let extends_context = if check_is_deferred_for_relation {
-                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                        reduction_context.mode,
-                    )
-                } else {
+                let extends_context = if check_is_object_relation_subject {
                     reduction_context
+                } else {
+                    relation_input_context
                 };
                 let extends_id = self.shallow_lower_type_expr_with_context(
                     extends,

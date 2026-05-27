@@ -491,10 +491,12 @@ pub(crate) fn resolve_macro_payload(
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
 ) -> Option<SemanticNodeId> {
     let parsed_arg = mac.parsed_type_argument.as_ref()?;
-    let type_args: Arc<[SemanticNodeId]> = match dispatch.lower_type_expr_in_scope_with_mode(
+    let type_args: Arc<[SemanticNodeId]> = match dispatch.lower_type_expr_in_scope_with_context(
         file,
         parsed_arg,
-        ProjectionMode::Navigate,
+        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+            ProjectionMode::Navigate,
+        ),
     ) {
         Some(node) => Arc::from(vec![node].into_boxed_slice()),
         None => {
@@ -909,22 +911,13 @@ fn member_shape_peek_or_compute(
     // pre-computed value is the correct answer; no second reducer
     // call.
     //
-    // The reducer runs under the CALLER's publication mode wrapped
-    // in a `Published(mode)` reduction context — the top-down
-    // demand-driven reducer treats `Published` as "this exact node
-    // is the demanded terminal of the current step." A per-prop
-    // publication with `Navigate` does NOT breadth-enumerate
-    // composite members / inactive conditional branches / mapped
-    // value bodies; the reducer's child selection
-    // (`push_demand_children`) only descends into composite children
-    // under whole-surface `Published(Expanded)`. Explicit narrowing
-    // operators (`IndexedAccess`, finite `Pick`/`Omit`, closed/open
-    // conditionals) STILL reduce path-precisely because their
-    // operands are pushed onto the worklist with the appropriate
-    // context. The cache `key` continues to use the caller's `mode`
-    // so a carrier-mode publication does not collide with an
-    // `Expanded` consumer slot.
-    let reduction_context = crate::semantic_query::ProjectionReductionContext::published(mode);
+    // The reducer uses the same demand context as the TypeExpr-start
+    // materializer: `Expanded` remains whole-surface publication, while
+    // per-prop `Navigate` is a structural-transit carrier publication
+    // that does not enumerate mapped/keyof interiors. The cache `key`
+    // continues to use the caller's `mode` so carrier publication does
+    // not collide with an `Expanded` consumer slot.
+    let reduction_context = super::materialize::type_expr_materializer_context(mode);
     let materialized = super::materialize::reduce_member_value_graph_native_with_context(
         ctx,
         scope_canonical_id,
@@ -1434,12 +1427,49 @@ pub(crate) fn reduce_field_type_expr_with_mode(
     // that explicitly name `Navigate` at
     // `reduce_field_type_expr_with_mode` get the shallower
     // materialisation depth instead.
-    super::materialize::materialize_component_meta_type_expr_until_stable(
+    let materialized = super::materialize::materialize_component_meta_type_expr_until_stable_full(
         &expr,
         scope_canonical_id,
         publish_mode,
         query_engine,
-    )
+    );
+    let reduced = materialized.type_expr;
+    if matches!(&expr, TypeExpr::IndexedAccess { .. })
+        && matches!(
+            &reduced,
+            TypeExpr::Ref {
+                type_arguments,
+                ..
+            } if type_arguments.is_empty()
+        )
+    {
+        let terminal = materialized
+            .node_id
+            .map(|node_id| {
+                super::materialize::reduce_member_value_graph_native_with_context(
+                    query_engine.ctx,
+                    scope_canonical_id,
+                    node_id,
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Expanded,
+                    ),
+                )
+                .type_expr
+            })
+            .unwrap_or_else(|| {
+                query_engine.materialize_member_surface_expr(scope_canonical_id, &reduced, true)
+            });
+        if !matches!(
+            &terminal,
+            TypeExpr::Ref {
+                type_arguments,
+                ..
+            } if type_arguments.is_empty()
+        ) {
+            return terminal;
+        }
+    }
+    reduced
 }
 
 /// Resolve a surface member's value to its underlying body for

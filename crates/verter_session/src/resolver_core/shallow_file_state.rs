@@ -239,6 +239,7 @@ pub enum BudgetDomain {
     LocalClosure,
     Frontier,
     BuilderExpansion,
+    ProjectionOperation,
     SolverResolveSteps,
     SolverArenaNodes,
     SolverInstantiationDepth,

@@ -2068,7 +2068,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 match self.dispatch.execute(SemanticQueryKey::Instantiate {
                     base: identity.clone(),
                     args: args_clone,
-                    context: crate::semantic_query::ProjectionReductionContext::published(
+                    context: crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
                     ),
                 }) {
@@ -2120,7 +2120,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 match self.dispatch.execute(SemanticQueryKey::Instantiate {
                     base: identity.clone(),
                     args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                    context: crate::semantic_query::ProjectionReductionContext::published(
+                    context: crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
                     ),
                 }) {

@@ -20,6 +20,46 @@ use crate::instant::Instant;
 use super::super::dep_signature::emit_dispatch_dep_signature_facts;
 use super::super::registry_materialize::preserve_package_backed_symbolic_refs_node;
 
+pub(crate) fn type_expr_materializer_context(
+    mode: crate::semantic_query::ProjectionMode,
+) -> crate::semantic_query::ProjectionReductionContext {
+    if matches!(mode, crate::semantic_query::ProjectionMode::Navigate) {
+        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(mode)
+    } else {
+        crate::semantic_query::ProjectionReductionContext::published(mode)
+    }
+}
+
+fn type_expr_root_is_published_operator(expr: &verter_type_expr::TypeExpr) -> bool {
+    use verter_type_expr::TypeExpr;
+
+    match expr {
+        TypeExpr::Parenthesized(inner) => type_expr_root_is_published_operator(inner),
+        TypeExpr::Ref { .. } => {
+            // References that survive parser lowering are declared
+            // surface roots. Builtin broad mapped carriers are handled
+            // by the `Mapped` arm below after dispatch lowering.
+            true
+        }
+        TypeExpr::Mapped { value, .. } => {
+            // Builtin broad object modifiers lower to identity mapped
+            // carriers with an opaque/miss placeholder value. Keep
+            // those as carriers at Navigate depth; publish mapped
+            // types that carry an author-visible value expression
+            // (`T[K]`, `string`, `Record<...>`, etc.).
+            !matches!(
+                value.as_ref(),
+                TypeExpr::Unknown { raw } if raw == "semanticMiss"
+            )
+        }
+        TypeExpr::KeyOf(_)
+        | TypeExpr::IndexedAccess { .. }
+        | TypeExpr::Conditional { .. }
+        | TypeExpr::TypeOf(_) => true,
+        _ => false,
+    }
+}
+
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) fn materialize_component_meta_type_expr_until_stable(
     expr: &verter_type_expr::TypeExpr,
@@ -47,8 +87,8 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable(
 /// delegates here and discards `node_id` / `dep_signature`.
 ///
 /// Materialization flows entirely through dispatch:
-/// `shallow_lower_type_expr` → `raise_and_reduce(mode)`. The dispatch
-/// covers the substitution-parity surfaces that drive the reducer
+/// context-aware shallow lowering -> context-aware graph reduction. The
+/// dispatch covers the substitution-parity surfaces that drive the reducer
 /// (Pick<X,K>['member'] indexed access, mapped+conditional `infer P`
 /// per-key reduction, method signatures used as `IndexedAccess`
 /// bases).
@@ -202,8 +242,15 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
             scope_canonical_id, mode
         );
     }
+    let reduction_context = if matches!(mode, crate::semantic_query::ProjectionMode::Navigate)
+        && type_expr_root_is_published_operator(expr)
+    {
+        crate::semantic_query::ProjectionReductionContext::published(mode)
+    } else {
+        type_expr_materializer_context(mode)
+    };
     let _us_lower_t0 = Instant::now();
-    let lowered = dispatch.shallow_lower_type_expr(
+    let lowered = dispatch.shallow_lower_type_expr_with_context(
         expr,
         &env,
         &scope,
@@ -211,7 +258,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         scope_payload.as_deref(),
         &shadowing,
         &mut substitutions,
-        mode,
+        reduction_context,
     );
     let _us_lower_ms = _us_lower_t0.elapsed().as_secs_f64() * 1000.0;
     if _us_trace {
@@ -221,7 +268,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         );
     }
     let _us_rr_t0 = Instant::now();
-    let dispatch_materialized = dispatch.raise_and_reduce(lowered, mode);
+    let dispatch_materialized = dispatch.raise_and_reduce_with_context(lowered, reduction_context);
     let _us_rr_ms = _us_rr_t0.elapsed().as_secs_f64() * 1000.0;
     if _us_trace {
         eprintln!(
@@ -327,8 +374,8 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
 /// [`materialize_component_meta_type_expr_until_stable_full`] is the
 /// legitimate entry for callers whose inputs are parser-produced
 /// `TypeExpr` annotations (e.g. `reduce_published_field_types`'s slot /
-/// model bindings). It calls `shallow_lower_type_expr` then
-/// `raise_and_reduce`. Per-member projectors that already hold a
+/// model bindings). It calls the context-aware TypeExpr materializer.
+/// Per-member projectors that already hold a
 /// `SurfaceMember.value: SemanticNodeId` (a settled graph node) should
 /// NOT pay the OXC lowerer round-trip: the lower step would lower the
 /// already-raised `TypeExpr` back to a graph node we already had.

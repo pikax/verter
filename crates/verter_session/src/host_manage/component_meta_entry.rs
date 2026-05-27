@@ -127,6 +127,22 @@ impl VerterHost {
             return Some(warm);
         }
 
+        let _ctx_guard = if crate::request_context::current_request_context().is_none() {
+            Some(crate::request_context::RequestContextGuard::install(
+                crate::request_context::RequestContext::with_kind_timing_and_projection_budget(
+                    self.next_request_id(),
+                    std::sync::Arc::<str>::from(canonical.as_str()),
+                    verter_audit::RequestKind::ComponentMeta,
+                    false,
+                    false,
+                    None,
+                    self.config.projection_op_budget,
+                ),
+            ))
+        } else {
+            None
+        };
+
         // Cold build under the existing `with_fact_tracer` scope.
         // The tracer continues to fan observations into any outer
         // scope (R24 fan-out). The FINALISED tracer read set is the
@@ -667,13 +683,14 @@ impl VerterHost {
         } else {
             None
         };
-        let ctx = crate::request_context::RequestContext::with_kind_and_timing(
+        let ctx = crate::request_context::RequestContext::with_kind_timing_and_projection_budget(
             request_id,
             std::sync::Arc::<str>::from(canonical.as_str()),
             verter_audit::RequestKind::ComponentMeta,
             footprint_capture,
             self.config.audit_timing_capture && self.config.audit_enabled,
             accumulator.clone(),
+            self.config.projection_op_budget,
         );
 
         // Construct the audit registration BEFORE installing the TLS
@@ -709,7 +726,6 @@ impl VerterHost {
         // scope exit, the registration drops first (deregistering
         // the sink — no more fan-out events arrive), then the
         // context guard drops, then the accumulator Arc drops.
-        //
         let _ctx_guard = crate::request_context::RequestContextGuard::install(ctx);
         let _sink_registration = accumulator.as_ref().and_then(|acc| {
             let sink = crate::component_meta_audit::session_vfs_sink::SessionVfsSink::new(

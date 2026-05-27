@@ -1601,7 +1601,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 &fence,
             ),
             Some(SemanticNodeData::Intersection(_) | SemanticNodeData::Union(_)) => self
-                .key_names_from_base_node(base)
+                .member_names_for_published_projection(base)
+                .or_else(|| self.key_names_from_base_node(base))
                 .map(|names| self.intern_keyspace_names(base, names, &fence))
                 .unwrap_or_else(|| self.graph().intern_node(SemanticNodeData::KeyOf { base })),
             Some(
@@ -1679,6 +1680,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())
                 })
             })
+    }
+
+    /// Resolve a source carrier to the one-level published member surface.
+    ///
+    /// Mapped-type publication needs full [`SurfaceMember`] records, not
+    /// names alone: identity mappers (`Partial<T>` / `Required<T>` /
+    /// `Readonly<T>`) must reuse each source member's `value`, while
+    /// modifier-preserving mappers inherit `optional` and `readonly`.
+    /// The global key-name enumerators intentionally return names only
+    /// and do not unwrap `DeclRef` / `InstantiationRef` carriers, so
+    /// publication code uses this local surface helper when a source is
+    /// not already an `Object`.
+    pub(super) fn source_members_for_published_projection(
+        &self,
+        source: SemanticNodeId,
+    ) -> Option<Vec<SurfaceMember>> {
+        if let Some(SemanticNodeData::Object(view)) = self.graph().node_data(source).as_deref() {
+            return Some(view.members.to_vec());
+        }
+
+        let read = self.execute_read(SemanticQueryKey::ProjectPath {
+            base: source,
+            path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Shallow,
+            ),
+        });
+        crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, &read.dep_signature);
+        let node = match read.value {
+            QueryResult::Value(id) => id,
+            QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
+        };
+        match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Object(view)) => Some(view.members.to_vec()),
+            _ => None,
+        }
+    }
+
+    fn member_names_for_published_projection(
+        &self,
+        source: SemanticNodeId,
+    ) -> Option<Vec<Arc<str>>> {
+        self.source_members_for_published_projection(source)
+            .map(|members| members.into_iter().map(|member| member.name).collect())
     }
 
     /// Mapped-type rewrite.
@@ -1776,10 +1821,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // source directly). If `source` is not an Object we can read
         // member names from, fall back to the keyspace shape — but
         // opaque keyspaces terminate the mapped dispatch cleanly.
-        let source_members: Vec<SurfaceMember> = match graph.node_data(source).as_deref() {
-            Some(SemanticNodeData::Object(view)) => view.members.to_vec(),
-            _ => Vec::new(),
-        };
+        let source_members: Vec<SurfaceMember> = self
+            .source_members_for_published_projection(source)
+            .unwrap_or_default();
         let key_names: Vec<Arc<str>> = if !source_members.is_empty() {
             if self.uses_synthetic_mapped_key_names(&source_members) {
                 match self.key_names_from_keyspace_node(mapper.key_space) {
@@ -2376,30 +2420,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         source: SemanticNodeId,
         _context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<Vec<SurfaceMember>> {
-        let read = self.execute_read(SemanticQueryKey::ProjectPath {
-            base: source,
-            path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-            context: crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Shallow,
-            ),
-        });
-        // Fan the sub-dispatch's dep_signature into the active fact
-        // tracer so the caller's cache-validity signature observes the
-        // same facts the source enumeration depended on. Without this
-        // the parent Mapped surface would warm with a signature missing
-        // the source-file content version.
-        crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, &read.dep_signature);
-        let node = match read.value {
-            QueryResult::Value(id) => id,
-            // `Recursive` (same-path reentrance) and `Error` propagate
-            // as a None-from-enumeration signal — `synthesise_mapped_surface`
-            // falls through to the per-key substrate or returns None.
-            QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
-        };
-        match self.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::Object(view)) => Some(view.members.to_vec()),
-            _ => None,
-        }
+        self.source_members_for_published_projection(source)
     }
 
     /// Per-key Mapped member name materialiser — shared by

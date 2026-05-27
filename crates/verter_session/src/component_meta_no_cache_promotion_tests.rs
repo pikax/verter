@@ -21,9 +21,12 @@
 use std::sync::Arc;
 
 use crate::host_test_audit::DispatchCounter;
+use crate::request_context::{RequestContext, RequestContextGuard};
+use crate::resolver_core::BudgetDomain;
 use crate::semantic_query::{
-    PathSegment, ProjectionMode, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
-    SemanticQueryKey, SurfaceMember, SurfaceView,
+    PathSegment, ProjectionMode, ProjectionReductionContext, QueryError, QueryResult,
+    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SurfaceMember,
+    SurfaceView,
 };
 use crate::types::HostConfig;
 use crate::VerterHost;
@@ -72,6 +75,84 @@ fn intern_three_member_object(host: &VerterHost) -> SemanticNodeId {
         }));
     }
     leaf
+}
+
+fn intern_single_member_object(host: &VerterHost, name: &'static str) -> SemanticNodeId {
+    let graph = host.project_type_store().semantic_graph();
+    let leaf = graph.intern_node(SemanticNodeData::Object(SurfaceView {
+        members: Arc::from(Vec::new().into_boxed_slice()),
+        call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    }));
+    let member = SurfaceMember {
+        name: Arc::from(name),
+        value: leaf,
+        optional: false,
+        readonly: false,
+        is_method: false,
+        declared_in_macro_type_arg: false,
+    };
+    graph.intern_node(SemanticNodeData::Object(SurfaceView {
+        members: Arc::from(vec![member].into_boxed_slice()),
+        call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    }))
+}
+
+#[test]
+fn request_projection_budget_caps_distinct_dispatch_cold_builds() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        projection_op_budget: 1,
+        ..HostConfig::default()
+    }));
+    let first_base = intern_single_member_object(&host, "first");
+    let second_base = intern_single_member_object(&host, "second");
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+    let first_key = SemanticQueryKey::KeyOf {
+        base: first_base,
+        context,
+    };
+    let second_key = SemanticQueryKey::KeyOf {
+        base: second_base,
+        context,
+    };
+
+    let ctx = RequestContext::with_kind_timing_and_projection_budget(
+        1,
+        Arc::from("/budget.vue"),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        host.config.projection_op_budget,
+    );
+    let _ctx_guard = RequestContextGuard::install(ctx);
+    let dispatch = host.semantic_dispatch();
+
+    let first = dispatch.execute(first_key);
+    assert!(
+        matches!(first, QueryResult::Value(_)),
+        "first cold projection within budget must succeed, got {first:?}",
+    );
+
+    let second = dispatch.execute(second_key);
+    match second {
+        QueryResult::Error(QueryError::BudgetExceeded(failure)) => {
+            assert_eq!(failure.domain, BudgetDomain::ProjectionOperation);
+            assert_eq!(failure.limit, 1);
+            assert_eq!(failure.actual, 2);
+        }
+        other => panic!(
+            "second distinct cold projection must trip the request projection budget; got {other:?}"
+        ),
+    }
 }
 
 /// 5b §5.D.4 — `ResolveMacroPayload` budget-exceeded must not warm.

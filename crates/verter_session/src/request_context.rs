@@ -29,135 +29,13 @@ use verter_scheduler::request_context::{
 };
 
 use crate::component_meta_audit::accumulator::RequestFootprintAccumulator;
+pub use crate::request_budget::RequestBudget;
 
-/// Request-scoped fuse state promoted to
-/// host-owned + thread-local accessor.
-///
-/// Tracks the per-request projection-op count that the legacy engine's
-/// `FuseBudgets::projection_op_count` rail used to terminate utility-
-/// shape recursion (`Partial<T>` / `Pick<T,K>` / etc.) before the call
-/// stack exhausts. The CAP is constructor-time on `HostConfig`
-/// (`HostConfig::projection_op_budget`) per §0.6.5 stack-depth
-/// discipline. The COUNTER is per-request — held here in TLS so
-/// dispatch-side helpers (which today do NOT have an engine instance
-/// to consult) can observe and increment the same fuse the engine's
-/// `check_projection_op_count` observes.
-///
-/// Constructed at the dispatch entry point from `HostConfig::projection_op_budget`
-/// (or its 2000-default when the field is `0`). Threaded via the
-/// existing `RequestContextLike::install_tls` bridge — NO new TLS
-/// axis (per the §5.13a.1.2 brief: "Threaded through dispatch's
-/// `Instantiate` and `MaterializeSurface` paths via the existing
-/// `RequestContextLike::install_tls` bridge … NO new TLS axis;
-/// reuse the existing one").
-#[derive(Debug)]
-pub struct RequestBudget {
-    /// Projection-operation budget for the request. Sourced from
-    /// `HostConfig::projection_op_budget`.
-    pub projection_op_budget: usize,
-    /// Per-request counter — incremented by the legacy engine's
-    /// `FuseState::check_projection_op_count` (during the 5m migration
-    /// window; the engine retains a parallel counter inside
-    /// `FuseState`) AND by the dispatch-side helper. The value seen
-    /// by the dispatch helper is the single-host-instance projection
-    /// counter for the current request.
-    pub projection_ops_executed: Cell<usize>,
-}
-
-impl RequestBudget {
-    /// Construct a new per-request budget with a zeroed counter and
-    /// the supplied cap.
-    ///
-    /// The returned `Arc<RequestBudget>` is request-scoped and lives
-    /// behind the request-context TLS axis; it never crosses a thread
-    /// boundary, so the `!Sync` `Cell<usize>` counter is safe even
-    /// though `Arc::new` triggers the
-    /// [`clippy::arc_with_non_send_sync`] lint. Switching to `Rc`
-    /// would lose the structural compatibility with the rest of the
-    /// resolver-core API surface (which threads `Arc<…>` everywhere
-    /// else), so the canonical fix is the explicit allow with this
-    /// rationale anchor.
-    #[must_use]
-    #[allow(
-        clippy::arc_with_non_send_sync,
-        reason = "request-scoped, TLS-pinned; Arc retained for resolver-core API symmetry"
-    )]
-    pub fn new(projection_op_budget: usize) -> Arc<Self> {
-        Arc::new(Self {
-            projection_op_budget,
-            projection_ops_executed: Cell::new(0),
-        })
-    }
-
-    /// Equivalent of the legacy engine's
-    /// `FuseState::check_projection_op_count`: increments the counter
-    /// and returns `true` when the budget has been exceeded (caller
-    /// should bail). The cap is the constructor-time value passed to
-    /// `RequestBudget::new`. When the cap is `0`, the legacy default
-    /// of 2000 is used as a fall-back so existing tests that
-    /// constructed a `HostConfig` without setting the field continue
-    /// to observe the documented cap.
-    pub fn check_projection_op_count(&self) -> bool {
-        let current = self.projection_ops_executed.get().saturating_add(1);
-        self.projection_ops_executed.set(current);
-        let cap = if self.projection_op_budget == 0 {
-            2000
-        } else {
-            self.projection_op_budget
-        };
-        current > cap
-    }
-
-    /// Read-only view of the counter (test-only — used by §5.D.4 to
-    /// observe budget-exceeded sentinel behavior).
-    #[cfg(test)]
-    pub(crate) fn projection_ops_executed_count(&self) -> usize {
-        self.projection_ops_executed.get()
-    }
-}
-
-thread_local! {
-    /// Request-scoped fuse state TLS slot.
-    /// Installed by `RequestBudgetGuard::install` and read by the
-    /// dispatch-side helpers (`current_request_budget`).
-    static CURRENT_REQUEST_BUDGET: RefCell<Option<Arc<RequestBudget>>> =
-        const { RefCell::new(None) };
-}
-
-/// RAII guard that installs a `RequestBudget` into TLS and restores
-/// the previous slot on drop. Stack-safe: `RefCell::replace` never
-/// panics on an already-occupied slot; `Drop` uses `take` + `replace`
-/// which also never panic.
-pub struct RequestBudgetGuard {
-    prev: Option<Arc<RequestBudget>>,
-}
-
-impl RequestBudgetGuard {
-    /// Install `budget` into TLS, returning a guard that restores the
-    /// previous slot on drop.
-    #[must_use]
-    pub fn install(budget: Arc<RequestBudget>) -> Self {
-        let prev = CURRENT_REQUEST_BUDGET.with(|c| c.replace(Some(budget)));
-        Self { prev }
-    }
-}
-
-impl Drop for RequestBudgetGuard {
-    fn drop(&mut self) {
-        let prev = self.prev.take();
-        CURRENT_REQUEST_BUDGET.with(|c| {
-            c.replace(prev);
-        });
-    }
-}
-
-/// Return a clone of the currently installed `RequestBudget`, or
-/// `None` when no budget is installed (e.g. callers outside an
-/// audited request — the engine path independently observes its
-/// `FuseState`).
+/// Return the request-scoped projection budget carried by the active
+/// [`RequestContext`].
 #[must_use]
 pub fn current_request_budget() -> Option<Arc<RequestBudget>> {
-    CURRENT_REQUEST_BUDGET.with(|c| c.borrow().as_ref().map(Arc::clone))
+    current_request_context().map(|ctx| Arc::clone(&ctx.projection_budget))
 }
 
 /// Per-cache hit/miss attribution counter pair. Bumped at the
@@ -398,6 +276,10 @@ pub struct RequestContext {
     /// `materialize_component_meta_structure` invocations observed
     /// during the request.
     pub materialize_structure_calls: AtomicU64,
+    /// Per-request projection-operation fuse used by semantic dispatch.
+    /// Stored on the existing request context so scheduler worker TLS
+    /// propagation carries the same budget state as audit/cache counters.
+    pub projection_budget: Arc<RequestBudget>,
     /// Per-context counter — subset of `materialize_structure_calls`
     /// satisfied by the materialiser's `MaterializeStructureDb` peek.
     ///
@@ -740,6 +622,31 @@ impl RequestContext {
         timing_capture: bool,
         audit_accumulator: Option<Arc<RequestFootprintAccumulator>>,
     ) -> Arc<Self> {
+        Self::with_kind_timing_and_projection_budget(
+            request_id,
+            canonical_id,
+            kind,
+            footprint_capture,
+            timing_capture,
+            audit_accumulator,
+            0,
+        )
+    }
+
+    /// Construct a new per-request context with an explicit
+    /// projection-operation budget. Component-meta entry points thread
+    /// `HostConfig::projection_op_budget` through this constructor so
+    /// semantic dispatch sees the same fuse on the main thread and on
+    /// scheduler workers.
+    pub fn with_kind_timing_and_projection_budget(
+        request_id: u64,
+        canonical_id: Arc<str>,
+        kind: verter_audit::RequestKind,
+        footprint_capture: bool,
+        timing_capture: bool,
+        audit_accumulator: Option<Arc<RequestFootprintAccumulator>>,
+        projection_op_budget: usize,
+    ) -> Arc<Self> {
         // Sniff the scheduler's TLS slot for an enclosing parent
         // request. When a sub-request is created inside another
         // audited request's TLS context (either on the same thread or
@@ -770,6 +677,7 @@ impl RequestContext {
             inflight_aborted_retries: AtomicU64::new(0),
             cold_aborts_swept: AtomicU64::new(0),
             materialize_structure_calls: AtomicU64::new(0),
+            projection_budget: RequestBudget::new(projection_op_budget),
             materialize_structure_cache_hits: AtomicU64::new(0),
             node_arena_lock_acquisitions: AtomicU64::new(0),
             family_map_lock_acquisitions: AtomicU64::new(0),
@@ -1543,33 +1451,6 @@ mod tests {
     }
 
     #[test]
-    fn request_context_guard_clears_tls_on_normal_return() {
-        assert!(current_request_context().is_none());
-        let ctx = make_ctx(1, true);
-        {
-            let _g = RequestContextGuard::install(Arc::clone(&ctx));
-            assert_eq!(current_request_context().unwrap().request_id, 1);
-        }
-        assert!(current_request_context().is_none());
-    }
-
-    #[test]
-    fn request_context_guard_clears_tls_on_panic_unwind() {
-        use std::panic::{catch_unwind, AssertUnwindSafe};
-        let ctx = make_ctx(2, true);
-        let r = catch_unwind(AssertUnwindSafe(|| {
-            let _g = RequestContextGuard::install(Arc::clone(&ctx));
-            assert_eq!(current_request_context().unwrap().request_id, 2);
-            panic!("test panic");
-        }));
-        assert!(r.is_err());
-        assert!(
-            current_request_context().is_none(),
-            "TLS slot must be cleared via the guard's Drop on unwind",
-        );
-    }
-
-    #[test]
     fn request_context_guard_drop_uses_take_and_replace_never_panics() {
         // Nested install — outer guard's Drop must restore outer's
         // prior (None), not panic on the inner's live borrow.
@@ -1583,57 +1464,6 @@ mod tests {
         assert_eq!(current_request_context().unwrap().request_id, 10);
         drop(g1);
         assert!(current_request_context().is_none());
-    }
-
-    #[test]
-    fn request_budget_check_increments_until_cap_then_returns_true() {
-        let budget = RequestBudget::new(3);
-        // Each call increments. The cap is 3 (a value of 3 is "at
-        // budget" — equality returns false; the FOURTH call is over
-        // budget — `>` returns true).
-        assert!(!budget.check_projection_op_count(), "1st call (1 of 3)");
-        assert!(!budget.check_projection_op_count(), "2nd call (2 of 3)");
-        assert!(!budget.check_projection_op_count(), "3rd call (3 of 3)");
-        assert!(budget.check_projection_op_count(), "4th call exceeds 3");
-        // Discrimination: the counter has been incremented exactly 4
-        // times. NEGATIVE assertion — counter must NOT have been reset
-        // by the trip.
-        assert_eq!(
-            budget.projection_ops_executed_count(),
-            4,
-            "counter must persist past the trip; the trip should not silently reset"
-        );
-    }
-
-    #[test]
-    fn request_budget_zero_cap_falls_back_to_default_2000() {
-        let budget = RequestBudget::new(0);
-        // Increment 1999 times — within the 2000 fall-back cap.
-        for _ in 0..1999 {
-            assert!(!budget.check_projection_op_count());
-        }
-        // The 2000th call is exactly at cap (2000 > 2000 is false).
-        assert!(!budget.check_projection_op_count(), "2000th call at cap");
-        // The 2001st call exceeds the fall-back cap.
-        assert!(
-            budget.check_projection_op_count(),
-            "2001st call exceeds default"
-        );
-    }
-
-    #[test]
-    fn request_budget_guard_clears_tls_on_normal_return() {
-        assert!(current_request_budget().is_none());
-        let budget = RequestBudget::new(123);
-        {
-            let _g = RequestBudgetGuard::install(Arc::clone(&budget));
-            assert_eq!(current_request_budget().unwrap().projection_op_budget, 123);
-        }
-        // NEGATIVE assertion: TLS slot is empty after the guard drops.
-        assert!(
-            current_request_budget().is_none(),
-            "RequestBudgetGuard must clear TLS on drop"
-        );
     }
 
     #[test]

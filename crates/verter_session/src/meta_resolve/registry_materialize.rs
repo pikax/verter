@@ -102,10 +102,12 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
             name: Arc::from(name),
             type_arguments: Arc::from(Vec::new().into_boxed_slice()),
         };
-        let Some(node_id) = dispatch.lower_type_expr_in_scope_with_mode(
+        let Some(node_id) = dispatch.lower_type_expr_in_scope_with_context(
             scope_canonical_id,
             &probe,
-            ProjectionMode::Navigate,
+            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                ProjectionMode::Navigate,
+            ),
         ) else {
             return false;
         };
@@ -129,6 +131,7 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
         scope_canonical_id: &str,
         engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
         active: &mut rustc_hash::FxHashSet<SemanticNodeId>,
+        publish_operators: bool,
     ) -> verter_type_expr::TypeExpr {
         use verter_type_expr::{ObjectMember, TypeExpr};
 
@@ -141,10 +144,12 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
         // would not have terminated either; the structural recursion
         // remains safe under the existing structural bounds).
         let dispatch_for_cycle = ProjectSemanticDispatch::new(engine.ctx);
-        let cycle_key = dispatch_for_cycle.lower_type_expr_in_scope_with_mode(
+        let cycle_key = dispatch_for_cycle.lower_type_expr_in_scope_with_context(
             scope_canonical_id,
             expr,
-            ProjectionMode::Navigate,
+            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                ProjectionMode::Navigate,
+            ),
         );
         if let Some(key) = cycle_key {
             if !active.insert(key) {
@@ -152,9 +157,12 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
             }
         }
 
-        let result = if let Some((root_symbol, route)) =
-            component_meta_registry_public_utility_route(expr)
-                .or_else(|| component_meta_registry_public_indexed_access_route(expr))
+        let result = if let Some((root_symbol, route)) = publish_operators
+            .then(|| {
+                component_meta_registry_public_utility_route(expr)
+                    .or_else(|| component_meta_registry_public_indexed_access_route(expr))
+            })
+            .flatten()
         {
             // Migrate route-target callers to dispatch
             // (sub- D-T recipe). Route the utility/indexed
@@ -233,7 +241,15 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
                     type_arguments: Arc::from(
                         type_arguments
                             .iter()
-                            .map(|arg| inner(arg, scope_canonical_id, engine, active))
+                            .map(|arg| {
+                                inner(
+                                    arg,
+                                    scope_canonical_id,
+                                    engine,
+                                    active,
+                                    publish_operators,
+                                )
+                            })
                             .collect::<Vec<_>>(),
                     ),
                 },
@@ -242,9 +258,16 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
                     scope_canonical_id,
                     engine,
                     active,
+                    publish_operators,
                 ))),
                 TypeExpr::Array { element, readonly } => TypeExpr::Array {
-                    element: Arc::new(inner(element, scope_canonical_id, engine, active)),
+                    element: Arc::new(inner(
+                        element,
+                        scope_canonical_id,
+                        engine,
+                        active,
+                        publish_operators,
+                    )),
                     readonly: *readonly,
                 },
                 TypeExpr::Tuple { elements, readonly } => TypeExpr::Tuple {
@@ -253,7 +276,13 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
                             .iter()
                             .map(|element| verter_type_expr::TupleElement {
                                 label: element.label.clone(),
-                                ty: inner(&element.ty, scope_canonical_id, engine, active),
+                                ty: inner(
+                                    &element.ty,
+                                    scope_canonical_id,
+                                    engine,
+                                    active,
+                                    publish_operators,
+                                ),
                                 optional: element.optional,
                                 rest: element.rest,
                             })
@@ -264,13 +293,17 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
                 TypeExpr::Union(types) => TypeExpr::Union(Arc::from(
                     types
                         .iter()
-                        .map(|ty| inner(ty, scope_canonical_id, engine, active))
+                        .map(|ty| {
+                            inner(ty, scope_canonical_id, engine, active, publish_operators)
+                        })
                         .collect::<Vec<_>>(),
                 )),
                 TypeExpr::Intersection(types) => TypeExpr::Intersection(Arc::from(
                     types
                         .iter()
-                        .map(|ty| inner(ty, scope_canonical_id, engine, active))
+                        .map(|ty| {
+                            inner(ty, scope_canonical_id, engine, active, publish_operators)
+                        })
                         .collect::<Vec<_>>(),
                 )),
                 TypeExpr::Conditional {
@@ -279,10 +312,22 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
                     true_type,
                     false_type,
                 } => TypeExpr::Conditional {
-                    check: Arc::new(inner(check, scope_canonical_id, engine, active)),
-                    extends: Arc::new(inner(extends, scope_canonical_id, engine, active)),
-                    true_type: Arc::new(inner(true_type, scope_canonical_id, engine, active)),
-                    false_type: Arc::new(inner(false_type, scope_canonical_id, engine, active)),
+                    check: Arc::new(inner(check, scope_canonical_id, engine, active, false)),
+                    extends: Arc::new(inner(extends, scope_canonical_id, engine, active, false)),
+                    true_type: Arc::new(inner(
+                        true_type,
+                        scope_canonical_id,
+                        engine,
+                        active,
+                        publish_operators,
+                    )),
+                    false_type: Arc::new(inner(
+                        false_type,
+                        scope_canonical_id,
+                        engine,
+                        active,
+                        publish_operators,
+                    )),
                 },
                 TypeExpr::Mapped {
                     parameter,
@@ -293,13 +338,31 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
                     value,
                 } => TypeExpr::Mapped {
                     parameter: parameter.clone(),
-                    source: Arc::new(inner(source, scope_canonical_id, engine, active)),
+                    source: Arc::new(inner(
+                        source,
+                        scope_canonical_id,
+                        engine,
+                        active,
+                        publish_operators,
+                    )),
                     optional: *optional,
                     readonly: *readonly,
                     name_type: name_type.as_deref().map(|name_type| {
-                        Arc::new(inner(name_type, scope_canonical_id, engine, active))
+                        Arc::new(inner(
+                            name_type,
+                            scope_canonical_id,
+                            engine,
+                            active,
+                            publish_operators,
+                        ))
                     }),
-                    value: Arc::new(inner(value, scope_canonical_id, engine, active)),
+                    value: Arc::new(inner(
+                        value,
+                        scope_canonical_id,
+                        engine,
+                        active,
+                        publish_operators,
+                    )),
                 },
                 TypeExpr::TemplateLiteral {
                     quasis,
@@ -309,65 +372,134 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
                     expressions: Arc::from(
                         expressions
                             .iter()
-                            .map(|expr| inner(expr, scope_canonical_id, engine, active))
+                            .map(|expr| {
+                                inner(
+                                    expr,
+                                    scope_canonical_id,
+                                    engine,
+                                    active,
+                                    publish_operators,
+                                )
+                            })
                             .collect::<Vec<_>>(),
                     ),
                 },
                 TypeExpr::Function(function) => {
                     let mut function = function.as_ref().clone();
                     for parameter in &mut function.parameters {
-                        parameter.ty = inner(&parameter.ty, scope_canonical_id, engine, active);
+                        parameter.ty = inner(
+                            &parameter.ty,
+                            scope_canonical_id,
+                            engine,
+                            active,
+                            publish_operators,
+                        );
                     }
                     if let Some(return_type) = function.return_type.as_mut() {
-                        *return_type =
-                            Arc::new(inner(return_type, scope_canonical_id, engine, active));
+                        *return_type = Arc::new(inner(
+                            return_type,
+                            scope_canonical_id,
+                            engine,
+                            active,
+                            publish_operators,
+                        ));
                     }
                     for type_parameter in &mut function.type_parameters {
                         if let Some(constraint) = type_parameter.constraint.as_mut() {
-                            *constraint =
-                                Arc::new(inner(constraint, scope_canonical_id, engine, active));
+                            *constraint = Arc::new(inner(
+                                constraint,
+                                scope_canonical_id,
+                                engine,
+                                active,
+                                publish_operators,
+                            ));
                         }
                         if let Some(default) = type_parameter.default.as_mut() {
-                            *default = Arc::new(inner(default, scope_canonical_id, engine, active));
+                            *default = Arc::new(inner(
+                                default,
+                                scope_canonical_id,
+                                engine,
+                                active,
+                                publish_operators,
+                            ));
                         }
                     }
                     TypeExpr::Function(Arc::new(function))
                 }
-                TypeExpr::KeyOf(inner_expr) => TypeExpr::KeyOf(Arc::new(inner(
-                    inner_expr,
-                    scope_canonical_id,
-                    engine,
-                    active,
-                ))),
+                TypeExpr::KeyOf(inner_expr) => {
+                    if publish_operators {
+                        if let Some(projected) = project_expr_class_a_via_dispatch_threaded(
+                            engine.ctx,
+                            Some(engine),
+                            scope_canonical_id,
+                            expr,
+                        ) {
+                            projected
+                        } else {
+                            TypeExpr::KeyOf(Arc::new(inner(
+                                inner_expr,
+                                scope_canonical_id,
+                                engine,
+                                active,
+                                publish_operators,
+                            )))
+                        }
+                    } else {
+                        TypeExpr::KeyOf(Arc::new(inner(
+                            inner_expr,
+                            scope_canonical_id,
+                            engine,
+                            active,
+                            false,
+                        )))
+                    }
+                }
                 TypeExpr::Rest(inner_expr) => TypeExpr::Rest(Arc::new(inner(
                     inner_expr,
                     scope_canonical_id,
                     engine,
                     active,
+                    publish_operators,
                 ))),
                 TypeExpr::Object(object) => {
                     let mut object = object.as_ref().clone();
                     for member in &mut object.properties {
                         match member {
                             ObjectMember::Property(property) => {
-                                property.ty =
-                                    inner(&property.ty, scope_canonical_id, engine, active);
+                                property.ty = inner(
+                                    &property.ty,
+                                    scope_canonical_id,
+                                    engine,
+                                    active,
+                                    publish_operators,
+                                );
                             }
                             ObjectMember::IndexSignature(signature) => {
-                                signature.key_type =
-                                    inner(&signature.key_type, scope_canonical_id, engine, active);
+                                signature.key_type = inner(
+                                    &signature.key_type,
+                                    scope_canonical_id,
+                                    engine,
+                                    active,
+                                    publish_operators,
+                                );
                                 signature.value_type = inner(
                                     &signature.value_type,
                                     scope_canonical_id,
                                     engine,
                                     active,
+                                    publish_operators,
                                 );
                             }
                             ObjectMember::CallSignature(function)
                             | ObjectMember::ConstructSignature(function) => {
                                 for parameter in &mut function.parameters {
-                                    parameter.ty =
-                                        inner(&parameter.ty, scope_canonical_id, engine, active);
+                                    parameter.ty = inner(
+                                        &parameter.ty,
+                                        scope_canonical_id,
+                                        engine,
+                                        active,
+                                        publish_operators,
+                                    );
                                 }
                                 if let Some(return_type) = function.return_type.as_mut() {
                                     *return_type = Arc::new(inner(
@@ -375,13 +507,19 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
                                         scope_canonical_id,
                                         engine,
                                         active,
+                                        publish_operators,
                                     ));
                                 }
                             }
                             ObjectMember::Method(method) => {
                                 for parameter in &mut method.function.parameters {
-                                    parameter.ty =
-                                        inner(&parameter.ty, scope_canonical_id, engine, active);
+                                    parameter.ty = inner(
+                                        &parameter.ty,
+                                        scope_canonical_id,
+                                        engine,
+                                        active,
+                                        publish_operators,
+                                    );
                                 }
                                 if let Some(return_type) = method.function.return_type.as_mut() {
                                     *return_type = Arc::new(inner(
@@ -389,6 +527,7 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
                                         scope_canonical_id,
                                         engine,
                                         active,
+                                        publish_operators,
                                     ));
                                 }
                             }
@@ -418,7 +557,7 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
     }
 
     let mut active: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
-    inner(expr, scope_canonical_id, engine, &mut active)
+    inner(expr, scope_canonical_id, engine, &mut active, true)
 }
 
 /// Graph-native predicate. Walks two parallel `SemanticNodeId`

@@ -117,6 +117,21 @@ impl VerterHost {
     ) -> Option<ResolvedComponentMetaState> {
         let started = component_meta_debug_enabled().then(Instant::now);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let _ctx_guard = if crate::request_context::current_request_context().is_none() {
+            Some(crate::request_context::RequestContextGuard::install(
+                crate::request_context::RequestContext::with_kind_timing_and_projection_budget(
+                    next_component_meta_audit_request_id(),
+                    std::sync::Arc::<str>::from(canonical.as_str()),
+                    verter_audit::RequestKind::ComponentMeta,
+                    false,
+                    self.config.audit_timing_capture && self.config.audit_enabled,
+                    None,
+                    self.config.projection_op_budget,
+                ),
+            ))
+        } else {
+            None
+        };
         let audit = self.config.audit_enabled.then(|| {
             // Prefer the request_id stamped by
             // `get_component_meta_with_resolution` (via the installed
@@ -1417,10 +1432,12 @@ impl VerterHost {
                 }
                 let host = query_engine.ctx;
                 let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
-                if let Some(node) = dispatch.lower_type_expr_in_scope_with_mode(
+                if let Some(node) = dispatch.lower_type_expr_in_scope_with_context(
                     scope_canonical_id,
                     expr,
-                    crate::semantic_query::ProjectionMode::Navigate,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                        crate::semantic_query::ProjectionMode::Navigate,
+                    ),
                 ) {
                     let graph = host.project_type_store().semantic_graph();
                     component_meta_registry_prefers_structural_materialization_node(graph, node, 0)

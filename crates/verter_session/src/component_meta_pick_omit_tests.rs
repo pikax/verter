@@ -43,6 +43,53 @@ fn build_hermetic_project(files: &[(&str, &str)]) -> Arc<MetaProject> {
     MetaProject::new(host)
 }
 
+/// Build a hermetic project with an explicit in-memory project graph.
+/// This matches the host-backed component-meta route used by workspace
+/// sessions while keeping every dependency synthetic.
+fn build_hermetic_project_with_workspace_graph(files: &[(&str, &str)]) -> Arc<MetaProject> {
+    let scheduler_config = verter_scheduler::scheduler::SchedulerConfig {
+        cpu_threads: 1,
+        ..verter_scheduler::scheduler::SchedulerConfig::default()
+    };
+    let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    let project_config = make_workspace_project_config("/workspace");
+    #[allow(deprecated)]
+    workspace.set_project_graph(verter_workspace::ProjectGraph::from_configs(vec![
+        project_config.clone(),
+    ]));
+    for (canonical, content) in files {
+        workspace.inject_file((*canonical).into(), Arc::from(*content));
+    }
+    let ide_project = project_config.to_ide_project_config();
+    let ws_access: Arc<dyn WorkspaceAccess> = workspace;
+    let host = VerterHost::new_with_scheduler_config(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws_access,
+        scheduler_config,
+    );
+    host.configure_projects(vec![ide_project]);
+    MetaProject::new(host)
+}
+
+#[allow(deprecated)]
+fn make_workspace_project_config(root: &str) -> verter_workspace::VfsProjectConfig {
+    verter_workspace::VfsProjectConfig {
+        root: root.to_string(),
+        rank: verter_workspace::ProjectRank::Explicit,
+        tsconfig_path: Some(format!("{root}/tsconfig.json")),
+        root_files: vec![],
+        extensions: vec![],
+        workspace_root: root.to_string(),
+        workspace_aliases: vec![],
+        compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+        references: vec![],
+        membership: verter_workspace::ProjectMembership::MatchAll,
+    }
+}
+
 /// Drive component-meta resolution for `canonical` and return the
 /// `pick_member_route_callable_descent_count` counter captured by the
 /// per-request token. Used by the §16.6 capture-token gate.
@@ -280,6 +327,193 @@ fn pick_imported_props_actions_with_full_chatmessages_keys_returns_within_budget
         "stress fixture must complete without descending into the \
          package-backed callable parameter; descent count {descent}",
     );
+}
+
+fn chat_messages_ai_index_dts() -> String {
+    use std::fmt::Write as _;
+
+    let mut source = String::from(
+        r#"export type ChatStatus = 'submitted' | 'streaming' | 'ready' | 'error'
+
+export interface UIDataTypes {
+"#,
+    );
+    for index in 0..80 {
+        let _ = writeln!(
+            source,
+            "  data{index:02}?: {{ value: string; nested?: {{ count: number; label: string }} }}"
+        );
+    }
+    source.push_str("}\n\nexport interface UITools {\n");
+    for index in 0..80 {
+        let _ = writeln!(
+            source,
+            "  tool{index:02}?: {{ input: {{ prompt: string; flag?: boolean }}; output: {{ text: string; score: number }} }}"
+        );
+    }
+    source.push_str(
+        r#"}
+
+export interface TextUIPart {
+  type: 'text'
+  text: string
+}
+
+export type DataUIPart<TDataParts extends UIDataTypes> = {
+  [K in keyof TDataParts & string]: {
+    type: `data-${K}`
+    data: NonNullable<TDataParts[K]>
+  }
+}[keyof TDataParts & string]
+
+export type ToolUIPart<TTools extends UITools> = {
+  [K in keyof TTools & string]: {
+    type: `tool-${K}`
+    input: NonNullable<TTools[K]> extends { input: infer I } ? I : never
+    output?: NonNullable<TTools[K]> extends { output: infer O } ? O : never
+  }
+}[keyof TTools & string]
+
+export interface UIMessage<
+  TMetadata = unknown,
+  TDataParts extends UIDataTypes = UIDataTypes,
+  TTools extends UITools = UITools
+> {
+  id: string
+  role: 'user' | 'assistant' | 'system'
+  metadata?: TMetadata
+  parts?: (TextUIPart | DataUIPart<TDataParts> | ToolUIPart<TTools>)[]
+  data?: TDataParts
+  tools?: TTools
+}
+"#,
+    );
+    source
+}
+
+const CHAT_MESSAGES_VUE_INDEX_DTS: &str = r#"export interface VNode {
+  __v_isVNode?: true
+}
+"#;
+
+const CHAT_MESSAGES_NUXT_SCHEMA_DTS: &str = r#"export interface AppConfig {
+  ui?: Record<string, unknown>
+}
+"#;
+
+const CHAT_MESSAGES_MISSING_BARREL_VUE: &str = r#"<script lang="ts">
+import type { VNode } from 'vue'
+import type { AppConfig } from '@nuxt/schema'
+import type { UIDataTypes, UIMessage, UITools, ChatStatus } from 'ai'
+import type { ButtonProps, ChatMessageProps, ChatMessageSlots, IconProps, LinkPropsKeys } from '../types'
+
+type ChatMessages = {
+  slots: { root?: string, viewport?: string }
+  ui: { root?: string, viewport?: string }
+  AppConfig: AppConfig
+}
+
+type MessageBase<T extends UIMessage[]>
+  = T[number] extends UIMessage<infer M, infer D, infer U>
+    ? UIMessage<M, D, U>
+    : UIMessage<unknown, UIDataTypes, UITools>
+
+type PropsBase<T extends UIMessage[]>
+  = MessageBase<T> extends UIMessage<infer M, infer D, infer U>
+    ? ChatMessageProps<M, D, U>
+    : never
+
+export interface ChatMessagesProps<T extends UIMessage[] = UIMessage[]> {
+  messages?: T
+  status?: ChatStatus
+  shouldAutoScroll?: boolean
+  shouldScrollToBottom?: boolean
+  autoScroll?: boolean | Omit<ButtonProps, LinkPropsKeys>
+  autoScrollIcon?: IconProps['name']
+  user?: Pick<PropsBase<T>, 'icon' | 'avatar' | 'variant' | 'side' | 'actions' | 'ui'>
+  assistant?: Pick<PropsBase<T>, 'icon' | 'avatar' | 'variant' | 'side' | 'actions' | 'ui'>
+  compact?: boolean
+  spacingOffset?: number
+  class?: any
+  ui?: ChatMessages['slots']
+}
+
+export type ChatMessagesSlots<T extends UIMessage[] = UIMessage[]> = {
+  default?(props?: {}): VNode[]
+  indicator?(props: { ui: ChatMessages['ui'] }): VNode[]
+  viewport?(props: { ui: ChatMessages['ui'], onClick: () => void }): VNode[]
+} & {
+  [K in keyof ChatMessageSlots]?: NonNullable<ChatMessageSlots[K]> extends (props: infer P) => VNode[]
+    ? (props: P & { message: MessageBase<T> }) => VNode[]
+    : never
+}
+</script>
+
+<script setup lang="ts" generic="T extends UIMessage[] = UIMessage[]">
+const props = withDefaults(defineProps<ChatMessagesProps<T>>(), {
+  autoScroll: true,
+  shouldAutoScroll: false,
+  shouldScrollToBottom: true,
+  spacingOffset: 0
+})
+const slots = defineSlots<ChatMessagesSlots<T>>()
+</script>
+
+<template><div /></template>
+"#;
+
+/// Hermetic reproduction of the `ChatMessages.vue` benchmark hang.
+/// The owner is self-contained except for an intentionally missing
+/// `../types` barrel. The resolver must preserve unresolved imported
+/// roots and still return the owner-local surface instead of repeatedly
+/// expanding the mapped `keyof ChatMessageSlots` and
+/// `Pick<PropsBase<T>, ...>` surfaces.
+#[test]
+fn chatmessages_missing_types_barrel_returns_partial_native_component_meta() {
+    let ai_index_dts = chat_messages_ai_index_dts();
+    let project = build_hermetic_project_with_workspace_graph(&[
+        (
+            "/workspace/node_modules/ai/package.json",
+            r#"{ "name": "ai", "types": "./index.d.ts" }"#,
+        ),
+        (
+            "/workspace/node_modules/@nuxt/schema/package.json",
+            r#"{ "name": "@nuxt/schema", "types": "./index.d.ts" }"#,
+        ),
+        (
+            "/workspace/node_modules/vue/package.json",
+            r#"{ "name": "vue", "types": "./index.d.ts" }"#,
+        ),
+        (
+            "/workspace/node_modules/ai/index.d.ts",
+            ai_index_dts.as_str(),
+        ),
+        (
+            "/workspace/node_modules/@nuxt/schema/index.d.ts",
+            CHAT_MESSAGES_NUXT_SCHEMA_DTS,
+        ),
+        (
+            "/workspace/node_modules/vue/index.d.ts",
+            CHAT_MESSAGES_VUE_INDEX_DTS,
+        ),
+        (
+            "/workspace/src/runtime/components/ChatMessages.vue",
+            CHAT_MESSAGES_MISSING_BARREL_VUE,
+        ),
+    ]);
+
+    let session = project.open_session_batch().expect("session");
+    let meta = session
+        .get_component_meta("/workspace/src/runtime/components/ChatMessages.vue")
+        .expect("session result")
+        .expect("missing imported type barrel must still produce partial metadata");
+
+    for expected in ["messages", "status", "user", "assistant", "ui"] {
+        assert!(
+            meta.props.iter().any(|p| p.name == expected),
+            "owner-local prop `{expected}` should publish when imported props are unresolved",
+        );
+    }
 }
 
 // ===========================================================================

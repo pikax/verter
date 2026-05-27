@@ -61,7 +61,7 @@ use verter_semantic::analysis::type_solver::host::{
 };
 use verter_semantic::analysis::type_solver::PreparedTypeDecl;
 
-use crate::resolver_core::ResolverContext;
+use crate::resolver_core::{BudgetDomain, BudgetExceededFailure, ResolverContext};
 use crate::semantic_query::{
     BranchSelection, CacheRead, DeclIdentity, DepSignature, DepVersion, IndexKey, LiteralValue,
     NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode,
@@ -674,6 +674,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let key_for_build = key.clone();
         let raw_build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+            if semantic_query_counts_toward_projection_budget(&key_for_build) {
+                if let Some(budget) = crate::request_context::current_request_budget() {
+                    if budget.check_projection_op_count() {
+                        let limit = budget.effective_projection_op_budget();
+                        let failure = BudgetExceededFailure {
+                            domain: BudgetDomain::ProjectionOperation,
+                            limit,
+                            actual: budget.projection_ops_executed_count() as u64,
+                            context: format!("semantic-dispatch:{key_for_build:?}"),
+                        };
+                        let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+                            (
+                                QueryResult::Error(QueryError::BudgetExceeded(failure)),
+                                self.project_generation_signature(),
+                            )
+                                .into();
+                        output.cache_suppress = true;
+                        return output;
+                    }
+                }
+            }
             match &key_for_build {
                 SemanticQueryKey::ResolveDecl(decl_key) => self.build_resolve_decl(decl_key),
                 SemanticQueryKey::TypeOf { value_root } => self.build_typeof(value_root),
@@ -998,6 +1019,17 @@ fn finalise_traced_build_output(
         }
     }
     output
+}
+
+fn semantic_query_counts_toward_projection_budget(key: &SemanticQueryKey) -> bool {
+    matches!(
+        key,
+        SemanticQueryKey::ProjectMember { .. }
+            | SemanticQueryKey::IndexedAccess { .. }
+            | SemanticQueryKey::ProjectPath { .. }
+            | SemanticQueryKey::KeyOf { .. }
+            | SemanticQueryKey::MappedType { .. }
+    )
 }
 
 impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {

@@ -15,6 +15,7 @@
 //! the dispatch demand context — only the type-shape predicate and
 //! the field-type reducer remain.
 
+use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
 use verter_type_expr::TypeExpr;
 
 use crate::semantic_query::ProjectionMode;
@@ -63,7 +64,8 @@ pub(crate) fn reduce_published_field_types(
 
         if let Some(shallow) = field.shallow_type_expr.as_ref() {
             if !matches!(shallow, TypeExpr::Unknown { .. })
-                && compare_type_expr_improvement(shallow, &reduced)
+                && (compare_type_expr_improvement(shallow, &reduced)
+                    || root_is_explicit_selector_operator(shallow))
             {
                 let shallow_reduced = reduce_field_type_expr_with_mode(
                     query_engine,
@@ -114,6 +116,18 @@ pub(crate) fn reduce_published_field_types(
         }
         let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
         field.r#type = reduce_field_type_expr(query_engine, scope_canonical_id, raised);
+    }
+}
+
+fn root_is_explicit_selector_operator(expr: &TypeExpr) -> bool {
+    match expr {
+        TypeExpr::Parenthesized(inner) => root_is_explicit_selector_operator(inner),
+        TypeExpr::IndexedAccess { .. } | TypeExpr::KeyOf(_) | TypeExpr::TypeOf(_) => true,
+        TypeExpr::Ref { name, .. } => matches!(
+            BuiltinUtility::from_name(name.as_ref()),
+            Some(BuiltinUtility::Pick | BuiltinUtility::Omit | BuiltinUtility::Record)
+        ),
+        _ => false,
     }
 }
 

@@ -579,14 +579,16 @@ pub(crate) fn bfs_compute_inner(
         let key = SemanticQueryKey::Instantiate {
             base: current,
             args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            // Skeleton mode preserves open generics so
-            // body lowering produces TypeParam graph nodes for T-refs (not
-            // Opaque(Miss)). Without this, nested-Conditional fixtures like
-            // canonical nuxt-ui DotPathKeys collapse the conditional and
-            // recursive refs are invisible to collect_ref_identities_node.
-            context: crate::semantic_query::ProjectionReductionContext::published(
-                ProjectionMode::Skeleton,
-            ),
+            // Skeleton mode preserves open generics so body lowering
+            // produces TypeParam graph nodes for T-refs (not
+            // Opaque(Miss)). This BFS is a structural guard, not a
+            // publication boundary, so keep the Skeleton shape while
+            // using StructuralTransit demand to prevent nested mapped
+            // operators from emitting member publication edges.
+            context:
+                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                    ProjectionMode::Skeleton,
+                ),
         };
         let read = dispatch.execute_read(key);
         crate::component_meta_audit::merge_dep_signature_into_local_fence(

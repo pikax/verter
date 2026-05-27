@@ -769,20 +769,24 @@ pub(crate) fn project_expr_class_a_via_dispatch_transit_shallow_threaded<'ctx>(
     // `Opaque` payload check) since the eager-resolution side effect
     // of `Published(Expanded)` lowering is no longer available.
     let (base, project_path) = if path_segments.is_empty() {
-        let base = dispatch.lower_type_expr_in_scope_with_mode(
+        let base = dispatch.lower_type_expr_in_scope_with_context(
             scope_canonical_id,
             expr,
-            ProjectionMode::Navigate,
+            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                ProjectionMode::Navigate,
+            ),
         )?;
         (
             base,
             Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
         )
     } else {
-        let base = dispatch.lower_type_expr_in_scope_with_mode(
+        let base = dispatch.lower_type_expr_in_scope_with_context(
             scope_canonical_id,
             base_expr,
-            ProjectionMode::Navigate,
+            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                ProjectionMode::Navigate,
+            ),
         )?;
         (base, path_segments)
     };
@@ -1250,7 +1254,14 @@ pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
     }
     let ctx = engine.ctx();
     let dispatch = ProjectSemanticDispatch::new(ctx);
-    let base = dispatch.lower_type_expr_in_scope_with_mode(scope_canonical_id, expr, base_mode)?;
+    let base = dispatch.lower_type_expr_in_scope_with_context(
+        scope_canonical_id,
+        expr,
+        ProjectionReductionContext {
+            mode: base_mode,
+            demand,
+        },
+    )?;
     let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
@@ -1341,10 +1352,12 @@ pub(crate) fn project_expr_surface_expr_with_compound_objects_transit_shallow_vi
     // Published(Shallow) terminal walks the one-level Object
     // publication surface; member values stay as carrier shells per
     // the shallow-by-default rule.
-    let base = dispatch.lower_type_expr_in_scope_with_mode(
+    let base = dispatch.lower_type_expr_in_scope_with_context(
         scope_canonical_id,
         expr,
-        ProjectionMode::Navigate,
+        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+            ProjectionMode::Navigate,
+        ),
     )?;
     let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
         base,

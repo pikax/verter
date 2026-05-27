@@ -444,14 +444,17 @@ fn slot_param_root_is_symbolic_only(
             // Resolve the body via Skeleton-instantiation so unbound
             // type parameters become TypeParam shells (preserving
             // Conditional branches that would otherwise collapse to
-            // `never`).
+            // `never`). This predicate only inspects symbolic shape,
+            // so use StructuralTransit demand rather than publishing
+            // mapped/keyof members while walking the skeleton.
             use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
             let key = SemanticQueryKey::Instantiate {
                 base: base.clone(),
                 args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                context: crate::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Skeleton,
-                ),
+                context:
+                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                        ProjectionMode::Skeleton,
+                    ),
             };
             let read = dispatch.execute_read(key);
             // Dual-emit: legacy accumulator + fact-tracer fan-out.
@@ -597,10 +600,12 @@ pub(crate) fn resolve_slot_bindings_graph_native(
             ));
             break 'macro_loop;
         }
-        let type_args: Arc<[SemanticNodeId]> = match dispatch.lower_type_expr_in_scope_with_mode(
+        let type_args: Arc<[SemanticNodeId]> = match dispatch.lower_type_expr_in_scope_with_context(
             owner_canonical,
             parsed_arg,
-            ProjectionMode::Navigate,
+            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                ProjectionMode::Navigate,
+            ),
         ) {
             Some(node) => Arc::from(vec![node].into_boxed_slice()),
             None => continue,
