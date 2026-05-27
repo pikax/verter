@@ -168,6 +168,20 @@ pub struct HostConfig {
     /// The miner truncates at this count and sets
     /// `graph_completeness.has_orphan_edges = true`. Default: 10_000.
     pub max_derivation_edges: usize,
+    /// Per-category caps on the audit accumulator's unbounded `Vec`
+    /// lanes. Each cap bounds the `Vec::push` count at the
+    /// accumulator surface; once a cap is reached, subsequent push
+    /// attempts increment the matching counter on
+    /// [`verter_audit::TruncationCounters`] and the item is dropped.
+    ///
+    /// Only consulted when `audit_enabled = true && footprint_capture
+    /// = true`. The defaults are generous (typical requests are well
+    /// under every cap) but bounded so a pathological fixture cannot
+    /// drive the host process into OOM.
+    ///
+    /// Default: [`verter_audit::AuditCaps::default`] (all categories
+    /// fall back to their `DEFAULT_*` constants).
+    pub audit_caps: verter_audit::AuditCaps,
     /// Depth budget for path-projection / dispatch traversals
     /// (supplement §5.D.0 r17 + §0.6.5 stack-depth
     /// discipline). Tests construct constrained hosts to exercise
@@ -491,6 +505,7 @@ impl Default for HostConfig {
             footprint_capture: false,
             audit_timing_capture: false,
             max_derivation_edges: 10_000,
+            audit_caps: verter_audit::AuditCaps::default(),
             depth_budget: crate::component_meta_materialize::MAX_DEPTH,
             projection_op_budget: 2000,
             eviction_policy: EvictionPolicyConfig::default(),

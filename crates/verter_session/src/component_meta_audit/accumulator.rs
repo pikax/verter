@@ -23,6 +23,7 @@ use super::{
     SubstitutionRecord, VfsReadRecord,
 };
 use crate::semantic_query::{OriginEdge, OriginEdgeKind, SemanticNodeId};
+use verter_audit::{AuditCaps, TruncationCounters};
 
 /// Raw derivation-edge entry captured during a request. The miner
 /// canonicalises these into the final `DerivationSubgraph.edges` with
@@ -78,6 +79,13 @@ pub struct AccumulatorState {
     /// Raw derivation edges captured by the `record_origin_edge` hook
     /// before the miner canonicalises them.
     pub derivation_edges_raw: Vec<DerivationEdgeRaw>,
+    /// Per-category truncation counters. Each `push_*` method on
+    /// [`RequestFootprintAccumulator`] checks the matching cap on the
+    /// owning [`AuditCaps`]; once the cap is reached, the item is
+    /// dropped and the matching counter is incremented. The miner
+    /// surfaces this struct on
+    /// [`verter_audit::RequestFootprintAudit::truncation_counters`].
+    pub truncation_counters: TruncationCounters,
 }
 
 /// Per-file timing ledger entry — pushed by the session-side VFS sink
@@ -118,15 +126,39 @@ pub struct FileParseTiming {
 
 /// Request-scoped accumulator. Thin wrapper over the locked state so
 /// the push API is easy to call from any context that holds an `Arc`.
+///
+/// Each push method checks the matching cap on
+/// [`Self::caps`]; once a category's `Vec` reaches the resolved cap,
+/// subsequent pushes drop the item and increment the matching
+/// counter on `state.truncation_counters`. The caps protect against
+/// the unbounded-growth OOM observed on pathological fixtures.
 #[derive(Debug, Default)]
 pub struct RequestFootprintAccumulator {
     state: Mutex<AccumulatorState>,
+    caps: AuditCaps,
 }
 
 impl RequestFootprintAccumulator {
-    /// Construct an empty accumulator. One per audited request.
+    /// Construct an accumulator using the default
+    /// [`AuditCaps`] (every category capped at its `DEFAULT_*`
+    /// constant — 10_000 by default). One per audited request.
     pub fn new() -> Self {
-        Self::default()
+        Self::with_caps(AuditCaps::default())
+    }
+
+    /// Construct an accumulator with explicit caps. Production
+    /// callers pass `host.config.audit_caps.clone()`; tests pass a
+    /// custom [`AuditCaps`] to exercise the cap behaviour.
+    pub fn with_caps(caps: AuditCaps) -> Self {
+        Self {
+            state: Mutex::new(AccumulatorState::default()),
+            caps,
+        }
+    }
+
+    /// Borrow the caps this accumulator was constructed with.
+    pub fn caps(&self) -> &AuditCaps {
+        &self.caps
     }
 
     /// Drain the accumulator into a cloned state snapshot. Used by the
@@ -138,29 +170,64 @@ impl RequestFootprintAccumulator {
 
     /// Append a fresh-`IndexedReady` build record.
     pub fn push_indexed_ready_build(&self, record: IndexedReadyBuildRecord) {
-        self.state.lock().indexed_ready_builds.push(record);
+        let cap = self.caps.indexed_ready_builds();
+        let mut st = self.state.lock();
+        if st.indexed_ready_builds.len() >= cap {
+            st.truncation_counters.indexed_ready_builds_truncated += 1;
+            return;
+        }
+        st.indexed_ready_builds.push(record);
     }
 
     /// Append a VFS-read event (usually fanned out from the
     /// workspace's `VfsAuditSink`).
     pub fn push_vfs_read(&self, record: VfsReadRecord) {
-        self.state.lock().vfs_reads.push(record);
+        let cap = self.caps.vfs_reads();
+        let mut st = self.state.lock();
+        if st.vfs_reads.len() >= cap {
+            st.truncation_counters.vfs_reads_truncated += 1;
+            return;
+        }
+        st.vfs_reads.push(record);
     }
 
     /// Append a per-file timing ledger entry. Pushed by the session-side
     /// VFS sink alongside the `VfsReadRecord`. The `read_ns` field is
     /// `Some` only when the host's `audit_timing_capture` flag was on
     /// at event time.
+    ///
+    /// Bounded by the same `vfs_reads` cap as `push_vfs_read` — the
+    /// two lanes are pushed in lockstep, so they must truncate
+    /// together. Counter is `vfs_reads_truncated`.
     pub fn push_file_read_timing(&self, record: FileReadTiming) {
-        self.state.lock().file_read_timings.push(record);
+        let cap = self.caps.vfs_reads();
+        let mut st = self.state.lock();
+        if st.file_read_timings.len() >= cap {
+            // Do not double-count: the matching `push_vfs_read` call
+            // (same event) already incremented the counter. Drop
+            // silently here so the truncation count stays equal to
+            // the number of distinct dropped VFS events.
+            return;
+        }
+        st.file_read_timings.push(record);
     }
 
     /// Append a per-file parse/lower timing ledger entry. Pushed by
     /// the executor's source stage when timing capture is on. The
     /// caller is responsible for ensuring the entry corresponds to a
     /// build this request triggered (read-once invariant).
+    ///
+    /// Bounded by the `indexed_ready_builds` cap — the parse-timing
+    /// lane is keyed by canonical and only populated for builds the
+    /// request triggered. Drop silently above the cap so the counter
+    /// stays equal to distinct dropped builds.
     pub fn push_file_parse_timing(&self, record: FileParseTiming) {
-        self.state.lock().file_parse_timings.push(record);
+        let cap = self.caps.indexed_ready_builds();
+        let mut st = self.state.lock();
+        if st.file_parse_timings.len() >= cap {
+            return;
+        }
+        st.file_parse_timings.push(record);
     }
 
     /// Append a shared-load reuse record from the scheduler's
@@ -171,50 +238,95 @@ impl RequestFootprintAccumulator {
         winner_request_id: u64,
         winner_audited: bool,
     ) {
-        self.state
-            .lock()
-            .shared_load_reuses
-            .push(SharedLoadReuseRecord {
-                canonical_id,
-                winner_request_id,
-                winner_audited,
-            });
+        let cap = self.caps.shared_load_reuses();
+        let mut st = self.state.lock();
+        if st.shared_load_reuses.len() >= cap {
+            st.truncation_counters.shared_load_reuses_truncated += 1;
+            return;
+        }
+        st.shared_load_reuses.push(SharedLoadReuseRecord {
+            canonical_id,
+            winner_request_id,
+            winner_audited,
+        });
     }
 
     /// Append an instantiation step.
     pub fn push_instantiation(&self, record: InstantiationRecord) {
-        self.state.lock().instantiations.push(record);
+        let cap = self.caps.instantiations();
+        let mut st = self.state.lock();
+        if st.instantiations.len() >= cap {
+            st.truncation_counters.instantiations_truncated += 1;
+            return;
+        }
+        st.instantiations.push(record);
     }
 
     /// Append a projection step.
     pub fn push_projection(&self, record: ProjectionRecord) {
-        self.state.lock().projections.push(record);
+        let cap = self.caps.projections();
+        let mut st = self.state.lock();
+        if st.projections.len() >= cap {
+            st.truncation_counters.projections_truncated += 1;
+            return;
+        }
+        st.projections.push(record);
     }
 
     /// Append a conditional-branch decision.
     pub fn push_conditional(&self, record: ConditionalRecord) {
-        self.state.lock().conditional_decisions.push(record);
+        let cap = self.caps.conditional_decisions();
+        let mut st = self.state.lock();
+        if st.conditional_decisions.len() >= cap {
+            st.truncation_counters.conditional_decisions_truncated += 1;
+            return;
+        }
+        st.conditional_decisions.push(record);
     }
 
     /// Append a type-parameter substitution step.
     pub fn push_substitution(&self, record: SubstitutionRecord) {
-        self.state.lock().substitutions.push(record);
+        let cap = self.caps.substitutions();
+        let mut st = self.state.lock();
+        if st.substitutions.len() >= cap {
+            st.truncation_counters.substitutions_truncated += 1;
+            return;
+        }
+        st.substitutions.push(record);
     }
 
     /// Append an alias-resolve step.
     pub fn push_alias_resolution(&self, record: AliasResolveRecord) {
-        self.state.lock().alias_resolutions.push(record);
+        let cap = self.caps.alias_resolutions();
+        let mut st = self.state.lock();
+        if st.alias_resolutions.len() >= cap {
+            st.truncation_counters.alias_resolutions_truncated += 1;
+            return;
+        }
+        st.alias_resolutions.push(record);
     }
 
     /// Append a materialization envelope.
     pub fn push_materialization(&self, record: MaterializationRecord) {
-        self.state.lock().materializations.push(record);
+        let cap = self.caps.materializations();
+        let mut st = self.state.lock();
+        if st.materializations.len() >= cap {
+            st.truncation_counters.materializations_truncated += 1;
+            return;
+        }
+        st.materializations.push(record);
     }
 
     /// Append a structured event emitted by
     /// `component_meta_trace_structured!`.
     pub fn push_structured_event(&self, event: StructuredAuditEvent) {
-        self.state.lock().structured_events.push(event);
+        let cap = self.caps.structured_events();
+        let mut st = self.state.lock();
+        if st.structured_events.len() >= cap {
+            st.truncation_counters.structured_events_truncated += 1;
+            return;
+        }
+        st.structured_events.push(event);
     }
 
     /// Append a raw derivation edge captured by the
@@ -225,9 +337,13 @@ impl RequestFootprintAccumulator {
         kind: OriginEdgeKind,
         edge: OriginEdge,
     ) {
-        self.state
-            .lock()
-            .derivation_edges_raw
+        let cap = self.caps.derivation_edges();
+        let mut st = self.state.lock();
+        if st.derivation_edges_raw.len() >= cap {
+            st.truncation_counters.derivation_edges_raw_truncated += 1;
+            return;
+        }
+        st.derivation_edges_raw
             .push(DerivationEdgeRaw { result, kind, edge });
     }
 }

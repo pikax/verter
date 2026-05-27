@@ -353,6 +353,7 @@ impl VerterHost {
                             state,
                             &ctx,
                             self.config.max_derivation_edges,
+                            &self.config.audit_caps,
                         );
                         audit_builder.record_footprint(footprint);
                     }

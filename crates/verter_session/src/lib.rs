@@ -51,6 +51,8 @@
 
 pub mod app_config_proof_db;
 #[cfg(test)]
+mod audit_caps_truncation_tests;
+#[cfg(test)]
 mod audit_warm_cache_tests;
 pub mod audited_request;
 #[cfg(test)]

@@ -49,17 +49,22 @@ use crate::semantic_query::{
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use crate::types::Hash16;
+use verter_audit::AuditCaps;
 
 /// Mine a deterministic [`RequestFootprintAudit`] from the drained
 /// accumulator state, using `graph` for node-data lookups and `ctx` for
 /// per-context cache counters. `max_edges` caps the derivation subgraph
 /// — when truncation happens, the report's
-/// `has_orphan_edges` flag is set.
+/// `has_orphan_edges` flag is set. `caps` carries the
+/// post-canonicalisation node cap (the raw-push caps were already
+/// enforced at the accumulator surface — their counters arrived on
+/// `state.truncation_counters`).
 pub fn mine_footprint(
     graph: &SemanticGraphStore,
     state: AccumulatorState,
     ctx: &RequestContext,
     max_edges: usize,
+    caps: &AuditCaps,
 ) -> RequestFootprintAudit {
     // ── 1. Collect unique SemanticNodeIds touched by raw edges ──────
     let mut touched: Vec<SemanticNodeId> = Vec::new();
@@ -92,6 +97,19 @@ pub fn mine_footprint(
 
     // ── 3. Sort and assign NodeId = index ──────────────────────────
     nodes.sort_by(|a, b| node_sort_key(&a.1).cmp(&node_sort_key(&b.1)));
+    // Post-canonicalisation node cap. The raw-edge push surface
+    // already capped the upstream growth (via `caps.derivation_edges`
+    // at the accumulator); this is the corresponding cap on the
+    // post-canonicalisation node table. Distinct count is recorded
+    // into `truncation_counters.derivation_nodes_truncated`.
+    let nodes_cap = caps.derivation_nodes();
+    let nodes_truncated_count: u64 = if nodes.len() > nodes_cap {
+        let dropped = nodes.len() - nodes_cap;
+        nodes.truncate(nodes_cap);
+        dropped as u64
+    } else {
+        0
+    };
     let mut id_map: FxHashMap<SemanticNodeId, NodeId> =
         FxHashMap::with_capacity_and_hasher(nodes.len(), Default::default());
     let mut node_table: Vec<NodeRecord> = Vec::with_capacity(nodes.len());
@@ -292,6 +310,14 @@ pub fn mine_footprint(
             .load(Ordering::Relaxed) as u32,
     };
 
+    // Truncation counters: combine the accumulator-side counters
+    // (raw-push caps applied at `push_*` time) with the
+    // post-canonicalisation node cap applied above. The
+    // accumulator-side counters already record drops for every
+    // raw lane.
+    let mut truncation_counters = state.truncation_counters.clone();
+    truncation_counters.derivation_nodes_truncated += nodes_truncated_count;
+
     RequestFootprintAudit {
         indexed_ready_builds,
         vfs_reads: state.vfs_reads,
@@ -314,6 +340,7 @@ pub fn mine_footprint(
         },
         structured_events,
         resolver_hot_path,
+        truncation_counters,
     }
 }
 
@@ -790,7 +817,7 @@ mod tests {
         let graph = empty_graph();
         let ctx = make_ctx(1);
         let state = AccumulatorState::default();
-        let fp = mine_footprint(&graph, state, &ctx, 10_000);
+        let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
         assert_eq!(fp.derivation_subgraph.nodes.len(), 0);
         assert_eq!(fp.derivation_subgraph.edges.len(), 0);
         assert_eq!(fp.cache_outcomes.cold_builds, 0);
@@ -807,7 +834,13 @@ mod tests {
         ctx.sentinels.store(1, Ordering::Relaxed);
         ctx.inflight_aborted_retries.store(7, Ordering::Relaxed);
         ctx.cold_aborts_swept.store(11, Ordering::Relaxed);
-        let fp = mine_footprint(&graph, AccumulatorState::default(), &ctx, 10_000);
+        let fp = mine_footprint(
+            &graph,
+            AccumulatorState::default(),
+            &ctx,
+            10_000,
+            &AuditCaps::default(),
+        );
         assert_eq!(fp.cache_outcomes.cold_builds, 3);
         assert_eq!(fp.cache_outcomes.warm_hits, 5);
         assert_eq!(fp.cache_outcomes.joined_waits, 2);
@@ -829,7 +862,7 @@ mod tests {
                 OriginMeta::None,
             ));
         }
-        let fp = mine_footprint(&graph, state, &ctx, 5);
+        let fp = mine_footprint(&graph, state, &ctx, 5, &AuditCaps::default());
         assert_eq!(fp.derivation_subgraph.edges.len(), 5);
         assert!(fp.graph_completeness.has_orphan_edges);
         assert_eq!(fp.graph_completeness.edges_truncated, 5);
@@ -862,8 +895,8 @@ mod tests {
                 },
             ));
         }
-        let fp_a = mine_footprint(&graph, state_a, &ctx_a, 10_000);
-        let fp_b = mine_footprint(&graph, state_b, &ctx_b, 10_000);
+        let fp_a = mine_footprint(&graph, state_a, &ctx_a, 10_000, &AuditCaps::default());
+        let fp_b = mine_footprint(&graph, state_b, &ctx_b, 10_000, &AuditCaps::default());
         let bytes_a = serde_json::to_vec(&fp_a).expect("serialise a");
         let bytes_b = serde_json::to_vec(&fp_b).expect("serialise b");
         assert_eq!(
@@ -895,7 +928,7 @@ mod tests {
             CoreOriginEdgeKind::ConditionalSelect,
             OriginMeta::None,
         ));
-        let fp = mine_footprint(&graph, state, &ctx, 10_000);
+        let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
         let branches: Vec<ConditionalBranch> =
             fp.conditional_decisions.iter().map(|c| c.branch).collect();
         assert!(branches.contains(&ConditionalBranch::True));
@@ -916,7 +949,7 @@ mod tests {
                 OriginMeta::AliasName(Arc::from(format!("alias_{hop}"))),
             ));
         }
-        let fp = mine_footprint(&graph, state, &ctx, 10_000);
+        let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
         assert_eq!(fp.alias_resolutions.len(), 3);
         for rec in &fp.alias_resolutions {
             assert!(rec.alias_name.starts_with("alias_"));
@@ -939,7 +972,7 @@ mod tests {
             CoreOriginEdgeKind::ProjectPath,
             OriginMeta::Path(Arc::from(path)),
         ));
-        let fp = mine_footprint(&graph, state, &ctx, 10_000);
+        let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
         assert_eq!(fp.projections.len(), 1);
         let segs = &fp.projections[0].path;
         assert!(matches!(&segs[0], ProjectPathSegment::Member { name } if name.as_ref() == "a"));
@@ -964,7 +997,7 @@ mod tests {
                 canonical_id: Arc::from("/b.ts"),
                 whole_hash: [10u8; 16],
             });
-        let fp = mine_footprint(&graph, state, &ctx, 10_000);
+        let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
         assert_eq!(fp.indexed_ready_builds.len(), 2);
         assert_eq!(fp.indexed_ready_builds[0].canonical_id.as_ref(), "/a.ts");
         assert_eq!(fp.indexed_ready_builds[1].canonical_id.as_ref(), "/b.ts");
@@ -988,7 +1021,7 @@ mod tests {
             CoreOriginEdgeKind::AliasResolve,
             OriginMeta::AliasName(Arc::from("path_b")),
         ));
-        let fp = mine_footprint(&graph, state, &ctx, 10_000);
+        let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
         assert_eq!(fp.derivation_subgraph.edges.len(), 2);
         assert_eq!(
             fp.derivation_subgraph.edges[0].result, fp.derivation_subgraph.edges[1].result,

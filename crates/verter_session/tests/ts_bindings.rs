@@ -811,6 +811,18 @@ fn audit_generated_ts_uses_string_for_every_u64_field() {
             "SharedLoadReuseRecord | OriginEdgeMetaDto::SharedLoadReuse | StructuredAuditEvent::SharedLoadReuse",
         ),
         ("duration_ns", "StructuredAuditEvent::Dispatch/Materialize/CurrentEvalState"),
+        ("structured_events_truncated", "TruncationCounters"),
+        ("derivation_edges_raw_truncated", "TruncationCounters"),
+        ("derivation_nodes_truncated", "TruncationCounters"),
+        ("vfs_reads_truncated", "TruncationCounters"),
+        ("indexed_ready_builds_truncated", "TruncationCounters"),
+        ("materializations_truncated", "TruncationCounters"),
+        ("instantiations_truncated", "TruncationCounters"),
+        ("substitutions_truncated", "TruncationCounters"),
+        ("projections_truncated", "TruncationCounters"),
+        ("conditional_decisions_truncated", "TruncationCounters"),
+        ("alias_resolutions_truncated", "TruncationCounters"),
+        ("shared_load_reuses_truncated", "TruncationCounters"),
     ];
 
     for (name, location) in u64_fields {

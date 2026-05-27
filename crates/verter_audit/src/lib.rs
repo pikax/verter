@@ -69,13 +69,13 @@ pub mod waits;
 // for everything else.
 
 pub use batch::{AuditRecordSource, BatchAuditAggregator, SLOWEST_RECORD_LIMIT};
-pub use config::{AuditConfig, AuditConsumerFilter};
+pub use config::{AuditCaps, AuditConfig, AuditConsumerFilter};
 pub use files::{FileAudit, FileRole};
 pub use footprint::{
     AliasResolveRecord, CacheOutcomeTally, ConditionalRecord, GraphCompletenessReport,
     IndexedReadyBuildRecord, InstantiationRecord, MaterializationRecord, ProjectionRecord,
     RequestFootprintAudit, ResolverHotPathCounters, SharedLoadReuseRecord, SubstitutionRecord,
-    VfsReadRecord,
+    TruncationCounters, VfsReadRecord,
 };
 pub use memory::{current_process_rss, RequestMemoryAudit};
 pub use noop::{install_noop_observer, NoOpObserver, NoOpObserverGuard};

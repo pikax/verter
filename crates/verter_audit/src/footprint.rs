@@ -68,6 +68,17 @@ pub struct RequestFootprintAudit {
     /// before this field landed.
     #[serde(default)]
     pub resolver_hot_path: ResolverHotPathCounters,
+    /// Per-category truncation counters for the audit's unbounded
+    /// `Vec` lanes. Non-zero values indicate the accumulator dropped
+    /// at least that many items after the configured
+    /// [`crate::AuditCaps`] limit was reached for that category. The
+    /// surfaced records are a prefix of the true request footprint
+    /// when any counter is non-zero.
+    ///
+    /// Serde-default for back-compat with audit payloads written
+    /// before this field landed.
+    #[serde(default)]
+    pub truncation_counters: TruncationCounters,
 }
 
 impl RequestFootprintAudit {
@@ -296,6 +307,97 @@ pub struct GraphCompletenessReport {
     pub has_orphan_edges: bool,
     /// Count of edges dropped during truncation.
     pub edges_truncated: u32,
+}
+
+/// Per-category truncation counters for the unbounded `Vec` lanes on
+/// [`RequestFootprintAudit`]. The accumulator caps each lane at the
+/// configured [`crate::AuditCaps`] limit; once a cap is reached,
+/// subsequent push attempts increment the matching counter and the
+/// item is dropped.
+///
+/// Pathological fixtures (e.g. very large component trees) saw
+/// unbounded growth on the lanes pre-cap — ChatMessages.vue produced
+/// an 8.4 GB audit JSON before truncation. The caps keep the payload
+/// bounded for any consumer (LSP host, MCP host, batch aggregator)
+/// running with `audit_enabled = true`. Audit consumers that observe
+/// non-zero counters here know the surfaced records are a prefix of
+/// the true request footprint.
+///
+/// All fields are zero by default. A non-zero value means at least
+/// that many additional items would have been pushed; the payload
+/// surfaces the first `cap` items in order.
+///
+/// Every `u64` field is transported as a decimal string via
+/// [`u64_as_decimal_string`] / `#[ts(type = "string")]` to satisfy
+/// the audit schema's wide-int transport guard (Plan §3.B Commit 7.A).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "audit.generated.ts")]
+pub struct TruncationCounters {
+    /// Number of structured events dropped after the
+    /// `structured_events` cap was reached.
+    #[serde(with = "u64_as_decimal_string")]
+    #[ts(type = "string")]
+    pub structured_events_truncated: u64,
+    /// Number of raw derivation edges dropped at the accumulator
+    /// before the miner's canonicalisation pass. Distinct from
+    /// `GraphCompletenessReport::edges_truncated`, which counts
+    /// post-canonicalisation truncation against the miner's
+    /// `max_derivation_edges` cap.
+    #[serde(with = "u64_as_decimal_string")]
+    #[ts(type = "string")]
+    pub derivation_edges_raw_truncated: u64,
+    /// Number of derivation-subgraph nodes dropped post-mining when
+    /// the canonicalised node count exceeded the
+    /// `derivation_nodes` cap.
+    #[serde(with = "u64_as_decimal_string")]
+    #[ts(type = "string")]
+    pub derivation_nodes_truncated: u64,
+    /// Number of VFS-read records dropped after the `vfs_reads` cap
+    /// was reached.
+    #[serde(with = "u64_as_decimal_string")]
+    #[ts(type = "string")]
+    pub vfs_reads_truncated: u64,
+    /// Number of `IndexedReady` build records dropped after the
+    /// `indexed_ready_builds` cap was reached (the "files" lane in
+    /// the OOM analysis).
+    #[serde(with = "u64_as_decimal_string")]
+    #[ts(type = "string")]
+    pub indexed_ready_builds_truncated: u64,
+    /// Number of materialization envelopes dropped after the
+    /// `materializations` cap was reached.
+    #[serde(with = "u64_as_decimal_string")]
+    #[ts(type = "string")]
+    pub materializations_truncated: u64,
+    /// Number of instantiation records dropped after the
+    /// `instantiations` cap was reached.
+    #[serde(with = "u64_as_decimal_string")]
+    #[ts(type = "string")]
+    pub instantiations_truncated: u64,
+    /// Number of substitution records dropped after the
+    /// `substitutions` cap was reached.
+    #[serde(with = "u64_as_decimal_string")]
+    #[ts(type = "string")]
+    pub substitutions_truncated: u64,
+    /// Number of projection records dropped after the
+    /// `projections` cap was reached.
+    #[serde(with = "u64_as_decimal_string")]
+    #[ts(type = "string")]
+    pub projections_truncated: u64,
+    /// Number of conditional-branch decisions dropped after the
+    /// `conditional_decisions` cap was reached.
+    #[serde(with = "u64_as_decimal_string")]
+    #[ts(type = "string")]
+    pub conditional_decisions_truncated: u64,
+    /// Number of alias-resolve hops dropped after the
+    /// `alias_resolutions` cap was reached.
+    #[serde(with = "u64_as_decimal_string")]
+    #[ts(type = "string")]
+    pub alias_resolutions_truncated: u64,
+    /// Number of shared-load reuse records dropped after the
+    /// `shared_load_reuses` cap was reached.
+    #[serde(with = "u64_as_decimal_string")]
+    #[ts(type = "string")]
+    pub shared_load_reuses_truncated: u64,
 }
 
 /// Per-request resolver / import-route hot-path counters. Populated
