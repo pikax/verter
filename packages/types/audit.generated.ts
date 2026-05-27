@@ -1845,7 +1845,99 @@ prepared_decl_bundle_reject_import_route_mismatch: number,
  * non-zero count means the bundle is admitting fact variants the
  * per-rejection attribution does not yet cover.
  */
-prepared_decl_bundle_reject_other: number, };
+prepared_decl_bundle_reject_other: number, 
+/**
+ * Cold dispatches of `SemanticQueryKey::TypeOf`.
+ */
+semantic_query_typeof_cold: number, 
+/**
+ * Warm dispatches of `SemanticQueryKey::TypeOf`.
+ */
+semantic_query_typeof_warm: number, 
+/**
+ * Cold dispatches of `SemanticQueryKey::Instantiate`.
+ */
+semantic_query_instantiate_cold: number, 
+/**
+ * Warm dispatches of `SemanticQueryKey::Instantiate`.
+ */
+semantic_query_instantiate_warm: number, 
+/**
+ * Cold dispatches of `SemanticQueryKey::Conditional`.
+ */
+semantic_query_conditional_cold: number, 
+/**
+ * Warm dispatches of `SemanticQueryKey::Conditional`.
+ */
+semantic_query_conditional_warm: number, 
+/**
+ * Cold dispatches of `SemanticQueryKey::MappedType`.
+ */
+semantic_query_mapped_type_cold: number, 
+/**
+ * Warm dispatches of `SemanticQueryKey::MappedType`.
+ */
+semantic_query_mapped_type_warm: number, 
+/**
+ * Cold dispatches of `SemanticQueryKey::IndexedAccess`.
+ */
+semantic_query_indexed_access_cold: number, 
+/**
+ * Warm dispatches of `SemanticQueryKey::IndexedAccess`.
+ */
+semantic_query_indexed_access_warm: number, 
+/**
+ * Cold dispatches of `SemanticQueryKey::KeyOf`.
+ */
+semantic_query_keyof_cold: number, 
+/**
+ * Warm dispatches of `SemanticQueryKey::KeyOf`.
+ */
+semantic_query_keyof_warm: number, 
+/**
+ * Cold dispatches of `SemanticQueryKey::ProjectPath` /
+ * `ProjectMember`.
+ */
+semantic_query_project_path_cold: number, 
+/**
+ * Warm dispatches of `SemanticQueryKey::ProjectPath` /
+ * `ProjectMember`.
+ */
+semantic_query_project_path_warm: number, 
+/**
+ * Top-level
+ * `ProjectSemanticDispatch::substitute_semantic_type_param`
+ * calls.
+ */
+substitute_top_level_calls: number, 
+/**
+ * Hits on the `substitute_memo_get` fast path.
+ */
+substitute_memo_hits: number, 
+/**
+ * `substitute_with_change_tracking` returns from the `TypeOf`
+ * opaque-return arm (codex-prescribed).
+ */
+substitute_typeof_opaque: number, 
+/**
+ * `substitute_with_change_tracking` descents into the
+ * `Conditional` arm (codex-prescribed).
+ */
+substitute_conditional_descend: number, 
+/**
+ * `substitute_with_change_tracking` descents into the `MappedType`
+ * arm (codex-prescribed).
+ */
+substitute_mapped_type_descend: number, 
+/**
+ * Calls to `build_typeof` (gemini's HIGH-confidence direction).
+ */
+build_typeof_calls: number, 
+/**
+ * `build_typeof` calls where `ensure_indexed_ready` returned
+ * `None` (the brief's prepared-value miss site).
+ */
+build_typeof_prepared_value_misses: number, };
 
 /**
  * Scheduler-side attribution captured at first dispatch of an audited

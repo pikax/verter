@@ -163,6 +163,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         value_root: &ValueRootKey,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        // Phase C: telemetry for the typeof traversal site (gemini's
+        // HIGH-confidence direction; brief site `build.rs:162`).
+        if let Some(observer) = verter_audit::current_observer() {
+            observer.record_event(verter_audit::AuditEvent::BuildTypeofCall);
+        }
         // Self-version rooting: observe the value-root scope
         // canonical.s `IndexedReady` ONCE through the overlay-aware
         // `ensure_indexed_ready` accessor. The single observed
@@ -176,7 +181,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .ensure_indexed_ready(value_root.scope.canonical_id.as_ref())
         {
             Some(indexed) => indexed,
-            None => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
+            None => {
+                // Phase C: prepared-value miss site.
+                if let Some(observer) = verter_audit::current_observer() {
+                    observer.record_event(verter_audit::AuditEvent::BuildTypeofPreparedValueMiss);
+                }
+                return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
+            }
         };
         let shallow = &indexed.shallow_state;
         let observed_hash = indexed.whole_hash;

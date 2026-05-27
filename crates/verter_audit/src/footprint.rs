@@ -499,4 +499,59 @@ pub struct ResolverHotPathCounters {
     /// non-zero count means the bundle is admitting fact variants the
     /// per-rejection attribution does not yet cover.
     pub prepared_decl_bundle_reject_other: u32,
+    // Phase C focused semantic-query counters --------------------------
+    // Attribute `ProjectSemanticDispatch::execute` calls by
+    // `SemanticQueryKey` variant + cold-vs-warm to localise pathological
+    // cost (ChatMessages.vue's >30s timeout). Producers in
+    // `verter_session::project_semantic_dispatch`.
+    /// Cold dispatches of `SemanticQueryKey::TypeOf`.
+    pub semantic_query_typeof_cold: u32,
+    /// Warm dispatches of `SemanticQueryKey::TypeOf`.
+    pub semantic_query_typeof_warm: u32,
+    /// Cold dispatches of `SemanticQueryKey::Instantiate`.
+    pub semantic_query_instantiate_cold: u32,
+    /// Warm dispatches of `SemanticQueryKey::Instantiate`.
+    pub semantic_query_instantiate_warm: u32,
+    /// Cold dispatches of `SemanticQueryKey::Conditional`.
+    pub semantic_query_conditional_cold: u32,
+    /// Warm dispatches of `SemanticQueryKey::Conditional`.
+    pub semantic_query_conditional_warm: u32,
+    /// Cold dispatches of `SemanticQueryKey::MappedType`.
+    pub semantic_query_mapped_type_cold: u32,
+    /// Warm dispatches of `SemanticQueryKey::MappedType`.
+    pub semantic_query_mapped_type_warm: u32,
+    /// Cold dispatches of `SemanticQueryKey::IndexedAccess`.
+    pub semantic_query_indexed_access_cold: u32,
+    /// Warm dispatches of `SemanticQueryKey::IndexedAccess`.
+    pub semantic_query_indexed_access_warm: u32,
+    /// Cold dispatches of `SemanticQueryKey::KeyOf`.
+    pub semantic_query_keyof_cold: u32,
+    /// Warm dispatches of `SemanticQueryKey::KeyOf`.
+    pub semantic_query_keyof_warm: u32,
+    /// Cold dispatches of `SemanticQueryKey::ProjectPath` /
+    /// `ProjectMember`.
+    pub semantic_query_project_path_cold: u32,
+    /// Warm dispatches of `SemanticQueryKey::ProjectPath` /
+    /// `ProjectMember`.
+    pub semantic_query_project_path_warm: u32,
+    /// Top-level
+    /// `ProjectSemanticDispatch::substitute_semantic_type_param`
+    /// calls.
+    pub substitute_top_level_calls: u32,
+    /// Hits on the `substitute_memo_get` fast path.
+    pub substitute_memo_hits: u32,
+    /// `substitute_with_change_tracking` returns from the `TypeOf`
+    /// opaque-return arm (codex-prescribed).
+    pub substitute_typeof_opaque: u32,
+    /// `substitute_with_change_tracking` descents into the
+    /// `Conditional` arm (codex-prescribed).
+    pub substitute_conditional_descend: u32,
+    /// `substitute_with_change_tracking` descents into the `MappedType`
+    /// arm (codex-prescribed).
+    pub substitute_mapped_type_descend: u32,
+    /// Calls to `build_typeof` (gemini's HIGH-confidence direction).
+    pub build_typeof_calls: u32,
+    /// `build_typeof` calls where `ensure_indexed_ready` returned
+    /// `None` (the brief's prepared-value miss site).
+    pub build_typeof_prepared_value_misses: u32,
 }

@@ -774,9 +774,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // On `Overflow` the build is marked `cache_suppress = true` so
         // the memo refuses to admit the entry — caller cold-recomputes
         // on the next request.
+        // Phase C telemetry: detect whether the cold-build closure
+        // actually ran so the per-kind cold/warm counters reflect what
+        // happened inside `execute_cooperative` (warm hits short-
+        // circuit before `traced_build` fires).
+        let cold_build_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cold_build_ran_for_closure = Arc::clone(&cold_build_ran);
         let host = self.ctx.host_for_fact_tracer_install();
         let provenance = Arc::clone(&host.provenance);
         let traced_build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+            cold_build_ran_for_closure.store(true, std::sync::atomic::Ordering::Relaxed);
             let (output, finalise) =
                 crate::fact_signature_helpers::install_fact_tracer(host, || {
                     // Test-only fact-injection hook. When the
@@ -792,6 +799,76 @@ impl<'a> ProjectSemanticDispatch<'a> {
             finalise_traced_build_output(output, finalise, &provenance)
         };
         let cache_read = graph.execute_cooperative(self.ctx, key.clone(), sentinel, traced_build);
+        // Phase C: attribute the dispatch by `SemanticQueryKey` kind +
+        // cold/warm. Cold = the `traced_build` closure ran. Warm = the
+        // memo short-circuited before the closure fired.
+        let is_cold = cold_build_ran.load(std::sync::atomic::Ordering::Relaxed);
+        if let Some(observer) = verter_audit::current_observer() {
+            use verter_audit::AuditEvent;
+            let event = match &key {
+                SemanticQueryKey::TypeOf { .. } => {
+                    if is_cold {
+                        Some(AuditEvent::SemanticQueryTypeOfCold)
+                    } else {
+                        Some(AuditEvent::SemanticQueryTypeOfWarm)
+                    }
+                }
+                SemanticQueryKey::Instantiate { .. } => {
+                    if is_cold {
+                        Some(AuditEvent::SemanticQueryInstantiateCold)
+                    } else {
+                        Some(AuditEvent::SemanticQueryInstantiateWarm)
+                    }
+                }
+                SemanticQueryKey::Conditional { .. } => {
+                    if is_cold {
+                        Some(AuditEvent::SemanticQueryConditionalCold)
+                    } else {
+                        Some(AuditEvent::SemanticQueryConditionalWarm)
+                    }
+                }
+                SemanticQueryKey::MappedType { .. } => {
+                    if is_cold {
+                        Some(AuditEvent::SemanticQueryMappedTypeCold)
+                    } else {
+                        Some(AuditEvent::SemanticQueryMappedTypeWarm)
+                    }
+                }
+                // Post-admission-time `IndexedAccess` is rewritten to
+                // `ProjectPath` BEFORE the memo sees it, so live keys
+                // are always `ProjectPath`. The arm stays for
+                // exhaustiveness should the canonicalisation ever
+                // shift.
+                SemanticQueryKey::IndexedAccess { .. } => {
+                    if is_cold {
+                        Some(AuditEvent::SemanticQueryIndexedAccessCold)
+                    } else {
+                        Some(AuditEvent::SemanticQueryIndexedAccessWarm)
+                    }
+                }
+                SemanticQueryKey::KeyOf { .. } => {
+                    if is_cold {
+                        Some(AuditEvent::SemanticQueryKeyOfCold)
+                    } else {
+                        Some(AuditEvent::SemanticQueryKeyOfWarm)
+                    }
+                }
+                SemanticQueryKey::ProjectPath { .. } | SemanticQueryKey::ProjectMember { .. } => {
+                    if is_cold {
+                        Some(AuditEvent::SemanticQueryProjectPathCold)
+                    } else {
+                        Some(AuditEvent::SemanticQueryProjectPathWarm)
+                    }
+                }
+                // ResolveDecl, NormalizeUnion, NormalizeIntersection,
+                // ResolvedNamedType, Relate, ResolveMacroPayload —
+                // not in Phase C's focused counter set.
+                _ => None,
+            };
+            if let Some(event) = event {
+                observer.record_event(event);
+            }
+        }
         tracing::debug!(
             target: "verter::dispatch::execute_via_helper",
             ?key,

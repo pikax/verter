@@ -308,6 +308,45 @@ pub fn mine_footprint(
         prepared_decl_bundle_reject_other: ctx
             .prepared_decl_bundle_reject_other
             .load(Ordering::Relaxed) as u32,
+        semantic_query_typeof_cold: ctx.semantic_query_typeof_cold.load(Ordering::Relaxed) as u32,
+        semantic_query_typeof_warm: ctx.semantic_query_typeof_warm.load(Ordering::Relaxed) as u32,
+        semantic_query_instantiate_cold: ctx.semantic_query_instantiate_cold.load(Ordering::Relaxed)
+            as u32,
+        semantic_query_instantiate_warm: ctx.semantic_query_instantiate_warm.load(Ordering::Relaxed)
+            as u32,
+        semantic_query_conditional_cold: ctx.semantic_query_conditional_cold.load(Ordering::Relaxed)
+            as u32,
+        semantic_query_conditional_warm: ctx.semantic_query_conditional_warm.load(Ordering::Relaxed)
+            as u32,
+        semantic_query_mapped_type_cold: ctx.semantic_query_mapped_type_cold.load(Ordering::Relaxed)
+            as u32,
+        semantic_query_mapped_type_warm: ctx.semantic_query_mapped_type_warm.load(Ordering::Relaxed)
+            as u32,
+        semantic_query_indexed_access_cold: ctx
+            .semantic_query_indexed_access_cold
+            .load(Ordering::Relaxed) as u32,
+        semantic_query_indexed_access_warm: ctx
+            .semantic_query_indexed_access_warm
+            .load(Ordering::Relaxed) as u32,
+        semantic_query_keyof_cold: ctx.semantic_query_keyof_cold.load(Ordering::Relaxed) as u32,
+        semantic_query_keyof_warm: ctx.semantic_query_keyof_warm.load(Ordering::Relaxed) as u32,
+        semantic_query_project_path_cold: ctx
+            .semantic_query_project_path_cold
+            .load(Ordering::Relaxed) as u32,
+        semantic_query_project_path_warm: ctx
+            .semantic_query_project_path_warm
+            .load(Ordering::Relaxed) as u32,
+        substitute_top_level_calls: ctx.substitute_top_level_calls.load(Ordering::Relaxed) as u32,
+        substitute_memo_hits: ctx.substitute_memo_hits.load(Ordering::Relaxed) as u32,
+        substitute_typeof_opaque: ctx.substitute_typeof_opaque.load(Ordering::Relaxed) as u32,
+        substitute_conditional_descend: ctx.substitute_conditional_descend.load(Ordering::Relaxed)
+            as u32,
+        substitute_mapped_type_descend: ctx.substitute_mapped_type_descend.load(Ordering::Relaxed)
+            as u32,
+        build_typeof_calls: ctx.build_typeof_calls.load(Ordering::Relaxed) as u32,
+        build_typeof_prepared_value_misses: ctx
+            .build_typeof_prepared_value_misses
+            .load(Ordering::Relaxed) as u32,
     };
 
     // Truncation counters: combine the accumulator-side counters

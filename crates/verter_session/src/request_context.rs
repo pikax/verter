@@ -631,6 +631,58 @@ pub struct RequestContext {
     pub prepared_decl_bundle_reject_import_route_mismatch: AtomicU64,
     /// Bundle warm-read rejection — unattributed (must stay 0).
     pub prepared_decl_bundle_reject_other: AtomicU64,
+    // Phase C focused semantic-query counters ---------------------------
+    // Each is per-request, bumped from `ProjectSemanticDispatch`. The
+    // mining surface in `ResolverHotPathCounters` carries the `u32`
+    // snapshot.
+    /// Cold dispatches of `SemanticQueryKey::TypeOf`.
+    pub semantic_query_typeof_cold: AtomicU64,
+    /// Warm dispatches of `SemanticQueryKey::TypeOf`.
+    pub semantic_query_typeof_warm: AtomicU64,
+    /// Cold dispatches of `SemanticQueryKey::Instantiate`.
+    pub semantic_query_instantiate_cold: AtomicU64,
+    /// Warm dispatches of `SemanticQueryKey::Instantiate`.
+    pub semantic_query_instantiate_warm: AtomicU64,
+    /// Cold dispatches of `SemanticQueryKey::Conditional`.
+    pub semantic_query_conditional_cold: AtomicU64,
+    /// Warm dispatches of `SemanticQueryKey::Conditional`.
+    pub semantic_query_conditional_warm: AtomicU64,
+    /// Cold dispatches of `SemanticQueryKey::MappedType`.
+    pub semantic_query_mapped_type_cold: AtomicU64,
+    /// Warm dispatches of `SemanticQueryKey::MappedType`.
+    pub semantic_query_mapped_type_warm: AtomicU64,
+    /// Cold dispatches of `SemanticQueryKey::IndexedAccess`.
+    pub semantic_query_indexed_access_cold: AtomicU64,
+    /// Warm dispatches of `SemanticQueryKey::IndexedAccess`.
+    pub semantic_query_indexed_access_warm: AtomicU64,
+    /// Cold dispatches of `SemanticQueryKey::KeyOf`.
+    pub semantic_query_keyof_cold: AtomicU64,
+    /// Warm dispatches of `SemanticQueryKey::KeyOf`.
+    pub semantic_query_keyof_warm: AtomicU64,
+    /// Cold dispatches of `SemanticQueryKey::ProjectPath` /
+    /// `ProjectMember`.
+    pub semantic_query_project_path_cold: AtomicU64,
+    /// Warm dispatches of `SemanticQueryKey::ProjectPath` /
+    /// `ProjectMember`.
+    pub semantic_query_project_path_warm: AtomicU64,
+    /// Top-level `substitute_semantic_type_param` calls.
+    pub substitute_top_level_calls: AtomicU64,
+    /// Hits on the `substitute_memo_get` fast path.
+    pub substitute_memo_hits: AtomicU64,
+    /// `TypeOf` opaque returns from
+    /// `substitute_with_change_tracking`.
+    pub substitute_typeof_opaque: AtomicU64,
+    /// `Conditional` descents in
+    /// `substitute_with_change_tracking`.
+    pub substitute_conditional_descend: AtomicU64,
+    /// `MappedType` descents in
+    /// `substitute_with_change_tracking`.
+    pub substitute_mapped_type_descend: AtomicU64,
+    /// Calls to `build_typeof`.
+    pub build_typeof_calls: AtomicU64,
+    /// `build_typeof` calls where `ensure_indexed_ready` returned
+    /// `None`.
+    pub build_typeof_prepared_value_misses: AtomicU64,
 }
 
 impl RequestContext {
@@ -775,6 +827,27 @@ impl RequestContext {
             prepared_decl_bundle_reject_import_route_absent: AtomicU64::new(0),
             prepared_decl_bundle_reject_import_route_mismatch: AtomicU64::new(0),
             prepared_decl_bundle_reject_other: AtomicU64::new(0),
+            semantic_query_typeof_cold: AtomicU64::new(0),
+            semantic_query_typeof_warm: AtomicU64::new(0),
+            semantic_query_instantiate_cold: AtomicU64::new(0),
+            semantic_query_instantiate_warm: AtomicU64::new(0),
+            semantic_query_conditional_cold: AtomicU64::new(0),
+            semantic_query_conditional_warm: AtomicU64::new(0),
+            semantic_query_mapped_type_cold: AtomicU64::new(0),
+            semantic_query_mapped_type_warm: AtomicU64::new(0),
+            semantic_query_indexed_access_cold: AtomicU64::new(0),
+            semantic_query_indexed_access_warm: AtomicU64::new(0),
+            semantic_query_keyof_cold: AtomicU64::new(0),
+            semantic_query_keyof_warm: AtomicU64::new(0),
+            semantic_query_project_path_cold: AtomicU64::new(0),
+            semantic_query_project_path_warm: AtomicU64::new(0),
+            substitute_top_level_calls: AtomicU64::new(0),
+            substitute_memo_hits: AtomicU64::new(0),
+            substitute_typeof_opaque: AtomicU64::new(0),
+            substitute_conditional_descend: AtomicU64::new(0),
+            substitute_mapped_type_descend: AtomicU64::new(0),
+            build_typeof_calls: AtomicU64::new(0),
+            build_typeof_prepared_value_misses: AtomicU64::new(0),
         })
     }
 
@@ -1051,6 +1124,88 @@ impl verter_audit::AuditObserver for RequestContext {
             }
             verter_audit::AuditEvent::PreparedDeclBundleRejectOther => {
                 self.prepared_decl_bundle_reject_other
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::SemanticQueryTypeOfCold => {
+                self.semantic_query_typeof_cold
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::SemanticQueryTypeOfWarm => {
+                self.semantic_query_typeof_warm
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::SemanticQueryInstantiateCold => {
+                self.semantic_query_instantiate_cold
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::SemanticQueryInstantiateWarm => {
+                self.semantic_query_instantiate_warm
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::SemanticQueryConditionalCold => {
+                self.semantic_query_conditional_cold
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::SemanticQueryConditionalWarm => {
+                self.semantic_query_conditional_warm
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::SemanticQueryMappedTypeCold => {
+                self.semantic_query_mapped_type_cold
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::SemanticQueryMappedTypeWarm => {
+                self.semantic_query_mapped_type_warm
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::SemanticQueryIndexedAccessCold => {
+                self.semantic_query_indexed_access_cold
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::SemanticQueryIndexedAccessWarm => {
+                self.semantic_query_indexed_access_warm
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::SemanticQueryKeyOfCold => {
+                self.semantic_query_keyof_cold
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::SemanticQueryKeyOfWarm => {
+                self.semantic_query_keyof_warm
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::SemanticQueryProjectPathCold => {
+                self.semantic_query_project_path_cold
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::SemanticQueryProjectPathWarm => {
+                self.semantic_query_project_path_warm
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::SubstituteTopLevelCall => {
+                self.substitute_top_level_calls
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::SubstituteMemoHit => {
+                self.substitute_memo_hits.fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::SubstituteTypeOfOpaque => {
+                self.substitute_typeof_opaque
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::SubstituteConditionalDescend => {
+                self.substitute_conditional_descend
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::SubstituteMappedTypeDescend => {
+                self.substitute_mapped_type_descend
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::BuildTypeofCall => {
+                self.build_typeof_calls.fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::BuildTypeofPreparedValueMiss => {
+                self.build_typeof_prepared_value_misses
                     .fetch_add(1, Ordering::Relaxed);
             }
         }

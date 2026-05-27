@@ -41,6 +41,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         parameter_node: SemanticNodeId,
         arg: SemanticNodeId,
     ) -> SemanticNodeId {
+        // Phase C: top-level substitute-call telemetry. Bumped at the
+        // entry of `substitute_semantic_type_param` (the public
+        // surface), so the snapshot reflects the number of distinct
+        // top-level substitutions issued for this request — NOT the
+        // recursive `substitute_with_change_tracking` walks. Paired
+        // with `SubstituteMemoHit` (next line) to expose the
+        // hit-rate of the hash-cons memo.
+        if let Some(observer) = verter_audit::current_observer() {
+            observer.record_event(verter_audit::AuditEvent::SubstituteTopLevelCall);
+        }
         // Hash-cons memo. The store-owned `substitute_memo` collapses
         // identical `(value_expr, parameter_node, arg)` triples that
         // reach this entry-point from different call paths (per-K
@@ -53,6 +63,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // is a pure function of its three inputs, so the cache needs
         // no fact-signature validation.
         if let Some(cached) = self.graph().substitute_memo_get(node, parameter_node, arg) {
+            if let Some(observer) = verter_audit::current_observer() {
+                observer.record_event(verter_audit::AuditEvent::SubstituteMemoHit);
+            }
             return cached;
         }
         // Change-tracking through recursion. The internal helper
@@ -393,6 +406,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             }
             SemanticNodeData::Mapped { source, mapper } => {
+                // Phase C: codex-prescribed "mapped descents" counter.
+                if let Some(observer) = verter_audit::current_observer() {
+                    observer.record_event(verter_audit::AuditEvent::SubstituteMappedTypeDescend);
+                }
                 // Shadowing check by node-id equality. Both
                 // `mapper.parameter` and `parameter` are
                 // `SemanticNodeId`s, so the comparison is direct
@@ -454,6 +471,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // never descends into it, so the input node id is returned
                 // unchanged with `changed = false` — the caller skips the
                 // rebuild + re-intern entirely.
+                //
+                // Phase C: codex-prescribed "opaque TypeOf returns"
+                // counter (brief site `substitute.rs:452`).
+                if let Some(observer) = verter_audit::current_observer() {
+                    observer.record_event(verter_audit::AuditEvent::SubstituteTypeOfOpaque);
+                }
                 (node, false)
             }
             SemanticNodeData::Conditional {
@@ -463,6 +486,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 false_branch_ref,
                 distributive,
             } => {
+                // Phase C: codex-prescribed "conditional descents"
+                // counter — every visit of the Conditional arm
+                // descends into its four sub-trees, regardless of
+                // whether the rebuild ultimately fires.
+                if let Some(observer) = verter_audit::current_observer() {
+                    observer.record_event(verter_audit::AuditEvent::SubstituteConditionalDescend);
+                }
                 let (sub_check, cc) =
                     self.substitute_with_change_tracking(*check, parameter_node, arg);
                 let (sub_extends, ec) =

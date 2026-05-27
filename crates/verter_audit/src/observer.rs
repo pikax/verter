@@ -149,6 +149,82 @@ pub enum AuditEvent {
     /// fact variants the per-rejection attribution does not yet cover
     /// and the diagnosis is incomplete.
     PreparedDeclBundleRejectOther,
+    /// Phase C focused semantic-query counters
+    /// ----------------------------------------
+    /// These attribute each `ProjectSemanticDispatch::execute` call by
+    /// `SemanticQueryKey` variant + cold-vs-warm so a Phase C
+    /// investigator can attribute pathological-fixture cost (e.g.
+    /// ChatMessages.vue's >30s timeout) to a specific query kind.
+    /// Cold = the cold-build closure ran. Warm = the cache served the
+    /// result without running the closure. Bumped at the
+    /// `execute_cooperative` dispatch in
+    /// `ProjectSemanticDispatch::execute_via_cold_build_helper`.
+    /// One cold dispatch of a `SemanticQueryKey::TypeOf` query.
+    SemanticQueryTypeOfCold,
+    /// One warm dispatch of a `SemanticQueryKey::TypeOf` query.
+    SemanticQueryTypeOfWarm,
+    /// One cold dispatch of a `SemanticQueryKey::Instantiate` query.
+    SemanticQueryInstantiateCold,
+    /// One warm dispatch of a `SemanticQueryKey::Instantiate` query.
+    SemanticQueryInstantiateWarm,
+    /// One cold dispatch of a `SemanticQueryKey::Conditional` query.
+    SemanticQueryConditionalCold,
+    /// One warm dispatch of a `SemanticQueryKey::Conditional` query.
+    SemanticQueryConditionalWarm,
+    /// One cold dispatch of a `SemanticQueryKey::MappedType` query.
+    SemanticQueryMappedTypeCold,
+    /// One warm dispatch of a `SemanticQueryKey::MappedType` query.
+    SemanticQueryMappedTypeWarm,
+    /// One cold dispatch of a `SemanticQueryKey::IndexedAccess` query.
+    SemanticQueryIndexedAccessCold,
+    /// One warm dispatch of a `SemanticQueryKey::IndexedAccess` query.
+    SemanticQueryIndexedAccessWarm,
+    /// One cold dispatch of a `SemanticQueryKey::KeyOf` query.
+    SemanticQueryKeyOfCold,
+    /// One warm dispatch of a `SemanticQueryKey::KeyOf` query.
+    SemanticQueryKeyOfWarm,
+    /// One cold dispatch of a `SemanticQueryKey::ProjectPath` /
+    /// `ProjectMember` query.
+    SemanticQueryProjectPathCold,
+    /// One warm dispatch of a `SemanticQueryKey::ProjectPath` /
+    /// `ProjectMember` query.
+    SemanticQueryProjectPathWarm,
+    /// One call to
+    /// `ProjectSemanticDispatch::substitute_semantic_type_param`.
+    /// Bumped at the entry of substitute (NOT the recursive
+    /// `substitute_with_change_tracking`) so the count is per top-level
+    /// substitution. Pairs with the cache-hit counter below to
+    /// distinguish a fresh substitute walk from a memo hit.
+    SubstituteTopLevelCall,
+    /// One hit on the `substitute_memo_get` fast path in
+    /// `substitute_semantic_type_param`. Bumped when the memo collapsed
+    /// an identical `(value_expr, parameter_node, arg)` triple.
+    SubstituteMemoHit,
+    /// One return of `(node, false)` from
+    /// `substitute_with_change_tracking`'s `SemanticNodeData::TypeOf`
+    /// arm — the substitute did NOT descend into the TypeOf, treating
+    /// it as opaque. The brief flags this as the codex-prescribed site
+    /// for the "opaque TypeOf returns" counter.
+    SubstituteTypeOfOpaque,
+    /// One return from `substitute_with_change_tracking`'s
+    /// `Conditional` arm that descended into the conditional branches
+    /// (a non-identity recursive walk). Distinguishes
+    /// "Conditional touched" from "Conditional rebuilt".
+    SubstituteConditionalDescend,
+    /// One return from `substitute_with_change_tracking`'s
+    /// `MappedType` arm that descended into the mapper's
+    /// constraint / source / value_expr (a non-identity recursive
+    /// walk). The brief flags this as the codex-prescribed site for
+    /// the "Mapped descents" counter.
+    SubstituteMappedTypeDescend,
+    /// One call to `build_typeof` (the `typeof`-rooted declaration
+    /// lookup at `build.rs:162`). The brief flags this as a primary
+    /// suspect: gemini's HIGH-confidence direction.
+    BuildTypeofCall,
+    /// One `build_typeof` call where the value-root scope returned
+    /// `None` from `ensure_indexed_ready` (the prepared-value miss
+    /// the brief flags at `build.rs:162`).
+    BuildTypeofPreparedValueMiss,
 }
 
 /// Trait implemented by anything wanting to receive audit events.
