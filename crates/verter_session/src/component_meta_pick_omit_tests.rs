@@ -20,9 +20,9 @@ use crate::VerterHost;
 /// Build a hermetic project (host wrapped in `MetaProject`) backed
 /// by a [`MemoryWorkspace`] pre-populated with the supplied files.
 fn build_hermetic_project(files: &[(&str, &str)]) -> Arc<MetaProject> {
-    // Path C C12 (per): test hosts construct schedulers
-    // with `cpu_threads = 1` to avoid CPU oversubscription when many
-    // parallel test threads each spin up their own Rayon pools.
+    // Test hosts construct schedulers with `cpu_threads = 1` to
+    // avoid CPU oversubscription when many parallel test threads each
+    // spin up their own Rayon pools.
     let scheduler_config = verter_scheduler::scheduler::SchedulerConfig {
         cpu_threads: 1,
         ..verter_scheduler::scheduler::SchedulerConfig::default()

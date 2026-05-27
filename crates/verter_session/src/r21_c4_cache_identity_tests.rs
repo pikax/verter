@@ -1,22 +1,21 @@
-//! R21-F1 c4 — discriminating cache identity tests for the
-//! `from_root_body` parameter on the prepared-surface walker's two
-//! query-identity caches (`PreparedSurfaceDb` + `PreparedMemberDb`).
+//! Discriminating cache identity tests for the `from_root_body`
+//! parameter on the prepared-surface walker's two query-identity
+//! caches (`PreparedSurfaceDb` + `PreparedMemberDb`).
 //!
-//! ## Codex's BINDING TOP RISK for R21
+//! ## Risk closed
 //!
-//! From `D:/tmp/round20-f1-codex-out.txt`:
+//! Without `from_root_body` in the cache key, a partial cache-incomplete
+//! landing would create false confidence by exposing the
+//! `declared_in_macro_type_arg` field while still serving stale or
+//! defaulted provenance through one of the shared resolver paths.
 //!
-//! > A partial or cache-incomplete F1 landing creates false confidence
-//! > by exposing the field while still serving stale or defaulted
-//! > provenance through one of the shared resolver paths.
-//!
-//! c4 closes this risk by threading `from_root_body` through the
-//! walker AND making it part of the cache key for both the
-//! `PreparedSurfaceCacheKey` and `PreparedMemberCacheKey`. Two
-//! distinct entry contexts (body position vs. heritage descent) for
-//! the SAME `(canonical, symbol, substitutions)` triple publish two
-//! distinct cache slots whose `ProjectedSurface` / `ProjectedMember`
-//! values carry the correct per-member `declared_in_macro_type_arg`.
+//! The fix threads `from_root_body` through the walker AND makes
+//! it part of the cache key for both `PreparedSurfaceCacheKey` and
+//! `PreparedMemberCacheKey`. Two distinct entry contexts (body
+//! position vs. heritage descent) for the SAME
+//! `(canonical, symbol, substitutions)` triple publish two distinct
+//! cache slots whose `ProjectedSurface` / `ProjectedMember` values
+//! carry the correct per-member `declared_in_macro_type_arg`.
 //!
 //! ## Discriminator
 //!

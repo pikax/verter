@@ -1,9 +1,9 @@
-//! Phase C cross-file regression tests for the
+//! Cross-file regression tests for the
 //! `prepared_surface.rs::TypeExpr::Intersection` non-fatal-unsupported
-//! merge, plus Fix 1's analyzer-side `declared_in_macro_type_arg`
+//! merge, plus the analyzer-side `declared_in_macro_type_arg`
 //! provenance contract.
 //!
-//! ## Phase C invariant under test
+//! ## Intersection-merge invariant under test
 //!
 //!   A `TypeExpr::Intersection([A, B])` lowered surface MUST publish
 //!   the members contributed by any resolvable arm even when sibling
@@ -16,28 +16,26 @@
 //!
 //! Three layers of coverage:
 //!
-//! 1. **Class A / Class B** — positive regression characterizations
-//!    of the post-fix invariant: with the non-fatal-unsupported
-//!    merge in place, the explicit body member survives an
-//!    unresolvable heritage arm. These tests document the desired
-//!    behaviour on the realistic corpus shapes (`AuthForm.vue` /
-//!    `Form.vue` / `Table.vue` from the nuxt-ui bench corpus).
+//! 1. **Body-member survives unresolvable heritage** — positive
+//!    regression characterizations: the non-fatal-unsupported merge
+//!    lets an explicit body member survive an unresolvable heritage
+//!    arm. Realistic corpus shapes (`AuthForm.vue` / `Form.vue` /
+//!    `Table.vue` from the nuxt-ui bench corpus) drive the cases.
 //!
 //! 2. **`intersection_merge_tests::merge_prepared_intersection_arms_*`**
 //!    in `resolver_core/component_meta_query_engine/prepared_surface.rs`
-//!    — the F4 discriminating tests added in R20-fix2. They exercise
-//!    the pure `merge_prepared_intersection_arms` helper directly
-//!    with synthesised `PreparedSurfaceProjection` inputs, bypassing
-//!    the component-meta pipeline's rescue paths entirely. Reverting
-//!    the helper's `// Skip` arm on `Unsupported` to the pre-fix
+//!    — discriminating tests that exercise the pure
+//!    `merge_prepared_intersection_arms` helper directly with
+//!    synthesised `PreparedSurfaceProjection` inputs, bypassing the
+//!    component-meta pipeline's rescue paths entirely. Reverting the
+//!    helper's `// Skip` arm on `Unsupported` to a hard
 //!    `return PreparedSurfaceProjection::Unsupported;` makes the
 //!    `..._skips_unsupported_arm_when_sibling_resolves` and
 //!    `..._treats_empty_arm_as_resolved` tests fail with precise
-//!    diffs; the R20-fix2 report captures the RED output at
-//!    `bench-evidence/r20fix2-f4-red-discrimination.txt`.
+//!    diffs.
 //!
-//! 3. **Fix 1 analyzer-side `declared_in_macro_type_arg` contract**
-//!    — `inline_literal_..._for_on_event_shadow_of_declared_emit`
+//! 3. **Analyzer-side `declared_in_macro_type_arg` contract** —
+//!    `inline_literal_..._for_on_event_shadow_of_declared_emit`
 //!    and `local_interface_own_body_marked_declared_while_heritage_arm_unresolvable`.
 //!    Inline-literal `defineProps<{ onSubmit?: ... }>()` + a
 //!    declared `submit` emit must yield an `AnalyzedPropField`
@@ -47,23 +45,20 @@
 //!    body-extractor `declared = true` populations makes them
 //!    fail.
 //!
-//! ## Cross-file imported-interface provenance scope (R20-fix2 F1 STOP)
+//! ## Cross-file imported-interface provenance scope
 //!
-//! The R20-fix2 round audited cross-file `defineProps<ImportedProps>()`
-//! provenance flow and confirmed the architecturally-correct
-//! threading touches five types (`ResolvedProp`, `ProjectedMember`,
-//! `SurfaceMember`, `ExpandedField`, `ExpandedProperty`) across
-//! three crates, plus prepared-surface walker heritage tracking,
-//! plus FFI / proto re-wire, plus ~30 fixture constructor
-//! updates. That scope is a dedicated architectural cycle, not a
-//! fix-cycle item. The bench gate stays green at HEAD because the
-//! Phase C intersection fix (Class A / Class B / the F4
-//! discriminator) covers membership; the cross-file
-//! `declared_in_macro_type_arg` propagation affects override
-//! semantics that the current bench corpus does not exercise
-//! (codex#2 measured 0/179 components hit the cross-file
-//! imported-macro-root shape). See `D:/tmp/round20-fix2-report.md`
-//! for the STATUS escalation.
+//! Cross-file `defineProps<ImportedProps>()` provenance flow
+//! requires threading the `declared_in_macro_type_arg` bit through
+//! five types (`ResolvedProp`, `ProjectedMember`, `SurfaceMember`,
+//! `ExpandedField`, `ExpandedProperty`) across three crates, plus
+//! prepared-surface walker heritage tracking, plus FFI / proto
+//! re-wire, plus ~30 fixture constructor updates. This is a
+//! dedicated architectural cycle not exercised by the current
+//! bench corpus (0/179 components hit the cross-file
+//! imported-macro-root shape). Membership is still covered today
+//! via the intersection-merge fix (the discriminating helper
+//! tests above); override semantics for the cross-file case is
+//! tracked as future work.
 
 use super::*;
 use crate::types::HostConfig;

@@ -165,13 +165,12 @@ fn resolve_decl_recognises_import_local_bindings() {
 /// structurally-distinct concrete result shapes, and those shapes
 /// receive distinct node ids even under the C7 compound-key interner.
 ///
-/// **Fixture rewrite (Path C C7 /, §14.4).** Pre-C7 this
-/// test interned a bare `Primitive(String)` as the `base` and two
-/// distinct arg tuples to distinguish. Under structural interning
-/// both `Instantiate` queries collapse to `Opaque(Miss)` (the base
-/// is not a real generic) — `Miss` results are semantically
-/// identical and dedup to one id, invalidating the pre-rev-8
-/// assertion "distinct cache keys produce distinct ids".
+/// **Fixture rationale.** Under structural interning of compound
+/// keys, a bare `Primitive(String)` base + two distinct arg tuples
+/// would collapse both `Instantiate` queries to `Opaque(Miss)`
+/// (the base is not a real generic) and the two `Miss` results would
+/// dedup to one id, breaking any "distinct cache keys produce
+/// distinct ids" assertion that relied on the pre-interner naming.
 ///
 /// The rewrite uses a real generic `type Wrap<T> = { value: T }`
 /// whose instantiations `Wrap<number>` vs `Wrap<string>` produce
@@ -1091,7 +1090,7 @@ fn resolve_decl_records_file_scope_in_sidecar() {
 //  - `build_instantiate` resolving the base via `DispatchHost` and
 //    interning the shell-level object with member refs.
 //  - `Instantiate` + `SubstituteTypeParam` origin edges.
-//  - `DeclIdentity` on `Instantiate.base` (Path C C16).
+//  - `DeclIdentity` on `Instantiate.base`.
 
 fn resolve_decl_anchor(
     dispatch: &ProjectSemanticDispatch<'_>,
@@ -1133,8 +1132,8 @@ fn decl_identity(
 
 /// `build_resolve_decl` returns a `DeclPlaceholder` — the declaration
 /// identity is carried as data so consumers can construct `Instantiate`
-/// keys. Path C C16 retired the `DeclAnchor` variant; `DeclPlaceholder`
-/// is the Opaque-wrapped replacement.
+/// keys. The retired `DeclAnchor` variant has been replaced by
+/// `DeclPlaceholder` (the Opaque-wrapped form).
 #[test]
 fn resolve_decl_produces_materialized_body() {
     let host = host();
@@ -1971,8 +1970,8 @@ fn substitute_no_op_short_circuits_intern_preserving_scope() {
     // Build a deep tree that contains no TypeParam matching the
     // substituted parameter. The walker descends through every arm
     // (Union → Object → Array → Function → Conditional) but
-    // discovers no match — the post-Fix-D fast path returns the
-    // input id at every layer without rebuild.
+    // discovers no match — the change-tracking helper's fast path
+    // returns the input id at every layer without rebuild.
     let string_node = primitive(&graph, PrimitiveKind::String);
     let number_node = primitive(&graph, PrimitiveKind::Number);
     let array_node = graph.intern_node(SemanticNodeData::Array {
@@ -3099,15 +3098,15 @@ fn mapped_type_value_materialised_from_source_member_for_known_keys() {
     let source = simple_object(&graph, &[("a", num), ("b", num)]);
     let key_space = primitive(&graph, PrimitiveKind::String);
 
-    // Path C C5: the canary no longer needs to model the `T[K]`
-    // identity pattern structurally in `value_expr` — classification
-    // moved to lowering time. Setting `kind: MapperKind::Identity`
-    // tells `build_mapped_type` to take the fast path that reuses
-    // source member values per key. Pre-C5 this fixture built an
-    // explicit `IndexedAccess { object: source, index: TypeNode(K) }`
-    // to satisfy the retired runtime helper
-    // `mapper_value_is_identity_t_of_k`; the helper is gone and the
-    // explicit construction is dead weight.
+    // Identity-mapper canary: the test no longer needs to model the
+    // `T[K]` identity pattern structurally in `value_expr` because
+    // classification happens at lowering time. Setting
+    // `kind: MapperKind::Identity` tells `build_mapped_type` to take
+    // the fast path that reuses source member values per key. The
+    // previous version of this fixture had to construct an explicit
+    // `IndexedAccess { object: source, index: TypeNode(K) }` to
+    // satisfy the (now-retired) runtime helper
+    // `mapper_value_is_identity_t_of_k`.
     let value_expr = self::primitive(&graph, PrimitiveKind::Number);
 
     let mapper = MapperKey {
@@ -3412,8 +3411,8 @@ fn mapped_type_uses_source_member_names_when_object_source() {
 
 /// Helper: build a `DeclIdentity` carrying a utility name so
 /// `build_instantiate` sees it as "utility" through `utility_source`.
-/// Path C C16: returns `DeclIdentity` instead of interning a retired
-/// `DeclAnchor` node.
+/// Returns `DeclIdentity` directly — the prior `DeclAnchor` node
+/// variant has been retired.
 fn utility_identity(
     _graph: &Arc<SemanticGraphStore>,
     name: &str,
@@ -4372,15 +4371,13 @@ fn function_surface_publishes_as_object_with_call_signatures() {
 /// instantly if someone tries to promote a scratch-only node into
 /// the publication graph.
 ///
-/// `Infer` was originally included in this list but was promoted to a
-/// first-class variant by Cluster A (Pass 3). The infer
-/// binding has a concrete semantic role — it's the named placeholder
-/// in a conditional's `extends` clause, substituted in the true
-/// branch when the check decides Assignable — so keeping it as a
-/// scratch-only shape conflicted with the InferBind origin-edge
-/// lifecycle. Anti-pattern #3 in §10 (scope-as-discriminator for
-/// infer) is structurally avoided by the explicit variant, NOT by
-/// keeping Infer scratch-only.
+/// `Infer` is intentionally NOT in this list: it has a concrete
+/// semantic role as the named placeholder in a conditional's
+/// `extends` clause, substituted in the true branch when the check
+/// decides Assignable. Keeping it as a scratch-only shape would
+/// conflict with the `InferBind` origin-edge lifecycle; the explicit
+/// first-class variant avoids the scope-as-discriminator anti-pattern
+/// structurally.
 ///
 /// Each needle is followed by punctuation so it cannot prefix-
 /// match an unrelated identifier (same discipline as
@@ -4646,9 +4643,8 @@ fn substitute_preserves_scope_on_shell_rebuilds() {
 /// Combined with C7's dedup, both references resolve to the same
 /// SemanticNodeId.
 ///
-/// Pre-C7: this test fails regardless (append-only allocator).
-/// Un-ignored by Path C C7 — compound-key structural interning closes
-/// the aliasing property the C6a identity model set up.
+/// Compound-key structural interning closes the aliasing property
+/// this test characterises (an append-only allocator would fail it).
 #[test]
 fn unresolved_typeparameter_references_alias_by_name_within_same_file() {
     let host = host();
@@ -4701,12 +4697,12 @@ fn unresolved_typeparameter_references_alias_by_name_within_same_file() {
     );
 }
 
-/// Path C C8 — the iterative relation engine handles structurally-
-/// novel deeply nested distribution without a per-frame stack-safety
-/// cap. The pre-C8 recursive form capped at `RELATION_MAX_DEPTH = 192`
-/// and returned `Unknown` on anything deeper. The post-C8 iterative
-/// form runs the work on a heap-backed stack; budget only fires on
-/// genuine runaway (budget = `10 × graph.node_count()`), not on
+/// The iterative relation engine handles structurally-novel deeply
+/// nested distribution without a per-frame stack-safety cap. A
+/// recursive form capped at `RELATION_MAX_DEPTH = 192` would return
+/// `Unknown` on anything deeper; the iterative form runs the work
+/// on a heap-backed stack and only fires the budget on genuine
+/// runaway (budget = `10 × graph.node_count()`), not on
 /// reasonably-deep nesting.
 ///
 /// Discriminator: build a 500-deep **readonly** nested array chain
@@ -4761,15 +4757,16 @@ fn relation_handles_deeply_nested_arrays_beyond_pre_c8_depth_cap() {
     );
 }
 
-/// Path C C11a — nested-infer in Function types. `T extends (props: infer P) => any ? P : never`
-/// with `T = (x: string) => any` should bind `P = string` and return
-/// `string`. Pre-C11a the `Function` arm in `substitute_semantic_type_param`
-/// did not exist (catch-all left Function shells untouched) AND
-/// `build_conditional` had no Function-with-Infer arm — so the conditional
-/// lowered to a deferred shell rather than resolving. Post-C11a the
-/// dedicated build_conditional arm extracts per-position infer bindings
-/// and the substitute Function arm recurses through params / return_type
-/// so the substituted true_branch surfaces the concrete binding.
+/// Nested-infer in Function types invariant:
+/// `T extends (props: infer P) => any ? P : never` with
+/// `T = (x: string) => any` must bind `P = string` and return
+/// `string`. Without a dedicated `Function` arm in
+/// `substitute_semantic_type_param` AND a Function-with-Infer arm in
+/// `build_conditional`, the conditional would lower to a deferred
+/// shell rather than resolving. The `build_conditional` arm extracts
+/// per-position infer bindings and the substitute `Function` arm
+/// recurses through `params` / `return_type` so the substituted
+/// true_branch surfaces the concrete binding.
 #[test]
 fn nested_function_infer_binds_per_position_to_check_signature() {
     use crate::semantic_query::{FunctionParam, TypeParamDecl};
@@ -4833,11 +4830,11 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
     );
 }
 
-/// Path C C11a — `substitute_semantic_type_param`'s Function arm
-/// recurses into `params` and `return_type`. Pre-C11a the catch-all
-/// `_ => node` left Function shells untouched, so a TypeParam reference
-/// inside a Function param was not substituted. Post-C11a the Function
-/// arm rebuilds the shell with substituted member types.
+/// `substitute_semantic_type_param`'s `Function` arm must recurse
+/// into `params` and `return_type` and rebuild the shell with
+/// substituted member types. A catch-all `_ => node` would leave
+/// Function shells untouched and a TypeParam reference inside a
+/// Function param would NOT be substituted.
 #[test]
 fn substitute_recurses_into_function_params_and_return_type() {
     use crate::semantic_query::{DeclIdentity, FunctionParam, TypeParamDecl};
@@ -4894,19 +4891,19 @@ fn substitute_recurses_into_function_params_and_return_type() {
     }
 }
 
-/// Path C C10 — `keyof (A & B)` where `A` is enumerable (Object
-/// surface) and `B` is unresolvable (a deferred shell or TypeParam)
-/// must return `A`'s keys. Pre-C10 the Intersection arm's all-or-
-/// nothing `?` operator propagated `None` up whenever any arm was
-/// unresolvable, erasing A's enumerable keys. Post-C10 the arm
-/// accumulates the union of keys across every enumerable arm and
-/// returns `None` only when every arm is unresolvable.
+/// `keyof (A & B)` invariant: where `A` is enumerable (Object
+/// surface) and `B` is unresolvable (a deferred shell or TypeParam),
+/// the result must be `A`'s keys. The Intersection arm must
+/// accumulate the union of keys across every enumerable arm and
+/// only return `None` when every arm is unresolvable; an all-or-
+/// nothing `?`-propagating arm would erase A's keys whenever any
+/// arm was unresolvable.
 ///
 /// Discriminator: build `{ a: number, b: number } & TypeParam(K)`
 /// and query `keyof`. The Object arm enumerates `["a", "b"]`; the
-/// TypeParam arm is unresolvable. Pre-C10 → deferred KeyOf shell
-/// (keys = None); post-C10 → `Union(Literal("a"), Literal("b"))`
-/// (keys = Some(["a", "b"])).
+/// TypeParam arm is unresolvable. The accumulator must yield
+/// `Union(Literal("a"), Literal("b"))` (keys = Some(["a", "b"]))
+/// rather than collapsing to a deferred KeyOf shell.
 #[test]
 fn keyof_intersection_accumulates_enumerable_arms_and_ignores_unresolvable() {
     use crate::semantic_query::DeclIdentity;
@@ -6385,8 +6382,8 @@ fn execute_omit_dispatches_through_instantiate_omit_builtin() {
 
 /// `execute_to_type_expr` lowers a successful `QueryResult::Value`
 /// through `raise_node_to_type_expr` and preserves the dep_signature
-/// — the lossy `Option<TypeExpr>` shape rejected by Codex round 7 P1
-/// is NOT used here.
+/// — a lossy `Option<TypeExpr>` return shape would drop the
+/// dep_signature on the floor and is NOT used here.
 #[test]
 fn execute_to_type_expr_preserves_dep_signature_on_success() {
     let host = host();

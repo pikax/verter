@@ -54,8 +54,8 @@ fn substitute_visits_repeated_type_param_reference_across_siblings() {
 #[test]
 fn substitute_returns_input_node_on_cyclic_reentry() {
     let substitute_src = include_str!("project_semantic_dispatch/substitute.rs");
-    // Catch-all arm returns `node` unchanged. Post-Fix-D the helper
-    // returns a `(node, changed)` tuple, so accept either form.
+    // Catch-all arm returns `node` unchanged. The change-tracking
+    // variant returns a `(node, changed)` tuple, so accept either form.
     assert!(
         substitute_src.contains("_ => node") || substitute_src.contains("_ => (node, false)"),
         "substitute_semantic_type_param (or its change-tracking helper) must carry a \
@@ -334,8 +334,8 @@ fn mapped_type_value_substitutes_into_keyspace_even_when_source_is_not_object() 
 
     // Value expression IS the mapper's K parameter — so
     // post-substitution each key's value is the literal of that
-    // key's name. Path C C6a node-id substitute matching requires
-    // the value_expr's TypeParam reference to use the SAME
+    // key's name. Node-id substitute matching requires the
+    // value_expr's TypeParam reference to use the SAME
     // SemanticNodeId as the mapper's binder.
     let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity::synthetic("K"),
@@ -354,8 +354,8 @@ fn mapped_type_value_substitutes_into_keyspace_even_when_source_is_not_object() 
         name_remap: None,
         // value_expr is `K` (the mapper parameter) — not an
         // `IndexedAccess { object = source, index = K }` shape, so
-        // Path C C5 classifies it as `Computed`: the build path
-        // substitutes name → Literal(name) and evaluates.
+        // the mapper-kind classifier marks it as `Computed`: the
+        // build path substitutes name → Literal(name) and evaluates.
         kind: crate::semantic_query::MapperKind::Computed,
     };
 
@@ -461,8 +461,8 @@ fn mapped_type_value_falls_back_to_substituted_shell_when_evaluation_yields_opaq
         readonly: ReadonlyMod::Keep,
         name_remap: None,
         // `IndexedAccess { object = source, index = TypeNode(K) }`
-        // is the canonical identity projection — Path C C5 classifies
-        // as `Identity`.
+        // is the canonical identity projection — the mapper-kind
+        // classifier marks it as `Identity`.
         kind: crate::semantic_query::MapperKind::Identity,
     };
 

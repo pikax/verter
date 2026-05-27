@@ -1663,7 +1663,7 @@ fn ssr_v_model_root_dynamic_model_props() {
 }
 
 // ══════════════════════════════════════════════════════════════════
-// Round 3 Fix 1: Component variable naming (kebab → underscore)
+// Component variable naming: kebab-case → underscore
 // ══════════════════════════════════════════════════════════════════
 
 /// @ai-generated — Kebab-case component tags use underscore replacement, not PascalCase.
@@ -1706,7 +1706,7 @@ fn ssr_component_var_name_pascal_case() {
 }
 
 // ══════════════════════════════════════════════════════════════════
-// Round 3 Fix 2: Setup ref for locally imported components
+// Setup ref resolution for locally imported components
 // ══════════════════════════════════════════════════════════════════
 
 /// @ai-generated — Imported component uses $setup ref, not _resolveComponent.
@@ -1752,7 +1752,7 @@ import MyComp from './MyComp.vue'
 }
 
 // ══════════════════════════════════════════════════════════════════
-// Round 3 Fix 3: Event handler props on components
+// Event handler props on components
 // ══════════════════════════════════════════════════════════════════
 
 /// @ai-generated — Component event handlers are included as onXxx props.
@@ -1809,7 +1809,7 @@ fn ssr_html_element_events_still_ignored() {
 }
 
 // ══════════════════════════════════════════════════════════════════
-// Round 3 Fix 4: Source-order attribute rendering (v-model)
+// Source-order attribute rendering (v-model)
 // ══════════════════════════════════════════════════════════════════
 
 /// @ai-generated — v-model attr placed at correct source position.
@@ -1832,7 +1832,7 @@ fn ssr_attr_source_order_v_model() {
 }
 
 // ══════════════════════════════════════════════════════════════════
-// Round 3 Fix 5: Text whitespace around interpolations
+// Text whitespace around interpolations
 // ══════════════════════════════════════════════════════════════════
 
 /// @ai-generated — Whitespace around {{ }} at element boundaries is trimmed.
@@ -1889,7 +1889,7 @@ fn ssr_text_whitespace_non_interpolation_preserved() {
 }
 
 // ══════════════════════════════════════════════════════════════════
-// Round 3→7 Fix: HTML entity decode + re-encode in SSR text
+// HTML entity decode + re-encode in SSR text
 // ══════════════════════════════════════════════════════════════════
 
 /// @ai-generated — HTML special entities are decoded then re-encoded in SSR.
@@ -2361,7 +2361,7 @@ import MyComp from './MyComp.vue'
 }
 
 // ══════════════════════════════════════════════════════════════════
-// Round 5: v-model on components
+// v-model on components
 // ══════════════════════════════════════════════════════════════════
 
 /// @ai-generated — v-model on component decomposes to modelValue + onUpdate:modelValue.
@@ -2478,7 +2478,7 @@ import MyBtn from './MyBtn.vue'
 }
 
 // ══════════════════════════════════════════════════════════════════
-// Round 5: ref in component/root props
+// `ref` in component/root props
 // ══════════════════════════════════════════════════════════════════
 
 /// @ai-generated — ref on component emitted in props.
@@ -2521,7 +2521,7 @@ fn ssr_root_ref_in_merge_props() {
 }
 
 // ══════════════════════════════════════════════════════════════════
-// Round 5: static style as JS object in mergeProps
+// static style as JS object in mergeProps
 // ══════════════════════════════════════════════════════════════════
 
 /// @ai-generated — Static style in root _mergeProps uses JS object form.
@@ -4597,7 +4597,7 @@ const showModal = ref(false)
 }
 
 // ══════════════════════════════════════════════════════════════════
-// Round 24: v-model checkbox/radio inline attrs
+// v-model checkbox/radio inline attrs
 // ══════════════════════════════════════════════════════════════════
 
 /// @ai-generated — v-model on checkbox should emit inline type="checkbox" + _ssrIncludeBooleanAttr.
@@ -4661,7 +4661,7 @@ const picked = ref('one')
 }
 
 // ══════════════════════════════════════════════════════════════════
-// Round 25: v-else-if robustness + single-child v-if fragment
+// v-else-if robustness + single-child v-if fragment
 // ══════════════════════════════════════════════════════════════════
 
 /// @ai-generated — v-else-if chain should emit proper else if conditionals.

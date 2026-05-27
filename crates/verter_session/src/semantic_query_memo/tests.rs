@@ -38,10 +38,10 @@ fn interning_returns_unique_stable_ids() {
     assert_eq!(a.0 + 1, b.0);
 }
 
-/// Path C C7 positive invariant — two `intern_node_with_scope` calls
-/// for the same `(payload, scope)` pair share one
-/// [`SemanticNodeId`]. Under the pre-C7 append-only allocator the two
-/// calls returned distinct ids.
+/// Structural-interning positive invariant — two
+/// `intern_node_with_scope` calls for the same `(payload, scope)`
+/// pair must share one [`SemanticNodeId`]. An append-only allocator
+/// would return distinct ids and break dedup.
 #[test]
 fn intern_dedups_structural_values_across_contexts() {
     let store = SemanticGraphStore::new();
@@ -76,7 +76,7 @@ fn intern_dedups_structural_values_across_contexts() {
     );
 }
 
-/// Path C C7 negative invariant — `VueMacroElements` is an
+/// Structural-interning negative invariant — `VueMacroElements` is an
 /// identity-carrier with latest-insert-wins semantics (see
 /// [`SemanticGraphStore::insert_resolved_named_type`]). Two
 /// `intern_node` calls for the same `Arc<ResolvedElements>` payload
@@ -114,7 +114,7 @@ fn node_data_is_readable_via_graph_read_trait() {
     ));
 }
 
-/// Path C C17 — sharded dedup produces the same `SemanticNodeId`
+/// Sharded-dedup invariant — sharded dedup produces the same `SemanticNodeId`
 /// across threads for identical `(payload, scope)` pairs. The
 /// invariant is strong: two threads interning the same payload at
 /// the same scope must observe equal ids immediately (no visibility
@@ -142,7 +142,7 @@ fn intern_identity_invariant_holds_across_threads() {
     );
 }
 
-/// Path C C17 — `shard_index_for` is deterministic: identical
+/// Sharded-dedup invariant — `shard_index_for` is deterministic: identical
 /// `(data, scope)` pairs route to the same shard regardless of
 /// calling thread or program run. This is load-bearing for the
 /// sharded-dedup correctness: a payload's shard must not drift
@@ -489,8 +489,9 @@ fn dep_signature_interner_returns_same_arc_for_equivalent_payloads() {
 }
 
 /// Sweep removes empty buckets and dead-Weak buckets.
-/// Round-7 Codex#2 P1 #2 — mandatory test:
-/// `dep_signature_intern_sweep_removes_empty_buckets`.
+/// Memory-hygiene invariant: the interner's sweep pass must reclaim
+/// buckets whose `Weak` entries have all been dropped, otherwise the
+/// hash-cons table grows unbounded.
 #[test]
 fn dep_signature_intern_sweep_removes_empty_buckets() {
     let interner = DepSignatureInterner::new();
@@ -3693,13 +3694,11 @@ fn record_path_length_and_projection_depth_drive_percentiles() {
 /// reservoir is needed because the store already records the full
 /// per-node edge layout.
 ///
-/// **Fixture rewrite (Path C C7 /, §14.4).** Pre-C7 this
-/// test minted 10 "distinct" nodes by calling `intern_node(Primitive(Number))`
-/// ten times and relied on the append-only allocator to return fresh
-/// ids for each call. Under C7's structural dedup that mechanism is
-/// invalid: all 10 calls converge on one [`SemanticNodeId`] and the
-/// per-node edge counts collapse into a single `[1, 2, …, 10]`-edge
-/// list on one node.
+/// **Fixture rationale.** Minting 10 "distinct" nodes by calling
+/// `intern_node(Primitive(Number))` ten times only works under an
+/// append-only allocator. Under structural dedup, all 10 calls
+/// converge on one [`SemanticNodeId`] and the per-node edge counts
+/// collapse into a single `[1, 2, …, 10]`-edge list on one node.
 ///
 /// The rewrite interns ten structurally-distinct payloads so the
 /// post-C7 implementation still produces ten result nodes with a
@@ -6146,17 +6145,18 @@ fn same_view_joiner_still_coalesces_onto_winner() {
 /// overflow** does NOT receive the winner's node — it forks and
 /// cold-recomputes for its own view.
 ///
-/// Codex P2 (fix round 8): the fix-round-7 joiner gate validates
-/// "whatever carrier was stored" against the follower's `ctx`. But a
-/// `cache_suppress` winner from a tracer overflow has no bounded fact
-/// list — `finalise_traced_build_output`'s `Overflow` arm leaves
+/// Joiner-gate invariant: the joiner gate validates "whatever carrier
+/// was stored" against the follower's `ctx`. But a `cache_suppress`
+/// winner from a tracer overflow has no bounded fact list —
+/// `finalise_traced_build_output`'s `Overflow` arm leaves
 /// `graph_carrier` unset, and `execute_cooperative` broadcasts a
 /// SYNTHETIC empty-fact carrier (`ReadSetSignature::new(empty_fact_…,
-/// dep_signature)`). An empty-fact carrier with no self-roots validates
-/// VACUOUSLY against ANY follower's `ctx` — the strict
-/// `validates_self_root_whole_hash` arm never fires. So pre-fix-8 a
-/// follower running under a DIFFERENT session overlay coalesces onto
-/// the suppressed winner's view-specific result instead of forking.
+/// dep_signature)`). An empty-fact carrier with no self-roots
+/// validates VACUOUSLY against ANY follower's `ctx` — the strict
+/// `validates_self_root_whole_hash` arm never fires. Without the
+/// suppressed-winner force-fork gate, a follower running under a
+/// DIFFERENT session overlay would coalesce onto the suppressed
+/// winner's view-specific result instead of forking, because
 /// `cache_suppress` blocks memo insertion but NOT in-flight reuse.
 ///
 /// Setup mirrors
@@ -6336,10 +6336,11 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
          broadcasts a SYNTHETIC empty-fact carrier with no self-root, \
          which validates VACUOUSLY against any view — so the follower \
          MUST be force-forked and cold-recompute for its own overlay \
-         view. Pre-fix-8 the joiner gate validated the empty carrier \
-         vacuously and coalesced the follower onto the winner's \
-         view-specific suppressed result; the follower's build closure \
-         never ran (codex P2 fix round 8).",
+         view. Without the suppressed-winner force-fork gate, the \
+         joiner gate would validate the empty carrier vacuously and \
+         coalesce the follower onto the winner's view-specific \
+         suppressed result; the follower's build closure would never \
+         run.",
     );
 
     assert_ne!(
@@ -6389,16 +6390,17 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
 /// NOT receive the winner's node — it forks and cold-recomputes for its
 /// own view.
 ///
-/// Codex P2 (fix round 8): the `Ok(traced)→None` suppress arm of
-/// `finalise_traced_build_output` carries the build's traced cross-file
-/// *dependency* facts on a non-admitted carrier but leaves
-/// `self_root_canonicals` EMPTY (the build could not be soundly
-/// self-rooted). The fix-round-7 joiner gate's
-/// `validate_with_self_roots` then routes every `FileWholeHash` in the
-/// carrier through the LAZY `validates` (none is a listed self-root),
-/// whose untracked-file arm optimistically accepts — so the carrier
-/// validates against ANY follower's `ctx`. Pre-fix-8 a follower under a
-/// different overlay coalesces onto the suppressed winner's
+/// Joiner-gate invariant (no-self-root suppress case): the
+/// `Ok(traced)→None` suppress arm of `finalise_traced_build_output`
+/// carries the build's traced cross-file *dependency* facts on a
+/// non-admitted carrier but leaves `self_root_canonicals` EMPTY (the
+/// build could not be soundly self-rooted). The joiner gate's
+/// `validate_with_self_roots` then routes every `FileWholeHash` in
+/// the carrier through the LAZY `validates` (none is a listed
+/// self-root), whose untracked-file arm optimistically accepts — so
+/// the carrier validates against ANY follower's `ctx`. Without the
+/// suppressed-winner force-fork gate, a follower under a different
+/// overlay would coalesce onto the suppressed winner's
 /// view-specific result.
 ///
 /// Setup: a real `/p2_8_unrootable/keyed.ts` is upserted; the winner
@@ -6588,10 +6590,11 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
          against any view (the dependency `FileWholeHash` routes \
          through the lazy untracked-file-accepting `validates`), so the \
          follower MUST be force-forked and cold-recompute for its own \
-         overlay view. Pre-fix-8 the joiner gate validated the \
-         self-root-less carrier vacuously and coalesced the follower \
-         onto the winner's view-specific suppressed result; the \
-         follower's build closure never ran (codex P2 fix round 8).",
+         overlay view. Without the suppressed-winner force-fork gate, \
+         the joiner gate would validate the self-root-less carrier \
+         vacuously and coalesce the follower onto the winner's \
+         view-specific suppressed result; the follower's build \
+         closure would never run.",
     );
 
     assert_ne!(
@@ -6642,18 +6645,18 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
 /// even though the winner is **NOT `cache_suppress`**. It forks and
 /// cold-recomputes for its own view.
 ///
-/// Codex P2 (fix round 9): fix round 8 made the no-self-root joiner
-/// fork fire only for `cache_suppress` winners
-/// (`suppressed_without_self_root = cache_suppress && !carrier
-/// .has_view_discriminating_self_root(..)`). But a NON-suppressed
-/// winner can ALSO have no view-discriminating self-root: a
-/// `QueryResult::Error(Miss)` produced because the requested
+/// Joiner-gate invariant (non-suppressed no-self-root case): the
+/// no-self-root joiner fork must fire for NON-suppressed winners as
+/// well, not only `cache_suppress` winners. A NON-suppressed winner
+/// can have no view-discriminating self-root when a
+/// `QueryResult::Error(Miss)` is produced because the requested
 /// declaration is absent UNDER THE WINNER'S overlay. That build
-/// completes with `cache_suppress == false` and a carrier holding only
-/// cross-file *dependency* facts (no self-root for the keyed
-/// canonical, because the declaration the self-root would have rooted
-/// does not exist under the winner's view). The fix-8 predicate is
-/// gated on `cache_suppress`, which is `false` here, so it does not
+/// completes with `cache_suppress == false` and a carrier holding
+/// only cross-file *dependency* facts (no self-root for the keyed
+/// canonical, because the declaration the self-root would have
+/// rooted does not exist under the winner's view). A predicate gated
+/// on `cache_suppress` would miss this case because `cache_suppress`
+/// is `false` here, so it does not
 /// fork — `validate_with_self_roots` then routes the carrier's
 /// dependency `FileWholeHash` through the lazy untracked-file-accepting
 /// `validates` and the carrier validates VACUOUSLY against any
@@ -6887,11 +6890,11 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
          untracked-file-accepting `validates`), so the follower MUST be \
          force-forked and cold-recompute for its own overlay view, \
          under which the declaration the winner found missing DOES \
-         exist. Pre-fix-9 the joiner fork predicate was gated on \
-         `cache_suppress`, which is false here, so it never fired and \
-         the follower coalesced onto the winner's stale view-specific \
-         miss; the follower's build closure never ran (codex P2 fix \
-         round 9).",
+         exist. A joiner fork predicate gated solely on \
+         `cache_suppress` would never fire here (`cache_suppress` is \
+         false for a non-suppressed Miss winner) and the follower \
+         would coalesce onto the winner's stale view-specific miss; \
+         the follower's build closure would never run.",
     );
 
     match follower_value {

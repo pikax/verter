@@ -9917,7 +9917,7 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 // ===========================================================================
 // graph-native registry-route + cycle-BFS predicates
 //
-// Discriminating tests for the round-7 parity matrix ():
+// Discriminating tests for the registry-route + cycle-BFS predicate matrix:
 //
 // 1. `Pick<Foo<T>, 'a'>` (generic root) — rejected.
 // 2. `Foo[0]` (numeric index) — rejected.
@@ -10172,7 +10172,7 @@ mod node_predicates_tests {
         assert_eq!(extraction.root_args[0], t_ref);
     }
 
-    /// Round-7 parity row 2: `Foo[0]` — numeric index rejected.
+    /// Predicate matrix row 2: `Foo[0]` — numeric index rejected.
     /// Only `IndexKey::String` literals are valid registry-route hops.
     #[test]
     fn extract_route_rejects_numeric_indexed_access() {
@@ -10191,11 +10191,11 @@ mod node_predicates_tests {
 
         assert!(
             extract_route_root_identity_node(graph, indexed, 0).is_none(),
-            "Foo[0] must be rejected (numeric index) — round-7 parity"
+            "Foo[0] must be rejected (numeric index) — registry-route predicate matrix"
         );
     }
 
-    /// Round-7 parity row 3: `Pick<Foo, 'a' | 'b' | 'c'>` — accepted.
+    /// Predicate matrix row 3: `Pick<Foo, 'a' | 'b' | 'c'>` — accepted.
     /// Three-way literal-string union is the canonical accept case.
     #[test]
     fn extract_route_accepts_three_literal_union_pick() {
@@ -10224,7 +10224,7 @@ mod node_predicates_tests {
         });
 
         let extraction = extract_route_root_identity_node(graph, pick_node, 0)
-            .expect("Pick<Foo, 'a' | 'b' | 'c'> must be accepted (round-7 parity row 3)");
+            .expect("Pick<Foo, 'a' | 'b' | 'c'> must be accepted (predicate matrix row 3)");
         assert_eq!(extraction.root_identity, foo_identity);
         match extraction.route {
             RouteDemand::Pick(keys) => {
@@ -10238,7 +10238,7 @@ mod node_predicates_tests {
         }
     }
 
-    /// Round-7 parity row 4: `Pick<Foo>` — 1-arg rejected.
+    /// Predicate matrix row 4: `Pick<Foo>` — 1-arg rejected.
     #[test]
     fn extract_route_rejects_one_arg_pick() {
         let project = make_project();
@@ -10256,11 +10256,11 @@ mod node_predicates_tests {
 
         assert!(
             extract_route_root_identity_node(graph, pick_node, 0).is_none(),
-            "Pick<Foo> (1-arg) must be rejected (args.len() != 2) — round-7 parity"
+            "Pick<Foo> (1-arg) must be rejected (args.len() != 2) — predicate matrix"
         );
     }
 
-    /// Round-7 parity row 5: `Pick<Foo, 'a', 'b'>` — 3-arg rejected.
+    /// Predicate matrix row 5: `Pick<Foo, 'a', 'b'>` — 3-arg rejected.
     #[test]
     fn extract_route_rejects_three_arg_pick() {
         let project = make_project();
@@ -10284,11 +10284,11 @@ mod node_predicates_tests {
 
         assert!(
             extract_route_root_identity_node(graph, pick_node, 0).is_none(),
-            "Pick<Foo, 'a', 'b'> (3-arg) must be rejected — round-7 parity"
+            "Pick<Foo, 'a', 'b'> (3-arg) must be rejected — predicate matrix"
         );
     }
 
-    /// Round-7 parity row 6: `Pick<Foo, never>` — empty union rejected.
+    /// Predicate matrix row 6: `Pick<Foo, never>` — empty union rejected.
     /// Modeled as an empty `Union` node (representing the `never` identity).
     #[test]
     fn extract_route_rejects_empty_union_pick() {
@@ -10310,7 +10310,7 @@ mod node_predicates_tests {
 
         assert!(
             extract_route_root_identity_node(graph, pick_node, 0).is_none(),
-            "Pick<Foo, never> (empty key set) must be rejected — round-7 parity"
+            "Pick<Foo, never> (empty key set) must be rejected — predicate matrix"
         );
     }
 
@@ -10400,7 +10400,7 @@ mod node_predicates_tests {
         );
     }
 
-    /// Round-7 parity row 7: A → B → C → A cycle through a complex
+    /// Predicate matrix row 7: A → B → C → A cycle through a complex
     /// helper.
     ///
     /// 13 / R7-14 — the legacy parity BFS only flags a

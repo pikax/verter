@@ -458,7 +458,7 @@ fn test_move_slice_with_insertions() {
     ct.append_left(4, "X");
     assert_eq!(ct.build_string(), "ABCDXEFGH");
 
-    // Now move slice 2-6 (which includes "CD", the inserted "X", and "EF") to position 0
+    // Now move byte range [2..6) (which includes "CD", the inserted "X", and "EF") to position 0
     ct.move_slice(2, 6, 0);
 
     // Expected: "CDXEF" moves to beginning, leaving "AB" and "GH"
@@ -476,7 +476,7 @@ fn test_move_slice_with_multiple_insertions() {
     ct.append_left(5, "2");
     assert_eq!(ct.build_string(), "ABC1DE2FGH");
 
-    // Move slice 2-6 to end (position 8)
+    // Move byte range [2..6) to end (position 8)
     ct.move_slice(2, 6, 8);
 
     // "C1DE2F" should move to end
@@ -568,7 +568,7 @@ fn test_move_wrapped_with_insertions() {
     ct.append_left(4, "X");
     assert_eq!(ct.build_string(), "ABCDXEFGH");
 
-    // Move slice 2-6 with wrapping - insertion should come along
+    // Move byte range [2..6) with wrapping - insertion should come along
     ct.move_wrapped(2, 6, 0, "[", "]");
     assert_eq!(ct.build_string(), "[CDXEF]ABGH");
 }

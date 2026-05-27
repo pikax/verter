@@ -77,8 +77,8 @@ fn ensure_facts(host: &VerterHost, canonical_id: &str) -> [u8; 16] {
 }
 
 fn indexed_whole_hash(host: &VerterHost, canonical_id: &str) -> Option<[u8; 16]> {
-    // Post-Phase-5: `IndexedReady` is the only post-parse cache; warm it
-    // via `ensure_indexed_ready` then verify the project store reflects
+    // `IndexedReady` is the only post-parse cache; warm it via
+    // `ensure_indexed_ready` then verify the project store reflects
     // the same whole_hash.
     let whole_hash = host
         .ensure_indexed_ready(canonical_id)
@@ -1143,7 +1143,7 @@ fn empty_import_routes_default_is_zero_len() {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Slice 11 — dep-signature propagation contract tests
+// dep-signature propagation contract tests
 // ──────────────────────────────────────────────────────────────────────────
 
 /// A semantic query result is cached: a second query for the same key

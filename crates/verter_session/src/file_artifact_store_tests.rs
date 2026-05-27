@@ -212,18 +212,16 @@ fn legacy_remove_drops_entry() {
 
 // ── Overlay-scoped isolation from base canonical-wide scans ──
 //
-// Block 2.S-F fix-round-1 introduced [`FileArtifactKey::overlay_scoped`]
-// so a session-view overlay artifact is keyed distinctly from the base
-// artifact (the discriminator lives in the `parse_env_hash` dimension).
-// Exact-key lookups (`get` / `get_overlay_scoped` / `get_artifacts`)
-// are isolated by the key. The canonical-wide *scans*
-// (`get_any`, `get_artifacts_any`, `snapshot_all`) match by
-// `canonical` only, so fix-round-1 alone left
-// them able to surface an overlay-scoped artifact to a base reader —
-// which would then derive base cache keys / route facts from
-// session-specific import routes. These tests pin the completed
-// isolation: a base canonical-wide scan must NEVER surface an
-// overlay-scoped artifact.
+// [`FileArtifactKey::overlay_scoped`] keys a session-view overlay
+// artifact distinctly from the base artifact (the discriminator lives
+// in the `parse_env_hash` dimension). Exact-key lookups (`get` /
+// `get_overlay_scoped` / `get_artifacts`) are isolated by the key.
+// The canonical-wide *scans* (`get_any`, `get_artifacts_any`,
+// `snapshot_all`) match by `canonical` only — and must NOT surface an
+// overlay-scoped artifact to a base reader, which would then derive
+// base cache keys / route facts from session-specific import routes.
+// These tests pin that isolation invariant: a base canonical-wide
+// scan must NEVER surface an overlay-scoped artifact.
 
 /// Stable non-zero overlay discriminator for the isolation tests.
 /// Mirrors the `parse_env_hash` shape `FileArtifactKey::overlay_scoped`

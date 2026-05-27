@@ -3812,15 +3812,16 @@ mod upsert_compile_cache_tests {
         assert!(kinds.contains(&ResolveRequestKind::TypeImport));
     }
 
-    /// §4.3 #15b (R7 / F18 / Codex 2 round 7 #1): Pre-load route flow.
+    /// Pre-load route flow invariant.
     /// (a) `set_import_dependencies` populates `cc.import_routes` BEFORE
     /// the file is upserted (creates cc stub).
     /// (b) Trigger `ensure_loaded` via type resolution — this loads the
     /// source through the scheduler and calls `integrate_scheduler_snapshot`.
     /// (c) Workspace reverse-dep graph reports the bundler-resolved target.
     /// (d) `cc.import_routes` is preserved (host source-of-truth).
-    /// **Pre-R7 fix this fails** — R6 cleared `cc.import_routes` in
-    /// `integrate_scheduler_snapshot`, destroying bundler pre-load state.
+    /// Regression guard: a prior implementation cleared `cc.import_routes`
+    /// inside `integrate_scheduler_snapshot`, destroying bundler pre-load
+    /// state. The host remains the source-of-truth for import routes.
     #[test]
     fn ensure_loaded_preserves_preloaded_import_routes_and_workspace_exact_edges() {
         let host = VerterHost::new_standalone(HostConfig::default());

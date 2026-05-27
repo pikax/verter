@@ -14,10 +14,10 @@ fn make_project() -> Arc<MetaProject> {
     })
 }
 
-/// Path C C12 (per): test hosts construct schedulers with
-/// `cpu_threads = 1` to avoid CPU oversubscription when many parallel
-/// test threads each spin up their own Rayon pools. See for
-/// the diagnosis (Option R1) that retired `HEAVY_COMPONENT_META_TEST_MUTEX`.
+/// Test hosts construct schedulers with `cpu_threads = 1` to avoid
+/// CPU oversubscription when many parallel test threads each spin
+/// up their own Rayon pools. This is the architecture that replaced
+/// the prior `HEAVY_COMPONENT_META_TEST_MUTEX` serialisation strategy.
 fn test_scheduler_config() -> verter_scheduler::scheduler::SchedulerConfig {
     verter_scheduler::scheduler::SchedulerConfig {
         cpu_threads: 1,
@@ -77,8 +77,8 @@ fn evaluated_prop_type<'a>(types: &'a ExpandedComponentTypes, name: &str) -> &'a
         .r#type
 }
 
-/// Path C C12 — `open_session()` defaults to interactive mode;
-/// `open_session_batch()` returns a batch-mode session.
+/// `open_session()` defaults to interactive mode; `open_session_batch()`
+/// returns a batch-mode session.
 #[test]
 fn open_session_defaults_to_interactive_mode() {
     let project = make_project();
@@ -11439,9 +11439,9 @@ defineProps<{
         label_key.type_expr
     );
 
-    // Path C C1 acceptance: confirm the new contention-instrumentation
-    // counters are populated by an actual heavy-component-meta run. A
-    // resolve + extract path must have loaded files, taken the overlay
+    // Confirm contention-instrumentation counters are populated by an
+    // actual heavy-component-meta run. A resolve + extract path must
+    // have loaded files, taken the overlay
     // gate at least once, pushed nodes into the arena, and claimed at
     // least one execute_cooperative owner slot. Relaxed reads are
     // sufficient: all atomic increments happen before this assertion on
@@ -18930,7 +18930,7 @@ const emit = defineEmits<{
 }
 
 // ---------------------------------------------------------------------------
-// Path C C14 — singleflight lane session-scoping characterization test
+// Singleflight lane session-scoping characterization test
 // ---------------------------------------------------------------------------
 
 #[test]

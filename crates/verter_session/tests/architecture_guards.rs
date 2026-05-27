@@ -4201,6 +4201,7 @@ mod foundations_guards {
     /// `Commit XY` markers (e.g. `Commit AX`, `Commit BX`) which the
     /// numeric-only `Commit \d+` scan does not see.
     pub fn line_has_phase_archaeology(line: &str) -> bool {
+        let bytes = line.as_bytes();
         // Substring matches for fixed vocabulary. These are unambiguous
         // in production source and never appear as legitimate prose.
         const FIXED_NEEDLES: &[&str] = &[
@@ -4211,7 +4212,10 @@ mod foundations_guards {
             "Post-cutover",
             "pre-Phase",
             "Pre-Phase",
+            "post-Phase",
+            "Post-Phase",
             "retired in",
+            "phase-archaeology",
             // Stage-family phase-archaeology mirroring the Phase
             // family. The Stage vocabulary is the dominant
             // project-management noun used by the fact-based cache
@@ -4296,49 +4300,71 @@ mod foundations_guards {
                 search_from = abs + prefix.len();
             }
         }
-        // `deleted in 5[a-z]` / `deletion in 5[a-z]` (deletion-history
-        // vocabulary from the 5-series plan: a lowercase `5` followed
-        // by a single ASCII letter, after either the past-tense
-        // `deleted in ` or the noun `deletion in `).
+        // `deleted in <digit>` / `deletion in <digit>` — deletion
+        // history with explicit plan reference (e.g. `deleted in 5g`,
+        // `deleted in 11d`, `deleted in 3`). A digit immediately after
+        // the past-tense `deleted in ` or noun `deletion in ` is the
+        // archaeology marker; legitimate prose like `deleted in the
+        // refactor` lacks the digit and is preserved.
         let lower = line.to_ascii_lowercase();
-        for prefix in ["deleted in 5", "deletion in 5"] {
-            if let Some(idx) = lower.find(prefix) {
-                let bytes = lower.as_bytes();
-                let after = idx + prefix.len();
-                if after < bytes.len() && bytes[after].is_ascii_lowercase() {
+        for prefix in ["deleted in ", "deletion in "] {
+            let mut search_from = 0usize;
+            while let Some(rel) = lower[search_from..].find(prefix) {
+                let abs = search_from + rel;
+                let after = abs + prefix.len();
+                let lower_bytes = lower.as_bytes();
+                if after < lower_bytes.len() && lower_bytes[after].is_ascii_digit() {
                     return true;
                 }
+                search_from = abs + prefix.len();
             }
         }
-        // `phase \d+` / `phase-\d+` (case-insensitive on the verb,
-        // ASCII digit immediately after the separator).
+        // `Phase \d+` / `phase \d+` / `Phase-\d+` / `phase-\d+`
+        // (case-insensitive on the verb). Carve-out: `Phase 1: …` is
+        // algorithm-phase prose (colon-prefixed verb after the digit
+        // run); preserve it. Any other byte after the digit run
+        // (letter, `-`, `.`, space, EOL, `,`, `)`, `—`, etc.) is
+        // archaeology.
         for prefix in ["phase ", "phase-", "Phase ", "Phase-"] {
             let mut search_from = 0usize;
             while let Some(rel) = line[search_from..].find(prefix) {
                 let abs = search_from + rel;
-                let after = abs + prefix.len();
-                if after < line.len() {
-                    let next = line.as_bytes()[after];
-                    if next.is_ascii_digit() {
+                let mut after = abs + prefix.len();
+                let digit_start = after;
+                while after < bytes.len() && bytes[after].is_ascii_digit() {
+                    after += 1;
+                }
+                if after > digit_start {
+                    if after >= bytes.len() {
+                        return true;
+                    }
+                    if bytes[after] != b':' {
                         return true;
                     }
                 }
                 search_from = abs + prefix.len();
             }
         }
-        // `Stage \d+` / `Stage-\d+` / `stage \d+` / `stage-\d+`
-        // (parallel shape to the Phase scan above). Stage is the
-        // project-management noun used by the fact-based cache
-        // refactor's plan; it leaks into production source the
-        // same way Phase does and must be cleaned up the same way.
+        // `Stage \d+` / `Stage-\d+` / `stage \d+` / `stage-\d+` —
+        // parallel shape to the Phase scan above with the same `:`
+        // carve-out for algorithm-stage prose (`Stage 1: read …`).
+        // Stage is the project-management noun used by the
+        // fact-based cache refactor's plan; it leaks into production
+        // source the same way Phase does.
         for prefix in ["stage ", "stage-", "Stage ", "Stage-"] {
             let mut search_from = 0usize;
             while let Some(rel) = line[search_from..].find(prefix) {
                 let abs = search_from + rel;
-                let after = abs + prefix.len();
-                if after < line.len() {
-                    let next = line.as_bytes()[after];
-                    if next.is_ascii_digit() {
+                let mut after = abs + prefix.len();
+                let digit_start = after;
+                while after < bytes.len() && bytes[after].is_ascii_digit() {
+                    after += 1;
+                }
+                if after > digit_start {
+                    if after >= bytes.len() {
+                        return true;
+                    }
+                    if bytes[after] != b':' {
                         return true;
                     }
                 }
@@ -4372,9 +4398,24 @@ mod foundations_guards {
                 search_from = abs + prefix.len();
             }
         }
-        // `Commit XY` — orchestrator commit markers like `Commit AX`,
-        // `Commit BX`, `Commit C`. Distinct from the legitimate
-        // `Commit \d+` numeric pattern caught elsewhere.
+        // `Commit \d+` — explicit numeric commit reference. The
+        // orchestrator's plan documents enumerate commits as `Commit
+        // 3`, `Commit 12`, etc.; production source must never cite
+        // them by number.
+        for prefix in ["Commit ", "commit "] {
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(prefix) {
+                let abs = search_from + rel;
+                let after = abs + prefix.len();
+                if after < bytes.len() && bytes[after].is_ascii_digit() {
+                    return true;
+                }
+                search_from = abs + prefix.len();
+            }
+        }
+        // `Commit XY` — alpha-suffixed orchestrator commit markers
+        // (e.g. `Commit AX`, `Commit BX`, `Commit C`). Distinct from
+        // the numeric `Commit \d+` scan above.
         //
         // Discriminator after `Commit [A-Z]`:
         //   - another upper / digit (`AX`, `A0`) is archaeology
@@ -4388,7 +4429,6 @@ mod foundations_guards {
             while let Some(rel) = line[search_from..].find(prefix) {
                 let abs = search_from + rel;
                 let after = abs + prefix.len();
-                let bytes = line.as_bytes();
                 if after < bytes.len() && bytes[after].is_ascii_uppercase() {
                     if after + 1 >= bytes.len() {
                         return true;
@@ -4402,6 +4442,35 @@ mod foundations_guards {
                     }
                 }
                 search_from = abs + prefix.len();
+            }
+        }
+        // `revision \d+` / `Revision \d+` — explicit revision-number
+        // reference. The orchestrator's plan documents enumerate
+        // revisions; production source must not cite them by number.
+        for prefix in ["revision ", "Revision "] {
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(prefix) {
+                let abs = search_from + rel;
+                let after = abs + prefix.len();
+                if after < bytes.len() && bytes[after].is_ascii_digit() {
+                    return true;
+                }
+                search_from = abs + prefix.len();
+            }
+        }
+        // `rev \d+` — standalone shorthand revision reference.
+        // Word-boundary required on the leading `rev` so identifiers
+        // like `reverse`, `reveal`, `revoke` do not flag.
+        for (i, _) in line.match_indices("rev ") {
+            if i > 0 {
+                let prev = bytes[i - 1];
+                if !(prev == b' ' || prev == b'\t' || prev == b'(') {
+                    continue;
+                }
+            }
+            let after = i + "rev ".len();
+            if after < bytes.len() && bytes[after].is_ascii_digit() {
+                return true;
             }
         }
         // `PE\d+\b` — orchestrator's per-block phase-extraction
@@ -4554,14 +4623,16 @@ mod foundations_guards {
                 search_from = abs + needle.len();
             }
         }
-        // `round-?\d+\b` / `pre-Round-\d+\b` / `post-Round-\d+\b`
-        // (case-insensitive on `round`). Orchestrator round markers
-        // are explicit `round-7`, `round 7`, `Round-10`, `pre-Round-10`
-        // etc. Word-boundary requirement on the leading token avoids
+        // `round\d+\b` / `round-?\d+\b` / `round \d+\b` (case-insensitive
+        // on `round`). Orchestrator round markers appear as `round-7`,
+        // `round 7`, `round20-fix2`, `Round-10`, `pre-Round-10`, etc.
+        // Word-boundary requirement on the leading token avoids
         // flagging identifiers that contain `round` as a substring
         // (`background`, `surround`). The trailing digit must be at
-        // a word boundary so `roundtrip` and similar are NOT flagged.
-        for needle in ["round ", "round-", "Round ", "Round-"] {
+        // a word boundary so `roundtrip` is NOT flagged. The
+        // separator-less form (`round20`) catches scratch-file path
+        // references like `D:/tmp/round20-fix2-report.md`.
+        for needle in ["round ", "round-", "round", "Round ", "Round-", "Round"] {
             let bytes = line.as_bytes();
             let mut search_from = 0usize;
             while let Some(rel) = line[search_from..].find(needle) {
@@ -4793,6 +4864,19 @@ mod foundations_guards {
             "// Cluster A: single-infer conditional.",
             "/// Cluster B value selection.",
             "// per Cluster C — relate Object surface.",
+            // Plan-section / Commit-number / revision archaeology
+            // (formerly the broader-D111 classifier's scope, now folded
+            // into the single source of truth).
+            "// Plan §3 Commit 9 — hover.provenance opt-in.",
+            "/// plan §3 Commit 8 — necessary for the audit bundle.",
+            "// Plan §3 Step 4 — audit warm-cache.",
+            "/// Plan §4.8 / Phase C / Commit R — RefCycleResultDb.",
+            "// Phase D §5.6 WIP-L — function shape (plan §2 decision).",
+            "// architectural-debt-closure rev 10.",
+            "// were deleted in Commit 3 of the cutover sub-plan).",
+            "// Counterpart deleted in Plan §6.15 / N — entry stored.",
+            "// Five-phase materialiser entry per plan §10.",
+            "// `phase-archaeology` is a sweep target.",
         ];
         for line in cases {
             assert!(
@@ -4811,6 +4895,17 @@ mod foundations_guards {
             "// `find_matching_angle` is no longer required because the dispatch resolver owns it.",
             "// Phase angle in radians for the easing curve.", // legitimate "phase" usage
             "// Builder Phase C owns the second pass.",        // 'Phase C' is a letter, not a digit
+            // Algorithm-phase carve-out (colon-prefixed verb describes
+            // an algorithm step rather than a plan-phase reference).
+            "// Phase 1: collect import statements.",
+            "// Phase 2: emit lowered IR.",
+            "// phase 3: walk dependency graph.",
+            // Algorithm-stage carve-out — the Stage family inherits
+            // the same `:`-prefixed carve-out as Phase.
+            "// Stage 1: read parser input.",
+            "// stage 2: lower to typed IR.",
+            // Legitimate `rev` usage that's not a number.
+            "// Reverses (rev) the iteration order.",
             // Stage-family negative cases — Stage followed by a
             // letter (not a digit), or "stage" used in a legitimate
             // prose sense, must not flag.
@@ -4880,363 +4975,22 @@ mod foundations_guards {
         }
     }
 
-    // ── Guard 7-bis — no_phase_archaeology_in_production_code_broader_d111 ──
+    // ── (Guard 7-bis retired — merged into guard 7 above.) ──
     //
-    // Strict superset of guard 7. Implements the D111 classifier rule
-    // (committed at `tools/god-module-audit/README.md`) for production
-    // source files. Final-state code must not reference plan sections,
-    // commit numbers, decimal phase tags, deletion history with explicit
-    // commit/section references, or revision numbers.
+    // The D111-classifier rule from `tools/god-module-audit/README.md`
+    // is the SOLE archaeology classifier in this file, implemented by
+    // `line_has_phase_archaeology`. Both production-source code
+    // (`no_phase_archaeology_in_production_code`) and test-file code
+    // (`phase_archaeology_test_files_count_zero`) call the same
+    // predicate so the two scopes stay byte-identical with no risk of
+    // drift between parallel predicates.
     //
-    // Predicate: scan every production `.rs` file under `crates/*/src/`
-    // (`walk_production_rs` already excludes `_tests.rs`, `tests.rs`,
-    // `tests/`, `benches/`, `examples/`, and `target/`). The guard fails
-    // when ANY line matches the regex below.
-    //
-    // Forbidden patterns (broader regex from D111):
-    //   - `Plan §` / `plan §` — explicit reference to a plan section.
-    //   - `Phase \d+` followed by anything other than a letter or `:` —
-    //     covers `Phase 5d`, `Phase 11b.2`, `Phase 5)`. The `:` carve-out
-    //     preserves algorithm-phase comments like `Phase 1: collect ...`
-    //     where the verb pinpoints an algorithm step.
-    //   - `Commit \d+` — explicit commit number reference.
-    //   - `deleted in \d` / `retired in` — deletion / retirement history.
-    //   - `revision \d+` / `rev \d+` — revision number reference (only
-    //     when the rev/revision is followed by a decimal digit, to avoid
-    //     legitimate prose like "the rev returns").
-    //
-    // Algorithm-phase carve-out: `Phase 1: collect ...` is preserved
-    // (colon-prefixed verb describes an algorithm step). Letter-suffixed
-    // phases (`Phase 5d`, `Phase 11b`) are NOT preserved — those are
-    // project-management vocabulary.
-
-    /// Predicate: returns `true` when `line` contains a forbidden
-    /// broader-D111 phase-archaeology pattern. Strict superset of the
-    /// narrower guard 7 predicate, except for the algorithm-phase
-    /// carve-out (`Phase 1: collect ...`) which the narrower predicate
-    /// does NOT distinguish from project-management `Phase 1`.
-    ///
-    /// The carve-out is deliberate: post-sweep, `Phase 1: collect ...`
-    /// comments describing algorithm steps are preserved per the D111
-    /// classifier rule. The narrower guard 7 has no such carve-out
-    /// because production code currently contains no algorithm-phase
-    /// comments to protect — the broader rule documents the
-    /// distinction so future authors know it.
-    ///
-    /// Also catches the orchestrator's project-management vocabulary
-    /// `Block N.x` (decimal-letter suffix) and `Commit XY` (alpha
-    /// suffix) which the existing numeric scans do not see.
-    pub fn line_has_phase_archaeology_d111(line: &str) -> bool {
-        let bytes = line.as_bytes();
-        // ── Fixed substrings — always archaeology. ──
-        const FIXED_NEEDLES: &[&str] = &[
-            "d-cutover",
-            "D-Cutover",
-            "post-cutover",
-            "Post-cutover",
-            "Post-Cutover",
-            "pre-Phase",
-            "Pre-Phase",
-            "retired in",
-            "Plan §",
-            "plan §",
-            "phase-archaeology",
-            // Stage-family — mirror the Phase fixed needles.
-            "pre-Stage",
-            "Pre-Stage",
-            "post-Stage",
-            "Post-Stage",
-        ];
-        for needle in FIXED_NEEDLES {
-            if line.contains(needle) {
-                return true;
-            }
-        }
-        // ── `Phase \d+` with the `:` carve-out. ──
-        // `Phase 1: collect ...` is algorithm-phase (preserve). Any
-        // other byte after the digit run (letter, `-`, `.`, space, EOL,
-        // `,`, `)`, `—`, etc.) is archaeology.
-        for prefix in ["Phase ", "phase ", "Phase-", "phase-"] {
-            let mut search_from = 0usize;
-            while let Some(rel) = line[search_from..].find(prefix) {
-                let abs = search_from + rel;
-                let mut after = abs + prefix.len();
-                let digit_start = after;
-                while after < bytes.len() && bytes[after].is_ascii_digit() {
-                    after += 1;
-                }
-                if after > digit_start {
-                    if after >= bytes.len() {
-                        return true;
-                    }
-                    let next = bytes[after];
-                    if next != b':' {
-                        return true;
-                    }
-                }
-                search_from = abs + prefix.len();
-            }
-        }
-        // ── `Stage \d+` with the `:` carve-out. ──
-        for prefix in ["Stage ", "stage ", "Stage-", "stage-"] {
-            let mut search_from = 0usize;
-            while let Some(rel) = line[search_from..].find(prefix) {
-                let abs = search_from + rel;
-                let mut after = abs + prefix.len();
-                let digit_start = after;
-                while after < bytes.len() && bytes[after].is_ascii_digit() {
-                    after += 1;
-                }
-                if after > digit_start {
-                    if after >= bytes.len() {
-                        return true;
-                    }
-                    let next = bytes[after];
-                    if next != b':' {
-                        return true;
-                    }
-                }
-                search_from = abs + prefix.len();
-            }
-        }
-        // ── `Commit \d+` — explicit commit-number reference. ──
-        for prefix in ["Commit ", "commit "] {
-            let mut search_from = 0usize;
-            while let Some(rel) = line[search_from..].find(prefix) {
-                let abs = search_from + rel;
-                let after = abs + prefix.len();
-                if after < bytes.len() && bytes[after].is_ascii_digit() {
-                    return true;
-                }
-                search_from = abs + prefix.len();
-            }
-        }
-        // ── `Commit XY` — alpha-suffixed orchestrator commit markers
-        // like `Commit AX`, `Commit BX`, `Commit C`. Discriminator
-        // after `Commit [A-Z]`:
-        //   - another upper / digit is archaeology
-        //   - lowercase letter is verb-noun prose (`Commit Source`,
-        //     `Commit Atlas`), NOT archaeology
-        //   - any non-alphabetic byte (space, punctuation, EOL) is a
-        //     single-letter orchestrator marker, archaeology
-        for prefix in ["Commit ", "commit "] {
-            let mut search_from = 0usize;
-            while let Some(rel) = line[search_from..].find(prefix) {
-                let abs = search_from + rel;
-                let after = abs + prefix.len();
-                if after < bytes.len() && bytes[after].is_ascii_uppercase() {
-                    if after + 1 >= bytes.len() {
-                        return true;
-                    }
-                    let trailing = bytes[after + 1];
-                    if trailing.is_ascii_uppercase()
-                        || trailing.is_ascii_digit()
-                        || !trailing.is_ascii_alphabetic()
-                    {
-                        return true;
-                    }
-                }
-                search_from = abs + prefix.len();
-            }
-        }
-        // ── `Block \d+\.[a-z]` — orchestrator block vocabulary
-        // (`Block 6.i`, `Block 6.j`, `Block 12.a`). The decimal+letter
-        // suffix is unique to the orchestrator's block naming and
-        // does not appear in legitimate prose ("basic block",
-        // "allocator block" etc.). Case-sensitive on the leading B.
-        for prefix in ["Block "] {
-            let mut search_from = 0usize;
-            while let Some(rel) = line[search_from..].find(prefix) {
-                let abs = search_from + rel;
-                let mut after = abs + prefix.len();
-                let digit_start = after;
-                while after < bytes.len() && bytes[after].is_ascii_digit() {
-                    after += 1;
-                }
-                if after > digit_start
-                    && after + 1 < bytes.len()
-                    && bytes[after] == b'.'
-                    && bytes[after + 1].is_ascii_lowercase()
-                {
-                    return true;
-                }
-                search_from = abs + prefix.len();
-            }
-        }
-        // ── `deleted in \d` — deletion history with digit reference. ──
-        let lower = line.to_ascii_lowercase();
-        if let Some(idx) = lower.find("deleted in ") {
-            let after = idx + "deleted in ".len();
-            let bytes_l = lower.as_bytes();
-            if after < bytes_l.len() && bytes_l[after].is_ascii_digit() {
-                return true;
-            }
-        }
-        // ── `revision N` / `Revision N`. ──
-        for prefix in ["revision ", "Revision "] {
-            let mut search_from = 0usize;
-            while let Some(rel) = line[search_from..].find(prefix) {
-                let abs = search_from + rel;
-                let after = abs + prefix.len();
-                if after < bytes.len() && bytes[after].is_ascii_digit() {
-                    return true;
-                }
-                search_from = abs + prefix.len();
-            }
-        }
-        // ── `rev N` standalone word. ──
-        for (i, _) in line.match_indices("rev ") {
-            if i > 0 {
-                let prev = bytes[i - 1];
-                if !(prev == b' ' || prev == b'\t' || prev == b'(') {
-                    continue;
-                }
-            }
-            let after = i + "rev ".len();
-            if after < bytes.len() && bytes[after].is_ascii_digit() {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Walk the production tree and return `(rel_path, line_no, line)`
-    /// triples for every D111-classified archaeology match.
-    pub fn guard7_bis_violations() -> Vec<(String, usize, String)> {
-        let crates_root = workspace_root().join("crates");
-        let mut violations = Vec::new();
-        let entries = match fs::read_dir(&crates_root) {
-            Ok(it) => it,
-            Err(_) => return violations,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let src_dir = path.join("src");
-            if !src_dir.exists() {
-                continue;
-            }
-            for file in walk_production_rs(&src_dir) {
-                let src = match fs::read_to_string(&file) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-                let rel = relative_to_root(&file);
-                for (idx, line) in src.lines().enumerate() {
-                    if line_has_phase_archaeology_d111(line) {
-                        violations.push((rel.clone(), idx + 1, line.to_string()));
-                    }
-                }
-            }
-        }
-        violations.sort();
-        violations
-    }
-
-    #[test]
-    fn no_phase_archaeology_in_production_code_broader_d111() {
-        let violations = guard7_bis_violations();
-        assert!(
-            violations.is_empty(),
-            "Guard 7-bis (`no_phase_archaeology_in_production_code_broader_d111`) violations:\n\
-             production source files reference plan sections, commit numbers, decimal phase\n\
-             tags, deletion history with explicit references, or revision numbers. Once a\n\
-             plan is over, the code should read as final-state. Durable architecture\n\
-             insights belong in `.claude/skills/*` or `docs/arch/`, not in source comments.\n\n\
-             Forbidden patterns (broader D111 regex):\n\
-               - `Plan §` / `plan §`\n\
-               - `Phase \\d+` (NOT followed by letter or `:` — `Phase 1: collect` preserved)\n\
-               - `Commit \\d+`\n\
-               - `deleted in \\d` / `retired in`\n\
-               - `revision \\d+` / `rev \\d+`\n\n\
-             Found {} violation(s):\n  {}",
-            violations.len(),
-            violations
-                .iter()
-                .map(|(rel, lineno, line)| format!("{rel}:{lineno}: {}", line.trim()))
-                .collect::<Vec<_>>()
-                .join("\n  "),
-        );
-    }
-
-    #[test]
-    fn guard7_bis_predicate_rejects_deliberate_violations_and_preserves_algorithm_phases() {
-        // Deliberate-violation lines that the broader D111 guard MUST
-        // reject. Mirror real archaeology shapes seen in the codebase
-        // before this guard was tightened.
-        let cases = [
-            "// Plan §3 Commit 9 — hover.provenance opt-in.",
-            "/// plan §3 Commit 8 — necessary for the audit bundle.",
-            "// Plan §3 Step 4 — audit warm-cache",
-            "/// Plan §4.8 / Phase C / Commit R — RefCycleResultDb",
-            "// Phase D §5.6 WIP-L — function shape (plan §2 decision).",
-            "// architectural-debt-closure rev 10",
-            "// were deleted in Commit 3 of the cutover sub-plan).",
-            "// Counterpart deleted in Plan §6.15 / N — entry stored.",
-            "// Five-phase materialiser entry per plan §10.",
-            // Stage-family — mirror the Phase-family violations.
-            "// Stage 4d retired the per-session overlay lifecycle.",
-            "/// Pre-Stage-4d the overlay-mutation invoked this hook.",
-            "// post-Stage-4d the path is a no-op.",
-            "// Stage-5b instrumentation counter — admission discriminator.",
-            "/// Stage 6e installs the legacy_dep_signature shadow.",
-            "/// stage 6a wires the real cache.",
-            // Block N.x — orchestrator block vocabulary.
-            "// Block 6.i Commit AX — descend the per-member cursor.",
-            "// Block 6.j R18 — emit PublishedField at the boundary.",
-            "/// Block 6.c per-request hoist.",
-            // Commit XY — alpha-suffixed commit markers.
-            "// Commit AX (codex-hybrid): the call-site provides the cursor.",
-            "// per Commit BX of the cutover.",
-        ];
-        for line in cases {
-            assert!(
-                line_has_phase_archaeology_d111(line),
-                "guard 7-bis predicate must reject deliberate-violation line: {line:?}",
-            );
-        }
-        // Allowed lines: legitimate prose, algorithm-phase comments,
-        // and final-state architecture documentation. The guard MUST
-        // NOT flag these.
-        let allowed = [
-            // Algorithm-phase carve-out (colon-prefixed verb).
-            "// Phase 1: collect import statements.",
-            "// Phase 2: emit lowered IR.",
-            "// phase 3: walk dependency graph.",
-            // Algorithm-stage carve-out — the Stage family inherits
-            // the same `:`-prefixed carve-out as Phase.
-            "// Stage 1: read parser input.",
-            "// stage 2: lower to typed IR.",
-            // Final-state prose with no project-management vocabulary.
-            "// Walk the prepared declaration graph for imported types.",
-            "/// Returns the projected surface for a given semantic node.",
-            "// LRU bounded at 100 entries.",
-            "// hover.provenance is opt-in (default false).",
-            // Legitimate `rev` / `revision` usage that's not a number.
-            "// Reverses (rev) the iteration order.",
-            "/// The phase angle in radians for the easing curve.",
-            // `Phase` followed by a letter without digits — not archaeology
-            // by the broader rule (the rule specifies `Phase \\d+`).
-            "// Builder Phase C owns the second pass.",
-            // Stage followed by a letter — same carve-out as Phase.
-            "// Build Stage C handles the second pass.",
-            // Block prose that is NOT orchestrator vocabulary.
-            "// Walk each basic block in source order.",
-            "// allocator block reuse counter.",
-            "// `block_until_idle` waits until the queue drains.",
-            // Commit verb prose — sentence-initial verb usage.
-            "// On commit, flush the buffered writes.",
-            "/// Commit the in-flight transaction.",
-        ];
-        for line in allowed {
-            assert!(
-                !line_has_phase_archaeology_d111(line),
-                "guard 7-bis predicate must NOT flag legitimate line: {line:?}",
-            );
-        }
-    }
+    // The merge happened by absorbing the `:` carve-out for
+    // `Phase \d+` / `Stage \d+`, the `Commit \d+` numeric scan, the
+    // `revision \d+` / `rev \d+` scans, the `phase-archaeology` fixed
+    // needle, the `post-Phase` / `Post-Phase` fixed needles, and the
+    // broadened `deleted in \d` scan into `line_has_phase_archaeology`.
+    // The single classifier now covers every D111 pattern.
 
     // ── Guard D14 — no_std_fs_outside_native_fs_or_allow_list ──
     //
@@ -6707,9 +6461,10 @@ fn macro_impacting_constructs_fail_lowering_not_silent_skip() {
 // | W5d | crates/verter_session/src/resolver_core/component_meta      |
 // | W5e | crates/verter_ffi/src/convert                               |
 
-/// Shared helper for the W5f phase-archaeology guards. Reuses the
-/// broader-D111 classifier from `foundations_guards` so the test-file
-/// and production-code predicates stay byte-identical.
+/// Shared helper for the test-file phase-archaeology guard. Reuses
+/// the unified phase-archaeology classifier from `foundations_guards`
+/// so the test-file and production-code predicates stay byte-identical
+/// (single source of truth).
 mod w5f_test_archaeology {
     use std::path::Path;
     use walkdir::WalkDir;
@@ -6765,7 +6520,7 @@ mod w5f_test_archaeology {
                 let src_text =
                     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
                 for (line_no, line) in src_text.lines().enumerate() {
-                    if super::foundations_guards::line_has_phase_archaeology_d111(line) {
+                    if super::foundations_guards::line_has_phase_archaeology(line) {
                         violations.push(format!("{rel}:{}", line_no + 1));
                     }
                 }
@@ -6877,10 +6632,10 @@ fn each_post_split_module_under_lines_budget() {
 fn phase_archaeology_test_files_count_zero() {
     // Strict invariant: zero phase-archaeology references in test files
     // inside `crates/*/src/` — `tests.rs`, `*_tests.rs`, and anything
-    // under a `tests/` subdirectory. The classifier is shared with the
-    // broader-D111 production-code guard
-    // (`foundations_guards::line_has_phase_archaeology_d111`), so the
-    // test-file and production-code predicates stay byte-identical.
+    // under a `tests/` subdirectory. The classifier is the unified
+    // `foundations_guards::line_has_phase_archaeology` predicate, so the
+    // test-file and production-code guards stay byte-identical (single
+    // source of truth).
     let violations = w5f_test_archaeology::collect_test_archaeology_violations();
     assert!(
         violations.is_empty(),

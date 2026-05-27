@@ -466,12 +466,12 @@ defineModel<string>()
 
 /// PublishedField non-vacuity gate (DISCRIMINATING).
 ///
-/// Round 17 closed the Rule-5 validator's false-negative class
-/// (`PublishedField` edges crossing the `fp.projections` lift), but
-/// the validator's `PublishedField` discriminating branch was dead
-/// code on real corpus data: zero production sites emitted
-/// `MemberEdgeProvenance::PublishedField`. 179/179 corpus PASS was
-/// vacuous via the structural-allowlist short-circuit.
+/// Invariant: every macro projector must emit a `PublishedField`
+/// member-edge origin so the Rule-5 validator's `PublishedField`
+/// discriminating branch is exercised on real corpus data. A prior
+/// regression had the validator passing 179/179 corpus components
+/// vacuously via the structural-allowlist short-circuit because
+/// zero production sites emitted `MemberEdgeProvenance::PublishedField`.
 ///
 /// This test pins the producer-side PublishedField wiring.
 /// Every macro projector (`defineProps` / `defineEmits` /

@@ -2684,8 +2684,8 @@ fn materialize_memo_db_observed_whole_hash_dependency_preserves_observed_hash() 
 /// canonical's CURRENT content hash is a distinct `H_current`
 /// (`H_current != H_observed`). The emitted scope `FileWholeHash` MUST
 /// carry `H_observed`. A builder that ignored the parameter and
-/// re-read the scope's current content (the round-3 P1 defect: the
-/// scope hash was read twice non-atomically — once for the value, once
+/// re-read the scope's current content (a publish-race defect: the
+/// scope hash read twice non-atomically — once for the value, once
 /// for the signature) would emit `H_current`; the stale value would
 /// then be published rooted by a fresh-looking current hash and
 /// validate on every warm read, permanently masking an edit landing in
@@ -2693,7 +2693,7 @@ fn materialize_memo_db_observed_whole_hash_dependency_preserves_observed_hash() 
 ///
 /// RED proof (this fix changed the builder signature): with the body
 /// reverted to re-read the scope's current content hash for the
-/// self-root (the round-3 P1 defect), the emitted scope `FileWholeHash`
+/// self-root (the publish-race defect), the emitted scope `FileWholeHash`
 /// carries `H_current` and the `assert_eq!(.., H_observed)` trips. The
 /// post-fix body emits the caller-supplied parameter and the assertion
 /// holds.
@@ -2786,7 +2786,7 @@ fn materialize_memo_db_scope_self_root_carries_observed_hash_not_current() {
     assert_ne!(
         scope_fact_hash, current_hash,
         "the emitted scope self-root must NOT carry the scope's post-edit current content \
-         hash — re-reading the current hash is the round-3 P1 publish-race defect.",
+         hash — re-reading the current hash is the publish-race defect.",
     );
 }
 
@@ -2855,7 +2855,7 @@ fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end(
 
     // The scope is edited AFTER the value's hash observation but BEFORE
     // the write-through builds the fact signature — the exact race
-    // window the round-3 P1 describes.
+    // window the publish-race defect describes.
     upsert(&host, scope, "export type Probe = string;\n");
     let current_hash_h2 = host
         .ensure_indexed_ready(scope)
@@ -3627,9 +3627,9 @@ fn prepared_target_db_signature_builder_is_provenance_pure() {
 // producer-level test cannot isolate the self-root fix; `OwnerCollectionDb`'s
 // producer refuses admission of the torn entry pre-fix (see the note above the
 // `ResolvabilityDb` test); `PreparedTargetDb`'s producer is `pub(super)` and
-// not reachable from this module. Their round-6 producer hash-source change
-// (the identical base-only `shallow_file_state` → view-aware
-// `authoritative_current_content_hash` substitution) is covered by the
+// not reachable from this module. Their producer-side hash-source
+// (base-only `shallow_file_state` → view-aware
+// `authoritative_current_content_hash`) is covered by the
 // `*_signature_builder_is_provenance_pure` builder tests above and the
 // `central_fact_signature_helpers_are_provenance_pure` architecture guard.
 

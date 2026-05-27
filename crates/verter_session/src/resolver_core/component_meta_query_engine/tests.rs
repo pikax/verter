@@ -4104,12 +4104,14 @@ fn resolve_imported_registry_symbol_reuses_value_on_admission_failure_without_re
 ///    `validate` arm returns it WITHOUT running the closure).
 ///  - `None` — shared-cache admission was refused.
 ///
-/// Fix-round-7 wrote `let _ = get_or_compute(...)` and unconditionally
-/// returned the locally-computed `resolved`. That discards the
-/// `Some(cached)` value the concurrent-publish warm-hit arm returns —
-/// so when the local slow-lane resolution produced `None` (e.g. the
-/// exported name does not resolve) the producer reported a spurious
-/// miss even though the authoritative cache held a real symbol.
+/// Regression: a producer that writes `let _ = get_or_compute(...)`
+/// and unconditionally returns the locally-computed `resolved`
+/// discards the `Some(cached)` value the concurrent-publish warm-hit
+/// arm returns — so when the local slow-lane resolution produced
+/// `None` (e.g. the exported name does not resolve) the producer
+/// reported a spurious miss even though the authoritative cache held
+/// a real symbol. This test pins the contract that the producer must
+/// honour `Some(cached)` whenever the warm-hit arm fires.
 ///
 /// The fixture pins the discriminator:
 ///
@@ -4208,17 +4210,20 @@ fn resolve_imported_registry_symbol_surfaces_concurrently_published_value() {
 }
 
 /// Discriminating regression for the imported-registry singleflight
-/// bug (codex fix-round-9 P2).
+/// invariant: the slow-lane resolution must execute inside the
+/// `ImportedRegistryDb` cooperative-admission closure so it runs at
+/// most once per `(key, generation)`.
 ///
 /// `resolve_imported_registry_symbol`'s expensive resolution —
 /// `resolve_imported_registry_symbol_with_budget` — consumes the
 /// per-request wildcard-route fuse (`allow_wildcard_route()` /
-/// `wildcard_route_fanout`) on the slow lane. Fix-round-7 moved that
-/// resolution OUTSIDE the `ImportedRegistryDb` cooperative-admission
-/// closure. With the resolution outside the singleflight slot, several
-/// requests that miss the cache for the SAME key each run the
-/// resolution independently and each tick the wildcard-route fuse —
-/// the one-winner contract documented for these DBs is regressed.
+/// `wildcard_route_fanout`) on the slow lane. A prior implementation
+/// moved that resolution OUTSIDE the `ImportedRegistryDb`
+/// cooperative-admission closure. With the resolution outside the
+/// singleflight slot, several requests that miss the cache for the
+/// SAME key each run the resolution independently and each tick the
+/// wildcard-route fuse — the one-winner contract documented for these
+/// DBs is regressed.
 ///
 /// The fix runs the resolution INSIDE the
 /// `cooperative_admit_with_post_publish` `compute` closure, so exactly

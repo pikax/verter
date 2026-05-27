@@ -1711,12 +1711,13 @@ fn session_overlay_warm_validation_matrix() {
 ///
 /// `session_overlay_warm_validation_matrix` above covers a carrier
 /// whose only fact is the self-root `FileWholeHash`. That fact routes
-/// through `validates_self_root_whole_hash`, which fix-round-3 closed by
-/// re-rooting `HostStoreView.whole_hashes`. A `Parse` fact routes
-/// through a DIFFERENT validator — `validates_parse_domain`, which reads
-/// the per-canonical `Arc<FileFacts>` from `HostStoreView.file_facts`.
+/// through `validates_self_root_whole_hash`, which closes the
+/// self-root validation by re-rooting `HostStoreView.whole_hashes`.
+/// A `Parse` fact routes through a DIFFERENT validator —
+/// `validates_parse_domain`, which reads the per-canonical
+/// `Arc<FileFacts>` from `HostStoreView.file_facts`.
 /// `HostStoreView::build` snapshots `file_facts` from the **base**
-/// content; `with_session_overlay` (fix-round-3) re-rooted only
+/// content; `with_session_overlay` re-roots only
 /// `whole_hashes`. So a warm `MemoEntry` whose carrier holds a `Parse`
 /// fact for an overlaid canonical — the fact's `expected_hash` is the
 /// fact hash live in the **overlay** artifact, because a cold build
