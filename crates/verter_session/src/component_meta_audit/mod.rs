@@ -114,6 +114,34 @@ pub fn vfs_layer_from_workspace(layer: verter_workspace::audit_sink::VfsAuditLay
     }
 }
 
+/// Record one `MaterializationRecord` against the currently-installed
+/// [`RequestFootprintAccumulator`].
+///
+/// No-op when no accumulator is installed (the synthetic-record path
+/// and unaudited callers). Producers that materialise a payload of
+/// interest call this at the exit of the materialiser with a
+/// substrate-defined [`MaterializationSubject`] variant + measured
+/// wall-clock duration so the footprint miner can attribute the cost
+/// per envelope.
+///
+/// The lane was previously empty: no production call site existed
+/// before the prepared-decl-bundle cold producers + the
+/// `materialize_component_meta_structure` entry point were wired to
+/// push materialisation records. That empty lane was a footprint
+/// blind spot — per-request cost attribution had no envelope per
+/// cold prepared-decl build, so a >5.9M-occurrence cold counter on
+/// ChatMessages.vue had no duration breakdown for investigators to
+/// consult.
+#[inline]
+pub fn record_materialization(subject: MaterializationSubject, duration_ms: f64) {
+    if let Some(acc) = crate::request_context::current_accumulator() {
+        acc.push_materialization(MaterializationRecord {
+            subject,
+            duration_ms,
+        });
+    }
+}
+
 /// Snapshot the per-request cache counters from the currently
 /// installed [`crate::request_context::RequestContext`] into a
 /// [`verter_audit::store::CacheLayerBreakdown`]. Used at request

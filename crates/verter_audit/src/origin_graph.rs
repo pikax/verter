@@ -421,6 +421,24 @@ pub enum MaterializationSubject {
         /// Caller-side projection mode the materialiser ran with.
         mode: ProjectionModeAudit,
     },
+    /// Prepared-decl bundle materialization. Subject of every
+    /// cold-path build inside
+    /// `materialize_prepared_decl_bundle_from_route_owned_shallow`
+    /// and `materialize_prepared_decl_bundle` (the two cold
+    /// producers of `prepared_decl_bundles`).
+    ///
+    /// `cold` distinguishes a true cold rebuild (`true`) from a
+    /// warm-cache hit short-circuit the producer detected before
+    /// committing the bundle (`false` — currently unused on
+    /// production paths, reserved for the `get_if_valid_self_rooted`
+    /// re-check branch inside the singleflight leader closure).
+    PreparedDeclBundle {
+        /// Canonical id of the bundle's keyed file (its self-root).
+        canonical: Arc<str>,
+        /// `true` when the bundle was built from cold; `false`
+        /// reserved for a future re-check warm short-circuit.
+        cold: bool,
+    },
 }
 
 /// PUB mirror of the materialiser's `MaterializationScope` axis.

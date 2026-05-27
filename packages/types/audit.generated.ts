@@ -960,7 +960,16 @@ scope_axis: MaterializationScopeAudit,
 /**
  * Caller-side projection mode the materialiser ran with.
  */
-mode: ProjectionModeAudit, } };
+mode: ProjectionModeAudit, } } | { "PreparedDeclBundle": { 
+/**
+ * Canonical id of the bundle's keyed file (its self-root).
+ */
+canonical: string, 
+/**
+ * `true` when the bundle was built from cold; `false`
+ * reserved for a future re-check warm short-circuit.
+ */
+cold: boolean, } };
 
 /**
  * Reason a `MaterializeStructurePolicySkip` event fired — captures

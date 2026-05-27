@@ -462,6 +462,15 @@ impl VerterHost {
             return None;
         }
 
+        // Wall-clock fence for the cold materialisation envelope. The
+        // `materializations` lane is empty without this — the per-request
+        // footprint accumulator carries no production-side producer
+        // for the prepared-decl-bundle cold path unless this site
+        // pushes a `MaterializationRecord` at the cold-build exit (see
+        // also `materialize_prepared_decl_bundle` below for the
+        // standard cold-build sibling).
+        let materialize_started_at = crate::instant::Instant::now();
+
         let state = self.route_owned_shallow_state(canonical_id)?;
         if state.symbols.is_empty()
             && state.value_symbols.is_empty()
@@ -539,6 +548,21 @@ impl VerterHost {
             ),
         );
 
+        // Push a `MaterializationSubject::PreparedDeclBundle`
+        // record onto the per-request footprint accumulator. Wired
+        // here (route-owned-shallow cold path) and at
+        // `materialize_prepared_decl_bundle` below (standard cold
+        // path) so both `prepared_decl_bundles` cold producers light
+        // up the `materializations` lane.
+        let duration_ms = materialize_started_at.elapsed().as_secs_f64() * 1000.0;
+        crate::component_meta_audit::record_materialization(
+            crate::component_meta_audit::MaterializationSubject::PreparedDeclBundle {
+                canonical: std::sync::Arc::<str>::from(canonical_id),
+                cold: true,
+            },
+            duration_ms,
+        );
+
         Some(bundle)
     }
 
@@ -548,6 +572,16 @@ impl VerterHost {
         &self,
         canonical_id: &str,
     ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
+        // Wall-clock fence for the cold materialisation envelope —
+        // see the route-owned-shallow sibling above for the
+        // rationale (push one materialisation record per cold
+        // bundle build so the footprint lane has a per-envelope
+        // duration breakdown). Captured BEFORE the
+        // `ensure_indexed_ready` lookup so a cold IndexedReady build
+        // that the materialiser triggers is part of the recorded
+        // duration.
+        let materialize_started_at = crate::instant::Instant::now();
+
         // 1. Ensure source/shallow data exists.
         let facts = self.ensure_indexed_ready(canonical_id)?;
         let state = &facts.shallow_state;
@@ -648,6 +682,18 @@ impl VerterHost {
                 bundle.prepared_value_decls.len(),
                 bundle.dep_edges.len(),
             ),
+        );
+
+        // Push the materialization record onto the per-request
+        // accumulator so the footprint lane gets a per-envelope
+        // duration entry for this cold bundle build.
+        let duration_ms = materialize_started_at.elapsed().as_secs_f64() * 1000.0;
+        crate::component_meta_audit::record_materialization(
+            crate::component_meta_audit::MaterializationSubject::PreparedDeclBundle {
+                canonical: std::sync::Arc::<str>::from(canonical_id),
+                cold: true,
+            },
+            duration_ms,
         );
 
         Some(bundle)
