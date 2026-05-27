@@ -39,18 +39,10 @@ pub fn current_request_budget() -> Option<Arc<RequestBudget>> {
 }
 
 /// Snapshot the request-scoped materialization-cache-suppress sticky
-/// flag. Returns `false` when no request context is installed (audit
-/// substrate's `NoOpObserver` paths and out-of-band callers behave as
-/// "no suppression" for legacy parity).
-///
-/// The flag is set by reducer / materializer paths whenever a
-/// projection-budget-exhausted (or other fatal `QueryError`) read
-/// propagates through `dispatch.execute_read(...).cache_suppress`.
-/// `compute_component_meta_state_inner` reads the flag after the
-/// final projector pass and OR-folds it into
-/// `ResolvedComponentMetaState.synthesis_should_suppress` so the
-/// final-result `ComponentMetaResultDb` cache refuses to admit a
-/// partial.
+/// flag. Set by reducer / materializer paths on `cache_suppress=true`
+/// dispatch reads; OR-folded into `synthesis_should_suppress` by
+/// `compute_component_meta_state_inner`. Returns `false` when no
+/// `RequestContext` is installed.
 #[must_use]
 pub fn current_materialization_cache_suppress() -> bool {
     current_request_context()
@@ -59,11 +51,8 @@ pub fn current_materialization_cache_suppress() -> bool {
 }
 
 /// Set the request-scoped materialization-cache-suppress sticky flag.
-/// Called by reducer / materializer paths on every observed
-/// `cache_suppress=true` semantic read so the partial outcome can
-/// never warm the final-result `ComponentMetaResultDb` cache. Sticky:
-/// once set during a request, stays set until the request completes
-/// and its `RequestContext` is dropped.
+/// Sticky for the request's lifetime. No-op when no `RequestContext`
+/// is installed.
 pub fn mark_request_materialization_cache_suppress() {
     if let Some(ctx) = current_request_context() {
         ctx.materialization_cache_suppress
@@ -469,15 +458,12 @@ pub struct RequestContext {
     /// [`verter_audit::ComponentMetaPayload::memo_publish_suppressed`].
     /// Discriminating signal for the no-poison gate.
     pub memo_publish_suppressed: AtomicU64,
-    /// Request-scoped sticky flag set by reducer / materializer paths
-    /// whenever they observe a `cache_suppress=true` semantic read
-    /// (most commonly a projection-budget exhaustion). Read by
-    /// `compute_component_meta_state_inner` after the projection
-    /// second pass and OR-folded into
-    /// `ResolvedComponentMetaState.synthesis_should_suppress` so the
-    /// final-result `ComponentMetaResultDb` cache refuses to admit a
-    /// partial. Sticky: once set during a request it stays set; the
-    /// counterpart accessor never clears it.
+    /// Sticky flag raised by reducer / materializer paths on every
+    /// `cache_suppress=true` semantic read. OR-folded into
+    /// `synthesis_should_suppress` so the final-result
+    /// `ComponentMetaResultDb` refuses to admit projection-budget
+    /// partials. See `current_materialization_cache_suppress` and
+    /// `mark_request_materialization_cache_suppress`.
     pub materialization_cache_suppress: AtomicBool,
 
     // ─────── Resolver / import-route hot-path counters ───────

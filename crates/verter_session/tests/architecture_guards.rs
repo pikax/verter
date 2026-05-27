@@ -4028,6 +4028,14 @@ mod foundations_guards {
             // expander-vs-projector lines is the eventual cleanup.
             "crates/verter_session/src/meta_resolve/projectors/mod.rs",
             "crates/verter_session/src/parse.rs",
+            // Per-request state container — owns `RequestContext`, the
+            // cache-attribution counters, the projection budget, the
+            // materialization-cache-suppress sticky flag, and the TLS
+            // install/restore plumbing. Densely documented because
+            // each field is the public API every cache/audit consumer
+            // reads. Splitting along counter / flag / budget lines is
+            // the eventual cleanup.
+            "crates/verter_session/src/request_context.rs",
             "crates/verter_session/src/project_semantic_dispatch/build.rs",
             "crates/verter_session/src/project_semantic_dispatch/lower.rs",
             // Project semantic dispatch entry-points module. The
