@@ -114,16 +114,16 @@ pub struct ResolveDeclKey {
     pub name: Arc<str>,
 }
 
-/// Declaration identity for [`SemanticNodeData::TypeParam`] (Path C C6).
+/// Declaration identity for [`SemanticNodeData::TypeParam`].
 ///
 /// Distinguishes two unrelated `type A<T> = ...` and `type B<T> = ...`
-/// declarations in the same source file. Pre-C6 the `TypeParam` variant
-/// keyed on `name` alone, so identical parameter names across unrelated
-/// declarations would collide structurally once C7 introduces interning.
-/// C6 folds declaration identity (owning file + content generation +
-/// declaring entity name) into the payload itself so the compound
-/// `(payload, scope)` key in C7 gets a primary discriminator at the
-/// payload level.
+/// declarations in the same source file. Identical parameter names
+/// across unrelated declarations must not collide structurally under
+/// the semantic-graph interner, so the `TypeParam` variant carries
+/// declaration identity (owning file + content generation +
+/// declaring entity name) in the payload itself — the compound
+/// `(payload, scope)` interner key has a primary discriminator at
+/// the payload level rather than relying solely on display name.
 ///
 /// `decl_name` names the declaring entity — typically an interface,
 /// type-alias, or class name, plus a script-setup sentinel
@@ -362,9 +362,11 @@ impl VersionedDeclIdentity {
     }
 }
 
-/// A reference that is either a declaration identity (not interned in the
-/// arena) or a concrete semantic node. Path C C16: declaration identity
-/// is carried as `DeclIdentity` data, not as an interned node variant.
+/// A reference that is either a declaration identity (not interned
+/// in the arena) or a concrete semantic node. Declaration identity
+/// is carried as a `DeclIdentity` value, not as an interned node
+/// variant, so a generic instantiation's `base` does not require a
+/// distinct `DeclAnchor` node in the arena.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SemanticRef {
     Decl(DeclIdentity),
@@ -397,7 +399,7 @@ pub enum ReadonlyMod {
     Keep,
 }
 
-/// Lowering-time classification of a [`MapperKey::value_expr`] (Path C C5).
+/// Lowering-time classification of a [`MapperKey::value_expr`].
 ///
 /// `Identity` means the lowered `value_expr` is structurally the
 /// `T[K]` projection of the mapped source — `IndexedAccess { object:
@@ -407,12 +409,12 @@ pub enum ReadonlyMod {
 /// `Partial<T>` / `Required<T>` / `Readonly<T>`). `Computed` means
 /// the value is any other shape (computed projection, conditional
 /// body, intersected helper) and must go through
-/// `substitute_semantic_type_param` + `evaluate_deferred_semantic_node`.
+/// `substitute_semantic_type_param` +
+/// `evaluate_deferred_semantic_node`.
 ///
-/// Pre-C5, `build_mapped_type` ran the runtime helper
-/// `mapper_value_is_identity_t_of_k` on every call. C5 hoists the
-/// classification to lowering time so the build path matches on a
-/// stable tag and the helper retires.
+/// Classification happens at lowering time so the build path matches
+/// on a stable tag rather than re-inspecting the AST shape at every
+/// `build_mapped_type` call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MapperKind {
     /// `value_expr` is structurally `IndexedAccess { object:
@@ -436,17 +438,12 @@ impl MapperKind {
     ///   `TypeParam` node with the same name as `mapper_param`.
     /// - Anything else → [`MapperKind::Computed`].
     ///
-    /// Ported verbatim from the retired `mapper_value_is_identity_t_of_k`
-    /// helper so existing fast-path coverage is
-    /// preserved.
-    ///
-    /// **Path C C6a item 7.** `mapper_param_node` is the mapper's
-    /// binder node id (the `TypeParam` introduced by the enclosing
-    /// `[K in ...]` binding). Classification checks that the
-    /// indexed-access `index`'s type node equals this binder by
-    /// `SemanticNodeId`, not by `display_name` string. This avoids
-    /// conflating two binders that share a display name but are
-    /// semantically distinct.
+    /// `mapper_param_node` is the mapper's binder node id (the
+    /// `TypeParam` introduced by the enclosing `[K in ...]`
+    /// binding). Classification checks that the indexed-access
+    /// `index`'s type node equals this binder by `SemanticNodeId`,
+    /// not by `display_name` string — two binders that share a
+    /// display name but are semantically distinct must not conflate.
     #[must_use]
     pub fn classify_value_expr(
         graph: &crate::semantic_query_memo::SemanticGraphStore,
@@ -484,15 +481,15 @@ impl MapperKind {
 /// value expression so two mappers that share the same key space but differ
 /// in the value expression do not alias.
 ///
-/// **Path C C6a item 6.** `parameter_node` carries the mapper's
-/// binder identity as the interned `TypeParam`'s [`SemanticNodeId`]
-/// (rather than the pre-C6a `parameter: Arc<str>` display name).
-/// Binder matching across substitute/classify paths is now node-id
-/// equality, so two distinct mapped binders sharing a display name
-/// no longer conflate.
+/// `parameter_node` carries the mapper's binder identity as the
+/// interned `TypeParam`'s [`SemanticNodeId`] rather than as a
+/// display-name `Arc<str>`. Binder matching across
+/// substitute / classify paths is node-id equality, so two distinct
+/// mapped binders sharing a display name do not conflate.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MapperKey {
-    /// The binder's interned `TypeParam` node id (Path C C6a item 6).
+    /// The binder's interned `TypeParam` node id — binder identity
+    /// is by `SemanticNodeId` rather than by display name.
     pub parameter_node: SemanticNodeId,
     pub key_space: SemanticNodeId,
     pub value_expr: SemanticNodeId,
@@ -500,7 +497,8 @@ pub struct MapperKey {
     pub readonly: ReadonlyMod,
     /// Optional `as` clause remapping the key.
     pub name_remap: Option<SemanticNodeId>,
-    /// Path C C5 classification of `value_expr`. See [`MapperKind`].
+    /// Lowering-time classification of `value_expr`. See
+    /// [`MapperKind`].
     pub kind: MapperKind,
 }
 
@@ -1057,13 +1055,13 @@ pub enum QueryError {
     },
 }
 
-// Path C C7 — `SemanticNodeData` structurally interns under a compound
-// `(payload, scope)` key, so every field transitively reachable from a
-// variant must implement `Hash` / `Eq`. `QueryError::BudgetExceeded`
+// `SemanticNodeData` structurally interns under a compound
+// `(payload, scope)` key, so every field transitively reachable from
+// a variant must implement `Hash` / `Eq`. `QueryError::BudgetExceeded`
 // wraps `BudgetExceededFailure` which has no `Hash`/`Eq`; treat all
-// `BudgetExceeded` carriers as one identity for interning purposes (they
-// are opaque error tokens, not structural distinguishers). Other variants
-// compare by their fields.
+// `BudgetExceeded` carriers as one identity for interning purposes
+// (they are opaque error tokens, not structural distinguishers).
+// Other variants compare by their fields.
 impl PartialEq for QueryError {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -1457,32 +1455,33 @@ pub enum SemanticNodeData {
         path: Arc<[Arc<str>]>,
     },
     TypeParam {
-        /// Declaration identity (Path C C6). Distinguishes cross-
-        /// declaration same-name parameters (`type A<T>` vs
-        /// `type B<T>` in the same file) so structural interning in
-        /// C7 does not collide unrelated decls.
+        /// Declaration identity. Distinguishes cross-declaration
+        /// same-name parameters (`type A<T>` vs `type B<T>` in the
+        /// same file) so structural interning does not collide
+        /// unrelated decls.
         decl: DeclIdentity,
         /// Position in the declaration's generic clause (0-based).
-        /// Path C C6 sets this to `0` by default; downstream
-        /// plumbing through the lowering pipeline can refine it to
-        /// the true clause position.
+        /// Defaults to `0` for paths that have not yet plumbed the
+        /// true clause position through the lowering pipeline; the
+        /// script-setup lowering path supplies the true ordinal.
         param_index: u16,
-        /// Declaration-site constraint (`T extends Constraint`). Lowered
-        /// once at declaration time; callers substituting the TypeParam
-        /// do NOT re-substitute constraint or default (those carry
-        /// declaration-local meaning, not call-site meaning
-        /// Cluster A + anti-pattern #4 structural basis).
+        /// Declaration-site constraint (`T extends Constraint`).
+        /// Lowered once at declaration time; callers substituting
+        /// the TypeParam do NOT re-substitute constraint or default
+        /// — those carry declaration-local meaning, not call-site
+        /// meaning, which keeps the substitute helper's identity
+        /// preservation invariant.
         constraint: Option<SemanticNodeId>,
-        /// Declaration-site default (`T = Default`). Same contract as
-        /// `constraint`.
+        /// Declaration-site default (`T = Default`). Same contract
+        /// as `constraint`.
         default: Option<SemanticNodeId>,
         /// Human-readable parameter name for `Debug` / error output.
-        /// Path C C6 excludes this from `Hash`/`Eq` identity so two
-        /// calls that construct the same declaration-identity
-        /// TypeParam with the same constraint/default/index but
-        /// different display names intern to the same slot. In
-        /// practice `display_name` is consistent with `decl +
-        /// param_index`; the exclusion is defensive.
+        /// Excluded from `Hash` / `Eq` identity so two calls that
+        /// construct the same declaration-identity TypeParam with
+        /// the same constraint/default/index but different display
+        /// names intern to the same slot. In practice `display_name`
+        /// is consistent with `decl + param_index`; the exclusion
+        /// is defensive.
         display_name: Arc<str>,
     },
     /// `infer X` placeholder inside a conditional's `extends` clause
@@ -1623,16 +1622,16 @@ impl SemanticNodeData {
     }
 }
 
-// Path C C7 — structural interning in `NodeArena` keys on
+// Structural interning in `NodeArena` keys on
 // `(SemanticNodeData, NodeScopeId)`. Manual `Hash`/`Eq`/`PartialEq`
 // rather than a derive because:
 //
-// - **TypeParam** identity excludes `display_name` per F11.
+// - **TypeParam** identity excludes `display_name`.
 //   `decl + param_index` (with `constraint` / `default`) is the
-//   semantic identity; `display_name` is a presentational field used
-//   for Debug output and error messages. Two `TypeParam` nodes with
-//   matching identity but differing `display_name` must alias under
-//   C7 dedup.
+//   semantic identity; `display_name` is a presentational field
+//   used for Debug output and error messages. Two `TypeParam` nodes
+//   with matching identity but differing `display_name` must alias
+//   under dedup.
 // - **VueMacroElements** is an identity-carrier with
 //   latest-insert-wins semantics (see `SemanticGraphStore::insert_resolved_named_type`
 //   at [`semantic_query_memo.rs:287-301`]). Equality and hashing are

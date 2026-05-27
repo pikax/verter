@@ -501,9 +501,8 @@ pub(crate) fn engine_dep_signature_for_two_canonicals(
 #[cfg(test)]
 use std::cell::Cell;
 
-/// Path C C11b — composite-scope context for prepared-member-path
-/// projection. Bundles the two scopes the prepared-route walker keeps
-/// live:
+/// Composite-scope context for prepared-member-path projection.
+/// Bundles the two scopes the prepared-route walker keeps live:
 ///
 /// - `decl_scope`: the canonical id of the file where the prepared
 ///   declaration (e.g., `type Button = ComponentConfig<typeof theme>`)
@@ -517,22 +516,24 @@ use std::cell::Cell;
 /// See [`ComponentMetaQueryEngine::solve_or_project_leaf_expr_with_context`]
 /// for the per-TypeExpr dispatch rules.
 //
-// No longer constructed after
-// trampoline conversion of the retired surface methods. Deleted in
-// 5g per §F call-graph closure.
+// Retained `#[allow(dead_code)]` for diagnostic / future re-entry use;
+// the prepared-route walker now consumes the constituent scopes
+// directly via [`ProjectionChainScopes`] / the `chain_scopes` field
+// rather than through this composite.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct PreparedProjectionContext {
     decl_scope: String,
     arg_scope: String,
-    /// Path C C11-residual-B: scopes from outer levels of a
-    /// declaration-chain projection. Populated as the recursion
-    /// descends from `project_prepared_member_path_route_projection_from_*`
-    /// so a `TypeOf(value)` reference inside an inner helper body
-    /// (e.g., the lowered `ComponentUI<typeof theme>` inside
+    /// Scopes from outer levels of a declaration-chain projection.
+    /// Populated as the recursion descends from
+    /// `project_prepared_member_path_route_projection_from_*` so a
+    /// `TypeOf(value)` reference inside an inner helper body (e.g.,
+    /// the lowered `ComponentUI<typeof theme>` inside
     /// `ComponentConfig`'s body, where the original `Button` alias
     /// lives in `button-types.ts`) can fall back through the chain
-    /// to find the scope where the value symbol was actually visible.
+    /// to find the scope where the value symbol was actually
+    /// visible.
     ///
     /// Innermost-first ordering: `chain_scopes[0]` is the scope of the
     /// most recently entered declaration. Deduplicated against
@@ -651,7 +652,7 @@ pub(crate) struct FastShallowFieldExpr {
 /// | `materialize_memo` | (b) | — `(scope, expr, navigate_flag) → MaterializedTypeExpr` memo. Dispatch's post-lowering memo cannot replace this because the key is the un-lowered `TypeExpr`. |
 /// | `prepared_*_query_count`, `prepared_*_hit_count` | (a) | `#[cfg(test)]` instrumentation counters. |
 /// | `fuse_budgets` / `fuse_state` | (a) | Engine-construction-scoped fuse rails (§1.4). |
-/// | `projection_chain_scopes` | (a) | Call-scoped scope chain (Path C C11-residual-B). |
+/// | `projection_chain_scopes` | (a) | Call-scoped scope chain for prepared-route projection. |
 ///
 /// **Audit conclusion:** all (b) producer caches operate at the
 /// pre-lowering `TypeExpr` identity space, which dispatch's
@@ -736,12 +737,13 @@ pub struct ComponentMetaQueryEngine<'a> {
     prepared_shared_member_hit_count: usize,
     fuse_budgets: FuseBudgets,
     fuse_state: FuseState,
-    /// Path C C11-residual-B: ambient declaration-scope chain accumulated
-    /// during prepared-member-path projection recursion. Innermost entry
-    /// at index 0; outermost (originating call's `decl_scope`) at the
-    /// end. Used by `solve_or_project_leaf_expr_with_context` to find the
-    /// scope where a `TypeOf(value)` reference is visible when neither
-    /// `decl_scope` (the current declaration owner) nor `arg_scope` (the
+    /// Ambient declaration-scope chain accumulated during
+    /// prepared-member-path projection recursion. Innermost entry at
+    /// index 0; outermost (originating call's `decl_scope`) at the
+    /// end. Used by `solve_or_project_leaf_expr_with_context` to find
+    /// the scope where a `TypeOf(value)` reference is visible when
+    /// neither `decl_scope` (the current declaration owner) nor
+    /// `arg_scope` (the
     /// caller's SFC) contains the value symbol.
     ///
     /// Unread after trampoline

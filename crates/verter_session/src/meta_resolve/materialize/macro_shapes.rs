@@ -1905,33 +1905,24 @@ pub(crate) fn produce_one_macro_object_shape(
             if let Some((def_canonical, def_name)) =
                 classify_named_ref_for_db_projection(query_engine, owner_canonical, name)
             {
-                // Chain Y closure (codex
-                // Q1-Y) — route fast-path is now demand-explicit. The
-                // pre-Round-10 path always called
-                // `project_type_surface_shape_via_host_threaded`
-                // → `engine.dispatch_projected_surface`
-                // → `dispatch_root_instantiated`
-                // → `Instantiate(Published(Expanded))`, which
-                // instantiated the root's full structural body and
-                // emitted per-key `ProjectMember` edges for inherited
-                // library member names on `extends Omit<…>` /
-                // generic-substituted macro payloads (the diagnostic's
-                // EditorDragHandle Chain Y).
+                // Route fast-path is demand-explicit: the path
+                // selection branches on the macro payload's root shape
+                // via `macro_payload_root_is_conditional_carrier`.
                 //
-                // The path-precision predicate
-                // `macro_payload_root_is_conditional_carrier` mirrors
-                // the round-9 non-fast-path gate (see the same
-                // predicate threaded into the solver block below): a
-                // Conditional macro payload root retains
+                // A Conditional macro payload root retains
                 // `Published(Expanded)` so the inherited-emits
                 // branch-merge protocol
                 // (`PayloadSurfaceScope::EmitClassMacroObject`) can
-                // enumerate both branches' members; a non-Conditional
+                // enumerate both branches' members. A non-Conditional
                 // root (Object / Intersection / Mapped / Ref /
                 // InstantiationRef) routes through the transit-shallow
                 // sibling that carrier-lowers the synthesised
                 // `Ref { def_name, [] }` under `Navigate` mode and
-                // projects under `Published(Shallow)`.
+                // projects under `Published(Shallow)`, keeping nested
+                // operators lazy at the publication boundary so a
+                // macro payload that does not need a full surface
+                // walk never enters `build_key_of` /
+                // `build_mapped_type`'s per-key emission loop.
                 let payload_root_is_conditional = macro_payload_root_is_conditional_carrier(
                     query_engine,
                     owner_canonical,
@@ -2075,9 +2066,9 @@ pub(crate) fn produce_one_macro_object_shape(
     // Conditional macro payload roots keep the rescue gate. The
     // `Published(Expanded)` lowering above produces the carrier shell
     // the inherited-emits branch-merge consumes; rescue widening on
-    // the same Conditional-rooted surface is the round-7 + round-8
-    // behaviour and must persist to satisfy the round-8 inherited-
-    // emits locked-down tests under solver-empty fallback paths.
+    // the same Conditional-rooted surface is required to satisfy the
+    // inherited-emits locked-down tests under solver-empty fallback
+    // paths.
     let rescue_projection = payload_root_is_conditional
         && (solver_count == 0
             || expr_needs_projection_rescue(query_engine, owner_canonical, lowered));
@@ -2522,21 +2513,20 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
     // intentionally lenient; transit-shallow Class A above is the
     // demand-driven publication path that the slot publication
     // boundary favours.
-    // Chain Z closure (codex Q1-Z) —
-    // the slot fallback's compound-objects helper migrates from the
-    // pre-Round-10 Expanded path (`...via_host_threaded`) to the
-    // transit-shallow sibling (`...transit_shallow_via_host_threaded`)
-    // added to `dispatch_helpers.rs`. The Expanded helper lowered the
-    // slot payload's TypeExpr in `Published(Expanded)` and emitted
-    // 30 of the 364 captured ProjectMember leak edges on ChatMessages
-    // fresh-cold (per `D:/tmp/round10-diagnostic-report.md` Chain Z).
-    // The transit-shallow sibling lowers under `Navigate` mode and
-    // walks the publication terminal under `Published(Shallow)` so
-    // the slot payload's `Mapped<...>` body stays deferred at the
-    // macro-publication boundary; the slot-binding consumer reaches
-    // the bindings via the graph-native path (per the fn docstring
-    // above) and the callable-realization substrate normalises
-    // carrier-shaped slot values.
+    // The slot fallback's compound-objects helper uses the
+    // transit-shallow sibling
+    // (`...transit_shallow_via_host_threaded` in
+    // `dispatch_helpers.rs`) so the slot payload's `Mapped<...>` body
+    // stays deferred at the macro-publication boundary. The
+    // Expanded variant lowers under `Published(Expanded)` and would
+    // emit per-key ProjectMember edges for every enumerated slot
+    // (observed in fresh-cold runs against ChatMessages-style
+    // payloads); the transit-shallow path lowers under `Navigate`
+    // mode and walks the publication terminal under
+    // `Published(Shallow)`. The slot-binding consumer reaches the
+    // bindings via the graph-native path described above, and the
+    // callable-realization substrate normalises carrier-shaped slot
+    // values downstream.
     let projected_body = project_expr_class_a_via_dispatch_transit_shallow(
         query_engine.ctx,
         owner_canonical,

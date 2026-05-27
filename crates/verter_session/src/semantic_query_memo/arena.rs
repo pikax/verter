@@ -5,21 +5,21 @@
 //! vec live inside one `RwLock<ArenaInner>` so reads (`node_data`,
 //! `node_scope`) are concurrent while writes (intern-miss) serialize.
 //!
-//! **Path C C7 — structural interning.** Two callers that construct the
-//! same `SemanticNodeData::Primitive(Number)` in the same scope share one
-//! [`SemanticNodeId`] — preventing the semantic graph from growing unbounded
-//! under repeated structural construction. Cross-scope same-payload
-//! interns stay distinct.
+//! **Structural interning.** Two callers that construct the same
+//! `SemanticNodeData::Primitive(Number)` in the same scope share one
+//! [`SemanticNodeId`] — preventing the semantic graph from growing
+//! unbounded under repeated structural construction. Cross-scope
+//! same-payload interns stay distinct.
 //!
-//! **Path C C17 — sharded dedup index.** The dedup index
-//! moved off `ArenaInner` onto `[Mutex<ShardIndex>; NUM_SHARDS]`. Payload
-//! hash + scope hash route to a specific shard; intern-hits (the steady-
-//! state hot path) take only that shard's Mutex — so `K` threads interning
-//! payloads that route to distinct shards proceed in parallel. Intern-misses
-//! acquire the shard Mutex, then briefly acquire `inner.write()` to allocate
-//! the next sequential id and push the node. Storage stays global and dense
-//! so `id.0 as usize` indexing + `a.0 + 1 == b.0` serial-id invariant are
-//! preserved.
+//! **Sharded dedup index.** The dedup index lives on
+//! `[Mutex<ShardIndex>; NUM_SHARDS]` rather than inside `ArenaInner`.
+//! Payload hash + scope hash route to a specific shard; intern-hits
+//! (the steady-state hot path) take only that shard's Mutex — so `K`
+//! threads interning payloads that route to distinct shards proceed
+//! in parallel. Intern-misses acquire the shard Mutex, then briefly
+//! acquire `inner.write()` to allocate the next sequential id and
+//! push the node. Storage stays global and dense so `id.0 as usize`
+//! indexing + `a.0 + 1 == b.0` serial-id invariant are preserved.
 //!
 //! Dispatch builders query the sidecar via [`super::SemanticGraphStore::node_scope`]
 //! to route per-base-scope lookups through the correct
@@ -46,9 +46,10 @@ use crate::semantic_query::{NodeScopeId, SemanticNodeData, SemanticNodeId};
 pub(super) const NUM_SHARDS: usize = 16;
 pub(super) const SHARD_MASK: u64 = (NUM_SHARDS as u64) - 1;
 
-/// Path C C17 — per-shard dedup index. Routes keyed by
-/// `hash(payload, scope) & SHARD_MASK`. Same payload + scope → same
-/// shard, so intern-hits never race across shards.
+/// Per-shard dedup index. Routes keyed by
+/// `hash(payload, scope) & SHARD_MASK`; the same payload + scope
+/// always lands on the same shard, so intern-hits never race across
+/// shards.
 #[derive(Default)]
 pub(super) struct ShardIndex {
     index: FxHashMap<(SemanticNodeData, NodeScopeId), SemanticNodeId>,
@@ -68,10 +69,11 @@ pub(super) struct ArenaInner {
     scopes: Vec<Option<NodeScopeId>>,
 }
 
-/// Path C C17 shard routing — deterministic `hash((data, scope)) & mask`.
-/// Same `(data, scope)` pair always routes to the same shard, regardless
-/// of the calling thread. FxHash picked for speed; the dedup key's own
-/// `Eq` implementation disambiguates collisions within a shard.
+/// Deterministic shard routing — `hash((data, scope)) & mask`. The
+/// same `(data, scope)` pair always routes to the same shard,
+/// regardless of the calling thread. FxHash picked for speed; the
+/// dedup key's own `Eq` implementation disambiguates collisions
+/// within a shard.
 pub(super) fn shard_index_for(data: &SemanticNodeData, scope: &NodeScopeId) -> usize {
     use std::hash::{Hash, Hasher};
     let mut hasher = rustc_hash::FxHasher::default();
@@ -85,13 +87,14 @@ pub(super) struct NodeArena {
     /// (`get`, `scope`) are concurrent and writers (intern-miss) briefly
     /// serialize to push a fresh slot.
     inner: parking_lot::RwLock<ArenaInner>,
-    /// Path C C17 — sharded dedup indexes. Each shard owns the key-range
-    /// whose `hash(payload, scope) & mask` lands on it.
+    /// Sharded dedup indexes. Each shard owns the key-range whose
+    /// `hash(payload, scope) & mask` lands on it.
     shards: [parking_lot::Mutex<ShardIndex>; NUM_SHARDS],
-    /// Path C C1 instrumentation. When present, `push_impl` records per-call
-    /// counters and inner.write() wait time so subsequent passes (C7, C17)
-    /// have evidence-grade contention data without retro-fitting telemetry.
-    /// `None` for the test-default arenas constructed via `Default::default()`.
+    /// Optional contention instrumentation. When present,
+    /// `push_impl` records per-call counters and `inner.write()`
+    /// wait time so downstream passes have evidence-grade contention
+    /// data. `None` for test-default arenas constructed via
+    /// `Default::default()`.
     pub(super) provenance: Option<Arc<crate::types::MetaProvenance>>,
 }
 
@@ -125,24 +128,25 @@ impl NodeArena {
     }
 
     fn push_impl(&self, data: SemanticNodeData, scope: NodeScopeId) -> SemanticNodeId {
-        // `VueMacroElements` is exempt per — record `None` so
-        // `node_scope` returns `None` rather than `Some(Global)` for those
-        // nodes. The exemption is structural so even
-        // `intern_node_with_scope(VueMacroElements, Some(scope))` yields
-        // `None` in the sidecar slot. Path C C7/C17 additionally short-
-        // circuits `VueMacroElements` past the sharded dedup — identity-
-        // carriers must allocate fresh slots on every insert so the
-        // `NamedTypeCache` latest-insert-wins contract stays observable.
+        // `VueMacroElements` is exempt — record `None` so
+        // `node_scope` returns `None` rather than `Some(Global)` for
+        // those nodes. The exemption is structural so even
+        // `intern_node_with_scope(VueMacroElements, Some(scope))`
+        // yields `None` in the sidecar slot. The sharded dedup is
+        // also short-circuited — identity-carriers must allocate a
+        // fresh slot on every insert so the `NamedTypeCache`
+        // latest-insert-wins contract stays observable.
         let is_vue_macro = matches!(data, SemanticNodeData::VueMacroElements(_));
 
-        // Path C C1 instrumentation. Capture the discriminant before
-        // moving `data` so we can bucket per-variant pushes.
+        // Capture the discriminant before moving `data` so the
+        // contention instrumentation can bucket per-variant pushes.
         let discriminant = data.discriminant_index();
 
-        // Path C C17 — sharded dedup hot path. VueMacroElements bypasses
-        // the shard index entirely (fresh slot every call). Other variants
-        // route to their shard, check for an existing id; miss path
-        // acquires inner.write() briefly to push the new slot.
+        // Sharded dedup hot path. `VueMacroElements` bypasses the
+        // shard index entirely (fresh slot every call). Other
+        // variants route to their shard and check for an existing
+        // id; the miss path acquires `inner.write()` briefly to push
+        // the new slot.
         let (id, is_miss, write_wait_ns) = if is_vue_macro {
             let write_start = Instant::now();
             let mut inner = self.inner.write();

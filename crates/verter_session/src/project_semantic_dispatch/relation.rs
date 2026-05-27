@@ -1,7 +1,7 @@
 //! Relation engine for semantic-node assignability.
 //!
-//! This is the authoritative relation engine post-Phase-D. Supersedes the
-//! retired arena `verter_semantic::analysis::type_solver::relate`. Results
+//! This is the authoritative relation engine on the semantic graph.
+//! Results
 //! memoise through [`SemanticGraphStore::insert_relation`] /
 //! [`SemanticGraphStore::get_relation`] keyed by the `(source, target)`
 //! node pair, with dep-signature fencing so warm hits revalidate under
@@ -36,14 +36,14 @@ thread_local! {
     /// Cyclic re-entry returns `RelationResult::Unknown` per
     /// contract row without recursing.
     ///
-    /// **Path C C8** — the previous `RELATION_DEPTH` stack-safety rail is
-    /// retired. Structural fan-out (Alias unwrap, Union / Intersection
-    /// distribution, Array / Tuple element descent) is now iterative and
-    /// grows the heap-backed worklist rather than the Rust call stack, so
-    /// pathological 1000-arm distribution no longer risks
-    /// `STATUS_STACK_OVERFLOW`. Termination is preserved by the graph-
-    /// size-scaled work budget in `decide_relation` plus the in-flight
-    /// set's cycle detection.
+    /// Stack-safety is provided iteratively: structural fan-out
+    /// (Alias unwrap, Union / Intersection distribution, Array /
+    /// Tuple element descent) grows the heap-backed worklist rather
+    /// than the Rust call stack, so pathological 1000-arm
+    /// distribution does not risk `STATUS_STACK_OVERFLOW`.
+    /// Termination is guaranteed by the graph-size-scaled work
+    /// budget in `decide_relation` plus the in-flight set's cycle
+    /// detection.
     static RELATION_IN_FLIGHT: RefCell<FxHashSet<(SemanticNodeId, SemanticNodeId)>> =
         RefCell::new(FxHashSet::default());
 }
@@ -62,17 +62,19 @@ fn exit_relation_guard(source: SemanticNodeId, target: SemanticNodeId) {
     });
 }
 
-/// Outcome of Path C C4's identity-carrier unwrap.
+/// Outcome of the identity-carrier unwrap performed before relation
+/// dispatch.
 ///
-/// `Concrete(id)` is the id the relation engine can compare structurally
-/// (primitives, unions, objects, etc.); `Unresolvable` maps to
-/// [`RelationResult::Unknown`] in the caller.
+/// `Concrete(id)` is the id the relation engine can compare
+/// structurally (primitives, unions, objects, etc.); `Unresolvable`
+/// maps to [`RelationResult::Unknown`] in the caller.
 enum IdentityCarrierUnwrap {
     Concrete(SemanticNodeId),
     Unresolvable,
 }
 
-/// Canonical Record shapes the Cluster C arm handles.
+/// Canonical Record shapes the `Record<K, V>`-against-Object arm
+/// handles.
 ///
 /// `Record<K, V>` lowers to two different object surfaces depending on
 /// whether K is a literal (union of literals) or a generic primitive.
@@ -176,16 +178,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `execute(Instantiate)` for DeclAnchor unwrap) without threading
     /// `&ProjectSemanticDispatch` through every free-function helper.
     ///
-    /// **Path C C4 — identity-carrier unwrap.** Before calling the
-    /// core `decide_relation` authority, any decl identity carrier on
+    /// **Identity-carrier unwrap.** Before calling the core
+    /// `decide_relation` authority, any decl identity carrier on
     /// either side is instantiated into its concrete shape via
-    /// [`Self::unwrap_identity_carrier_for_relation`]. The core authority
-    /// assumes concrete shapes only; identity carriers are semantic
-    /// anchors, not relation-comparable nodes. Unwrap failure (cycle /
-    /// error / non-concrete result) surfaces as
-    /// [`RelationResult::Unknown`] — matches the pre-C4 short-circuit
-    /// semantics without leaking the identity-carrier variant into the
-    /// relation arms themselves.
+    /// [`Self::unwrap_identity_carrier_for_relation`]. The core
+    /// authority assumes concrete shapes only; identity carriers are
+    /// semantic anchors, not relation-comparable nodes. Unwrap failure
+    /// (cycle / error / non-concrete result) surfaces as
+    /// [`RelationResult::Unknown`], keeping the identity-carrier
+    /// variant out of the relation arms themselves.
     fn decide_relation_with_dispatch(
         &self,
         source: SemanticNodeId,
@@ -206,9 +207,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         decide_relation(self.graph(), source, target, bindings)
     }
 
-    /// Instantiate a decl identity carrier into its concrete shape for
-    /// relation dispatch (Path C C4). Returns the id unchanged for
-    /// nodes that are already concrete. Returns
+    /// Instantiate a decl identity carrier into its concrete shape
+    /// for relation dispatch. Returns the id unchanged for nodes that
+    /// are already concrete. Returns
     /// [`IdentityCarrierUnwrap::Unresolvable`] when the instantiation
     /// yields a cycle, an error, or still-non-concrete shape — the
     /// caller maps that to [`RelationResult::Unknown`].
@@ -277,10 +278,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Cluster C: source-side DeclPlaceholder with Object body
-    /// against target-side Object that looks like a `Record<K, V>`
-    /// shape. Returns `Some(result)` when the arm applies; `None` to
-    /// fall through to the core `decide_relation` authority.
+    /// Source-side `DeclPlaceholder` with Object body against
+    /// target-side Object that looks like a `Record<K, V>` shape.
+    /// Returns `Some(result)` when the arm applies; `None` to fall
+    /// through to the core `decide_relation` authority.
     ///
     /// Fires only when:
     /// 1. `source` is an `Opaque(DeclPlaceholder)` whose
@@ -380,20 +381,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // shell returned under `StructuralTransit` does not match.
         // Normalisation runs under the default `Published(Expanded)`
         // context so `Record<U, Record<K, any>>` reduces to its
-        // Object surface for shape decision. Empirically (Round-13
-        // Step-0 on the corpus `ChatMessage.vue`) this site emits
-        // zero `ProjectMember` edges on the Chain W chain — the
-        // ChatMessage leak enters via the `TypeExpr::Conditional`
-        // `extends` lowering, not via this normalisation. Swapping
-        // this call to `StructuralTransit` (the round-12 codex
-        // proposal) provably regresses Record-target recognition
-        // for `A extends Record<U, K>`-style conditionals (the
+        // Object surface for shape decision. Switching this call to
+        // `StructuralTransit` would regress Record-target recognition
+        // for `A extends Record<U, K>`-style conditionals — the
         // `neutral` overlay-augmented member in
         // `component_meta_host::tests::overlay_queries_reapply_owner_after_overlay_only_helper_upserts`
         // and the two sibling `ComponentConfig` materialisation
-        // tests stop seeing the augmented variant member). The
-        // round-12 codex TOP RISK warned about exactly this
-        // regression.
+        // tests would stop seeing the augmented variant member.
         let normalised = self.evaluate_deferred_semantic_node(target);
         let data = graph.node_data(normalised)?;
         match &*data {
@@ -416,8 +410,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Per Cluster C: relate an Object surface against a
-    /// Record<K, V> target by checking that every required key (from
+    /// Relate an Object surface against a Record<K, V> target by
+    /// checking that every required key (from
     /// the key type's literal enumeration) is present on the source
     /// and each matching member value is assignable to V.
     ///
@@ -497,12 +491,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 }
 
-/// Iterative worklist item for [`decide_relation`] (Path C C8).
+/// Iterative worklist item for [`decide_relation`].
 ///
-/// The function is no longer recursive — pairs that need structural
-/// descent push sub-pairs onto the worklist, and reducers pop N prior
-/// results to combine them. See `expand_pair` for the per-variant
-/// expansion rules.
+/// The function is iterative, not recursive — pairs that need
+/// structural descent push sub-pairs onto the worklist, and reducers
+/// pop N prior results to combine them. See `expand_pair` for the
+/// per-variant expansion rules.
 #[derive(Debug, Clone)]
 enum RelateWork {
     /// Evaluate `(source, target)`. Expands into either a direct result

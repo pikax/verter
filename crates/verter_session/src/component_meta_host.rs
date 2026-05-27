@@ -34,15 +34,13 @@ use verter_type_expr::{ObjectMember, TypeExpr};
 use crate::host_manage::component_meta_trace_custom;
 use crate::VerterHost;
 
-// Path C C12 (per) retired `HEAVY_COMPONENT_META_TEST_MUTEX`
-// along with its `lock_heavy_component_meta_test` helper and mirrored
-// `HEAVY_COMPONENT_META_TEST_{ACQUIRES,WAIT_NS}` counters.
-// Diagnosis identified OS-level CPU/thread oversubscription (each
-// per-test `Scheduler` spawned a `cpu_threads = num_cpus()` Rayon pool)
-// as the true serialization target — not any in-process shared resource.
-// Test hosts now construct via `new_standalone_with_scheduler_config`
-// with `SchedulerConfig { cpu_threads: 1, .. }`, so the mutex is no
-// longer needed.
+// Test hosts construct via `new_standalone_with_scheduler_config` with
+// `SchedulerConfig { cpu_threads: 1, .. }`. The previous global
+// `HEAVY_COMPONENT_META_TEST_MUTEX` (and its `acquires` / `wait_ns`
+// counters) was a workaround for OS-level CPU oversubscription when each
+// per-test `Scheduler` spawned `cpu_threads = num_cpus()` worker pools;
+// pinning the scheduler to one CPU thread eliminates the contention
+// entirely, so no shared mutex is required.
 
 // ---------------------------------------------------------------------------
 // Error
@@ -110,10 +108,10 @@ impl ComponentMetaHost {
     /// Create a new component-meta host with a standalone memory workspace and
     /// an explicit [`SchedulerConfig`].
     ///
-    /// Path C C12 (per): test harnesses construct hosts with
+    /// Test harnesses construct hosts with
     /// `SchedulerConfig { cpu_threads: 1, ..SchedulerConfig::default() }`
-    /// to avoid CPU oversubscription when many parallel test threads each
-    /// spin up their own scheduler thread pools (see diagnosis).
+    /// to avoid CPU oversubscription when many parallel test threads
+    /// each spin up their own scheduler thread pools.
     pub fn new_standalone_with_scheduler_config(
         config: crate::types::HostConfig,
         scheduler_config: verter_scheduler::scheduler::SchedulerConfig,
@@ -213,7 +211,7 @@ impl ComponentMetaHost {
         })
     }
 
-    /// Open a new isolated session in [`ExecutionMode::Batch`] mode (Path C C12).
+    /// Open a new isolated session in [`ExecutionMode::Batch`] mode.
     ///
     /// Test harness and MCP server callers use this path. LSP callers stay on
     /// [`Self::open_session`] (Interactive mode).
@@ -736,9 +734,9 @@ mod tests {
     use super::*;
 
     fn make_host() -> ComponentMetaHost {
-        // Path C C12 (per): tests use `cpu_threads = 1` to avoid
-        // CPU oversubscription when many parallel test threads each spin up
-        // their own Rayon pools. See (Option R1).
+        // Tests use `cpu_threads = 1` to avoid CPU oversubscription
+        // when many parallel test threads each spin up their own
+        // Rayon pools.
         ComponentMetaHost::new_standalone_with_scheduler_config(
             crate::types::HostConfig::default(),
             verter_scheduler::scheduler::SchedulerConfig {

@@ -4473,6 +4473,187 @@ mod foundations_guards {
                 search_from = abs + needle.len();
             }
         }
+        // `Fix-[A-Z]\b` / `pre-Fix-[A-Z]\b` / `post-Fix-[A-Z]\b` —
+        // hyphenated per-fix alpha markers (e.g. `Fix-D`, `pre-Fix-D`,
+        // `post-Fix-D`). Distinct from `/ Fix D` above because they
+        // appear without the leading slash. Word-boundary on the
+        // leading token (preceding char must NOT be ASCII alphanumeric
+        // or underscore) prevents false-flagging identifiers that
+        // happen to contain `Fix-` inside a longer token. The trailing
+        // letter must be uppercase + word-boundary so legitimate
+        // hyphenated identifiers like `Fix-Each` are not flagged.
+        for needle in ["Fix-", "pre-Fix-", "post-Fix-", "Pre-Fix-", "Post-Fix-"] {
+            let bytes = line.as_bytes();
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(needle) {
+                let abs = search_from + rel;
+                let is_word_start =
+                    abs == 0 || !(bytes[abs - 1].is_ascii_alphanumeric() || bytes[abs - 1] == b'_');
+                if is_word_start {
+                    let after = abs + needle.len();
+                    if after < bytes.len() && bytes[after].is_ascii_uppercase() {
+                        let trailing_idx = after + 1;
+                        if trailing_idx >= bytes.len() {
+                            return true;
+                        }
+                        let trailing = bytes[trailing_idx];
+                        if trailing.is_ascii_uppercase()
+                            || trailing.is_ascii_digit()
+                            || !trailing.is_ascii_alphabetic()
+                        {
+                            return true;
+                        }
+                    }
+                }
+                search_from = abs + needle.len();
+            }
+        }
+        // `Path [A-Z] [A-Z]\d+[a-z]?\b` — orchestrator's per-path
+        // cluster marker (e.g. `Path C C5`, `Path C C11a`, `Path A B12`).
+        // Shape: `Path<space><UPPER><space><UPPER><digits>[lower]?`,
+        // with the trailing token at a word boundary. Case-sensitive
+        // on the leading `Path` to avoid flagging legitimate filesystem
+        // prose like "path c c5" (lowercase) — orchestrator markers
+        // always use the title-case form.
+        {
+            let needle = "Path ";
+            let bytes = line.as_bytes();
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(needle) {
+                let abs = search_from + rel;
+                let is_word_start =
+                    abs == 0 || !(bytes[abs - 1].is_ascii_alphanumeric() || bytes[abs - 1] == b'_');
+                let mut after = abs + needle.len();
+                if is_word_start
+                    && after < bytes.len()
+                    && bytes[after].is_ascii_uppercase()
+                    && after + 1 < bytes.len()
+                    && bytes[after + 1] == b' '
+                {
+                    after += 2; // consume `<UPPER><space>`
+                    if after < bytes.len() && bytes[after].is_ascii_uppercase() {
+                        let mut digit_after = after + 1;
+                        let digit_start = digit_after;
+                        while digit_after < bytes.len() && bytes[digit_after].is_ascii_digit() {
+                            digit_after += 1;
+                        }
+                        if digit_after > digit_start {
+                            // Optional single trailing lowercase letter.
+                            let mut end = digit_after;
+                            if end < bytes.len() && bytes[end].is_ascii_lowercase() {
+                                end += 1;
+                            }
+                            let is_word_end = end >= bytes.len()
+                                || !(bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_');
+                            if is_word_end {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                search_from = abs + needle.len();
+            }
+        }
+        // `round-?\d+\b` / `pre-Round-\d+\b` / `post-Round-\d+\b`
+        // (case-insensitive on `round`). Orchestrator round markers
+        // are explicit `round-7`, `round 7`, `Round-10`, `pre-Round-10`
+        // etc. Word-boundary requirement on the leading token avoids
+        // flagging identifiers that contain `round` as a substring
+        // (`background`, `surround`). The trailing digit must be at
+        // a word boundary so `roundtrip` and similar are NOT flagged.
+        for needle in ["round ", "round-", "Round ", "Round-"] {
+            let bytes = line.as_bytes();
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(needle) {
+                let abs = search_from + rel;
+                let is_word_start =
+                    abs == 0 || !(bytes[abs - 1].is_ascii_alphanumeric() || bytes[abs - 1] == b'_');
+                if is_word_start {
+                    let mut after = abs + needle.len();
+                    let digit_start = after;
+                    while after < bytes.len() && bytes[after].is_ascii_digit() {
+                        after += 1;
+                    }
+                    if after > digit_start {
+                        let is_word_end = after >= bytes.len()
+                            || !(bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_');
+                        if is_word_end {
+                            return true;
+                        }
+                    }
+                }
+                search_from = abs + needle.len();
+            }
+        }
+        // `Codex \d+(st|nd|rd|th)[- ]consult` — orchestrator's nth-
+        // consult marker (e.g. `Codex 4th-consult`, `Codex 7th consult`).
+        // Case-sensitive on the leading `Codex` to avoid flagging
+        // unrelated prose; the ordinal suffix + the literal `consult`
+        // word make this a unique orchestrator pattern.
+        {
+            let needle = "Codex ";
+            let bytes = line.as_bytes();
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(needle) {
+                let abs = search_from + rel;
+                let mut after = abs + needle.len();
+                let digit_start = after;
+                while after < bytes.len() && bytes[after].is_ascii_digit() {
+                    after += 1;
+                }
+                if after > digit_start && after + 2 <= bytes.len() {
+                    let suffix = &line[after..after + 2];
+                    if matches!(suffix, "st" | "nd" | "rd" | "th") {
+                        let mut sep_idx = after + 2;
+                        if sep_idx < bytes.len()
+                            && (bytes[sep_idx] == b' ' || bytes[sep_idx] == b'-')
+                            && sep_idx + 7 <= bytes.len()
+                            && &line[sep_idx + 1..sep_idx + 8] == "consult"
+                        {
+                            // Word-boundary at the end of `consult`.
+                            sep_idx += 8;
+                            let is_word_end = sep_idx >= bytes.len()
+                                || !(bytes[sep_idx].is_ascii_alphanumeric()
+                                    || bytes[sep_idx] == b'_');
+                            if is_word_end {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                search_from = abs + needle.len();
+            }
+        }
+        // `Cluster [A-Z]\b` — orchestrator's per-cluster alpha marker
+        // (e.g. `Cluster A`, `Cluster B`). Case-sensitive on `Cluster`
+        // to avoid flagging lowercase prose. The trailing letter must
+        // be uppercase + word-boundary so identifiers like
+        // `cluster_id` and proper-noun phrases ending with a
+        // lowercase token (`Cluster Affinity Score`) do not flag —
+        // only the single-letter discriminator form.
+        {
+            let needle = "Cluster ";
+            let bytes = line.as_bytes();
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(needle) {
+                let abs = search_from + rel;
+                let is_word_start =
+                    abs == 0 || !(bytes[abs - 1].is_ascii_alphanumeric() || bytes[abs - 1] == b'_');
+                if is_word_start {
+                    let after = abs + needle.len();
+                    if after < bytes.len() && bytes[after].is_ascii_uppercase() {
+                        let trailing_idx = after + 1;
+                        let is_single_letter_marker = trailing_idx >= bytes.len()
+                            || !(bytes[trailing_idx].is_ascii_alphanumeric()
+                                || bytes[trailing_idx] == b'_');
+                        if is_single_letter_marker {
+                            return true;
+                        }
+                    }
+                }
+                search_from = abs + needle.len();
+            }
+        }
         false
     }
 
@@ -4586,6 +4767,32 @@ mod foundations_guards {
             // (`/ Fix D`, `/ Fix AX`).
             "//! / Fix D wraps the public substitute in change-tracking.",
             "/// / Fix AX companion of the substitute helper.",
+            // Hyphenated Fix-letter / pre-Fix-letter / post-Fix-letter
+            // markers — distinct from the `/ Fix D` slash form.
+            "// Fix-D wraps the public substitute in change-tracking.",
+            "/// pre-Fix-D substitute helpers rebuilt every match arm.",
+            "// post-Fix-D the no-op branches short-circuit.",
+            "// Pre-Fix-AX companion of the substitute helper.",
+            // Path-letter cluster markers (`Path C C5`, `Path C C11a`).
+            "// Path C C5 propagates the lowering-time mapper kind.",
+            "/// Path C C11a — nested-infer in Function types.",
+            "// Path C C12 — batch submission handle.",
+            "// Path A B12 — alternate cluster marker.",
+            // round-N / Round-N / pre-Round-N / post-Round-N markers.
+            "// round-7 substrate extension closes the publication boundary.",
+            "// the round-12 codex TOP RISK warned about this regression.",
+            "/// pre-Round-10 admission called key_names_from_keyspace_node.",
+            "// post-Round-11 acceptance contract.",
+            "// Round-13 Step-0 on the corpus ChatMessage.vue.",
+            "// round 7 cutover demand.",
+            // Codex Nth-consult markers (title-case form).
+            "// Codex 4th-consult Q1 dispatch chain prerequisite.",
+            "/// Codex 7th consult diagnostic chain.",
+            "// Codex 2nd-consult landed in this revision.",
+            // Cluster-letter markers (single-letter discriminator only).
+            "// Cluster A: single-infer conditional.",
+            "/// Cluster B value selection.",
+            "// per Cluster C — relate Object surface.",
         ];
         for line in cases {
             assert!(
@@ -4631,6 +4838,39 @@ mod foundations_guards {
             // the trailing token must be uppercase to flag.
             "// Documentation: /Fix the documentation.",
             "// Run with `/Fix mode` to enable fixes.",
+            // Hyphenated Fix prose that is NOT an orchestrator
+            // marker: lowercase trailing token, or non-letter
+            // trailing token after the leading word, must NOT flag.
+            "// `fix-up` the trailing whitespace.",
+            "// affixfixer renames identifiers.", // `Fix-` is inside an identifier, not at word start
+            // `Path ` prose that is NOT an orchestrator marker:
+            // missing the `<UPPER> <UPPER><digits>` shape, or lower-
+            // case sub-tokens, must NOT flag.
+            "// Path resolution walks ancestor directories.",
+            "// Path C resolution algorithm.", // single letter — no digit token
+            "// Path C c5 invariant.", // lowercase second token — orchestrator markers are title-case
+            "// Path Compression heuristic in the union-find.",
+            "// path c c5 trace marker for diagnostics.", // lowercase `path` is not the orchestrator marker
+            // `round` prose that is NOT an orchestrator marker:
+            // either appears inside a longer identifier (no word
+            // boundary), or is missing the trailing digit.
+            "// Round up to the nearest power of two.",
+            "// roundtrip serialisation through the wire format.", // `round` inside identifier
+            "// Background lookup uses the workspace's resolver.", // `round` in `Background`
+            "// Surround the literal with quotes.",                // `round` in `Surround`
+            "// round trip without digits.",
+            // `Codex ` prose that is NOT a consult marker: missing
+            // the ordinal + `consult` suffix.
+            "// Codex agent dispatched in parallel.",
+            "// Codex 4 retries before falling back.", // no ordinal suffix
+            "// Codex 4th retry succeeded.",           // ordinal but no `consult`
+            // `Cluster` prose that is NOT a single-letter marker:
+            // followed by a multi-letter token, the cluster is a
+            // legitimate concept name rather than the orchestrator
+            // single-letter discriminator.
+            "// Cluster affinity score weighting.",
+            "// `cluster_id` selects the assigned worker pool.",
+            "// Cluster Allocator owns the per-shard pool.",
         ];
         for line in allowed {
             assert!(

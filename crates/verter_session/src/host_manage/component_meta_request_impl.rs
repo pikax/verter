@@ -8,7 +8,7 @@
 //!
 //! - `ComponentMetaRequestHost for VerterHost` (process-wide adapter)
 //! - `SessionRequestHost<'a>` + `ComponentMetaRequestHost` impl
-//!   (session-scoped adapter — Path C C14)
+//!   (session-scoped adapter)
 //! - `pub struct CapturedComponentMetaInputs` — captured-snapshot type
 //!   used by the request executor at `component_meta_request.rs`
 //! - The `Resolved*` type aliases re-exported from `resolver_core`
@@ -414,7 +414,7 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
 }
 
 // ---------------------------------------------------------------------------
-// SessionRequestHost — session-scoped ComponentMetaRequestHost (Path C C14)
+// SessionRequestHost — session-scoped ComponentMetaRequestHost
 // ---------------------------------------------------------------------------
 
 /// Session-scoped request host that routes reads through the session

@@ -964,21 +964,17 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             return view.members.iter().any(|m| m.name.as_ref() == needle);
                         }
                         // Tier 2: **non-emitting** key-domain
-                        // membership predicate (codex Q1-X closure of
-                        // Chain X).
+                        // membership predicate.
                         //
-                        // The pre-Round-10 admission called
+                        // The enumeration-based admission would call
                         // `key_names_from_keyspace_node` here — which
-                        // routed through `evaluate_deferred_semantic_node`
-                        // and `key_names_from_base_node`, both emitting
-                        // one `ProjectMember` edge per enumerated key
-                        // (`build_key_of` / `build_mapped_type`
-                        // publication loop). The diagnostic at
-                        // `D:/tmp/round10-diagnostic-report.md` Chain X
-                        // attributed 31.3% of the residual leak (114 of
-                        // 364 captured emissions) to this admission
-                        // tier: the walker emitted the entire keyspace
-                        // just to test membership of ONE segment.
+                        // routes through `evaluate_deferred_semantic_node`
+                        // and `key_names_from_base_node`, both
+                        // emitting one `ProjectMember` edge per
+                        // enumerated key (via the `build_key_of` /
+                        // `build_mapped_type` publication loop). That
+                        // would emit the entire keyspace just to test
+                        // membership of ONE segment.
                         //
                         // The non-emitting predicate decides admission
                         // structurally without `evaluate_deferred_*`
@@ -1031,8 +1027,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         let key_arg = self
                             .graph()
                             .intern_node(SemanticNodeData::Literal(key_literal_value));
-                        // Codex 4th-consult Q1 —
-                        // route through the shared
+                        // Route through the shared
                         // `materialize_selected_key_mapped_value_with_node`
                         // substrate. The node-keyed entry preserves
                         // String / Number literal kind through
@@ -1041,11 +1036,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         // substitute → evaluate → Instantiate →
                         // **trailing Conditional reduction**: the
                         // last step drives the body's `Conditional`
-                        // dispatch through C11a so per-key narrowing
-                        // closes generic-helper conditionals
-                        // (`ExtendSlotWithPlan<TPlan, K>`-style) to
-                        // the realized `Function` instead of leaving
-                        // a Conditional carrier shell. The
+                        // dispatch through the nested-infer arm so
+                        // per-key narrowing closes generic-helper
+                        // conditionals (`ExtendSlotWithPlan<TPlan, K>`-style)
+                        // to the realized `Function` instead of
+                        // leaving a Conditional carrier shell. The
                         // Opaque-fallback contract (substituted
                         // carrier on stall) is preserved inside the
                         // helper so the free mapper binder is never
@@ -1469,19 +1464,17 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         }
     }
 
-    /// Iterative empty-path-terminal expander (Path C C9). Replaces the
-    /// previous recursive form so Union / Intersection arm descent grows
-    /// the heap-backed worklist rather than the Rust call stack.
-    /// `DeclAnchor` expansion tail-iterates through the worklist rather
-    /// than via a recursive call.
+    /// Iterative empty-path-terminal expander. Union / Intersection
+    /// arm descent grows the heap-backed worklist rather than the
+    /// Rust call stack, and `DeclAnchor` expansion tail-iterates
+    /// through the worklist rather than via a recursive call.
     ///
     /// **Mapped arm.** When the walker runs in
     /// [`ProjectionMode::Expanded`] and a `SemanticNodeData::Mapped`
     /// shell appears at an empty-path terminal, re-enter dispatch via
     /// [`SemanticQueryKey::MappedType`] so the deferred shell is
-    /// materialised into its concrete surface rather than being returned
-    /// unchanged (addresses the pre-§14 Gemini F2 report where
-    /// `Expanded` mode left Mapped shells deferred).
+    /// materialised into its concrete surface rather than being
+    /// returned unchanged.
     fn expand_empty_path_terminal(&mut self, node: SemanticNodeId) -> SemanticNodeId {
         let mut work: Vec<ExpandFrame> = Vec::new();
         let mut results: Vec<SemanticNodeId> = Vec::new();
@@ -2584,19 +2577,17 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // Identity fast path — use source_member.value
                 // verbatim. Computed path — substitute the binder
                 // and materialise through the **Selected-Key Transit
-                // Realization** substrate (round 7 / codex 4th
-                // consult Q1). The selected-key helper extends the
-                // per-key materialiser with an explicit trailing
-                // Conditional reduction: when the mapper body is a
-                // Conditional generic helper (e.g.
+                // Realization** substrate. The selected-key helper
+                // extends the per-key materialiser with an explicit
+                // trailing Conditional reduction: when the mapper
+                // body is a Conditional generic helper (e.g.
                 // `ExtendSlotWithPlan<TPlan, K>` with a
                 // `PricingPlanSlots[K] extends (props: infer P) =>
                 // unknown ? ... : ...` body), the per-key value
                 // closes to the realized `Function` rather than the
                 // Conditional carrier shell. Without this, the
                 // graph-native slot-binding consumer's `Function`-arm
-                // match fails at the publication boundary
-                // (round-6 STOP Defect 1).
+                // match would fail at the publication boundary.
                 let value = if let (Some(sm), true) = (source_member, value_is_identity) {
                     sm.value
                 } else if let Some(shared) = shared_value {
@@ -2953,8 +2944,8 @@ fn collect_literal_keys(
     }
 }
 
-/// Worklist frame for the iterative `expand_empty_path_terminal` driver
-/// (Path C C9). `Expand` advances one node; `Combine*` rebuild a
+/// Worklist frame for the iterative `expand_empty_path_terminal`
+/// driver. `Expand` advances one node; `Combine*` rebuilds a
 /// compound from its previously-expanded arms.
 enum ExpandFrame {
     Expand(SemanticNodeId),

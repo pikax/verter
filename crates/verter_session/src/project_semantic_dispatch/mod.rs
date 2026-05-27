@@ -113,25 +113,22 @@ pub(super) type InstantiateIdentity = (Arc<str>, Arc<str>);
 pub struct ProjectSemanticDispatch<'a> {
     pub(super) ctx: &'a dyn ResolverContext,
     pub(super) instantiate_active: std::cell::RefCell<smallvec::SmallVec<[InstantiateIdentity; 8]>>,
-    /// Path C C6a item 3 — per-dispatcher mapped-binder ordinal
-    /// counter. Increments on every `TypeExpr::Mapped` binder
-    /// intern so two `[K in ...]` binders lowered in the same
-    /// dispatcher get distinct `param_index` ordinals even when
-    /// their declaring file, hash, and `"<mapper-param>"`
-    /// sentinel would otherwise collide.
+    /// Per-dispatcher mapped-binder ordinal counter. Increments on
+    /// every `TypeExpr::Mapped` binder intern so two `[K in ...]`
+    /// binders lowered in the same dispatcher get distinct
+    /// `param_index` ordinals even when their declaring file, hash,
+    /// and `"<mapper-param>"` sentinel would otherwise collide.
     ///
-    /// **Documented fallback from per-owning-scope** per plan
-    /// §14.2 item 3. The per-owning-scope ordinal would require
-    /// threading owner-scope context through every recursive
-    /// `shallow_lower_type_expr` call; per-dispatcher is strictly
-    /// coarser but still correct (distinct binders get distinct
-    /// ordinals). Trade-off: identity is stable within one
-    /// dispatcher lifetime but not across dispatcher instances,
-    /// so re-lowering the same file in a fresh dispatcher may
-    /// assign different ordinals. Per, this is
-    /// acceptable for C6a-through-C7 correctness; C17's sharded
-    /// interner can revisit if hot-path cache stability becomes
-    /// a measurable concern.
+    /// **Per-dispatcher rather than per-owning-scope.** A
+    /// per-owning-scope ordinal would require threading owner-scope
+    /// context through every recursive `shallow_lower_type_expr`
+    /// call; per-dispatcher is strictly coarser but still correct
+    /// (distinct binders get distinct ordinals). Trade-off: identity
+    /// is stable within one dispatcher lifetime but not across
+    /// dispatcher instances, so re-lowering the same file in a fresh
+    /// dispatcher may assign different ordinals — acceptable for
+    /// correctness; if hot-path cache stability becomes a measurable
+    /// concern, the sharded interner is the place to address it.
     pub(super) mapped_binder_ordinal: std::cell::Cell<u16>,
 }
 
@@ -165,8 +162,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Path C C6a item 3 — acquire the next mapped-binder ordinal
-    /// from the per-dispatcher counter, then increment. Used by
+    /// Acquire the next mapped-binder ordinal from the
+    /// per-dispatcher counter, then increment. Used by
     /// `shallow_lower_type_expr`'s Mapped arm to assign distinct
     /// `param_index` values to each `[K in ...]` binder.
     pub(super) fn next_mapped_binder_ordinal(&self) -> u16 {
@@ -1155,10 +1152,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         })
     }
 
-    /// `execute(key)` + `raise_node_to_type_expr` in
-    /// one call, returning the full `CacheRead` so dep_signature is
-    /// preserved for the caller's fence merge (Codex round 7 P1
-    /// rejected lossy `Option<TypeExpr>` returns).
+    /// `execute(key)` + `raise_node_to_type_expr` in one call,
+    /// returning the full `CacheRead` so `dep_signature` is
+    /// preserved for the caller's fence merge. A lossy
+    /// `Option<TypeExpr>` return would erase the dep-signature and
+    /// break the fence-merge contract, so this helper hands the
+    /// `CacheRead` through instead.
     ///
     /// Used by trampoline conversions and consumer migrations that
     /// need a `TypeExpr` for downstream `ComponentMetaAnalysis` field

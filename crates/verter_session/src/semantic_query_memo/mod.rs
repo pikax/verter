@@ -185,11 +185,11 @@ pub struct SemanticGraphStore {
     /// Lock-free telemetry counters. Read via [`Self::stats_snapshot`]
     /// into the public [`SemanticGraphStats`] surface.
     pub(super) stats: AtomicSemanticGraphStats,
-    /// Path C C1 contention instrumentation. Mirrors the arena's
-    /// `provenance` field: `Some` for stores wired up by the host, `None`
-    /// for the test-default stores constructed via `Default`. Used by
-    /// `execute_cooperative` to bucket owner vs joiner paths and held
-    /// time on `MetaProvenance`.
+    /// Optional contention instrumentation. Mirrors the arena's
+    /// `provenance` field: `Some` for stores wired up by the host,
+    /// `None` for test-default stores constructed via `Default`.
+    /// Used by `execute_cooperative` to bucket owner vs joiner paths
+    /// and held time on `MetaProvenance`.
     provenance: Option<Arc<crate::types::MetaProvenance>>,
     /// Per-store test trigger for the cold-abort sweep path. When a test
     /// sets this (via [`Self::test_force_cold_abort_sweep`]), the
@@ -527,10 +527,11 @@ impl SemanticGraphStore {
     }
 
     /// Construct a store wired to the host's
-    /// [`MetaProvenance`](crate::types::MetaProvenance) so the underlying
-    /// [`NodeArena`] and `execute_cooperative` path record Path C C1
-    /// instrumentation. Test-only direct constructions keep using
-    /// [`Self::new`] / [`Self::default`] (provenance stays `None`).
+    /// [`MetaProvenance`](crate::types::MetaProvenance) so the
+    /// underlying [`NodeArena`] and `execute_cooperative` path record
+    /// contention-instrumentation counters. Test-only direct
+    /// constructions use [`Self::new`] / [`Self::default`]
+    /// (provenance stays `None`).
     ///
     /// The constructor installs provenance via field mutation on a
     /// `Default`-built store so it stays compatible with the dispatch
@@ -591,22 +592,21 @@ impl SemanticGraphStore {
         self.arena.push_with_scope(data, scope)
     }
 
-    /// Intern a rebuilt shell `data` while preserving the scope of an
-    /// `origin` shell (Path C C6a items 4-5).
+    /// Intern a rebuilt shell `data` while preserving the scope of
+    /// an `origin` shell.
     ///
-    /// **Invariant** (per Claude Code R2): when a rebuilt shell `X'`
-    /// is derived from `X` with substituted sub-expressions,
+    /// **Invariant.** When a rebuilt shell `X'` is derived from `X`
+    /// with substituted sub-expressions,
     /// `node_scope(X') == node_scope(X)`. Used by
     /// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::substitute_semantic_type_param`]
-    /// and any other shell-rebuild site that previously called the
-    /// scope-less `intern_node` and would otherwise drop the origin
-    /// scope under C7's compound `(payload, scope)` interning.
+    /// and any other shell-rebuild site that would otherwise call
+    /// the scope-less `intern_node` and drop the origin scope under
+    /// the compound `(payload, scope)` interning.
     ///
     /// Falls back to [`NodeScopeId::Global`] when `origin`'s sidecar
     /// is empty (e.g., the origin is a `VueMacroElements` exempt
-    /// slot, or `origin` is out of bounds). The fallback preserves
-    /// pre-C6a behaviour for these cases — they were already
-    /// scope-less.
+    /// slot, or `origin` is out of bounds) — these cases are
+    /// already scope-less.
     #[must_use = "the returned SemanticNodeId is the only way to reach the interned node"]
     pub fn intern_preserving_scope(
         &self,
@@ -621,10 +621,11 @@ impl SemanticGraphStore {
     }
 
     /// Test/diagnostic — read the cumulative count of
-    /// `intern_preserving_scope` calls. /
-    /// discriminating signal for the substitute change-tracking
-    /// optimization: a no-op substitution must increment this
-    /// counter by zero post-Fix-D.
+    /// `intern_preserving_scope` calls. Acts as the discriminating
+    /// signal for the substitute change-tracking optimisation: a
+    /// no-op substitution must not increment this counter at all,
+    /// because identical sub-results short-circuit the rebuild +
+    /// re-intern path entirely.
     #[must_use]
     pub fn intern_preserving_scope_call_count(&self) -> u64 {
         self.stats

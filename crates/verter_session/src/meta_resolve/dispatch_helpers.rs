@@ -984,45 +984,31 @@ pub(crate) fn project_type_surface_shape_via_host_threaded<'ctx>(
 }
 
 /// **Transit-shallow** sibling of
-/// [`project_type_surface_shape_via_host_threaded`]
-/// (Chain Y closure, codex Q1-Y).
+/// [`project_type_surface_shape_via_host_threaded`].
 ///
-/// Closes the route fast-path leak on the nuxt-ui corpus
-/// `EditorDragHandle` (9.9% / 36 of 364 captured ProjectMember
-/// emissions per the round-10 diagnostic). The pre-Round-10 fast
-/// path in `produce_one_macro_object_shape` routed
-/// `Ref { name, type_arguments: [] }` macro payloads through
-/// [`project_type_surface_shape_via_host_threaded`] →
-/// `engine.dispatch_projected_surface` → `dispatch_root_instantiated`
-/// → `Instantiate(Published(Expanded))`. The Expanded demand
-/// instantiated the root's full structural body, re-entering
-/// `build_key_of` / `build_mapped_type` for the `extends Omit<…>` /
-/// generic-substituted carrier members and emitting 36 per-key
-/// `ProjectMember` edges.
-///
-/// Per codex Q1-Y (BINDING):
-///
-/// > route projection must be demand-explicit. Retire the implicit
-/// > Expanded route helper or make all callers pass demand
-/// > explicitly. Add a transit-shallow route path for macro
-/// > publication: carrier lower under shallow/navigation demand,
-/// > then terminal surface projection under shallow publication.
-///
-/// This sibling builds a synthetic `Ref { name, [] }` carrier for
-/// `(scope, symbol)` and dispatches it through
-/// [`project_expr_class_a_shape_via_dispatch_transit_shallow`] —
-/// the existing transit-shallow Class A helper that:
+/// Route projection is demand-explicit: this helper builds a
+/// synthetic `Ref { name, [] }` carrier for `(scope, symbol)` and
+/// dispatches it through
+/// [`project_expr_class_a_shape_via_dispatch_transit_shallow`] under
+/// transit-shallow demand:
 ///
 /// - **Empty-path lowering**: `Navigate` (keeps nested operators
 ///   lazy at the publication boundary).
 /// - **Terminal `ProjectPath` context**: `Published(Shallow)`
 ///   (one-level surface; inner carrier shells preserved).
 ///
+/// This keeps macro publication path-precise: the Expanded sibling
+/// instantiates the root's full structural body and re-enters
+/// `build_key_of` / `build_mapped_type` for `extends Omit<…>` /
+/// generic-substituted carrier members, emitting one per-key
+/// `ProjectMember` edge per enumerated key. The shallow helper
+/// keeps those operators lazy so a macro payload that does not need
+/// a full surface walk never enters the per-key emission loop.
+///
 /// The macro fast-path in `produce_one_macro_object_shape` uses
 /// this sibling when the payload root is NOT a Conditional carrier
-/// (path-precise per round-9 — Conditional macro payloads still
-/// route through the Expanded path for the inherited-emits
-/// branch-merge protocol).
+/// — Conditional macro payloads still route through the Expanded
+/// path for the inherited-emits branch-merge protocol.
 pub(crate) fn project_type_surface_shape_transit_shallow_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
@@ -1320,16 +1306,16 @@ pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
 /// - **Terminal `ProjectPath` context**: `Published(Shallow)`
 ///   (one-level surface; inner carrier shells preserved at the
 ///   publication boundary).
-/// - **Surface filter**: `type_expr_has_any_object_arm` retained
-///   — the slot fallback's pre-Round-10 acceptance contract (the
-///   `lower_type_expr` must produce a structural shape with at
-///   least one Object arm, otherwise the fallback returns `None`
-///   and the slot publication leaves the carrier as-is). The
-///   transit-shallow projection still admits Intersection-of-Object
-///   shapes through `solver_result_to_object_expansion` downstream;
-///   the filter here only refuses results that have NO object arm
-///   anywhere (purely scalar / Function / deferred shells), which
-///   the slot fallback also refused pre-Round-10.
+/// - **Surface filter**: `type_expr_has_any_object_arm` — the slot
+///   fallback's acceptance contract requires `lower_type_expr` to
+///   produce a structural shape with at least one Object arm;
+///   otherwise the fallback returns `None` and the slot publication
+///   leaves the carrier as-is. The transit-shallow projection still
+///   admits Intersection-of-Object shapes through
+///   `solver_result_to_object_expansion` downstream; the filter
+///   here only refuses results that have NO object arm anywhere
+///   (purely scalar / Function / deferred shells), which the slot
+///   fallback also refuses.
 ///
 /// Used exclusively by `produce_one_macro_object_shape_for_slots`'s
 /// `or_else` fallback when the primary

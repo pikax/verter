@@ -1,4 +1,4 @@
-﻿//! Per-macro projectors for component-meta extraction.
+//! Per-macro projectors for component-meta extraction.
 //!
 //! Each projector resolves a single macro's surface members through
 //! the shared dispatch primitives (`SemanticQueryKey::ResolveMacroPayload`
@@ -62,20 +62,21 @@ use super::exactness::classify_node;
 
 pub(crate) mod emits;
 pub(crate) mod exposed;
+pub(crate) mod macro_payload_substrate;
 pub(crate) mod model;
 pub(crate) mod options;
 pub(crate) mod props;
 pub(crate) mod published_reducer;
-pub(crate) mod round7_substrate;
 pub(crate) mod slots;
 
 // Substrate re-exports for the transit-shallow macro publication
-// pipeline (see [`round7_substrate`]). Marked
-// `#[allow(unused_imports)]` because individual consumers can be
-// wired by independent commits; the `#[allow(dead_code)]` on each
-// primitive at the definition site parallels this allowance.
+// pipeline (see [`macro_payload_substrate`]). The `unused_imports`
+// allowance parallels the `dead_code` allowance on each primitive at
+// the definition site: not every macro kind currently consumes every
+// substrate primitive, but the re-exports keep the boundary stable as
+// new consumers wire in.
 #[allow(unused_imports)]
-pub(crate) use round7_substrate::{
+pub(crate) use macro_payload_substrate::{
     resolve_macro_payload_diagnostic_probe, resolve_payload_surface_with_scope, MemberValueRole,
     PayloadSurfaceScope,
 };
@@ -656,7 +657,7 @@ pub(crate) fn resolve_payload_surface(
 
 // Macro-payload boundary substrate primitives — diagnostic probe,
 // scope tag, branch-merged scope-gated resolver, MemberValueRole —
-// live in the sibling [`round7_substrate`] module to keep this file
+// live in the sibling [`macro_payload_substrate`] module to keep this file
 // under the `no_oversize_files` architecture-guard cap. The
 // primitives are re-exported at the module top so call sites
 // continue to import them as `crate::meta_resolve::projectors::*`.
@@ -1406,40 +1407,33 @@ pub(crate) fn reduce_field_type_expr_with_mode(
         return materialized.type_expr;
     }
 
-    // Chain V closure (codex Q1-V) —
-    // the materializer now propagates the caller's `publish_mode`
-    // verbatim. Pre-Round-10 this entry hardcoded
-    // `ProjectionMode::Expanded` "because the top-down demand-driven
-    // reducer fixes inactive-conditional-branch leaks under any
-    // root context". Empirically that was insufficient: the per-prop
-    // publication surface (`reduce_published_field_types` →
-    // `reduce_field_type_expr_with_mode(Navigate)`) silently upgraded
-    // to `Expanded` here, then `shallow_lower_type_expr(... Expanded)`
-    // re-entered `build_key_of` / `build_mapped_type` for the
-    // inherited `Partial<EditorOptions>` / `Omit<EmblaOptionsType>` /
-    // generic-substituted carriers — emitting 184 of 364 residual
-    // Rule-5 ProjectMember leak edges on the nuxt-ui corpus
-    // (Editor + ChatMessage + ChatMessages chain V).
+    // The materialiser propagates the caller's `publish_mode`
+    // verbatim into the lower + raise pipeline so the per-prop
+    // publication boundary sees the shallower demand at every
+    // recursive `Instantiate` / `KeyOf` / `Mapped` dispatch.
+    // Hardcoding `ProjectionMode::Expanded` here would silently
+    // upgrade `Navigate` callers (`reduce_published_field_types` →
+    // `reduce_field_type_expr_with_mode(Navigate)`), and the
+    // upgraded path would re-enter `build_key_of` /
+    // `build_mapped_type` for inherited helpers like
+    // `Partial<EditorOptions>` / `Omit<EmblaOptionsType>` /
+    // generic-substituted carriers — emitting per-key
+    // `ProjectMember` edges for every enumerated inherited key.
     //
-    // The codex-spec'd fix: lower + raise under `publish_mode`
-    // directly so the per-prop publication boundary sees the
-    // shallower demand at every recursive `Instantiate` / `KeyOf` /
-    // `Mapped` dispatch. The materialiser's cache key is keyed on
+    // The materialiser's cache key is keyed on
     // `(scope, expr, ProjectionReductionContext::published(mode))`
     // (demand-substrate), so the demand-explicit
     // `Published(Navigate)` slot stays disjoint from the implicit
     // `Published(Expanded)` slot — no cache poisoning between
     // per-prop callers and slot/model-binding callers.
     //
-    // Legitimate TypeExpr-start callers that genuinely need
-    // `Expanded` (slot bindings, model bindings, the
-    // `Pick`/`Omit`/`IndexedAccess`/`keyof` paths the existing tests
-    // exercise) enter through
-    // [`reduce_field_type_expr`] (the default-`Expanded` overload)
-    // and pass `Expanded` here — their behaviour is preserved
-    // verbatim. Only callers that explicitly named `Navigate` at the
-    // `reduce_field_type_expr_with_mode` entry see the new shallower
-    // materialisation depth.
+    // TypeExpr-start callers that need `Expanded` (slot bindings,
+    // model bindings, the `Pick`/`Omit`/`IndexedAccess`/`keyof`
+    // paths) enter through [`reduce_field_type_expr`] (the
+    // default-`Expanded` overload) and pass `Expanded` here. Callers
+    // that explicitly name `Navigate` at
+    // `reduce_field_type_expr_with_mode` get the shallower
+    // materialisation depth instead.
     super::materialize::materialize_component_meta_type_expr_until_stable(
         &expr,
         scope_canonical_id,

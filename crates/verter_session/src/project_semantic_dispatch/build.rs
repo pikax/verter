@@ -88,12 +88,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// Resolve a top-level declaration lookup via the host's shallow state.
     ///
-    /// Path C C16: the retired `DeclAnchor` variant is no longer interned.
     /// Declaration identity is carried by the `Instantiate` key's
-    /// `DeclIdentity` field directly. This builder validates that the
-    /// name exists in the shallow state, records the file scope in the
-    /// sidecar, and returns an `Opaque(Miss)` placeholder node — the
-    /// actual identity is carried by the caller via the key.
+    /// `DeclIdentity` field directly — no separate `DeclAnchor` node is
+    /// interned. This builder validates that the name exists in the
+    /// shallow state, records the file scope in the sidecar, and returns
+    /// an `Opaque(Miss)` placeholder node; the actual identity is carried
+    /// by the caller via the key.
     pub(super) fn build_resolve_decl(
         &self,
         key: &ResolveDeclKey,
@@ -344,11 +344,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// Generic instantiation.
     ///
-    /// Path C C16: receives `DeclIdentity` directly from the
-    /// `Instantiate` key instead of unwrapping a `DeclAnchor` node.
-    /// Fetches the [`PreparedTypeDecl`] via [`DispatchHost`] and
-    /// produces **one shell level** of the declaration's structural shape
-    /// with `args` bound to the decl's type parameters.
+    /// Receives `DeclIdentity` directly from the `Instantiate` key —
+    /// declaration identity is part of the key rather than a separate
+    /// `DeclAnchor` node. Fetches the [`PreparedTypeDecl`] via
+    /// [`DispatchHost`] and produces **one shell level** of the
+    /// declaration's structural shape with `args` bound to the decl's
+    /// type parameters.
     ///
     /// `body_mode` controls how the decl body and its argument
     /// expressions are lowered after substitution. Memo entries split
@@ -882,12 +883,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // rule) and the follow-up hop dispatches back through the
             // path walker.
             let value_expr = self.opaque(QueryError::Miss);
-            // Path C C6a item 6: synthesise a TypeParam binder node
-            // for the utility mapper's `K`. The synthetic binder
-            // receives an ordinal from the per-dispatcher counter
-            // and a `<utility-mapper>` decl_name sentinel so two
-            // distinct utility invocations (Partial<X> and
-            // Partial<Y>) get distinct binder identities.
+            // Synthesise a TypeParam binder node for the utility
+            // mapper's `K`. The synthetic binder receives an ordinal
+            // from the per-dispatcher counter and a `<utility-mapper>`
+            // decl_name sentinel so two distinct utility invocations
+            // (`Partial<X>` and `Partial<Y>`) get distinct binder
+            // identities.
             let parameter_node = self.graph().intern_node(SemanticNodeData::TypeParam {
                 decl: crate::semantic_query::DeclIdentity {
                     canonical_id: Arc::from("<utility>"),
@@ -907,11 +908,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 readonly: ro,
                 name_remap: None,
                 // Partial / Required / Readonly are the canonical
-                // `{ [K in keyof T]: T[K] }` mappers — Path C C5
-                // classifies them as `Identity` explicitly. The
-                // placeholder `value_expr = Miss` is a shell marker
-                // (the build path never reads it for Identity mappers;
-                // it reads source member values directly), not a
+                // `{ [K in keyof T]: T[K] }` mappers — classify them
+                // as `Identity` explicitly. The placeholder
+                // `value_expr = Miss` is a shell marker (the build
+                // path never reads it for Identity mappers; it reads
+                // source member values directly), not a
                 // runtime-discoverable `T[K]` shape.
                 kind: crate::semantic_query::MapperKind::Identity,
             }
@@ -968,8 +969,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // Key space is K itself (usually a union of literals).
                 // For equivalence with userland `{ [P in K]: V }`, both
                 // paths set `key_space = K` and `value_expr = V`.
-                // Path C C6a item 6: synthesise a TypeParam binder
-                // node id for `P`.
+                // Synthesise a TypeParam binder node id for `P`.
                 let parameter_node = self.graph().intern_node(SemanticNodeData::TypeParam {
                     decl: crate::semantic_query::DeclIdentity {
                         canonical_id: Arc::from("<utility>"),
@@ -990,7 +990,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     name_remap: None,
                     // `Record<K, V>` maps every key to the same `V`
                     // expression — a computed projection, not the
-                    // identity `T[K]`. Path C C5 tags accordingly so
+                    // identity `T[K]`. Tag as `Computed` so
                     // `build_mapped_type` takes the substitute +
                     // evaluate path.
                     kind: crate::semantic_query::MapperKind::Computed,
@@ -1238,11 +1238,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // shells, opaque carriers) while closing the literal-type
             // case the `mapped_types` seed exercises.
             //
-            // Plan: §5.11 (`Exclude<>` / `Extract<>`
-            // concrete-literal reduction). The relation engine's
-            // union-distribution path (§3 Cluster A) already handles
-            // each per-member judgement; this arm composes those
-            // judgements into the utility's result.
+            // `Exclude<U, F>` / `Extract<U, F>` concrete-literal
+            // reduction. The relation engine's union-distribution path
+            // already handles each per-member judgement; this arm
+            // composes those judgements into the utility's result.
             "Extract" | "Exclude" if args.len() == 2 => {
                 let source_arg = args[0];
                 let filter_arg = args[1];
@@ -1702,12 +1701,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// intern distinct entries — enforced by
     /// `mapped_type_optionality_and_readonly_modifiers_in_cache_key`.
     ///
-    /// Path C C5 retired the `mapper_value_is_identity_t_of_k`
-    /// runtime helper. Every `MapperKey` now carries a stable
-    /// [`MapperKind`](crate::semantic_query::MapperKind) tag
-    /// classified at lowering time (see
-    /// [`crate::semantic_query::MapperKind::classify_value_expr`]).
-    /// `build_mapped_type` matches on `mapper.kind` directly.
+    /// Mapper-value classification is done at lowering time, not at
+    /// build time. Every [`MapperKey`](crate::semantic_query::MapperKey)
+    /// carries a stable [`MapperKind`](crate::semantic_query::MapperKind)
+    /// tag (see
+    /// [`crate::semantic_query::MapperKind::classify_value_expr`]);
+    /// `build_mapped_type` matches on `mapper.kind` directly rather
+    /// than re-classifying the runtime AST shape.
     pub(super) fn build_mapped_type(
         &self,
         source: SemanticNodeId,
@@ -1832,9 +1832,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `Opaque(_)` publishes the un-evaluated substituted node so
         // the value stays addressable by path re-dispatch.
         //
-        // Path C C5 moved the classification to lowering time; the
-        // pre-C5 runtime helper `mapper_value_is_identity_t_of_k`
-        // is retired.
+        // Identity vs Computed is decided once at lowering time and
+        // carried on `mapper.kind`; the build path reads the tag
+        // directly rather than re-inspecting the value-expression AST
+        // at runtime.
         let value_is_identity = matches!(mapper.kind, crate::semantic_query::MapperKind::Identity);
         // Key-space-independent value hoist. When the mapper's binder
         // (`mapper.parameter_node`) is not structurally reachable
@@ -1925,7 +1926,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     source_member.map(|m| m.readonly).unwrap_or(false)
                 }
             };
-            // Value selection per Cluster B:
+            // Value selection branches:
             //
             // - `source_members` matches this key AND `value_expr` IS
             //   structurally `T[K]` → use the member value directly
@@ -2095,9 +2096,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Per-key Mapped member value materialiser with explicit
-    /// **Selected-Key Transit Realization** — the round-7 substrate
-    /// extension that closes the publication boundary defect codex's
-    /// 4th consult Q1 identifies.
+    /// **Selected-Key Transit Realization**: drives one extra
+    /// evaluate dispatch after the per-K substitution so a generic
+    /// helper body that lowers to a `Conditional` reduces to its
+    /// realised arm before reaching the publication boundary.
     ///
     /// Extends [`Self::materialize_mapped_member_value_for_key`] by
     /// dispatching one more
@@ -2174,11 +2176,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// route through the same substitute → evaluate → Instantiate →
     /// **trailing Conditional reduction** chain. The trailing
     /// evaluate is what distinguishes the selected-key helper from
-    /// the round-6 baseline: the round-6 helper stops at the
-    /// Instantiate boundary, leaving the body's Conditional shell
-    /// addressable by re-dispatch but unrealised; the round-7 helper
-    /// drives Conditional reduction inline so consumers see the
-    /// closed `Function` (or projected member).
+    /// the plain mapped-value materialiser: the plain helper stops at
+    /// the Instantiate boundary, leaving the body's Conditional shell
+    /// addressable by re-dispatch but unrealised; this selected-key
+    /// helper drives Conditional reduction inline so consumers see
+    /// the closed `Function` (or projected member).
     pub(super) fn materialize_selected_key_mapped_value_with_node(
         &self,
         mapper: &crate::semantic_query::MapperKey,
@@ -2207,16 +2209,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Selected-Key Transit Realization: drive Conditional
         // reduction on the post-Instantiate body. The evaluator's
         // Conditional arm dispatches `SemanticQueryKey::Conditional`,
-        // which routes through `build_conditional`'s C11a
-        // infer-binding path (build.rs:2266) — the check operand
-        // evaluates via `evaluate_deferred_semantic_node` (default
+        // which routes through `build_conditional`'s nested-infer
+        // binding path — the check operand evaluates via
+        // `evaluate_deferred_semantic_node` (default
         // `Published(Expanded)`) which dispatches `IndexedAccess` in
-        // `Navigate` mode (evaluate.rs:95). The check operand
-        // (e.g. `PricingPlanSlots["badge"]`) reduces to a `Function`
-        // even though the caller's demand is `StructuralTransit`, and
-        // C11a binds the `infer P` then substitutes into the true
-        // branch — closing the conditional to a `Function` and
-        // unlocking the round-7 consumer contracts.
+        // `Navigate` mode. The check operand (e.g.
+        // `PricingPlanSlots["badge"]`) reduces to a `Function` even
+        // though the caller's demand is `StructuralTransit`, and the
+        // nested-infer arm binds the `infer P` then substitutes into
+        // the true branch — closing the conditional to a `Function`
+        // so consumers see the realised body rather than the shell.
         let realized = self.evaluate_deferred_semantic_node_with_context(resolved, context);
         if matches!(
             self.graph().node_data(realized).as_deref(),
@@ -2303,16 +2305,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// from migrating from `Published(Expanded)` to
     /// `StructuralTransit(Navigate)`.
     ///
-    /// **Why this helper, not an extension of `key_names_step`**: codex
-    /// Q1 #3 explicitly locks the global key-name enumerators
+    /// **Why this helper, not an extension of `key_names_step`**: the
+    /// global key-name enumerators
     /// (`key_names_from_base_node`, `key_names_from_keyspace_node`,
-    /// `key_names_step`) untouched — those serve `build_mapped_type`'s
-    /// Identity fast path (`Readonly<T>` / `Partial<T>` / `Required<T>`)
-    /// where the source surface is already an `Object` lowered through
-    /// the Expanded path. Teaching them to unwrap `DeclRef` /
-    /// `InstantiationRef` interferes with that Identity-mapper case
-    /// (round-5 STOP report empirically confirmed the regression on
-    /// `mapped_readonly.correctness.snap.json`).
+    /// `key_names_step`) are deliberately scoped to
+    /// `build_mapped_type`'s Identity fast path (`Readonly<T>` /
+    /// `Partial<T>` / `Required<T>`) where the source surface is
+    /// already an `Object` lowered through the Expanded path.
+    /// Teaching them to unwrap `DeclRef` / `InstantiationRef`
+    /// interferes with that Identity-mapper case — observable as a
+    /// `mapped_readonly.correctness.snap.json` regression — so the
+    /// `Navigate`-lowered carrier-unwrap path is factored into this
+    /// separate helper instead.
     ///
     /// This helper is the local fallback `synthesise_mapped_surface`
     /// calls when `key_names_from_base_node(source)` returns `None`
@@ -2533,25 +2537,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
 
-        // Cluster A: single-infer conditional `T extends infer
-        // X ? X : ...`. When `extends` is a bare
-        // [`SemanticNodeData::Infer`], bind the infer name to `check`
-        // on the true branch and emit an `InferBind` origin edge
-        // carrying the binding name. The true-branch substitution
-        // picks the Infer up symmetrically with TypeParam via
-        // `substitute_semantic_type_param`.
+        // Single-infer conditional `T extends infer X ? X : ...`.
+        // When `extends` is a bare [`SemanticNodeData::Infer`], bind
+        // the infer name to `check` on the true branch and emit an
+        // `InferBind` origin edge carrying the binding name. The
+        // true-branch substitution picks the Infer up symmetrically
+        // with TypeParam via `substitute_semantic_type_param`.
         //
-        // Multi-infer (`T extends [infer A, infer B] ? ...`), nested-
-        // infer, and template-literal-infer patterns stay deferred;
-        // they require the full relation-engine bindings integration
-        // still pending per TODO below.
+        // Multi-infer (`T extends [infer A, infer B] ? ...`) and
+        // template-literal-infer patterns stay deferred; they require
+        // the full relation-engine bindings integration still pending
+        // per TODO below.
         if let Some(SemanticNodeData::Infer { name }) = graph.node_data(extends).as_deref() {
             let infer_name: Arc<str> = Arc::clone(name);
-            // Path C C6a item 9a: intern the Infer node, then
-            // substitute by node id. substitute's Infer arm still
-            // matches by display_name for now ( item 8
-            // footnote — TypeScript `infer X` is a separate
-            // name-slot mechanism, C11a re-evaluates).
+            // Intern the Infer node so it has a stable
+            // `SemanticNodeId`, then substitute by node id. (The
+            // `infer X` binding occupies a separate name-slot
+            // mechanism from regular type parameters; the substitute
+            // helper's Infer arm matches by display_name to bridge
+            // that boundary.)
             let infer_node = graph.intern_node(SemanticNodeData::Infer {
                 name: Arc::clone(&infer_name),
             });
@@ -2572,19 +2576,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .with_observed_self_roots(observed_self_roots.clone());
         }
 
-        // Path C C11a — nested-infer in Function types.
-        // TypeScript patterns of the form
+        // Nested-infer in Function types. TypeScript patterns of the
+        // form
         // `T extends (x: infer U, y: infer V) => infer R ? true_branch : false_branch`
         // bind each `infer` binding to the corresponding position in
         // `check`'s signature, then substitute those bindings into the
-        // true branch. Pre-C11a this pattern lowered to a deferred
-        // Conditional shell because `relate_nodes`'s Function arm
+        // true branch. The relation engine's Function arm
         // short-circuits to `Unknown` in the presence of Infer
-        // positions (the relation engine does not currently emit
-        // infer bindings — see the TODO on the Assignable branch
-        // below). Post-C11a the infer bindings are extracted directly
-        // from the lowered shapes so the true-branch substitution can
-        // surface the concrete result.
+        // positions (it does not currently emit infer bindings — see
+        // the TODO on the Assignable branch below), so the bindings
+        // are extracted directly from the lowered shapes here and the
+        // true-branch substitution surfaces the concrete result.
         //
         // `check` is first materialised via `evaluate_deferred_semantic_node`
         // so `PricingPlanSlots["badge"]` / mapped-type references resolve

@@ -1446,10 +1446,10 @@ impl ShapeCacheKey {
     }
 
     /// Construct a TypeExpr-subject whole-subject key under an
-    /// explicit [`ProjectionReductionContext`]. Used by Round-10
-    /// the TypeExpr field materialiser so a per-prop
-    /// `Published(Navigate)` publication slot stays disjoint from a
-    /// `StructuralTransit(Navigate)` carrier-lower slot — same
+    /// explicit [`ProjectionReductionContext`]. The context
+    /// discriminator keeps the TypeExpr field materialiser's
+    /// per-prop `Published(Navigate)` publication slot disjoint from
+    /// a `StructuralTransit(Navigate)` carrier-lower slot — same
     /// subject, distinct cache entries.
     pub(crate) fn type_expr_whole_with_context(
         scope: Arc<str>,

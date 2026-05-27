@@ -107,8 +107,8 @@ pub(crate) enum RegistryMaterialization {
     SkipAppend,
 }
 
-/// Path C C11-residual-B: shallow substitution for owner-local generic
-/// alias refs at the registry-publish boundary. When a registry entry's
+/// Shallow substitution for owner-local generic alias refs at the
+/// registry-publish boundary. When a registry entry's
 /// raw body is `Ref { name, [args..] }` and the alias is declared in the
 /// SAME canonical scope as the registry consumer, look up the alias's
 /// prepared body. If the body is an Object, substitute the type

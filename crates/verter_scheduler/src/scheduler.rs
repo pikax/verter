@@ -26,7 +26,7 @@ use crate::queue::{AgingConfig, JobIndex, JobKey, QueueEntry};
 use crate::source_loader::{FileKind as SourceFileKind, SourceLoader};
 use crate::stage::{Priority, TargetStage, TaskKind};
 
-/// Path C C1 contention instrumentation for the scheduler. Owned by
+/// Contention instrumentation counters for the scheduler. Owned by
 /// [`Scheduler`]; surfaced via
 /// [`Scheduler::counters`](Scheduler::counters) so host-level provenance
 /// snapshots (verter_session's `MetaProvenanceSnapshot`) can aggregate
@@ -96,7 +96,7 @@ pub struct Request {
     pub request_context: Option<crate::request_context::OpaqueRequestContext>,
 }
 
-/// Path C C12 — batch submission handle.
+/// Batch submission handle.
 ///
 /// Produced by [`Scheduler::submit_batch`]; drained via
 /// [`Scheduler::wait_batch`]. Callers submit N independent requests
@@ -159,7 +159,8 @@ pub struct Scheduler {
     /// Driver thread handle (native only).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) driver_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
-    /// Path C C1 contention instrumentation.
+    /// Contention instrumentation counters surfaced through
+    /// [`Self::counters`].
     pub(crate) counters: SchedulerCounters,
 }
 
@@ -284,8 +285,8 @@ impl Scheduler {
         };
         match self.inbox.sender.send(submission) {
             Ok(()) => {
-                // Path C C1 instrumentation: record the submission + update
-                // the peak inbox depth observed.
+                // Record the submission + update the peak inbox depth
+                // observed (contention instrumentation).
                 self.counters.submit_count.fetch_add(1, Ordering::Relaxed);
                 let depth = self.inbox.sender.len() as u64;
                 let prev_max = self.counters.inbox_depth_max.load(Ordering::Relaxed);
@@ -305,10 +306,10 @@ impl Scheduler {
         }
     }
 
-    /// Path C C12 — batch submit. Submits N requests without
-    /// individual waits so the scheduler can coalesce drain and fan-
-    /// out onto its Rayon pool. Returns a [`BatchHandle`] that carries
-    /// one completion handle per request in submission order.
+    /// Batch submit. Submits N requests without individual waits so
+    /// the scheduler can coalesce drain and fan-out onto its Rayon
+    /// pool. Returns a [`BatchHandle`] that carries one completion
+    /// handle per request in submission order.
     pub fn submit_batch(&self, requests: Vec<Request>) -> BatchHandle {
         let mut handles = Vec::with_capacity(requests.len());
         for request in requests {
@@ -317,10 +318,10 @@ impl Scheduler {
         BatchHandle { handles }
     }
 
-    /// Path C C12 — wait for a submitted batch to complete. Drains
-    /// each [`CompletionHandle`] in submission order. The caller
-    /// receives per-request results as they arrive; the scheduler
-    /// fans out the work across its configured CPU pool.
+    /// Wait for a submitted batch to complete. Drains each
+    /// [`CompletionHandle`] in submission order. The caller receives
+    /// per-request results as they arrive; the scheduler fans out the
+    /// work across its configured CPU pool.
     ///
     /// Uses `wait_or_drive` so both native (driver thread) and
     /// single-threaded callers share the same completion semantics.
@@ -387,7 +388,7 @@ impl Scheduler {
         }
     }
 
-    /// Access Path C C1 contention instrumentation counters.
+    /// Access the scheduler's contention instrumentation counters.
     pub fn counters(&self) -> &SchedulerCounters {
         &self.counters
     }

@@ -146,7 +146,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // constraint / default so the projection back to
                     // `TypeExpr::TypeParameter(TypeParam { name,
                     // constraint, default })` is complete.
-                    // Cluster A.
                     let constraint = param.constraint.as_ref().map(|c| {
                         self.shallow_lower_type_expr_with_context(
                             c,
@@ -172,19 +171,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         )
                     });
                     let display_name: Arc<str> = Arc::from(param.name.as_str());
-                    // Path C C6a item 2: unresolved `TypeParameter`
-                    // path uses **file-scoped name-keyed identity** —
+                    // Unresolved `TypeParameter` path uses
+                    // **file-scoped name-keyed identity**:
                     // `decl_name = reference.name` (NOT the owning
                     // declaration's name, which is unavailable at
-                    // this site since the parameter could not be
+                    // this site because the parameter could not be
                     // resolved). Two unresolved `K` references
                     // anywhere in the same file alias to one
-                    // SemanticNodeId; cross-file unresolved `K`
-                    // references stay distinct via canonical_id.
-                    // `param_index = 0` is the documented zero per
-                    // item 2 ("file-scoped name-keyed
-                    // identity"). Escalation path if too coarse:
-                    // owner-scope-local `(name → ordinal)` map.
+                    // `SemanticNodeId`; cross-file unresolved `K`
+                    // references stay distinct via `canonical_id`.
+                    // `param_index = 0` is the file-scoped name-keyed
+                    // identity slot; the escalation path if this
+                    // proves too coarse is an owner-scope-local
+                    // `(name → ordinal)` map.
                     let decl = crate::semantic_query::DeclIdentity::from_scope(
                         scope,
                         Arc::clone(&display_name),
@@ -215,24 +214,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 substitutions.push((Arc::clone(name), arg_id));
                 arg_id
             }
-            // Cluster A + Path C C3: script-setup generic parameter.
-            // When the bare name maps to a `script_setup_type_bindings`
-            // entry, lower directly to a rich
+            // Script-setup generic parameter. When the bare name maps
+            // to a `script_setup_type_bindings` entry, lower directly
+            // to a rich
             // `SemanticNodeData::TypeParam { name, constraint, default }`
-            // — NOT via the ResolveDecl fallback. This
-            // preserves declaration-site constraint/default so the
-            // projection back to `TypeExpr::TypeParameter(TypeParam)`
-            // is complete at meta-extraction time. Must match on
+            // — NOT via the `ResolveDecl` fallback. This preserves
+            // declaration-site constraint/default so the projection
+            // back to `TypeExpr::TypeParameter(TypeParam)` is complete
+            // at meta-extraction time. Must match on
             // `scope_type_bindings` specifically (the script-setup
             // map), not `scope_type_names` which also contains
             // same-file type decls.
             //
-            // Pre-C3 the binding lookup produced a wrapped
-            // `PreparedTypeDecl` whose body was a `TypeExpr::TypeParameter`;
-            // C3 retired the wrapper and stores
-            // [`crate::resolver_core::prepared_decl::TypeParamBinding`]
-            // entries that already carry the unlowered constraint /
-            // default expressions. The arm reads them directly.
+            // The binding store is
+            // [`crate::resolver_core::prepared_decl::TypeParamBinding`],
+            // which carries the unlowered constraint / default
+            // expressions directly — this arm reads them without an
+            // intermediate `PreparedTypeDecl` wrapper.
             TypeExpr::Ref {
                 name,
                 type_arguments,
@@ -269,15 +267,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     )
                 });
                 let display_name = Arc::clone(&binding.name);
-                // Path C C6: script-setup type parameters get
-                // `decl_name = "<script-setup>"` sentinel per
-                // Pass C6, with the file's canonical_id + whole_hash
-                // taken from the current lowering scope. Path C C6a
-                // item 1: `param_index` is the binder's 0-based
-                // position in the `<script setup generic="...">`
-                // clause (carried on `TypeParamBinding.ordinal`),
-                // disambiguating multiple script-setup parameters in
-                // the same file.
+                // Script-setup type parameters get a
+                // `decl_name = "<script-setup>"` sentinel with the
+                // file's `canonical_id` + `whole_hash` taken from the
+                // current lowering scope. `param_index` is the
+                // binder's 0-based position in the
+                // `<script setup generic="...">` clause (carried on
+                // `TypeParamBinding.ordinal`), disambiguating
+                // multiple script-setup parameters in the same file.
                 let decl = match scope {
                     NodeScopeId::Global => DeclIdentity {
                         canonical_id: Arc::from(""),
@@ -925,21 +922,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
                 let mut mapper_env = env.clone();
                 let mapper_display_name: Arc<str> = Arc::from(parameter.as_str());
-                // Path C C6: the mapper parameter K is introduced by
-                // the enclosing `[K in S]` binding; treat its
-                // declaration as the mapped-type shell itself. The
-                // scope's canonical_id + whole_hash identifies the
-                // file; `decl_name = "<mapper-param>"` is a sentinel
-                // to distinguish from user-declared interface/type-
-                // alias parameters.
+                // The mapper parameter K is introduced by the
+                // enclosing `[K in S]` binding; treat its declaration
+                // as the mapped-type shell itself. The scope's
+                // `canonical_id` + `whole_hash` identifies the file;
+                // `decl_name = "<mapper-param>"` is a sentinel that
+                // distinguishes mapper parameters from user-declared
+                // interface / type-alias parameters.
                 //
-                // Path C C6a item 3: assign a per-dispatcher ordinal
-                // as `param_index` so two distinct `[K in ...]`
-                // binders in the same file (or same scope) hash to
-                // distinct identity tuples. Documented fallback from
-                // per-owning-scope per — see
+                // `param_index` is assigned from the per-dispatcher
+                // ordinal so two distinct `[K in ...]` binders in the
+                // same file (or same scope) hash to distinct identity
+                // tuples. See
                 // `ProjectSemanticDispatch::mapped_binder_ordinal`
-                // for the trade-off discussion.
+                // for the trade-off discussion against a strict
+                // per-owning-scope counter.
                 let mapper_decl = match scope {
                     NodeScopeId::Global => DeclIdentity {
                         canonical_id: Arc::from(""),
@@ -1046,13 +1043,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     )
                 });
 
-                // Path C C5 + C6a item 7: classify value_expr once
-                // at lowering time so `build_mapped_type` can match
-                // on `mapper.kind` instead of running the runtime
-                // `mapper_value_is_identity_t_of_k` detection on every
-                // call. Classification compares the indexed-access
-                // index node id against the mapper's binder node id
-                // directly, avoiding display-name conflation.
+                // Classify `value_expr` once at lowering time so
+                // `build_mapped_type` matches on `mapper.kind`
+                // directly instead of re-inspecting the runtime AST
+                // shape on every call. Classification compares the
+                // indexed-access index node id against the mapper's
+                // binder node id directly, avoiding display-name
+                // conflation.
                 let kind = crate::semantic_query::MapperKind::classify_value_expr(
                     graph,
                     value_sem,
@@ -1060,9 +1057,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     parameter_id,
                 );
                 let mapper = MapperKey {
-                    // Path C C6a item 6: the mapper carries the
-                    // binder's interned `TypeParam` node id, not the
-                    // display-name string.
+                    // The mapper carries the binder's interned
+                    // `TypeParam` node id, not the display-name
+                    // string — binder identity in the semantic graph
+                    // is by `SemanticNodeId`, not by display name.
                     parameter_node: parameter_id,
                     key_space: key_space_sem,
                     value_expr: value_sem,
@@ -1324,25 +1322,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     substitutions,
                     extends_context,
                 );
-                // Cluster A + Step 1.5 mapped+conditional infer
-                // closure: collect EVERY `SemanticNodeData::Infer { name }`
-                // reachable from `extends` (bare position OR nested inside
-                // Function / Tuple / Array / Union / Intersection / Object
-                // shapes) and bind each name in the true-branch env so
-                // `TypeExpr::Ref { name }` references in the true branch
-                // resolve back to the same Infer node id. Without this
-                // binding, the Ref routes through `ResolveDecl` and lowers
-                // to `Opaque(Miss)`, at which point the name is lost and
-                // `build_conditional`'s C11a Function-extends arm cannot
-                // substitute the bound type into the true branch — leaving
-                // a deferred shell with `Unknown { raw: "semanticMiss" }`
-                // sitting in the position the user wrote `infer P`.
+                // Mapped+conditional infer closure: collect EVERY
+                // `SemanticNodeData::Infer { name }` reachable from
+                // `extends` (bare position OR nested inside Function /
+                // Tuple / Array / Union / Intersection / Object
+                // shapes) and bind each name in the true-branch env
+                // so `TypeExpr::Ref { name }` references in the true
+                // branch resolve back to the same Infer node id.
+                // Without this binding, the Ref routes through
+                // `ResolveDecl` and lowers to `Opaque(Miss)`, at
+                // which point the name is lost and
+                // `build_conditional`'s nested-infer Function-extends
+                // arm cannot substitute the bound type into the true
+                // branch — leaving a deferred shell with
+                // `Unknown { raw: "semanticMiss" }` sitting in the
+                // position the user wrote `infer P`.
                 //
-                // The pre-Step-1.5 single-bare-Infer arm at
-                // `extends` lowered as `SemanticNodeData::Infer { name }`
-                // covered `T extends infer P ? P : T` only.
+                // The bare-Infer case `extends` lowered as
+                // `SemanticNodeData::Infer { name }` covers
+                // `T extends infer P ? P : T` directly;
                 // `T extends (props: infer P) => any ? P : T` and the
-                // many compound-extends shapes need the recursive walk.
+                // many compound-extends shapes need this recursive
+                // walk.
                 let true_env_owned;
                 let true_env = {
                     let mut extended = env.clone();

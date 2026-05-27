@@ -136,9 +136,9 @@ pub use surface_projector::{
 
 /// Lane-identity token for singleflight deduplication.
 ///
-/// Widened in Path C C14 to include session identity so that two sessions
-/// with different overlays but the same epoch never coalesce into the same
-/// singleflight lane.
+/// Carries session identity in addition to the epoch so two sessions
+/// with different overlays but the same epoch do not coalesce into
+/// the same singleflight lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StoreViewCompatToken {
     pub epoch: u64,

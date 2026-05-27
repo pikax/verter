@@ -269,17 +269,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .into_boxed_slice(),
             )),
             SemanticNodeData::Intersection(members) => {
-                // Path C C11a — drop empty-object arms from the
-                // Intersection projection. `Id<T> = {} & { [P in keyof T]: T[P] }`
+                // Drop empty-object arms from the Intersection
+                // projection. `Id<T> = {} & { [P in keyof T]: T[P] }`
                 // and similar helper patterns lower to
-                // Intersection([empty_object, mapped_object]); the empty
-                // arm contributes nothing semantically (`{} & X ≡ X`) but
-                // leaks through as a `TypeExpr::Unknown { raw:
-                // SEMANTIC_OBJECT_SURFACE }` sentinel which breaks callers
-                // that expect a pure Object at the projection boundary.
-                // Dropping the semantically-vacuous arm here collapses
-                // `{} & X → X` so imported-helper ui bindings materialise
-                // cleanly instead of nested in Intersection([Unknown, Object]).
+                // `Intersection([empty_object, mapped_object])`; the
+                // empty arm contributes nothing semantically
+                // (`{} & X ≡ X`) but would leak through as a
+                // `TypeExpr::Unknown { raw: SEMANTIC_OBJECT_SURFACE }`
+                // sentinel which breaks callers that expect a pure
+                // Object at the projection boundary. Dropping the
+                // semantically-vacuous arm here collapses `{} & X → X`
+                // so imported-helper UI bindings materialise cleanly
+                // instead of nested in
+                // `Intersection([Unknown, Object])`.
                 let mut arms: Vec<TypeExpr> = members
                     .iter()
                     .filter_map(|member| self.raise_node_to_type_expr_inner(*member, active))
@@ -371,12 +373,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 index: std::sync::Arc::new(self.index_key_to_type_expr(index, active)?),
             },
             SemanticNodeData::Mapped { mapper, .. } => TypeExpr::Mapped {
-                // Path C C6a item 9c: presentational projection. Look
-                // up the binder node by `mapper.parameter_node` and
-                // read its `display_name` for the projected
-                // `TypeExpr::Mapped { parameter }` field. C7's interner
-                // dedups only structurally-identical binders, so the
-                // representative's display_name is well-defined.
+                // Presentational projection: look up the binder node
+                // by `mapper.parameter_node` and read its
+                // `display_name` for the projected
+                // `TypeExpr::Mapped { parameter }` field. The
+                // semantic-graph interner dedups only
+                // structurally-identical binders, so the
+                // representative's `display_name` is well-defined.
                 parameter: match super::node_data_for(self.ctx, mapper.parameter_node).as_deref() {
                     Some(SemanticNodeData::TypeParam { display_name, .. }) => {
                         display_name.as_ref().to_string()
@@ -426,17 +429,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 default,
                 ..
             } => {
-                // Cluster A: project `constraint` / `default` back
-                // to `TypeExpr` so the round-trip preserves the declaration
-                // shape. The `active` visited set guards against cyclic
-                // constraint graphs (plan F7): when a TypeParam's
-                // constraint or default transitively reaches this same
-                // node, return `None` from the recursion and drop the
-                // field rather than looping.
+                // Project `constraint` / `default` back to `TypeExpr`
+                // so the round-trip preserves the declaration shape.
+                // The `active` visited set guards against cyclic
+                // constraint graphs: when a TypeParam's constraint or
+                // default transitively reaches this same node, return
+                // `None` from the recursion and drop the field rather
+                // than looping.
                 //
-                // Path C C6: the projected `TypeExpr::TypeParameter.name`
-                // uses `display_name` — the human-readable parameter
-                // name. `decl` / `param_index` are identity discriminators
+                // The projected `TypeExpr::TypeParameter.name` uses
+                // `display_name` — the human-readable parameter name.
+                // `decl` / `param_index` are identity discriminators
                 // for structural interning and do not appear in the
                 // projected `TypeExpr` shape.
                 if !active.insert(node) {

@@ -1244,15 +1244,16 @@ impl VerterHost {
             });
             let imported_generic_alias_root = imported_generic_alias_scope.is_some();
 
-            // Path C C11-residual-B: owner-local generic Refs preserve
-            // helper-Ref structure. When `Button = ComponentConfig<typeof theme>`
-            // is declared in the SAME file as `ComponentConfig` (owner-
-            // local), the registry should publish Button as the SHALLOW
+            // Owner-local generic Refs preserve helper-Ref structure.
+            // When `Button = ComponentConfig<typeof theme>` is
+            // declared in the SAME file as `ComponentConfig` (owner-
+            // local), the registry publishes Button as the SHALLOW
             // substituted body — `{ variants: ComponentVariants<...>,
             // slots: ComponentSlots<...>, ui: ComponentUI<...> }` —
-            // rather than fully materialising every helper. This keeps
-            // the registry consumer's Ref-to-helper navigation path
-            // queryable rather than collapsing helper identities into
+            // rather than fully materialising every helper. This
+            // keeps the registry consumer's Ref-to-helper navigation
+            // path queryable rather than collapsing helper identities
+            // into
             // their concrete shapes.
             //
             // Distinct from the imported-alias path

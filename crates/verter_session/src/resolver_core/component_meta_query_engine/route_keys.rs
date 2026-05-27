@@ -167,16 +167,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
                 match &projected_inner {
                     TypeExpr::Intersection(parts) | TypeExpr::Union(parts) => {
-                        // Path C C11-residual-C: accumulate enumerable
-                        // arms only. Pre-residual-C the `?` propagation
-                        // dropped the entire result when any single arm
-                        // could not enumerate keys, even when other arms
-                        // had concrete keyspaces. Mirrors the
+                        // Accumulate enumerable arms only — `keyof (A
+                        // & B)` returns the union of enumerable keys
+                        // across A and B and fails only when EVERY
+                        // arm is unresolvable. Mirrors the
                         // SemanticNode-level Intersection accumulation
-                        // change in `key_names_from_base_node` (Path C
-                        // C10) — `keyof (A & B)` returns the union of
-                        // enumerable keys across A and B and only fails
-                        // when EVERY arm is unresolvable.
+                        // contract in `key_names_from_base_node`; an
+                        // all-or-nothing `?` here would lose
+                        // enumerable keys from `A` when `B` is
+                        // unresolvable.
                         let mut keys = Vec::new();
                         let mut any_enumerable = false;
                         for part in parts.iter() {
@@ -245,13 +244,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> Option<Vec<String>> {
         use verter_type_expr::ObjectMember;
 
-        // Path C C11-residual-C: depth bumped from 4 to 8 to allow
-        // multi-step navigation chains like
+        // Depth budget of 8 accommodates multi-step navigation
+        // chains like
         // `(typeof theme & GetComponentAppConfig<AppConfig, "ui", "button">)['variants']['color']`
-        // which require: (1) IndexedAccess(Intersection,..) distribute
-        // → (2) IndexedAccess(Ref,..) expand alias → (3)
-        // IndexedAccess(Conditional,..) distribute → (4)
-        // IndexedAccess(IndexedAccess,..) recurse on inner → ...
+        // which require: (1) IndexedAccess(Intersection,..)
+        // distribute → (2) IndexedAccess(Ref,..) expand alias →
+        // (3) IndexedAccess(Conditional,..) distribute →
+        // (4) IndexedAccess(IndexedAccess,..) recurse on inner →
+        // and so on.
         if depth >= 8 {
             return None;
         }
@@ -309,13 +309,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 projected_surface_member_names(&projected_member)
             }
             TypeExpr::Intersection(parts) | TypeExpr::Union(parts) => {
-                // Path C C11-residual-C: accumulate enumerable arms
-                // only — see the matching change in
-                // `enumerate_route_literal_keys_inner`. `keyof
-                // (typeof theme & GetComponentAppConfig<...>)['variants']
-                // ['color']` must merge `theme.variants.color`'s keys
-                // with the conditional's resolvable arm keys, even when
-                // the deferred conditional arm couldn't enumerate.
+                // Accumulate enumerable arms only — see the matching
+                // accumulation in `enumerate_route_literal_keys_inner`.
+                // `keyof (typeof theme & GetComponentAppConfig<...>)['variants']['color']`
+                // must merge `theme.variants.color`'s keys with the
+                // conditional's resolvable arm keys, even when a
+                // deferred conditional arm cannot enumerate.
                 let mut keys = Vec::new();
                 let mut any_enumerable = false;
                 for part in parts.iter() {
@@ -432,14 +431,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 member_name,
                 depth + 1,
             ),
-            // Path C C11-residual-C: distribute member-name lookup over
-            // an `IndexedAccess` whose object is compound or reducible.
-            // For `(typeof theme & GetComponentAppConfig<...>)['variants']['color']`
+            // Distribute member-name lookup over an `IndexedAccess`
+            // whose object is compound or reducible. For
+            // `(typeof theme & GetComponentAppConfig<...>)['variants']['color']`
             // we want `theme.variants.color`'s keys merged with the
-            // conditional arm's `variants.color`'s keys. Pre-residual-C
-            // the catch-all returned `None` and the test lost AppConfig's
-            // `neutral` because the dispatch couldn't reduce the
-            // outer IndexedAccess to a concrete shape.
+            // conditional arm's `variants.color`'s keys; without this
+            // distribution the catch-all would return `None` because
+            // the dispatch cannot reduce the outer IndexedAccess to a
+            // single concrete shape.
             //
             // Handles:
             // - object = Intersection / Union: distribute over arms.

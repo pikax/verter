@@ -434,12 +434,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 optionality: mapper.optionality,
                                 readonly: mapper.readonly,
                                 name_remap: sub_name_remap,
-                                // Path C C5: propagate the lowering-time
-                                // kind through substitution. Identity is
-                                // preserved across substitution because
-                                // substitution applies uniformly to both
-                                // source and value_expr.object for
-                                // non-shadowed substitutions.
+                                // Propagate the lowering-time mapper kind
+                                // through substitution. Identity classification
+                                // is preserved because substitution applies
+                                // uniformly to both `source` and
+                                // `value_expr.object` for non-shadowed
+                                // substitutions, so a mapper that lowered as
+                                // identity `T[K]` remains identity after the
+                                // type-parameter rewrite.
                                 kind: mapper.kind,
                             },
                         },
@@ -448,12 +450,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             }
             SemanticNodeData::TypeOf { .. } => {
-                // TypeOf carries opaque value-root + path; no
-                // substitution descends into it. Returns the input
-                // node unchanged. This was a re-intern in the pre-
-                // Fix-D code (which dedup'd to the same id anyway);
-                // the change-tracking version returns the input
-                // directly without any work.
+                // TypeOf carries an opaque value-root + path. Substitution
+                // never descends into it, so the input node id is returned
+                // unchanged with `changed = false` — the caller skips the
+                // rebuild + re-intern entirely.
                 (node, false)
             }
             SemanticNodeData::Conditional {
@@ -488,27 +488,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     true,
                 )
             }
-            // Codex 4th-consult Q1 dispatch chain
-            // prerequisite) — InstantiationRef arm. Pre-round-7 the
-            // catch-all left InstantiationRef shells untouched, so
-            // type-parameter references inside `Helper<TPlan, K>`'s
-            // args leaked through substitution unchanged. The pre-
-            // round-7 path "worked" for the Expanded lowering only
-            // because Expanded inlines the generic body into a
-            // Conditional / Function shape directly at lowering time;
-            // under `StructuralTransit(Navigate)` macro publication
-            // (the round-7 cutover demand) the lowering preserves
-            // `InstantiationRef` as a lazy carrier and the args
-            // (`[TPlan-typeparam, K-typeparam]`) must substitute
-            // when the outer mapper's binder fires per-key
-            // realization. Without this arm, the per-key materialiser's
+            // InstantiationRef is a lazy carrier of `Helper<arg1, arg2>`
+            // where `base` is the declaration identity and `args` is the
+            // call-site type-argument vector. Substitution must descend
+            // into each arg so type-parameter references inside an
+            // unrealised instantiation (e.g. `Helper<TPlan, K>` inside a
+            // mapped-type binder loop) are rewritten when the outer
+            // binder fires per-key realisation. `base`/`DeclIdentity`
+            // carries no type-parameter references and is preserved
+            // verbatim. Without this descent, an unrealised
             // `Instantiate { ExtendSlotWithPlan<TPlan, "badge"> }` body
-            // lowering re-binds `TKey_E ← K-typeparam` (the free outer
-            // binder) instead of `TKey_E ← "badge"-literal`, and the
-            // body's Conditional never closes. base / DeclIdentity is
-            // preserved verbatim — DeclIdentity has no type-param
-            // references inside it; only args carry call-site type
-            // arguments.
+            // would re-bind its inner `TKey ← K-typeparam` instead of
+            // `TKey ← "badge"-literal`, and its Conditional payload
+            // would never close.
             SemanticNodeData::InstantiationRef { base, args } => {
                 let mut new_args = Vec::with_capacity(args.len());
                 let mut any_changed = false;
@@ -532,11 +524,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     true,
                 )
             }
-            // Path C C11a — Function arm. Pre-C11a the catch-all left
-            // Function shells untouched, so `T` / `infer X` references
-            // inside `(x: T, y: infer X) => R` leaked through
-            // substitution unchanged. This is the primary materialisation
-            // path for nested-infer in TS conditional `extends` clauses
+            // Function arm. Substitution must descend into every
+            // parameter type and the return type so `T` / `infer X`
+            // references inside `(x: T, y: infer X) => R` are rewritten
+            // when the outer binder fires. This is the primary
+            // materialisation path for nested-infer in TS conditional
+            // `extends` clauses.
             SemanticNodeData::Function {
                 params,
                 return_type,

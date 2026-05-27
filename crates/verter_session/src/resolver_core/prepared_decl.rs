@@ -23,18 +23,18 @@ pub struct ImportBinding {
     pub exported_name: String,
 }
 
-/// Script-setup generic type-parameter binding (Path C C3 — replaces the
-/// pre-C3 `Arc<PreparedTypeDecl>` wrapper for `<script setup lang="ts"
-/// generic="T extends Item = Item">` parameters).
+/// Script-setup generic type-parameter binding for
+/// `<script setup lang="ts" generic="T extends Item = Item">`
+/// parameters.
 ///
 /// The binding carries the parameter name plus its declaration-site
 /// `extends` constraint and `=` default as **unlowered** [`TypeExpr`]
 /// values; the dispatch lowering path interns them on demand into
 /// [`SemanticNodeData::TypeParam`](crate::semantic_query::SemanticNodeData::TypeParam)
-/// via `shallow_lower_type_expr`. PreparedTypeDecl was the wrong category
-/// for this data — type parameters do not have alias bodies, scope-local
-/// `name_resolution`, or the rest of the prepared-decl surface — so the
-/// pre-C3 wrapping mis-classified script-setup generics as type aliases.
+/// via `shallow_lower_type_expr`. `PreparedTypeDecl` would be the
+/// wrong category for this data — type parameters do not have alias
+/// bodies, scope-local `name_resolution`, or the rest of the
+/// prepared-decl surface.
 ///
 /// `ordinal` carries the 0-based clause position into the lowered
 /// `SemanticNodeData::TypeParam.param_index`, disambiguating same-name
@@ -43,8 +43,11 @@ pub struct ImportBinding {
 #[derive(Debug, Clone)]
 pub struct TypeParamBinding {
     pub name: Arc<str>,
-    /// Path C C6a item 1: 0-based position in the
-    /// `<script setup generic="T, U, V">` clause.
+    /// 0-based position in the
+    /// `<script setup generic="T, U, V">` clause, used as
+    /// [`SemanticNodeData::TypeParam.param_index`](crate::semantic_query::SemanticNodeData::TypeParam)
+    /// so multiple script-setup parameters in one file get distinct
+    /// identity tuples.
     pub ordinal: u16,
     pub constraint: Option<Arc<verter_type_expr::TypeExpr>>,
     pub default: Option<Arc<verter_type_expr::TypeExpr>>,
@@ -378,9 +381,8 @@ pub struct PreparedDeclBundle {
     /// Empty for non-Vue files. Populated once during bundle materialization
     /// so the solver hot path never calls `current_eval_state`.
     ///
-    /// Each entry is a [`TypeParamBinding`] (Path C C3); pre-C3 the
-    /// value type was `Arc<PreparedTypeDecl>` which mis-categorised the
-    /// parameter as a type-alias decl.
+    /// Each entry is a [`TypeParamBinding`] — type parameters are not
+    /// type aliases, so they do not flow through `PreparedTypeDecl`.
     pub script_setup_type_bindings: FxHashMap<String, TypeParamBinding>,
 }
 
@@ -391,8 +393,8 @@ pub struct PreparedDeclBundle {
 /// extracting them requires access to the host's source/parse state, which is a
 /// session-level concern. For non-Vue files the caller passes an empty map.
 ///
-/// Per Path C C3, each entry is a [`TypeParamBinding`]; the pre-C3
-/// `Arc<PreparedTypeDecl>` wrapping has been retired.
+/// Each entry is a [`TypeParamBinding`]; type parameters do not flow
+/// through `PreparedTypeDecl` because they are not type aliases.
 pub fn build_prepared_decl_bundle(
     canonical_id: &str,
     state: Arc<ShallowFileState>,

@@ -113,10 +113,10 @@ impl TargetStage {
 mod tests {
     use super::*;
 
-    /// Path C C13 — `SchedulerJobKind::ComponentMeta` identifies a
-    /// component-meta job by canonical id. Two jobs for the same
-    /// canonical id compare equal; different canonicals stay distinct.
-    /// Hash preserves the distinction so DashMap/HashMap keys work.
+    /// `SchedulerJobKind::ComponentMeta` identifies a component-meta
+    /// job by canonical id. Two jobs for the same canonical id
+    /// compare equal; different canonicals stay distinct. Hash
+    /// preserves the distinction so `DashMap` / `HashMap` keys work.
     #[test]
     fn scheduler_job_kind_component_meta_identity_by_canonical_id() {
         let a = SchedulerJobKind::ComponentMeta {

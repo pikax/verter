@@ -288,7 +288,7 @@ impl MetaProject {
         self.open_session_with_mode(ExecutionMode::Interactive)
     }
 
-    /// Open a new session in batch execution mode (Path C C12).
+    /// Open a new session in batch execution mode.
     ///
     /// Batch mode opts into the scheduler's batched submission surface
     /// where callers submit N independent requests before any waits.
@@ -399,11 +399,11 @@ impl MetaProject {
 // MetaSession
 // ---------------------------------------------------------------------------
 
-/// Path C C12 — session execution mode.
+/// Session execution mode.
 ///
 /// Separates interactive-latency callers (LSP) from batch-throughput
-/// callers (test harness, MCP server). Interactive mode matches the
-/// pre-C12 single-request-then-wait path; Batch mode opts into the
+/// callers (test harness, MCP server). Interactive mode follows the
+/// single-request-then-wait path; Batch mode opts into the
 /// scheduler's `submit_batch` / `wait_batch` surface so N independent
 /// requests fan out onto the Rayon pool.
 #[allow(dead_code)]
@@ -426,15 +426,15 @@ pub struct MetaSession {
     id: u64,
     project: Arc<MetaProject>,
     closed: AtomicBool,
-    /// Path C C12 — per-session execution mode. Scheduler dispatch
-    /// branches on this to choose between interactive and batch
-    /// surfaces. Currently consumed via [`Self::execution_mode`];
-    /// C13 wires component-meta job dispatch to honour the flag.
+    /// Per-session execution mode. Scheduler dispatch branches on
+    /// this to choose between interactive and batch surfaces; the
+    /// component-meta job dispatcher reads this flag to route batch
+    /// callers through the scheduler's batched submission surface.
     #[allow(dead_code)]
     execution_mode: ExecutionMode,
-    /// Path C C14 — session-owned runtime for overlay-sensitive
-    /// request execution. Owns session identity, overlay context
-    /// lifecycle, and session-scoped resolved-meta cache.
+    /// Session-owned runtime for overlay-sensitive request execution.
+    /// Owns session identity, overlay context lifecycle, and the
+    /// session-scoped resolved-meta cache.
     runtime: SessionRuntime,
 }
 
@@ -459,7 +459,7 @@ impl MetaSession {
         self.project.host()
     }
 
-    /// Path C C12 — this session's execution mode.
+    /// This session's execution mode.
     #[allow(dead_code)]
     pub fn execution_mode(&self) -> ExecutionMode {
         self.execution_mode

@@ -71,7 +71,7 @@ pub(crate) struct RouteExtraction {
 /// return `None` — they are NOT route shapes; they fall through to the
 /// recursive-helper guard in B1 step 4.
 ///
-/// Round-7 parity tightenings:
+/// Parity tightenings with TypeScript's built-in semantics:
 ///
 /// - Userland Pick/Omit (a userland `Pick`/`Omit` decl that shadows
 ///   the builtin) is NOT a registry route — only `__builtin__` Pick/
@@ -227,8 +227,9 @@ pub(crate) fn extract_indexed_access_route(
             SemanticNodeData::IndexedAccess { object, index } => {
                 let hop = match index {
                     IndexKey::String(s) => s.to_string(),
-                    // Round-7 parity: numeric/type indices are not
-                    // legal route hops.
+                    // Numeric / type indices are not legal route
+                    // hops (parity with TypeScript: `Foo[0]` and
+                    // `Foo[K]` are not declared registry routes).
                     IndexKey::Number(_) | IndexKey::TypeNode(_) => return None,
                 };
                 hops_reverse.push(hop);

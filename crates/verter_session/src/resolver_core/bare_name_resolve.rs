@@ -40,10 +40,10 @@ use crate::resolver_core::ResolverContext;
 /// parameter bindings + import bindings in a compact form the
 /// resolver can consult without re-walking the bundle.
 ///
-/// Per Path C C3, `scope_type_bindings` is keyed to
-/// [`TypeParamBinding`] (not `Arc<PreparedTypeDecl>`); script-setup
-/// generic parameters carry their declaration-site `extends` /
-/// default expressions directly.
+/// `scope_type_bindings` is keyed to [`TypeParamBinding`], NOT to
+/// `Arc<PreparedTypeDecl>`; script-setup generic parameters carry
+/// their declaration-site `extends` / default expressions directly
+/// without an intermediate prepared-decl wrapper.
 #[derive(Debug)]
 pub(crate) struct DeclarationScopePayload {
     pub(crate) scope_type_names: FxHashSet<String>,
@@ -260,12 +260,9 @@ fn resolve_imported_type_root_identity(
 /// 2. Import-root walk via `resolve_imported_type_root`, then retry
 ///    `prepared_type_decl` at the resolved `(canonical, name)`.
 ///
-/// **Per Path C C3, script-setup type-parameter bindings are no
-/// longer reachable through this function.** Pre-C3, the scope_payload
-/// short-circuit returned a `PreparedTypeDecl` wrapper around a
-/// `TypeExpr::TypeParameter` body for `<script setup generic="T...">`
-/// names. Script-setup parameters are not type-aliases and therefore
-/// not `PreparedTypeDecl`s; the lowering hot path now reads
+/// **Script-setup type-parameter bindings are NOT reachable through
+/// this function.** Script-setup parameters are not type-aliases and
+/// therefore not `PreparedTypeDecl`s; the lowering hot path reads
 /// `scope_payload.scope_type_bindings.get(name)` directly to obtain a
 /// [`TypeParamBinding`](crate::resolver_core::prepared_decl::TypeParamBinding)
 /// and emits a `SemanticNodeData::TypeParam` without going through

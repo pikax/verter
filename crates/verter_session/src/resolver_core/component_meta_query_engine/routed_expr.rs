@@ -808,16 +808,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             TypeExpr::TypeOf(_) => {
                 // `typeof value_ref`: caller-scoped first (the most
                 // common case is `Foo['x']` where `Foo` is a value
-                // imported into the calling SFC). Path C C11-residual-B:
-                // some helper-aliased patterns reference values that
-                // are visible in OUTER helper scopes (e.g.,
-                // `type Button = ComponentConfig<typeof theme>` declared
-                // in `button-types.ts` — `theme` is visible there, but
-                // by the time the projection recurses into
-                // `ComponentConfig`'s body in `types.ts`, neither
-                // `decl_scope=types.ts` nor `arg_scope=ImportedSlotButton.vue`
-                // can resolve `theme`. The `chain_scopes` carry the
-                // outer declaration scopes through the recursion so
+                // imported into the calling SFC). Some
+                // helper-aliased patterns reference values that are
+                // visible in OUTER helper scopes — e.g.,
+                // `type Button = ComponentConfig<typeof theme>`
+                // declared in `button-types.ts`, where `theme` is
+                // visible there, but by the time the projection
+                // recurses into `ComponentConfig`'s body in
+                // `types.ts`, neither `decl_scope=types.ts` nor
+                // `arg_scope=ImportedSlotButton.vue` can resolve
+                // `theme`. The `chain_scopes` carry the outer
+                // declaration scopes through the recursion so
                 // the value reference can find its visible scope.
                 let arg_first = self.solve_or_project_leaf_expr_until_stable(&arg_scope, expr);
                 if let Some(ref result) = arg_first {
@@ -873,14 +874,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         return arg_result;
                     }
                 }
-                // Path C C11-residual-B: split-scope projection. When
-                // the ref's name belongs to one scope (e.g. `ComponentUI`
-                // declared in `types.ts`) and its type_arguments
-                // reference values from another scope (e.g.
-                // `typeof theme` visible only in `button-types.ts`),
-                // pre-resolve each `TypeOf(value)` argument in any
-                // chain scope where the value is visible, then re-try
-                // the projection with the resolved arguments substituted.
+                // Split-scope projection. When the ref's name belongs
+                // to one scope (e.g. `ComponentUI` declared in
+                // `types.ts`) and its type_arguments reference values
+                // from another scope (e.g. `typeof theme` visible
+                // only in `button-types.ts`), pre-resolve each
+                // `TypeOf(value)` argument in any chain scope where
+                // the value is visible, then re-try the projection
+                // with the resolved arguments substituted.
                 if !chain_scopes.is_empty() {
                     let mut resolved_args: Vec<TypeExpr> = Vec::with_capacity(type_arguments.len());
                     let mut any_argument_resolved = false;
@@ -1240,15 +1241,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             target_prepared.as_ref(),
                             type_arguments.as_ref(),
                         )?;
-                        // Path C C11-residual-B: as we descend into the
-                        // target alias's declaration scope, push the
-                        // current `resolution_scope_canonical_id` onto
-                        // the projection chain. The leaf-expr handler
+                        // As we descend into the target alias's
+                        // declaration scope, push the current
+                        // `resolution_scope_canonical_id` onto the
+                        // projection chain. The leaf-expr handler
                         // uses this chain to find the scope where a
-                        // `TypeOf(value)` reference was visible at the
-                        // outer call site (e.g., `theme` imported in
-                        // `button-types.ts` while we're now recursing
-                        // into `ComponentConfig`'s body in `types.ts`).
+                        // `TypeOf(value)` reference was visible at
+                        // the outer call site (e.g., `theme`
+                        // imported in `button-types.ts` while we're
+                        // now recursing into `ComponentConfig`'s body
+                        // in `types.ts`).
                         let pushed = if !self
                             .projection_chain_scopes
                             .iter()

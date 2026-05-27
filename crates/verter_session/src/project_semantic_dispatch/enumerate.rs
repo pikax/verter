@@ -18,9 +18,8 @@ use crate::semantic_query::{
 use verter_semantic::facts::registry::{FactKey, InternedName, SymbolSpace};
 
 /// Worklist frame for the iterative `key_names_from_base_node`
-/// driver (Path C C10). `Expand` advances one node; `Combine*`
-/// reduce the top N prior results (one per arm) into the compound's
-/// key enumeration.
+/// driver. `Expand` advances one node; `Combine*` reduces the top N
+/// prior results (one per arm) into the compound's key enumeration.
 enum KeyNamesFrame {
     Expand(SemanticNodeId),
     CombineIntersection { arm_count: usize },
@@ -28,19 +27,15 @@ enum KeyNamesFrame {
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
-    /// Iterative `keyof` enumeration (Path C C10). Replaces the recursive
-    /// per-arm descent with a heap-backed worklist so deeply-nested
-    /// Intersection / Union arm chains no longer grow the Rust call
-    /// stack.
+    /// Iterative `keyof` enumeration: a heap-backed worklist drives
+    /// per-arm descent so deeply-nested Intersection / Union arm
+    /// chains do not grow the Rust call stack.
     ///
-    /// **Intersection accumulation change.**
-    /// The Intersection arm's pre-C10 all-or-nothing `?` operator
-    /// propagated `None` up whenever any arm was unresolvable, even when
-    /// other arms had enumerable keys. Post-C10 the Intersection arm
+    /// **Intersection accumulation contract.** The Intersection arm
     /// accumulates the union of keys across every **enumerable** arm
-    /// and returns `None` only when every arm is unresolvable —
-    /// addresses the pre-§14 Gemini F3 report where `keyof (A & B)` lost
-    /// enumerable keys from A when B was unresolvable.
+    /// and returns `None` only when every arm is unresolvable. An
+    /// all-or-nothing `?` here would lose enumerable keys from `A`
+    /// when `B` is unresolvable in `keyof (A & B)`.
     pub(super) fn key_names_from_base_node(&self, base: SemanticNodeId) -> Option<Vec<Arc<str>>> {
         let mut work: Vec<KeyNamesFrame> = Vec::new();
         let mut results: Vec<Option<Vec<Arc<str>>>> = Vec::new();
@@ -257,21 +252,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// ## Why
     ///
-    /// The pre-Round-10 path-admission tier at
-    /// `walk.rs:955-959` called [`Self::key_names_from_keyspace_node`]
-    /// to test "does this Mapped's key space contain `needle`?". That
-    /// helper internally calls
-    /// [`Self::evaluate_deferred_semantic_node`] on the keyspace node
-    /// AND [`Self::key_names_from_base_node`] on a `KeyOf { base }` arm
-    /// — both of which trigger `build_key_of` / `build_mapped_type`
-    /// per-key emissions through `intern_keyspace_names`
-    /// (`build.rs:1614`) and the publication loop (`build.rs:1876`).
-    ///
-    /// The diagnostic at `D:/tmp/round10-diagnostic-report.md` Chain X
-    /// (31.3% / 114 of 364 captured ProjectMember emissions on the
-    /// nuxt-ui corpus) confirms the leak source: the PathWalker's
-    /// Mapped admission emits the **entire** keyspace just to test
-    /// membership of ONE literal segment.
+    /// The full enumeration-based path admission would call
+    /// [`Self::key_names_from_keyspace_node`] to test "does this
+    /// Mapped's key space contain `needle`?". That helper internally
+    /// calls [`Self::evaluate_deferred_semantic_node`] on the
+    /// keyspace node AND [`Self::key_names_from_base_node`] on a
+    /// `KeyOf { base }` arm — both of which trigger `build_key_of` /
+    /// `build_mapped_type` per-key emissions through
+    /// `intern_keyspace_names` and the publication loop. That path
+    /// emits the **entire** keyspace just to test membership of ONE
+    /// literal segment, which is wasteful for the path-walker's
+    /// admission predicate.
     ///
     /// This predicate replaces the enumeration-based admission with a
     /// structural walk that NEVER calls `evaluate_deferred_semantic_node`
@@ -386,21 +377,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::Object(view) => {
                 Some(view.members.iter().any(|m| m.name.as_ref() == needle))
             }
-            // Chain X closure (codex
-            // 6th-consult Q1-X BINDING) — consult the parse-fact
-            // `MemberPresence` substrate for `DeclRef` /
-            // `InstantiationRef` bases.
+            // Consult the parse-fact `MemberPresence` substrate for
+            // `DeclRef` / `InstantiationRef` bases.
             //
-            // Pre-Round-11 the `DeclRef` arm fell through to `None`,
-            // which (because Tier 3's `primitive_keyspace_admits_segment`
-            // is `false` for non-primitives) made `key_admitted ==
-            // Some(false)`. The walker then fell through to the whole-
-            // surface MappedType dispatch at `walk.rs:1091` under
-            // `Published(Expanded)` — `build_mapped_type` enumerated
-            // the entire keyspace and emitted per-key `ProjectMember`
-            // edges for EVERY library member, the dominant residual
-            // emitter on the nuxt-ui-codex-bench corpus (Editor 383,
-            // ChatMessage 60, Carousel 89).
+            // Without this arm the `DeclRef` case falls through to
+            // `None`, which (because Tier 3's
+            // `primitive_keyspace_admits_segment` is `false` for
+            // non-primitives) drives `key_admitted == Some(false)`.
+            // The walker then falls through to the whole-surface
+            // MappedType dispatch under `Published(Expanded)`,
+            // `build_mapped_type` enumerates the entire keyspace,
+            // and a per-key `ProjectMember` edge is emitted for
+            // EVERY library member — the dominant residual emitter
+            // for `extends Library` / generic-substituted carriers.
             //
             // The fix routes admission through
             // [`crate::file_artifact_store::FileFacts`]'s parse-domain
@@ -422,8 +411,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // - `None`        — the artifact is not recoverable for
             //   the observed whole_hash (evicted, schema mismatch,
             //   tombstoned). The predicate returns `None` and the
-            //   caller falls through to the existing tiers; no
-            //   regression vs pre-Round-11 behaviour.
+            //   caller falls through to the existing tiers.
             //
             // The fact lookup is non-emitting by construction — it
             // reads from `FileFacts`'s registry, never dispatches an
@@ -598,8 +586,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// - `None`        — the file artifact for `(canonical,
     ///   observed_hash)` is not recoverable (evicted, schema
     ///   mismatch, content-hash drift). Fall through to the caller's
-    ///   existing tiers; this preserves the pre-Round-11 behaviour
-    ///   exactly for the unrecoverable case so no warm read regresses.
+    ///   existing tiers so the unrecoverable case falls back to the
+    ///   evaluator-backed enumeration path.
     ///
     /// The fact-registry's `MemberPresence` keys are emitted by the
     /// shallow-analysis fact emitter

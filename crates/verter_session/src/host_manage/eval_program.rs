@@ -36,14 +36,13 @@ impl VerterHost {
     /// Called once during `PreparedDeclBundle` materialization. Returns an
     /// empty map for non-Vue files or Vue files without `<script setup>` generics.
     ///
-    /// Per Path C C3, the result type is `FxHashMap<String,
-    /// TypeParamBinding>` — script-setup parameters are no longer
-    /// wrapped in a `PreparedTypeDecl`. Pre-C3 the wrapper carried a
-    /// large `name_resolution` table populated from the SFC's symbols /
-    /// imports; that table was unused by the lowering hot path
-    /// (constraint / default lowering threads its own `name_resolution`
-    /// through `shallow_lower_type_expr`), so dropping the wrapper also
-    /// drops dead allocation.
+    /// The result type is `FxHashMap<String, TypeParamBinding>` —
+    /// script-setup parameters are stored directly rather than
+    /// wrapped in a `PreparedTypeDecl`. Constraint / default lowering
+    /// threads its own `name_resolution` table through
+    /// `shallow_lower_type_expr`, so a separate wrapper-side
+    /// `name_resolution` table on the binding would be dead
+    /// allocation.
     pub(super) fn build_script_setup_type_bindings(
         &self,
         canonical_id: &str,
@@ -67,9 +66,9 @@ impl VerterHost {
                 param.name.clone(),
                 TypeParamBinding {
                     name: std::sync::Arc::from(param.name.as_str()),
-                    // Path C C6a item 1: 0-based clause position so
-                    // multiple `<script setup generic="T, U">` params
-                    // get distinct identity tuples.
+                    // 0-based clause position so multiple
+                    // `<script setup generic="T, U">` params get
+                    // distinct identity tuples.
                     ordinal: u16::try_from(idx).unwrap_or(u16::MAX),
                     constraint: param.constraint.clone(),
                     default: param.default.clone(),

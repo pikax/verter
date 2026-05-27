@@ -1853,7 +1853,7 @@ pub struct MetaProvenance {
     pub route_owned_snapshot_cache_hits: std::sync::atomic::AtomicU64,
     pub route_owned_snapshot_cached_parse_hits: std::sync::atomic::AtomicU64,
 
-    // ── Path C C1 contention instrumentation ────────────────────────────
+    // ── Contention instrumentation ──────────────────────────────────────
     /// `VerterHost::ensure_loaded` invocation count.
     pub ensure_loaded_calls: std::sync::atomic::AtomicU64,
     /// Time spent inside `Scheduler::wait_or_drive` from `ensure_loaded`.
@@ -2424,7 +2424,8 @@ pub struct MetaProvenanceSnapshot {
     pub imported_macro_declaration_builds: u64,
     pub route_owned_snapshot_cache_hits: u64,
     pub route_owned_snapshot_cached_parse_hits: u64,
-    /// Path C C1 contention instrumentation.
+    /// Contention instrumentation counters surfaced through the
+    /// host's `MetaProvenance`.
     pub ensure_loaded_calls: u64,
     pub ensure_loaded_wait_ns: u64,
     pub ensure_loaded_work_ns: u64,

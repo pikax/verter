@@ -109,11 +109,13 @@ pub(crate) struct AtomicSemanticGraphStats {
     pub(super) projection_depth_samples: Mutex<SampleCollector>,
     pub(super) decl_subexpression_lowering_count: AtomicU64,
     pub(super) relation_check_count: AtomicU64,
-    /// Of `intern_preserving_scope` calls
-    /// observed by the store. Pre-Fix-D substitute helpers rebuilt
-    /// every match arm unconditionally; post-Fix-D the no-op
-    /// branches short-circuit and skip the call entirely.
-    /// Discriminating signal for the change-tracking optimization.
+    /// Number of `intern_preserving_scope` calls observed by the
+    /// store. The substitute helper's change-tracking optimisation
+    /// short-circuits no-op arms and skips the rebuild +
+    /// `intern_preserving_scope` call entirely, so a substitution
+    /// that does not change anything must not increment this
+    /// counter — it is the discriminating signal for the
+    /// optimisation in tests.
     pub(super) intern_preserving_scope_calls: AtomicU64,
     /// Per-K mapped-type materialiser invocations observed by the
     /// store. Increments once per call to either

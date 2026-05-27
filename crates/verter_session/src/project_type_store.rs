@@ -1807,10 +1807,11 @@ impl ProjectTypeStore {
 
     /// Construct a store wired to the host's
     /// [`MetaProvenance`](crate::types::MetaProvenance) so the embedded
-    /// [`SemanticGraphStore`] reports Path C C1 instrumentation through the
-    /// shared provenance surface. Test-only `ProjectTypeStore::new()`
-    /// callers stay uninstrumented (semantic-graph stats remain visible
-    /// through their own `stats_snapshot` surface).
+    /// [`SemanticGraphStore`] reports its contention instrumentation
+    /// counters through the shared provenance surface. Test-only
+    /// `ProjectTypeStore::new()` callers stay uninstrumented
+    /// (semantic-graph stats remain visible through their own
+    /// `stats_snapshot` surface).
     #[must_use]
     pub fn with_provenance(provenance: Arc<crate::types::MetaProvenance>) -> Self {
         Self::build(Some(provenance))
