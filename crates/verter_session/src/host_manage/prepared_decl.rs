@@ -581,30 +581,42 @@ impl VerterHost {
 
         // 6. Compute fact versions.
         // The ImportRoute fact hash MUST match what the live
-        // `HostStoreView` snapshots via
-        // [`crate::host_manage::component_meta_methods::VerterHost::generation_current_import_route_hash`].
-        // That method reads the canonical's `IndexedReady.import_routes`
-        // (always populated by `ensure_indexed_ready` — includes BOTH
-        // resolved and unresolved/known-miss specifiers) and hashes
-        // them via `hash_import_route_targets`. The
-        // `prepared_decl_bundle_route_dep_edges` helper above iterates
-        // `state.import_targets` and SKIPS unresolved entries, so its
-        // hash necessarily diverges from the view's whenever the file
-        // has any unresolved imports — every warm-read validator
-        // rejection in that case routed through
+        // `HostStoreView` snapshots. Both view-side producers
+        // (`HostStoreView::build` line 684, IndexedReady loop; and
+        // `snapshot_tracked_import_route_hashes`, file-without-indexed
+        // loop) use
+        // [`crate::host_manage::component_meta_methods::VerterHost::generation_current_import_route_hash`]
+        // uniformly — that method reads the canonical's
+        // `IndexedReady.import_routes` (or the live
+        // `DerivedRawState.import_routes` map) AND re-resolves
+        // known-miss specifiers against the current workspace
+        // generation. Using the static `IndexedReady.import_route_hash`
+        // here diverges from the view whenever a file has a
+        // known-miss specifier that has since become resolvable: the
+        // view re-derives the hash including the now-positive
+        // resolution, the bundle's stored fact keeps the stale miss,
+        // and every warm-read validator rejection routes through
         // `PreparedDeclBundleRejectImportRouteMismatch` /
-        // `PreparedDeclBundleRejectImportRouteAbsent` before this fix.
+        // `PreparedDeclBundleRejectImportRouteAbsent`. Worse, the
+        // route-owned-shallow path at
+        // `materialize_prepared_decl_bundle_from_route_owned_shallow`
+        // already uses `generation_current_import_route_hash` (line
+        // 502), so the two cold-materialise paths admitted bundles
+        // with DIFFERENT `ImportRoute` hashes for the same canonical
+        // depending on which producer the cold-walk hit first — a
+        // gratuitous extra rebuild per known-miss flip.
         //
-        // Use the IndexedReady's `import_route_hash` directly — it is
-        // the exact `hash_import_route_targets(&import_routes)` the
-        // view re-derives, so the fact validates on every subsequent
-        // call without ever round-tripping through a re-resolve.
+        // Unify on the dynamic hash. For a fully-resolved file (no
+        // known-miss specifiers) `generation_current_import_route_hash`
+        // takes the cached-hash fast path and equals
+        // `facts.import_route_hash` — zero overhead in the common
+        // case.
         let whole_hash = facts.whole_hash;
         let mut fact_versions = vec![crate::resolver_core::FactVersionRef::FileWholeHash {
             canonical_id: canonical_id.to_string(),
             hash: whole_hash,
         }];
-        if let Some(import_route_hash) = facts.import_route_hash {
+        if let Some(import_route_hash) = self.generation_current_import_route_hash(canonical_id) {
             fact_versions.push(crate::resolver_core::FactVersionRef::DerivedFactHash {
                 canonical_id: canonical_id.to_string(),
                 kind: crate::resolver_core::DerivedFactKind::ImportRoute,

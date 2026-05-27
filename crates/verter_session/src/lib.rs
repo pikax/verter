@@ -65,6 +65,8 @@ pub mod component_meta_audit;
 mod component_meta_cache_discipline_tests;
 pub mod host_audit_runtime;
 #[cfg(test)]
+mod prepared_decl_import_route_hash_alignment_tests;
+#[cfg(test)]
 mod request_store_view_derived_hash_tests;
 // tests/invalidation_perf.rs — InvalidationByCanonical impl on
 // ImportedRegistryDb is exercised by the §12.A12 perf gate.
