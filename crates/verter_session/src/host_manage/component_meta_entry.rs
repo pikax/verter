@@ -652,8 +652,17 @@ impl VerterHost {
         // request id and the kind comes from the context.
         let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
         let accumulator = if footprint_capture {
+            // Wire `HostConfig::audit_caps` through to the
+            // accumulator so per-host cap overrides take effect on
+            // every raw push lane (structured_events, vfs_reads,
+            // materializations, etc.), not just the post-mining
+            // caps that `mine_footprint` applies. Using `::new()`
+            // here would hardcode `AuditCaps::default()` (10_000
+            // per category) regardless of `host.config.audit_caps`.
             Some(std::sync::Arc::new(
-                crate::component_meta_audit::RequestFootprintAccumulator::new(),
+                crate::component_meta_audit::RequestFootprintAccumulator::with_caps(
+                    self.config.audit_caps.clone(),
+                ),
             ))
         } else {
             None
