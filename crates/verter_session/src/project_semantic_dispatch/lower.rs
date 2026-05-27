@@ -1010,13 +1010,40 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .project_type_store()
                     .mapper_binder_registry()
                     .ordinal_for(&mapper_decl.canonical_id, &mapper_display_name, fingerprint);
-                // Phase G instrumentation: classify
-                // mapper-binder-ordinal assignment for collision
-                // detection. Now that the ordinal flows from the
-                // host-owned registry the collision counter must
-                // stay at ZERO in steady state — any non-zero
-                // value means the registry is failing to stabilise
-                // mapper identity for equivalent inputs.
+                // Mapper-binder-ordinal classification. The counter
+                // bumps whenever the SAME `(canonical, display_name)`
+                // triple is observed with a DIFFERENT ordinal in the
+                // same request — i.e. two `ordinal_for` calls for the
+                // same display-name slot landed in different
+                // [`MapperFingerprint`] entries.
+                //
+                // Dual meaning (Phase H clarification): a non-zero
+                // count does NOT necessarily mean the host-owned
+                // registry is "failing to stabilise mapper identity"
+                // — the registry only deduplicates fingerprints that
+                // share `(source_ptr, value_ptr, name_type_ptr,
+                // optional, readonly)`. A non-zero count therefore
+                // means at least one of:
+                //   (a) genuine registry instability — the SAME
+                //       logical mapper hashed to two pointers (e.g.
+                //       prepared-body re-decoding handed out fresh
+                //       Arcs across calls); OR
+                //   (b) genuine substitution fanout — different
+                //       instantiations of the same generic decl
+                //       lower to structurally distinct Mapped
+                //       subtrees with different lowered `source` /
+                //       `value` SemanticNodeIds, which is
+                //       semantically correct (each instantiation IS
+                //       a distinct mapped type).
+                //
+                // To attribute the count between (a) and (b),
+                // compare against `recursive_substitute_unique` /
+                // `substitute_top_level_calls` on the audit
+                // footprint: a substitution-driven fanout will show
+                // up there too. Empirically on ChatMessages.vue the
+                // 258K-collision count tracks 258K cold MappedType
+                // dispatches, indicating (b) — the registry is
+                // doing what it can.
                 if let Some(ctx) = crate::request_context::current_request_context() {
                     let hb = mapper_decl.whole_hash;
                     let hash_u64 = u64::from_le_bytes([
