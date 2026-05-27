@@ -32,8 +32,13 @@ function rustWorkspacePackages() {
 
 module.exports = {
   "*.rs": () => {
+    // Return an array so lint-staged executes each per-package fmt as a
+    // separate child process (sequentially, stopping on first non-zero
+    // exit). Returning a `&& `-joined string would have lint-staged try
+    // to exec the full string as a single command, and `cargo fmt` would
+    // parse `&&` as an argument it does not recognise.
     const packages = rustWorkspacePackages();
-    return packages.map((name) => `cargo fmt --package ${name} --check`).join(" && ");
+    return packages.map((name) => `cargo fmt --package ${name} --check`);
   },
   "*.{ts,js,mjs,cjs}": "oxfmt --check --no-error-on-unmatched-pattern",
 };
