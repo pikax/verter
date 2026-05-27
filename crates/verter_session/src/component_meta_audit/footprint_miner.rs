@@ -368,6 +368,14 @@ pub fn mine_footprint(
             .load(Ordering::Relaxed) as u32,
         mapped_binder_ordinal_collision: ctx.mapped_binder_ordinal_collision.load(Ordering::Relaxed)
             as u32,
+        recursive_substitute_unique: ctx.recursive_substitute_unique.load(Ordering::Relaxed) as u32,
+        recursive_substitute_repeated: ctx.recursive_substitute_repeated.load(Ordering::Relaxed)
+            as u32,
+        substitute_mapped_rebuild: ctx.substitute_mapped_rebuild.load(Ordering::Relaxed) as u32,
+        substitute_conditional_rebuild: ctx.substitute_conditional_rebuild.load(Ordering::Relaxed)
+            as u32,
+        recursive_substitute_memo_hits: ctx.recursive_substitute_memo_hits.load(Ordering::Relaxed)
+            as u32,
     };
 
     // Truncation counters: combine the accumulator-side counters

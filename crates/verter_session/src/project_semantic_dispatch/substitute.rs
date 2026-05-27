@@ -29,6 +29,7 @@
 use std::sync::Arc;
 
 use super::ProjectSemanticDispatch;
+use crate::request_context::RecursiveSubstituteIdentity;
 use crate::semantic_query::{
     FunctionParam, IndexKey, IndexSignature, MapperKey, QueryError, SemanticNodeData,
     SemanticNodeId, SurfaceMember, SurfaceView, TypeParamDecl,
@@ -97,6 +98,71 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// path. The optimization removes the wasted recursive walk +
     /// `Vec<>` allocations on the hot substitute path.
     fn substitute_with_change_tracking(
+        &self,
+        node: SemanticNodeId,
+        parameter_node: SemanticNodeId,
+        arg: SemanticNodeId,
+    ) -> (SemanticNodeId, bool) {
+        // Phase H classification + recursive hash-cons memo probe.
+        //
+        // Codex BINDING insight: the recursive helper BYPASSES the
+        // top-level `substitute_memo` even though
+        // `(node, parameter_node, arg)` is a complete identity for
+        // the substitution result. Wiring the existing store-owned
+        // memo at the recursive entry collapses repeated structural
+        // sub-tree substitutions across one substitution walk and
+        // across substitution walks within one workspace generation.
+        //
+        // Classification (unique vs repeated triples) fires on every
+        // recursive entry — including the trivial-identity branch
+        // (`node == parameter_node` ⇒ return `arg`) because that
+        // branch is still a recursive arrival at the SAME logical
+        // identity tuple and the per-request audit footprint must
+        // report it. A `_repeated` bump on the identity branch is
+        // structurally correct: visiting the binder twice in
+        // `Foo<K, K>`-style fixtures IS the recursive memo's hit
+        // case at the boundary.
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            ctx.classify_recursive_substitute(RecursiveSubstituteIdentity {
+                node: node.0,
+                parameter_node: parameter_node.0,
+                arg: arg.0,
+            });
+        }
+        // Trivial-identity short-circuit runs AFTER classification:
+        // the per-request audit needs to see every entry, but the
+        // identity branch returns `arg` without touching graph
+        // state.
+        if node == parameter_node {
+            return (arg, true);
+        }
+        if let Some(cached) = self.graph().substitute_memo_get(node, parameter_node, arg) {
+            if let Some(observer) = verter_audit::current_observer() {
+                observer.record_event(verter_audit::AuditEvent::RecursiveSubstituteMemoHit);
+            }
+            // The memo stores the substitution RESULT. `changed` is
+            // recovered cheaply from `result != node` — codex
+            // confirmed this is safe because substitution is a pure
+            // function of its three inputs and `intern_preserving_scope`
+            // already dedups structurally-equivalent rebuilds back
+            // to the same `SemanticNodeId`. A stored result that
+            // equals `node` is exactly the "no descendant changed"
+            // outcome the change-tracking short-circuit reports.
+            let changed = cached != node;
+            return (cached, changed);
+        }
+        let (result, changed) =
+            self.substitute_with_change_tracking_inner(node, parameter_node, arg);
+        self.graph()
+            .substitute_memo_publish(node, parameter_node, arg, result);
+        (result, changed)
+    }
+
+    /// Inner body of [`Self::substitute_with_change_tracking`].
+    /// Split out so the public wrapper owns the recursive
+    /// classification + hash-cons memo probe / publish, leaving
+    /// the structural match arms purely descent-focused.
+    fn substitute_with_change_tracking_inner(
         &self,
         node: SemanticNodeId,
         parameter_node: SemanticNodeId,
@@ -439,6 +505,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if !any_changed {
                     return (node, false);
                 }
+                // Phase H: codex-prescribed "Mapped rebuilt" counter.
+                // Distinct from `SubstituteMappedTypeDescend` (every
+                // visit) — fires only on the rebuild branch after at
+                // least one descendant sub-tree changed.
+                if let Some(observer) = verter_audit::current_observer() {
+                    observer.record_event(verter_audit::AuditEvent::SubstituteMappedRebuild);
+                }
                 (
                     self.graph().intern_preserving_scope(
                         node,
@@ -503,6 +576,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     self.substitute_with_change_tracking(*false_branch_ref, parameter_node, arg);
                 if !(cc || ec || tc || fc) {
                     return (node, false);
+                }
+                // Phase H: codex-prescribed "Conditional rebuilt"
+                // counter. Distinct from `SubstituteConditionalDescend`
+                // (every visit) — fires only on the rebuild branch.
+                if let Some(observer) = verter_audit::current_observer() {
+                    observer.record_event(verter_audit::AuditEvent::SubstituteConditionalRebuild);
                 }
                 (
                     self.graph().intern_preserving_scope(

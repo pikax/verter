@@ -1992,7 +1992,44 @@ prepared_decl_bundle_callsite_other: number,
  * MISS on what should be a HIT until ordinal assignment is
  * stabilised.
  */
-mapped_binder_ordinal_collision: number, };
+mapped_binder_ordinal_collision: number, 
+/**
+ * Recursive-helper entries whose `(node, parameter_node, arg)`
+ * triple is FIRST-SEEN in the active request. Before the
+ * recursive memo wires this measures the recursive walk's
+ * distinct triple count; after, it measures the lower bound on
+ * work the memo could not have collapsed.
+ */
+recursive_substitute_unique: number, 
+/**
+ * Recursive-helper entries whose `(node, parameter_node, arg)`
+ * triple was already seen in the active request. The
+ * recursive memo SHOULD short-circuit these entries; the ratio
+ * `_repeated / (_unique + _repeated)` predicts the memo's
+ * effectiveness.
+ */
+recursive_substitute_repeated: number, 
+/**
+ * `Mapped`-arm rebuilds in `substitute_with_change_tracking`
+ * after at least one descendant sub-tree actually changed.
+ * Distinguishes "Mapped rebuilt" from "Mapped descended"
+ * (`substitute_mapped_type_descend`) which counts every visit.
+ */
+substitute_mapped_rebuild: number, 
+/**
+ * `Conditional`-arm rebuilds in
+ * `substitute_with_change_tracking` after at least one
+ * descendant sub-tree actually changed.
+ */
+substitute_conditional_rebuild: number, 
+/**
+ * Hits on the RECURSIVE-helper hash-cons memo. Distinct from
+ * `substitute_memo_hits` which counts hits at the public
+ * surface. When the recursive memo is engaged this counter
+ * reports its hit count; before the memo wires this counter
+ * stays at 0.
+ */
+recursive_substitute_memo_hits: number, };
 
 /**
  * Scheduler-side attribution captured at first dispatch of an audited

@@ -619,6 +619,44 @@ pub struct RequestContext {
     /// Mapper-binder-ordinal collisions: the same mapper source
     /// triple interned at different ordinals within one request.
     pub mapped_binder_ordinal_collision: AtomicU64,
+    // Phase H focused recursive-substitution counters
+    // -----------------------------------------------
+    // Codex BINDING insight: the recursive helper
+    // `substitute_with_change_tracking` (substitute.rs:99-104)
+    // BYPASSES the top-level `substitute_memo` even though
+    // `(node, parameter_node, arg)` is a complete identity. These
+    // counters classify recursive entries so the implementer can
+    // confirm Path A (high repeat rate → wire memo) vs Path B (high
+    // unique rate → parameterized generic-body cache at
+    // build.rs:631-640 + lower.rs:140-215). After the recursive
+    // memo wires, `_repeated` measures saved work and
+    // `RecursiveSubstituteMemoHit` measures the memo's actual hit
+    // count (which may differ under FIFO eviction).
+    /// Recursive `substitute_with_change_tracking` entries whose
+    /// `(node, parameter_node, arg)` triple is FIRST-SEEN in the
+    /// active request.
+    pub recursive_substitute_unique: AtomicU64,
+    /// Recursive `substitute_with_change_tracking` entries whose
+    /// `(node, parameter_node, arg)` triple was already seen in
+    /// the active request — the recursive memo SHOULD short-circuit.
+    pub recursive_substitute_repeated: AtomicU64,
+    /// `Mapped`-arm rebuilds in `substitute_with_change_tracking`
+    /// after at least one descendant sub-tree changed.
+    pub substitute_mapped_rebuild: AtomicU64,
+    /// `Conditional`-arm rebuilds in `substitute_with_change_tracking`
+    /// after at least one descendant sub-tree changed.
+    pub substitute_conditional_rebuild: AtomicU64,
+    /// Recursive-helper hash-cons memo hits (at the
+    /// `substitute_with_change_tracking` entry, not the public
+    /// surface).
+    pub recursive_substitute_memo_hits: AtomicU64,
+    /// Per-request observation set for recursive substitution
+    /// identity triples — used by the unique/repeated classifier
+    /// at the recursive helper's entry. The set is per-request so
+    /// the classification resets between component-meta queries.
+    /// Held briefly per recursive entry, not held across recursion.
+    pub recursive_substitute_seen:
+        parking_lot::Mutex<rustc_hash::FxHashSet<RecursiveSubstituteIdentity>>,
     /// Per-request observation set for mapped-member identity tuples
     /// — used by the unique/repeated classifier in
     /// `record_mapped_member_materialization_classify`. Lock-free
@@ -671,6 +709,22 @@ pub struct MapperSourceIdentity {
     pub whole_hash: u64,
     /// The mapper-parameter's display name (`"K"`, `"P"`, etc.).
     pub display_name: Arc<str>,
+}
+
+/// Identity tuple for the Phase H recursive-substitution
+/// unique/repeated classifier. The triple matches the existing
+/// top-level `substitute_memo` key composition
+/// (`(value_expr, parameter_node, arg)`) so the classifier output
+/// directly predicts the recursive-memo's hit rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RecursiveSubstituteIdentity {
+    /// The `SemanticNodeId` of the recursive substitution input
+    /// (`node` parameter of `substitute_with_change_tracking`).
+    pub node: u64,
+    /// The binder SemanticNodeId (`parameter_node` parameter).
+    pub parameter_node: u64,
+    /// The substitution argument SemanticNodeId (`arg` parameter).
+    pub arg: u64,
 }
 
 impl RequestContext {
@@ -871,6 +925,12 @@ impl RequestContext {
             prepared_decl_bundle_callsite_build_instantiate: AtomicU64::new(0),
             prepared_decl_bundle_callsite_other: AtomicU64::new(0),
             mapped_binder_ordinal_collision: AtomicU64::new(0),
+            recursive_substitute_unique: AtomicU64::new(0),
+            recursive_substitute_repeated: AtomicU64::new(0),
+            substitute_mapped_rebuild: AtomicU64::new(0),
+            substitute_conditional_rebuild: AtomicU64::new(0),
+            recursive_substitute_memo_hits: AtomicU64::new(0),
+            recursive_substitute_seen: parking_lot::Mutex::new(rustc_hash::FxHashSet::default()),
             mapped_member_seen: parking_lot::Mutex::new(rustc_hash::FxHashSet::default()),
             mapper_source_ordinals: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
         })
@@ -1047,6 +1107,29 @@ impl RequestContext {
             None => {
                 map.insert(identity, ordinal);
             }
+        }
+    }
+
+    /// Classify one recursive `substitute_with_change_tracking`
+    /// entry as unique-or-repeated. The identity tuple
+    /// `(node, parameter_node, arg)` matches the existing top-level
+    /// `substitute_memo` key composition so the classifier output
+    /// is a direct predictor of the recursive memo's hit rate when
+    /// engaged.
+    ///
+    /// Cheap on the hot path: one `Mutex` lock + one
+    /// `FxHashSet::insert` + one `AuditEvent` emission. The set is
+    /// per-request so classification resets between component-meta
+    /// queries.
+    pub fn classify_recursive_substitute(&self, identity: RecursiveSubstituteIdentity) {
+        let inserted = self.recursive_substitute_seen.lock().insert(identity);
+        let event = if inserted {
+            verter_audit::AuditEvent::RecursiveSubstituteUnique
+        } else {
+            verter_audit::AuditEvent::RecursiveSubstituteRepeated
+        };
+        if let Some(obs) = verter_audit::current_observer() {
+            obs.record_event(event);
         }
     }
 }
@@ -1325,6 +1408,26 @@ impl verter_audit::AuditObserver for RequestContext {
             }
             verter_audit::AuditEvent::MappedBinderOrdinalCollision => {
                 self.mapped_binder_ordinal_collision
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::RecursiveSubstituteUnique => {
+                self.recursive_substitute_unique
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::RecursiveSubstituteRepeated => {
+                self.recursive_substitute_repeated
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::SubstituteMappedRebuild => {
+                self.substitute_mapped_rebuild
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::SubstituteConditionalRebuild => {
+                self.substitute_conditional_rebuild
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::RecursiveSubstituteMemoHit => {
+                self.recursive_substitute_memo_hits
                     .fetch_add(1, Ordering::Relaxed);
             }
         }

@@ -283,6 +283,67 @@ pub enum AuditEvent {
     /// instances, preventing the typed cache from collapsing what
     /// SHOULD be cache hits.
     MappedBinderOrdinalCollision,
+    /// Phase H focused recursive-substitution counters
+    /// -----------------------------------------------
+    /// Codex BINDING Phase H insight: the recursive helper at
+    /// `substitute.rs:99-104`
+    /// (`substitute_with_change_tracking`) BYPASSES the top-level
+    /// `substitute_memo` even though `(node, parameter_node, arg)`
+    /// is a complete identity. Phase G refuted Hypothesis A (the
+    /// per-K mapped-member helpers are NOT the bottleneck — they
+    /// run 0-1 times). The true cost is
+    /// `substitute_with_change_tracking` rebuilding `Mapped` and
+    /// `Conditional` nodes (`substitute.rs:408-467` and
+    /// `:482-520`) from substituted sub-trees that ARE structurally
+    /// identical across calls but carry NEW `SemanticNodeId`s.
+    /// These counters classify the recursive entries to confirm
+    /// the bottleneck shape BEFORE wiring a recursive memo, and
+    /// quantify the memo's hit-rate AFTER.
+    /// One recursive-helper entry whose `(node, parameter_node,
+    /// arg)` triple was FIRST-SEEN in the active request. Producer
+    /// at `substitute_with_change_tracking` entry; before the
+    /// recursive memo lands a high `_unique` count is expected.
+    /// After the recursive memo lands `_unique` measures the
+    /// distinct triple count for the request — the lower bound on
+    /// the work the memo could not have collapsed.
+    RecursiveSubstituteUnique,
+    /// One recursive-helper entry whose `(node, parameter_node,
+    /// arg)` triple was already seen in the active request — the
+    /// recursive memo SHOULD short-circuit this entry. The memo's
+    /// effectiveness on the active request is
+    /// `_repeated / (_unique + _repeated)`. Producer at
+    /// `substitute_with_change_tracking` entry.
+    RecursiveSubstituteRepeated,
+    /// One rebuild of a `Mapped` semantic node in
+    /// `substitute_with_change_tracking`
+    /// (`substitute.rs:408-467`) after one or more descendant
+    /// sub-trees actually changed. Distinguishes the "Mapped
+    /// rebuilt" hot path from the upstream "Mapped descended"
+    /// (`SubstituteMappedTypeDescend`) which counts every visit
+    /// regardless of rebuild. Producer at the rebuild branch
+    /// `(self.graph().intern_preserving_scope(..., Mapped { ... }))`.
+    SubstituteMappedRebuild,
+    /// One rebuild of a `Conditional` semantic node in
+    /// `substitute_with_change_tracking`
+    /// (`substitute.rs:482-520`) after one or more of the
+    /// `check`/`extends`/`true_branch_ref`/`false_branch_ref`
+    /// sub-trees actually changed. Distinguishes the "Conditional
+    /// rebuilt" hot path from the upstream "Conditional descended"
+    /// (`SubstituteConditionalDescend`). Producer at the rebuild
+    /// branch.
+    SubstituteConditionalRebuild,
+    /// One hit on the RECURSIVE-helper hash-cons memo (the
+    /// memo lookup at the entry of
+    /// `substitute_with_change_tracking`, not the top-level
+    /// `SubstituteMemoHit` which counts hits at the public
+    /// surface). When the recursive memo is engaged this counter
+    /// reports its hit count; before the memo wires this counter
+    /// stays at 0. Pairs with `RecursiveSubstituteRepeated` —
+    /// a non-zero gap between `_repeated` and
+    /// `RecursiveSubstituteMemoHit` indicates repeated triples
+    /// that the memo failed to serve (e.g. evicted under FIFO
+    /// pressure).
+    RecursiveSubstituteMemoHit,
 }
 
 /// Trait implemented by anything wanting to receive audit events.

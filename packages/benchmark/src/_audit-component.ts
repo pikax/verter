@@ -323,6 +323,12 @@ if (focusedJsonlPath) {
         rhp.prepared_decl_bundle_callsite_build_instantiate ?? 0,
       prepared_decl_bundle_callsite_other: rhp.prepared_decl_bundle_callsite_other ?? 0,
       mapped_binder_ordinal_collision: rhp.mapped_binder_ordinal_collision ?? 0,
+      // Phase H focused recursive-substitution counters.
+      recursive_substitute_unique: rhp.recursive_substitute_unique ?? 0,
+      recursive_substitute_repeated: rhp.recursive_substitute_repeated ?? 0,
+      substitute_mapped_rebuild: rhp.substitute_mapped_rebuild ?? 0,
+      substitute_conditional_rebuild: rhp.substitute_conditional_rebuild ?? 0,
+      recursive_substitute_memo_hits: rhp.recursive_substitute_memo_hits ?? 0,
       // Prepared-decl-bundle per-rejection (Phase A + Phase B counter set).
       prepared_decl_bundle_cold: rhp.prepared_decl_bundle_cold ?? 0,
       prepared_decl_bundle_warm: rhp.prepared_decl_bundle_warm ?? 0,

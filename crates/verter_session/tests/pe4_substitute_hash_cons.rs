@@ -241,15 +241,34 @@ fn distinct_triples_miss_hash_cons_memo() {
     let miss_delta = after.substitute_memo_misses - baseline.substitute_memo_misses;
     let hit_delta = after.substitute_memo_hits - baseline.substitute_memo_hits;
 
-    assert_eq!(
-        miss_delta, 3,
-        "three distinct triples MUST miss the hash-cons memo exactly three times; observed \
-         miss delta = {miss_delta}."
+    // After the Phase H recursive memo wire, both the top-level
+    // entry AND the recursive `substitute_with_change_tracking`
+    // helper probe the SAME store-owned `substitute_memo` — the
+    // helper used to bypass it. The unified memo is keyed by
+    // `(node, parameter_node, arg)`, which is identical key
+    // composition at both layers, so a top-level call now produces
+    // exactly one probe per distinct intermediate subtree it
+    // recurses into (in addition to the top-level entry probe).
+    //
+    // Discriminating assertions retained:
+    //  - Each distinct top-level triple MUST produce at LEAST one
+    //    miss (the cold path ran).
+    //  - Distinct top-level triples MUST NOT collapse to the same
+    //    memo entry — `hit_delta == 0` proves the key composition
+    //    keeps `arg` in the identity, so wrongly collapsing
+    //    `(value_expr, parameter_node, arg_a)` and
+    //    `(value_expr, parameter_node, arg_b)` would surface here.
+    assert!(
+        miss_delta >= 3,
+        "three distinct triples MUST each miss the hash-cons memo at the top-level entry; \
+         observed miss delta = {miss_delta}. The unified memo also counts recursive-helper \
+         probes so the total may exceed 3, but it must never fall short of one miss per cold \
+         top-level triple."
     );
     assert_eq!(
         hit_delta, 0,
         "three distinct triples MUST produce zero memo hits; observed hit delta = {hit_delta}. \
          A non-zero hit count means the cache key composition wrongly collapsed distinct \
-         triples."
+         triples (e.g. `arg` dropped from the identity)."
     );
 }
