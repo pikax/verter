@@ -155,6 +155,238 @@ fn request_projection_budget_caps_distinct_dispatch_cold_builds() {
     }
 }
 
+/// Post-trip projection-op queries MUST early-exit at the dispatcher
+/// entry without entering the `execute_cooperative` admission machinery.
+///
+/// Empirical motivation (ChatMessages.vue Phase F): 99.2% of the
+/// 255,038 cold MappedType builds in a single component-meta request
+/// were rejected by the projection-op budget *after* the fuse tripped.
+/// Each rejected build still paid the cooperative-admission cost — the
+/// in-flight table mutex + Arc clone, the per-key warm probe, the
+/// fact-tracer install + finalisation, the joiner-condvar entry path —
+/// for ~1ms per call in aggregate. ~250 seconds of pure overhead with
+/// zero progress, because every call returned
+/// `BudgetExceeded(cache_suppress=true)`.
+///
+/// Discriminator: drive the request past the projection-op fuse, then
+/// issue many additional projection-op queries on DISTINCT keys.
+/// Post-trip queries MUST:
+///
+/// 1. Return `BudgetExceeded` with the same `actual` value (the peek is
+///    non-incrementing — see `RequestBudget::is_exhausted`).
+/// 2. NOT increment the `RequestBudget::projection_ops_executed`
+///    counter past the trip-point value (which would mean the
+///    cooperative-admission build closure ran and bumped via
+///    `check_projection_op_count`).
+/// 3. NOT increment the cooperative-admission entry counter
+///    `EXECUTE_COOPERATIVE_CALLS` (the architectural invariant — the
+///    early-exit happens BEFORE `execute_cooperative`).
+///
+/// Pre-fix the test FAILS at all three assertions: every post-trip
+/// query incremented the executed counter, entered cooperative
+/// admission, and produced a stale `actual` that drifted with each
+/// new call. Post-fix the assertions hold because the dispatcher's
+/// fast-path early-exit returns the budget-exceeded sentinel without
+/// touching the cooperative-admission machinery.
+#[test]
+fn post_trip_projection_op_queries_bypass_cooperative_admission() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        projection_op_budget: 1,
+        ..HostConfig::default()
+    }));
+    let bases: Vec<SemanticNodeId> = (0..6)
+        .map(|i| {
+            let name: &'static str = match i {
+                0 => "k0",
+                1 => "k1",
+                2 => "k2",
+                3 => "k3",
+                4 => "k4",
+                _ => "k5",
+            };
+            intern_single_member_object(&host, name)
+        })
+        .collect();
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+
+    let ctx = RequestContext::with_kind_timing_and_projection_budget(
+        1,
+        Arc::from("/post-trip.vue"),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        host.config.projection_op_budget,
+    );
+    let request_budget = Arc::clone(&ctx.projection_budget);
+    let _ctx_guard = RequestContextGuard::install(ctx);
+    let dispatch = host.semantic_dispatch();
+
+    // The first call lands within budget (1/1), the second trips it
+    // (2/1 → BudgetExceeded with actual=2). Both calls enter the
+    // cooperative-admission machinery; only the second is rejected by
+    // the in-closure cap check.
+    let first_keyof = dispatch.execute(SemanticQueryKey::KeyOf {
+        base: bases[0],
+        context,
+    });
+    assert!(
+        matches!(first_keyof, QueryResult::Value(_)),
+        "1st keyof within budget should succeed (got {first_keyof:?})"
+    );
+    let second_keyof = dispatch.execute(SemanticQueryKey::KeyOf {
+        base: bases[1],
+        context,
+    });
+    let trip_actual = match second_keyof {
+        QueryResult::Error(QueryError::BudgetExceeded(ref failure)) => failure.actual,
+        other => panic!("2nd keyof should trip the budget (got {other:?})"),
+    };
+    assert_eq!(
+        trip_actual, 2,
+        "trip-point actual must be 2 (1st + 2nd checked-increments)"
+    );
+    let executed_at_trip = request_budget.projection_ops_executed_count();
+    assert_eq!(
+        executed_at_trip, 2,
+        "RequestBudget executed counter should equal 2 immediately after the trip"
+    );
+
+    // Drive 4 additional projection-op queries on DISTINCT (base)
+    // values. Each must return BudgetExceeded with the same `actual`
+    // value (peek-only — the executed counter MUST NOT advance).
+    for (i, &base) in bases.iter().enumerate().take(6).skip(2) {
+        let key = SemanticQueryKey::KeyOf { base, context };
+        let result = dispatch.execute(key);
+        match result {
+            QueryResult::Error(QueryError::BudgetExceeded(failure)) => {
+                assert_eq!(
+                    failure.domain,
+                    BudgetDomain::ProjectionOperation,
+                    "post-trip query #{i} domain must stay ProjectionOperation"
+                );
+                assert_eq!(
+                    failure.limit, 1,
+                    "post-trip query #{i} limit reports the configured budget"
+                );
+                assert_eq!(
+                    failure.actual, 2,
+                    "post-trip query #{i} reports the trip-point actual (peek is non-incrementing)"
+                );
+            }
+            other => panic!("post-trip query #{i} should still be BudgetExceeded (got {other:?})"),
+        }
+    }
+
+    // Discriminating invariant. The per-request projection budget is
+    // hermetic to this request (it lives on the RequestContext) so
+    // this assertion is robust against parallel test execution.
+    //
+    // Pre-fix: every post-trip dispatch enters the cooperative-
+    // admission build closure, which calls `check_projection_op_count`
+    // (a `fetch_add(1)`) — the executed counter would advance by 1 per
+    // post-trip query, ending at 6 (2 trip + 4 post-trip).
+    //
+    // Post-fix: the dispatcher's `is_exhausted` peek short-circuits
+    // before the build closure runs, leaving the executed counter at
+    // its trip-point value.
+    let executed_after_posttrip = request_budget.projection_ops_executed_count();
+    assert_eq!(
+        executed_after_posttrip, executed_at_trip,
+        "post-trip queries MUST NOT bump the request budget's executed counter; \
+         pre-fix value would advance to 6 (2 trip + 4 post-trip incremental check calls)"
+    );
+}
+
+/// Non-projection-op queries (Conditional, Instantiate, ResolveDecl,
+/// TypeOf, NormalizeUnion, NormalizeIntersection, ResolvedNamedType,
+/// Relate, ResolveMacroPayload) MUST be unaffected by the post-trip
+/// fast-path early-exit — the projection-op fuse only bounds the
+/// projection-op subset of the dispatch surface, and a request that
+/// trips the projection-op cap must still be able to complete any
+/// non-projection work on its way to publishing a partial result.
+///
+/// Discriminator: trip the projection-op budget, then dispatch a
+/// `NormalizeUnion` query on the post-trip request. The query MUST
+/// enter cooperative admission (the budget-gate is keyed on
+/// `semantic_query_counts_toward_projection_budget` only) and MUST
+/// produce a non-error value.
+///
+/// Pre-fix this test passes trivially because there was no early-exit
+/// at all. Post-fix it fails if the early-exit accidentally widens its
+/// gate to include non-projection queries — which would silently
+/// poison the budget-exhausted request's final-result assembly path.
+#[test]
+fn post_trip_non_projection_queries_still_dispatch_normally() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        projection_op_budget: 1,
+        ..HostConfig::default()
+    }));
+    let base_a = intern_single_member_object(&host, "a");
+    let base_b = intern_single_member_object(&host, "b");
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+
+    let ctx = RequestContext::with_kind_timing_and_projection_budget(
+        1,
+        Arc::from("/post-trip-non-projection.vue"),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        host.config.projection_op_budget,
+    );
+    let _ctx_guard = RequestContextGuard::install(ctx);
+    let dispatch = host.semantic_dispatch();
+
+    // Trip the projection-op fuse with two distinct KeyOf calls.
+    let _ = dispatch.execute(SemanticQueryKey::KeyOf {
+        base: base_a,
+        context,
+    });
+    let trip = dispatch.execute(SemanticQueryKey::KeyOf {
+        base: base_b,
+        context,
+    });
+    assert!(
+        matches!(trip, QueryResult::Error(QueryError::BudgetExceeded(_))),
+        "2nd keyof should trip the fuse (got {trip:?})"
+    );
+
+    // Snapshot cooperative-admission entry count after the trip.
+    let coop_at_trip = crate::loop5_instrumentation::EXECUTE_COOPERATIVE_CALLS
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    // A non-projection query (NormalizeUnion) on the post-trip request
+    // MUST enter cooperative admission and produce a non-error value.
+    // The query is structurally trivial (a single-member union
+    // normalises to that member), so an error result here would mean
+    // the early-exit incorrectly widened its gate.
+    let single_member: Arc<[SemanticNodeId]> = Arc::from(vec![base_a].into_boxed_slice());
+    let normalize_key = SemanticQueryKey::NormalizeUnion {
+        members: single_member,
+    };
+    let normalize_result = dispatch.execute(normalize_key);
+    assert!(
+        matches!(normalize_result, QueryResult::Value(_)),
+        "post-trip NormalizeUnion must dispatch normally; \
+         widening the early-exit gate to non-projection queries would \
+         break partial-result assembly (got {normalize_result:?})"
+    );
+
+    // Cooperative admission MUST have run for the NormalizeUnion call —
+    // the gate is keyed on `semantic_query_counts_toward_projection_budget`,
+    // which excludes NormalizeUnion. Delta should be >= 1.
+    let coop_after_normalize = crate::loop5_instrumentation::EXECUTE_COOPERATIVE_CALLS
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        coop_after_normalize > coop_at_trip,
+        "post-trip non-projection query MUST enter cooperative admission \
+         (coop_at_trip={coop_at_trip}, coop_after_normalize={coop_after_normalize})"
+    );
+}
+
 /// 5b §5.D.4 — `ResolveMacroPayload` budget-exceeded must not warm.
 /// The §5.D.4 r18 contract is "after a partial / budget-exceeded
 /// result, re-querying must NOT warm-serve the partial". We exercise

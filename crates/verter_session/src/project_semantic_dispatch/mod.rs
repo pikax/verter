@@ -652,6 +652,84 @@ impl<'a> ProjectSemanticDispatch<'a> {
             other => other,
         };
 
+        // Post-trip fast-path early-exit. Once the request's
+        // projection-op fuse has already tripped, every subsequent
+        // projection-op query (MappedType / KeyOf / ProjectPath /
+        // ProjectMember / IndexedAccess) entering the cooperative-
+        // admission machinery would burn ~μs on the in-flight table
+        // mutex, fact-tracer install, per-key warm probe, and joiner-
+        // condvar entry path — only to have the build closure return
+        // `BudgetExceeded` and the publish be suppressed. Empirically
+        // observed on `ChatMessages.vue`: 253K post-trip MappedType
+        // builds each averaging ~1ms in the materialisation lane, for
+        // ~250s of pure dispatch overhead past the fuse point.
+        //
+        // The early-exit collapses every post-trip projection-op query
+        // to a single peek + sentinel allocation, without ever entering
+        // `execute_cooperative`. The published audit semantics are
+        // preserved: the per-kind cold counter is bumped via the same
+        // attribution arms used by the slow path, the
+        // `BudgetExceeded(cache_suppress=true)` carrier is the same
+        // sentinel the build closure would have produced, and
+        // `failure.actual` continues to reflect the pre-trip executed
+        // count (the peek is non-incrementing — see
+        // [`RequestBudget::is_exhausted`]).
+        //
+        // The check is gated on `semantic_query_counts_toward_projection_budget`
+        // so non-projection queries (ResolveDecl, NormalizeUnion,
+        // Conditional, Instantiate, TypeOf, …) bypass the gate
+        // entirely — their cost is not what the projection-op fuse
+        // bounds.
+        if semantic_query_counts_toward_projection_budget(&key) {
+            if let Some(budget) = crate::request_context::current_request_budget() {
+                if budget.is_exhausted() {
+                    let limit = budget.effective_projection_op_budget();
+                    let failure = BudgetExceededFailure {
+                        domain: BudgetDomain::ProjectionOperation,
+                        limit,
+                        actual: budget.projection_ops_executed_count() as u64,
+                        context: format!("semantic-dispatch:post-trip:{key:?}"),
+                    };
+                    // Attribute the post-trip dispatch via the SAME
+                    // per-kind cold counters the slow path bumps from
+                    // `execute_via_cold_build_helper`'s post-cooperative
+                    // attribution block. Without this the audit's
+                    // `semantic_query_*_cold` rails would silently
+                    // under-count post-trip dispatches once the
+                    // early-exit lands, and bench attribution would lose
+                    // the runaway signal.
+                    if let Some(observer) = verter_audit::current_observer() {
+                        use verter_audit::AuditEvent;
+                        let event = match &key {
+                            SemanticQueryKey::MappedType { .. } => {
+                                Some(AuditEvent::SemanticQueryMappedTypeCold)
+                            }
+                            SemanticQueryKey::KeyOf { .. } => {
+                                Some(AuditEvent::SemanticQueryKeyOfCold)
+                            }
+                            SemanticQueryKey::ProjectPath { .. }
+                            | SemanticQueryKey::ProjectMember { .. } => {
+                                Some(AuditEvent::SemanticQueryProjectPathCold)
+                            }
+                            SemanticQueryKey::IndexedAccess { .. } => {
+                                Some(AuditEvent::SemanticQueryIndexedAccessCold)
+                            }
+                            _ => None,
+                        };
+                        if let Some(event) = event {
+                            observer.record_event(event);
+                        }
+                    }
+                    return CacheRead {
+                        value: QueryResult::Error(QueryError::BudgetExceeded(failure)),
+                        dep_signature: empty_signature(),
+                        walker_diagnostics: Arc::from([]),
+                        cache_suppress: true,
+                    };
+                }
+            }
+        }
+
         let graph = Arc::clone(self.graph());
         // Per-key recursion sentinel: when the memo detects same-path
         // re-entry on an `Instantiate` key, extract the decl name and

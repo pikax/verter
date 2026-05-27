@@ -92,6 +92,36 @@ impl RequestBudget {
     pub(crate) fn projection_ops_executed_count(&self) -> usize {
         self.projection_ops_executed.load(Ordering::Relaxed)
     }
+
+    /// Peek-only test for budget exhaustion. Returns `true` when the
+    /// already-executed projection-op count strictly exceeds the cap,
+    /// i.e. when a fresh [`Self::check_projection_op_count`] would also
+    /// return `true` *without* the prior incrementing call having been
+    /// the one to trip the fuse.
+    ///
+    /// The dispatcher's `execute_via_cold_build_helper` consults this
+    /// peek BEFORE entering the cooperative-admission machinery so that,
+    /// once a request trips its fuse, every subsequent projection-op
+    /// query short-circuits at the dispatch entry without paying the
+    /// `execute_cooperative` admission cost (in-flight table mutex,
+    /// joiner-condvar entry, fact-tracer install, per-key warm probe).
+    /// Without this gate a runaway request keeps spending μs-per-call
+    /// on admission overhead for each rejected MappedType / KeyOf /
+    /// ProjectPath dispatch — the empirically-observed 250K rejected
+    /// builds on `ChatMessages.vue` translate to ~250 wall-clock
+    /// seconds of materialisation-lane time spent past the fuse trip,
+    /// none of which makes progress because every call returns
+    /// `BudgetExceeded(cache_suppress=true)`.
+    ///
+    /// Non-incrementing on purpose: the cooperative-admission build
+    /// closure remains the single site that bumps the executed
+    /// counter via [`Self::check_projection_op_count`], so the trip
+    /// point and the reported `BudgetExceededFailure.actual` value
+    /// stay invariant across this fast-path peek.
+    #[must_use]
+    pub fn is_exhausted(&self) -> bool {
+        self.projection_ops_executed_count() > self.effective_projection_op_budget()
+    }
 }
 
 #[cfg(test)]
@@ -122,6 +152,43 @@ mod tests {
         assert!(
             budget.check_projection_op_count(),
             "2001st call exceeds default"
+        );
+    }
+
+    #[test]
+    fn request_budget_is_exhausted_tracks_post_trip_state_without_incrementing() {
+        let budget = RequestBudget::new(2);
+        assert!(
+            !budget.is_exhausted(),
+            "fresh budget reports !exhausted before any call"
+        );
+        assert!(!budget.check_projection_op_count(), "1st call (1 of 2)");
+        assert!(
+            !budget.is_exhausted(),
+            "within-budget call leaves !exhausted"
+        );
+        assert!(!budget.check_projection_op_count(), "2nd call (2 of 2)");
+        assert!(
+            !budget.is_exhausted(),
+            "at-cap call leaves !exhausted (the cap is inclusive)"
+        );
+        assert!(budget.check_projection_op_count(), "3rd call exceeds 2");
+        assert!(
+            budget.is_exhausted(),
+            "post-trip peek reports exhausted so the dispatcher early-exits"
+        );
+        // Crucial property: the peek must NOT increment. Without this
+        // invariant the dispatcher's fast-path early-exit would inflate
+        // `BudgetExceededFailure.actual` past the production value and
+        // skew the per-request audit.
+        let executed_before = budget.projection_ops_executed_count();
+        assert!(budget.is_exhausted());
+        assert!(budget.is_exhausted());
+        assert!(budget.is_exhausted());
+        assert_eq!(
+            budget.projection_ops_executed_count(),
+            executed_before,
+            "is_exhausted is peek-only — it must not bump the executed counter"
         );
     }
 }
