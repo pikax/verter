@@ -219,6 +219,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
             node_id: None,
             type_expr: expr.clone(),
             dep_signature: Arc::from(Vec::new()),
+            cache_suppress: false,
         };
     };
     let scope = NodeScopeId::File {
@@ -291,6 +292,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         node_id: dispatch_materialized.node_id,
         type_expr: dispatch_materialized.type_expr,
         dep_signature: dispatch_materialized.dep_signature,
+        cache_suppress: dispatch_materialized.cache_suppress,
     };
 
     // Step 3 closure: write-through to ctx-owned MaterializeMemoDb.
@@ -305,29 +307,39 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     // for that case; admitting a shared entry rooted on that lowering
     // hash without the observation's pinned `SyntacticExportSet` parse
     // fact would be a mis-rooted write.
-    if let Some(captured_scope_observation) = observed_scope {
-        // Loop-5 instrumentation — count every publish attempt. The
-        // get_or_compute path is a no-op on a concurrent winner but
-        // we count the attempt because the bench is single-threaded.
-        crate::loop5_instrumentation::MATERIALIZE_MEMO_PUBLISHES
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    //
+    // Additional gate: `cache_suppress=true` on the freshly materialized
+    // value means a downstream `dispatch.execute_read(...)` exhausted the
+    // projection-op budget (or returned another fatal `QueryError`). The
+    // partial outcome must NOT warm the shared `ShapeCacheDb` slot —
+    // admitting it would poison subsequent identical-key lookups against
+    // the same scope+expr+mode triple. The freshly-computed value is
+    // still returned to the caller; only the shared-cache admission is
+    // refused.
+    if !materialized.cache_suppress {
+        if let Some(captured_scope_observation) = observed_scope {
+            // Loop-5 instrumentation — count every publish attempt. The
+            // get_or_compute path is a no-op on a concurrent winner but
+            // we count the attempt because the bench is single-threaded.
+            crate::loop5_instrumentation::MATERIALIZE_MEMO_PUBLISHES
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        let cache_key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
-            std::sync::Arc::<str>::from(scope_canonical_id),
-            std::sync::Arc::new(expr.clone()),
-            mode,
-        );
-        let host_db = ctx.project_type_store().shape_cache_db();
-        let captured_value = materialized.clone();
-        // The SINGLE tear-free scope observation taken above is threaded
-        // into the write-through. The signature builder is
-        // provenance-pure: it roots the keyed scope on the observation's
-        // `whole_hash` and pinned `SyntacticExportSet` parse fact, never
-        // on a re-read of current content. The lowering `NodeScopeId`
-        // was built from the SAME observation's `whole_hash`, so the
-        // memo value and its fact signature root on one identical scope
-        // hash — no torn read.
-        let _ = host_db.get_or_compute(&cache_key, ctx, move || {
+            let cache_key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
+                std::sync::Arc::<str>::from(scope_canonical_id),
+                std::sync::Arc::new(expr.clone()),
+                mode,
+            );
+            let host_db = ctx.project_type_store().shape_cache_db();
+            let captured_value = materialized.clone();
+            // The SINGLE tear-free scope observation taken above is threaded
+            // into the write-through. The signature builder is
+            // provenance-pure: it roots the keyed scope on the observation's
+            // `whole_hash` and pinned `SyntacticExportSet` parse fact, never
+            // on a re-read of current content. The lowering `NodeScopeId`
+            // was built from the SAME observation's `whole_hash`, so the
+            // memo value and its fact signature root on one identical scope
+            // hash — no torn read.
+            let _ = host_db.get_or_compute(&cache_key, ctx, move || {
             // The keyed scope canonical is the entry's self-root, rooted
             // on the observed materialisation-time content version;
             // every canonical the materialisation walk observed (carried
@@ -354,12 +366,21 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
             )?;
             Some((captured_value, fact_sig))
         });
+        }
     }
 
-    query_engine
-        .materialize_memo
-        .borrow_mut()
-        .insert(memo_key, materialized.clone());
+    // Engine-local memo: skip on `cache_suppress=true` so the same
+    // request's later reduce calls do not pick the partial up as a
+    // warm-hit (the per-engine memo is request-scoped, but it can be
+    // consulted multiple times within one component-meta resolution
+    // for different fields that share the same `(scope, expr, mode)`
+    // key).
+    if !materialized.cache_suppress {
+        query_engine
+            .materialize_memo
+            .borrow_mut()
+            .insert(memo_key, materialized.clone());
+    }
     materialized
 }
 

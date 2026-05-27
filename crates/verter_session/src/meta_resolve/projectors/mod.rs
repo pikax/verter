@@ -779,12 +779,14 @@ fn member_shape_peek_or_compute(
                 node_id: Some(member_value),
                 type_expr: raised,
                 dep_signature: Arc::from(Vec::new()),
+                cache_suppress: false,
             };
         };
         let value = MaterializedTypeExpr {
             node_id: Some(member_value),
             type_expr: raised,
             dep_signature: package_backed_fence,
+            cache_suppress: false,
         };
         return admit_member_shape_if_possible(ctx, &key, value);
     }
@@ -802,6 +804,7 @@ fn member_shape_peek_or_compute(
             node_id: Some(member_value),
             type_expr: raised,
             dep_signature: Arc::from(Vec::new()),
+            cache_suppress: false,
         };
     };
     // F1: cycle-gate fence — computed lazily because the cycle gate
@@ -828,6 +831,7 @@ fn member_shape_peek_or_compute(
                 node_id: Some(member_value),
                 type_expr: raised,
                 dep_signature: combined_fence,
+                cache_suppress: false,
             };
             return admit_member_shape_if_possible(ctx, &key, value);
         }
@@ -861,6 +865,7 @@ fn member_shape_peek_or_compute(
             node_id: Some(member_value),
             type_expr: raised,
             dep_signature: gate_fence,
+            cache_suppress: false,
         };
         return admit_member_shape_if_possible(ctx, &key, value);
     }
@@ -883,6 +888,7 @@ fn member_shape_peek_or_compute(
                     node_id: Some(member_value),
                     type_expr: leaf,
                     dep_signature: gate_fence,
+                    cache_suppress: false,
                 };
                 return admit_member_shape_if_possible(ctx, &key, value);
             }
@@ -891,6 +897,7 @@ fn member_shape_peek_or_compute(
                     node_id: Some(member_value),
                     type_expr: raised,
                     dep_signature: gate_fence,
+                    cache_suppress: false,
                 };
                 return admit_member_shape_if_possible(ctx, &key, value);
             }
@@ -1036,6 +1043,7 @@ fn admit_type_expr_shape_if_possible(
         node_id: None,
         type_expr: materialized_type_expr,
         dep_signature,
+        cache_suppress: false,
     };
     let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
         Arc::<str>::from(scope_canonical_id),

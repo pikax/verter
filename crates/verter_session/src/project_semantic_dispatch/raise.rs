@@ -655,10 +655,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .unwrap_or(TypeExpr::Unknown {
                 raw: "<raise miss after reduction>".to_string(),
             });
+        let cache_suppress = state.cache_suppress;
         MaterializedTypeExpr {
             node_id: Some(reduced),
             type_expr,
             dep_signature: state.into_dep_signature(),
+            cache_suppress,
         }
     }
 
@@ -1410,6 +1412,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         let read = self.execute_read(key);
         state.merge_dep_signature(&read.dep_signature);
+        // Cache-suppression propagation: a `cache_suppress=true` read
+        // means the semantic dispatch produced a partial outcome that
+        // must not warm any shared cache. Mark the per-reduce-state
+        // flag so the enclosing `raise_and_reduce_with_context` returns
+        // a `MaterializedTypeExpr` carrying `cache_suppress=true`, AND
+        // raise the request-scoped sticky bit so downstream callers
+        // (the projector second pass, the final ComponentMeta cache
+        // admission gate) observe it without needing a hand-threaded
+        // return value.
+        if read.cache_suppress {
+            state.cache_suppress = true;
+            crate::request_context::mark_request_materialization_cache_suppress();
+        }
         let result = match read.value {
             QueryResult::Value(result) => {
                 if result == node {
@@ -1768,6 +1783,14 @@ pub struct MaterializedTypeExpr {
     pub node_id: Option<SemanticNodeId>,
     pub type_expr: TypeExpr,
     pub dep_signature: DepSignature,
+    /// `true` when ANY semantic-dispatch read consumed by the reducer
+    /// returned with `cache_suppress=true` (projection-budget exhaustion
+    /// or another fatal `QueryError`). Callers that publish the
+    /// materialized result into a downstream shared cache (e.g. the
+    /// per-field cache in `field_types.rs`, the projector second pass)
+    /// must propagate this bit so the final-result `ComponentMetaResultDb`
+    /// admission gate observes it and refuses to warm a partial.
+    pub cache_suppress: bool,
 }
 
 #[allow(dead_code)] // wired by raise_and_reduce above.
@@ -1776,6 +1799,13 @@ struct ReduceState {
     visited: FxHashSet<(SemanticNodeId, ProjectionReductionContext)>,
     mapping: MappingMap,
     dep_facts: Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
+    /// OR-fold of every `read.cache_suppress` observed by `reduce_one`
+    /// during this reduce pass. Propagated into the returned
+    /// `MaterializedTypeExpr.cache_suppress` so direct consumers
+    /// (e.g. `field_types::materialize_component_meta_type_expr_until_stable_full`)
+    /// can refuse to publish the result into shared caches without
+    /// needing to inspect the request-scoped TLS flag.
+    cache_suppress: bool,
 }
 
 #[allow(dead_code)] // wired by raise_and_reduce above.

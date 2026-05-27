@@ -1139,6 +1139,22 @@ impl VerterHost {
         let surface_identities = parts.surface_identities;
         let surface_identities_for_export = surface_identities.clone();
 
+        // P0 #1 — Cache-suppression propagation: OR-fold the
+        // request-scoped sticky flag set by reducer / materializer paths
+        // (raise.rs reduce_one, field_types::materialize_*) into the
+        // final synthesis-suppress signal so the `ComponentMetaResultDb`
+        // admission gate at `cache_component_meta` /
+        // `component_meta_entry::write_published_component_meta` refuses
+        // any partial whose reducer / materializer pipeline observed a
+        // budget-exceeded (or other fatal `QueryError`) read. Without
+        // this OR-fold, a `cache_suppress=true` from field-type
+        // materialization would warm the final-result cache and a
+        // subsequent identical request would replay the poisoned partial
+        // instead of re-running the cold compute against the fresh
+        // budget.
+        let synthesis_should_suppress = synthesis_should_suppress
+            || crate::request_context::current_materialization_cache_suppress();
+
         let state = ResolvedComponentMetaState {
             snapshot,
             mode,

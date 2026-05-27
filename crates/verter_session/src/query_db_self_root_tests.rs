@@ -786,6 +786,7 @@ fn materialized(
             raw: marker.to_string(),
         },
         dep_signature,
+        cache_suppress: false,
     }
 }
 
@@ -7050,6 +7051,7 @@ fn materialize_memo_failed_revalidation_does_not_leak_live_counter() {
                 node_id: None,
                 type_expr: TypeExpr::Unknown { raw: String::new() },
                 dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+                cache_suppress: false,
             },
             empty_fact_signature(),
         ))
@@ -7301,6 +7303,7 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
                     dep_signature: Arc::from(
                         [] as [(Arc<str>, crate::semantic_query::DepVersion); 0]
                     ),
+                    cache_suppress: false,
                 },
                 empty_fact_signature(),
             ))
