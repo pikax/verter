@@ -234,13 +234,12 @@ slowest_5: Array<SlowRecordSummary>, };
 export type BundlerKindTag = "Vite" | "Webpack" | "Rollup" | "Esbuild" | "Rolldown" | { "Other": string };
 
 /**
- * Block 7.5 rule-compliance diagnostic counters. Empirical
- * instrumentation that quantifies the bypass surfaces the 3-way
- * consult identified as the residual +19% perf-gap suspects:
- * per-request `HostStoreView::from_host` builds, bare-host
- * `ComponentMetaQueryEngine::new(...)` constructions, and
- * `ResolverContext::resolver_store_view()` warm-hit validator
- * rebuilds. Snapshotted from the session-side
+ * Rule-compliance diagnostic counters. Empirical instrumentation
+ * that quantifies the bypass surfaces identified as residual
+ * perf-gap suspects: per-request `HostStoreView::from_host`
+ * builds, bare-host `ComponentMetaQueryEngine::new(...)`
+ * constructions, and `ResolverContext::resolver_store_view()`
+ * warm-hit validator rebuilds. Snapshotted from the session-side
  * `RequestContext::cache_counters.bypass_diagnostics` field at
  * request finalisation, so the values are exact deltas for THIS
  * request only (no host-global accumulation).
@@ -257,14 +256,16 @@ host_store_view_from_host_builds: string,
  * `ComponentMetaQueryEngine::new(ctx)` constructions on this
  * request where `ctx.is_request_bound()` returned `false` —
  * i.e. the engine was bound to a bare `&VerterHost` rather
- * than a request-bound context. Post-Block-7.5 invariant: `0`.
+ * than a request-bound context. Final-state invariant: `0`.
  */
 bare_engine_constructions: string, 
 /**
  * `ResolverContext::resolver_store_view()` call count on this
  * request. Each call rebuilds a full owned `HostStoreView`;
- * warm-hit validator paths in `fact_signature_helpers` rebuild
- * on EVERY cache lookup pre-Bug-2.
+ * warm-hit validator paths in `fact_signature_helpers`
+ * previously rebuilt on every cache lookup until the
+ * per-request hoist landed — this counter quantifies the
+ * residual rebuild surface.
  */
 resolver_store_view_calls: string, };
 
@@ -1635,7 +1636,7 @@ prepared_value_decls: number,
  */
 cache_layers: CacheLayerBreakdown, 
 /**
- * Block 7.5 rule-compliance diagnostic counters. See
+ * Rule-compliance diagnostic counters. See
  * [`BypassDiagnostics`] for the per-counter contract.
  */
 bypass_diagnostics: BypassDiagnostics, };
