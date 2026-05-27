@@ -1781,6 +1781,17 @@ pub struct ProjectTypeStore {
     /// Keyed on `content_hash` so cosmetic edits recompute display facts only.
     /// See [`crate::member_display_fact_store::MemberDisplayFactStore`].
     member_display_facts: crate::member_display_fact_store::MemberDisplayFactStore,
+    /// Phase G — host-owned mapped-binder ordinal registry. The
+    /// registry hands out STABLE `param_index` ordinals for each
+    /// `(canonical, display_name, fingerprint)` triple so two
+    /// lowerings of the SAME source mapper produce the SAME
+    /// `TypeParam` SemanticNodeId — and therefore the SAME
+    /// `MapperKey` cache key for
+    /// `SemanticQueryKey::MappedType`. Replaces the legacy
+    /// per-dispatcher counter that destabilised mapper identity
+    /// across dispatcher instances. See
+    /// [`crate::mapper_binder_registry`].
+    mapper_binder_registry: Arc<crate::mapper_binder_registry::MapperBinderRegistry>,
     /// Debug / diagnostic counters.
     pub counters: ProjectTypeStoreCounters,
 }
@@ -1908,6 +1919,9 @@ impl ProjectTypeStore {
             member_semantic_facts: crate::member_semantic_fact_store::MemberSemanticFactStore::new(
             ),
             member_display_facts: crate::member_display_fact_store::MemberDisplayFactStore::new(),
+            mapper_binder_registry: Arc::new(
+                crate::mapper_binder_registry::MapperBinderRegistry::new(),
+            ),
             counters,
         }
     }
@@ -2178,6 +2192,19 @@ impl ProjectTypeStore {
         &self.member_display_facts
     }
 
+    /// Phase G — host-owned mapped-binder ordinal registry. Hands
+    /// out STABLE `param_index` ordinals for each `(canonical,
+    /// display_name, fingerprint)` triple so two lowerings of the
+    /// SAME source mapper produce the SAME `TypeParam`
+    /// SemanticNodeId — and therefore the SAME `MapperKey` cache
+    /// key for `SemanticQueryKey::MappedType`. See
+    /// [`crate::mapper_binder_registry`].
+    pub(crate) fn mapper_binder_registry(
+        &self,
+    ) -> &Arc<crate::mapper_binder_registry::MapperBinderRegistry> {
+        &self.mapper_binder_registry
+    }
+
     /// Issue #6 / accessor for the `AppConfigNoOverrideProof`
     /// cache consulted by the ComponentConfig theme variant fast path.
     /// On miss, the fast path declines and the slow path runs.
@@ -2278,6 +2305,15 @@ impl ProjectTypeStore {
         self.member_semantic_facts
             .invalidate_canonical(canonical_id);
         self.member_display_facts.invalidate_canonical(canonical_id);
+        // Phase G — drop the per-canonical mapper-binder
+        // registry slot. The next lowering of any mapper in this
+        // file starts with a fresh `Arc::as_ptr` keyspace so a
+        // pointer reuse across the content edit cannot collide
+        // with a stale fingerprint. See
+        // [`crate::mapper_binder_registry`] for the registry
+        // contract.
+        self.mapper_binder_registry
+            .clear_for_canonical(canonical_id);
         // D48 split: the per-domain compile-cache entries
         // (CompileCacheDb / DerivedRawCacheDb / DependencyCacheDb) are
         // NOT dropped here. The matrix routes the "source content

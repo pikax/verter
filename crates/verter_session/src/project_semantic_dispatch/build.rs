@@ -20,9 +20,30 @@ use super::{
 use crate::semantic_query::{
     BranchSelection, DeclIdentity, DepSignature, HostResolvedNamedTypeKey, IndexSignature,
     LiteralValue, NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind,
-    ProjectionMode, QueryError, QueryResult, ResolveDeclKey, SemanticNodeData, SemanticNodeId,
-    SemanticQueryApi, SemanticQueryKey, SurfaceMember, SurfaceView, ValueRootKey,
+    ProjectionMode, QueryError, QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeData,
+    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SurfaceMember, SurfaceView, ValueRootKey,
 };
+
+/// Encode a [`ProjectionReductionContext`] as a compact u32 bit
+/// pattern used in the Phase G mapped-member-materialization
+/// identity tuple. Layout: bits 0 (demand) and 1–3 (mode tag).
+#[inline]
+pub(super) fn encode_projection_reduction_context_bits(
+    context: crate::semantic_query::ProjectionReductionContext,
+) -> u32 {
+    let mode_tag: u32 = match context.mode {
+        ProjectionMode::Identity => 0,
+        ProjectionMode::Navigate => 1,
+        ProjectionMode::Shallow => 2,
+        ProjectionMode::Expanded => 3,
+        ProjectionMode::Skeleton => 4,
+    };
+    let demand_bit: u32 = match context.demand {
+        ReductionDemand::Published => 0,
+        ReductionDemand::StructuralTransit => 1,
+    };
+    (mode_tag << 1) | demand_bit
+}
 
 // Per-call counter (test-only). Incremented every time
 // `find_longest_warm_prefix` returns `Some(_)` during a
@@ -492,6 +513,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // expression, lower the default in the decl's scope and bind
         // it — mirrors the solver's `resolve_type_parameters_in_body`
         // behaviour at solve.rs:2580.
+        // Phase G instrumentation: callsite attribution for
+        // `prepared_decl_bundle_warm` reads from `build_instantiate`.
+        if let Some(obs) = verter_audit::current_observer() {
+            obs.record_event(verter_audit::AuditEvent::PreparedDeclBundleCallsiteBuildInstantiate);
+        }
         let scope_payload = self
             .ctx
             .prepared_decl_bundle(decl_canonical.as_ref())
@@ -895,18 +921,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // path walker.
             let value_expr = self.opaque(QueryError::Miss);
             // Synthesise a TypeParam binder node for the utility
-            // mapper's `K`. The synthetic binder receives an ordinal
-            // from the per-dispatcher counter and a `<utility-mapper>`
-            // decl_name sentinel so two distinct utility invocations
-            // (`Partial<X>` and `Partial<Y>`) get distinct binder
-            // identities.
+            // mapper's `K`. Phase G fix: the param_index is the
+            // source SemanticNodeId itself (truncated to u16) so
+            // two utility invocations on the SAME source share
+            // the SAME binder identity → same `MapperKey` → same
+            // `SemanticQueryKey::MappedType` cache key. Distinct
+            // sources naturally get distinct ordinals via the
+            // SemanticNodeId.
+            //
+            // For sources whose SemanticNodeId exceeds u16 the
+            // truncated ordinals can theoretically collide, but
+            // the arena dedup also includes the `display_name`,
+            // `decl`, and `constraint` fields — two utility
+            // mappers with the same display_name + decl that
+            // happen to alias at u16 are extremely unlikely AND
+            // the failure mode is "two mappers share a binder
+            // SemanticNodeId" which causes a substitute walk to
+            // bind the same K for both — semantically benign
+            // because the consumer's source-keyed dispatch
+            // remains source-specific via the outer
+            // `SemanticQueryKey::MappedType.source`.
+            let param_index = (source.0 & 0xFFFF) as u16;
             let parameter_node = self.graph().intern_node(SemanticNodeData::TypeParam {
                 decl: crate::semantic_query::DeclIdentity {
                     canonical_id: Arc::from("<utility>"),
                     whole_hash: crate::semantic_query::HashValue::default(),
                     decl_name: Arc::from("<utility-mapper>"),
                 },
-                param_index: self.next_mapped_binder_ordinal(),
+                param_index,
                 constraint: None,
                 default: None,
                 display_name: Arc::from("K"),
@@ -981,13 +1023,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // For equivalence with userland `{ [P in K]: V }`, both
                 // paths set `key_space = K` and `value_expr = V`.
                 // Synthesise a TypeParam binder node id for `P`.
+                //
+                // Phase G fix: the param_index is derived from
+                // (key_arg, value_arg) so two `Record<K, V>`
+                // invocations on the same K, V share the SAME
+                // binder identity → same `MapperKey` → same
+                // `SemanticQueryKey::MappedType` cache key.
+                let param_index = ((key_arg.0 ^ value_arg.0.rotate_left(8)) & 0xFFFF) as u16;
                 let parameter_node = self.graph().intern_node(SemanticNodeData::TypeParam {
                     decl: crate::semantic_query::DeclIdentity {
                         canonical_id: Arc::from("<utility>"),
                         whole_hash: crate::semantic_query::HashValue::default(),
                         decl_name: Arc::from("<utility-mapper>"),
                     },
-                    param_index: self.next_mapped_binder_ordinal(),
+                    param_index,
                     constraint: None,
                     default: None,
                     display_name: Arc::from("P"),
@@ -2122,6 +2171,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .intern_node(SemanticNodeData::Literal(LiteralValue::String(
                 key_name.to_string(),
             )));
+        // Phase G instrumentation — classify this per-K call as
+        // unique or repeated based on the identity tuple a typed
+        // mapped-member materialization cache would key on. The
+        // classifier records the tuple in the per-request observed
+        // set and bumps the matching unique/repeated counter pair.
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            ctx.classify_mapped_member_materialization(
+                crate::request_context::MappedMemberIdentity {
+                    parameter_node: mapper.parameter_node.0,
+                    value_expr: mapper.value_expr.0,
+                    key_node: key_arg.0,
+                    context_bits: encode_projection_reduction_context_bits(context),
+                    variant: 0,
+                },
+            );
+        }
         let substituted =
             self.substitute_semantic_type_param(mapper.value_expr, mapper.parameter_node, key_arg);
         let evaluated = self.evaluate_deferred_semantic_node_with_context(substituted, context);
@@ -2243,6 +2308,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
         self.graph().record_mapped_per_k_materialization();
+        // Phase G instrumentation — selected-key variant.
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            ctx.classify_mapped_member_materialization(
+                crate::request_context::MappedMemberIdentity {
+                    parameter_node: mapper.parameter_node.0,
+                    value_expr: mapper.value_expr.0,
+                    key_node: key_arg.0,
+                    context_bits: encode_projection_reduction_context_bits(context),
+                    variant: 1,
+                },
+            );
+        }
         let substituted =
             self.substitute_semantic_type_param(mapper.value_expr, mapper.parameter_node, key_arg);
         let evaluated = self.evaluate_deferred_semantic_node_with_context(substituted, context);

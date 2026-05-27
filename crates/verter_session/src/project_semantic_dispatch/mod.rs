@@ -113,23 +113,6 @@ pub(super) type InstantiateIdentity = (Arc<str>, Arc<str>);
 pub struct ProjectSemanticDispatch<'a> {
     pub(super) ctx: &'a dyn ResolverContext,
     pub(super) instantiate_active: std::cell::RefCell<smallvec::SmallVec<[InstantiateIdentity; 8]>>,
-    /// Per-dispatcher mapped-binder ordinal counter. Increments on
-    /// every `TypeExpr::Mapped` binder intern so two `[K in ...]`
-    /// binders lowered in the same dispatcher get distinct
-    /// `param_index` ordinals even when their declaring file, hash,
-    /// and `"<mapper-param>"` sentinel would otherwise collide.
-    ///
-    /// **Per-dispatcher rather than per-owning-scope.** A
-    /// per-owning-scope ordinal would require threading owner-scope
-    /// context through every recursive `shallow_lower_type_expr`
-    /// call; per-dispatcher is strictly coarser but still correct
-    /// (distinct binders get distinct ordinals). Trade-off: identity
-    /// is stable within one dispatcher lifetime but not across
-    /// dispatcher instances, so re-lowering the same file in a fresh
-    /// dispatcher may assign different ordinals — acceptable for
-    /// correctness; if hot-path cache stability becomes a measurable
-    /// concern, the sharded interner is the place to address it.
-    pub(super) mapped_binder_ordinal: std::cell::Cell<u16>,
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
@@ -157,18 +140,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         Self {
             ctx,
             instantiate_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
-            mapped_binder_ordinal: std::cell::Cell::new(0),
         }
-    }
-
-    /// Acquire the next mapped-binder ordinal from the
-    /// per-dispatcher counter, then increment. Used by
-    /// `shallow_lower_type_expr`'s Mapped arm to assign distinct
-    /// `param_index` values to each `[K in ...]` binder.
-    pub(super) fn next_mapped_binder_ordinal(&self) -> u16 {
-        let current = self.mapped_binder_ordinal.get();
-        self.mapped_binder_ordinal.set(current.saturating_add(1));
-        current
     }
 
     /// Push `identity` onto the active-instantiation stack. Returns `true`
@@ -1658,6 +1630,18 @@ impl<'a> SessionDispatchHost<'a> {
     ) {
         match self.base_scope(base) {
             NodeScopeId::File { canonical_id, .. } => {
+                // Phase G instrumentation: callsite attribution for
+                // `prepared_decl_bundle_warm` reads. The four
+                // `DispatchHost` trait callbacks
+                // (`resolve_prepared_type_decl`, `root_identity`,
+                // `utility_source`, `bare_ref_origin`) all route
+                // through this helper — dominant expected source of
+                // the K-loop warm-read pressure.
+                if let Some(obs) = verter_audit::current_observer() {
+                    obs.record_event(
+                        verter_audit::AuditEvent::PreparedDeclBundleCallsiteScopePayload,
+                    );
+                }
                 let payload = self.ctx.prepared_decl_bundle(canonical_id.as_ref()).map(
                     |bundle| {
                         crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(

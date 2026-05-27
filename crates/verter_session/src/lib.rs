@@ -209,6 +209,7 @@ pub mod invalidation_domain;
 /// callers bump atomic counters at named call sites and dump aggregates
 /// via `dump_loop5_instrumentation_counters()`.
 pub mod loop5_instrumentation;
+pub(crate) mod mapper_binder_registry;
 pub mod meta;
 pub mod meta_resolve;
 #[cfg(test)]

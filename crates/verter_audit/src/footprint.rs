@@ -554,4 +554,41 @@ pub struct ResolverHotPathCounters {
     /// `build_typeof` calls where `ensure_indexed_ready` returned
     /// `None` (the brief's prepared-value miss site).
     pub build_typeof_prepared_value_misses: u32,
+    // Phase G focused mapped-member materialization counters
+    // -------------------------------------------------------
+    // Codex BINDING Phase G direction (Hypothesis A): a typed
+    // mapped-member materialization cache should collapse the K-loop
+    // cross product. These counters confirm whether the K-loop is
+    // re-computing distinct identity tuples (cache helps) or
+    // genuinely distinct values (cache won't help).
+    /// Per-K calls to `materialize_mapped_member_value_for_key` whose
+    /// identity tuple is FIRST-SEEN in the request.
+    pub mapped_member_plain_unique: u32,
+    /// Per-K calls to `materialize_mapped_member_value_for_key` whose
+    /// identity tuple was already seen — would be a cache hit.
+    pub mapped_member_plain_repeated: u32,
+    /// Per-K calls to `materialize_selected_key_mapped_value*` whose
+    /// identity tuple is FIRST-SEEN in the request.
+    pub mapped_member_selected_key_unique: u32,
+    /// Per-K calls to `materialize_selected_key_mapped_value*` whose
+    /// identity tuple was already seen — would be a cache hit.
+    pub mapped_member_selected_key_repeated: u32,
+    /// `prepared_decl_bundle` warm-read attribution: calls from
+    /// `SessionDispatchHost::scope_payload_for_base` (dominant
+    /// expected K-loop source).
+    pub prepared_decl_bundle_callsite_scope_payload: u32,
+    /// `prepared_decl_bundle` warm-read attribution: calls from
+    /// `build_instantiate`.
+    pub prepared_decl_bundle_callsite_build_instantiate: u32,
+    /// `prepared_decl_bundle` warm-read attribution: residual sites
+    /// (must be small for attribution to be useful).
+    pub prepared_decl_bundle_callsite_other: u32,
+    /// Mapper-identity-instability signal: same mapper source
+    /// triple received DIFFERENT `mapped_binder_ordinal` ordinals
+    /// from different dispatcher instances during this request.
+    /// Non-zero count means codex's mapper-identity-instability
+    /// concern is confirmed — the typed mapped-member cache would
+    /// MISS on what should be a HIT until ordinal assignment is
+    /// stabilised.
+    pub mapped_binder_ordinal_collision: u32,
 }

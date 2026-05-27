@@ -347,6 +347,27 @@ pub fn mine_footprint(
         build_typeof_prepared_value_misses: ctx
             .build_typeof_prepared_value_misses
             .load(Ordering::Relaxed) as u32,
+        mapped_member_plain_unique: ctx.mapped_member_plain_unique.load(Ordering::Relaxed) as u32,
+        mapped_member_plain_repeated: ctx.mapped_member_plain_repeated.load(Ordering::Relaxed)
+            as u32,
+        mapped_member_selected_key_unique: ctx
+            .mapped_member_selected_key_unique
+            .load(Ordering::Relaxed) as u32,
+        mapped_member_selected_key_repeated: ctx
+            .mapped_member_selected_key_repeated
+            .load(Ordering::Relaxed) as u32,
+        prepared_decl_bundle_callsite_scope_payload: ctx
+            .prepared_decl_bundle_callsite_scope_payload
+            .load(Ordering::Relaxed) as u32,
+        prepared_decl_bundle_callsite_build_instantiate: ctx
+            .prepared_decl_bundle_callsite_build_instantiate
+            .load(Ordering::Relaxed)
+            as u32,
+        prepared_decl_bundle_callsite_other: ctx
+            .prepared_decl_bundle_callsite_other
+            .load(Ordering::Relaxed) as u32,
+        mapped_binder_ordinal_collision: ctx.mapped_binder_ordinal_collision.load(Ordering::Relaxed)
+            as u32,
     };
 
     // Truncation counters: combine the accumulator-side counters

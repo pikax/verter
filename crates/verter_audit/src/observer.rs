@@ -225,6 +225,64 @@ pub enum AuditEvent {
     /// `None` from `ensure_indexed_ready` (the prepared-value miss
     /// the brief flags at `build.rs:162`).
     BuildTypeofPreparedValueMiss,
+    /// Phase G focused mapped-member materialization counters
+    /// ------------------------------------------------------
+    /// Per-K mapped-member materialization is the codex BINDING
+    /// Phase G hot path: `build_mapped_type` (`build.rs:1968`) +
+    /// `synthesise_mapped_surface` (`walk.rs:2550`) iterate
+    /// enumerated keys and call into
+    /// `materialize_mapped_member_value_for_key` (plain Expanded
+    /// path, `build.rs:2113`) or
+    /// `materialize_selected_key_mapped_value` (selected-key
+    /// publication path, `build.rs:2207`). Both helpers substitute
+    /// the mapper binder + evaluate. The instrumentation splits the
+    /// two helpers and counts unique vs repeated identity tuples to
+    /// confirm Hypothesis A (a typed mapped-member materialization
+    /// cache will collapse the K-loop cross product).
+    /// One call to `materialize_mapped_member_value_for_key` whose
+    /// identity tuple `(mapper.value_expr, mapper.parameter_node,
+    /// key_name, mode, demand)` was seen for the FIRST time in the
+    /// active request — would NOT be served by a cache (cold).
+    /// Producer at the helper's entry in
+    /// `materialize_mapped_member_value_for_key`.
+    MappedMemberPlainUnique,
+    /// One call to `materialize_mapped_member_value_for_key` whose
+    /// identity tuple was already seen in the active request —
+    /// WOULD be served by a typed mapped-member cache (repeat).
+    MappedMemberPlainRepeated,
+    /// One call to `materialize_selected_key_mapped_value` /
+    /// `materialize_selected_key_mapped_value_with_node` whose
+    /// identity tuple was seen for the FIRST time in the active
+    /// request — would NOT be served by a cache (cold).
+    MappedMemberSelectedKeyUnique,
+    /// One call to `materialize_selected_key_mapped_value` /
+    /// `materialize_selected_key_mapped_value_with_node` whose
+    /// identity tuple was already seen in the active request —
+    /// WOULD be served by a typed mapped-member cache (repeat).
+    MappedMemberSelectedKeyRepeated,
+    /// One call to `prepared_decl_bundle` from
+    /// `SessionDispatchHost::scope_payload_for_base`
+    /// (`mod.rs:1661`) — the four `DispatchHost` trait callbacks
+    /// (`resolve_prepared_type_decl`, `root_identity`,
+    /// `utility_source`, `bare_ref_origin`) all route through this
+    /// helper. Dominant warm-read attribution for the K-loop hot path.
+    PreparedDeclBundleCallsiteScopePayload,
+    /// One call to `prepared_decl_bundle` from `build_instantiate`
+    /// (`build.rs:495`) — the per-instantiation scope-payload
+    /// fetch.
+    PreparedDeclBundleCallsiteBuildInstantiate,
+    /// One call to `prepared_decl_bundle` from any other site
+    /// (residual; must be small for the attribution to be useful).
+    PreparedDeclBundleCallsiteOther,
+    /// One observed collision where the SAME mapper source AST
+    /// (`(canonical_id, whole_hash, display_name)` triple) was
+    /// interned at DIFFERENT `mapped_binder_ordinal` values within
+    /// a single request — the mapper-identity-instability signal
+    /// codex flagged. Non-zero count means the per-dispatcher
+    /// counter is destabilising mapper identity across dispatch
+    /// instances, preventing the typed cache from collapsing what
+    /// SHOULD be cache hits.
+    MappedBinderOrdinalCollision,
 }
 
 /// Trait implemented by anything wanting to receive audit events.

@@ -312,6 +312,17 @@ if (focusedJsonlPath) {
       // build_typeof telemetry (gemini's HIGH-confidence direction).
       build_typeof_calls: rhp.build_typeof_calls ?? 0,
       build_typeof_prepared_value_misses: rhp.build_typeof_prepared_value_misses ?? 0,
+      // Phase G focused mapped-member materialization counters.
+      mapped_member_plain_unique: rhp.mapped_member_plain_unique ?? 0,
+      mapped_member_plain_repeated: rhp.mapped_member_plain_repeated ?? 0,
+      mapped_member_selected_key_unique: rhp.mapped_member_selected_key_unique ?? 0,
+      mapped_member_selected_key_repeated: rhp.mapped_member_selected_key_repeated ?? 0,
+      prepared_decl_bundle_callsite_scope_payload:
+        rhp.prepared_decl_bundle_callsite_scope_payload ?? 0,
+      prepared_decl_bundle_callsite_build_instantiate:
+        rhp.prepared_decl_bundle_callsite_build_instantiate ?? 0,
+      prepared_decl_bundle_callsite_other: rhp.prepared_decl_bundle_callsite_other ?? 0,
+      mapped_binder_ordinal_collision: rhp.mapped_binder_ordinal_collision ?? 0,
       // Prepared-decl-bundle per-rejection (Phase A + Phase B counter set).
       prepared_decl_bundle_cold: rhp.prepared_decl_bundle_cold ?? 0,
       prepared_decl_bundle_warm: rhp.prepared_decl_bundle_warm ?? 0,

@@ -950,13 +950,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // distinguishes mapper parameters from user-declared
                 // interface / type-alias parameters.
                 //
-                // `param_index` is assigned from the per-dispatcher
-                // ordinal so two distinct `[K in ...]` binders in the
-                // same file (or same scope) hash to distinct identity
-                // tuples. See
-                // `ProjectSemanticDispatch::mapped_binder_ordinal`
-                // for the trade-off discussion against a strict
-                // per-owning-scope counter.
+                // `param_index` is assigned from the host-owned
+                // [`MapperBinderRegistry`](crate::mapper_binder_registry)
+                // keyed by `(canonical, display_name,
+                // structural-fingerprint(source_ptr, value_ptr,
+                // name_type_ptr, optional, readonly))`. Two
+                // lowerings of the SAME source mapper share the
+                // same ordinal — and therefore the same
+                // `TypeParam` SemanticNodeId, the same
+                // `MapperKey`, and the same `MappedType` cache
+                // key. Two distinct `[K in ...]` binders in the
+                // same scope still get distinct ordinals via
+                // distinct fingerprints. See
+                // [`crate::mapper_binder_registry`].
                 let mapper_decl = match scope {
                     NodeScopeId::Global => DeclIdentity {
                         canonical_id: Arc::from(""),
@@ -973,7 +979,56 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         decl_name: Arc::from("<mapper-param>"),
                     },
                 };
-                let mapper_ordinal = self.next_mapped_binder_ordinal();
+                // Phase G fix: resolve the `param_index` ordinal
+                // through the host-owned
+                // [`MapperBinderRegistry`](crate::mapper_binder_registry::MapperBinderRegistry)
+                // keyed by `(canonical, display_name,
+                // fingerprint(source_ptr, value_ptr,
+                // name_type_ptr, optional, readonly))`. Two
+                // lowerings of the SAME source mapper get the
+                // SAME ordinal — and therefore the SAME
+                // `TypeParam` SemanticNodeId, the SAME
+                // `MapperKey`, and the SAME
+                // `SemanticQueryKey::MappedType` cache key.
+                //
+                // This replaces the per-dispatcher counter
+                // (`ProjectSemanticDispatch::next_mapped_binder_ordinal`)
+                // which destabilised mapper identity across
+                // dispatcher instances — codex's BINDING Phase G
+                // concern empirically confirmed (258,546 ordinal
+                // collisions ≈ 258,611 cold MappedType builds on
+                // ChatMessages.vue).
+                let fingerprint = crate::mapper_binder_registry::MapperFingerprint::from_components(
+                    source,
+                    value,
+                    *optional,
+                    *readonly,
+                    name_type.as_ref(),
+                );
+                let mapper_ordinal = self
+                    .ctx
+                    .project_type_store()
+                    .mapper_binder_registry()
+                    .ordinal_for(&mapper_decl.canonical_id, &mapper_display_name, fingerprint);
+                // Phase G instrumentation: classify
+                // mapper-binder-ordinal assignment for collision
+                // detection. Now that the ordinal flows from the
+                // host-owned registry the collision counter must
+                // stay at ZERO in steady state — any non-zero
+                // value means the registry is failing to stabilise
+                // mapper identity for equivalent inputs.
+                if let Some(ctx) = crate::request_context::current_request_context() {
+                    let hb = mapper_decl.whole_hash;
+                    let hash_u64 = u64::from_le_bytes([
+                        hb[0], hb[1], hb[2], hb[3], hb[4], hb[5], hb[6], hb[7],
+                    ]);
+                    let identity = crate::request_context::MapperSourceIdentity {
+                        canonical_id: Arc::clone(&mapper_decl.canonical_id),
+                        whole_hash: hash_u64,
+                        display_name: Arc::clone(&mapper_display_name),
+                    };
+                    ctx.classify_mapper_binder_ordinal(identity, mapper_ordinal);
+                }
                 let parameter_id = graph.intern_node_with_scope(
                     SemanticNodeData::TypeParam {
                         decl: mapper_decl,

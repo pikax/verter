@@ -594,6 +594,83 @@ pub struct RequestContext {
     /// `build_typeof` calls where `ensure_indexed_ready` returned
     /// `None`.
     pub build_typeof_prepared_value_misses: AtomicU64,
+    // Phase G focused mapped-member materialization counters
+    // -------------------------------------------------------
+    /// Calls to `materialize_mapped_member_value_for_key` whose
+    /// identity tuple is FIRST-SEEN in the active request.
+    pub mapped_member_plain_unique: AtomicU64,
+    /// Calls to `materialize_mapped_member_value_for_key` whose
+    /// identity tuple was already seen in the active request.
+    pub mapped_member_plain_repeated: AtomicU64,
+    /// Calls to `materialize_selected_key_mapped_value*` whose
+    /// identity tuple is FIRST-SEEN in the active request.
+    pub mapped_member_selected_key_unique: AtomicU64,
+    /// Calls to `materialize_selected_key_mapped_value*` whose
+    /// identity tuple was already seen in the active request.
+    pub mapped_member_selected_key_repeated: AtomicU64,
+    /// `prepared_decl_bundle` callsite attribution: from
+    /// `SessionDispatchHost::scope_payload_for_base`.
+    pub prepared_decl_bundle_callsite_scope_payload: AtomicU64,
+    /// `prepared_decl_bundle` callsite attribution: from
+    /// `build_instantiate`.
+    pub prepared_decl_bundle_callsite_build_instantiate: AtomicU64,
+    /// `prepared_decl_bundle` callsite attribution: residual sites.
+    pub prepared_decl_bundle_callsite_other: AtomicU64,
+    /// Mapper-binder-ordinal collisions: the same mapper source
+    /// triple interned at different ordinals within one request.
+    pub mapped_binder_ordinal_collision: AtomicU64,
+    /// Per-request observation set for mapped-member identity tuples
+    /// — used by the unique/repeated classifier in
+    /// `record_mapped_member_materialization_classify`. Lock-free
+    /// ABI: a `parking_lot::Mutex` guards the small `FxHashSet` and
+    /// is held briefly per per-K call. The set is per-request so the
+    /// classification resets between component-meta queries.
+    pub mapped_member_seen: parking_lot::Mutex<rustc_hash::FxHashSet<MappedMemberIdentity>>,
+    /// Per-request observation set for mapper-source triples →
+    /// observed ordinals, used by the binder-ordinal collision
+    /// classifier in
+    /// `record_mapper_binder_ordinal_for_classification`.
+    pub mapper_source_ordinals:
+        parking_lot::Mutex<rustc_hash::FxHashMap<MapperSourceIdentity, u16>>,
+}
+
+/// Identity tuple for the Phase G mapped-member materialization
+/// unique/repeated classifier. Pairs the mapper binder + value
+/// expression + key + reduction context — what a typed cache key
+/// for the materialization result would look like.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MappedMemberIdentity {
+    /// `mapper.parameter_node` — the binder SemanticNodeId.
+    pub parameter_node: u64,
+    /// `mapper.value_expr` — the substitution target SemanticNodeId.
+    pub value_expr: u64,
+    /// The enumerated key literal node id (interned literal-string /
+    /// literal-number) the helper is being called with.
+    pub key_node: u64,
+    /// Compact encoding of the reduction context:
+    /// `(mode_tag << 1) | demand_bit`.
+    pub context_bits: u32,
+    /// `0` = plain `materialize_mapped_member_value_for_key`,
+    /// `1` = selected-key variant.
+    pub variant: u8,
+}
+
+/// Identity tuple for the Phase G mapper-binder-ordinal collision
+/// classifier. The source triple is what `lower.rs` uses to
+/// construct the binder's `DeclIdentity`; if the same triple
+/// produces two different `param_index` ordinals across calls,
+/// downstream `SemanticNodeData::TypeParam` interns hash to two
+/// distinct SemanticNodeIds — and the typed cache misses on what
+/// SHOULD be a hit.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MapperSourceIdentity {
+    /// The mapper-binder's declaring file canonical (`""` for
+    /// `NodeScopeId::Global`).
+    pub canonical_id: Arc<str>,
+    /// The declaring file's whole-hash.
+    pub whole_hash: u64,
+    /// The mapper-parameter's display name (`"K"`, `"P"`, etc.).
+    pub display_name: Arc<str>,
 }
 
 impl RequestContext {
@@ -786,6 +863,16 @@ impl RequestContext {
             substitute_mapped_type_descend: AtomicU64::new(0),
             build_typeof_calls: AtomicU64::new(0),
             build_typeof_prepared_value_misses: AtomicU64::new(0),
+            mapped_member_plain_unique: AtomicU64::new(0),
+            mapped_member_plain_repeated: AtomicU64::new(0),
+            mapped_member_selected_key_unique: AtomicU64::new(0),
+            mapped_member_selected_key_repeated: AtomicU64::new(0),
+            prepared_decl_bundle_callsite_scope_payload: AtomicU64::new(0),
+            prepared_decl_bundle_callsite_build_instantiate: AtomicU64::new(0),
+            prepared_decl_bundle_callsite_other: AtomicU64::new(0),
+            mapped_binder_ordinal_collision: AtomicU64::new(0),
+            mapped_member_seen: parking_lot::Mutex::new(rustc_hash::FxHashSet::default()),
+            mapper_source_ordinals: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
         })
     }
 
@@ -898,6 +985,68 @@ impl RequestContext {
         if depth >= verter_audit::WALKER_DEPTH_CAP {
             self.type_resolution_recursion_limit_reached
                 .store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Classify one mapped-member materialization call as unique or
+    /// repeated based on the identity tuple
+    /// `(mapper.value_expr, mapper.parameter_node, key_node, context,
+    /// variant)`. Bumps the appropriate `mapped_member_*_unique` /
+    /// `mapped_member_*_repeated` counter via
+    /// [`verter_audit::current_observer`] — paired so a Phase G
+    /// investigator can compute the unique/repeated ratio that
+    /// determines whether a typed mapped-member cache would close
+    /// the K-loop cross product.
+    ///
+    /// Cheap on the hot path: one `Mutex` lock + one
+    /// `FxHashSet::insert` + one `AuditEvent` emission. The set
+    /// is per-request so classification resets between
+    /// component-meta queries.
+    pub fn classify_mapped_member_materialization(&self, identity: MappedMemberIdentity) {
+        let inserted = self.mapped_member_seen.lock().insert(identity);
+        let event = match (identity.variant, inserted) {
+            (0, true) => verter_audit::AuditEvent::MappedMemberPlainUnique,
+            (0, false) => verter_audit::AuditEvent::MappedMemberPlainRepeated,
+            (_, true) => verter_audit::AuditEvent::MappedMemberSelectedKeyUnique,
+            (_, false) => verter_audit::AuditEvent::MappedMemberSelectedKeyRepeated,
+        };
+        if let Some(obs) = verter_audit::current_observer() {
+            obs.record_event(event);
+        }
+    }
+
+    /// Classify one mapped-binder-ordinal assignment. Records the
+    /// `(canonical_id, whole_hash, display_name)` triple → ordinal
+    /// mapping; if the same triple has already been assigned a
+    /// DIFFERENT ordinal earlier in this request, bumps
+    /// `mapped_binder_ordinal_collision` (mapper-identity-instability).
+    ///
+    /// Phase G mapper-identity-stability gate. A non-zero count
+    /// confirms codex's mapper-identity-instability concern at
+    /// `lower.rs:976` — the same mapper source triple receiving
+    /// different ordinals from different dispatcher instances will
+    /// hash to distinct `SemanticNodeData::TypeParam` interns and
+    /// the typed mapped-member cache will MISS on what should be a
+    /// HIT.
+    pub fn classify_mapper_binder_ordinal(&self, identity: MapperSourceIdentity, ordinal: u16) {
+        let mut map = self.mapper_source_ordinals.lock();
+        match map.get(&identity) {
+            Some(&existing) if existing == ordinal => {
+                // Same triple, same ordinal — stable. No-op.
+            }
+            Some(_) => {
+                // Same triple, DIFFERENT ordinal. Mapper-identity
+                // instability — record the collision but leave the
+                // first-seen ordinal in place so subsequent
+                // observations still detect drift.
+                drop(map);
+                if let Some(obs) = verter_audit::current_observer() {
+                    obs.record_event(verter_audit::AuditEvent::MappedBinderOrdinalCollision);
+                }
+            }
+            None => {
+                map.insert(identity, ordinal);
+            }
         }
     }
 }
@@ -1144,6 +1293,38 @@ impl verter_audit::AuditObserver for RequestContext {
             }
             verter_audit::AuditEvent::BuildTypeofPreparedValueMiss => {
                 self.build_typeof_prepared_value_misses
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::MappedMemberPlainUnique => {
+                self.mapped_member_plain_unique
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::MappedMemberPlainRepeated => {
+                self.mapped_member_plain_repeated
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::MappedMemberSelectedKeyUnique => {
+                self.mapped_member_selected_key_unique
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::MappedMemberSelectedKeyRepeated => {
+                self.mapped_member_selected_key_repeated
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::PreparedDeclBundleCallsiteScopePayload => {
+                self.prepared_decl_bundle_callsite_scope_payload
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::PreparedDeclBundleCallsiteBuildInstantiate => {
+                self.prepared_decl_bundle_callsite_build_instantiate
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::PreparedDeclBundleCallsiteOther => {
+                self.prepared_decl_bundle_callsite_other
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::MappedBinderOrdinalCollision => {
+                self.mapped_binder_ordinal_collision
                     .fetch_add(1, Ordering::Relaxed);
             }
         }

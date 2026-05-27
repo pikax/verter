@@ -3793,6 +3793,12 @@ mod foundations_guards {
         "pub(crate) mod host_test_audit",
         "pub(crate) mod instant",
         "pub(crate) mod intrinsic_registry",
+        // Phase G — host-owned mapped-binder ordinal registry
+        // for stable `MapperKey` cache identity across dispatcher
+        // instances. Internal substrate; consumed only by
+        // `project_semantic_dispatch::lower`'s `TypeExpr::Mapped`
+        // arm via `ProjectTypeStore::mapper_binder_registry()`.
+        "pub(crate) mod mapper_binder_registry",
         // tests/cache_invariant_migration.rs — the W0.5 schema-bump
         // cohort fixture exercises `OwnerImportSurfaceDb::evict_if_schema_mismatch`.
         "pub mod owner_import_surface",

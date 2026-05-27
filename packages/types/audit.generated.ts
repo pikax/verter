@@ -1946,7 +1946,53 @@ build_typeof_calls: number,
  * `build_typeof` calls where `ensure_indexed_ready` returned
  * `None` (the brief's prepared-value miss site).
  */
-build_typeof_prepared_value_misses: number, };
+build_typeof_prepared_value_misses: number, 
+/**
+ * Per-K calls to `materialize_mapped_member_value_for_key` whose
+ * identity tuple is FIRST-SEEN in the request.
+ */
+mapped_member_plain_unique: number, 
+/**
+ * Per-K calls to `materialize_mapped_member_value_for_key` whose
+ * identity tuple was already seen — would be a cache hit.
+ */
+mapped_member_plain_repeated: number, 
+/**
+ * Per-K calls to `materialize_selected_key_mapped_value*` whose
+ * identity tuple is FIRST-SEEN in the request.
+ */
+mapped_member_selected_key_unique: number, 
+/**
+ * Per-K calls to `materialize_selected_key_mapped_value*` whose
+ * identity tuple was already seen — would be a cache hit.
+ */
+mapped_member_selected_key_repeated: number, 
+/**
+ * `prepared_decl_bundle` warm-read attribution: calls from
+ * `SessionDispatchHost::scope_payload_for_base` (dominant
+ * expected K-loop source).
+ */
+prepared_decl_bundle_callsite_scope_payload: number, 
+/**
+ * `prepared_decl_bundle` warm-read attribution: calls from
+ * `build_instantiate`.
+ */
+prepared_decl_bundle_callsite_build_instantiate: number, 
+/**
+ * `prepared_decl_bundle` warm-read attribution: residual sites
+ * (must be small for attribution to be useful).
+ */
+prepared_decl_bundle_callsite_other: number, 
+/**
+ * Mapper-identity-instability signal: same mapper source
+ * triple received DIFFERENT `mapped_binder_ordinal` ordinals
+ * from different dispatcher instances during this request.
+ * Non-zero count means codex's mapper-identity-instability
+ * concern is confirmed — the typed mapped-member cache would
+ * MISS on what should be a HIT until ordinal assignment is
+ * stabilised.
+ */
+mapped_binder_ordinal_collision: number, };
 
 /**
  * Scheduler-side attribution captured at first dispatch of an audited
