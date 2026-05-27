@@ -197,7 +197,7 @@ impl VerterHost {
                 obs.record_event(verter_audit::AuditEvent::PreparedDeclBundleCold);
             }
             let result = self
-                .materialize_prepared_decl_bundle_from_route_owned_shallow(canonical_id)
+                .materialize_prepared_decl_bundle_from_route_owned_shallow(view, canonical_id)
                 .or_else(|| self.materialize_prepared_decl_bundle(canonical_id));
             let stable = result.is_some();
             Ok(crate::resolver_core::StableExecutionValue {
@@ -453,6 +453,7 @@ impl VerterHost {
 
     fn materialize_prepared_decl_bundle_from_route_owned_shallow(
         &self,
+        view: &dyn crate::resolver_core::StoreView,
         canonical_id: &str,
     ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
         let declaration_file = canonical_id.ends_with(".d.ts")
@@ -521,6 +522,48 @@ impl VerterHost {
                 hash: import_route_hash,
             });
         }
+
+        // Promote the route-owned canonical's facts into the request
+        // overlay BEFORE the bundle insert. Without this promotion the
+        // request-entry [`HostStoreView`] snapshot misses the
+        // just-published canonical (the snapshot is built once at
+        // request entry from `snapshot_route_owned_shallow_cache_entries`
+        // — entries published after that lookup are invisible to the
+        // view), and every subsequent warm-validation of the bundle's
+        // stored `(FileWholeHash, ImportRoute)` facts falls through to
+        // the base view's untracked-canonical reject. The next read
+        // therefore triggers a fresh cold rebuild, and the loop
+        // repeats every time the canonical is consulted. With the
+        // promotion the overlay knows the canonical's authoritative
+        // hashes and the next warm read matches.
+        //
+        // `route_hash` is `None` when the shallow state has no
+        // resolvable surface — mirrors
+        // `RouteOwnedShallowStateSnapshot::from_entry` (only
+        // computes the hash when `has_resolvable_surface()` is true).
+        // The host view's snapshot uses the same predicate, so the
+        // overlay stays in sync with what the request-entry view
+        // would have carried had the canonical been published before
+        // snapshot time.
+        //
+        // The producer-side epoch guard would mirror
+        // `complete_canonical_inner`'s
+        // `host.current_store_view_epoch() != base.mutation_epoch()`
+        // short-circuit — but the resolver-tier `StoreView` trait
+        // cannot take `&VerterHost` (`no_concrete_verter_host_in_seal_scope`
+        // architecture guard). The materialiser publishes
+        // unconditionally; a superseded view will be detected by
+        // the outer audited-request retry loop, which discards the
+        // overlay before re-running the request.
+        let route_hash = state
+            .has_resolvable_surface()
+            .then(|| crate::resolver_store::hash_route_surface(state.as_ref()));
+        view.promote_route_owned_completion(
+            canonical_id,
+            state.whole_hash,
+            route_hash,
+            live_import_route_hash,
+        );
 
         // Strict admission. Bundles always carry `FileWholeHash`.
         self.resolver

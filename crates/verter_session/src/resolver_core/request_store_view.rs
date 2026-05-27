@@ -256,6 +256,72 @@ impl CanonicalCompletionOverlay {
         self.complete_canonical_inner(host, base, canonical, Some(view));
     }
 
+    /// Promote a route-owned-shallow canonical's facts into the
+    /// overlay without consulting `host.scheduler` /
+    /// `host.effective_file_state` / `host.project_type_store().indexed()`.
+    ///
+    /// The base [`Self::complete_canonical`] / `_inner` path resolves
+    /// the canonical's `whole_hash` from the scheduler then loads
+    /// `FileArtifacts` from the indexed authority to populate
+    /// `file_facts` + derived hashes. Route-owned-shallow canonicals
+    /// (declaration files — `.d.ts`, `.d.mts`, `.d.cts` — for which
+    /// `ensure_indexed_ready` does not produce an artifact) have NO
+    /// indexed artifact, so the indexed-authority fallback inside
+    /// [`Self::write_completion_entry`] returns `None` and the route /
+    /// import-route derived-hash entries never enter the overlay. The
+    /// next warm-read validation of a route-owned bundle's stored
+    /// `ImportRoute` fact therefore falls through to the base view's
+    /// `derived_hashes` snapshot — which itself does not see entries
+    /// published after the snapshot was built — and rejects the
+    /// bundle as `untracked`, causing a fresh cold rebuild every
+    /// time.
+    ///
+    /// This method writes the producer-known `(whole_hash, route_hash,
+    /// import_route_hash)` triple directly into the overlay. Each
+    /// flag-after-insert ordering matches
+    /// [`Self::write_completion_entry`] (lock held across the map
+    /// insert + `_nonempty` flag store + release).
+    ///
+    /// The epoch guard against `host.current_store_view_epoch !=
+    /// base.mutation_epoch()` lives at the producer-side call site
+    /// (the host-tier prepared-decl-bundle materialiser holds the
+    /// concrete `&VerterHost` and the base view, and can short-circuit
+    /// before invoking this overlay write). Keeping `host` out of the
+    /// resolver-tier API surface preserves the resolver-context seal
+    /// (`no_concrete_verter_host_in_seal_scope` architecture guard).
+    pub(crate) fn complete_route_owned_canonical(
+        &self,
+        canonical: &str,
+        whole_hash: Hash16,
+        route_hash: Option<Hash16>,
+        import_route_hash: Option<Hash16>,
+    ) {
+        // Mirror the flag-after-insert ordering of
+        // `write_completion_entry`: hold the lock across the map
+        // insert + `_nonempty` flag store + release so a concurrent
+        // reader observing `_nonempty == false` is guaranteed to also
+        // observe the map as still empty for the canonical.
+        {
+            let mut whole = self.whole_hashes.write();
+            whole.insert(canonical.to_owned(), whole_hash);
+            self.whole_hashes_nonempty.store(true, Ordering::Release);
+            drop(whole);
+        }
+
+        if route_hash.is_some() || import_route_hash.is_some() {
+            let mut derived = self.derived_hashes.write();
+            let entry = derived.entry(canonical.to_owned()).or_default();
+            if let Some(h) = route_hash {
+                entry.route = Some(h);
+            }
+            if let Some(h) = import_route_hash {
+                entry.import_route = Some(h);
+            }
+            self.derived_hashes_nonempty.store(true, Ordering::Release);
+            drop(derived);
+        }
+    }
+
     fn complete_canonical_inner(
         &self,
         host: &crate::VerterHost,
@@ -727,5 +793,30 @@ impl<'a> StoreView for RequestStoreView<'a> {
         // directly to the base view eliminates the dead probe + lock
         // acquire on every `ModuleAugmentationIndexShape` validation.
         self.base.validates_route_surface_domain(fact)
+    }
+
+    fn promote_route_owned_completion(
+        &self,
+        canonical: &str,
+        whole_hash: Hash16,
+        route_hash: Option<Hash16>,
+        import_route_hash: Option<Hash16>,
+    ) {
+        // Route the call through the overlay's
+        // `complete_route_owned_canonical` writer — it writes
+        // `whole_hashes` + `derived_hashes` entries with the same
+        // flag-after-insert ordering as the standard
+        // `write_completion_entry` path. The epoch guard lives at
+        // the producer-side call site (where the concrete host is
+        // available) so this trait method stays off the
+        // `VerterHost` type and the resolver-context seal
+        // (`no_concrete_verter_host_in_seal_scope` architecture
+        // guard) keeps holding.
+        self.overlay.complete_route_owned_canonical(
+            canonical,
+            whole_hash,
+            route_hash,
+            import_route_hash,
+        );
     }
 }

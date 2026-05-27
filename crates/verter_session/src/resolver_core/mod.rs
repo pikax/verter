@@ -247,6 +247,59 @@ pub trait StoreView {
     fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool {
         sig.iter().all(|f| self.validates(f))
     }
+
+    /// Promote a route-owned-shallow canonical's facts into the
+    /// request-scoped completion overlay.
+    ///
+    /// Called by the cold prepared-decl-bundle materialiser that
+    /// publishes route-owned-only canonicals (declaration files —
+    /// `.d.ts`, `.d.mts`, `.d.cts` — for which `ensure_indexed_ready`
+    /// does not produce an artifact; the route-owned-shallow path
+    /// publishes a bundle keyed against the route-owned `whole_hash`
+    /// and the live-generation `import_route_hash`). Without this
+    /// promotion the request-entry [`crate::resolver_store::HostStoreView`]
+    /// snapshot misses the just-published canonical's `Route` /
+    /// `ImportRoute` derived-fact entries (the snapshot is built ONCE
+    /// at request entry from `snapshot_route_owned_shallow_cache_entries`
+    /// — entries published after that snapshot lookup are invisible to
+    /// the view), and every subsequent warm-validation read of the
+    /// bundle's stored derived-fact hashes routes through the base
+    /// view's untracked-canonical reject and triggers a fresh cold
+    /// rebuild. With promotion the next read sees the route-owned
+    /// canonical as tracked, the warm validation matches, and the
+    /// bundle's cold/warm ratio collapses from O(N) cold rebuilds to
+    /// the expected 1:N (one cold + N-1 warm).
+    ///
+    /// The producer-side caller is responsible for the epoch guard
+    /// (skip the call if the host's `current_store_view_epoch` no
+    /// longer matches the base view's `mutation_epoch`) — keeping
+    /// the trait off the concrete `VerterHost` type to preserve the
+    /// resolver-context seal (architecture guard
+    /// `no_concrete_verter_host_in_seal_scope`).
+    ///
+    /// Implementers writing into a per-request overlay must:
+    /// - Insert `whole_hash` into the overlay's `whole_hashes` map
+    ///   (so `validates_self_root_whole_hash` accepts the bundle's
+    ///   `FileWholeHash` self-root).
+    /// - Insert `route_hash` into the overlay's `derived_hashes` under
+    ///   the `Route` kind when `Some`.
+    /// - Insert `import_route_hash` into the overlay's `derived_hashes`
+    ///   under the `ImportRoute` kind when `Some` (this is the leak
+    ///   the producer captures — the bundle's fact hash MUST match
+    ///   what the view's snapshot would carry).
+    ///
+    /// Default impl is no-op so non-request views (the bare
+    /// [`crate::resolver_store::HostStoreView`], test-only
+    /// [`PermissiveStoreView`], etc.) inherit "no overlay" semantics
+    /// — they have no per-request append-only side maps to mutate.
+    fn promote_route_owned_completion(
+        &self,
+        _canonical: &str,
+        _whole_hash: crate::types::Hash16,
+        _route_hash: Option<crate::types::Hash16>,
+        _import_route_hash: Option<crate::types::Hash16>,
+    ) {
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
