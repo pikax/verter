@@ -99,6 +99,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let host_db = ctx.project_type_store().imported_registry_db();
         if let Some(opt_arc) = host_db.peek(&arc_key, ctx) {
             let cached = opt_arc.as_deref().cloned();
+            // Per-request audit attribution: imported-registry-symbol
+            // served from a host-cache peek. Differentiate warm
+            // positive from warm negative (`None`) so the audit
+            // reflects how many of the warm hits were actually
+            // "this symbol is known unresolvable".
+            if let Some(obs) = verter_audit::current_observer() {
+                obs.record_event(verter_audit::AuditEvent::ImportedRegistryWarm);
+                if cached.is_none() {
+                    obs.record_event(verter_audit::AuditEvent::ImportedRegistryNegative);
+                }
+            }
             self.imported_registry_symbols
                 .borrow_mut()
                 .insert(key, cached.clone());
@@ -199,6 +210,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let host_value = host_db.get_or_compute_admit(&arc_key, ctx, || {
             #[cfg(test)]
             super::IMPORTED_REGISTRY_RESOLVE_INVOCATIONS.with(|n| n.set(n.get().saturating_add(1)));
+            // Per-request audit attribution: cold path running the
+            // expensive `resolve_imported_registry_symbol_with_budget`
+            // resolution. Joiners that block on this closure do NOT
+            // re-enter — so the counter reflects unique cold work,
+            // not per-waiter overhead.
+            if let Some(obs) = verter_audit::current_observer() {
+                obs.record_event(verter_audit::AuditEvent::ImportedRegistryCold);
+            }
             // Snapshot the project generation BEFORE the resolution
             // dispatches any work. The `fact_dep_signature` carrier
             // validates only file-content whole-hashes; a
@@ -257,6 +276,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             Some(cached) => cached.as_deref().cloned(),
             None => None,
         };
+        // Per-request audit attribution: a `None` result on the cold
+        // path indicates the imported-registry-symbol resolution
+        // could not find the symbol at all from the owner. The warm
+        // peek branch above handles the warm-negative case separately.
+        if result.is_none() {
+            if let Some(obs) = verter_audit::current_observer() {
+                obs.record_event(verter_audit::AuditEvent::ImportedRegistryNegative);
+            }
+        }
         self.imported_registry_symbols
             .borrow_mut()
             .insert(key, result.clone());

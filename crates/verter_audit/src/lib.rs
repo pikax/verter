@@ -74,7 +74,8 @@ pub use files::{FileAudit, FileRole};
 pub use footprint::{
     AliasResolveRecord, CacheOutcomeTally, ConditionalRecord, GraphCompletenessReport,
     IndexedReadyBuildRecord, InstantiationRecord, MaterializationRecord, ProjectionRecord,
-    RequestFootprintAudit, SharedLoadReuseRecord, SubstitutionRecord, VfsReadRecord,
+    RequestFootprintAudit, ResolverHotPathCounters, SharedLoadReuseRecord, SubstitutionRecord,
+    VfsReadRecord,
 };
 pub use memory::{current_process_rss, RequestMemoryAudit};
 pub use noop::{install_noop_observer, NoOpObserver, NoOpObserverGuard};

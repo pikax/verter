@@ -17,8 +17,7 @@ use crate::scheduler::SchedulerAudit;
 ///
 /// Producers prefer the dedicated `record_*` methods over the generic
 /// `record_event`; this enum carries counter-style attributions for
-/// events without a structured payload — used today by the
-/// inflight-abort retry mirror and the cold-abort sweep tick.
+/// events without a structured payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AuditEvent {
     /// One inflight-aborted retry observed in the cold-resolver loop.
@@ -32,6 +31,95 @@ pub enum AuditEvent {
     /// without bypassing the `CodeTransform` API surface (see CLAUDE.md
     /// §"CodeTransform Is the Single Source of Truth").
     CompileCodeTransformOp,
+    /// One invocation of the cross-file external-type frontier closure
+    /// (route-graph BFS in `verter_session::host_resolve::frontier_engine`).
+    /// Producer increments at the entry of
+    /// `run_external_type_frontier_closure_with_view`.
+    FrontierClosureInvocation,
+    /// Subset of [`Self::FrontierClosureInvocation`] whose final target
+    /// was `None` (broken import chain — no exported symbol resolved).
+    /// Producer increments AFTER the closure returns `Ok((_, None, _))`.
+    FrontierClosureTargetNone,
+    /// Subset of [`Self::FrontierClosureTargetNone`] where the
+    /// `(owner_canonical, type_name)` pair already returned `None`
+    /// earlier in the same audited request. Producer side checks a
+    /// per-request set; the FIRST `None` for a pair bumps only
+    /// `FrontierClosureTargetNone`, subsequent `None`s bump BOTH.
+    FrontierClosureRedundantTargetNonePair,
+    /// One warm hit on a host-owned "this `(owner, type)` resolved to
+    /// `None`" entry in the resolved-external-type cache. Always `0`
+    /// today (the cache only carries positive entries) — non-zero
+    /// values indicate negative caching has landed.
+    ResolvedExternalTypeCacheNegativeHit,
+    /// One miss on a host-owned negative entry in the
+    /// resolved-external-type cache. Proxies "we re-walked the
+    /// frontier because there was no negative entry to short-circuit".
+    /// Producer increments when the cache lookup returns no entry AND
+    /// the closure subsequently returned `target = None`.
+    ResolvedExternalTypeCacheNegativeMiss,
+    /// One cold (cache-miss) import-route resolution that returned a
+    /// positive target. Producer at the type-import lookup site.
+    ResolveImportColdPositive,
+    /// One cold import-route resolution that returned `None` (no
+    /// known target — workspace resolver said the specifier is
+    /// unresolvable from this owner).
+    ResolveImportColdNegative,
+    /// One warm import-route resolution served from the host cache /
+    /// `IndexedReady.import_routes` snapshot with a positive target.
+    ResolveImportWarmPositive,
+    /// One warm import-route resolution served from cache with a
+    /// negative (known-miss) target.
+    ResolveImportWarmNegative,
+    /// One import-route lookup that returned an entry the helper
+    /// classified as `import_route_is_known_miss` (the route was
+    /// previously recorded as unresolvable and is being served from
+    /// the known-miss sidecar). Producer at `authoritative_import_route`.
+    KnownMissRouteServed,
+    /// One known-miss entry that the validator REVALIDATED as still
+    /// missing in the current `content_generation` (no new file
+    /// appeared to satisfy it). Producer at the
+    /// `cached_import_route_resolution` validator branch.
+    KnownMissRouteRevalidated,
+    /// One known-miss entry that the validator RECOMPUTED because the
+    /// `content_generation` advanced past the recorded value (a new
+    /// candidate file may now satisfy it). Producer at the
+    /// `cached_import_route_resolution` validator branch.
+    KnownMissRouteRecomputed,
+    /// One cold resolution of an imported registry symbol (cache miss
+    /// in `ImportedRegistryDb`). Producer at the cooperative-admission
+    /// closure entry in
+    /// `ComponentMetaQueryEngine::resolve_imported_registry_symbol`.
+    ImportedRegistryCold,
+    /// One warm hit on `ImportedRegistryDb` peek. Producer at the
+    /// `host_db.peek(...)` branch.
+    ImportedRegistryWarm,
+    /// One imported-registry resolution that returned `None` (the
+    /// symbol could not be resolved at all from the owner). Producer
+    /// at the cold closure's negative return.
+    ImportedRegistryNegative,
+    /// One cold (cache-miss) imported-type-root resolution. Producer
+    /// at the `ImportedRootDb::get_or_resolve_returning_facts` closure
+    /// entry — the closure body runs only on cache miss.
+    ImportedRootCold,
+    /// One warm-cache hit on imported-type-root resolution. Producer
+    /// at the post-cache-lookup branch where the returned `Some` came
+    /// from cache (the closure did not run).
+    ImportedRootWarm,
+    /// One barrel-export hop traversed during route-frontier
+    /// resolution (`export { X } from 'Y'` re-export chain).
+    /// Producer at the `route_shallow_state` barrel-edge expansion.
+    RouteDbBarrelStep,
+    /// One `export *` wildcard fan-out expansion observed during
+    /// route-frontier resolution. Producer at the wildcard-route
+    /// fanout fuse check site (one per source the wildcard enumerates).
+    RouteDbWildcardFanout,
+    /// One cold (cache-miss) prepared-decl bundle materialization.
+    /// Producer at the singleflight-leader closure entry in
+    /// `prepared_decl_bundle_with_store_view`.
+    PreparedDeclBundleCold,
+    /// One warm prepared-decl bundle cache hit. Producer at the
+    /// fast-path `get_if_valid_self_rooted` success branch.
+    PreparedDeclBundleWarm,
 }
 
 /// Trait implemented by anything wanting to receive audit events.

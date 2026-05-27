@@ -235,6 +235,27 @@ impl VerterHost {
         }
 
         let Some(target) = target else {
+            // Per-request audit attribution. The cross-file frontier
+            // closure resolved this `(owner, type_name)` pair to
+            // `target = None` — broken import chain. The session
+            // helper bumps `frontier_closure_invocations_target_none`
+            // always, and bumps
+            // `frontier_closure_redundant_target_none_pairs` when the
+            // same pair was already observed earlier in this request
+            // — the dominant signal for the "cross-request
+            // negative-resolution caching defect" hypothesis. The
+            // host-owned resolved-type cache stores positive entries
+            // only and is consulted only AFTER `target = Some`, so a
+            // `None` outcome here ALWAYS proxies "no negative cache
+            // entry short-circuited the closure" — emit
+            // `ResolvedExternalTypeCacheNegativeMiss` to surface the
+            // cost separately from the redundant-pair count.
+            if let Some(req_ctx) = crate::request_context::current_request_context() {
+                req_ctx.observe_frontier_target_none_for_pair(owner_canonical, type_name);
+            }
+            if let Some(obs) = verter_audit::current_observer() {
+                obs.record_event(verter_audit::AuditEvent::ResolvedExternalTypeCacheNegativeMiss);
+            }
             if self.ensure_indexed_ready(dep_canonical.as_str()).is_none() {
                 if required_root_dep {
                     let err = crate::types::ExternalTypeResolveError::MissingRootDependency;
@@ -288,6 +309,18 @@ impl VerterHost {
                 self.provenance
                     .resolved_external_type_cache_hits
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Per-request audit attribution: differentiate a warm
+                // POSITIVE hit (entry.resolved.is_some()) from a warm
+                // NEGATIVE hit (entry.resolved.is_none()). The negative
+                // arm is the discriminating signal that would land
+                // once host-side negative caching is implemented.
+                if let Some(obs) = verter_audit::current_observer() {
+                    if entry.resolved.is_none() {
+                        obs.record_event(
+                            verter_audit::AuditEvent::ResolvedExternalTypeCacheNegativeHit,
+                        );
+                    }
+                }
                 for dep in &entry.tracked_deps {
                     tracked_deps.insert(dep.clone());
                     resolution_deps.insert(dep.clone());

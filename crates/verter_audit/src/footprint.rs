@@ -58,6 +58,16 @@ pub struct RequestFootprintAudit {
     /// before this field landed.
     #[serde(default)]
     pub structured_events: Vec<StructuredAuditEvent>,
+    /// Per-request hot-path counters for the resolver / import-route
+    /// substrate. Exact per-request because each counter is bumped
+    /// against the active observer's per-request atomics. Zero-valued
+    /// counters are still emitted (serde does not skip them) so audit
+    /// consumers can rely on a stable shape for diffing.
+    ///
+    /// Serde-default for back-compat with audit payloads written
+    /// before this field landed.
+    #[serde(default)]
+    pub resolver_hot_path: ResolverHotPathCounters,
 }
 
 impl RequestFootprintAudit {
@@ -286,4 +296,80 @@ pub struct GraphCompletenessReport {
     pub has_orphan_edges: bool,
     /// Count of edges dropped during truncation.
     pub edges_truncated: u32,
+}
+
+/// Per-request resolver / import-route hot-path counters. Populated
+/// by producer-side emits via `verter_audit::current_observer()` and
+/// surfaced on [`RequestFootprintAudit::resolver_hot_path`]. Exact
+/// per-request — each field maps to one [`crate::AuditEvent`]
+/// variant (or pair) that the session-side `RequestContext` bumps
+/// atomically.
+///
+/// All counters are zero by default; consumers diff them against
+/// other components' audits to attribute cost spikes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "audit.generated.ts")]
+pub struct ResolverHotPathCounters {
+    /// Total invocations of
+    /// `run_external_type_frontier_closure_with_view` during the
+    /// audited request.
+    pub frontier_closure_invocations_total: u32,
+    /// Subset of [`Self::frontier_closure_invocations_total`] whose
+    /// frontier returned `target = None` (broken import chain).
+    pub frontier_closure_invocations_target_none: u32,
+    /// Subset of [`Self::frontier_closure_invocations_target_none`]
+    /// where the `(owner_canonical, type_name)` pair already emitted
+    /// a `None` earlier in the same request — the producer detected
+    /// the duplicate via a per-request set. The dominant signal for
+    /// the "cross-request negative-resolution caching defect"
+    /// hypothesis.
+    pub frontier_closure_redundant_target_none_pairs: u32,
+    /// Warm hits on a host-owned negative entry in the
+    /// resolved-external-type cache. Always `0` until negative
+    /// caching lands.
+    pub resolved_external_type_cache_negative_hits: u32,
+    /// Misses on a host-owned negative entry — the cache had no
+    /// "known None" entry to short-circuit, so the closure walked
+    /// the frontier fully.
+    pub resolved_external_type_cache_negative_misses: u32,
+    /// Cold import-route resolutions that returned a positive
+    /// target.
+    pub resolve_import_cold_positive: u32,
+    /// Cold import-route resolutions that returned `None` (no
+    /// known target).
+    pub resolve_import_cold_negative: u32,
+    /// Warm import-route resolutions served with a positive target.
+    pub resolve_import_warm_positive: u32,
+    /// Warm import-route resolutions served with a known-miss target.
+    pub resolve_import_warm_negative: u32,
+    /// Import-route lookups that the helper classified as
+    /// `import_route_is_known_miss`.
+    pub known_miss_route_served: u32,
+    /// Known-miss entries the validator revalidated as still missing
+    /// in the current `content_generation`.
+    pub known_miss_route_revalidated: u32,
+    /// Known-miss entries the validator recomputed because the
+    /// `content_generation` advanced past the recorded value.
+    pub known_miss_route_recomputed: u32,
+    /// Cold imported-registry-symbol resolutions (cache miss in
+    /// `ImportedRegistryDb`).
+    pub imported_registry_cold: u32,
+    /// Warm imported-registry-symbol resolutions (`peek` hit).
+    pub imported_registry_warm: u32,
+    /// Imported-registry-symbol resolutions that returned `None`
+    /// from the cold compute path.
+    pub imported_registry_negative: u32,
+    /// Cold imported-type-root resolutions (closure body ran).
+    pub imported_root_cold: u32,
+    /// Warm imported-type-root resolutions (closure did not run).
+    pub imported_root_warm: u32,
+    /// Barrel-export hops traversed during route-frontier resolution.
+    pub route_db_barrel_steps: u32,
+    /// `export *` wildcard fan-out expansions observed.
+    pub route_db_wildcard_fanout: u32,
+    /// Cold prepared-decl bundle materializations (singleflight
+    /// leader closure ran).
+    pub prepared_decl_bundle_cold: u32,
+    /// Warm prepared-decl bundle cache hits.
+    pub prepared_decl_bundle_warm: u32,
 }

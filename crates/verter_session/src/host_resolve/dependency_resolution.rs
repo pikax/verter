@@ -93,6 +93,23 @@ impl VerterHost {
             // already revalidates known-miss entries against the
             // `import_routes_known_miss_recorded_at_generation` sidecar,
             // so anything it returns is generation-current.
+            //
+            // Per-request audit attribution: classify the warm hit as
+            // positive vs negative (known-miss). Negative warm hits are
+            // the discriminating signal that the known-miss sidecar
+            // short-circuited a re-resolution for this audited request.
+            if let Some(obs) = verter_audit::current_observer() {
+                let known_miss = Self::import_route_is_known_miss(&resolution);
+                let event = if known_miss {
+                    verter_audit::AuditEvent::ResolveImportWarmNegative
+                } else {
+                    verter_audit::AuditEvent::ResolveImportWarmPositive
+                };
+                obs.record_event(event);
+                if known_miss {
+                    obs.record_event(verter_audit::AuditEvent::KnownMissRouteServed);
+                }
+            }
             (Some(resolution), "host-cache")
         } else {
             // `IndexedReady.import_routes` fallback. This snapshot is
@@ -119,6 +136,18 @@ impl VerterHost {
                 .get(import_source)
                 .cloned()
                 .filter(|resolution| !Self::import_route_is_known_miss(resolution));
+            // Per-request audit attribution: an `IndexedReady` lookup
+            // is a "cold" resolution from the audit's perspective
+            // (the host-cache miss above forced us into the
+            // snapshot). Classify positive vs negative.
+            if let Some(obs) = verter_audit::current_observer() {
+                let event = if from_indexed.is_some() {
+                    verter_audit::AuditEvent::ResolveImportColdPositive
+                } else {
+                    verter_audit::AuditEvent::ResolveImportColdNegative
+                };
+                obs.record_event(event);
+            }
             (from_indexed, "indexed_ready")
         };
 

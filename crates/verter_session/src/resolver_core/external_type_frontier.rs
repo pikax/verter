@@ -236,6 +236,14 @@ impl ExternalTypeFrontier {
             // Prefer the pre-canonicalized edge, but ask the host for a
             // type-route target when the shallow state left the edge empty.
             for ext_ref in &resolved.unresolved_external {
+                // Per-request audit attribution: one barrel-export hop
+                // traversed. Each external ref the BFS expands counts
+                // as one barrel step, including refs whose target is
+                // later deduplicated by the `seen` set — the counter
+                // measures raw walk work, not unique-target count.
+                if let Some(obs) = verter_audit::current_observer() {
+                    obs.record_event(verter_audit::AuditEvent::RouteDbBarrelStep);
+                }
                 let target_canonical = if ext_ref.canonical_id.is_empty() {
                     host.resolve_type_edge_canonical(
                         &resolved.canonical_id,

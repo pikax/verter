@@ -568,6 +568,71 @@ pub struct RequestContext {
     /// non-zero value pins that the no-poison gate fired during the
     /// request.
     pub memo_publish_suppressed: AtomicU64,
+
+    // ─────── Resolver / import-route hot-path counters ───────
+    //
+    // Populated by producer-side emits via
+    // `verter_audit::current_observer().record_event(...)`. Snapshotted
+    // at request finalisation into
+    // [`verter_audit::ResolverHotPathCounters`] on the
+    // [`verter_audit::RequestFootprintAudit::resolver_hot_path`] field.
+    /// Total invocations of `run_external_type_frontier_closure_with_view`.
+    pub frontier_closure_invocations_total: AtomicU64,
+    /// Subset of [`Self::frontier_closure_invocations_total`] whose
+    /// frontier returned `target = None`.
+    pub frontier_closure_invocations_target_none: AtomicU64,
+    /// Subset of [`Self::frontier_closure_invocations_target_none`]
+    /// for `(owner, type_name)` pairs already observed in the request.
+    /// Discriminating signal for the "cross-request negative-resolution
+    /// caching defect" hypothesis.
+    pub frontier_closure_redundant_target_none_pairs: AtomicU64,
+    /// Per-request set tracking the `(owner_canonical, type_name)`
+    /// pairs that have already emitted a `None` from the frontier
+    /// closure during this request. Used by the producer to discriminate
+    /// "first None for pair" (bumps only `target_none`) from "subsequent
+    /// None for same pair" (bumps both `target_none` AND
+    /// `redundant_target_none_pairs`).
+    pub frontier_target_none_pairs_seen:
+        Mutex<rustc_hash::FxHashSet<(std::string::String, std::string::String)>>,
+    /// Warm hits on a host-owned negative entry in the
+    /// resolved-external-type cache.
+    pub resolved_external_type_cache_negative_hits: AtomicU64,
+    /// Misses on a host-owned negative entry — the cache had no
+    /// "known None" entry to short-circuit.
+    pub resolved_external_type_cache_negative_misses: AtomicU64,
+    /// Cold import-route resolutions that returned a positive target.
+    pub resolve_import_cold_positive: AtomicU64,
+    /// Cold import-route resolutions that returned `None`.
+    pub resolve_import_cold_negative: AtomicU64,
+    /// Warm import-route resolutions served with a positive target.
+    pub resolve_import_warm_positive: AtomicU64,
+    /// Warm import-route resolutions served with a known-miss target.
+    pub resolve_import_warm_negative: AtomicU64,
+    /// Import-route lookups classified as `import_route_is_known_miss`.
+    pub known_miss_route_served: AtomicU64,
+    /// Known-miss entries revalidated as still missing.
+    pub known_miss_route_revalidated: AtomicU64,
+    /// Known-miss entries recomputed because the `content_generation`
+    /// advanced.
+    pub known_miss_route_recomputed: AtomicU64,
+    /// Cold imported-registry-symbol resolutions.
+    pub imported_registry_cold: AtomicU64,
+    /// Warm imported-registry-symbol resolutions (`peek` hit).
+    pub imported_registry_warm: AtomicU64,
+    /// Imported-registry-symbol resolutions that returned `None`.
+    pub imported_registry_negative: AtomicU64,
+    /// Cold imported-type-root resolutions (closure body ran).
+    pub imported_root_cold: AtomicU64,
+    /// Warm imported-type-root resolutions (cached value reused).
+    pub imported_root_warm: AtomicU64,
+    /// Barrel-export hops traversed during route-frontier resolution.
+    pub route_db_barrel_steps: AtomicU64,
+    /// `export *` wildcard fan-out expansions observed.
+    pub route_db_wildcard_fanout: AtomicU64,
+    /// Cold prepared-decl bundle materializations.
+    pub prepared_decl_bundle_cold: AtomicU64,
+    /// Warm prepared-decl bundle cache hits.
+    pub prepared_decl_bundle_warm: AtomicU64,
 }
 
 impl RequestContext {
@@ -684,6 +749,28 @@ impl RequestContext {
             expanded_instantiate_calls: AtomicU64::new(0),
             memo_insertions: AtomicU64::new(0),
             memo_publish_suppressed: AtomicU64::new(0),
+            frontier_closure_invocations_total: AtomicU64::new(0),
+            frontier_closure_invocations_target_none: AtomicU64::new(0),
+            frontier_closure_redundant_target_none_pairs: AtomicU64::new(0),
+            frontier_target_none_pairs_seen: Mutex::new(rustc_hash::FxHashSet::default()),
+            resolved_external_type_cache_negative_hits: AtomicU64::new(0),
+            resolved_external_type_cache_negative_misses: AtomicU64::new(0),
+            resolve_import_cold_positive: AtomicU64::new(0),
+            resolve_import_cold_negative: AtomicU64::new(0),
+            resolve_import_warm_positive: AtomicU64::new(0),
+            resolve_import_warm_negative: AtomicU64::new(0),
+            known_miss_route_served: AtomicU64::new(0),
+            known_miss_route_revalidated: AtomicU64::new(0),
+            known_miss_route_recomputed: AtomicU64::new(0),
+            imported_registry_cold: AtomicU64::new(0),
+            imported_registry_warm: AtomicU64::new(0),
+            imported_registry_negative: AtomicU64::new(0),
+            imported_root_cold: AtomicU64::new(0),
+            imported_root_warm: AtomicU64::new(0),
+            route_db_barrel_steps: AtomicU64::new(0),
+            route_db_wildcard_fanout: AtomicU64::new(0),
+            prepared_decl_bundle_cold: AtomicU64::new(0),
+            prepared_decl_bundle_warm: AtomicU64::new(0),
         })
     }
 
@@ -753,6 +840,31 @@ impl RequestContext {
     pub fn bump_type_resolution_projection_op(&self) {
         self.type_resolution_projection_ops
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Mark that the cross-file external-type frontier closure
+    /// resolved `(owner_canonical, type_name)` to `target = None`
+    /// during this request. ALWAYS bumps
+    /// `frontier_closure_invocations_target_none`; bumps
+    /// `frontier_closure_redundant_target_none_pairs` ONLY when the
+    /// pair has already been observed earlier in the request — the
+    /// dominant signal for the "cross-request negative-resolution
+    /// caching defect" hypothesis.
+    ///
+    /// Producer side — the cross-file resolver in
+    /// `host_resolve::external_type_resolution` — calls this after
+    /// the frontier returns `Ok((_, None, _))`. Cheap on the hot
+    /// path: one `Mutex` lock + one `FxHashSet::insert` + at most one
+    /// `fetch_add`.
+    pub fn observe_frontier_target_none_for_pair(&self, owner: &str, type_name: &str) {
+        self.frontier_closure_invocations_target_none
+            .fetch_add(1, Ordering::Relaxed);
+        let key = (owner.to_string(), type_name.to_string());
+        let inserted = self.frontier_target_none_pairs_seen.lock().insert(key);
+        if !inserted {
+            self.frontier_closure_redundant_target_none_pairs
+                .fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Update the per-request walker depth high-water mark. Cheap on
@@ -833,6 +945,84 @@ impl verter_audit::AuditObserver for RequestContext {
             }
             verter_audit::AuditEvent::CompileCodeTransformOp => {
                 self.compile_code_transform_ops
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::FrontierClosureInvocation => {
+                self.frontier_closure_invocations_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::FrontierClosureTargetNone => {
+                self.frontier_closure_invocations_target_none
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::FrontierClosureRedundantTargetNonePair => {
+                self.frontier_closure_redundant_target_none_pairs
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::ResolvedExternalTypeCacheNegativeHit => {
+                self.resolved_external_type_cache_negative_hits
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::ResolvedExternalTypeCacheNegativeMiss => {
+                self.resolved_external_type_cache_negative_misses
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::ResolveImportColdPositive => {
+                self.resolve_import_cold_positive
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::ResolveImportColdNegative => {
+                self.resolve_import_cold_negative
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::ResolveImportWarmPositive => {
+                self.resolve_import_warm_positive
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::ResolveImportWarmNegative => {
+                self.resolve_import_warm_negative
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::KnownMissRouteServed => {
+                self.known_miss_route_served.fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::KnownMissRouteRevalidated => {
+                self.known_miss_route_revalidated
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::KnownMissRouteRecomputed => {
+                self.known_miss_route_recomputed
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::ImportedRegistryCold => {
+                self.imported_registry_cold.fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::ImportedRegistryWarm => {
+                self.imported_registry_warm.fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::ImportedRegistryNegative => {
+                self.imported_registry_negative
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::ImportedRootCold => {
+                self.imported_root_cold.fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::ImportedRootWarm => {
+                self.imported_root_warm.fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::RouteDbBarrelStep => {
+                self.route_db_barrel_steps.fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::RouteDbWildcardFanout => {
+                self.route_db_wildcard_fanout
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::PreparedDeclBundleCold => {
+                self.prepared_decl_bundle_cold
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::PreparedDeclBundleWarm => {
+                self.prepared_decl_bundle_warm
                     .fetch_add(1, Ordering::Relaxed);
             }
         }

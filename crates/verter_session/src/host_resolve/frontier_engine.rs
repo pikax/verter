@@ -100,6 +100,13 @@ impl VerterHost {
         crate::types::ExternalTypeResolveError,
     > {
         assert_route_frontier_allowed();
+        // Per-request audit attribution: every invocation of the
+        // cross-file external-type frontier closure bumps the total
+        // counter on the active observer. Near-zero cost when no
+        // observer is installed.
+        if let Some(obs) = verter_audit::current_observer() {
+            obs.record_event(verter_audit::AuditEvent::FrontierClosureInvocation);
+        }
         let adapter = HostFrontierAdapter {
             host: self,
             materialize_symbols: false,

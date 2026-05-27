@@ -140,6 +140,11 @@ impl ImportedRootDb {
         let key = (provider_canonical.to_owned(), imported_name.to_owned());
 
         if let Some(hit) = self.roots.get_if_valid_with_facts(&key, view) {
+            // Per-request audit attribution: warm-cache hit. The
+            // closure body did not run — this is a true reuse.
+            if let Some(obs) = verter_audit::current_observer() {
+                obs.record_event(verter_audit::AuditEvent::ImportedRootWarm);
+            }
             return Some(hit);
         }
 
@@ -158,6 +163,13 @@ impl ImportedRootDb {
             if let Some(hit) = self.roots.get_if_valid_with_facts(&key, view) {
                 captured_facts_ref.set(Some(hit.1));
                 return Ok(hit.0);
+            }
+            // Per-request audit attribution: cold path running the
+            // expensive `resolve()` closure. Joiners that block on
+            // this singleflight do NOT re-enter — the counter
+            // reflects unique cold work, not per-waiter overhead.
+            if let Some(obs) = verter_audit::current_observer() {
+                obs.record_event(verter_audit::AuditEvent::ImportedRootCold);
             }
             match resolve() {
                 Some((result, facts)) => {

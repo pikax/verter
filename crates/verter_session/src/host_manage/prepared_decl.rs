@@ -77,6 +77,11 @@ impl VerterHost {
             self.provenance
                 .bundle_cache_hits
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Per-request audit attribution: prepared-decl bundle
+            // served from cache (no materialisation).
+            if let Some(obs) = verter_audit::current_observer() {
+                obs.record_event(verter_audit::AuditEvent::PreparedDeclBundleWarm);
+            }
             return Some(bundle);
         }
 
@@ -93,6 +98,14 @@ impl VerterHost {
                     value: Some((*bundle).clone()),
                     stable: true,
                 });
+            }
+            // Per-request audit attribution: cold materialisation of
+            // the prepared-decl bundle. Bumped only when the
+            // singleflight leader's recheck miss confirmed the cold
+            // path, so joiners that block on the leader do not double
+            // count.
+            if let Some(obs) = verter_audit::current_observer() {
+                obs.record_event(verter_audit::AuditEvent::PreparedDeclBundleCold);
             }
             let result = self
                 .materialize_prepared_decl_bundle_from_route_owned_shallow(canonical_id)
@@ -1711,7 +1724,19 @@ impl VerterHost {
                 .unwrap_or(0);
             let current = self.ws().content_generation();
             if recorded_at == 0 || current > recorded_at {
+                // Per-request audit attribution: the known-miss entry
+                // is stale relative to the current `content_generation`
+                // — caller will recompute against the live workspace.
+                if let Some(obs) = verter_audit::current_observer() {
+                    obs.record_event(verter_audit::AuditEvent::KnownMissRouteRecomputed);
+                }
                 return None;
+            }
+            // Per-request audit attribution: the known-miss entry
+            // revalidated successfully against the current generation
+            // — caller short-circuits without re-resolving.
+            if let Some(obs) = verter_audit::current_observer() {
+                obs.record_event(verter_audit::AuditEvent::KnownMissRouteRevalidated);
             }
         }
         Some(resolution)

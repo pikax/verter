@@ -230,6 +230,46 @@ pub fn mine_footprint(
         cold_aborts_swept: ctx.cold_aborts_swept.load(Ordering::Relaxed) as u32,
     };
 
+    // ── 7b. Resolver / import-route hot-path counters (exact) ─────
+    let resolver_hot_path = verter_audit::ResolverHotPathCounters {
+        frontier_closure_invocations_total: ctx
+            .frontier_closure_invocations_total
+            .load(Ordering::Relaxed) as u32,
+        frontier_closure_invocations_target_none: ctx
+            .frontier_closure_invocations_target_none
+            .load(Ordering::Relaxed) as u32,
+        frontier_closure_redundant_target_none_pairs: ctx
+            .frontier_closure_redundant_target_none_pairs
+            .load(Ordering::Relaxed) as u32,
+        resolved_external_type_cache_negative_hits: ctx
+            .resolved_external_type_cache_negative_hits
+            .load(Ordering::Relaxed) as u32,
+        resolved_external_type_cache_negative_misses: ctx
+            .resolved_external_type_cache_negative_misses
+            .load(Ordering::Relaxed) as u32,
+        resolve_import_cold_positive: ctx.resolve_import_cold_positive.load(Ordering::Relaxed)
+            as u32,
+        resolve_import_cold_negative: ctx.resolve_import_cold_negative.load(Ordering::Relaxed)
+            as u32,
+        resolve_import_warm_positive: ctx.resolve_import_warm_positive.load(Ordering::Relaxed)
+            as u32,
+        resolve_import_warm_negative: ctx.resolve_import_warm_negative.load(Ordering::Relaxed)
+            as u32,
+        known_miss_route_served: ctx.known_miss_route_served.load(Ordering::Relaxed) as u32,
+        known_miss_route_revalidated: ctx.known_miss_route_revalidated.load(Ordering::Relaxed)
+            as u32,
+        known_miss_route_recomputed: ctx.known_miss_route_recomputed.load(Ordering::Relaxed) as u32,
+        imported_registry_cold: ctx.imported_registry_cold.load(Ordering::Relaxed) as u32,
+        imported_registry_warm: ctx.imported_registry_warm.load(Ordering::Relaxed) as u32,
+        imported_registry_negative: ctx.imported_registry_negative.load(Ordering::Relaxed) as u32,
+        imported_root_cold: ctx.imported_root_cold.load(Ordering::Relaxed) as u32,
+        imported_root_warm: ctx.imported_root_warm.load(Ordering::Relaxed) as u32,
+        route_db_barrel_steps: ctx.route_db_barrel_steps.load(Ordering::Relaxed) as u32,
+        route_db_wildcard_fanout: ctx.route_db_wildcard_fanout.load(Ordering::Relaxed) as u32,
+        prepared_decl_bundle_cold: ctx.prepared_decl_bundle_cold.load(Ordering::Relaxed) as u32,
+        prepared_decl_bundle_warm: ctx.prepared_decl_bundle_warm.load(Ordering::Relaxed) as u32,
+    };
+
     RequestFootprintAudit {
         indexed_ready_builds,
         vfs_reads: state.vfs_reads,
@@ -251,6 +291,7 @@ pub fn mine_footprint(
             edges,
         },
         structured_events,
+        resolver_hot_path,
     }
 }
 
