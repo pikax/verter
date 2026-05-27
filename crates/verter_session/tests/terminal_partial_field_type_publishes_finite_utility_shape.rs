@@ -1,9 +1,9 @@
-//! Block 6.i Round 10 — terminal TypeExpr utility publication.
+//! Terminal-TypeExpr utility publication invariant.
 //!
 //! A direct field type such as `Partial<EditorOptions>` is a terminal
 //! published utility root, not an intermediate carrier. It must still
 //! publish the finite utility result (`Partial` makes every member
-//! optional). The Chain-V carrier-stop regressions are covered by the
+//! optional). The carrier-stop regressions are covered by the
 //! generic `Omit<Partial<...>>` and ChatMessages-shaped tests where the
 //! utility lives inside transit/consumer input rather than at the
 //! publication boundary.
