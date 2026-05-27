@@ -49,6 +49,76 @@ impl VerterHost {
         self.prepared_decl_bundle_with_store_view(&view, canonical_id)
     }
 
+    /// Attribute a prepared-decl bundle warm-read rejection to one of
+    /// the five `PreparedDeclBundleReject*` audit counters.
+    ///
+    /// Inspects `rejected_fact` (the first fact that failed validation
+    /// in the most-recent candidate, as returned by
+    /// [`crate::resolver_core::ValidatedFactCache::get_if_valid_self_rooted_attributed`])
+    /// and consults the view's direct accessors
+    /// ([`crate::resolver_core::StoreView::tracks_file`] for the self-root
+    /// arm; [`crate::resolver_core::StoreView::derived_hash_for`] for the
+    /// `ImportRoute` arm) to determine WHICH check rejected. Fires
+    /// exactly one audit event per call:
+    ///
+    /// * `PreparedDeclBundleRejectEntryMissing` — `rejected_fact ==
+    ///   None && candidate_count == 0` (no cache entry at all).
+    /// * `PreparedDeclBundleRejectSelfRootUntracked` — `FileWholeHash`
+    ///   self-root, `view.tracks_file(canonical)` is `false`.
+    /// * `PreparedDeclBundleRejectSelfRootHashMismatch` —
+    ///   `FileWholeHash` self-root, tracked but stored hash differs.
+    /// * `PreparedDeclBundleRejectImportRouteAbsent` —
+    ///   `DerivedFactHash { kind: ImportRoute }` for the bundle's
+    ///   canonical, `view.derived_hash_for` returns `None`.
+    /// * `PreparedDeclBundleRejectImportRouteMismatch` — same but the
+    ///   stored hash differs from the view's hash.
+    /// * `PreparedDeclBundleRejectOther` — fallthrough; must stay 0
+    ///   in steady state.
+    fn attribute_prepared_decl_bundle_rejection(
+        view: &dyn crate::resolver_core::StoreView,
+        canonical_id: &str,
+        rejected_fact: Option<&crate::resolver_core::FactVersionRef>,
+        candidate_count: usize,
+    ) {
+        let Some(obs) = verter_audit::current_observer() else {
+            return;
+        };
+        let event = match rejected_fact {
+            None if candidate_count == 0 => {
+                verter_audit::AuditEvent::PreparedDeclBundleRejectEntryMissing
+            }
+            Some(crate::resolver_core::FactVersionRef::FileWholeHash {
+                canonical_id: fact_canonical,
+                ..
+            }) if fact_canonical == canonical_id => {
+                if view.tracks_file(fact_canonical) {
+                    verter_audit::AuditEvent::PreparedDeclBundleRejectSelfRootHashMismatch
+                } else {
+                    verter_audit::AuditEvent::PreparedDeclBundleRejectSelfRootUntracked
+                }
+            }
+            Some(crate::resolver_core::FactVersionRef::DerivedFactHash {
+                canonical_id: fact_canonical,
+                kind: crate::resolver_core::DerivedFactKind::ImportRoute,
+                ..
+            }) if fact_canonical == canonical_id => {
+                if view
+                    .derived_hash_for(
+                        fact_canonical,
+                        crate::resolver_core::DerivedFactKind::ImportRoute,
+                    )
+                    .is_some()
+                {
+                    verter_audit::AuditEvent::PreparedDeclBundleRejectImportRouteMismatch
+                } else {
+                    verter_audit::AuditEvent::PreparedDeclBundleRejectImportRouteAbsent
+                }
+            }
+            _ => verter_audit::AuditEvent::PreparedDeclBundleRejectOther,
+        };
+        obs.record_event(event);
+    }
+
     /// View-bound variant of [`Self::prepared_decl_bundle`].
     ///
     /// `view` is a borrow into the request-bound [`HostStoreView`] built
@@ -71,18 +141,34 @@ impl VerterHost {
         // canonical is its self-root — validated **strictly** so a
         // deleted (now-untracked) keyed file rejects the stale bundle
         // instead of riding the lazy untracked-accept rule.
+        //
+        // On a rejection the attributed sibling returns the FIRST
+        // rejected fact from the most-recent candidate; we feed it
+        // to `attribute_prepared_decl_bundle_rejection` so the
+        // matching per-cause audit counter fires (one of the five
+        // `PreparedDeclBundleReject*` variants).
         let bundles = &self.resolver.runtime.prepared_decl_bundles;
         let key = canonical_id.to_string();
-        if let Some(bundle) = bundles.get_if_valid_self_rooted(&key, view, &[canonical_id]) {
-            self.provenance
-                .bundle_cache_hits
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // Per-request audit attribution: prepared-decl bundle
-            // served from cache (no materialisation).
-            if let Some(obs) = verter_audit::current_observer() {
-                obs.record_event(verter_audit::AuditEvent::PreparedDeclBundleWarm);
+        match bundles.get_if_valid_self_rooted_attributed(&key, view, &[canonical_id]) {
+            Ok(bundle) => {
+                self.provenance
+                    .bundle_cache_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Per-request audit attribution: prepared-decl bundle
+                // served from cache (no materialisation).
+                if let Some(obs) = verter_audit::current_observer() {
+                    obs.record_event(verter_audit::AuditEvent::PreparedDeclBundleWarm);
+                }
+                return Some(bundle);
             }
-            return Some(bundle);
+            Err((rejected_fact, candidate_count)) => {
+                Self::attribute_prepared_decl_bundle_rejection(
+                    view,
+                    canonical_id,
+                    rejected_fact.as_ref(),
+                    candidate_count,
+                );
+            }
         }
 
         // Cold path with singleflight: coalesce concurrent materializations
@@ -93,6 +179,9 @@ impl VerterHost {
             // Re-check cache inside the singleflight leader closure (another
             // thread may have populated it between our first check and winning
             // the flight). Strict self-root validation on the keyed canonical.
+            // Re-check skips the rejection-attribution call: the per-cause
+            // counter already fired on the outer fast-path miss; a recheck
+            // miss attribution would double-count the same logical rejection.
             if let Some(bundle) = bundles.get_if_valid_self_rooted(&key, view, &[canonical_id]) {
                 return Ok(crate::resolver_core::StableExecutionValue {
                     value: Some((*bundle).clone()),

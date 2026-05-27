@@ -268,6 +268,28 @@ pub fn mine_footprint(
         route_db_wildcard_fanout: ctx.route_db_wildcard_fanout.load(Ordering::Relaxed) as u32,
         prepared_decl_bundle_cold: ctx.prepared_decl_bundle_cold.load(Ordering::Relaxed) as u32,
         prepared_decl_bundle_warm: ctx.prepared_decl_bundle_warm.load(Ordering::Relaxed) as u32,
+        prepared_decl_bundle_reject_entry_missing: ctx
+            .prepared_decl_bundle_reject_entry_missing
+            .load(Ordering::Relaxed) as u32,
+        prepared_decl_bundle_reject_self_root_untracked: ctx
+            .prepared_decl_bundle_reject_self_root_untracked
+            .load(Ordering::Relaxed)
+            as u32,
+        prepared_decl_bundle_reject_self_root_hash_mismatch: ctx
+            .prepared_decl_bundle_reject_self_root_hash_mismatch
+            .load(Ordering::Relaxed)
+            as u32,
+        prepared_decl_bundle_reject_import_route_absent: ctx
+            .prepared_decl_bundle_reject_import_route_absent
+            .load(Ordering::Relaxed)
+            as u32,
+        prepared_decl_bundle_reject_import_route_mismatch: ctx
+            .prepared_decl_bundle_reject_import_route_mismatch
+            .load(Ordering::Relaxed)
+            as u32,
+        prepared_decl_bundle_reject_other: ctx
+            .prepared_decl_bundle_reject_other
+            .load(Ordering::Relaxed) as u32,
     };
 
     RequestFootprintAudit {

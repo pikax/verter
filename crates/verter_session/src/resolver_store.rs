@@ -1261,6 +1261,20 @@ impl crate::resolver_core::StoreView for HostStoreView {
         self.whole_hashes.contains_key(canonical_id)
     }
 
+    /// Direct read of the snapshotted `DerivedFactHash` for a
+    /// `(canonical, kind)` pair. Used by per-rejection attribution
+    /// helpers to discriminate "entry absent" from "entry present,
+    /// hash differs" without re-probing the validator.
+    fn derived_hash_for(
+        &self,
+        canonical_id: &str,
+        kind: crate::resolver_core::DerivedFactKind,
+    ) -> Option<crate::resolver_core::ResolverHash16> {
+        self.derived_hashes
+            .get(&(canonical_id.to_owned(), kind))
+            .copied()
+    }
+
     /// Strict self-root `FileWholeHash` validation.
     ///
     /// Unlike the [`Self::validates`] `FileWholeHash` arm — whose

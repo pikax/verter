@@ -215,6 +215,28 @@ pub trait StoreView {
         false
     }
 
+    /// Direct read of the view's `DerivedFactHash` snapshot for a
+    /// `(canonical, kind)` pair.
+    ///
+    /// Returns `Some(hash)` when the view's per-domain producer has
+    /// snapshotted a derived hash for the pair (e.g.
+    /// `HostStoreView::derived_hashes[(canonical, ImportRoute)]`),
+    /// `None` otherwise. Used by per-rejection attribution helpers
+    /// (e.g. `attribute_prepared_decl_bundle_rejection`) to
+    /// distinguish "entry absent" from "entry present, hash differs"
+    /// without re-probing the validator with synthetic hashes.
+    ///
+    /// Default returns `None` so test-only / permissive views inherit
+    /// "no derived snapshot" semantics; production `HostStoreView`
+    /// overrides to return the actual snapshot value.
+    fn derived_hash_for(
+        &self,
+        _canonical_id: &str,
+        _kind: DerivedFactKind,
+    ) -> Option<ResolverHash16> {
+        None
+    }
+
     /// Validate every fact in `sig` under this view; return `true` iff
     /// all entries validate. Empty signatures trivially return `true`.
     ///
@@ -814,6 +836,79 @@ where
         self.stale_misses
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         None
+    }
+
+    /// Attributed sibling of [`Self::get_if_valid_self_rooted`].
+    ///
+    /// On a warm hit returns `Ok(Arc<V>)` (counters bumped identically).
+    /// On a rejection returns `Err((rejected_fact, candidate_count))`
+    /// where `rejected_fact` is a clone of the FIRST fact in the
+    /// MOST-RECENT candidate (the back of the multi-candidate vec — the
+    /// last admitted) that failed `view.validates*`, and
+    /// `candidate_count` is the number of candidates considered.
+    /// Returns `Err((None, 0))` when no entry exists in the cache at
+    /// all (the `DashMap` shard has no key).
+    ///
+    /// Consumers feed `rejected_fact` to a domain-specific attribution
+    /// helper (e.g. `prepared_decl_bundle_with_store_view`'s
+    /// `attribute_prepared_decl_bundle_rejection`) so the matching
+    /// per-rejection audit counter fires. Counters on this method
+    /// mirror [`Self::get_if_valid_self_rooted`] exactly — the
+    /// attribution caller adds NO extra counter beyond the per-cause
+    /// `AuditEvent`.
+    ///
+    /// `FactVersionRef` is large by design (carries owned canonical
+    /// strings + per-domain payloads); the attribution caller only
+    /// inspects the discriminant + canonical, never stores the Err.
+    /// Boxing would add a heap alloc per warm-read MISS — the wrong
+    /// tradeoff for a hot-path helper, so the clippy lint is allowed.
+    #[allow(clippy::result_large_err)]
+    pub fn get_if_valid_self_rooted_attributed<TView>(
+        &self,
+        key: &K,
+        view: &TView,
+        self_root_canonicals: &[&str],
+    ) -> Result<Arc<V>, (Option<FactVersionRef>, usize)>
+    where
+        TView: StoreView + ?Sized,
+    {
+        self.validations_attempted
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let entry = match self.entries.get(key) {
+            Some(e) => e,
+            None => return Err((None, 0)),
+        };
+        let candidates = entry.candidates.load();
+        let candidate_count = candidates.len();
+        // Mirror `get_if_valid_self_rooted`: iterate candidates in
+        // admission order, return the first validating one.
+        let mut last_rejected_fact: Option<FactVersionRef> = None;
+        for candidate in candidates.iter() {
+            let mut candidate_ok = true;
+            for fact in candidate.fact_dep_signature.iter() {
+                let fact_ok = match fact {
+                    FactVersionRef::FileWholeHash { canonical_id, hash }
+                        if self_root_canonicals.contains(&canonical_id.as_str()) =>
+                    {
+                        view.validates_self_root_whole_hash(canonical_id, hash)
+                    }
+                    other => view.validates(other),
+                };
+                if !fact_ok {
+                    candidate_ok = false;
+                    last_rejected_fact = Some(fact.clone());
+                    break;
+                }
+            }
+            if candidate_ok {
+                self.warm_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Ok(candidate.value.clone());
+            }
+        }
+        self.stale_misses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Err((last_rejected_fact, candidate_count))
     }
 
     /// Like [`Self::get_if_valid`] but also returns the validating

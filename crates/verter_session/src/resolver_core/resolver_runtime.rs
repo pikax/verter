@@ -67,6 +67,24 @@ where
             .get_if_valid_self_rooted(key, view, self_root_canonicals)
     }
 
+    /// Attributed warm-read sibling of [`Self::get_if_valid_self_rooted`].
+    /// Forwards to [`ValidatedFactCache::get_if_valid_self_rooted_attributed`].
+    /// `FactVersionRef` is large by design — see the cache-side helper's
+    /// rationale for the `clippy::result_large_err` allowance.
+    #[allow(clippy::result_large_err)]
+    pub fn get_if_valid_self_rooted_attributed<TView>(
+        &self,
+        key: &K,
+        view: &TView,
+        self_root_canonicals: &[&str],
+    ) -> Result<Arc<V>, (Option<crate::resolver_core::FactVersionRef>, usize)>
+    where
+        TView: crate::resolver_core::StoreView + ?Sized,
+    {
+        self.cache
+            .get_if_valid_self_rooted_attributed(key, view, self_root_canonicals)
+    }
+
     pub fn insert_arc(&self, key: K, value: Arc<V>, facts: Vec<FactVersionRef>) {
         self.cache.insert_arc(key, value, facts);
     }

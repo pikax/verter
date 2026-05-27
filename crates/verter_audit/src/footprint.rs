@@ -372,4 +372,29 @@ pub struct ResolverHotPathCounters {
     pub prepared_decl_bundle_cold: u32,
     /// Warm prepared-decl bundle cache hits.
     pub prepared_decl_bundle_warm: u32,
+    /// Bundle warm-read rejections where the cache `DashMap` carried
+    /// no entry for the canonical at all (no prior insert, or evicted).
+    pub prepared_decl_bundle_reject_entry_missing: u32,
+    /// Bundle warm-read rejections where the entry's self-root
+    /// `FileWholeHash` canonical is untracked by the view
+    /// (`whole_hashes.get(canonical)` returned `None`).
+    pub prepared_decl_bundle_reject_self_root_untracked: u32,
+    /// Bundle warm-read rejections where the entry's self-root
+    /// `FileWholeHash` is tracked by the view but the stored hash
+    /// differs from `whole_hashes[canonical]` — a real content edit
+    /// invalidated the bundle.
+    pub prepared_decl_bundle_reject_self_root_hash_mismatch: u32,
+    /// Bundle warm-read rejections where the entry's `ImportRoute`
+    /// `DerivedFactHash` is missing from the view's `derived_hashes`
+    /// map (no live ImportRoute snapshot for this canonical).
+    pub prepared_decl_bundle_reject_import_route_absent: u32,
+    /// Bundle warm-read rejections where the entry's `ImportRoute`
+    /// `DerivedFactHash` exists in the view but the stored hash
+    /// differs from the live snapshot.
+    pub prepared_decl_bundle_reject_import_route_mismatch: u32,
+    /// Bundle warm-read rejections that did not match any of the four
+    /// attributed predicates above. Must stay 0 in steady state — a
+    /// non-zero count means the bundle is admitting fact variants the
+    /// per-rejection attribution does not yet cover.
+    pub prepared_decl_bundle_reject_other: u32,
 }

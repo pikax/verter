@@ -120,6 +120,35 @@ pub enum AuditEvent {
     /// One warm prepared-decl bundle cache hit. Producer at the
     /// fast-path `get_if_valid_self_rooted` success branch.
     PreparedDeclBundleWarm,
+    /// One prepared-decl bundle warm-read rejection where the cache
+    /// `DashMap` carried no entry for the canonical at all. Bumped at
+    /// the fast-path validator in `prepared_decl_bundle_with_store_view`
+    /// when [`crate::current_observer`] reports an attribution sink.
+    PreparedDeclBundleRejectEntryMissing,
+    /// One prepared-decl bundle warm-read rejection where the cache
+    /// entry's self-root `FileWholeHash` canonical is untracked by the
+    /// view (`whole_hashes.get(canonical)` returned `None`).
+    PreparedDeclBundleRejectSelfRootUntracked,
+    /// One prepared-decl bundle warm-read rejection where the cache
+    /// entry's self-root `FileWholeHash` is tracked by the view but
+    /// the stored hash differs from `whole_hashes[canonical]`.
+    PreparedDeclBundleRejectSelfRootHashMismatch,
+    /// One prepared-decl bundle warm-read rejection where the cache
+    /// entry's `ImportRoute` `DerivedFactHash` is missing from the
+    /// view's `derived_hashes` map (no live ImportRoute snapshot for
+    /// this canonical).
+    PreparedDeclBundleRejectImportRouteAbsent,
+    /// One prepared-decl bundle warm-read rejection where the cache
+    /// entry's `ImportRoute` `DerivedFactHash` exists in the view's
+    /// `derived_hashes` but the stored hash differs from the live
+    /// snapshot.
+    PreparedDeclBundleRejectImportRouteMismatch,
+    /// One prepared-decl bundle warm-read rejection that did not match
+    /// any of the four attributed predicates above. Must stay 0 in
+    /// steady state — a non-zero count means the bundle is admitting
+    /// fact variants the per-rejection attribution does not yet cover
+    /// and the diagnosis is incomplete.
+    PreparedDeclBundleRejectOther,
 }
 
 /// Trait implemented by anything wanting to receive audit events.

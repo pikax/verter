@@ -397,19 +397,6 @@ inflight_aborted_retries: number,
 cold_aborts_swept: number, };
 
 /**
- * Why the walker stopped.
- */
-export type ChainTermination = "Complete" | { "DepthExceeded": { 
-/**
- * Depth cap that was exceeded.
- */
-cap: number, } } | { "Cycle": { 
-/**
- * EdgeId where the walker detected the cycle.
- */
-at_edge: EdgeId, } } | "NotFound";
-
-/**
  * Compile request payload.
  */
 export type CompilePayload = { 
@@ -1225,60 +1212,6 @@ base: NodeId,
 path: Array<ProjectPathSegment>, };
 
 /**
- * Provenance chain returned by [`RequestAuditRecord::why_loaded`] /
- * [`RequestAuditRecord::why_instantiated`]. Always carries a
- * [`ChainTermination`] so renderers can distinguish a complete walk
- * from a depth-capped, cycle-terminated, or shared-load-redirected
- * one.
- */
-export type ProvenanceChain = { 
-/**
- * In-audit `NodeId` the walk started from. `None` when the walker
- * could not locate any matching root in the audit record.
- */
-root: NodeId | null, 
-/**
- * Steps in BFS order. Each step is one derivation edge whose
- * `result` is the current frontier node; `depth` records the hop
- * count from the root.
- */
-steps: Array<ProvenanceStep>, 
-/**
- * Why the walk stopped. `Complete` means the frontier exhausted
- * without hitting any structural termination.
- */
-terminated: ChainTermination, 
-/**
- * Shared-load reuses observed for the queried canonical (only
- * populated by `why_loaded`). Renderers display these as terminal
- * branches per
- */
-shared_load_terminals: Array<SharedLoadReuseRecord>, };
-
-/**
- * One step on a [`ProvenanceChain`].
- */
-export type ProvenanceStep = { 
-/**
- * EdgeId of the derivation edge visited at this step.
- */
-edge_id: EdgeId, 
-/**
- * Distance from the walker's root node (BFS depth).
- */
-depth: number, 
-/**
- * `display_label` of the edge's result node.
- */
-node_label: string, 
-/**
- * The full derivation edge (result / sources / meta) captured
- * verbatim so the TS-side renderer doesn't need to re-resolve
- * edges against the source audit.
- */
-edge: DerivationEdgeRecord, };
-
-/**
  * One of three projection views of the published macro surface.
  *
  * `PublishedField` audit edges are emitted in `Native` truth; the
@@ -1795,7 +1728,44 @@ prepared_decl_bundle_cold: number,
 /**
  * Warm prepared-decl bundle cache hits.
  */
-prepared_decl_bundle_warm: number, };
+prepared_decl_bundle_warm: number, 
+/**
+ * Bundle warm-read rejections where the cache `DashMap` carried
+ * no entry for the canonical at all (no prior insert, or evicted).
+ */
+prepared_decl_bundle_reject_entry_missing: number, 
+/**
+ * Bundle warm-read rejections where the entry's self-root
+ * `FileWholeHash` canonical is untracked by the view
+ * (`whole_hashes.get(canonical)` returned `None`).
+ */
+prepared_decl_bundle_reject_self_root_untracked: number, 
+/**
+ * Bundle warm-read rejections where the entry's self-root
+ * `FileWholeHash` is tracked by the view but the stored hash
+ * differs from `whole_hashes[canonical]` — a real content edit
+ * invalidated the bundle.
+ */
+prepared_decl_bundle_reject_self_root_hash_mismatch: number, 
+/**
+ * Bundle warm-read rejections where the entry's `ImportRoute`
+ * `DerivedFactHash` is missing from the view's `derived_hashes`
+ * map (no live ImportRoute snapshot for this canonical).
+ */
+prepared_decl_bundle_reject_import_route_absent: number, 
+/**
+ * Bundle warm-read rejections where the entry's `ImportRoute`
+ * `DerivedFactHash` exists in the view but the stored hash
+ * differs from the live snapshot.
+ */
+prepared_decl_bundle_reject_import_route_mismatch: number, 
+/**
+ * Bundle warm-read rejections that did not match any of the four
+ * attributed predicates above. Must stay 0 in steady state — a
+ * non-zero count means the bundle is admitting fact variants the
+ * per-rejection attribution does not yet cover.
+ */
+prepared_decl_bundle_reject_other: number, };
 
 /**
  * Scheduler-side attribution captured at first dispatch of an audited
