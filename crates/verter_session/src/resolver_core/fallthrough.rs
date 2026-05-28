@@ -1706,27 +1706,27 @@ mod tests {
     fn known_spread_keys_from_type_expr_intersects_union_keys() {
         let summary = known_spread_keys_from_type_expr(&TypeExpr::union(vec![
             TypeExpr::Object(Arc::new(ObjectExpr {
-                properties: vec![ObjectMember::Property(ObjectProperty {
-                    name: "id".to_string(),
-                    optional: false,
-                    readonly: false,
-                    ty: TypeExpr::primitive(PrimitiveName::String),
-                })],
+                properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                    "id".to_string(),
+                    TypeExpr::primitive(PrimitiveName::String),
+                    false,
+                    false,
+                ))],
             })),
             TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: vec![
-                    ObjectMember::Property(ObjectProperty {
-                        name: "id".to_string(),
-                        optional: false,
-                        readonly: false,
-                        ty: TypeExpr::primitive(PrimitiveName::String),
-                    }),
-                    ObjectMember::Property(ObjectProperty {
-                        name: "title".to_string(),
-                        optional: false,
-                        readonly: false,
-                        ty: TypeExpr::primitive(PrimitiveName::String),
-                    }),
+                    ObjectMember::Property(ObjectProperty::synthetic(
+                        "id".to_string(),
+                        TypeExpr::primitive(PrimitiveName::String),
+                        false,
+                        false,
+                    )),
+                    ObjectMember::Property(ObjectProperty::synthetic(
+                        "title".to_string(),
+                        TypeExpr::primitive(PrimitiveName::String),
+                        false,
+                        false,
+                    )),
                 ],
             })),
         ]))

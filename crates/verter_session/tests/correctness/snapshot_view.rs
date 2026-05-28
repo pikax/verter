@@ -747,12 +747,12 @@ mod self_tests {
             properties: props
                 .into_iter()
                 .map(|(name, ty, optional)| {
-                    ObjectMember::Property(ObjectProperty {
-                        name: name.to_string(),
+                    ObjectMember::Property(ObjectProperty::synthetic(
+                        name.to_string(),
                         ty,
                         optional,
-                        readonly: false,
-                    })
+                        false,
+                    ))
                 })
                 .collect(),
         }))
@@ -808,16 +808,16 @@ mod self_tests {
 
     #[test]
     fn renders_function_signature_with_void_default() {
-        let func = TypeExpr::Function(Arc::new(FunctionExpr {
-            type_parameters: Vec::new(),
-            parameters: vec![FunctionParam {
-                name: Some("value".to_string()),
-                ty: TypeExpr::Primitive(PrimitiveName::Number),
-                optional: false,
-                rest: false,
-            }],
-            return_type: None,
-        }));
+        let func = TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
+            vec![FunctionParam::synthetic(
+                Some("value".to_string()),
+                TypeExpr::Primitive(PrimitiveName::Number),
+                false,
+                false,
+            )],
+            None,
+            Vec::new(),
+        )));
         assert_eq!(render_type_signature(&func), "(value: number) => void");
     }
 

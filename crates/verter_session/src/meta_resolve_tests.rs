@@ -6,6 +6,110 @@ use crate::VerterHost;
 use std::sync::Arc;
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
+/// Rebuild a `TypeExpr` with every OXC span dropped (member / signature /
+/// parameter / index spans → default `None`).
+///
+/// Used by structural-equivalence assertions that compare two surfaces
+/// produced by DIFFERENT layers, exactly one of which carries OXC span
+/// provenance. The raw `PreparedTypeDecl.body` (lowered directly from OXC)
+/// carries real spans; the dispatch → graph → `projected_surface_to_type_expr`
+/// path re-emits IR through the span-free `query_engine::ProjectedMember`
+/// projection. Threading spans through that component-meta projection layer is
+/// a follow-up (the projection-layer unification pass); until then, structural
+/// equivalence is asserted by normalising spans on both sides. This still
+/// discriminates the property under test (names / shape / types / modifiers /
+/// optionality / body structure remain compared).
+fn strip_spans(expr: &TypeExpr) -> TypeExpr {
+    use std::sync::Arc as StdArc;
+    use verter_type_expr::{
+        FunctionExpr, FunctionParam, IndexSignature, MethodSignature, ObjectExpr, ObjectMember,
+        TupleElement, TypeParam,
+    };
+    let strip_fn = |f: &FunctionExpr| -> FunctionExpr {
+        FunctionExpr::synthetic(
+            f.parameters
+                .iter()
+                .map(|p| {
+                    FunctionParam::synthetic(p.name.clone(), strip_spans(&p.ty), p.optional, p.rest)
+                })
+                .collect(),
+            f.return_type
+                .as_ref()
+                .map(|rt| StdArc::new(strip_spans(rt))),
+            f.type_parameters
+                .iter()
+                .map(|tp| TypeParam {
+                    name: tp.name.clone(),
+                    constraint: tp.constraint.as_ref().map(|c| StdArc::new(strip_spans(c))),
+                    default: tp.default.as_ref().map(|d| StdArc::new(strip_spans(d))),
+                })
+                .collect(),
+        )
+    };
+    match expr {
+        TypeExpr::Object(obj) => TypeExpr::Object(StdArc::new(ObjectExpr {
+            properties: obj
+                .properties
+                .iter()
+                .map(|m| match m {
+                    ObjectMember::Property(p) => {
+                        ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic(
+                            p.name.clone(),
+                            strip_spans(&p.ty),
+                            p.optional,
+                            p.readonly,
+                        ))
+                    }
+                    ObjectMember::Method(m) => ObjectMember::Method(MethodSignature::synthetic(
+                        m.name.clone(),
+                        strip_fn(&m.function),
+                        m.optional,
+                    )),
+                    ObjectMember::CallSignature(f) => ObjectMember::CallSignature(strip_fn(f)),
+                    ObjectMember::ConstructSignature(f) => {
+                        ObjectMember::ConstructSignature(strip_fn(f))
+                    }
+                    ObjectMember::IndexSignature(s) => {
+                        ObjectMember::IndexSignature(IndexSignature::synthetic(
+                            s.key_name.clone(),
+                            strip_spans(&s.key_type),
+                            strip_spans(&s.value_type),
+                            s.readonly,
+                        ))
+                    }
+                })
+                .collect(),
+        })),
+        TypeExpr::Function(f) => TypeExpr::Function(StdArc::new(strip_fn(f))),
+        TypeExpr::Union(arms) => TypeExpr::Union(StdArc::from(
+            arms.iter().map(strip_spans).collect::<Vec<_>>(),
+        )),
+        TypeExpr::Intersection(arms) => TypeExpr::Intersection(StdArc::from(
+            arms.iter().map(strip_spans).collect::<Vec<_>>(),
+        )),
+        TypeExpr::Array { element, readonly } => TypeExpr::Array {
+            element: StdArc::new(strip_spans(element)),
+            readonly: *readonly,
+        },
+        TypeExpr::Tuple { elements, readonly } => TypeExpr::Tuple {
+            elements: StdArc::from(
+                elements
+                    .iter()
+                    .map(|el| TupleElement {
+                        label: el.label.clone(),
+                        ty: strip_spans(&el.ty),
+                        optional: el.optional,
+                        rest: el.rest,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            readonly: *readonly,
+        },
+        TypeExpr::Parenthesized(inner) => TypeExpr::Parenthesized(StdArc::new(strip_spans(inner))),
+        other => other.clone(),
+    }
+}
+
 // ===========================================================================
 // Test helpers
 // ===========================================================================
@@ -108,12 +212,12 @@ fn imported_registry_seed_refresh_does_not_engage_skip_under_graph_only_authorit
     };
     let object = verter_type_expr::TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
         properties: vec![verter_type_expr::ObjectMember::Property(
-            verter_type_expr::ObjectProperty {
-                name: "label".to_string(),
-                ty: verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
-                optional: true,
-                readonly: false,
-            },
+            verter_type_expr::ObjectProperty::synthetic(
+                "label".to_string(),
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+                true,
+                false,
+            ),
         )],
     }));
 
@@ -1995,8 +2099,15 @@ fn registry_decl_materialization_skips_raw_snapshot_fallback_for_snapshotless_im
     )
     .expect("registry decl materialization should resolve Props through dispatch");
 
+    // Structural equivalence: the dispatch-projected surface re-emits IR
+    // through the span-free `query_engine::ProjectedMember` projection, while
+    // `decl.body` carries the raw OXC spans. Normalise spans on both sides so
+    // the assertion checks the cache-reuse property (same names / shape /
+    // types / modifiers), not display-only span provenance (which the
+    // component-meta projection layer threads in a follow-up pass).
     assert_eq!(
-        materialized, decl.body,
+        strip_spans(&materialized),
+        strip_spans(&decl.body),
         "registry decl projection should reuse cached prepared state from FileArtifactStore",
     );
 }
@@ -9574,18 +9685,18 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
     // The macro shell: `PricingPlansSlots<{ id: string; tier: 'pro' }>`.
     let plan_arg = TypeExpr::Object(StdArc::new(verter_type_expr::ObjectExpr {
         properties: vec![
-            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty {
-                name: "id".to_string(),
-                ty: TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
-                optional: false,
-                readonly: false,
-            }),
-            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty {
-                name: "tier".to_string(),
-                ty: TypeExpr::string_literal("pro"),
-                optional: false,
-                readonly: false,
-            }),
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic(
+                "id".to_string(),
+                TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+                false,
+                false,
+            )),
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic(
+                "tier".to_string(),
+                TypeExpr::string_literal("pro"),
+                false,
+                false,
+            )),
         ],
     }));
 
@@ -9774,18 +9885,18 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 
     let plan_arg = TypeExpr::Object(StdArc::new(verter_type_expr::ObjectExpr {
         properties: vec![
-            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty {
-                name: "id".to_string(),
-                ty: TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
-                optional: false,
-                readonly: false,
-            }),
-            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty {
-                name: "tier".to_string(),
-                ty: TypeExpr::string_literal("pro"),
-                optional: false,
-                readonly: false,
-            }),
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic(
+                "id".to_string(),
+                TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+                false,
+                false,
+            )),
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic(
+                "tier".to_string(),
+                TypeExpr::string_literal("pro"),
+                false,
+                false,
+            )),
         ],
     }));
     let macro_shell = TypeExpr::Ref {
@@ -10405,6 +10516,8 @@ mod node_predicates_tests {
             params: StdArc::from(Vec::new().into_boxed_slice()),
             return_type: object_body,
             type_parameters: StdArc::from(Vec::new().into_boxed_slice()),
+            signature_span: None,
+            return_type_span: None,
         });
         assert!(
             !declaration_body_prefers_inline_materialization_node(graph, function_body),
@@ -10949,6 +11062,7 @@ defineProps<{ value: Foo }>()
                         is_method: false,
                         declared_in_macro_type_arg: false,
                         merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                        spans: Default::default(),
                     },
                     SurfaceMember {
                         name: StdArc::from("b"),
@@ -10958,6 +11072,7 @@ defineProps<{ value: Foo }>()
                         is_method: false,
                         declared_in_macro_type_arg: false,
                         merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                        spans: Default::default(),
                     },
                     SurfaceMember {
                         name: StdArc::from("c"),
@@ -10967,6 +11082,7 @@ defineProps<{ value: Foo }>()
                         is_method: false,
                         declared_in_macro_type_arg: false,
                         merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                        spans: Default::default(),
                     },
                 ]
                 .into_boxed_slice(),
@@ -10995,6 +11111,7 @@ defineProps<{ value: Foo }>()
                         is_method: false,
                         declared_in_macro_type_arg: false,
                         merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                        spans: Default::default(),
                     },
                     SurfaceMember {
                         name: StdArc::from("b"),
@@ -11004,6 +11121,7 @@ defineProps<{ value: Foo }>()
                         is_method: false,
                         declared_in_macro_type_arg: false,
                         merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                        spans: Default::default(),
                     },
                     SurfaceMember {
                         name: StdArc::from("c"),
@@ -11013,6 +11131,7 @@ defineProps<{ value: Foo }>()
                         is_method: false,
                         declared_in_macro_type_arg: false,
                         merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                        spans: Default::default(),
                     },
                 ]
                 .into_boxed_slice(),

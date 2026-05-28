@@ -844,18 +844,18 @@ mod tests {
     fn prepared_type_decl_member_index_from_object_body() {
         let body = TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
-                ObjectMember::Property(ObjectProperty {
-                    name: "label".into(),
-                    ty: TypeExpr::Primitive(PrimitiveName::String),
-                    optional: false,
-                    readonly: false,
-                }),
-                ObjectMember::Property(ObjectProperty {
-                    name: "count".into(),
-                    ty: TypeExpr::Primitive(PrimitiveName::Number),
-                    optional: true,
-                    readonly: false,
-                }),
+                ObjectMember::Property(ObjectProperty::synthetic(
+                    "label".into(),
+                    TypeExpr::Primitive(PrimitiveName::String),
+                    false,
+                    false,
+                )),
+                ObjectMember::Property(ObjectProperty::synthetic(
+                    "count".into(),
+                    TypeExpr::Primitive(PrimitiveName::Number),
+                    true,
+                    false,
+                )),
             ],
         }));
 
@@ -894,21 +894,21 @@ mod tests {
         // `is_method` assertions below FAIL.
         let body = TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
-                ObjectMember::Property(ObjectProperty {
-                    name: "label".into(),
-                    ty: TypeExpr::Primitive(PrimitiveName::String),
-                    optional: false,
-                    readonly: false,
-                }),
-                ObjectMember::Method(verter_type_expr::MethodSignature {
-                    name: "greet".into(),
-                    function: verter_type_expr::FunctionExpr {
-                        parameters: vec![],
-                        return_type: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
-                        type_parameters: vec![],
-                    },
-                    optional: false,
-                }),
+                ObjectMember::Property(ObjectProperty::synthetic(
+                    "label".into(),
+                    TypeExpr::Primitive(PrimitiveName::String),
+                    false,
+                    false,
+                )),
+                ObjectMember::Method(verter_type_expr::MethodSignature::synthetic(
+                    "greet".into(),
+                    verter_type_expr::FunctionExpr::synthetic(
+                        vec![],
+                        Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
+                        vec![],
+                    ),
+                    false,
+                )),
             ],
         }));
 
@@ -1027,12 +1027,12 @@ mod tests {
             properties: props
                 .iter()
                 .map(|(name, ty, optional)| {
-                    ObjectMember::Property(ObjectProperty {
-                        name: (*name).into(),
-                        ty: ty.clone(),
-                        optional: *optional,
-                        readonly: false,
-                    })
+                    ObjectMember::Property(ObjectProperty::synthetic(
+                        (*name).into(),
+                        ty.clone(),
+                        *optional,
+                        false,
+                    ))
                 })
                 .collect(),
         }))

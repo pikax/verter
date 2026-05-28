@@ -837,37 +837,37 @@ fn define_slots_eval_extracts_bindings_from_optional_function_types() {
                     properties: vec![crate::analysis::type_expand::ExpandedProperty {
                         name: "leading".to_string(),
                         ty: TypeExpr::union(vec![
-                            TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr {
-                                parameters: vec![verter_type_expr::FunctionParam {
-                                    name: Some("props".to_string()),
-                                    ty: TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-                                        properties: vec![
-                                            verter_type_expr::ObjectMember::Property(
-                                                verter_type_expr::ObjectProperty {
-                                                    name: "item".to_string(),
-                                                    ty: TypeExpr::Primitive(PrimitiveName::String),
-                                                    optional: false,
-                                                    readonly: false,
-                                                },
-                                            ),
-                                            verter_type_expr::ObjectMember::Property(
-                                                verter_type_expr::ObjectProperty {
-                                                    name: "open".to_string(),
-                                                    ty: TypeExpr::Primitive(PrimitiveName::Boolean),
-                                                    optional: false,
-                                                    readonly: false,
-                                                },
-                                            ),
-                                        ],
-                                    })),
-                                    optional: false,
-                                    rest: false,
-                                }],
-                                return_type: Some(Arc::new(TypeExpr::Primitive(
-                                    PrimitiveName::Any,
-                                ))),
-                                type_parameters: Vec::new(),
-                            })),
+                            TypeExpr::Function(Arc::new(
+                                verter_type_expr::FunctionExpr::synthetic(
+                                    vec![verter_type_expr::FunctionParam::synthetic(
+                                        Some("props".to_string()),
+                                        TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+                                            properties: vec![
+                                                verter_type_expr::ObjectMember::Property(
+                                                    verter_type_expr::ObjectProperty::synthetic(
+                                                        "item".to_string(),
+                                                        TypeExpr::Primitive(PrimitiveName::String),
+                                                        false,
+                                                        false,
+                                                    ),
+                                                ),
+                                                verter_type_expr::ObjectMember::Property(
+                                                    verter_type_expr::ObjectProperty::synthetic(
+                                                        "open".to_string(),
+                                                        TypeExpr::Primitive(PrimitiveName::Boolean),
+                                                        false,
+                                                        false,
+                                                    ),
+                                                ),
+                                            ],
+                                        })),
+                                        false,
+                                        false,
+                                    )],
+                                    Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
+                                    Vec::new(),
+                                ),
+                            )),
                             TypeExpr::Primitive(PrimitiveName::Undefined),
                         ]),
                         optional: true,
@@ -935,46 +935,27 @@ fn huge_partial_slot_binding_expansions_fall_back_to_symbolic_source_type() {
                 crate::analysis::type_expand::ExpandedObjectShape {
                     properties: vec![crate::analysis::type_expand::ExpandedProperty {
                         name: "day".to_string(),
-                        ty: TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr {
-                            parameters: vec![verter_type_expr::FunctionParam {
-                                name: Some("props".to_string()),
-                                ty: TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+                        ty: TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr::synthetic(vec![verter_type_expr::FunctionParam::synthetic(Some("props".to_string()), TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
                                     properties: vec![
                                         verter_type_expr::ObjectMember::Property(
-                                            verter_type_expr::ObjectProperty {
-                                                name: "day".to_string(),
-                                                ty: TypeExpr::Object(Arc::new(
+                                            verter_type_expr::ObjectProperty::synthetic("day".to_string(), TypeExpr::Object(Arc::new(
                                                     verter_type_expr::ObjectExpr {
                                                         properties: (0..512)
                                                             .map(|index| {
                                                                 verter_type_expr::ObjectMember::Property(
-                                                                    verter_type_expr::ObjectProperty {
-                                                                        name: format!("field{index}"),
-                                                                        ty: TypeExpr::Primitive(
+                                                                    verter_type_expr::ObjectProperty::synthetic(format!("field{index}"), TypeExpr::Primitive(
                                                                             PrimitiveName::String,
-                                                                        ),
-                                                                        optional: true,
-                                                                        readonly: false,
-                                                                    },
+                                                                        ), true, false),
                                                                 )
                                                             })
                                                             .collect(),
                                                     },
-                                                )),
-                                                optional: false,
-                                                readonly: false,
-                                            },
+                                                )), false, false),
                                         ),
                                     ],
-                                })),
-                                optional: false,
-                                rest: false,
-                            }],
-                            return_type: Some(Arc::new(TypeExpr::Primitive(
+                                })), false, false)], Some(Arc::new(TypeExpr::Primitive(
                                 PrimitiveName::Any,
-                            ))),
-                            type_parameters: Vec::new(),
-                        })),
+                            ))), Vec::new()))),
                         optional: true,
                         readonly: false,
                         declared_in_macro_type_arg: false,
@@ -1142,32 +1123,36 @@ fn define_slots_prefer_concrete_evaluated_slot_bindings_over_symbolic_direct_bin
                 crate::analysis::type_expand::ExpandedObjectShape {
                     properties: vec![crate::analysis::type_expand::ExpandedProperty {
                         name: "default".to_string(),
-                        ty: TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr {
-                            parameters: vec![verter_type_expr::FunctionParam {
-                                name: Some("props".to_string()),
-                                ty: TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-                                    properties: vec![verter_type_expr::ObjectMember::Property(
-                                        verter_type_expr::ObjectProperty {
-                                            name: "ui".to_string(),
-                                            ty: TypeExpr::Ref {
-                                                name: Arc::from("ComponentUI"),
-                                                type_arguments: Arc::from(vec![TypeExpr::TypeOf(
-                                                    verter_type_expr::ValueRef {
-                                                        path: vec!["theme".to_string()],
-                                                    },
-                                                )]),
-                                            },
-                                            optional: false,
-                                            readonly: false,
-                                        },
-                                    )],
-                                })),
-                                optional: false,
-                                rest: false,
-                            }],
-                            return_type: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
-                            type_parameters: Vec::new(),
-                        })),
+                        ty: TypeExpr::Function(Arc::new(
+                            verter_type_expr::FunctionExpr::synthetic(
+                                vec![verter_type_expr::FunctionParam::synthetic(
+                                    Some("props".to_string()),
+                                    TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+                                        properties: vec![verter_type_expr::ObjectMember::Property(
+                                            verter_type_expr::ObjectProperty::synthetic(
+                                                "ui".to_string(),
+                                                TypeExpr::Ref {
+                                                    name: Arc::from("ComponentUI"),
+                                                    type_arguments: Arc::from(vec![
+                                                        TypeExpr::TypeOf(
+                                                            verter_type_expr::ValueRef {
+                                                                path: vec!["theme".to_string()],
+                                                            },
+                                                        ),
+                                                    ]),
+                                                },
+                                                false,
+                                                false,
+                                            ),
+                                        )],
+                                    })),
+                                    false,
+                                    false,
+                                )],
+                                Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
+                                Vec::new(),
+                            ),
+                        )),
                         optional: true,
                         readonly: false,
                         declared_in_macro_type_arg: false,
@@ -1181,12 +1166,12 @@ fn define_slots_prefer_concrete_evaluated_slot_bindings_over_symbolic_direct_bin
             name: "default.ui".to_string(),
             r#type: TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
                 properties: vec![verter_type_expr::ObjectMember::Property(
-                    verter_type_expr::ObjectProperty {
-                        name: "base".to_string(),
-                        ty: TypeExpr::Primitive(PrimitiveName::String),
-                        optional: false,
-                        readonly: false,
-                    },
+                    verter_type_expr::ObjectProperty::synthetic(
+                        "base".to_string(),
+                        TypeExpr::Primitive(PrimitiveName::String),
+                        false,
+                        false,
+                    ),
                 )],
             })),
             raw_type: Some("Button['ui']".to_string()),
@@ -1270,19 +1255,21 @@ fn define_slots_keep_source_bindings_when_expanded_slot_bindings_are_empty() {
                 crate::analysis::type_expand::ExpandedObjectShape {
                     properties: vec![crate::analysis::type_expand::ExpandedProperty {
                         name: "day".to_string(),
-                        ty: TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr {
-                            parameters: vec![verter_type_expr::FunctionParam {
-                                name: Some("props".to_string()),
-                                ty: TypeExpr::IndexedAccess {
-                                    object: Arc::new(TypeExpr::named("CalendarSlotProps")),
-                                    index: Arc::new(TypeExpr::string_literal("day")),
-                                },
-                                optional: false,
-                                rest: false,
-                            }],
-                            return_type: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
-                            type_parameters: Vec::new(),
-                        })),
+                        ty: TypeExpr::Function(Arc::new(
+                            verter_type_expr::FunctionExpr::synthetic(
+                                vec![verter_type_expr::FunctionParam::synthetic(
+                                    Some("props".to_string()),
+                                    TypeExpr::IndexedAccess {
+                                        object: Arc::new(TypeExpr::named("CalendarSlotProps")),
+                                        index: Arc::new(TypeExpr::string_literal("day")),
+                                    },
+                                    false,
+                                    false,
+                                )],
+                                Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
+                                Vec::new(),
+                            ),
+                        )),
                         optional: true,
                         readonly: false,
                         declared_in_macro_type_arg: false,
@@ -1354,56 +1341,50 @@ fn define_slots_extract_bindings_from_call_signature_object_types() {
                         name: "content".to_string(),
                         ty: TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
                             properties: vec![verter_type_expr::ObjectMember::CallSignature(
-                                verter_type_expr::FunctionExpr {
-                                    parameters: vec![verter_type_expr::FunctionParam {
-                                        name: Some("props".to_string()),
-                                        ty: TypeExpr::Object(Arc::new(
-                                            verter_type_expr::ObjectExpr {
-                                                properties: vec![
-                                                    verter_type_expr::ObjectMember::Property(
-                                                        verter_type_expr::ObjectProperty {
-                                                            name: "item".to_string(),
-                                                            ty: TypeExpr::named("T"),
-                                                            optional: false,
-                                                            readonly: false,
-                                                        },
+                                verter_type_expr::FunctionExpr::synthetic(
+                                    vec![verter_type_expr::FunctionParam::synthetic(
+                                        Some("props".to_string()),
+                                        TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+                                            properties: vec![
+                                                verter_type_expr::ObjectMember::Property(
+                                                    verter_type_expr::ObjectProperty::synthetic(
+                                                        "item".to_string(),
+                                                        TypeExpr::named("T"),
+                                                        false,
+                                                        false,
                                                     ),
-                                                    verter_type_expr::ObjectMember::Property(
-                                                        verter_type_expr::ObjectProperty {
-                                                            name: "index".to_string(),
-                                                            ty: TypeExpr::Primitive(
-                                                                PrimitiveName::Number,
+                                                ),
+                                                verter_type_expr::ObjectMember::Property(
+                                                    verter_type_expr::ObjectProperty::synthetic(
+                                                        "index".to_string(),
+                                                        TypeExpr::Primitive(PrimitiveName::Number),
+                                                        false,
+                                                        false,
+                                                    ),
+                                                ),
+                                                verter_type_expr::ObjectMember::Property(
+                                                    verter_type_expr::ObjectProperty::synthetic(
+                                                        "ui".to_string(),
+                                                        TypeExpr::IndexedAccess {
+                                                            object: Arc::new(TypeExpr::named(
+                                                                "Tabs",
+                                                            )),
+                                                            index: Arc::new(
+                                                                TypeExpr::string_literal("ui"),
                                                             ),
-                                                            optional: false,
-                                                            readonly: false,
                                                         },
+                                                        false,
+                                                        false,
                                                     ),
-                                                    verter_type_expr::ObjectMember::Property(
-                                                        verter_type_expr::ObjectProperty {
-                                                            name: "ui".to_string(),
-                                                            ty: TypeExpr::IndexedAccess {
-                                                                object: Arc::new(TypeExpr::named(
-                                                                    "Tabs",
-                                                                )),
-                                                                index: Arc::new(
-                                                                    TypeExpr::string_literal("ui"),
-                                                                ),
-                                                            },
-                                                            optional: false,
-                                                            readonly: false,
-                                                        },
-                                                    ),
-                                                ],
-                                            },
-                                        )),
-                                        optional: false,
-                                        rest: false,
-                                    }],
-                                    return_type: Some(Arc::new(TypeExpr::Primitive(
-                                        PrimitiveName::Any,
-                                    ))),
-                                    type_parameters: Vec::new(),
-                                },
+                                                ),
+                                            ],
+                                        })),
+                                        false,
+                                        false,
+                                    )],
+                                    Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
+                                    Vec::new(),
+                                ),
                             )],
                         })),
                         optional: true,
@@ -1847,18 +1828,18 @@ fn small_partial_undefined_object_props_fall_back_to_symbolic_source_type() {
     )])];
     let degraded = TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
         properties: vec![
-            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty {
-                name: "base".to_string(),
-                ty: TypeExpr::Primitive(PrimitiveName::Undefined),
-                optional: false,
-                readonly: false,
-            }),
-            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty {
-                name: "label".to_string(),
-                ty: TypeExpr::Primitive(PrimitiveName::Undefined),
-                optional: false,
-                readonly: false,
-            }),
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic(
+                "base".to_string(),
+                TypeExpr::Primitive(PrimitiveName::Undefined),
+                false,
+                false,
+            )),
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic(
+                "label".to_string(),
+                TypeExpr::Primitive(PrimitiveName::Undefined),
+                false,
+                false,
+            )),
         ],
     }));
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
@@ -1936,31 +1917,31 @@ fn huge_partial_prop_expansions_fall_back_to_symbolic_source_type() {
     )])];
     let huge_members = (0..512)
         .map(|index| {
-            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty {
-                name: format!("field{index}"),
-                ty: TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic(
+                format!("field{index}"),
+                TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
                     properties: vec![
                         verter_type_expr::ObjectMember::Property(
-                            verter_type_expr::ObjectProperty {
-                                name: "enabled".to_string(),
-                                ty: TypeExpr::Primitive(PrimitiveName::Boolean),
-                                optional: false,
-                                readonly: false,
-                            },
+                            verter_type_expr::ObjectProperty::synthetic(
+                                "enabled".to_string(),
+                                TypeExpr::Primitive(PrimitiveName::Boolean),
+                                false,
+                                false,
+                            ),
                         ),
                         verter_type_expr::ObjectMember::Property(
-                            verter_type_expr::ObjectProperty {
-                                name: "label".to_string(),
-                                ty: TypeExpr::Primitive(PrimitiveName::String),
-                                optional: true,
-                                readonly: false,
-                            },
+                            verter_type_expr::ObjectProperty::synthetic(
+                                "label".to_string(),
+                                TypeExpr::Primitive(PrimitiveName::String),
+                                true,
+                                false,
+                            ),
                         ),
                     ],
                 })),
-                optional: true,
-                readonly: false,
-            })
+                true,
+                false,
+            ))
         })
         .collect();
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
@@ -2006,12 +1987,12 @@ fn huge_partial_prop_expansions_fall_back_to_symbolic_source_type() {
                                 properties: (0..512)
                                     .map(|index| {
                                         verter_type_expr::ObjectMember::Property(
-                                            verter_type_expr::ObjectProperty {
-                                                name: format!("field{index}"),
-                                                ty: TypeExpr::Primitive(PrimitiveName::String),
-                                                optional: true,
-                                                readonly: false,
-                                            },
+                                            verter_type_expr::ObjectProperty::synthetic(
+                                                format!("field{index}"),
+                                                TypeExpr::Primitive(PrimitiveName::String),
+                                                true,
+                                                false,
+                                            ),
                                         )
                                     })
                                     .collect(),
@@ -2370,45 +2351,45 @@ fn expanded_slot_bindings_preserve_source_binding_order() {
                     properties: vec![crate::analysis::type_expand::ExpandedProperty {
                         name: "default".to_string(),
                         ty: TypeExpr::union(vec![
-                            TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr {
-                                parameters: vec![verter_type_expr::FunctionParam {
-                                    name: Some("props".to_string()),
-                                    ty: TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-                                        properties: vec![
-                                            verter_type_expr::ObjectMember::Property(
-                                                verter_type_expr::ObjectProperty {
-                                                    name: "index".to_string(),
-                                                    ty: TypeExpr::Primitive(PrimitiveName::Number),
-                                                    optional: false,
-                                                    readonly: false,
-                                                },
-                                            ),
-                                            verter_type_expr::ObjectMember::Property(
-                                                verter_type_expr::ObjectProperty {
-                                                    name: "item".to_string(),
-                                                    ty: TypeExpr::named("T"),
-                                                    optional: false,
-                                                    readonly: false,
-                                                },
-                                            ),
-                                            verter_type_expr::ObjectMember::Property(
-                                                verter_type_expr::ObjectProperty {
-                                                    name: "open".to_string(),
-                                                    ty: TypeExpr::Primitive(PrimitiveName::Boolean),
-                                                    optional: false,
-                                                    readonly: false,
-                                                },
-                                            ),
-                                        ],
-                                    })),
-                                    optional: false,
-                                    rest: false,
-                                }],
-                                return_type: Some(Arc::new(TypeExpr::Primitive(
-                                    PrimitiveName::Any,
-                                ))),
-                                type_parameters: Vec::new(),
-                            })),
+                            TypeExpr::Function(Arc::new(
+                                verter_type_expr::FunctionExpr::synthetic(
+                                    vec![verter_type_expr::FunctionParam::synthetic(
+                                        Some("props".to_string()),
+                                        TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+                                            properties: vec![
+                                                verter_type_expr::ObjectMember::Property(
+                                                    verter_type_expr::ObjectProperty::synthetic(
+                                                        "index".to_string(),
+                                                        TypeExpr::Primitive(PrimitiveName::Number),
+                                                        false,
+                                                        false,
+                                                    ),
+                                                ),
+                                                verter_type_expr::ObjectMember::Property(
+                                                    verter_type_expr::ObjectProperty::synthetic(
+                                                        "item".to_string(),
+                                                        TypeExpr::named("T"),
+                                                        false,
+                                                        false,
+                                                    ),
+                                                ),
+                                                verter_type_expr::ObjectMember::Property(
+                                                    verter_type_expr::ObjectProperty::synthetic(
+                                                        "open".to_string(),
+                                                        TypeExpr::Primitive(PrimitiveName::Boolean),
+                                                        false,
+                                                        false,
+                                                    ),
+                                                ),
+                                            ],
+                                        })),
+                                        false,
+                                        false,
+                                    )],
+                                    Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
+                                    Vec::new(),
+                                ),
+                            )),
                             TypeExpr::Primitive(PrimitiveName::Undefined),
                         ]),
                         optional: true,

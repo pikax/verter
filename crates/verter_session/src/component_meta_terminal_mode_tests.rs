@@ -57,6 +57,7 @@ fn intern_four_hop_object(host: &VerterHost) -> SemanticNodeId {
             is_method: false,
             declared_in_macro_type_arg: false,
             merge_role: crate::semantic_query::MemberMergeRole::Authored,
+            spans: Default::default(),
         };
         current = graph.intern_node(SemanticNodeData::Object(SurfaceView {
             members: Arc::from(vec![member].into_boxed_slice()),

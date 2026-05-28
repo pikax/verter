@@ -2540,12 +2540,12 @@ fn build_expanded_type_expr_consumes_type_expr_field_directly_without_reparse() 
     let result = super::build_expanded_type_expr(&fields);
 
     let expected = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty {
-            name: "prop".to_string(),
-            ty: typed_indexed_access.clone(),
-            optional: false,
-            readonly: false,
-        })],
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            "prop".to_string(),
+            typed_indexed_access.clone(),
+            false,
+            false,
+        ))],
     }));
 
     assert_eq!(
@@ -2582,14 +2582,14 @@ fn build_expanded_type_expr_consumes_type_expr_field_directly_without_reparse() 
     }];
     let result_no_typed = super::build_expanded_type_expr(&fields_no_typed);
     let expected_no_typed = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty {
-            name: "prop".to_string(),
-            ty: TypeExpr::Unknown {
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            "prop".to_string(),
+            TypeExpr::Unknown {
                 raw: "AnythingHere".to_string(),
             },
-            optional: false,
-            readonly: false,
-        })],
+            false,
+            false,
+        ))],
     }));
     assert_eq!(
         result_no_typed, expected_no_typed,
@@ -2612,14 +2612,14 @@ fn build_expanded_type_expr_consumes_type_expr_field_directly_without_reparse() 
     }];
     let result_none = super::build_expanded_type_expr(&fields_none);
     let expected_none = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty {
-            name: "p".to_string(),
-            ty: TypeExpr::Unknown {
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            "p".to_string(),
+            TypeExpr::Unknown {
                 raw: "unknown".to_string(),
             },
-            optional: false,
-            readonly: false,
-        })],
+            false,
+            false,
+        ))],
     }));
     assert_eq!(result_none, expected_none);
 }

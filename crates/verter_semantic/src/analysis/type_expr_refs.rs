@@ -306,12 +306,12 @@ mod tests {
     #[test]
     fn ref_inside_object_property_is_a_reference() {
         let expr = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty {
-                name: "x".to_string(),
-                ty: t_ref("T"),
-                optional: false,
-                readonly: false,
-            })],
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                "x".to_string(),
+                t_ref("T"),
+                false,
+                false,
+            ))],
         }));
         assert!(field_references_type_params(&expr, &names_t()));
     }
@@ -373,20 +373,20 @@ mod tests {
         // <T>(x: T): T — outer `T` is active. The function's own
         // type parameter `T` shadows the outer `T` inside the
         // function's signature. Result: false.
-        let func = FunctionExpr {
-            parameters: vec![FunctionParam {
-                name: Some("x".to_string()),
-                ty: t_ref("T"),
-                optional: false,
-                rest: false,
-            }],
-            return_type: Some(Arc::new(t_ref("T"))),
-            type_parameters: vec![TypeParam {
+        let func = FunctionExpr::synthetic(
+            vec![FunctionParam::synthetic(
+                Some("x".to_string()),
+                t_ref("T"),
+                false,
+                false,
+            )],
+            Some(Arc::new(t_ref("T"))),
+            vec![TypeParam {
                 name: "T".to_string(),
                 constraint: None,
                 default: None,
             }],
-        };
+        );
         assert!(
             !function_references_names(&func, &|name| name == "T"),
             "function-type parameter must shadow outer T"
@@ -396,16 +396,16 @@ mod tests {
     #[test]
     fn function_signature_without_shadow_observes_outer_t() {
         // (x: T): T — no own type parameters. Outer T is observed.
-        let func = FunctionExpr {
-            parameters: vec![FunctionParam {
-                name: Some("x".to_string()),
-                ty: t_ref("T"),
-                optional: false,
-                rest: false,
-            }],
-            return_type: Some(Arc::new(t_ref("T"))),
-            type_parameters: Vec::new(),
-        };
+        let func = FunctionExpr::synthetic(
+            vec![FunctionParam::synthetic(
+                Some("x".to_string()),
+                t_ref("T"),
+                false,
+                false,
+            )],
+            Some(Arc::new(t_ref("T"))),
+            Vec::new(),
+        );
         assert!(
             function_references_names(&func, &|name| name == "T"),
             "function with no own type parameters must observe outer T"

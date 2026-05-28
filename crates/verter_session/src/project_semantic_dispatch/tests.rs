@@ -323,6 +323,7 @@ fn project_member_reads_object_surface() {
                 is_method: false,
                 declared_in_macro_type_arg: false,
                 merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                spans: Default::default(),
             }]
             .into_boxed_slice(),
         ),
@@ -386,6 +387,7 @@ fn key_of_object_yields_string_union() {
                     is_method: false,
                     declared_in_macro_type_arg: false,
                     merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                    spans: Default::default(),
                 },
                 SurfaceMember {
                     name: Arc::from("b"),
@@ -395,6 +397,7 @@ fn key_of_object_yields_string_union() {
                     is_method: false,
                     declared_in_macro_type_arg: false,
                     merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                    spans: Default::default(),
                 },
             ]
             .into_boxed_slice(),
@@ -444,6 +447,7 @@ fn project_path_of_length_one_dedups_with_project_member_at_memo() {
                 is_method: false,
                 declared_in_macro_type_arg: false,
                 merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                spans: Default::default(),
             }]
             .into_boxed_slice(),
         ),
@@ -523,6 +527,7 @@ fn indexed_access_canonicalises_to_project_path_before_admission() {
                 is_method: false,
                 declared_in_macro_type_arg: false,
                 merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                spans: Default::default(),
             }]
             .into_boxed_slice(),
         ),
@@ -588,6 +593,7 @@ fn surface_view_carries_surface_member_optional_readonly_is_method() {
                     is_method: true,
                     declared_in_macro_type_arg: false,
                     merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                    spans: Default::default(),
                 },
                 SurfaceMember {
                     name: Arc::from("plain"),
@@ -597,6 +603,7 @@ fn surface_view_carries_surface_member_optional_readonly_is_method() {
                     is_method: false,
                     declared_in_macro_type_arg: false,
                     merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                    spans: Default::default(),
                 },
             ]
             .into_boxed_slice(),
@@ -897,6 +904,7 @@ fn concurrent_sugar_and_canonical_requests_share_in_flight_entry() {
                 is_method: false,
                 declared_in_macro_type_arg: false,
                 merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                spans: Default::default(),
             }]
             .into_boxed_slice(),
         ),
@@ -1884,6 +1892,7 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode() {
                 is_method: false,
                 declared_in_macro_type_arg: false,
                 merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                spans: Default::default(),
             }]
             .into_boxed_slice(),
         ),
@@ -1903,6 +1912,7 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode() {
                 is_method: false,
                 declared_in_macro_type_arg: false,
                 merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                spans: Default::default(),
             }]
             .into_boxed_slice(),
         ),
@@ -1999,6 +2009,7 @@ fn substitute_no_op_short_circuits_intern_preserving_scope() {
                     is_method: false,
                     declared_in_macro_type_arg: false,
                     merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                    spans: Default::default(),
                 },
                 SurfaceMember {
                     name: Arc::from("b"),
@@ -2008,6 +2019,7 @@ fn substitute_no_op_short_circuits_intern_preserving_scope() {
                     is_method: false,
                     declared_in_macro_type_arg: false,
                     merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                    spans: Default::default(),
                 },
                 SurfaceMember {
                     name: Arc::from("c"),
@@ -2017,6 +2029,7 @@ fn substitute_no_op_short_circuits_intern_preserving_scope() {
                     is_method: false,
                     declared_in_macro_type_arg: false,
                     merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                    spans: Default::default(),
                 },
             ]
             .into_boxed_slice(),
@@ -2508,6 +2521,7 @@ fn simple_object(
             is_method: false,
             declared_in_macro_type_arg: false,
             merge_role: crate::semantic_query::MemberMergeRole::Authored,
+            spans: Default::default(),
         })
         .collect();
     graph.intern_node(SemanticNodeData::Object(SurfaceView {
@@ -4798,30 +4812,34 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
     });
     let extends = graph.intern_node(SemanticNodeData::Function {
         params: Arc::from(
-            vec![FunctionParam {
-                name: Some(Arc::from("x")),
-                ty: infer_p,
-                optional: false,
-                rest: false,
-            }]
+            vec![FunctionParam::synthetic(
+                Some(Arc::from("x")),
+                infer_p,
+                false,
+                false,
+            )]
             .into_boxed_slice(),
         ),
         return_type: any_node,
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        signature_span: None,
+        return_type_span: None,
     });
     // check = `(x: string) => any` — concrete Function.
     let check = graph.intern_node(SemanticNodeData::Function {
         params: Arc::from(
-            vec![FunctionParam {
-                name: Some(Arc::from("x")),
-                ty: string_node,
-                optional: false,
-                rest: false,
-            }]
+            vec![FunctionParam::synthetic(
+                Some(Arc::from("x")),
+                string_node,
+                false,
+                false,
+            )]
             .into_boxed_slice(),
         ),
         return_type: any_node,
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        signature_span: None,
+        return_type_span: None,
     });
     // true_branch = bare `P` reference (re-uses the same Infer node).
     let true_branch = infer_p;
@@ -4867,16 +4885,18 @@ fn substitute_recurses_into_function_params_and_return_type() {
     // `(x: T) => T` — both param and return reference T.
     let fn_node = graph.intern_node(SemanticNodeData::Function {
         params: Arc::from(
-            vec![FunctionParam {
-                name: Some(Arc::from("x")),
-                ty: t_param,
-                optional: false,
-                rest: false,
-            }]
+            vec![FunctionParam::synthetic(
+                Some(Arc::from("x")),
+                t_param,
+                false,
+                false,
+            )]
             .into_boxed_slice(),
         ),
         return_type: t_param,
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        signature_span: None,
+        return_type_span: None,
     });
 
     // Substitute T → string. Expect `(x: string) => string`.
@@ -5180,6 +5200,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
                     is_method: false,
                     declared_in_macro_type_arg: false,
                     merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                    spans: Default::default(),
                 },
                 SurfaceMember {
                     name: Arc::from("loadingColor"),
@@ -5189,6 +5210,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
                     is_method: false,
                     declared_in_macro_type_arg: false,
                     merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                    spans: Default::default(),
                 },
             ]
             .into_boxed_slice(),
@@ -5212,6 +5234,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
                 is_method: false,
                 declared_in_macro_type_arg: false,
                 merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                spans: Default::default(),
             }]
             .into_boxed_slice(),
         ),
@@ -6066,6 +6089,7 @@ fn navigate_integrity_project_path_does_not_route_through_macro_payload() {
                 is_method: false,
                 declared_in_macro_type_arg: false,
                 merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                spans: Default::default(),
             }]
             .into_boxed_slice(),
         ),
@@ -6307,6 +6331,7 @@ fn execute_pick_dispatches_through_instantiate_pick_builtin() {
                 is_method: false,
                 declared_in_macro_type_arg: false,
                 merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                spans: Default::default(),
             }]
             .into_boxed_slice(),
         ),
@@ -6364,6 +6389,7 @@ fn execute_omit_dispatches_through_instantiate_omit_builtin() {
                 is_method: false,
                 declared_in_macro_type_arg: false,
                 merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                spans: Default::default(),
             }]
             .into_boxed_slice(),
         ),
@@ -6604,6 +6630,7 @@ fn surface_member(
         is_method: false,
         declared_in_macro_type_arg: false,
         merge_role: crate::semantic_query::MemberMergeRole::Authored,
+        spans: Default::default(),
     }
 }
 

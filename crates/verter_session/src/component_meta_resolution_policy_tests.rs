@@ -178,12 +178,12 @@ fn meta_entry(name: &str, canonical_source: &str) -> ResolvedTypeRegistryMeta {
 
 fn object_with_property(prop_name: &str, ty: TypeExpr) -> TypeExpr {
     TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty {
-            name: prop_name.to_string(),
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            prop_name.to_string(),
             ty,
-            optional: false,
-            readonly: false,
-        })],
+            false,
+            false,
+        ))],
     }))
 }
 

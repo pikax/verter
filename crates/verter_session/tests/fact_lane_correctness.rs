@@ -31,26 +31,26 @@ fn generic_param_rename_does_not_shift_semantic_hash() {
     // `<T>(x: T) => T` and `<U>(x: U) => U` are alpha-equivalent;
     // semantic_hash MUST be identical.
     let make = |param_name: &str| -> TypeExpr {
-        TypeExpr::Function(Arc::new(FunctionExpr {
-            type_parameters: vec![TypeParam {
+        TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
+            vec![FunctionParam::synthetic(
+                Some("x".to_string()),
+                TypeExpr::Ref {
+                    name: Arc::from(param_name),
+                    type_arguments: Arc::from(Vec::new()),
+                },
+                false,
+                false,
+            )],
+            Some(Arc::new(TypeExpr::Ref {
+                name: Arc::from(param_name),
+                type_arguments: Arc::from(Vec::new()),
+            })),
+            vec![TypeParam {
                 name: param_name.to_string(),
                 constraint: None,
                 default: None,
             }],
-            parameters: vec![FunctionParam {
-                name: Some("x".to_string()),
-                ty: TypeExpr::Ref {
-                    name: Arc::from(param_name),
-                    type_arguments: Arc::from(Vec::new()),
-                },
-                optional: false,
-                rest: false,
-            }],
-            return_type: Some(Arc::new(TypeExpr::Ref {
-                name: Arc::from(param_name),
-                type_arguments: Arc::from(Vec::new()),
-            })),
-        }))
+        )))
     };
     let fn_t = make("T");
     let fn_u = make("U");
@@ -68,16 +68,16 @@ fn parameter_name_rename_does_not_shift_semantic_hash() {
     // structural hash MUST treat `(x: string) => void` and `(y: string) => void`
     // as identical.
     let make = |pname: &str| -> TypeExpr {
-        TypeExpr::Function(Arc::new(FunctionExpr {
-            type_parameters: Vec::new(),
-            parameters: vec![FunctionParam {
-                name: Some(pname.to_string()),
-                ty: TypeExpr::Primitive(PrimitiveName::String),
-                optional: false,
-                rest: false,
-            }],
-            return_type: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Void))),
-        }))
+        TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
+            vec![FunctionParam::synthetic(
+                Some(pname.to_string()),
+                TypeExpr::Primitive(PrimitiveName::String),
+                false,
+                false,
+            )],
+            Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Void))),
+            Vec::new(),
+        )))
     };
     let h_x = compute_semantic_hash(&make("x"), SymbolSpace::Type, &UnresolvedLens);
     let h_y = compute_semantic_hash(&make("y"), SymbolSpace::Type, &UnresolvedLens);
@@ -92,20 +92,20 @@ fn property_value_change_shifts_semantic_hash() {
     // Discrimination: a real type-shape change (string → number)
     // DOES shift the semantic_hash.
     let body_a = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty {
-            name: "x".to_string(),
-            ty: TypeExpr::Primitive(PrimitiveName::String),
-            optional: false,
-            readonly: false,
-        })],
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            "x".to_string(),
+            TypeExpr::Primitive(PrimitiveName::String),
+            false,
+            false,
+        ))],
     }));
     let body_b = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty {
-            name: "x".to_string(),
-            ty: TypeExpr::Primitive(PrimitiveName::Number),
-            optional: false,
-            readonly: false,
-        })],
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            "x".to_string(),
+            TypeExpr::Primitive(PrimitiveName::Number),
+            false,
+            false,
+        ))],
     }));
     let h_a = compute_semantic_hash(&body_a, SymbolSpace::Type, &UnresolvedLens);
     let h_b = compute_semantic_hash(&body_b, SymbolSpace::Type, &UnresolvedLens);

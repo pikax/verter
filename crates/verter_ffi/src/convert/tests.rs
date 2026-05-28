@@ -264,14 +264,9 @@ fn component_meta_type_registry_prefers_resolved_registry_type_expr_when_availab
                 type_expr: verter_type_expr::TypeExpr::Object(Arc::new(
                     verter_type_expr::ObjectExpr {
                         properties: vec![verter_type_expr::ObjectMember::Property(
-                            verter_type_expr::ObjectProperty {
-                                name: "variants".to_string(),
-                                ty: verter_type_expr::TypeExpr::Object(Arc::new(
+                            verter_type_expr::ObjectProperty::synthetic("variants".to_string(), verter_type_expr::TypeExpr::Object(Arc::new(
                                     verter_type_expr::ObjectExpr { properties: vec![] },
-                                )),
-                                optional: false,
-                                readonly: false,
-                            },
+                                )), false, false),
                         )],
                     },
                 )),

@@ -245,12 +245,12 @@ fn collect_object_props(expr: &TypeExpr, props: &mut BTreeMap<String, ObjectProp
                     ObjectMember::Method(method) => {
                         props.insert(
                             method.name.clone(),
-                            ObjectProperty {
-                                name: method.name.clone(),
-                                ty: TypeExpr::Function(Arc::new(method.function.clone())),
-                                optional: method.optional,
-                                readonly: false,
-                            },
+                            ObjectProperty::synthetic(
+                                method.name.clone(),
+                                TypeExpr::Function(Arc::new(method.function.clone())),
+                                method.optional,
+                                false,
+                            ),
                         );
                     }
                     ObjectMember::IndexSignature(_)

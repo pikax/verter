@@ -929,6 +929,7 @@ fn required_member(name: &str, value: crate::semantic_query::SemanticNodeId) -> 
         is_method: false,
         declared_in_macro_type_arg: false,
         merge_role: crate::semantic_query::MemberMergeRole::Authored,
+        spans: Default::default(),
     }
 }
 
@@ -941,6 +942,7 @@ fn optional_member(name: &str, value: crate::semantic_query::SemanticNodeId) -> 
         is_method: false,
         declared_in_macro_type_arg: false,
         merge_role: crate::semantic_query::MemberMergeRole::Authored,
+        spans: Default::default(),
     }
 }
 
@@ -2917,6 +2919,7 @@ fn ax_hybrid_key_of_carrier_stops_under_structural_transit() {
             is_method: false,
             declared_in_macro_type_arg: false,
             merge_role: crate::semantic_query::MemberMergeRole::Authored,
+            spans: Default::default(),
         },
         SurfaceMember {
             name: Arc::from("b"),
@@ -2926,6 +2929,7 @@ fn ax_hybrid_key_of_carrier_stops_under_structural_transit() {
             is_method: false,
             declared_in_macro_type_arg: false,
             merge_role: crate::semantic_query::MemberMergeRole::Authored,
+            spans: Default::default(),
         },
     ])));
 
@@ -3003,6 +3007,7 @@ fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
             is_method: false,
             declared_in_macro_type_arg: false,
             merge_role: crate::semantic_query::MemberMergeRole::Authored,
+            spans: Default::default(),
         },
         SurfaceMember {
             name: Arc::from("b"),
@@ -3012,6 +3017,7 @@ fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
             is_method: false,
             declared_in_macro_type_arg: false,
             merge_role: crate::semantic_query::MemberMergeRole::Authored,
+            spans: Default::default(),
         },
     ])));
 
@@ -3123,6 +3129,7 @@ fn ax_hybrid_userland_mypick_follows_same_carrier_stop_as_builtin_pick() {
             is_method: false,
             declared_in_macro_type_arg: false,
             merge_role: crate::semantic_query::MemberMergeRole::Authored,
+            spans: Default::default(),
         },
     ])));
 

@@ -66,18 +66,18 @@ fn shallow_object_does_not_trip_budget() {
     // baseline behavior.
     let body = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty {
-                name: "a".to_string(),
-                ty: TypeExpr::Primitive(PrimitiveName::String),
-                optional: false,
-                readonly: false,
-            }),
-            ObjectMember::Property(ObjectProperty {
-                name: "b".to_string(),
-                ty: TypeExpr::Primitive(PrimitiveName::Number),
-                optional: false,
-                readonly: false,
-            }),
+            ObjectMember::Property(ObjectProperty::synthetic(
+                "a".to_string(),
+                TypeExpr::Primitive(PrimitiveName::String),
+                false,
+                false,
+            )),
+            ObjectMember::Property(ObjectProperty::synthetic(
+                "b".to_string(),
+                TypeExpr::Primitive(PrimitiveName::Number),
+                false,
+                false,
+            )),
         ],
     }));
     let result = compute_semantic_hash(&body, SymbolSpace::Type, &UnresolvedLens);

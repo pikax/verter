@@ -1062,15 +1062,15 @@ type LocalItem = {
                 name: "Props".to_string(),
                 expanded: "{ item?: LocalItem }".to_string(),
                 type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                    properties: vec![ObjectMember::Property(ObjectProperty {
-                        name: "item".to_string(),
-                        ty: TypeExpr::Ref {
+                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                        "item".to_string(),
+                        TypeExpr::Ref {
                             name: "LocalItem".into(),
                             type_arguments: Vec::new().into(),
                         },
-                        optional: true,
-                        readonly: false,
-                    })],
+                        true,
+                        false,
+                    ))],
                 }))),
                 span: Span::new(0, source.len() as u32),
             }],
@@ -1220,12 +1220,12 @@ type Props = Pick<ImportedBase, 'href'>
                 name: "Props".to_string(),
                 expanded: "{ href?: string }".to_string(),
                 type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                    properties: vec![ObjectMember::Property(ObjectProperty {
-                        name: "href".to_string(),
-                        ty: TypeExpr::Primitive(PrimitiveName::String),
-                        optional: true,
-                        readonly: false,
-                    })],
+                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                        "href".to_string(),
+                        TypeExpr::Primitive(PrimitiveName::String),
+                        true,
+                        false,
+                    ))],
                 }))),
                 span: Span::new(0, source.len() as u32),
             }],
@@ -1354,12 +1354,12 @@ type Props = Pick<ImportedBase, 'href'>
                 name: "Props".to_string(),
                 expanded: "{ href?: string }".to_string(),
                 type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                    properties: vec![ObjectMember::Property(ObjectProperty {
-                        name: "href".to_string(),
-                        ty: TypeExpr::Primitive(PrimitiveName::String),
-                        optional: true,
-                        readonly: false,
-                    })],
+                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                        "href".to_string(),
+                        TypeExpr::Primitive(PrimitiveName::String),
+                        true,
+                        false,
+                    ))],
                 }))),
                 span: Span::new(0, source.len() as u32),
             }],
@@ -1478,18 +1478,18 @@ type Props = {
                 name: "Props".to_string(),
                 expanded: "{ href?: ImportedBase['href'] }".to_string(),
                 type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                    properties: vec![ObjectMember::Property(ObjectProperty {
-                        name: "href".to_string(),
-                        ty: TypeExpr::IndexedAccess {
+                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                        "href".to_string(),
+                        TypeExpr::IndexedAccess {
                             object: std::sync::Arc::new(TypeExpr::Ref {
                                 name: "ImportedBase".into(),
                                 type_arguments: Vec::new().into(),
                             }),
                             index: std::sync::Arc::new(TypeExpr::string_literal("href")),
                         },
-                        optional: true,
-                        readonly: false,
-                    })],
+                        true,
+                        false,
+                    ))],
                 }))),
                 span: Span::new(0, source.len() as u32),
             }],
@@ -1612,15 +1612,15 @@ type Props = {
                 name: "Props".to_string(),
                 expanded: "{ tooltip?: ImportedBase }".to_string(),
                 type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                    properties: vec![ObjectMember::Property(ObjectProperty {
-                        name: "tooltip".to_string(),
-                        ty: TypeExpr::Ref {
+                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                        "tooltip".to_string(),
+                        TypeExpr::Ref {
                             name: "ImportedBase".into(),
                             type_arguments: Vec::new().into(),
                         },
-                        optional: true,
-                        readonly: false,
-                    })],
+                        true,
+                        false,
+                    ))],
                 }))),
                 span: Span::new(0, source.len() as u32),
             }],
@@ -2159,12 +2159,12 @@ interface Helper {
                     name: "Helper".to_string(),
                     expanded: "{ label?: string }".to_string(),
                     type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                        properties: vec![ObjectMember::Property(ObjectProperty {
-                            name: "label".to_string(),
-                            ty: TypeExpr::Primitive(PrimitiveName::String),
-                            optional: true,
-                            readonly: false,
-                        })],
+                        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                            "label".to_string(),
+                            TypeExpr::Primitive(PrimitiveName::String),
+                            true,
+                            false,
+                        ))],
                     }))),
                     span: Span::new(0, source.len() as u32),
                 },

@@ -61,12 +61,12 @@ fn build_type_decl<'a>(name: &'a str, members: Vec<(&'a str, TypeExpr)>) -> Type
         properties: members
             .iter()
             .map(|(n, ty)| {
-                ObjectMember::Property(ObjectProperty {
-                    name: n.to_string(),
-                    ty: ty.clone(),
-                    optional: false,
-                    readonly: false,
-                })
+                ObjectMember::Property(ObjectProperty::synthetic(
+                    n.to_string(),
+                    ty.clone(),
+                    false,
+                    false,
+                ))
             })
             .collect(),
     }));

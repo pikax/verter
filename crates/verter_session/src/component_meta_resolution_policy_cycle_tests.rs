@@ -135,12 +135,12 @@ fn meta_entry(name: &str, canonical_source: &str) -> ResolvedTypeRegistryMeta {
 
 fn object_with_property(prop_name: &str, ty: TypeExpr) -> TypeExpr {
     TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty {
-            name: prop_name.to_string(),
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            prop_name.to_string(),
             ty,
-            optional: false,
-            readonly: false,
-        })],
+            false,
+            false,
+        ))],
     }))
 }
 
@@ -366,12 +366,12 @@ fn policy_active_refs_breaks_anonymous_indirect_cycle() {
     // recognise the re-entry through the anonymous shape and
     // terminate.
     let inner_object = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty {
-            name: "y".to_string(),
-            ty: ref_zero("A"),
-            optional: false,
-            readonly: false,
-        })],
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            "y".to_string(),
+            ref_zero("A"),
+            false,
+            false,
+        ))],
     }));
     let pick_inner = ref_with_args(
         "Pick",
@@ -451,30 +451,30 @@ fn policy_active_refs_distinguishes_pick_with_different_type_args() {
     // `combined: { a_branch: Pick<X, 'a'>, b_branch: Pick<X, 'b'> }`
     let outer = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty {
-                name: "a_branch".to_string(),
-                ty: ref_with_args(
+            ObjectMember::Property(ObjectProperty::synthetic(
+                "a_branch".to_string(),
+                ref_with_args(
                     "Pick",
                     vec![
                         ref_zero("X"),
                         TypeExpr::Literal(LiteralValue::String("a".to_string())),
                     ],
                 ),
-                optional: false,
-                readonly: false,
-            }),
-            ObjectMember::Property(ObjectProperty {
-                name: "b_branch".to_string(),
-                ty: ref_with_args(
+                false,
+                false,
+            )),
+            ObjectMember::Property(ObjectProperty::synthetic(
+                "b_branch".to_string(),
+                ref_with_args(
                     "Pick",
                     vec![
                         ref_zero("X"),
                         TypeExpr::Literal(LiteralValue::String("b".to_string())),
                     ],
                 ),
-                optional: false,
-                readonly: false,
-            }),
+                false,
+                false,
+            )),
         ],
     }));
     meta.props.push(prop("combined", outer));
@@ -483,18 +483,18 @@ fn policy_active_refs_distinguishes_pick_with_different_type_args() {
     // members reach this body via different type arguments.
     let x_body = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty {
-                name: "a".to_string(),
-                ty: TypeExpr::Primitive(PrimitiveName::String),
-                optional: false,
-                readonly: false,
-            }),
-            ObjectMember::Property(ObjectProperty {
-                name: "b".to_string(),
-                ty: TypeExpr::Primitive(PrimitiveName::Number),
-                optional: false,
-                readonly: false,
-            }),
+            ObjectMember::Property(ObjectProperty::synthetic(
+                "a".to_string(),
+                TypeExpr::Primitive(PrimitiveName::String),
+                false,
+                false,
+            )),
+            ObjectMember::Property(ObjectProperty::synthetic(
+                "b".to_string(),
+                TypeExpr::Primitive(PrimitiveName::Number),
+                false,
+                false,
+            )),
         ],
     }));
     let registry = vec![registry_entry("X", x_body)];

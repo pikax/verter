@@ -234,25 +234,25 @@ fn project_define_emits_prefers_raw_source_tuple_payload_text() {
 /// Build a `TypeExpr::Function` representing `(props: { props_obj }) => return_ty`
 /// for slot-test fixtures.
 fn slot_function_type(props: Vec<ObjectMember>, return_ty: TypeExpr) -> TypeExpr {
-    TypeExpr::Function(std::sync::Arc::new(FunctionExpr {
-        parameters: vec![FunctionParam {
-            name: Some("props".to_string()),
-            ty: TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties: props })),
-            optional: false,
-            rest: false,
-        }],
-        return_type: Some(std::sync::Arc::new(return_ty)),
-        type_parameters: Vec::new(),
-    }))
+    TypeExpr::Function(std::sync::Arc::new(FunctionExpr::synthetic(
+        vec![FunctionParam::synthetic(
+            Some("props".to_string()),
+            TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties: props })),
+            false,
+            false,
+        )],
+        Some(std::sync::Arc::new(return_ty)),
+        Vec::new(),
+    )))
 }
 
 fn slot_object_property(name: &str, optional: bool, ty: TypeExpr) -> ObjectMember {
-    ObjectMember::Property(ObjectProperty {
-        name: name.to_string(),
+    ObjectMember::Property(ObjectProperty::synthetic(
+        name.to_string(),
         ty,
         optional,
-        readonly: false,
-    })
+        false,
+    ))
 }
 
 #[test]
@@ -332,18 +332,18 @@ fn project_define_slots_preserves_symbolic_binding_types_for_pick_params() {
             TypeExpr::Literal(verter_type_expr::LiteralValue::String("day".to_string())),
         ]),
     };
-    let function_ty = TypeExpr::Function(std::sync::Arc::new(FunctionExpr {
-        parameters: vec![FunctionParam {
-            name: Some("props".to_string()),
-            ty: pick_ty,
-            optional: false,
-            rest: false,
-        }],
-        return_type: Some(std::sync::Arc::new(TypeExpr::Primitive(
+    let function_ty = TypeExpr::Function(std::sync::Arc::new(FunctionExpr::synthetic(
+        vec![FunctionParam::synthetic(
+            Some("props".to_string()),
+            pick_ty,
+            false,
+            false,
+        )],
+        Some(std::sync::Arc::new(TypeExpr::Primitive(
             verter_type_expr::PrimitiveName::Any,
         ))),
-        type_parameters: Vec::new(),
-    }));
+        Vec::new(),
+    )));
     let slot_prop = typed_prop("day", true, function_ty, "/sfc/Calendar.vue");
     let elements = ResolvedElements {
         props: vec![slot_prop],
@@ -712,23 +712,23 @@ fn project_define_slots_bridges_return_expr_from_function_type() {
         name: std::sync::Arc::from("VNode"),
         type_arguments: std::sync::Arc::from(Vec::<TypeExpr>::new()),
     };
-    let function_ty = TypeExpr::Function(std::sync::Arc::new(FunctionExpr {
-        parameters: vec![FunctionParam {
-            name: Some("props".to_string()),
-            ty: TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                properties: vec![ObjectMember::Property(ObjectProperty {
-                    name: "item".to_string(),
-                    ty: TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
-                    optional: false,
-                    readonly: false,
-                })],
+    let function_ty = TypeExpr::Function(std::sync::Arc::new(FunctionExpr::synthetic(
+        vec![FunctionParam::synthetic(
+            Some("props".to_string()),
+            TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                    "item".to_string(),
+                    TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+                    false,
+                    false,
+                ))],
             })),
-            optional: false,
-            rest: false,
-        }],
-        return_type: Some(std::sync::Arc::new(return_ty.clone())),
-        type_parameters: Vec::new(),
-    }));
+            false,
+            false,
+        )],
+        Some(std::sync::Arc::new(return_ty.clone())),
+        Vec::new(),
+    )));
     let mut slot_prop = typed_prop("default", false, function_ty, "/sfc/D.vue");
     slot_prop.types = vec![verter_compiler::utils::oxc::vue::resolve_type::RuntimeType::Function];
     let elements = ResolvedElements {
@@ -766,31 +766,31 @@ fn project_define_slots_populates_inline_binding_exprs_from_typed_function_param
         name: std::sync::Arc::from("VNode"),
         type_arguments: std::sync::Arc::from(Vec::<TypeExpr>::new()),
     };
-    let function_ty = TypeExpr::Function(std::sync::Arc::new(FunctionExpr {
-        parameters: vec![FunctionParam {
-            name: Some("props".to_string()),
-            ty: TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+    let function_ty = TypeExpr::Function(std::sync::Arc::new(FunctionExpr::synthetic(
+        vec![FunctionParam::synthetic(
+            Some("props".to_string()),
+            TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
                 properties: vec![
-                    ObjectMember::Property(ObjectProperty {
-                        name: "x".to_string(),
-                        ty: item_ty.clone(),
-                        optional: false,
-                        readonly: false,
-                    }),
-                    ObjectMember::Property(ObjectProperty {
-                        name: "y".to_string(),
-                        ty: label_ty.clone(),
-                        optional: false,
-                        readonly: false,
-                    }),
+                    ObjectMember::Property(ObjectProperty::synthetic(
+                        "x".to_string(),
+                        item_ty.clone(),
+                        false,
+                        false,
+                    )),
+                    ObjectMember::Property(ObjectProperty::synthetic(
+                        "y".to_string(),
+                        label_ty.clone(),
+                        false,
+                        false,
+                    )),
                 ],
             })),
-            optional: false,
-            rest: false,
-        }],
-        return_type: Some(std::sync::Arc::new(return_ty)),
-        type_parameters: Vec::new(),
-    }));
+            false,
+            false,
+        )],
+        Some(std::sync::Arc::new(return_ty)),
+        Vec::new(),
+    )));
     let mut slot_prop = typed_prop("default", false, function_ty, "/sfc/E.vue");
     slot_prop.types = vec![verter_compiler::utils::oxc::vue::resolve_type::RuntimeType::Function];
     let elements = ResolvedElements {

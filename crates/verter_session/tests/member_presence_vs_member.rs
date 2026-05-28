@@ -46,12 +46,12 @@ fn build_foo(members: Vec<(&str, TypeExpr)>) -> Arc<IndexedReady> {
         properties: members
             .iter()
             .map(|(name, ty)| {
-                ObjectMember::Property(ObjectProperty {
-                    name: (*name).to_string(),
-                    ty: ty.clone(),
-                    optional: false,
-                    readonly: false,
-                })
+                ObjectMember::Property(ObjectProperty::synthetic(
+                    (*name).to_string(),
+                    ty.clone(),
+                    false,
+                    false,
+                ))
             })
             .collect(),
     }));
@@ -154,44 +154,44 @@ fn bullet_6_pick_literal_key_path_precise_invariant() {
     // gets edited.
     let body_a = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty {
-                name: "id".to_string(),
-                ty: TypeExpr::Primitive(PrimitiveName::Number),
-                optional: false,
-                readonly: false,
-            }),
-            ObjectMember::Property(ObjectProperty {
-                name: "name".to_string(),
-                ty: TypeExpr::Primitive(PrimitiveName::String),
-                optional: false,
-                readonly: false,
-            }),
+            ObjectMember::Property(ObjectProperty::synthetic(
+                "id".to_string(),
+                TypeExpr::Primitive(PrimitiveName::Number),
+                false,
+                false,
+            )),
+            ObjectMember::Property(ObjectProperty::synthetic(
+                "name".to_string(),
+                TypeExpr::Primitive(PrimitiveName::String),
+                false,
+                false,
+            )),
         ],
     }));
     let body_b_v1 = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty {
-            name: "other".to_string(),
-            ty: TypeExpr::Primitive(PrimitiveName::String),
-            optional: false,
-            readonly: false,
-        })],
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            "other".to_string(),
+            TypeExpr::Primitive(PrimitiveName::String),
+            false,
+            false,
+        ))],
     }));
     let body_b_v2 = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty {
-            name: "other".to_string(),
-            // Edit: `string` → `number`.
-            ty: TypeExpr::Primitive(PrimitiveName::Number),
-            optional: false,
-            readonly: false,
-        })],
+        // Edit: `string` → `number`.
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            "other".to_string(),
+            TypeExpr::Primitive(PrimitiveName::Number),
+            false,
+            false,
+        ))],
     }));
     let body_c = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty {
-            name: "extra".to_string(),
-            ty: TypeExpr::Primitive(PrimitiveName::Boolean),
-            optional: false,
-            readonly: false,
-        })],
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            "extra".to_string(),
+            TypeExpr::Primitive(PrimitiveName::Boolean),
+            false,
+            false,
+        ))],
     }));
 
     // Member.semantic_hash per member body (Phase 2, what Stage 6d

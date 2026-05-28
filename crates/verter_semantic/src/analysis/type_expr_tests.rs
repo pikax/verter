@@ -620,8 +620,16 @@ fn function_type_json_roundtrip_preserves_generic_parameter_metadata() {
     assert_eq!(json["returnType"]["kind"], "typeParameter");
     assert_eq!(json["returnType"]["constraint"]["kind"], "ref");
 
-    let roundtrip: TypeExpr = serde_json::from_value(json).expect("deserialize function");
-    assert_eq!(roundtrip, expr);
+    let roundtrip: TypeExpr = serde_json::from_value(json.clone()).expect("deserialize function");
+    // OXC spans are in-memory provenance and are intentionally NOT part of the
+    // JSON wire schema (`to_json_value` does not emit them), so a JSON
+    // round-trip is span-lossy by design — a full `roundtrip == expr` would
+    // (correctly) differ only on spans. Assert wire-losslessness instead:
+    // re-serialising the round-trip yields byte-identical JSON, so everything
+    // the wire carries — including the generic parameter metadata this test is
+    // named for — survived verbatim.
+    let reserialized = serde_json::to_value(&roundtrip).expect("re-serialize round-trip");
+    assert_eq!(reserialized, json);
     assert!(!roundtrip.is_unknown());
     assert!(!matches!(roundtrip, TypeExpr::Object(_)));
 }

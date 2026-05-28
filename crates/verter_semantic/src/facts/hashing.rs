@@ -952,12 +952,12 @@ mod tests {
         let properties: Vec<ObjectMember> = members
             .into_iter()
             .map(|(name, ty)| {
-                ObjectMember::Property(ObjectProperty {
-                    name: name.to_string(),
+                ObjectMember::Property(ObjectProperty::synthetic(
+                    name.to_string(),
                     ty,
-                    optional: false,
-                    readonly: false,
-                })
+                    false,
+                    false,
+                ))
             })
             .collect();
         TypeExpr::Object(Arc::new(ObjectExpr { properties }))

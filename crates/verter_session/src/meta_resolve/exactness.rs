@@ -187,18 +187,18 @@ mod tests {
     fn closed_object_with_primitive_members_is_concrete() {
         let expr = TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
-                ObjectMember::Property(ObjectProperty {
-                    name: "msg".to_string(),
-                    ty: TypeExpr::Primitive(PrimitiveName::String),
-                    optional: false,
-                    readonly: false,
-                }),
-                ObjectMember::Property(ObjectProperty {
-                    name: "count".to_string(),
-                    ty: TypeExpr::Primitive(PrimitiveName::Number),
-                    optional: false,
-                    readonly: false,
-                }),
+                ObjectMember::Property(ObjectProperty::synthetic(
+                    "msg".to_string(),
+                    TypeExpr::Primitive(PrimitiveName::String),
+                    false,
+                    false,
+                )),
+                ObjectMember::Property(ObjectProperty::synthetic(
+                    "count".to_string(),
+                    TypeExpr::Primitive(PrimitiveName::Number),
+                    false,
+                    false,
+                )),
             ],
         }));
         assert_eq!(classify_type_expr(&expr), ExpansionExactness::ExactConcrete,);
@@ -207,15 +207,15 @@ mod tests {
     #[test]
     fn open_object_with_ref_member_is_symbolic() {
         let expr = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty {
-                name: "msg".to_string(),
-                ty: TypeExpr::Ref {
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                "msg".to_string(),
+                TypeExpr::Ref {
                     name: Arc::from("Unresolved"),
                     type_arguments: Arc::from(Vec::<TypeExpr>::new().into_boxed_slice()),
                 },
-                optional: false,
-                readonly: false,
-            })],
+                false,
+                false,
+            ))],
         }));
         assert_eq!(classify_type_expr(&expr), ExpansionExactness::ExactSymbolic,);
     }
@@ -234,24 +234,24 @@ mod tests {
         // { msg: { inner: T } } — outer object has a non-concrete
         // value; classification must surface symbolic.
         let inner = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty {
-                name: "inner".to_string(),
-                ty: TypeExpr::TypeParameter(verter_type_expr::TypeParam {
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                "inner".to_string(),
+                TypeExpr::TypeParameter(verter_type_expr::TypeParam {
                     name: "T".to_string(),
                     constraint: None,
                     default: None,
                 }),
-                optional: false,
-                readonly: false,
-            })],
+                false,
+                false,
+            ))],
         }));
         let outer = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty {
-                name: "msg".to_string(),
-                ty: inner,
-                optional: false,
-                readonly: false,
-            })],
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                "msg".to_string(),
+                inner,
+                false,
+                false,
+            ))],
         }));
         assert_eq!(
             classify_type_expr(&outer),

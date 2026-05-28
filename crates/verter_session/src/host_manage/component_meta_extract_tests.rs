@@ -510,12 +510,12 @@ mod walker_coverage_tests {
         let mut node = participating_ref();
         for _ in 0..100 {
             let obj = ObjectExpr {
-                properties: vec![ObjectMember::Property(ObjectProperty {
-                    name: "a".to_string(),
-                    ty: node,
-                    optional: false,
-                    readonly: false,
-                })],
+                properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                    "a".to_string(),
+                    node,
+                    false,
+                    false,
+                ))],
             };
             node = TypeExpr::Object(Arc::new(obj));
         }
@@ -579,18 +579,18 @@ mod walker_coverage_tests {
 
         // `() => { wrapped: Target }`
         let object = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty {
-                name: "wrapped".to_string(),
-                ty: participating_ref(),
-                optional: false,
-                readonly: false,
-            })],
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                "wrapped".to_string(),
+                participating_ref(),
+                false,
+                false,
+            ))],
         }));
-        let function = TypeExpr::Function(Arc::new(FunctionExpr {
-            parameters: Vec::new(),
-            return_type: Some(Arc::new(object)),
-            type_parameters: Vec::new(),
-        }));
+        let function = TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
+            Vec::new(),
+            Some(Arc::new(object)),
+            Vec::new(),
+        )));
 
         let collected = super::super::collect_imported_macro_participating_refs_for_test(
             project.host(),
@@ -616,18 +616,18 @@ mod walker_coverage_tests {
         let participating = participating_set();
 
         // `(arg: Target) => void`
-        let function = TypeExpr::Function(Arc::new(FunctionExpr {
-            parameters: vec![FunctionParam {
-                name: Some("arg".to_string()),
-                ty: participating_ref(),
-                optional: false,
-                rest: false,
-            }],
-            return_type: Some(Arc::new(TypeExpr::Primitive(
+        let function = TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
+            vec![FunctionParam::synthetic(
+                Some("arg".to_string()),
+                participating_ref(),
+                false,
+                false,
+            )],
+            Some(Arc::new(TypeExpr::Primitive(
                 verter_type_expr::PrimitiveName::Void,
             ))),
-            type_parameters: Vec::new(),
-        }));
+            Vec::new(),
+        )));
 
         let collected = super::super::collect_imported_macro_participating_refs_for_test(
             project.host(),
