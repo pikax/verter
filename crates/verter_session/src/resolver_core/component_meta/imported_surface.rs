@@ -571,10 +571,31 @@ impl ImportedMacroSurface {
         };
         let source = indexed.eval_source.as_ref();
 
-        // Determine the declaring declaration's span so the JSDoc search is
-        // scoped to it (not a file-wide first match). When the origin file's
-        // type analysis is unavailable, fall back to the whole-file search
-        // (the prior behaviour — still correct for single-declaration files).
+        // STRUCTURAL attach (the authority): the member's OWN name-token offset
+        // (`SurfaceMember::spans.name`, stamped at lowering against
+        // `declaration_origin`) anchors the leading-JSDoc block — the same
+        // mechanism `TypeInfoSurface::with_member_jsdoc_spans` uses. This
+        // disambiguates two declarations that share a member name AND value type
+        // (P2-3): their value nodes intern identically, so the value-node
+        // disambiguation below cannot tell them apart, but each member carries
+        // its OWN declaration span, so the declaration that declares THIS member
+        // is read — never a same-named, same-typed decoy.
+        if let Some(name_span) = member.spans.name {
+            let (description, tags) = verter_semantic::analysis::jsdoc::extract_jsdoc_near_offset(
+                source,
+                name_span.start,
+            );
+            // A member declaring no leading JSDoc at its OWN site returns the
+            // empty result here rather than falling through to a name search: a
+            // same-named decoy declaration must not lend its JSDoc to a member
+            // whose own declaration carries none.
+            return (description, tags);
+        }
+
+        // No member name span — a genuinely synthetic / multi-origin member with
+        // no single source site. Scope the name search to the declaring
+        // declaration's span when resolvable, else fall back to the whole-file
+        // search (still correct for a single-declaration file).
         if let Some((start, end)) = Self::declaring_decl_span(
             ctx,
             source,

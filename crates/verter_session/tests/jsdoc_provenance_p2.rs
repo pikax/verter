@@ -141,3 +141,50 @@ fn p2_2_generic_inherited_member_jsdoc_resolves_to_base_declaration_file() {
         "the inherited member's JSDoc must not pick up the derived interface's decoy doc"
     );
 }
+
+// ---------------------------------------------------------------------------
+// P2-3 — duplicate-name same-value JSDoc.
+//
+// `Decoy.field` and `Real.field` have the SAME member name AND the SAME value
+// type (`string`), so their member value nodes intern identically. The pre-fix
+// value-node disambiguation in `declaring_decl_span` therefore cannot tell the
+// two declarations apart and collapses to ONE declaration's doc for BOTH:
+// querying EITHER `Decoy` or `Real` returned `Real`'s `/** right */`. Querying
+// `Decoy` is thus the discriminator — pre-fix returns the wrong `right`,
+// post-fix returns `Decoy`'s own `wrong` (anchored on `Decoy.field`'s own
+// declaration span).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn p2_3_duplicate_name_same_value_jsdoc_disambiguates_by_declaration_span() {
+    const FILE: &str = "/w/dup.ts";
+    let src = "export interface Decoy {\n  /** wrong */\n  field: string;\n}\n\
+        export interface Real {\n  /** right */\n  field: string;\n}\n";
+
+    let host = build_host(&[(FILE, src)]);
+
+    // DISCRIMINATOR: querying `Decoy` must return ITS OWN doc (`wrong`). Pre-fix
+    // the value-node collision returned `Real`'s `right` for `Decoy` too; only
+    // the per-member declaration-span anchor reads `Decoy.field`'s own JSDoc.
+    let decoy_doc = member_prop_description(&host, FILE, "Decoy", "field");
+    assert_eq!(
+        decoy_doc.as_deref(),
+        Some("wrong"),
+        "`Decoy.field`'s JSDoc must be its OWN `wrong` doc, disambiguated by its declaration \
+         span. Pre-fix the same-name same-value collision returned `Real`'s `right` here."
+    );
+    assert_ne!(
+        decoy_doc.as_deref(),
+        Some("right"),
+        "`Decoy.field` must NOT pick up `Real.field`'s `right` doc (the value-node-collision bug)"
+    );
+
+    // CONTROL: querying `Real` returns its own `right` doc (both pre- and
+    // post-fix). Proves the fix did not merely swap which declaration wins.
+    let real_doc = member_prop_description(&host, FILE, "Real", "field");
+    assert_eq!(
+        real_doc.as_deref(),
+        Some("right"),
+        "`Real.field`'s JSDoc must be its OWN `right` doc"
+    );
+}
