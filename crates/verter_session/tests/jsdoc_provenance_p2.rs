@@ -188,3 +188,56 @@ fn p2_3_duplicate_name_same_value_jsdoc_disambiguates_by_declaration_span() {
         "`Real.field`'s JSDoc must be its OWN `right` doc"
     );
 }
+
+// ---------------------------------------------------------------------------
+// P2-4 — class `/** doc */ foo!: string` definite-assignment field.
+//
+// The pre-fix textual matcher accepted `name` → optional `?` → `:` / `(` but
+// NOT `!` (definite assignment), so a `foo!: string` field's leading JSDoc was
+// missed (`description == None`). The structural attach anchors on the member's
+// name-token offset (the `!` is AFTER the name, so the backward leading-comment
+// walk is unaffected); any remaining textual matcher must also understand `!:`
+// (but is not the authority).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn p2_4_class_definite_assignment_field_carries_jsdoc() {
+    const FILE: &str = "/w/definite.ts";
+    // `foo!: string` is a documented definite-assignment field; `plain: number`
+    // is a documented normal field (control); `bare!: boolean` is a
+    // definite-assignment field with NO JSDoc (negative control).
+    let src = "export class WithDefinite {\n  \
+        /** the definite field */\n  \
+        foo!: string;\n  \
+        /** the plain field */\n  \
+        plain: number;\n  \
+        bare!: boolean;\n}\n";
+
+    let host = build_host(&[(FILE, src)]);
+
+    // POSITIVE: the documented definite-assignment field `foo!: string` carries
+    // its JSDoc (the `!` must not block the leading-comment attach). Pre-fix the
+    // `?`-only matcher missed it → `None`.
+    let foo_doc = member_prop_description(&host, FILE, "WithDefinite", "foo");
+    assert_eq!(
+        foo_doc.as_deref(),
+        Some("the definite field"),
+        "`foo!: string`'s JSDoc must resolve; a `None` proves the `!:` matcher gap"
+    );
+
+    // CONTROL: the plain documented field still resolves (no regression).
+    let plain_doc = member_prop_description(&host, FILE, "WithDefinite", "plain");
+    assert_eq!(
+        plain_doc.as_deref(),
+        Some("the plain field"),
+        "the plain field `plain: number` must still carry its JSDoc"
+    );
+
+    // NEGATIVE: an undocumented definite-assignment field carries no JSDoc (the
+    // attach must not invent one for `bare`).
+    let bare_doc = member_prop_description(&host, FILE, "WithDefinite", "bare");
+    assert_eq!(
+        bare_doc, None,
+        "an undocumented definite-assignment field `bare!: boolean` must carry NO JSDoc"
+    );
+}

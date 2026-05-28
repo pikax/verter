@@ -751,7 +751,12 @@ fn member_decl_site_in_range(
             while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
                 cursor += 1;
             }
-            if cursor < bytes.len() && bytes[cursor] == b'?' {
+            // Optional (`name?:`) OR definite-assignment (`name!:`, a class
+            // field) marker between the name and the `:`. A class
+            // `/** doc */ foo!: string` field declares its member the same way
+            // a `?:`/`:`/`(` member does, so the `!` must not make the presence
+            // probe miss the declaration site.
+            if cursor < bytes.len() && (bytes[cursor] == b'?' || bytes[cursor] == b'!') {
                 cursor += 1;
             }
             if cursor < bytes.len() && (bytes[cursor] == b':' || bytes[cursor] == b'(') {

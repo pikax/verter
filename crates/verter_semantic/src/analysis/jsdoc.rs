@@ -380,11 +380,7 @@ fn strip_jsdoc_line(source: &str, line_start: usize, line_end: usize) -> Option<
 /// Compute the description + tag offset spans of the JSDoc block at absolute
 /// `[block_start, block_end)` (the block INCLUDES its `/**` and `*/`
 /// delimiters).
-fn jsdoc_block_spans(
-    source: &str,
-    block_start: usize,
-    block_end: usize,
-) -> JsdocBlockSpanOffsets {
+fn jsdoc_block_spans(source: &str, block_start: usize, block_end: usize) -> JsdocBlockSpanOffsets {
     // Inner content between `/**` and `*/`.
     let inner_start = (block_start + 3).min(block_end);
     let inner_end = block_end.saturating_sub(2).max(inner_start);
@@ -416,10 +412,8 @@ fn jsdoc_block_spans(
                 while text_start < e && bytes[text_start].is_ascii_whitespace() {
                     text_start += 1;
                 }
-                let text = (text_start < e).then(|| verter_span::Span::new(
-                    text_start as u32,
-                    e as u32,
-                ));
+                let text =
+                    (text_start < e).then(|| verter_span::Span::new(text_start as u32, e as u32));
                 tags.push(JsdocTagSpanOffsets {
                     name: verter_span::Span::new(name_start as u32, name_end as u32),
                     text,
@@ -616,12 +610,19 @@ pub fn extract_jsdoc_for_property_name_in_range(
             while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
                 cursor += 1;
             }
-            if cursor < bytes.len() && bytes[cursor] == b'?' {
+            // Optional (`name?:`) OR definite-assignment (`name!:`, a class
+            // field) marker between the name and the `:`. Both are valid; a
+            // class `/** doc */ foo!: string` field must not be skipped just
+            // because it carries `!` instead of `?`. This is the NON-authority
+            // textual fallback: the structural name-span attach handles `!:`
+            // already, but this name-based fallback (expanded-prop / synthetic
+            // member lookup) must not REJECT a definite-assignment field.
+            if cursor < bytes.len() && (bytes[cursor] == b'?' || bytes[cursor] == b'!') {
                 cursor += 1;
             }
-            // Property-style (`name:` / `name?:`) OR method-style (`name(`,
-            // e.g. an interface method member `default(props): any`). A
-            // method-style member declares its leading JSDoc the same way a
+            // Property-style (`name:` / `name?:` / `name!:`) OR method-style
+            // (`name(`, e.g. an interface method member `default(props): any`).
+            // A method-style member declares its leading JSDoc the same way a
             // property does, so the same `extract_jsdoc_near_offset` resolves
             // it from the member-name offset.
             if cursor < bytes.len() && (bytes[cursor] == b':' || bytes[cursor] == b'(') {
@@ -644,8 +645,40 @@ fn is_identifier_continue(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_jsdoc_near_offset, parse_jsdoc_tag_type_payload};
+    use super::{
+        extract_jsdoc_for_property_name, extract_jsdoc_near_offset, parse_jsdoc_tag_type_payload,
+    };
     use verter_type_expr::{PrimitiveName, TypeExpr};
+
+    // P2-4: the name-based textual fallback must accept a definite-assignment
+    // (`name!:`) field. This is the NON-authority matcher (the structural
+    // name-span attach is preferred), but a name-based fallback
+    // (`jsdoc_for_expanded_prop`, synthetic-member lookup) must not REJECT a
+    // class `/** doc */ foo!: string` field. Pre-fix the matcher accepted
+    // `name` → `?` → `:`/`(` but not `!`, so this returned `None`.
+    #[test]
+    fn extract_jsdoc_for_property_name_accepts_definite_assignment_field() {
+        let source = "class C {\n  /** the definite field */\n  foo!: string;\n}\n";
+        let (description, _tags) = extract_jsdoc_for_property_name(source, "foo");
+        assert_eq!(
+            description.as_deref(),
+            Some("the definite field"),
+            "a definite-assignment field `foo!: string` must match the name-based fallback; a \
+             `None` proves the matcher still rejects `!:`"
+        );
+    }
+
+    // Negative control: a definite-assignment field with NO leading JSDoc must
+    // still return empty (the `!:` acceptance must not fabricate a description).
+    #[test]
+    fn extract_jsdoc_for_property_name_definite_assignment_without_doc_is_empty() {
+        let source = "class C {\n  bare!: boolean;\n}\n";
+        let (description, tags) = extract_jsdoc_for_property_name(source, "bare");
+        assert!(
+            description.is_none() && tags.is_empty(),
+            "an undocumented `bare!: boolean` field must yield no JSDoc; got {description:?}"
+        );
+    }
 
     #[test]
     fn parse_jsdoc_tag_type_payload_lowers_primitive_keyword() {
