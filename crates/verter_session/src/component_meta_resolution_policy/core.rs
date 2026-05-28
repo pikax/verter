@@ -557,12 +557,13 @@ fn rewrite_object_member(
     match member {
         ObjectMember::Property(prop) => {
             let new_ty = rewrite_expr(&prop.ty, ctx)?;
-            Some(ObjectMember::Property(ObjectProperty {
-                name: prop.name.clone(),
-                ty: new_ty,
-                optional: prop.optional,
-                readonly: prop.readonly,
-            }))
+            Some(ObjectMember::Property(ObjectProperty::with_spans(
+                prop.name.clone(),
+                new_ty,
+                prop.optional,
+                prop.readonly,
+                prop.spans,
+            )))
         }
         ObjectMember::IndexSignature(sig) => {
             let new_key = rewrite_expr(&sig.key_type, ctx);
@@ -570,12 +571,13 @@ fn rewrite_object_member(
             if new_key.is_none() && new_value.is_none() {
                 return None;
             }
-            Some(ObjectMember::IndexSignature(IndexSignature {
-                key_name: sig.key_name.clone(),
-                key_type: new_key.unwrap_or_else(|| sig.key_type.clone()),
-                value_type: new_value.unwrap_or_else(|| sig.value_type.clone()),
-                readonly: sig.readonly,
-            }))
+            Some(ObjectMember::IndexSignature(IndexSignature::with_spans(
+                sig.key_name.clone(),
+                new_key.unwrap_or_else(|| sig.key_type.clone()),
+                new_value.unwrap_or_else(|| sig.value_type.clone()),
+                sig.readonly,
+                sig.spans,
+            )))
         }
         ObjectMember::CallSignature(func) => {
             rewrite_function(func, ctx).map(ObjectMember::CallSignature)
@@ -585,11 +587,12 @@ fn rewrite_object_member(
         }
         ObjectMember::Method(method) => {
             let new_func = rewrite_function(&method.function, ctx)?;
-            Some(ObjectMember::Method(MethodSignature {
-                name: method.name.clone(),
-                function: new_func,
-                optional: method.optional,
-            }))
+            Some(ObjectMember::Method(MethodSignature::with_spans(
+                method.name.clone(),
+                new_func,
+                method.optional,
+                method.spans,
+            )))
         }
     }
 }
@@ -609,14 +612,15 @@ fn rewrite_function(func: &FunctionExpr, ctx: &mut PolicyCtx<'_, '_>) -> Option<
     if next_params.is_none() && new_return.is_none() {
         return None;
     }
-    Some(FunctionExpr {
-        parameters: next_params.unwrap_or_else(|| func.parameters.clone()),
-        return_type: match (new_return, &func.return_type) {
+    Some(FunctionExpr::with_spans(
+        next_params.unwrap_or_else(|| func.parameters.clone()),
+        match (new_return, &func.return_type) {
             (Some(rewritten), _) => Some(Arc::new(rewritten)),
             (None, original) => original.clone(),
         },
-        type_parameters: func.type_parameters.clone(),
-    })
+        func.type_parameters.clone(),
+        func.spans,
+    ))
 }
 
 // ---------------------------------------------------------------------------

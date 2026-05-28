@@ -1196,12 +1196,14 @@ fn build_public_instance_slot_type(
                 .bindings
                 .iter()
                 .map(|binding| {
-                    verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty {
-                        name: binding.name.clone(),
-                        ty: binding.type_expr.clone(),
-                        optional: false,
-                        readonly: false,
-                    })
+                    verter_type_expr::ObjectMember::Property(
+                        verter_type_expr::ObjectProperty::synthetic(
+                            binding.name.clone(),
+                            binding.type_expr.clone(),
+                            false,
+                            false,
+                        ),
+                    )
                 })
                 .collect(),
         }));
@@ -1214,20 +1216,21 @@ fn build_public_instance_slot_type(
         .unwrap_or(verter_type_expr::TypeExpr::Primitive(
             verter_type_expr::PrimitiveName::Unknown,
         ));
-    let function = verter_type_expr::TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr {
-        parameters: if slot.bindings.is_empty() {
-            Vec::new()
-        } else {
-            vec![verter_type_expr::FunctionParam {
-                name: Some("props".to_string()),
-                ty: parameter_type,
-                optional: false,
-                rest: false,
-            }]
-        },
-        return_type: Some(Arc::new(return_type)),
-        type_parameters: Vec::new(),
-    }));
+    let function =
+        verter_type_expr::TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr::synthetic(
+            if slot.bindings.is_empty() {
+                Vec::new()
+            } else {
+                vec![verter_type_expr::FunctionParam::synthetic(
+                    Some("props".to_string()),
+                    parameter_type,
+                    false,
+                    false,
+                )]
+            },
+            Some(Arc::new(return_type)),
+            Vec::new(),
+        )));
     if slot.is_required {
         function
     } else {
@@ -1244,12 +1247,12 @@ fn build_public_instance_slots_member(
     let slot_properties = slots
         .iter()
         .map(|slot| {
-            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty {
-                name: slot.name.clone(),
-                ty: build_public_instance_slot_type(slot),
-                optional: !slot.is_required,
-                readonly: false,
-            })
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic(
+                slot.name.clone(),
+                build_public_instance_slot_type(slot),
+                !slot.is_required,
+                false,
+            ))
         })
         .collect();
 

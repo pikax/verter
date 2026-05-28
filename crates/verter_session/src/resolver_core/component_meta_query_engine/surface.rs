@@ -823,12 +823,15 @@ fn substitute_type_expr(expr: &TypeExpr, substitutions: &FxHashMap<String, TypeE
                     .iter()
                     .map(|member| match member {
                         ObjectMember::Property(property) => {
-                            ObjectMember::Property(verter_type_expr::ObjectProperty {
-                                name: property.name.clone(),
-                                ty: substitute_type_expr(&property.ty, substitutions),
-                                optional: property.optional,
-                                readonly: property.readonly,
-                            })
+                            // Structure-preserving substitution: keep the
+                            // member's OXC declaration-site spans verbatim.
+                            ObjectMember::Property(verter_type_expr::ObjectProperty::with_spans(
+                                property.name.clone(),
+                                substitute_type_expr(&property.ty, substitutions),
+                                property.optional,
+                                property.readonly,
+                                property.spans,
+                            ))
                         }
                         ObjectMember::Method(method) => {
                             let mut method = method.clone();
@@ -844,15 +847,15 @@ fn substitute_type_expr(expr: &TypeExpr, substitutions: &FxHashMap<String, TypeE
                             ObjectMember::Method(method)
                         }
                         ObjectMember::IndexSignature(signature) => {
-                            ObjectMember::IndexSignature(verter_type_expr::IndexSignature {
-                                key_name: signature.key_name.clone(),
-                                key_type: substitute_type_expr(&signature.key_type, substitutions),
-                                value_type: substitute_type_expr(
-                                    &signature.value_type,
-                                    substitutions,
+                            ObjectMember::IndexSignature(
+                                verter_type_expr::IndexSignature::with_spans(
+                                    signature.key_name.clone(),
+                                    substitute_type_expr(&signature.key_type, substitutions),
+                                    substitute_type_expr(&signature.value_type, substitutions),
+                                    signature.readonly,
+                                    signature.spans,
                                 ),
-                                readonly: signature.readonly,
-                            })
+                            )
                         }
                         ObjectMember::CallSignature(function) => ObjectMember::CallSignature(
                             substitute_function_expr(function, substitutions),
@@ -1004,8 +1007,8 @@ fn function_expr_references_substitutions(
 pub(crate) fn projected_surface_to_type_expr(surface: &ProjectedSurface) -> Option<TypeExpr> {
     use std::sync::Arc;
     use verter_type_expr::{
-        FunctionExpr, IndexSignature, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty,
-        PrimitiveName,
+        FunctionExpr, IndexSignature, IndexSignatureSpans, MemberSpans, MethodSignature,
+        ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName,
     };
 
     if surface.members.is_empty()
@@ -1030,52 +1033,61 @@ pub(crate) fn projected_surface_to_type_expr(surface: &ProjectedSurface) -> Opti
         .map(|member| {
             if member.is_method {
                 if let TypeExpr::Function(function) = &member.ty {
-                    return ObjectMember::Method(MethodSignature {
-                        name: member.name.clone(),
-                        function: (**function).clone(),
-                        optional: member.optional,
-                    });
+                    // `ProjectedMember` carries no member-level span; the
+                    // function shape's own spans are preserved via the clone.
+                    return ObjectMember::Method(MethodSignature::with_spans(
+                        member.name.clone(),
+                        (**function).clone(),
+                        member.optional,
+                        MemberSpans::default(),
+                    ));
                 }
             }
 
-            ObjectMember::Property(ObjectProperty {
-                name: member.name.clone(),
-                ty: member.ty.clone(),
-                optional: member.optional,
-                readonly: member.readonly,
-            })
+            ObjectMember::Property(ObjectProperty::with_spans(
+                member.name.clone(),
+                member.ty.clone(),
+                member.optional,
+                member.readonly,
+                MemberSpans::default(),
+            ))
         })
         .collect::<Vec<_>>();
 
     for signature in &surface.call_signatures {
         if let TypeExpr::Function(function) = signature {
-            properties.push(ObjectMember::CallSignature(FunctionExpr {
-                parameters: function.parameters.clone(),
-                return_type: function.return_type.clone(),
-                type_parameters: function.type_parameters.clone(),
-            }));
+            // Preserve the call-signature function shape's OXC spans verbatim.
+            properties.push(ObjectMember::CallSignature(FunctionExpr::with_spans(
+                function.parameters.clone(),
+                function.return_type.clone(),
+                function.type_parameters.clone(),
+                function.spans,
+            )));
         }
     }
 
     for signature in &surface.construct_signatures {
         if let TypeExpr::Function(function) = signature {
-            properties.push(ObjectMember::ConstructSignature(FunctionExpr {
-                parameters: function.parameters.clone(),
-                return_type: function.return_type.clone(),
-                type_parameters: function.type_parameters.clone(),
-            }));
+            properties.push(ObjectMember::ConstructSignature(FunctionExpr::with_spans(
+                function.parameters.clone(),
+                function.return_type.clone(),
+                function.type_parameters.clone(),
+                function.spans,
+            )));
         }
     }
 
     if surface.has_index_signature {
-        properties.push(ObjectMember::IndexSignature(IndexSignature {
-            key_name: "key".to_string(),
-            key_type: TypeExpr::Primitive(PrimitiveName::String),
-            value_type: TypeExpr::Unknown {
+        // Fully synthetic open-surface index signature — no source site.
+        properties.push(ObjectMember::IndexSignature(IndexSignature::with_spans(
+            "key".to_string(),
+            TypeExpr::Primitive(PrimitiveName::String),
+            TypeExpr::Unknown {
                 raw: "projectedOpenSurface".to_string(),
             },
-            readonly: false,
-        }));
+            false,
+            IndexSignatureSpans::default(),
+        )));
     }
 
     Some(TypeExpr::Object(Arc::new(ObjectExpr { properties })))

@@ -487,17 +487,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 params,
                 return_type,
                 type_parameters,
+                signature_span,
+                return_type_span,
             } => {
-                use verter_type_expr::{FunctionExpr, FunctionParam, TypeParam};
+                use verter_type_expr::{FunctionExpr, FunctionParam, FunctionSpans, TypeParam};
                 let parameters: Vec<FunctionParam> = params
                     .iter()
                     .filter_map(|p| {
-                        Some(FunctionParam {
-                            name: p.name.as_ref().map(|n| n.as_ref().to_string()),
-                            ty: self.raise_node_to_type_expr_inner(p.ty, active)?,
-                            optional: p.optional,
-                            rest: p.rest,
-                        })
+                        Some(FunctionParam::with_span(
+                            p.name.as_ref().map(|n| n.as_ref().to_string()),
+                            self.raise_node_to_type_expr_inner(p.ty, active)?,
+                            p.optional,
+                            p.rest,
+                            // Carry the graph parameter's span back to the IR.
+                            p.span,
+                        ))
                     })
                     .collect();
                 let return_ty = self
@@ -517,11 +521,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             .map(std::sync::Arc::new),
                     })
                     .collect();
-                TypeExpr::Function(std::sync::Arc::new(FunctionExpr {
+                // Carry the graph Function node's signature / return spans back
+                // to the IR (round-trip provenance preservation).
+                TypeExpr::Function(std::sync::Arc::new(FunctionExpr::with_spans(
                     parameters,
-                    return_type: return_ty,
-                    type_parameters: type_params,
-                }))
+                    return_ty,
+                    type_params,
+                    FunctionSpans {
+                        signature: *signature_span,
+                        return_type: *return_type_span,
+                    },
+                )))
             }
             // D26 lazy carriers. DeclRef raises to a
             // bare `Ref { name }` with empty type arguments. Identity
@@ -903,6 +913,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 params,
                 return_type,
                 type_parameters,
+                ..
             } => {
                 if is_whole_surface_published(parent_context) {
                     for p in params.iter() {
@@ -1363,12 +1374,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 params,
                 return_type,
                 type_parameters,
+                signature_span,
+                return_type_span,
             } => rebuild_function(
                 self,
                 node,
                 params,
                 *return_type,
                 type_parameters,
+                *signature_span,
+                *return_type_span,
                 &state.mapping,
                 context,
             )
@@ -1699,12 +1714,15 @@ fn rebuild_tuple(
 }
 
 #[allow(dead_code)] // wired by reduce_one above.
+#[allow(clippy::too_many_arguments)]
 fn rebuild_function(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
     params: &Arc<[crate::semantic_query::FunctionParam]>,
     return_type: SemanticNodeId,
     type_parameters: &Arc<[crate::semantic_query::TypeParamDecl]>,
+    signature_span: Option<verter_span::Span>,
+    return_type_span: Option<verter_span::Span>,
     mapping: &MappingMap,
     context: ProjectionReductionContext,
 ) -> Option<SemanticNodeId> {
@@ -1757,6 +1775,9 @@ fn rebuild_function(
             params: Arc::from(new_params.into_boxed_slice()),
             return_type: new_return,
             type_parameters: Arc::from(new_type_params.into_boxed_slice()),
+            // Node remapping preserves source provenance.
+            signature_span,
+            return_type_span,
         },
     ))
 }

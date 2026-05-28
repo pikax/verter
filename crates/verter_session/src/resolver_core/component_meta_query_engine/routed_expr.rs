@@ -1558,7 +1558,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         members: &[String],
     ) -> Option<TypeExpr> {
         use verter_type_expr::{
-            MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
+            MemberSpans, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
         };
 
         let prepared = self.prepared_type_decl(scope_canonical_id, symbol_name);
@@ -1587,20 +1587,24 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             self.cache_projected_member(scope_canonical_id, symbol_name, &projected_member);
             if projected_member.is_method {
                 if let TypeExpr::Function(function) = &projected_member.ty {
-                    properties.push(ObjectMember::Method(MethodSignature {
-                        name: projected_member.name,
-                        function: (**function).clone(),
-                        optional: projected_member.optional,
-                    }));
+                    // `ProjectedMember` carries no member-level span; the
+                    // function shape's own spans are preserved via the clone.
+                    properties.push(ObjectMember::Method(MethodSignature::with_spans(
+                        projected_member.name,
+                        (**function).clone(),
+                        projected_member.optional,
+                        MemberSpans::default(),
+                    )));
                     continue;
                 }
             }
-            properties.push(ObjectMember::Property(ObjectProperty {
-                name: projected_member.name,
-                ty: projected_member.ty,
-                optional: projected_member.optional,
-                readonly: projected_member.readonly,
-            }));
+            properties.push(ObjectMember::Property(ObjectProperty::with_spans(
+                projected_member.name,
+                projected_member.ty,
+                projected_member.optional,
+                projected_member.readonly,
+                MemberSpans::default(),
+            )));
         }
         Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
             properties,
@@ -1637,7 +1641,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         members: &[String],
     ) -> Option<TypeExpr> {
         use verter_type_expr::{
-            MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
+            MemberSpans, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
         };
 
         let prepared = self.prepared_type_decl(scope_canonical_id, symbol_name)?;
@@ -1649,20 +1653,24 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             }
             if member.is_method {
                 if let TypeExpr::Function(function) = &member.ty {
-                    properties.push(ObjectMember::Method(MethodSignature {
-                        name: member_name.clone(),
-                        function: (**function).clone(),
-                        optional: member.optional,
-                    }));
+                    // `PreparedMember` carries no member-level span; the
+                    // function shape's own spans are preserved via the clone.
+                    properties.push(ObjectMember::Method(MethodSignature::with_spans(
+                        member_name.clone(),
+                        (**function).clone(),
+                        member.optional,
+                        MemberSpans::default(),
+                    )));
                     continue;
                 }
             }
-            properties.push(ObjectMember::Property(ObjectProperty {
-                name: member_name.clone(),
-                ty: member.ty.clone(),
-                optional: member.optional,
-                readonly: member.readonly,
-            }));
+            properties.push(ObjectMember::Property(ObjectProperty::with_spans(
+                member_name.clone(),
+                member.ty.clone(),
+                member.optional,
+                member.readonly,
+                MemberSpans::default(),
+            )));
         }
         Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
             properties,

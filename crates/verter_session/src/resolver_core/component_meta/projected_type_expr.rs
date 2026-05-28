@@ -2,7 +2,8 @@ use rustc_hash::FxHashSet;
 use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
 use verter_semantic::analysis::types::AnalyzedMacroKind;
 use verter_type_expr::{
-    FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr, TypeExprScope,
+    FunctionExpr, FunctionParam, MemberSpans, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
+    TypeExprScope,
 };
 
 use crate::resolver_core::project_macro_surfaces;
@@ -50,12 +51,13 @@ pub fn projected_macro_surfaces_to_type_expr(
                     let ty = prop.type_expr.clone().expect(
                         "AnalyzedPropField.type_expr populated by analyzer (W0.2 invariant)",
                     );
-                    ObjectMember::Property(ObjectProperty {
-                        name: prop.name.clone(),
+                    ObjectMember::Property(ObjectProperty::with_spans(
+                        prop.name.clone(),
                         ty,
-                        optional: prop.is_optional,
-                        readonly: false,
-                    })
+                        prop.is_optional,
+                        false,
+                        MemberSpans::name_only(prop.span),
+                    ))
                 })
                 .collect::<Vec<_>>();
             TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }))
@@ -71,12 +73,13 @@ pub fn projected_macro_surfaces_to_type_expr(
                     let ty = emit.payload_expr.clone().expect(
                         "AnalyzedEmitField.payload_expr populated by analyzer (W0.2 invariant)",
                     );
-                    ObjectMember::Property(ObjectProperty {
-                        name: emit.name.clone(),
+                    ObjectMember::Property(ObjectProperty::with_spans(
+                        emit.name.clone(),
                         ty,
-                        optional: false,
-                        readonly: false,
-                    })
+                        false,
+                        false,
+                        MemberSpans::name_only(emit.span),
+                    ))
                 })
                 .collect::<Vec<_>>();
             TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }))
@@ -101,37 +104,42 @@ pub fn projected_macro_surfaces_to_type_expr(
                                 .binding_expr
                                 .clone()
                                 .expect("AnalyzedSlotFieldBinding.binding_expr populated by analyzer (W0.2 invariant)");
-                            ObjectMember::Property(ObjectProperty {
-                                name: binding.name.clone(),
+                            ObjectMember::Property(ObjectProperty::with_spans(
+                                binding.name.clone(),
                                 ty,
-                                optional: false,
-                                readonly: false,
-                            })
+                                false,
+                                false,
+                                MemberSpans::name_only(binding.span),
+                            ))
                         })
                         .collect::<Vec<_>>();
                     let parameters = if binding_props.is_empty() {
                         Vec::new()
                     } else {
-                        vec![FunctionParam {
-                            name: Some("props".to_string()),
-                            ty: TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+                        // Synthetic `props` parameter wrapping the slot
+                        // bindings — no source declaration site.
+                        vec![FunctionParam::synthetic(
+                            Some("props".to_string()),
+                            TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
                                 properties: binding_props,
                             })),
-                            optional: false,
-                            rest: false,
-                        }]
+                            false,
+                            false,
+                        )]
                     };
-                    let function = TypeExpr::Function(std::sync::Arc::new(FunctionExpr {
+                    // Synthetic slot function wrapper `(props) => return`.
+                    let function = TypeExpr::Function(std::sync::Arc::new(FunctionExpr::synthetic(
                         parameters,
-                        return_type: Some(std::sync::Arc::new(return_ty)),
-                        type_parameters: Vec::new(),
-                    }));
-                    ObjectMember::Property(ObjectProperty {
-                        name: slot.name.clone(),
-                        ty: function,
-                        optional: !slot.is_required,
-                        readonly: false,
-                    })
+                        Some(std::sync::Arc::new(return_ty)),
+                        Vec::new(),
+                    )));
+                    ObjectMember::Property(ObjectProperty::with_spans(
+                        slot.name.clone(),
+                        function,
+                        !slot.is_required,
+                        false,
+                        MemberSpans::name_only(slot.span),
+                    ))
                 })
                 .collect::<Vec<_>>();
             TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }))
@@ -713,12 +721,12 @@ mod tests {
         use verter_semantic::analysis::TypeResolutionSource;
 
         let aggregate = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty {
-                name: "kind".to_string(),
-                ty: TypeExpr::Literal(LiteralValue::String("authoritative".to_string())),
-                optional: false,
-                readonly: false,
-            })],
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                "kind".to_string(),
+                TypeExpr::Literal(LiteralValue::String("authoritative".to_string())),
+                false,
+                false,
+            ))],
         }));
 
         let projected = ProjectedMacroSurfaces {
@@ -780,11 +788,11 @@ mod slot_return_expr_tests {
             name: Arc::from("Element"),
             type_arguments: Arc::from(Vec::new().as_slice()),
         };
-        let func = TypeExpr::Function(Arc::new(FunctionExpr {
-            parameters: Vec::new(),
-            return_type: Some(Arc::new(return_ty.clone())),
-            type_parameters: Vec::new(),
-        }));
+        let func = TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
+            Vec::new(),
+            Some(Arc::new(return_ty.clone())),
+            Vec::new(),
+        )));
 
         let shape = ExpandedObjectShape {
             properties: vec![ExpandedProperty {

@@ -1560,7 +1560,8 @@ pub(crate) fn slot_field_function_type_expr(
 ) -> verter_type_expr::TypeExpr {
     use std::sync::Arc;
     use verter_type_expr::{
-        FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
+        FunctionExpr, FunctionParam, MemberSpans, ObjectExpr, ObjectMember, ObjectProperty,
+        TypeExpr,
     };
 
     // W0.2 invariant: the analyzer populates AnalyzedSlotField.return_expr
@@ -1581,28 +1582,32 @@ pub(crate) fn slot_field_function_type_expr(
                 let ty = binding.binding_expr.clone().expect(
                     "AnalyzedSlotFieldBinding.binding_expr populated by analyzer (W0.2 invariant)",
                 );
-                ObjectMember::Property(ObjectProperty {
-                    name: binding.name.clone(),
+                // The analyzed binding tracks the NAME span only.
+                ObjectMember::Property(ObjectProperty::with_spans(
+                    binding.name.clone(),
                     ty,
-                    optional: false,
-                    readonly: false,
-                })
+                    false,
+                    false,
+                    MemberSpans::name_only(binding.span),
+                ))
             })
             .collect();
         let props_object = TypeExpr::Object(Arc::new(ObjectExpr { properties }));
-        vec![FunctionParam {
-            name: Some("props".to_string()),
-            ty: props_object,
-            optional: false,
-            rest: false,
-        }]
+        // Synthetic `props` parameter wrapping the slot bindings.
+        vec![FunctionParam::synthetic(
+            Some("props".to_string()),
+            props_object,
+            false,
+            false,
+        )]
     };
 
-    TypeExpr::Function(Arc::new(FunctionExpr {
+    // Synthetic slot function wrapper `(props) => return`.
+    TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
         parameters,
-        return_type: Some(Arc::new(return_type)),
-        type_parameters: Vec::new(),
-    }))
+        Some(Arc::new(return_type)),
+        Vec::new(),
+    )))
 }
 
 pub(crate) fn reuse_expanded_define_props_shape(
@@ -1742,40 +1747,45 @@ pub(crate) fn expanded_shape_to_type_expr(
 
     let mut properties = Vec::new();
 
+    // `ExpandedObjectShape` (and its `ExpandedProperty` / `ExpandedParameter`
+    // / `ExpandedCallSignature` / `ExpandedIndexSignature` parts) carry no
+    // source spans, so every member synthesized here is span-free.
     for property in &shape.properties {
-        properties.push(ObjectMember::Property(ObjectProperty {
-            name: property.name.clone(),
-            ty: property.ty.clone(),
-            optional: property.optional,
-            readonly: property.readonly,
-        }));
+        properties.push(ObjectMember::Property(ObjectProperty::synthetic(
+            property.name.clone(),
+            property.ty.clone(),
+            property.optional,
+            property.readonly,
+        )));
     }
 
     for signature in &shape.call_signatures {
-        properties.push(ObjectMember::CallSignature(FunctionExpr {
-            parameters: signature
+        properties.push(ObjectMember::CallSignature(FunctionExpr::synthetic(
+            signature
                 .parameters
                 .iter()
-                .map(|parameter| FunctionParam {
-                    name: (!parameter.name.is_empty()).then(|| parameter.name.clone()),
-                    ty: parameter.ty.clone(),
-                    optional: parameter.optional,
-                    rest: parameter.rest,
+                .map(|parameter| {
+                    FunctionParam::synthetic(
+                        (!parameter.name.is_empty()).then(|| parameter.name.clone()),
+                        parameter.ty.clone(),
+                        parameter.optional,
+                        parameter.rest,
+                    )
                 })
                 .collect(),
-            return_type: Some(std::sync::Arc::new(signature.return_type.clone())),
-            type_parameters: signature.type_parameters.clone(),
-        }));
+            Some(std::sync::Arc::new(signature.return_type.clone())),
+            signature.type_parameters.clone(),
+        )));
     }
 
     for signature in &shape.index_signatures {
         properties.push(verter_type_expr::ObjectMember::IndexSignature(
-            verter_type_expr::IndexSignature {
-                key_name: "key".to_string(),
-                key_type: signature.key_type.clone(),
-                value_type: signature.value_type.clone(),
-                readonly: signature.readonly,
-            },
+            verter_type_expr::IndexSignature::synthetic(
+                "key".to_string(),
+                signature.key_type.clone(),
+                signature.value_type.clone(),
+                signature.readonly,
+            ),
         ));
     }
 

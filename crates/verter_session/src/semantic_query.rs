@@ -908,6 +908,18 @@ pub struct SurfaceMember {
     pub optional: bool,
     pub readonly: bool,
     pub is_method: bool,
+    /// OXC declaration-site spans for this member, stamped during shallow
+    /// lowering and carried verbatim from the `verter_type_expr` IR
+    /// ([`verter_type_expr::MemberSpans`]). Coordinates are in the member's
+    /// OWN origin file (the file recorded by the value node's
+    /// [`NodeScopeId::File`] scope) — for a cross-file inherited member this
+    /// is the heritage base's file, not the consuming declaration's. Spans are
+    /// content-version facts: they participate in node interning
+    /// (provenance-aware: an identical same-file shape at a different source
+    /// location interns to a distinct node) but never enter `parse_stable_hash`.
+    /// `None` components for genuinely synthetic members (union common-members,
+    /// mapped-produced members) with no single source site.
+    pub spans: verter_type_expr::MemberSpans,
     /// Whether this member was explicitly declared in the macro's type
     /// argument's own body (vs reached via heritage / Omit / intersection
     /// from an external source). See
@@ -938,6 +950,12 @@ pub struct IndexSignature {
     pub key_type: SemanticNodeId,
     pub value_type: SemanticNodeId,
     pub readonly: bool,
+    /// OXC declaration-site spans for this index signature, carried verbatim
+    /// from the `verter_type_expr` IR ([`verter_type_expr::IndexSignatureSpans`]).
+    /// Coordinates are in the owning declaration's source file. Participates in
+    /// node interning but never enters `parse_stable_hash`. `None` components
+    /// for a synthetic index signature with no source site.
+    pub spans: verter_type_expr::IndexSignatureSpans,
 }
 
 /// One-level surface view of a semantic node. Members are ordered to keep
@@ -1765,6 +1783,16 @@ pub enum SemanticNodeData {
         params: Arc<[FunctionParam]>,
         return_type: SemanticNodeId,
         type_parameters: Arc<[TypeParamDecl]>,
+        /// OXC span of the WHOLE signature, stamped from the IR
+        /// [`verter_type_expr::FunctionExpr`]'s signature span (NOT recovered
+        /// from child node ids). Coordinates are in the signature's origin
+        /// file. Participates in node interning (see the manual `Hash`/`Eq`)
+        /// but never enters `parse_stable_hash`. `None` for a synthetic /
+        /// composed signature with no single source site.
+        signature_span: Option<verter_span::Span>,
+        /// OXC span of the return-type annotation, stamped from the IR
+        /// `FunctionExpr`'s return span. `None` when absent.
+        return_type_span: Option<verter_span::Span>,
     },
     /// Lazy declaration-reference carrier.
     ///
@@ -1975,13 +2003,20 @@ impl PartialEq for SemanticNodeData {
                     params: ap,
                     return_type: ar,
                     type_parameters: atp,
+                    signature_span: asig,
+                    return_type_span: aret,
                 },
                 Self::Function {
                     params: bp,
                     return_type: br,
                     type_parameters: btp,
+                    signature_span: bsig,
+                    return_type_span: bret,
                 },
-            ) => ap == bp && ar == br && atp == btp,
+                // Spans participate in identity: provenance-aware interning so
+                // an identical same-file signature shape at a different source
+                // location does not alias another node's spans (codex BINDING).
+            ) => ap == bp && ar == br && atp == btp && asig == bsig && aret == bret,
             (Self::DeclRef { identity: a }, Self::DeclRef { identity: b }) => a == b,
             (
                 Self::InstantiationRef { base: ab, args: aa },
@@ -2090,10 +2125,15 @@ impl std::hash::Hash for SemanticNodeData {
                 params,
                 return_type,
                 type_parameters,
+                signature_span,
+                return_type_span,
             } => {
                 params.hash(state);
                 return_type.hash(state);
                 type_parameters.hash(state);
+                // Spans participate in identity (provenance-aware interning).
+                signature_span.hash(state);
+                return_type_span.hash(state);
             }
             Self::DeclRef { identity } => {
                 identity.hash(state);
@@ -2113,6 +2153,32 @@ pub struct FunctionParam {
     pub ty: SemanticNodeId,
     pub optional: bool,
     pub rest: bool,
+    /// OXC span of the whole parameter, carried verbatim from the
+    /// `verter_type_expr` IR parameter. Coordinates are in the signature's
+    /// origin file. Participates in node interning (the derived `Hash`/`Eq`
+    /// include it) but never enters `parse_stable_hash`. `None` for a synthetic
+    /// parameter with no source site.
+    pub span: Option<verter_span::Span>,
+}
+
+impl FunctionParam {
+    /// Construct a graph parameter with NO source span (a synthesized /
+    /// test-fixture parameter with no single declaration site).
+    #[must_use]
+    pub fn synthetic(
+        name: Option<Arc<str>>,
+        ty: SemanticNodeId,
+        optional: bool,
+        rest: bool,
+    ) -> Self {
+        Self {
+            name,
+            ty,
+            optional,
+            rest,
+            span: None,
+        }
+    }
 }
 
 /// Type-parameter declaration on a [`SemanticNodeData::Function`].

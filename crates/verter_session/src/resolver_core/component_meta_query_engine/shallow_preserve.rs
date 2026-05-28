@@ -1047,65 +1047,75 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         .collect::<Option<Vec<_>>>()?,
                 ),
             }),
-            TypeExpr::Function(function) => Some(TypeExpr::Function(std::sync::Arc::new(
-                verter_type_expr::FunctionExpr {
-                    parameters: function
-                        .parameters
-                        .iter()
-                        .map(|parameter| {
-                            Some(verter_type_expr::FunctionParam {
-                                name: parameter.name.clone(),
-                                ty: self.rewrite_fast_shallow_alias_body(
-                                    scope_canonical_id,
-                                    &parameter.ty,
-                                    active_aliases,
-                                )?,
-                                optional: parameter.optional,
-                                rest: parameter.rest,
-                            })
+            TypeExpr::Function(function) => {
+                // Structure-preserving alias rewrite: keep the function's OXC
+                // signature spans and each parameter's span verbatim.
+                let parameters = function
+                    .parameters
+                    .iter()
+                    .map(|parameter| {
+                        let ty = self.rewrite_fast_shallow_alias_body(
+                            scope_canonical_id,
+                            &parameter.ty,
+                            active_aliases,
+                        )?;
+                        Some(verter_type_expr::FunctionParam::with_span(
+                            parameter.name.clone(),
+                            ty,
+                            parameter.optional,
+                            parameter.rest,
+                            parameter.span,
+                        ))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                let return_type = match function.return_type.as_deref() {
+                    Some(return_type) => Some(std::sync::Arc::new(
+                        self.rewrite_fast_shallow_alias_body(
+                            scope_canonical_id,
+                            return_type,
+                            active_aliases,
+                        )?,
+                    )),
+                    None => None,
+                };
+                let type_parameters = function
+                    .type_parameters
+                    .iter()
+                    .map(|parameter| {
+                        Some(verter_type_expr::TypeParam {
+                            name: parameter.name.clone(),
+                            constraint: match parameter.constraint.as_deref() {
+                                Some(constraint) => Some(std::sync::Arc::new(
+                                    self.rewrite_fast_shallow_alias_body(
+                                        scope_canonical_id,
+                                        constraint,
+                                        active_aliases,
+                                    )?,
+                                )),
+                                None => None,
+                            },
+                            default: match parameter.default.as_deref() {
+                                Some(default) => Some(std::sync::Arc::new(
+                                    self.rewrite_fast_shallow_alias_body(
+                                        scope_canonical_id,
+                                        default,
+                                        active_aliases,
+                                    )?,
+                                )),
+                                None => None,
+                            },
                         })
-                        .collect::<Option<Vec<_>>>()?,
-                    return_type: match function.return_type.as_deref() {
-                        Some(return_type) => {
-                            Some(std::sync::Arc::new(self.rewrite_fast_shallow_alias_body(
-                                scope_canonical_id,
-                                return_type,
-                                active_aliases,
-                            )?))
-                        }
-                        None => None,
-                    },
-                    type_parameters: function
-                        .type_parameters
-                        .iter()
-                        .map(|parameter| {
-                            Some(verter_type_expr::TypeParam {
-                                name: parameter.name.clone(),
-                                constraint: match parameter.constraint.as_deref() {
-                                    Some(constraint) => Some(std::sync::Arc::new(
-                                        self.rewrite_fast_shallow_alias_body(
-                                            scope_canonical_id,
-                                            constraint,
-                                            active_aliases,
-                                        )?,
-                                    )),
-                                    None => None,
-                                },
-                                default: match parameter.default.as_deref() {
-                                    Some(default) => Some(std::sync::Arc::new(
-                                        self.rewrite_fast_shallow_alias_body(
-                                            scope_canonical_id,
-                                            default,
-                                            active_aliases,
-                                        )?,
-                                    )),
-                                    None => None,
-                                },
-                            })
-                        })
-                        .collect::<Option<Vec<_>>>()?,
-                },
-            ))),
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(TypeExpr::Function(std::sync::Arc::new(
+                    verter_type_expr::FunctionExpr::with_spans(
+                        parameters,
+                        return_type,
+                        type_parameters,
+                        function.spans,
+                    ),
+                )))
+            }
             TypeExpr::Ref {
                 name,
                 type_arguments,

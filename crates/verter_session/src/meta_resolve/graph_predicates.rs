@@ -910,6 +910,7 @@ pub(crate) fn collect_ref_identities_node(
                 params,
                 return_type,
                 type_parameters,
+                ..
             } => {
                 for param in params.iter() {
                     stack.push(param.ty);

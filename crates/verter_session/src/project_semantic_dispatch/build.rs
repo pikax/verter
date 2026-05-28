@@ -365,11 +365,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 crate::semantic_query::ProjectionMode::Expanded,
             )
         } else if let Some(sig) = prepared.function_signature.as_ref() {
-            let function_expr = FunctionExpr {
-                parameters: sig.parameters.clone(),
-                return_type: sig.return_type.clone().map(Arc::new),
-                type_parameters: sig.type_parameters.clone(),
-            };
+            // `FunctionSignature` carries per-parameter spans (preserved by the
+            // clone) but no whole-signature span, so the signature span stays
+            // `None` here.
+            let function_expr = FunctionExpr::synthetic(
+                sig.parameters.clone(),
+                sig.return_type.clone().map(Arc::new),
+                sig.type_parameters.clone(),
+            );
             let object_expr = ObjectExpr {
                 properties: vec![if prepared.kind
                     == verter_semantic::analysis::type_eval::ValueDeclKind::Class
@@ -394,12 +397,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 properties: members
                     .iter()
                     .map(|(name, ty)| {
-                        ObjectMember::Property(ObjectProperty {
-                            name: name.clone(),
-                            ty: ty.clone(),
-                            optional: false,
-                            readonly: true,
-                        })
+                        // Enum-member synthetic property — the prepared enum
+                        // member map carries no per-member source span.
+                        ObjectMember::Property(ObjectProperty::synthetic(
+                            name.clone(),
+                            ty.clone(),
+                            false,
+                            true,
+                        ))
                     })
                     .collect(),
             };
@@ -1070,6 +1075,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     optional: member.optional,
                     readonly: member.readonly,
                     is_method: member.is_method,
+                    // `PreparedMember` (the `member_index` entry) carries no
+                    // declaration-site span, so spans are absent here.
+                    spans: verter_type_expr::MemberSpans::default(),
                     declared_in_macro_type_arg: own_body_bit,
                     // `member_index` is the declaration's OWN-body direct
                     // member index (heritage `extends` arms are excluded), so
@@ -2426,6 +2434,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // construction, never an interface/class heritage overlay —
                 // `Authored` (they do not participate in own-body shadowing).
                 merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                // Mapped-produced member: synthesized from a key domain, no
+                // single source declaration site.
+                spans: verter_type_expr::MemberSpans::default(),
             });
             project_member_edges.push((value, produced_name));
         }

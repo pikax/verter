@@ -349,7 +349,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         // source member's structural shape — only the
                         // value's type-param occurrences change.
                         // Preserve the upstream
-                        // `declared_in_macro_type_arg` fact and merge role.
+                        // `declared_in_macro_type_arg` fact, merge role, and
+                        // the member's OXC declaration-site spans.
+                        spans: member.spans,
                         declared_in_macro_type_arg: member.declared_in_macro_type_arg,
                         merge_role: member.merge_role,
                     });
@@ -386,6 +388,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         key_type: sub_key,
                         value_type: sub_value,
                         readonly: signature.readonly,
+                        // Preserve the index signature's OXC spans.
+                        spans: signature.spans,
                     });
                 }
                 let new_keyspace = match surface.keyspace {
@@ -644,6 +648,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 params,
                 return_type,
                 type_parameters,
+                signature_span,
+                return_type_span,
             } => {
                 let mut any_changed = false;
                 let mut new_params = Vec::with_capacity(params.len());
@@ -656,6 +662,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         ty: sub_ty,
                         optional: param.optional,
                         rest: param.rest,
+                        // Substitution preserves the parameter's OXC span.
+                        span: param.span,
                     });
                 }
                 let (sub_return, return_changed) =
@@ -697,6 +705,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             params: Arc::from(new_params.into_boxed_slice()),
                             return_type: sub_return,
                             type_parameters: Arc::from(new_type_parameters.into_boxed_slice()),
+                            // Substitution preserves the signature's OXC spans.
+                            signature_span: *signature_span,
+                            return_type_span: *return_type_span,
                         },
                     ),
                     true,
@@ -886,6 +897,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     params,
                     return_type,
                     type_parameters,
+                    ..
                 } => {
                     for param in params.iter() {
                         stack.push(param.ty);

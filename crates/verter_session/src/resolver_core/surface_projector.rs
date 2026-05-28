@@ -8,7 +8,8 @@ use verter_semantic::analysis::types::{
     AnalyzedSlotFieldBinding, JsdocTag,
 };
 use verter_type_expr::{
-    FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr, TypeExprScope,
+    FunctionExpr, FunctionParam, MemberSpans, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
+    TypeExprScope,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -389,12 +390,13 @@ fn build_aggregate_props_expr(
             Some(ty) => ty.clone(),
             None => return (None, None),
         };
-        properties.push(ObjectMember::Property(ObjectProperty {
-            name: prop.name.clone(),
+        properties.push(ObjectMember::Property(ObjectProperty::with_spans(
+            prop.name.clone(),
             ty,
-            optional: prop.is_optional,
-            readonly: false,
-        }));
+            prop.is_optional,
+            false,
+            MemberSpans::name_only(prop.span),
+        )));
     }
     let aggregate = TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }));
     let aggregate_scope = TypeExprScope::new(scope);
@@ -429,12 +431,13 @@ fn build_aggregate_emits_expr(
             Some(ty) => ty.clone(),
             None => return (None, None),
         };
-        properties.push(ObjectMember::Property(ObjectProperty {
-            name: emit.name.clone(),
+        properties.push(ObjectMember::Property(ObjectProperty::with_spans(
+            emit.name.clone(),
             ty,
-            optional: false,
-            readonly: false,
-        }));
+            false,
+            false,
+            MemberSpans::name_only(emit.span),
+        )));
     }
     let aggregate = TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }));
     (Some(aggregate), Some(TypeExprScope::new(scope)))
@@ -476,39 +479,45 @@ fn build_aggregate_slots_expr(
                     Some(ty) => ty.clone(),
                     None => return (None, None),
                 };
-                acc.push(ObjectMember::Property(ObjectProperty {
-                    name: binding.name.clone(),
+                acc.push(ObjectMember::Property(ObjectProperty::with_spans(
+                    binding.name.clone(),
                     ty,
-                    optional: false,
-                    readonly: false,
-                }));
+                    false,
+                    false,
+                    MemberSpans::name_only(binding.span),
+                )));
             }
             acc
         };
 
         let mut parameters: Vec<FunctionParam> = Vec::new();
         if !binding_props.is_empty() {
-            parameters.push(FunctionParam {
-                name: Some("props".to_string()),
-                ty: TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+            // Synthetic `props` parameter wrapping the slot bindings — no
+            // source declaration site.
+            parameters.push(FunctionParam::synthetic(
+                Some("props".to_string()),
+                TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
                     properties: binding_props,
                 })),
-                optional: false,
-                rest: false,
-            });
+                false,
+                false,
+            ));
         }
-        let function = TypeExpr::Function(std::sync::Arc::new(FunctionExpr {
+        // Synthetic slot function wrapper `(props) => return` — no single
+        // source signature node.
+        let function = TypeExpr::Function(std::sync::Arc::new(FunctionExpr::synthetic(
             parameters,
-            return_type: Some(std::sync::Arc::new(return_ty)),
-            type_parameters: Vec::new(),
-        }));
+            Some(std::sync::Arc::new(return_ty)),
+            Vec::new(),
+        )));
 
-        properties.push(ObjectMember::Property(ObjectProperty {
-            name: slot.name.clone(),
-            ty: function,
-            optional: !slot.is_required,
-            readonly: false,
-        }));
+        properties.push(ObjectMember::Property(ObjectProperty::with_spans(
+            slot.name.clone(),
+            function,
+            !slot.is_required,
+            false,
+            MemberSpans::name_only(slot.span),
+        )));
     }
     let aggregate = TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }));
     (Some(aggregate), Some(TypeExprScope::new(scope)))

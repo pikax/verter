@@ -1491,8 +1491,10 @@ fn materialize_object_surface(
             readonly: member.readonly,
             is_method: member.is_method,
             // Materialisation preserves member structure — only the
-            // value is materialised, the structural fact is carried
-            // through unchanged from the upstream `SurfaceMember`.
+            // value is materialised, the structural fact (and the member's
+            // OXC spans) is carried through unchanged from the upstream
+            // `SurfaceMember`.
+            spans: member.spans,
             declared_in_macro_type_arg: member.declared_in_macro_type_arg,
             merge_role: member.merge_role,
         });
@@ -1521,6 +1523,8 @@ fn materialize_object_surface(
             key_type: sub_key_ty,
             value_type: sub_value,
             readonly: sig.readonly,
+            // Materialisation preserves the index signature's OXC spans.
+            spans: sig.spans,
         });
     }
 

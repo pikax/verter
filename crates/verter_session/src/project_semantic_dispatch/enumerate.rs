@@ -666,6 +666,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // union, not the macro-T own body or a heritage overlay —
                 // `Authored` (it never shadows / is shadowed).
                 merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                // Union common-member: present in every arm, no single source
+                // declaration site — genuinely synthetic.
+                spans: verter_type_expr::MemberSpans::default(),
             });
         }
         Some(MacroSurfaceView {

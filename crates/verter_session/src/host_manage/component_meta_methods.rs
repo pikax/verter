@@ -1388,12 +1388,9 @@ impl VerterHost {
                                     }
                                     _ => stabilized.clone(),
                                 };
-                                ObjectMember::Property(ObjectProperty {
-                                    name: property.name.clone(),
-                                    ty: if compare_type_expr_improvement(
-                                        &solved,
-                                        &property.ty,
-                                    ) {
+                                ObjectMember::Property(ObjectProperty::with_spans(
+                                    property.name.clone(),
+                                    if compare_type_expr_improvement(&solved, &property.ty) {
                                         solved
                                     } else if compare_type_expr_improvement(
                                         &stabilized,
@@ -1408,9 +1405,11 @@ impl VerterHost {
                                     } else {
                                         property.ty.clone()
                                     },
-                                    optional: property.optional,
-                                    readonly: property.readonly,
-                                })
+                                    property.optional,
+                                    property.readonly,
+                                    // Type improvement preserves the member's spans.
+                                    property.spans,
+                                ))
                             }
                             other => other.clone(),
                         })
@@ -1525,15 +1524,16 @@ impl VerterHost {
             leaf: verter_type_expr::TypeExpr,
         ) -> verter_type_expr::TypeExpr {
             path.iter().rfold(leaf, |child, member| {
+                // Synthesized nested-object wrapper from a member-name path.
                 verter_type_expr::TypeExpr::Object(std::sync::Arc::new(
                     verter_type_expr::ObjectExpr {
                         properties: vec![verter_type_expr::ObjectMember::Property(
-                            verter_type_expr::ObjectProperty {
-                                name: member.clone(),
-                                ty: child,
-                                optional: true,
-                                readonly: false,
-                            },
+                            verter_type_expr::ObjectProperty::synthetic(
+                                member.clone(),
+                                child,
+                                true,
+                                false,
+                            ),
                         )],
                     },
                 ))
@@ -1818,12 +1818,14 @@ impl VerterHost {
                                     &raw_leaf,
                                     true,
                                 );
-                                properties.push(ObjectMember::Property(ObjectProperty {
-                                    name: member.clone(),
-                                    ty: projected_leaf,
-                                    optional: true,
-                                    readonly: false,
-                                }));
+                                // Synthesized Pick-member projection from a
+                                // member-name string — no source member value.
+                                properties.push(ObjectMember::Property(ObjectProperty::synthetic(
+                                    member.clone(),
+                                    projected_leaf,
+                                    true,
+                                    false,
+                                )));
                                 continue;
                             }
                         }
@@ -1953,16 +1955,16 @@ impl VerterHost {
                         } else {
                             stabilized_surface
                         };
-                        properties.push(ObjectMember::Property(ObjectProperty {
-                            name: member.clone(),
-                            ty: if compare_type_expr_improvement(&best_surface, &member_surface) {
+                        properties.push(ObjectMember::Property(ObjectProperty::synthetic(
+                            member.clone(),
+                            if compare_type_expr_improvement(&best_surface, &member_surface) {
                                 best_surface
                             } else {
                                 member_surface
                             },
-                            optional: true,
-                            readonly: false,
-                        }));
+                            true,
+                            false,
+                        )));
                     }
                     (!properties.is_empty())
                         .then(|| TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties })))

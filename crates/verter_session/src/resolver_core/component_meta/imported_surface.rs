@@ -961,11 +961,16 @@ impl ResolvedMacroSurface {
                     // Payload function: same return type + type params,
                     // parameters with the leading event-name parameter
                     // dropped.
-                    let payload_fn = TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr {
-                        parameters: func.parameters.iter().skip(1).cloned().collect(),
-                        return_type: func.return_type.clone(),
-                        type_parameters: func.type_parameters.clone(),
-                    }));
+                    // Dropping the leading event-name parameter preserves the
+                    // function's OXC signature spans and the surviving
+                    // parameters' spans (carried via the clone).
+                    let payload_fn =
+                        TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr::with_spans(
+                            func.parameters.iter().skip(1).cloned().collect(),
+                            func.return_type.clone(),
+                            func.type_parameters.clone(),
+                            func.spans,
+                        )));
                     // Scope the payload to the call signature's ORIGIN file:
                     // an inherited call-signature emit carries its payload
                     // `Ref`s from the heritage base's file.

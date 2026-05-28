@@ -708,6 +708,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 optional: prop.optional,
                                 readonly: prop.readonly,
                                 is_method: false,
+                                // Carry the IR member's OXC declaration-site
+                                // spans verbatim onto the graph payload.
+                                spans: prop.spans,
                                 declared_in_macro_type_arg: reduction_context
                                     .is_macro_type_arg_own_body(),
                                 // Leaf stamping of the surface-merge role from
@@ -760,6 +763,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 optional: method.optional,
                                 readonly: false,
                                 is_method: true,
+                                // Carry the IR method's OXC member spans.
+                                spans: method.spans,
                                 declared_in_macro_type_arg: reduction_context
                                     .is_macro_type_arg_own_body(),
                                 // Leaf stamping of the surface-merge role —
@@ -831,6 +836,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 key_type,
                                 value_type,
                                 readonly: sig.readonly,
+                                // Carry the IR index signature's OXC spans.
+                                spans: sig.spans,
                             });
                         }
                     }
@@ -1622,6 +1629,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         ),
                         optional: param.optional,
                         rest: param.rest,
+                        // Carry the IR parameter's OXC span verbatim.
+                        span: param.span,
                     })
                     .collect();
                 let return_type = match func.return_type.as_deref() {
@@ -1673,6 +1682,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         params: Arc::from(params.into_boxed_slice()),
                         return_type,
                         type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+                        // Stamp the whole-signature + return spans from the IR
+                        // FunctionExpr (NOT recovered from child node ids).
+                        signature_span: func.spans.signature,
+                        return_type_span: func.spans.return_type,
                     },
                     scope.clone(),
                 )

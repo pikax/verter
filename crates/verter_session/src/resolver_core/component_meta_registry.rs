@@ -447,12 +447,14 @@ fn merge_component_meta_registry_candidates_bounded(
                         existing_property.readonly =
                             existing_property.readonly && right_property.readonly;
                     } else {
-                        merged_members.push(ObjectMember::Property(ObjectProperty {
-                            name: right_property.name.clone(),
-                            ty: right_property.ty.clone(),
-                            optional: right_property.optional,
-                            readonly: right_property.readonly,
-                        }));
+                        // Carry the right-hand property's OXC spans verbatim.
+                        merged_members.push(ObjectMember::Property(ObjectProperty::with_spans(
+                            right_property.name.clone(),
+                            right_property.ty.clone(),
+                            right_property.optional,
+                            right_property.readonly,
+                            right_property.spans,
+                        )));
                     }
                 }
                 _ => {
@@ -1151,13 +1153,15 @@ pub(crate) fn component_meta_registry_raw_member_path_surface(
     }
 
     Some(path.iter().rfold(leaf.clone(), |child, member_name| {
+        // Synthesized nested-object wrapper from a navigation path of member
+        // names — no source declaration site.
         TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty {
-                name: member_name.clone(),
-                ty: child,
-                optional: true,
-                readonly: false,
-            })],
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                member_name.clone(),
+                child,
+                true,
+                false,
+            ))],
         }))
     }))
 }
@@ -2515,12 +2519,12 @@ mod tests {
             properties: names
                 .iter()
                 .map(|name| {
-                    ObjectMember::Property(ObjectProperty {
-                        name: (*name).to_string(),
-                        ty: TypeExpr::Primitive(PrimitiveName::String),
-                        optional: false,
-                        readonly: false,
-                    })
+                    ObjectMember::Property(ObjectProperty::synthetic(
+                        (*name).to_string(),
+                        TypeExpr::Primitive(PrimitiveName::String),
+                        false,
+                        false,
+                    ))
                 })
                 .collect(),
         }))
@@ -2627,30 +2631,30 @@ mod tests {
     #[test]
     fn merge_registry_candidates_combines_partial_object_routes() {
         let left = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty {
-                name: "slots".to_string(),
-                ty: object_with_props(&["base", "label"]),
-                optional: true,
-                readonly: false,
-            })],
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                "slots".to_string(),
+                object_with_props(&["base", "label"]),
+                true,
+                false,
+            ))],
         }));
         let right = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty {
-                name: "variants".to_string(),
-                ty: TypeExpr::Object(Arc::new(ObjectExpr {
-                    properties: vec![ObjectMember::Property(ObjectProperty {
-                        name: "color".to_string(),
-                        ty: TypeExpr::union(vec![
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                "variants".to_string(),
+                TypeExpr::Object(Arc::new(ObjectExpr {
+                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                        "color".to_string(),
+                        TypeExpr::union(vec![
                             TypeExpr::string_literal("primary"),
                             TypeExpr::string_literal("secondary"),
                         ]),
-                        optional: false,
-                        readonly: false,
-                    })],
+                        false,
+                        false,
+                    ))],
                 })),
-                optional: true,
-                readonly: false,
-            })],
+                true,
+                false,
+            ))],
         }));
 
         let merged = merge_component_meta_registry_candidates(Some(left), Some(right))
@@ -2882,24 +2886,24 @@ export interface AvatarProps {
         let resolved_body = Some(object_with_props(&["next"]));
         let decl_body = Some(TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
-                ObjectMember::Property(ObjectProperty {
-                    name: "base".to_string(),
-                    ty: TypeExpr::Primitive(PrimitiveName::String),
-                    optional: true,
-                    readonly: false,
-                }),
-                ObjectMember::Property(ObjectProperty {
-                    name: "current".to_string(),
-                    ty: TypeExpr::named("T"),
-                    optional: true,
-                    readonly: false,
-                }),
-                ObjectMember::Property(ObjectProperty {
-                    name: "next".to_string(),
-                    ty: TypeExpr::Primitive(PrimitiveName::Number),
-                    optional: true,
-                    readonly: false,
-                }),
+                ObjectMember::Property(ObjectProperty::synthetic(
+                    "base".to_string(),
+                    TypeExpr::Primitive(PrimitiveName::String),
+                    true,
+                    false,
+                )),
+                ObjectMember::Property(ObjectProperty::synthetic(
+                    "current".to_string(),
+                    TypeExpr::named("T"),
+                    true,
+                    false,
+                )),
+                ObjectMember::Property(ObjectProperty::synthetic(
+                    "next".to_string(),
+                    TypeExpr::Primitive(PrimitiveName::Number),
+                    true,
+                    false,
+                )),
             ],
         })));
 
@@ -2914,12 +2918,12 @@ export interface AvatarProps {
     #[test]
     fn choose_preferred_imported_type_body_keeps_meaningful_top_level_union_surface() {
         let flattened_object = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty {
-                name: "path".to_string(),
-                ty: TypeExpr::Primitive(PrimitiveName::String),
-                optional: false,
-                readonly: false,
-            })],
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                "path".to_string(),
+                TypeExpr::Primitive(PrimitiveName::String),
+                false,
+                false,
+            ))],
         }));
         let symbolic_union = TypeExpr::union(vec![
             TypeExpr::Primitive(PrimitiveName::String),
@@ -2939,37 +2943,37 @@ export interface AvatarProps {
 
     #[test]
     fn choose_preferred_imported_type_body_prefers_method_signatures_over_function_properties() {
-        let function = FunctionExpr {
-            parameters: vec![FunctionParam {
-                name: Some("props".to_string()),
-                ty: TypeExpr::Object(Arc::new(ObjectExpr {
-                    properties: vec![ObjectMember::Property(ObjectProperty {
-                        name: "ui".to_string(),
-                        ty: TypeExpr::Primitive(PrimitiveName::String),
-                        optional: false,
-                        readonly: false,
-                    })],
+        let function = FunctionExpr::synthetic(
+            vec![FunctionParam::synthetic(
+                Some("props".to_string()),
+                TypeExpr::Object(Arc::new(ObjectExpr {
+                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                        "ui".to_string(),
+                        TypeExpr::Primitive(PrimitiveName::String),
+                        false,
+                        false,
+                    ))],
                 })),
-                optional: false,
-                rest: false,
-            }],
-            return_type: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
-            type_parameters: vec![],
-        };
+                false,
+                false,
+            )],
+            Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
+            vec![],
+        );
         let property_object = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty {
-                name: "default".to_string(),
-                ty: TypeExpr::Function(Arc::new(function.clone())),
-                optional: true,
-                readonly: false,
-            })],
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                "default".to_string(),
+                TypeExpr::Function(Arc::new(function.clone())),
+                true,
+                false,
+            ))],
         }));
         let method_object = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Method(MethodSignature {
-                name: "default".to_string(),
+            properties: vec![ObjectMember::Method(MethodSignature::synthetic(
+                "default".to_string(),
                 function,
-                optional: true,
-            })],
+                true,
+            ))],
         }));
 
         let preferred =
@@ -2983,25 +2987,25 @@ export interface AvatarProps {
     fn raw_member_path_surface_projects_explicit_object_members_without_widening() {
         let raw = TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
-                ObjectMember::Property(ObjectProperty {
-                    name: "ui".to_string(),
-                    ty: TypeExpr::Object(Arc::new(ObjectExpr {
-                        properties: vec![ObjectMember::Property(ObjectProperty {
-                            name: "base".to_string(),
-                            ty: TypeExpr::Primitive(PrimitiveName::String),
-                            optional: true,
-                            readonly: false,
-                        })],
+                ObjectMember::Property(ObjectProperty::synthetic(
+                    "ui".to_string(),
+                    TypeExpr::Object(Arc::new(ObjectExpr {
+                        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                            "base".to_string(),
+                            TypeExpr::Primitive(PrimitiveName::String),
+                            true,
+                            false,
+                        ))],
                     })),
-                    optional: true,
-                    readonly: false,
-                }),
-                ObjectMember::Property(ObjectProperty {
-                    name: "label".to_string(),
-                    ty: TypeExpr::Primitive(PrimitiveName::String),
-                    optional: true,
-                    readonly: false,
-                }),
+                    true,
+                    false,
+                )),
+                ObjectMember::Property(ObjectProperty::synthetic(
+                    "label".to_string(),
+                    TypeExpr::Primitive(PrimitiveName::String),
+                    true,
+                    false,
+                )),
             ],
         }));
 
@@ -3240,14 +3244,14 @@ export interface AvatarProps {
         // routed-helper path enqueues the root name. A bare `Ref`
         // would be filtered by `allow_plain_refs=false` in
         // `collect_component_meta_registry_function_surface_refs`.
-        FunctionExpr {
-            parameters: Vec::new(),
-            return_type: Some(Arc::new(TypeExpr::IndexedAccess {
+        FunctionExpr::synthetic(
+            Vec::new(),
+            Some(Arc::new(TypeExpr::IndexedAccess {
                 object: Arc::new(ref_named(name)),
                 index: Arc::new(TypeExpr::Literal(LiteralValue::String("x".to_string()))),
             })),
-            type_parameters: Vec::new(),
-        }
+            Vec::new(),
+        )
     }
 
     #[test]
@@ -3255,16 +3259,16 @@ export interface AvatarProps {
         // Pick<Foo, "methodA"> equivalent — Include("methodA"). The
         // Method arm must skip `methodB` and walk `methodA`'s nested
         // refs.
-        let method_a = ObjectMember::Method(MethodSignature {
-            name: "methodA".to_string(),
-            function: fn_returning("MethodAReturnRef"),
-            optional: false,
-        });
-        let method_b = ObjectMember::Method(MethodSignature {
-            name: "methodB".to_string(),
-            function: fn_returning("MethodBReturnRef"),
-            optional: false,
-        });
+        let method_a = ObjectMember::Method(MethodSignature::synthetic(
+            "methodA".to_string(),
+            fn_returning("MethodAReturnRef"),
+            false,
+        ));
+        let method_b = ObjectMember::Method(MethodSignature::synthetic(
+            "methodB".to_string(),
+            fn_returning("MethodBReturnRef"),
+            false,
+        ));
         let expr = TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![method_a, method_b],
         }));
@@ -3296,12 +3300,12 @@ export interface AvatarProps {
 
     #[test]
     fn g2_index_signature_skipped_under_narrowed_cursor() {
-        let sig = ObjectMember::IndexSignature(verter_type_expr::IndexSignature {
-            key_name: "key".to_string(),
-            key_type: ref_named("IndexKeyRef"),
-            value_type: ref_named("IndexValueRef"),
-            readonly: false,
-        });
+        let sig = ObjectMember::IndexSignature(verter_type_expr::IndexSignature::synthetic(
+            "key".to_string(),
+            ref_named("IndexKeyRef"),
+            ref_named("IndexValueRef"),
+            false,
+        ));
         let expr = object_with_member(sig);
         let published_names = rustc_hash::FxHashSet::default();
         let mut queued_names = rustc_hash::FxHashSet::default();
@@ -3331,12 +3335,12 @@ export interface AvatarProps {
 
     #[test]
     fn g2_index_signature_walked_under_whole_surface() {
-        let sig = ObjectMember::IndexSignature(verter_type_expr::IndexSignature {
-            key_name: "key".to_string(),
-            key_type: ref_named("IndexKeyRef"),
-            value_type: ref_named("IndexValueRef"),
-            readonly: false,
-        });
+        let sig = ObjectMember::IndexSignature(verter_type_expr::IndexSignature::synthetic(
+            "key".to_string(),
+            ref_named("IndexKeyRef"),
+            ref_named("IndexValueRef"),
+            false,
+        ));
         let expr = object_with_member(sig);
         let published_names = rustc_hash::FxHashSet::default();
         let mut queued_names = rustc_hash::FxHashSet::default();

@@ -193,23 +193,27 @@ pub(crate) fn walk_substitute_typeexpr(
     }
     let recurse = |e: &TypeExpr| -> TypeExpr { walk_substitute_typeexpr(e, try_replace) };
     let recurse_fn = |f: &FunctionExpr| -> FunctionExpr {
-        FunctionExpr {
-            parameters: f
-                .parameters
+        // Structure-preserving substitution: keep the function's and each
+        // parameter's OXC spans verbatim.
+        FunctionExpr::with_spans(
+            f.parameters
                 .iter()
-                .map(|fp| FunctionParam {
-                    name: fp.name.clone(),
-                    ty: recurse(&fp.ty),
-                    optional: fp.optional,
-                    rest: fp.rest,
+                .map(|fp| {
+                    FunctionParam::with_span(
+                        fp.name.clone(),
+                        recurse(&fp.ty),
+                        fp.optional,
+                        fp.rest,
+                        fp.span,
+                    )
                 })
                 .collect(),
-            return_type: f
-                .return_type
+            f.return_type
                 .as_ref()
                 .map(|rt| std::sync::Arc::new(recurse(rt))),
-            type_parameters: f.type_parameters.clone(),
-        }
+            f.type_parameters.clone(),
+            f.spans,
+        )
     };
     match expr {
         TypeExpr::Ref {
@@ -253,28 +257,34 @@ pub(crate) fn walk_substitute_typeexpr(
                 .properties
                 .iter()
                 .map(|member| match member {
-                    ObjectMember::Property(p) => ObjectMember::Property(ObjectProperty {
-                        name: p.name.clone(),
-                        ty: recurse(&p.ty),
-                        optional: p.optional,
-                        readonly: p.readonly,
-                    }),
-                    ObjectMember::Method(m) => ObjectMember::Method(MethodSignature {
-                        name: m.name.clone(),
-                        function: recurse_fn(&m.function),
-                        optional: m.optional,
-                    }),
+                    // Structure-preserving substitution: keep member spans.
+                    ObjectMember::Property(p) => {
+                        ObjectMember::Property(ObjectProperty::with_spans(
+                            p.name.clone(),
+                            recurse(&p.ty),
+                            p.optional,
+                            p.readonly,
+                            p.spans,
+                        ))
+                    }
+                    ObjectMember::Method(m) => ObjectMember::Method(MethodSignature::with_spans(
+                        m.name.clone(),
+                        recurse_fn(&m.function),
+                        m.optional,
+                        m.spans,
+                    )),
                     ObjectMember::CallSignature(f) => ObjectMember::CallSignature(recurse_fn(f)),
                     ObjectMember::ConstructSignature(f) => {
                         ObjectMember::ConstructSignature(recurse_fn(f))
                     }
                     ObjectMember::IndexSignature(sig) => {
-                        ObjectMember::IndexSignature(IndexSignature {
-                            key_name: sig.key_name.clone(),
-                            key_type: recurse(&sig.key_type),
-                            value_type: recurse(&sig.value_type),
-                            readonly: sig.readonly,
-                        })
+                        ObjectMember::IndexSignature(IndexSignature::with_spans(
+                            sig.key_name.clone(),
+                            recurse(&sig.key_type),
+                            recurse(&sig.value_type),
+                            sig.readonly,
+                            sig.spans,
+                        ))
                     }
                 })
                 .collect(),

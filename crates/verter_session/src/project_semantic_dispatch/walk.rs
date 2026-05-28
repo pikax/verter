@@ -261,6 +261,11 @@ pub struct ShallowSurfaceMember {
     pub is_method: bool,
     pub declared_in_macro_type_arg: bool,
     pub merge_role: crate::semantic_query::MemberMergeRole,
+    /// OXC declaration-site spans, carried verbatim from the source
+    /// [`SurfaceMember`] through the walker's intermediate state so the
+    /// empty-path Shallow projection round-trip is lossless for member
+    /// provenance.
+    pub spans: verter_type_expr::MemberSpans,
 }
 
 impl ShallowSurface {
@@ -295,6 +300,8 @@ impl ShallowSurface {
                     is_method: m.is_method,
                     declared_in_macro_type_arg: m.declared_in_macro_type_arg,
                     merge_role: m.merge_role,
+                    // Carry the source member's OXC spans verbatim.
+                    spans: m.spans,
                 })
                 .collect(),
             call_signatures: view.call_signatures.to_vec(),
@@ -2787,6 +2794,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // never an interface/class heritage overlay — `Authored`
                     // (it never shadows / is shadowed).
                     merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                    // Mapped-produced member: synthesized from a key domain,
+                    // no single source declaration site.
+                    spans: verter_type_expr::MemberSpans::default(),
                 }
             })
             .collect();
@@ -3005,6 +3015,13 @@ struct MergedMemberAccum {
     readonly: bool,
     is_method: bool,
     declared_in_macro_type_arg: bool,
+    /// Spans of the first `OwnBody` contributor — the winning member when the
+    /// own-body-shadows-heritage rule fires (or when the result is `OwnBody`).
+    own_body_spans: Option<verter_type_expr::MemberSpans>,
+    /// Spans of the first contributor of ANY role — used when the result is
+    /// not own-body (intersection / heritage / authored), so the surviving
+    /// member references its own first declaration site.
+    first_spans: Option<verter_type_expr::MemberSpans>,
 }
 
 impl MergedMemberAccum {
@@ -3021,6 +3038,8 @@ impl MergedMemberAccum {
             readonly: false,
             is_method: false,
             declared_in_macro_type_arg: false,
+            own_body_spans: None,
+            first_spans: None,
         }
     }
 
@@ -3031,6 +3050,15 @@ impl MergedMemberAccum {
         self.is_method = self.is_method || member.is_method;
         self.declared_in_macro_type_arg =
             self.declared_in_macro_type_arg || member.declared_in_macro_type_arg;
+        // Retain a representative span per the value-selection rule: the first
+        // own-body contributor (the shadow winner) and the first contributor
+        // of any role (the intersection/heritage representative).
+        if self.first_spans.is_none() {
+            self.first_spans = Some(member.spans);
+        }
+        if matches!(member.merge_role, MemberMergeRole::OwnBody) && self.own_body_spans.is_none() {
+            self.own_body_spans = Some(member.spans);
+        }
         match member.merge_role {
             MemberMergeRole::OwnBody => {
                 self.saw_own_body = true;
@@ -3086,6 +3114,14 @@ impl MergedMemberAccum {
             [single] => *single,
             _ => merge_value_nodes_recursive(graph, &values),
         };
+        // The surviving member's spans follow the value-selection rule: an
+        // own-body result references the own-body declaration site; otherwise
+        // the first contributor's site.
+        let spans = if matches!(role, MemberMergeRole::OwnBody) {
+            self.own_body_spans.or(self.first_spans).unwrap_or_default()
+        } else {
+            self.first_spans.unwrap_or_default()
+        };
         ShallowSurfaceMember {
             name: self.name,
             value,
@@ -3094,6 +3130,7 @@ impl MergedMemberAccum {
             is_method: self.is_method,
             declared_in_macro_type_arg: self.declared_in_macro_type_arg,
             merge_role: role,
+            spans,
         }
     }
 }
@@ -3144,7 +3181,7 @@ fn merge_value_nodes_recursive(
 }
 
 /// Merge per-arm union surfaces under the TS-correct common-member rule,
-/// matching the Stage 1.5 reader's `union_common_member_surface`:
+/// matching the canonical union common-member semantics:
 ///
 /// - A member survives iff it is present (by name) in EVERY resolvable arm.
 /// - Its value is the UNION of the per-arm member value nodes (`(A | B)['k']`
@@ -3219,6 +3256,9 @@ fn merge_union_surfaces(
             is_method: false,
             declared_in_macro_type_arg: false,
             merge_role: MemberMergeRole::Authored,
+            // Union common-member: the name appears in every arm, so there is
+            // no single source declaration site — genuinely synthetic.
+            spans: verter_type_expr::MemberSpans::default(),
         });
     }
     Some(ShallowSurface {
@@ -3252,6 +3292,8 @@ fn surface_view_from_shallow(surface: &ShallowSurface) -> SurfaceView {
             is_method: m.is_method,
             declared_in_macro_type_arg: m.declared_in_macro_type_arg,
             merge_role: m.merge_role,
+            // Carry the walker's preserved OXC spans back onto the graph member.
+            spans: m.spans,
         })
         .collect();
     SurfaceView {

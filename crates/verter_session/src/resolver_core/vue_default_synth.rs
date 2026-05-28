@@ -107,12 +107,14 @@ pub fn synthesise_vue_default_value_symbol(macros: &[AnalyzedMacro]) -> Option<S
         }
         *already_seen = true;
 
-        members.push(ObjectMember::Property(ObjectProperty {
-            name: member_name.to_string(),
-            ty: type_arg.as_ref().clone(),
-            optional: false,
-            readonly: false,
-        }));
+        // Synthesized public-instance member (`$props` / `$slots` / …) — no
+        // source declaration site for the synthetic member name.
+        members.push(ObjectMember::Property(ObjectProperty::synthetic(
+            member_name.to_string(),
+            type_arg.as_ref().clone(),
+            false,
+            false,
+        )));
     }
 
     if members.is_empty() {
