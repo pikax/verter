@@ -543,14 +543,28 @@ impl ImportedMacroSurface {
     /// rail's "no JSDoc" outcome.
     fn member_display_jsdoc(
         ctx: &dyn ResolverContext,
-        member_value: SemanticNodeId,
-        member_name: &str,
+        member: &crate::semantic_query::SurfaceMember,
     ) -> (
         Option<String>,
         Vec<verter_semantic::analysis::types::JsdocTag>,
     ) {
-        let Some(canonical_id) = Self::member_origin_canonical(ctx, member_value) else {
-            return (None, Vec::new());
+        // The member's JSDoc lives in its DECLARATION file — the file recorded
+        // by `SurfaceMember::declaration_origin` (set from the LOWERING scope of
+        // the object the member is declared in, which SURVIVES substitution).
+        // This is NOT the member's value-type node scope: a generic inherited
+        // member (`Base<T>` → `Base<string>`) has a substituted value node that
+        // points at the type-arg in the DERIVED file, so a value-node-origin
+        // lookup reads the wrong file (P2-2). Fall back to the value node's
+        // scope only when no declaration origin is recorded (a synthetic /
+        // multi-origin member) so a non-generic structural member still
+        // resolves.
+        let canonical_id = match member
+            .declaration_origin
+            .clone()
+            .or_else(|| Self::member_origin_canonical(ctx, member.value))
+        {
+            Some(canonical_id) => canonical_id,
+            None => return (None, Vec::new()),
         };
         let Some(indexed) = ctx.ensure_indexed_ready(canonical_id.as_ref()) else {
             return (None, Vec::new());
@@ -561,18 +575,25 @@ impl ImportedMacroSurface {
         // scoped to it (not a file-wide first match). When the origin file's
         // type analysis is unavailable, fall back to the whole-file search
         // (the prior behaviour — still correct for single-declaration files).
-        if let Some((start, end)) =
-            Self::declaring_decl_span(ctx, source, &canonical_id, member_value, member_name)
-        {
+        if let Some((start, end)) = Self::declaring_decl_span(
+            ctx,
+            source,
+            &canonical_id,
+            member.value,
+            member.name.as_ref(),
+        ) {
             return verter_semantic::analysis::jsdoc::extract_jsdoc_for_property_name_in_range(
                 source,
-                member_name,
+                member.name.as_ref(),
                 start,
                 end,
             );
         }
 
-        verter_semantic::analysis::jsdoc::extract_jsdoc_for_property_name(source, member_name)
+        verter_semantic::analysis::jsdoc::extract_jsdoc_for_property_name(
+            source,
+            member.name.as_ref(),
+        )
     }
 
     /// Resolve the `(start, end)` byte span of the declaration in
@@ -867,11 +888,8 @@ impl ResolvedMacroSurface {
                         let type_annotation = type_expr.as_ref().and_then(
                             crate::resolver_core::surface_projector::render_type_expr_display,
                         );
-                        let (description, tags) = ImportedMacroSurface::member_display_jsdoc(
-                            ctx,
-                            member.value,
-                            member.name.as_ref(),
-                        );
+                        let (description, tags) =
+                            ImportedMacroSurface::member_display_jsdoc(ctx, member);
                         AnalyzedPropField {
                             name: member.name.as_ref().to_string(),
                             is_optional: member.optional,
@@ -1023,11 +1041,8 @@ impl ResolvedMacroSurface {
                         let payload_type = payload_expr.as_ref().and_then(
                             crate::resolver_core::surface_projector::render_type_expr_display,
                         );
-                        let (description, tags) = ImportedMacroSurface::member_display_jsdoc(
-                            ctx,
-                            member.value,
-                            member.name.as_ref(),
-                        );
+                        let (description, tags) =
+                            ImportedMacroSurface::member_display_jsdoc(ctx, member);
                         emits.push(AnalyzedEmitField {
                             name: member.name.as_ref().to_string(),
                             span: verter_span::Span::default(),
@@ -1114,11 +1129,8 @@ impl ResolvedMacroSurface {
                         let return_type = return_expr.as_ref().and_then(
                             crate::resolver_core::surface_projector::render_type_expr_display,
                         );
-                        let (description, tags) = ImportedMacroSurface::member_display_jsdoc(
-                            ctx,
-                            member.value,
-                            member.name.as_ref(),
-                        );
+                        let (description, tags) =
+                            ImportedMacroSurface::member_display_jsdoc(ctx, member);
                         Some(AnalyzedSlotField {
                             name: member.name.as_ref().to_string(),
                             is_required: !member.optional,
