@@ -12635,11 +12635,110 @@ mod single_resolution_engine_guards {
         out
     }
 
-    /// Line-precise scan for a literal substring (no identifier-boundary
-    /// requirement). Used for the `read_surface_members` DEFINITION pattern
-    /// `fn read_surface_members(`, which cannot suffix-collide.
-    fn scan_literal_sites(needle: &str) -> Vec<(String, u32, String)> {
+    /// Structural `fn`-DEFINITION matcher: true iff `line` declares a function
+    /// named `name`, matching the form
+    ///
+    /// ```text
+    /// fn <ws> name <ws?> <generic-params?> <ws?> (
+    /// ```
+    ///
+    /// i.e. the `fn` keyword (identifier-bounded), one-or-more whitespace, the
+    /// identifier-bounded `name`, then — past optional whitespace and an
+    /// OPTIONAL balanced `<…>` generic-parameter block (e.g. `<'a>`,
+    /// `<T, U>`, `<T: Bound<X>>`) and more optional whitespace — an opening
+    /// `(`. A fixed `fn name(` substring matcher (the prior `scan_literal_sites`
+    /// approach) MISSED a generic-syntax duplicate `fn name<'a>(…)` and a
+    /// whitespace-padded `fn  name (` form; this matches the structural
+    /// definition shape instead. Visibility prefixes (`pub`, `pub(crate)`),
+    /// `async`, `const`, etc. all sit BEFORE `fn` and are irrelevant because the
+    /// scan locates the `fn` token anywhere on the line. Call sites
+    /// (`read_surface_members(ctx, …)`) and imports (`read_surface_members,`)
+    /// have no preceding `fn` token and never match.
+    fn line_contains_fn_definition(line: &str, name: &str) -> bool {
+        let bytes = line.as_bytes();
+        let nm = name.as_bytes();
+        let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+
+        // Locate every identifier-bounded `fn` token on the line.
+        let mut i = 0usize;
+        while i + 2 <= bytes.len() {
+            let is_fn = &bytes[i..i + 2] == b"fn"
+                && (i == 0 || !is_ident_char(bytes[i - 1]))
+                && (i + 2 == bytes.len() || !is_ident_char(bytes[i + 2]));
+            if !is_fn {
+                i += 1;
+                continue;
+            }
+
+            // Require >= 1 whitespace after `fn`.
+            let mut j = i + 2;
+            let ws_start = j;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j == ws_start {
+                i += 1;
+                continue;
+            }
+
+            // The function name, identifier-bounded.
+            if j + nm.len() <= bytes.len()
+                && &bytes[j..j + nm.len()] == nm
+                && (j == 0 || !is_ident_char(bytes[j - 1]))
+                && (j + nm.len() == bytes.len() || !is_ident_char(bytes[j + nm.len()]))
+            {
+                let mut k = j + nm.len();
+                // Optional whitespace before generics / params.
+                while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+                    k += 1;
+                }
+                // Optional balanced `<…>` generic-parameter block.
+                if k < bytes.len() && bytes[k] == b'<' {
+                    let mut depth = 0i32;
+                    let mut closed = false;
+                    while k < bytes.len() {
+                        match bytes[k] {
+                            b'<' => depth += 1,
+                            b'>' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    k += 1;
+                                    closed = true;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        k += 1;
+                    }
+                    // An unbalanced `<` (generics spilling onto the next line)
+                    // is not a single-line definition this matcher recognises.
+                    if !closed {
+                        i += 1;
+                        continue;
+                    }
+                    // Optional whitespace between generics and `(`.
+                    while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+                        k += 1;
+                    }
+                }
+                if k < bytes.len() && bytes[k] == b'(' {
+                    return true;
+                }
+            }
+
+            i += 1;
+        }
+        false
+    }
+
+    /// Line-precise scan for a `fn`-DEFINITION of `name` (see
+    /// `line_contains_fn_definition`). Emits the canonical `fn <name>(`
+    /// representation per match so the allowlist tuple is stable regardless of
+    /// the on-line spacing or generic parameters at the definition site.
+    fn scan_fn_definition_sites(name: &str) -> Vec<(String, u32, String)> {
         let files = collect_production_rs_files();
+        let canonical = format!("fn {name}(");
         let mut out: Vec<(String, u32, String)> = Vec::new();
         for (path, rel) in &files {
             let src = match fs::read_to_string(path) {
@@ -12648,8 +12747,8 @@ mod single_resolution_engine_guards {
             };
             let stripped = preprocess(&src);
             for (idx, line) in stripped.split('\n').enumerate() {
-                if line.contains(needle) {
-                    out.push((rel.clone(), (idx + 1) as u32, needle.to_string()));
+                if line_contains_fn_definition(line, name) {
+                    out.push((rel.clone(), (idx + 1) as u32, canonical.clone()));
                 }
             }
         }
@@ -12779,9 +12878,12 @@ mod single_resolution_engine_guards {
     //     doc-comment says "Mirrors `slot_binding_graph::read_surface_members`",
     //   * `meta_resolve/slot_binding_graph.rs:390` (`fn ...`).
     // The consolidation collapses these to ONE shared reader. The guard scans
-    // the DEFINITION pattern `fn read_surface_members(` (call sites are not
-    // duplication and are not scanned). A NEW third definition fails; when
-    // Stage 4 collapses to one, the allowlist shrinks to a single entry.
+    // the structural DEFINITION form (`line_contains_fn_definition` — the `fn`
+    // keyword + name + optional generic params + `(`), so a generic-syntax
+    // duplicate `fn read_surface_members<'a>(…)` or a whitespace-padded
+    // `fn  read_surface_members (` is caught too (call sites and imports have no
+    // preceding `fn` token and are not scanned). A NEW third definition fails;
+    // when Stage 4 collapses to one, the allowlist shrinks to a single entry.
     // -----------------------------------------------------------------------
     const READ_SURFACE_MEMBERS_DEF_ALLOWLIST: &[(&str, u32, &str)] = &[
         (
@@ -12798,7 +12900,7 @@ mod single_resolution_engine_guards {
 
     #[test]
     fn no_new_duplicate_read_surface_members_definition() {
-        let actual = scan_literal_sites("fn read_surface_members(");
+        let actual = scan_fn_definition_sites("read_surface_members");
         assert_exact_allowlist_match(
             "no_new_duplicate_read_surface_members_definition",
             &actual,
@@ -13136,7 +13238,21 @@ mod single_resolution_engine_guards {
     /// Helper: returns `true` iff `f` panicked (i.e. the guard reported a
     /// violation). Suppresses the default panic hook so the planted-failure
     /// output does not clutter the test log.
+    ///
+    /// [P3] The panic hook is PROCESS-WIDE. `cargo test` runs the discriminator
+    /// tests in parallel, so two concurrent calls would otherwise interleave —
+    /// one restoring the previous hook while another is still inside
+    /// `catch_unwind` — leaving the silent hook installed for an UNRELATED
+    /// failing test (nondeterministic, swallowed panic output). The whole
+    /// swap -> `catch_unwind` -> restore is serialized under a process-global
+    /// mutex so only one discriminator owns the hook at a time. A poisoned lock
+    /// (a prior `lock()` holder panicked OUTSIDE `catch_unwind`, which does not
+    /// happen here) is recovered via `into_inner` — the guarded data is unit, so
+    /// there is no invariant to uphold, and we must not abort the suite.
     fn guard_reports_violation(f: impl FnOnce() + std::panic::UnwindSafe) -> bool {
+        static HOOK_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _hook_lock = HOOK_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         let result = std::panic::catch_unwind(f);
@@ -13989,6 +14105,112 @@ mod tests {\n\
             "read_surface_members guard must FAIL on a stale allowlist entry — \
              this forces the duplicate-reader ledger to shrink"
         );
+    }
+
+    #[test]
+    fn fn_definition_matcher_catches_generic_and_padded_forms() {
+        // [P2] The duplicate-reader guard scans for the structural `fn`
+        // DEFINITION form, NOT a fixed `fn read_surface_members(` substring. A
+        // future duplicate could be declared with generics or extra whitespace;
+        // these MUST be caught. This test pins `line_contains_fn_definition`
+        // directly AND proves the old literal-substring matcher would have
+        // MISSED these forms — so the structural logic is load-bearing, not a
+        // no-op rename.
+        let name = "read_surface_members";
+        let old_literal = format!("fn {name}(");
+
+        // Forms a NEW duplicate could legitimately take. Each MUST match the
+        // structural matcher.
+        let generic_forms = [
+            "fn read_surface_members<'a>(",
+            "fn read_surface_members<'a>(ctx: &'a Ctx) -> Vec<X> {",
+            "    pub(crate) fn read_surface_members<T, U>(x: T) -> U {",
+            "fn read_surface_members<T: Bound<X>>(x: T) {",
+            "fn  read_surface_members (", // padded whitespace, no generics
+            "fn read_surface_members <'a> (ctx: &'a Ctx) {",
+            "async fn read_surface_members<T>(x: T) {",
+        ];
+        for form in generic_forms {
+            assert!(
+                line_contains_fn_definition(form, name),
+                "structural matcher must match the definition form: {form:?}"
+            );
+        }
+
+        // Proof the NEW logic is exercised: the OLD literal-substring matcher
+        // (`line.contains(\"fn read_surface_members(\")`) MISSES every form that
+        // separates the name from `(` by generics or whitespace. If these were
+        // still matched by a substring scan, the structural matcher would be a
+        // redundant no-op — they are not, so it is load-bearing.
+        let old_missed = [
+            "fn read_surface_members<'a>(",
+            "fn read_surface_members<T, U>(x: T) -> U {",
+            "fn  read_surface_members (",
+            "fn read_surface_members <'a> (ctx: &'a Ctx) {",
+        ];
+        for form in old_missed {
+            assert!(
+                !form.contains(&old_literal),
+                "old literal-substring matcher MUST miss {form:?} — this proves \
+                 the generic-aware matcher is load-bearing, not a rename of an \
+                 already-passing substring scan"
+            );
+            assert!(
+                line_contains_fn_definition(form, name),
+                "…and the NEW structural matcher MUST catch it: {form:?}"
+            );
+        }
+
+        // The canonical (no-generic) form the real allowlist stores is matched
+        // by BOTH — equivalence on the existing sites.
+        assert!(
+            old_literal.contains(&old_literal) && line_contains_fn_definition(&old_literal, name),
+            "the canonical `fn read_surface_members(` form must match both matchers"
+        );
+        assert!(
+            line_contains_fn_definition("pub(crate) fn read_surface_members(", name),
+            "the live `pub(crate) fn read_surface_members(` definition form must match"
+        );
+
+        // Negatives: a CALL site and an IMPORT (no preceding `fn` token) must
+        // NOT match — duplication is about DEFINITIONS only.
+        assert!(
+            !line_contains_fn_definition("let members = read_surface_members(ctx, node);", name),
+            "a call site must NOT match the `fn`-definition matcher"
+        );
+        assert!(
+            !line_contains_fn_definition("    read_surface_members, resolve_macro_payload,", name),
+            "a grouped import must NOT match the `fn`-definition matcher"
+        );
+        // The `fn` token must be identifier-bounded: a suffixed keyword-like
+        // token (`afn`, `fnx`) is not the `fn` keyword.
+        assert!(
+            !line_contains_fn_definition("afn read_surface_members(", name),
+            "`afn` is not the `fn` keyword — must not match"
+        );
+        // A different function name must not satisfy this name's matcher.
+        assert!(
+            !line_contains_fn_definition("fn read_surface_members_v2(", name),
+            "identifier-boundary discipline: `read_surface_members_v2` is a \
+             distinct name and must not match"
+        );
+
+        // Re-derive the live allowlist under the new matcher: the count and the
+        // canonical representation must be unchanged (exactly the two known
+        // definitions, each stored as `fn read_surface_members(`).
+        let live = scan_fn_definition_sites(name);
+        assert_eq!(
+            live.len(),
+            READ_SURFACE_MEMBERS_DEF_ALLOWLIST.len(),
+            "generic-aware matcher must find exactly the allowlisted definition \
+             count on the live tree (no over- or under-match): found {live:?}"
+        );
+        for (_, _, rep) in &live {
+            assert_eq!(
+                rep, &old_literal,
+                "canonical match representation must be `fn read_surface_members(`"
+            );
+        }
     }
 
     #[test]
