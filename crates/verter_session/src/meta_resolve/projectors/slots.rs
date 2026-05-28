@@ -72,7 +72,9 @@ pub(crate) fn project_slots(
             MacroExpansionKind::DefineSlots,
             // Slots are structural — `declared_in_macro_type_arg` is a
             // props-axis concern and is always `false` for slot members.
-            crate::semantic_query::SurfaceProvenanceContext::Structural,
+            // Routed through the single-source-of-truth helper (which maps
+            // DefineSlots → Structural) rather than hardcoding the value.
+            super::macro_payload_surface_provenance(AnalyzedMacroKind::DefineSlots),
             diag_sink,
         ) {
             Some(node) => node,

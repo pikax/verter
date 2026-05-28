@@ -284,18 +284,40 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   concatenate every arm's call signatures. The provenance flows
     ///   into each arm so an own-body intersection literal arm keeps the
     ///   bit. Returns `None` only when no arm is resolvable.
+    /// - `Alias(target)` → an identity / utility alias shell
+    ///   (`NoInfer<T>`, and any other `build_instantiate` arm that
+    ///   interns a pass-through [`SemanticNodeData::Alias`]). The alias
+    ///   is structurally transparent — `NoInfer<Base>` IS `Base` — so the
+    ///   reader follows `target` and reads its surface, propagating the
+    ///   caller's `provenance` UNCHANGED. An identity alias of the macro-T
+    ///   root therefore surfaces its own-body members with the same
+    ///   `declared_in_macro_type_arg` the un-aliased root would (the
+    ///   eager same-file rail propagates provenance through the identity
+    ///   utilities it handles — `Partial` / `Required` in
+    ///   `verter_semantic::analysis::macros::resolve_type_to_prop_fields`
+    ///   — rather than downgrading; only the TRANSFORMATIVE utilities
+    ///   (`Omit` / `Pick`) reshape the surface and downgrade).
     /// - `DeclPlaceholder` → `Instantiate` the bare declaration body
     ///   under `Published(Expanded)` carrying the provenance, then read
     ///   the unwrapped surface.
-    /// - Everything else (primitives, deferred shells, unions, …) →
-    ///   `None`. A `Union` carrier has no single member surface a macro
-    ///   payload reads, so it collapses to `None` here — the eager rail
-    ///   never produces a macro surface from a bare union either.
+    /// - `Union(arms)` → the TS-correct shallow surface of a union-typed
+    ///   macro payload is its COMMON members: a key published only when it
+    ///   is present in EVERY arm (mirroring `key_names_from_base_node`'s
+    ///   `CombineUnion` key intersection), typed as the union of the
+    ///   per-arm member value types. A disjoint union has no common keys →
+    ///   empty surface (still correct); an overlapping union surfaces only
+    ///   the shared members. Union-arm members are reached THROUGH the
+    ///   union, not written at the macro-T root, so they recurse
+    ///   STRUCTURALLY (the synthesized common member is `false`).
+    /// - Everything else (primitives, deferred shells, literals, type
+    ///   params, …) → `None`. They have no single member surface a macro
+    ///   payload reads.
     ///
     /// The walk is depth-bounded by the declaration graph: it expands a
     /// placeholder at most one `Instantiate` deep and recurses only
-    /// through Intersection arms, never through member value bodies (a
-    /// member's value type is projected lazily by the caller via
+    /// through Alias / Intersection / Union arms, never through member
+    /// value bodies (a member's value type is projected lazily by the
+    /// caller via
     /// [`crate::resolver_core::ImportedMacroSurface::project_named_member`]).
     pub(crate) fn surface_view_from_base_node(
         &self,
@@ -322,6 +344,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 members: view.members.to_vec(),
                 call_signatures: view.call_signatures.to_vec(),
             }),
+            // Identity / utility alias shell (`NoInfer<T>` and any other
+            // `build_instantiate` arm that interns a pass-through Alias).
+            // Structurally transparent: follow `target` and read its
+            // surface, propagating the caller's provenance UNCHANGED so an
+            // identity alias of the macro-T root keeps its own-body
+            // members' `declared_in_macro_type_arg`. Without this arm the
+            // alias fell through to the catch-all `None`, which
+            // `ImportedMacroSurface::resolve_surface_view` turns into an
+            // EMPTY macro surface — `defineProps<NoInfer<Base>>()` and
+            // `type Props = NoInfer<Base>` would lose every member.
+            SemanticNodeData::Alias(target) => {
+                let target = *target;
+                drop(data);
+                self.surface_view_from_base_node(target, provenance)
+            }
             SemanticNodeData::Intersection(arms) => {
                 let arms = Arc::clone(arms);
                 drop(data);
@@ -385,10 +422,121 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     _ => None,
                 }
             }
-            // Primitives, deferred shells, unions, literals, type params,
-            // … have no single member surface a macro payload reads.
+            // Union-typed macro payload: the TS-correct shallow surface is
+            // the COMMON members — a key present in EVERY arm, typed as the
+            // union of the per-arm member value types. Mirrors
+            // `key_names_from_base_node`'s `CombineUnion` key intersection,
+            // but synthesizes full members (value/optional/readonly) so the
+            // macro interpretation reads types, not just names. A disjoint
+            // union → no common keys → empty surface (the documented
+            // common-members-only contract); an overlapping union → the
+            // shared members only. Union-arm members are reached THROUGH the
+            // union (not written at the macro-T root), so each arm recurses
+            // STRUCTURALLY and the synthesized common member is `false`.
+            SemanticNodeData::Union(arms) => {
+                let arms = Arc::clone(arms);
+                drop(data);
+                self.union_common_member_surface(&arms)
+            }
+            // Primitives, deferred shells, literals, type params, … have no
+            // single member surface a macro payload reads.
             _ => None,
         }
+    }
+
+    /// Synthesize the common-member surface of a union's arms (the
+    /// `SemanticNodeData::Union` case of [`Self::surface_view_from_base_node`]).
+    ///
+    /// A member is published iff it is present (by name) in EVERY
+    /// **resolvable** arm; its value type is the union of the per-arm
+    /// member value nodes. This is the TS-correct shallow reading of a
+    /// union-typed payload: `(A | B)['k']` is well-typed only when `k`
+    /// exists in both `A` and `B`, and its type is `A['k'] | B['k']`.
+    ///
+    /// - Disjoint union (no shared key) → empty `MacroSurfaceView` (NOT
+    ///   `None`: the union resolved, it simply has no common members —
+    ///   distinct from an unresolvable carrier).
+    /// - Any arm with no readable surface (a deferred carrier, a
+    ///   primitive, …) makes the whole result `None`: a union whose arm
+    ///   cannot be read has an unknown common-member set, so the reader
+    ///   must not publish a partial intersection.
+    /// - Member flags: optional iff optional in ANY arm (the union value
+    ///   admits the optional case); readonly iff readonly in ALL arms (a
+    ///   union property is writable only when writable in every arm);
+    ///   `is_method` / `declared_in_macro_type_arg` are `false` on the
+    ///   synthesized member (it carries a union value, not a literal
+    ///   method, and is reached through the union rather than the macro-T
+    ///   own body).
+    /// - Call signatures: a union has no single call surface, so the
+    ///   synthesized view carries none.
+    fn union_common_member_surface(&self, arms: &[SemanticNodeId]) -> Option<MacroSurfaceView> {
+        if arms.is_empty() {
+            return Some(MacroSurfaceView::default());
+        }
+        // Read each arm's surface structurally (union-arm members are not
+        // the macro-T own body). One unreadable arm → unknown common set.
+        let arm_views: Vec<MacroSurfaceView> = arms
+            .iter()
+            .map(|arm| {
+                self.surface_view_from_base_node(
+                    *arm,
+                    crate::semantic_query::SurfaceProvenanceContext::Structural,
+                )
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        // Keys common to ALL arms, in the first arm's declaration order.
+        let first = &arm_views[0];
+        let mut members: Vec<SurfaceMember> = Vec::new();
+        for first_member in &first.members {
+            // Collect this member's value node from every arm; skip the
+            // key entirely if any arm lacks it (not a common member).
+            let mut per_arm_values: Vec<SemanticNodeId> = Vec::with_capacity(arm_views.len());
+            let mut optional_in_any = false;
+            let mut readonly_in_all = true;
+            let mut present_in_all = true;
+            for arm_view in &arm_views {
+                match arm_view
+                    .members
+                    .iter()
+                    .find(|m| m.name == first_member.name)
+                {
+                    Some(arm_member) => {
+                        per_arm_values.push(arm_member.value);
+                        optional_in_any |= arm_member.optional;
+                        readonly_in_all &= arm_member.readonly;
+                    }
+                    None => {
+                        present_in_all = false;
+                        break;
+                    }
+                }
+            }
+            if !present_in_all {
+                continue;
+            }
+            // Value type = union of the per-arm member values. A single
+            // shared value node stays as-is (no singleton union wrapper).
+            let value = if per_arm_values.len() == 1 {
+                per_arm_values[0]
+            } else {
+                self.graph().intern_node(SemanticNodeData::Union(Arc::from(
+                    per_arm_values.into_boxed_slice(),
+                )))
+            };
+            members.push(SurfaceMember {
+                name: Arc::clone(&first_member.name),
+                value,
+                optional: optional_in_any,
+                readonly: readonly_in_all,
+                is_method: false,
+                declared_in_macro_type_arg: false,
+            });
+        }
+        Some(MacroSurfaceView {
+            members,
+            call_signatures: Vec::new(),
+        })
     }
 
     pub(super) fn key_names_from_keyspace_node(

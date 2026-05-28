@@ -880,6 +880,70 @@ mod tests {
     }
 
     #[test]
+    fn prepared_type_decl_member_index_indexes_method_syntax() {
+        // Method-syntax members (`default(props): any`) must be indexed
+        // distinctly from property-valued functions (`fn: () => void`),
+        // carrying `is_method == true`, so the macro-surface own-member
+        // overlay can stamp `declared_in_macro_type_arg` for an own
+        // interface method. A property and a method coexist in one body to
+        // prove BOTH branches of `index_object_members` run.
+        //
+        // Discrimination: removing the `ObjectMember::Method` arm from
+        // `index_object_members` makes `decl.member("greet")` return `None`
+        // (the method is never indexed), so both the `is_some` and the
+        // `is_method` assertions below FAIL.
+        let body = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty {
+                    name: "label".into(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: false,
+                    readonly: false,
+                }),
+                ObjectMember::Method(verter_type_expr::MethodSignature {
+                    name: "greet".into(),
+                    function: verter_type_expr::FunctionExpr {
+                        parameters: vec![],
+                        return_type: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
+                        type_parameters: vec![],
+                    },
+                    optional: false,
+                }),
+            ],
+        }));
+
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/types.ts", "Slots"),
+            TypeDeclKind::Interface,
+            body,
+        );
+        decl.build_member_index();
+
+        // The property member is indexed as a non-method.
+        let label = decl.member("label").expect("property `label` indexed");
+        assert!(
+            !label.is_method,
+            "a property member must carry is_method=false",
+        );
+
+        // The method-syntax member is indexed AND flagged is_method=true.
+        let greet = decl
+            .member("greet")
+            .expect("method-syntax member `greet` MUST be indexed (the Method branch)");
+        assert!(
+            greet.is_method,
+            "a method-syntax member (`greet(): any`) MUST carry is_method=true; \
+             a property-valued function would carry is_method=false",
+        );
+        // The method's value is its function shape.
+        assert!(
+            matches!(greet.ty, TypeExpr::Function(_)),
+            "the method member's value type must be a Function shape, got {:?}",
+            greet.ty,
+        );
+    }
+
+    #[test]
     fn prepared_decl_kind_from_type_decl_kind() {
         assert_eq!(
             PreparedDeclKind::from(TypeDeclKind::Alias),

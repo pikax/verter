@@ -72,8 +72,10 @@ pub(crate) fn project_options(
             payload_node,
             macro_index,
             MacroExpansionKind::DefineProps,
-            // Options pass-through surface is structural.
-            crate::semantic_query::SurfaceProvenanceContext::Structural,
+            // Options pass-through surface is structural. Routed through the
+            // single-source-of-truth helper (which maps DefineOptions →
+            // Structural) rather than hardcoding the value.
+            super::macro_payload_surface_provenance(AnalyzedMacroKind::DefineOptions),
             diag_sink,
         ) {
             Some(node) => node,

@@ -38,6 +38,7 @@
 use std::sync::Arc;
 
 use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, MacroExpansionKind};
+use verter_semantic::analysis::AnalyzedMacroKind;
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
@@ -246,8 +247,10 @@ pub(crate) fn resolve_payload_surface_with_scope(
             macro_index,
             expansion_kind,
             // Emit-class payloads are structural (props-axis bit is
-            // always false for emits).
-            crate::semantic_query::SurfaceProvenanceContext::Structural,
+            // always false for emits). Routed through the
+            // single-source-of-truth helper (which maps DefineEmits →
+            // Structural) rather than hardcoding the value.
+            super::macro_payload_surface_provenance(AnalyzedMacroKind::DefineEmits),
             diag_sink,
         );
     }
@@ -271,8 +274,10 @@ pub(crate) fn resolve_payload_surface_with_scope(
             macro_index,
             expansion_kind,
             // Emit-class payloads are structural (props-axis bit is
-            // always false for emits).
-            crate::semantic_query::SurfaceProvenanceContext::Structural,
+            // always false for emits). Routed through the
+            // single-source-of-truth helper (which maps DefineEmits →
+            // Structural) rather than hardcoding the value.
+            super::macro_payload_surface_provenance(AnalyzedMacroKind::DefineEmits),
             diag_sink,
         );
     }

@@ -73,8 +73,10 @@ pub(crate) fn project_exposed(
             payload_node,
             macro_index,
             MacroExpansionKind::DefineProps,
-            // Exposed pass-through surface is structural.
-            crate::semantic_query::SurfaceProvenanceContext::Structural,
+            // Exposed pass-through surface is structural. Routed through the
+            // single-source-of-truth helper (which maps DefineExpose →
+            // Structural) rather than hardcoding the value.
+            super::macro_payload_surface_provenance(AnalyzedMacroKind::DefineExpose),
             diag_sink,
         ) {
             Some(node) => node,

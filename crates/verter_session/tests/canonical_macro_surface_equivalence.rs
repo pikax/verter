@@ -23,30 +23,41 @@
 //!
 //! Both arms feed the SAME shared `prop_members` / `emit_members` /
 //! `slot_members` interpretation, so each test asserts arm-to-arm
-//! equivalence — names, order, types, optionality, readonly,
-//! `declared_in_macro_type_arg` provenance, emit payloads, slot
-//! bindings/returns.
+//! equivalence — prop names, order, per-field `TypeExpr`, optionality
+//! (`is_optional`), `declared_in_macro_type_arg` provenance, emit
+//! payloads (`payload_expr`), slot bindings (`binding_expr`), and slot
+//! return types (`return_expr`, compared exactly). Note: there is NO
+//! prop `readonly` field — `AnalyzedPropField` carries `is_optional`
+//! only — so readonly is deliberately NOT among the asserted axes.
 //!
 //! # Why these discriminate (CLAUDE.md Stub Prevention)
 //!
 //! Each test would FAIL if the canonical path dropped or reordered a
 //! field, lost the `declared_in_macro_type_arg` provenance, mis-handled
-//! call-signature emits, admitted a non-function slot, or walked an
-//! unrelated package import. The discrimination proof for the
-//! provenance field: removing the `MacroTypeArgOwnBody` context from
-//! the canonical surface resolver (so the imported declaration's
-//! own-body members lower structurally) makes
+//! call-signature emits, admitted a non-function slot, dropped a slot's
+//! return type, dropped an identity-alias shell, mis-synthesized a
+//! union's common members, or walked an unrelated package import. The
+//! discrimination proof for the provenance field: removing the
+//! `MacroTypeArgOwnBody` context from the canonical surface resolver (so
+//! the imported declaration's own-body members lower structurally) makes
 //! [`canonical_props_equivalence_direct_imported_root`] and
 //! [`canonical_props_equivalence_heritage_own_vs_inherited`] go RED on
-//! the `declared_in_macro_type_arg` assertion.
+//! the `declared_in_macro_type_arg` assertion. The alias-shell and
+//! union-common-member fixtures
+//! ([`canonical_props_equivalence_identity_utility_alias`],
+//! [`canonical_props_equivalence_union_shared_member_published`]) go RED
+//! against the pre-fix `surface_view_from_base_node` (which returned
+//! `None` → empty surface for both shapes).
 //!
 //! Required fixtures (all hermetic, vendored — NO external corpus):
 //! direct imported root + heritage (`extends`); call-signature emits
-//! AND property-key emits (both forms); slots with NON-function
-//! members; `withDefaults` (optionality changes); union / intersection
-//! / conditional macro payloads; package-backed helper type with
-//! UNRELATED imports (must not be walked); same-canonical-edit
-//! warm-cache rejection.
+//! AND property-key emits (both forms); slots with NON-function members
+//! AND exact slot-return comparison; `withDefaults` payload-surface
+//! optionality through the lazy canonical path; identity/utility alias
+//! shell (`NoInfer<Base>`); union with a SHARED member (common-members
+//! synthesis) AND disjoint union (empty); intersection macro payload;
+//! package-backed helper type with UNRELATED imports (must not be
+//! walked); same-canonical-edit warm-cache rejection.
 
 #![allow(clippy::too_many_lines)]
 
@@ -366,11 +377,17 @@ fn canonical_slots_equivalence_non_function_filtered_and_bindings() {
             e.name
         );
     }
-    // Return type preserved on both arms.
+    // Return type preserved on both arms — compared EXACTLY (not merely
+    // presence): the slot's `return_expr` TypeExpr must round-trip
+    // identically through the canonical surface reader. A presence-only
+    // check would miss a canonical path that produced a DIFFERENT return
+    // shape (e.g. `any` vs the declared return); the exact compare
+    // discriminates that.
     assert_eq!(
-        e_default.return_expr.is_some(),
-        l_default.return_expr.is_some(),
-        "slot return_expr presence must match",
+        e_default.return_expr, l_default.return_expr,
+        "slot `default` return_expr must match the eager arm EXACTLY: \
+         eager={:?} lazy={:?}",
+        e_default.return_expr, l_default.return_expr,
     );
 }
 
@@ -601,82 +618,333 @@ fn canonical_props_equivalence_same_canonical_edit_rejects_warm_cache() {
 }
 
 // ===========================================================================
-// withDefaults — defaults-object merge affects published optionality
+// withDefaults — payload-surface optionality through the LAZY canonical path
 // ===========================================================================
 //
-// `withDefaults` resolves the SAME props payload type as `defineProps`
-// (its macro provenance is `MacroTypeArgOwnBody`, identical to
-// `DefineProps` — see `macro_payload_surface_provenance`), then the thin
-// normalizer merges the runtime defaults object: a prop with a default
-// becomes NON-required on the published surface even when its type
-// annotation is non-optional. This characterizes the withDefaults
-// normalizer end-to-end through the production component-meta payload
-// (the type-resolution half is proven field-for-field equivalent by the
-// `canonical_props_equivalence_*` tests above).
+// `withDefaults(defineProps<T>(), …)` resolves the SAME props payload type
+// `T` as `defineProps<T>()`, under the SAME macro provenance
+// (`macro_payload_surface_provenance(WithDefaults)` ==
+// `SurfaceProvenanceContext::MacroTypeArgOwnBody`, identical to
+// `DefineProps`). The runtime defaults-object merge (relaxing a typed-
+// required prop to non-required) is a SEPARATE downstream normalizer step
+// applied to the published meta — it is NOT part of the macro payload
+// surface. This test therefore characterizes the lazy CANONICAL payload
+// surface for the `WithDefaults` macro kind: it drives the lazy bridge
+// (`lazy_prop_members`) against the REAL eager OXC producer
+// (`eager_prop_members` resolved under `AnalyzedMacroKind::WithDefaults`),
+// exactly as the other `canonical_*_equivalence` tests drive lazy vs eager.
+//
+// The discriminating signal is the payload surface's TYPE-LEVEL optionality
+// + own-body provenance under the withDefaults macro kind: a lazy canonical
+// path that mishandled withDefaults optionality (dropped the `?` of an
+// optional payload member, or read the surface under `Structural` instead
+// of `MacroTypeArgOwnBody` so own-body members lost `declared_in_macro_type_arg`)
+// would diverge from the eager arm here. The production defaults-merge
+// (`get_component_meta`) is exercised by the host-level meta tests in
+// `crate::meta_tests`, not re-characterized here.
 
-#[test]
-fn canonical_with_defaults_equivalence_defaults_relax_optionality() {
-    use verter_session::component_meta_host::ComponentMetaHost;
-    use verter_session::{CompileErrorPolicy, HostConfig};
-
-    let mh = ComponentMetaHost::new_standalone(HostConfig {
-        dev_mode: false,
-        compile_error_policy: CompileErrorPolicy::StrictError,
-        ..HostConfig::default()
-    });
-    // `size` is REQUIRED by type (`size: number`) but withDefaults
-    // supplies a default, so the published prop must be non-required.
-    // `label` has no default and stays required.
-    let component = r#"
+const WITH_DEFAULTS_TYPES: &str = r#"
+export interface Props {
+  size: number;
+  variant?: 'a' | 'b';
+  label: string;
+}
+"#;
+const WITH_DEFAULTS_OWNER: &str = r#"
 <script setup lang="ts">
-interface Props { size: number; label: string }
+import type { Props } from './types';
 withDefaults(defineProps<Props>(), { size: 10 });
 </script>
 <template><div /></template>
 "#;
-    mh.upsert_base("/src/WithDefaults.vue", component)
-        .expect("WithDefaults.vue upsert");
-    let meta = mh
-        .host()
-        .get_component_meta("/src/WithDefaults.vue")
-        .expect("component meta resolves");
 
-    let size = meta
-        .props
-        .iter()
-        .find(|p| p.name == "size")
-        .expect("meta.props contains `size`");
-    let label = meta
-        .props
-        .iter()
-        .find(|p| p.name == "label")
-        .expect("meta.props contains `label`");
+#[test]
+fn canonical_with_defaults_equivalence_payload_surface_optionality() {
+    let host = build_host(WITH_DEFAULTS_OWNER, WITH_DEFAULTS_TYPES);
 
-    // Discriminating: the withDefaults merge MUST relax `size` to
-    // non-required (it has a default) while leaving `label` required.
-    // A normalizer that ignored the defaults object would leave `size`
-    // required; one that blanket-relaxed every prop would drop `label`'s
-    // required flag.
-    assert!(
-        !size.required,
-        "`size` has a withDefaults default → published prop MUST be non-required; \
-         got required={}",
-        size.required,
+    // Eager arm driven under the `WithDefaults` macro kind — the REAL OXC
+    // producer projects the `Props` payload surface for withDefaults.
+    let eager =
+        eager_probe(&host, "Props", AnalyzedMacroKind::WithDefaults).eager_prop_members(&host);
+    // Lazy canonical arm: resolve the imported `Props` declaration through
+    // the macro-aware shared surface reader. (`lazy_prop_members` enters
+    // under `MacroTypeArgOwnBody`, the SAME provenance the withDefaults
+    // projector uses — `macro_payload_surface_provenance(WithDefaults)`.)
+    let lazy = lazy_probe("Props").lazy_prop_members(&host);
+
+    // Discriminator: the eager rail must produce the full surface.
+    assert_eq!(
+        eager.len(),
+        3,
+        "eager withDefaults payload surface must have size, variant, label; got {:?}",
+        eager.iter().map(|p| &p.name).collect::<Vec<_>>(),
     );
-    assert!(
-        size.has_default,
-        "`size` MUST carry has_default=true from the withDefaults object",
+
+    let eager_names: Vec<&str> = eager.iter().map(|p| p.name.as_str()).collect();
+    let lazy_names: Vec<&str> = lazy.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(
+        eager_names, lazy_names,
+        "lazy withDefaults payload member names/order MUST match the eager arm",
     );
-    assert!(
-        label.required,
-        "`label` has NO default → MUST stay required; got required={}",
-        label.required,
+
+    // Type-level optionality + TypeExpr + provenance, field-for-field. A
+    // lazy-canonical withDefaults optionality bug (lost `variant?`, or all
+    // members flipped) diverges here against the eager arm.
+    for (e, l) in eager.iter().zip(lazy.iter()) {
+        assert_eq!(
+            e.is_optional, l.is_optional,
+            "optionality mismatch for withDefaults payload prop `{}` \
+             (eager={}, lazy={})",
+            e.name, e.is_optional, l.is_optional,
+        );
+        assert_eq!(
+            e.type_expr, l.type_expr,
+            "TypeExpr mismatch for withDefaults payload prop `{}`",
+            e.name,
+        );
+        assert_eq!(
+            e.declared_in_macro_type_arg, l.declared_in_macro_type_arg,
+            "declared_in_macro_type_arg mismatch for withDefaults payload prop \
+             `{}` (eager={}, lazy={}) — the WithDefaults surface MUST carry the \
+             own-body provenance, identical to DefineProps",
+            e.name, e.declared_in_macro_type_arg, l.declared_in_macro_type_arg,
+        );
+    }
+
+    // Negative: exactly `variant` is the optional payload member. Rules out
+    // a lazy arm that dropped optionality (all-required) or inverted it.
+    let lazy_optional: Vec<&str> = lazy
+        .iter()
+        .filter(|p| p.is_optional)
+        .map(|p| p.name.as_str())
+        .collect();
+    assert_eq!(
+        lazy_optional,
+        vec!["variant"],
+        "exactly `variant` is optional in the lazy withDefaults payload surface; \
+         got {lazy_optional:?}",
     );
-    // NOTE: this test drives the EAGER production `get_component_meta`
-    // path (Stage 1 does not flip the producer), so it characterizes the
-    // withDefaults defaults-merge optionality only. The
-    // `declared_in_macro_type_arg` provenance of the canonical path is
-    // proven field-for-field equivalent to eager by the probe-based
-    // `canonical_props_equivalence_*` tests above; it is intentionally
-    // NOT re-asserted here against the unflipped production path.
+
+    // Positive provenance: every own-body member of the withDefaults payload
+    // `Props` carries declared_in_macro_type_arg=true (the WithDefaults macro
+    // kind enters under MacroTypeArgOwnBody, identical to DefineProps).
+    assert!(
+        lazy.iter().all(|p| p.declared_in_macro_type_arg),
+        "every own-body withDefaults payload prop MUST carry \
+         declared_in_macro_type_arg=true; got {:?}",
+        lazy.iter()
+            .map(|p| (p.name.clone(), p.declared_in_macro_type_arg))
+            .collect::<Vec<_>>(),
+    );
+}
+
+// ===========================================================================
+// PROPS — identity/utility alias shell (`NoInfer<Base>`)
+// ===========================================================================
+//
+// `build_instantiate` lowers an identity / utility alias such as
+// `NoInfer<T>` to `SemanticNodeData::Alias(source)`. Before the alias-shell
+// fix the canonical surface reader (`surface_view_from_base_node`) handled
+// only `Object` / `Intersection` / `DeclPlaceholder` and the catch-all
+// returned `None` — which `resolve_surface_view` turns into an EMPTY macro
+// surface. So `type Props = NoInfer<Base>` lost every member.
+//
+// `NoInfer<Base>` IS `Base` (an identity utility — no member transformation),
+// so the canonical surface of the alias MUST equal the canonical surface of
+// the un-aliased `Base`: same member names/order, same per-field TypeExpr,
+// same optionality, AND the same `declared_in_macro_type_arg` provenance
+// (own-body members stay `true` at the macro-T root — the alias is a
+// transparent indirection, matching the eager same-file rail's identity-
+// utility provenance propagation for `Partial` / `Required` in
+// `verter_semantic::analysis::macros::resolve_type_to_prop_fields`).
+//
+// EAGER-ORACLE NOTE: the `EagerMacroSurfaceProbe` cross-file path
+// (`resolve_macro_elements`) does NOT resolve a named alias-to-`NoInfer`
+// (it returns an empty surface for `export type Props = NoInfer<Base>`),
+// so it is NOT a usable oracle for THIS shape. The ground truth used here
+// is the un-aliased `Base` surface produced by the SAME canonical reader
+// (which IS field-for-field equivalent to eager — proven by
+// `canonical_props_equivalence_direct_imported_root`). The production
+// `get_component_meta` path independently resolves `NoInfer<Base>` to
+// Base's two members with the matching required/optional flags, confirming
+// the alias is transparent in production.
+
+const PROPS_ALIAS_SHELL_TYPES: &str = r#"
+export interface Base {
+  a: string;
+  b?: number;
+  c: boolean;
+}
+export type Props = NoInfer<Base>;
+"#;
+const PROPS_ALIAS_SHELL_OWNER: &str = r#"
+<script setup lang="ts">
+import type { Props } from './types';
+defineProps<Props>();
+</script>
+<template><div /></template>
+"#;
+
+#[test]
+fn canonical_props_equivalence_identity_utility_alias() {
+    let host = build_host(PROPS_ALIAS_SHELL_OWNER, PROPS_ALIAS_SHELL_TYPES);
+
+    // Ground truth: the un-aliased `Base` surface through the SAME
+    // canonical reader (proven eager-equivalent by
+    // `canonical_props_equivalence_direct_imported_root`).
+    let base = lazy_probe("Base").lazy_prop_members(&host);
+    // The aliased `type Props = NoInfer<Base>` surface.
+    let alias = lazy_probe("Props").lazy_prop_members(&host);
+
+    // Pre-fix discrimination: before the `Alias` arm landed,
+    // `surface_view_from_base_node` returned `None` for the alias shell,
+    // so `alias` was EMPTY. This assertion (non-empty + equal to Base)
+    // FAILS against the pre-fix reader and PASSES post-fix.
+    assert_eq!(
+        base.len(),
+        3,
+        "ground-truth Base surface must have a, b, c; got {:?}",
+        base.iter().map(|p| &p.name).collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        alias.len(),
+        base.len(),
+        "the identity-alias `NoInfer<Base>` surface MUST carry every member \
+         of `Base` — an empty/short surface means the alias shell was dropped \
+         (the pre-fix `None` → empty-surface bug). got alias={:?}",
+        alias.iter().map(|p| &p.name).collect::<Vec<_>>(),
+    );
+
+    let base_names: Vec<&str> = base.iter().map(|p| p.name.as_str()).collect();
+    let alias_names: Vec<&str> = alias.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(
+        alias_names, base_names,
+        "alias-shell member names/order MUST equal the un-aliased Base surface",
+    );
+
+    for (b, a) in base.iter().zip(alias.iter()) {
+        assert_eq!(
+            a.is_optional, b.is_optional,
+            "optionality of `{}` must match the un-aliased Base surface",
+            b.name,
+        );
+        assert_eq!(
+            a.type_expr, b.type_expr,
+            "type_expr of `{}` must match the un-aliased Base surface",
+            b.name,
+        );
+        assert_eq!(
+            a.declared_in_macro_type_arg, b.declared_in_macro_type_arg,
+            "declared_in_macro_type_arg of `{}` must match (alias is a \
+             transparent identity indirection): Base={}, alias={}",
+            b.name, b.declared_in_macro_type_arg, a.declared_in_macro_type_arg,
+        );
+    }
+
+    // Positive provenance assertion: `NoInfer<Base>` is the macro-T own
+    // body, so every member carries `declared_in_macro_type_arg = true`
+    // (identical to `defineProps<Base>()`). A reader that downgraded the
+    // alias to structural would report `false` here.
+    assert!(
+        alias.iter().all(|p| p.declared_in_macro_type_arg),
+        "every member surfaced through the identity alias `NoInfer<Base>` \
+         MUST carry declared_in_macro_type_arg=true (the alias is transparent \
+         at the macro-T root); got {:?}",
+        alias
+            .iter()
+            .map(|p| (p.name.clone(), p.declared_in_macro_type_arg))
+            .collect::<Vec<_>>(),
+    );
+}
+
+// ===========================================================================
+// PROPS — union with a SHARED member (common-members synthesis)
+// ===========================================================================
+//
+// `surface_view_from_base_node` previously collapsed ALL unions to `None`,
+// so `A | B` published nothing. The existing disjoint-union test
+// (`canonical_props_equivalence_union_payload_carrier_common_members_only`)
+// passed only because disjoint → empty is coincidentally the correct
+// common-members result. This test uses an OVERLAPPING union: `A | B`
+// where both arms declare `shared`. The TS-correct shallow surface of a
+// union-typed macro payload is its COMMON members, so `shared` MUST be
+// published (typed as the union of the per-arm member types), while the
+// arm-exclusive members (`onlyA`, `onlyB`) must NOT appear.
+
+const PROPS_UNION_SHARED_TYPES: &str = r#"
+export interface A { shared: string; onlyA: number; }
+export interface B { shared: string; onlyB: boolean; }
+export type Props = A | B;
+"#;
+const PROPS_UNION_SHARED_OWNER: &str = r#"
+<script setup lang="ts">
+import type { Props } from './types';
+defineProps<Props>();
+</script>
+<template><div /></template>
+"#;
+
+#[test]
+fn canonical_props_equivalence_union_shared_member_published() {
+    let host = build_host(PROPS_UNION_SHARED_OWNER, PROPS_UNION_SHARED_TYPES);
+    let lazy = lazy_probe("Props").lazy_prop_members(&host);
+
+    let lazy_names: Vec<&str> = lazy.iter().map(|p| p.name.as_str()).collect();
+
+    // Pre-fix discrimination: before the `Union` arm landed,
+    // `surface_view_from_base_node` returned `None` for ANY union, so the
+    // surface was EMPTY even for an overlapping union. This assertion
+    // (the shared member IS published) FAILS pre-fix and PASSES post-fix.
+    assert!(
+        lazy_names.contains(&"shared"),
+        "the union `A | B` shares member `shared` (present in BOTH arms), so \
+         the canonical common-members surface MUST publish it — an empty \
+         surface means the union collapsed to None (pre-fix bug). got {lazy_names:?}",
+    );
+
+    // Negative: arm-exclusive members must NOT leak into the common-members
+    // surface. `(A | B)['onlyA']` is not well-typed (absent from B), so the
+    // shallow union surface must exclude it.
+    assert!(
+        !lazy_names.contains(&"onlyA") && !lazy_names.contains(&"onlyB"),
+        "arm-exclusive members (`onlyA`, `onlyB`) MUST NOT appear on the \
+         common-members surface of `A | B` — only members present in EVERY \
+         arm are published. got {lazy_names:?}",
+    );
+    assert_eq!(
+        lazy_names,
+        vec!["shared"],
+        "the common-members surface of `A | B` is exactly `{{ shared }}`; \
+         got {lazy_names:?}",
+    );
+}
+
+#[test]
+fn canonical_props_equivalence_union_disjoint_still_empty() {
+    // Disjoint-union companion to the shared-member test: a union with NO
+    // common key still publishes an EMPTY surface (the common-members
+    // contract — disjoint → empty is the correct, not coincidental,
+    // result). Guards against a regression that wrongly flattened a
+    // disjoint union to the union of arm members.
+    const TYPES: &str = r#"
+export interface A { a: string; }
+export interface B { b: number; }
+export type Props = A | B;
+"#;
+    const OWNER: &str = r#"
+<script setup lang="ts">
+import type { Props } from './types';
+defineProps<Props>();
+</script>
+<template><div /></template>
+"#;
+    let host = build_host(OWNER, TYPES);
+    let lazy = lazy_probe("Props").lazy_prop_members(&host);
+    let lazy_names: Vec<&str> = lazy.iter().map(|p| p.name.as_str()).collect();
+    assert!(
+        lazy_names.is_empty(),
+        "a DISJOINT union `A | B` (no shared key) has no common members, so \
+         the canonical surface MUST be empty — a non-empty set means the \
+         union arms were wrongly flattened. got {lazy_names:?}",
+    );
 }
