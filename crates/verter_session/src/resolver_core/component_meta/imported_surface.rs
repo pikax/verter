@@ -298,6 +298,94 @@ impl ImportedMacroSurface {
         let path: Arc<[PathSegment]> = Arc::from([PathSegment::Member(Arc::from(name))]);
         dispatch.project_path(root, path, mode)
     }
+
+    /// Enumerate the named members of this imported macro surface.
+    ///
+    /// Composition (path-precise, name-level only):
+    ///
+    /// 1. Dispatch [`SemanticQueryKey::ResolveDecl`] to obtain the
+    ///    declaration's [`SemanticNodeId`] (the same root
+    ///    [`Self::resolve_root`] returns).
+    /// 2. Hand that node to the single shared `keyof`-level
+    ///    enumerator
+    ///    [`crate::project_semantic_dispatch::ProjectSemanticDispatch::key_names_from_base_node`].
+    ///    The enumerator owns the declaration-placeholder unwrap
+    ///    (instantiating the bare interface/alias body so its member
+    ///    surface is readable) and the `keyof (A & B)` / `keyof (A |
+    ///    B)` Intersection/Union accumulation — the bridge does NOT
+    ///    re-implement either. It reads member NAMES off the surface;
+    ///    it never projects a member's value type.
+    ///
+    /// This is the `keyof`-level surface: the result is the member
+    /// name set, NOT the projected member types. Consumers that need
+    /// a member's value type call [`Self::project_named_member`] per
+    /// name afterwards (lazy, path-precise) or materialize the full
+    /// set eagerly (the FFI / `ResolvedMacroInput` case). Either way
+    /// enumeration itself issues no `ProjectPath` / `ProjectMember`
+    /// dispatch — it is strictly name discovery, so a deeply-nested
+    /// member value type (`wanted: Heavy`) is never walked.
+    ///
+    /// Reusing the dedicated enumerator (rather than a private
+    /// raise + member-name walk) keeps the bridge on the one shared
+    /// resolver path: any fix to `keyof` enumeration semantics
+    /// benefits the bridge automatically, and the bridge cannot
+    /// drift into a second member-name walker.
+    ///
+    /// Returns the member names as `Arc<str>` so each name round-trips
+    /// directly into [`Self::project_named_member`] without a fresh
+    /// allocation.
+    ///
+    /// Failure / empty semantics:
+    ///
+    /// - The root [`SemanticQueryKey::ResolveDecl`] dispatch's
+    ///   [`QueryResult::Error`] / [`QueryResult::Recursive`] variants
+    ///   propagate unchanged.
+    /// - A resolved root with no enumerable member surface (a
+    ///   primitive, a still-deferred shell, a conditional that did
+    ///   not reduce, …) yields an empty `Vec`. "Surface present but
+    ///   exposes no enumerable members" and "surface unresolvable"
+    ///   collapse to the same empty result here; callers that must
+    ///   distinguish them inspect [`Self::resolve_root`] directly.
+    ///
+    /// Bumps the
+    /// [`verter_audit::AuditEvent::ImportedMacroSurfaceProjection`]
+    /// counter exactly once per call (matching the
+    /// once-per-public-accessor discipline of [`Self::resolve_root`]
+    /// and [`Self::project_named_member`]). Enumeration is a bridge
+    /// accessor, so it contributes to the same bridge-demand counter
+    /// rather than a speculative enumeration-only footprint field
+    /// (there are no production consumers yet — a finer
+    /// enumerate-vs-project split is wired with the consumer
+    /// migration, where the footprint surface is regenerated anyway).
+    ///
+    /// Crate-public because `ResolverContext` is `pub(crate)` — see
+    /// the note on [`Self::resolve_root`].
+    pub(crate) fn enumerate_member_names(
+        &self,
+        ctx: &dyn ResolverContext,
+    ) -> QueryResult<Vec<Arc<str>>> {
+        bump_projection_counter();
+        let dispatch = ctx.dispatch();
+        // Step 1: resolve the declaration root. We dispatch
+        // `ResolveDecl` directly (rather than re-entering
+        // `resolve_root`) so enumeration bumps the bridge-demand
+        // counter exactly once, not twice.
+        let root = match dispatch.execute(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: self.identity.top_level_scope(),
+            name: Arc::clone(&self.identity.type_name),
+        })) {
+            QueryResult::Value(node) => node,
+            QueryResult::Error(err) => return QueryResult::Error(err),
+            QueryResult::Recursive(node) => return QueryResult::Recursive(node),
+        };
+        // Step 2: enumerate member names via the single shared
+        // `keyof`-level enumerator. It owns placeholder unwrap +
+        // Intersection/Union accumulation and reads names only —
+        // never projecting a member's value type. `None` (no
+        // enumerable surface) collapses to an empty member set.
+        let names = dispatch.key_names_from_base_node(root).unwrap_or_default();
+        QueryResult::Value(names)
+    }
 }
 
 /// Eager-resolved-macro newtype mirroring the existing public
@@ -354,7 +442,8 @@ pub enum ResolvedMacroSurface {
 
 /// Bump the
 /// [`verter_audit::AuditEvent::ImportedMacroSurfaceProjection`]
-/// counter exactly once per public bridge dispatch entry.
+/// counter exactly once per public bridge dispatch entry
+/// (`resolve_root`, `project_named_member`, `enumerate_member_names`).
 ///
 /// Inlined so the call is a single TLS-observer fetch + atomic add
 /// on the warm path — no allocation, no closure construction.

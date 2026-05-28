@@ -345,15 +345,20 @@ pub enum AuditEvent {
     /// pressure).
     RecursiveSubstituteMemoHit,
     /// One call to a public
-    /// [`ImportedMacroSurface`] projection accessor (either
-    /// `resolve_root` or `project_named_member`).
+    /// [`ImportedMacroSurface`] projection accessor (`resolve_root`,
+    /// `project_named_member`, or `enumerate_member_names`).
     ///
-    /// Producer: every public method on
+    /// Producer: every public dispatch accessor on
     /// `verter_session::resolver_core::ImportedMacroSurface` bumps
     /// this counter exactly once at entry, before any dispatch
     /// work. The counter is the observability hook that lets
     /// later analyses verify whether consumers reach the typed-IR
-    /// bridge or a parallel resolution rail.
+    /// bridge or a parallel resolution rail. Enumeration
+    /// (`enumerate_member_names`) contributes to the same
+    /// bridge-demand counter rather than a separate
+    /// enumeration-only counter — a finer enumerate-vs-project
+    /// split is a future refinement wired alongside consumer
+    /// adoption, not yet present.
     ///
     /// Until a consumer adopts the bridge in production the
     /// counter stays at 0 across audited production requests.

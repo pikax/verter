@@ -374,6 +374,19 @@ pub mod test_only {
                     self.0.project_named_member(ctx, name, mode)
                 })
             }
+
+            /// Enumerate the named members of the imported
+            /// declaration. Drives
+            /// `ImportedMacroSurface::enumerate_member_names`
+            /// through the same hermetic context as
+            /// [`Self::resolve_root`].
+            ///
+            /// Returns the raw `QueryResult` so the test can assert
+            /// on the `Value(names)` set as well as the
+            /// `Error(_)` / `Recursive(_)` shapes.
+            pub fn enumerate_member_names(&self, host: &VerterHost) -> QueryResult<Vec<Arc<str>>> {
+                with_bare_host_ctx_for_test(host, |ctx| self.0.enumerate_member_names(ctx))
+            }
         }
     }
 }

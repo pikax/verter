@@ -36,7 +36,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// and returns `None` only when every arm is unresolvable. An
     /// all-or-nothing `?` here would lose enumerable keys from `A`
     /// when `B` is unresolvable in `keyof (A & B)`.
-    pub(super) fn key_names_from_base_node(&self, base: SemanticNodeId) -> Option<Vec<Arc<str>>> {
+    ///
+    /// `pub(crate)` (not `pub(super)`) so the `component_meta`
+    /// typed-IR bridge
+    /// ([`crate::resolver_core::ImportedMacroSurface::enumerate_member_names`])
+    /// reuses this single shared `keyof`-level enumerator rather than
+    /// forking a second member-name walker. The bridge passes the
+    /// `ResolveDecl` root node it already holds; this enumerator owns
+    /// the declaration-placeholder unwrap + Intersection/Union
+    /// accumulation so the bridge does not re-implement either.
+    pub(crate) fn key_names_from_base_node(&self, base: SemanticNodeId) -> Option<Vec<Arc<str>>> {
         let mut work: Vec<KeyNamesFrame> = Vec::new();
         let mut results: Vec<Option<Vec<Arc<str>>>> = Vec::new();
         work.push(KeyNamesFrame::Expand(base));

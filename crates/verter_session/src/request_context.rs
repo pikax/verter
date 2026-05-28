@@ -652,7 +652,8 @@ pub struct RequestContext {
     pub recursive_substitute_memo_hits: AtomicU64,
     /// [`crate::resolver_core::ImportedMacroSurface`] projection
     /// accessor invocations. Bumped exactly once per public
-    /// `resolve_root` or `project_named_member` call. The counter
+    /// `resolve_root`, `project_named_member`, or
+    /// `enumerate_member_names` call. The counter
     /// is the empirical hook that lets later analyses confirm
     /// consumers reach the typed-IR bridge rather than a parallel
     /// rail. Until a consumer adopts the bridge in production the
