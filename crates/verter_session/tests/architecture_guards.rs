@@ -11504,3 +11504,974 @@ fn macro_authority_reads_surface_not_direct_fields() {
         all_violations.join("\n  "),
     );
 }
+
+// ===========================================================================
+// Single Resolution Engine guards (CLAUDE.md "Single Resolution Engine Rule")
+// ===========================================================================
+//
+// Verter must have exactly ONE type-resolution engine: the canonical
+// typed-IR dispatch `SemanticQueryKey -> ProjectSemanticDispatch::execute
+// -> SemanticGraphStore`. The redundant eager OXC `resolve_type` engine
+// (`crates/verter_parser/src/utils/oxc/vue/script/resolve_type/`) plus its
+// query-time rail (prepared-surface walker, eager macro-surface producer,
+// `ResolvedElements` output type) is being DELETED across the consolidation
+// stages.
+//
+// These guards are the FIRST stage (Stage 0): they lock the demolition so
+// that while later stages tear the old engine down, NO new production site
+// of a doomed symbol can be added. Each guard owns an EXACT allowlist of the
+// symbol's CURRENT production sites captured against the live tree; the match
+// is bidirectional, exactly like `typed_ir_resolver_guards`:
+//
+//   * a site in source that is NOT in the allowlist fails ("Unallowlisted
+//     site introduced") — this is the new-production-site trap;
+//   * an allowlist entry that no longer matches anything in source ALSO fails
+//     ("Allowlisted entry NOT FOUND") — so the allowlist is a SHRINKING
+//     ledger: every later stage that deletes a site removes its entry, and
+//     the post-consolidation floor is empty allowlists.
+//
+// Granularity is per-symbol and principled:
+//   * `from_eager_meta` and the duplicate `read_surface_members` DEFINITIONS
+//     are few and the exact site matters — line-precise `(file, line,
+//     pattern)` tuples (matching `typed_ir_resolver_guards`).
+//   * `resolve_type::`, `ResolvedElements`, and `PreparedSurfaceProjection`
+//     are pervasive WITHIN their owning modules but must not spread to NEW
+//     files — file-level allowlists (matching `GET_ANY_ALLOWLIST` /
+//     `no_std_fs_outside_native_fs_or_allow_list`). A new production *file*
+//     referencing the symbol is the architecturally meaningful violation.
+//
+// LEGITIMATE FRONT-END IS NOT FLAGGED: the one-time TS->TypeExpr lowering
+// `verter_type_expr_oxc::lower_ts_type` (called during shallow analysis,
+// produces the `TypeExpr` stored on `IndexedReady`) is the canonical
+// front-end the one resolver is built on. It lives in
+// `crates/verter_type_expr_oxc/` and references NONE of the forbidden tokens,
+// so the scanners exclude it naturally. Only QUERY-time OXC resolution is
+// forbidden.
+mod single_resolution_engine_guards {
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    /// Walk `<repo>/crates/<crate>/src/**` and yield every production
+    /// `.rs` file as `(absolute_path, repo_relative_path)`. Excludes
+    /// test-only sources exactly as the sibling guards do — `<name>_tests.rs`
+    /// and `tests.rs` siblings, and anything under a `tests/` path segment —
+    /// PLUS the `test_only_*` prefix.
+    ///
+    /// The `test_only_` exclusion covers `test_only_imported_macro_surface.rs`:
+    /// it is a `#[doc(hidden)] pub mod test_only` probe body (attached via
+    /// `#[path]`), compiled in all builds but a test-only probe by contract
+    /// (the `test_only_module_is_only_consumed_by_test_files` guard pins that
+    /// it is consumed only by test files). It is NOT a production rail, so it
+    /// is excluded from these production-site ledgers.
+    fn collect_production_rs_files() -> Vec<(PathBuf, String)> {
+        let root = super::workspace_root();
+        let crates_dir = root.join("crates");
+        let mut out: Vec<(PathBuf, String)> = Vec::new();
+        let entries = match fs::read_dir(&crates_dir) {
+            Ok(e) => e,
+            Err(err) => panic!("read_dir {}: {err}", crates_dir.display()),
+        };
+        for ent in entries.flatten() {
+            let crate_path = ent.path();
+            if !crate_path.is_dir() {
+                continue;
+            }
+            let src_dir = crate_path.join("src");
+            if !src_dir.is_dir() {
+                continue;
+            }
+            let mut files: Vec<PathBuf> = Vec::new();
+            walk_rs(&src_dir, &mut files);
+            for f in files {
+                let rel = f
+                    .strip_prefix(&root)
+                    .unwrap_or(&f)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if is_test_or_probe_file(&rel) {
+                    continue;
+                }
+                out.push((f, rel));
+            }
+        }
+        out
+    }
+
+    fn walk_rs(dir: &Path, out: &mut Vec<PathBuf>) {
+        if !dir.is_dir() {
+            return;
+        }
+        for entry in
+            fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {}: {}", dir.display(), e))
+        {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let p = entry.path();
+            if p.is_dir() {
+                walk_rs(&p, out);
+            } else if p.extension().and_then(|s| s.to_str()) == Some("rs") {
+                out.push(p);
+            }
+        }
+    }
+
+    /// True for files whose contents are test-only: `*_tests.rs` / `tests.rs`
+    /// siblings, anything under a `tests/` segment, or a `test_only_*` probe
+    /// body. See `collect_production_rs_files` for the `test_only_` rationale.
+    fn is_test_or_probe_file(rel: &str) -> bool {
+        let name = rel.rsplit('/').next().unwrap_or("");
+        if name.ends_with("_tests.rs") || name == "tests.rs" || name.starts_with("test_only_") {
+            return true;
+        }
+        rel.split('/').any(|seg| seg == "tests")
+    }
+
+    /// Replace `//` line comments and `/* ... */` block comments with
+    /// equivalent-length whitespace, preserving newlines so line numbers
+    /// stay stable. Skips comment-like sequences inside regular and raw
+    /// string literals so the strip never invalidates real source.
+    /// (Mirrors `typed_ir_resolver_guards::strip_comments` /
+    /// `no_legacy_walker::strip_comments`.)
+    fn strip_comments(src: &str) -> String {
+        let bytes = src.as_bytes();
+        let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+        let n = bytes.len();
+        let mut i = 0usize;
+        while i < n {
+            let c = bytes[i];
+            // Raw string: r"..."  /  r#"..."#  /  r##"..."##  ...
+            if c == b'r' {
+                let mut j = i + 1;
+                let mut hashes = 0usize;
+                while j < n && bytes[j] == b'#' {
+                    hashes += 1;
+                    j += 1;
+                }
+                if j < n && bytes[j] == b'"' {
+                    out.extend_from_slice(&bytes[i..=j]);
+                    let close: Vec<u8> = std::iter::once(b'"')
+                        .chain(std::iter::repeat_n(b'#', hashes))
+                        .collect();
+                    let mut k = j + 1;
+                    while k + close.len() <= n {
+                        if &bytes[k..k + close.len()] == close.as_slice() {
+                            out.extend_from_slice(&bytes[(j + 1)..(k + close.len())]);
+                            i = k + close.len();
+                            break;
+                        }
+                        out.push(bytes[k]);
+                        k += 1;
+                    }
+                    if k + close.len() > n {
+                        out.extend_from_slice(&bytes[(j + 1)..n]);
+                        i = n;
+                    }
+                    continue;
+                }
+                // Not a raw string — fall through to normal handling.
+            }
+            // Regular string literal "..." (with \"  escape handling)
+            if c == b'"' {
+                out.push(b'"');
+                let mut k = i + 1;
+                while k < n {
+                    if bytes[k] == b'\\' && k + 1 < n {
+                        out.push(bytes[k]);
+                        out.push(bytes[k + 1]);
+                        k += 2;
+                        continue;
+                    }
+                    if bytes[k] == b'"' {
+                        out.push(b'"');
+                        k += 1;
+                        break;
+                    }
+                    out.push(bytes[k]);
+                    k += 1;
+                }
+                i = k;
+                continue;
+            }
+            // Line comment //
+            if c == b'/' && i + 1 < n && bytes[i + 1] == b'/' {
+                let mut k = i;
+                while k < n && bytes[k] != b'\n' {
+                    out.push(b' ');
+                    k += 1;
+                }
+                i = k;
+                continue;
+            }
+            // Block comment /* ... */ with nesting support.
+            if c == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
+                let mut depth = 1u32;
+                out.push(b' ');
+                out.push(b' ');
+                let mut k = i + 2;
+                while k < n && depth > 0 {
+                    if k + 1 < n && bytes[k] == b'/' && bytes[k + 1] == b'*' {
+                        depth += 1;
+                        out.push(b' ');
+                        out.push(b' ');
+                        k += 2;
+                        continue;
+                    }
+                    if k + 1 < n && bytes[k] == b'*' && bytes[k + 1] == b'/' {
+                        depth -= 1;
+                        out.push(b' ');
+                        out.push(b' ');
+                        k += 2;
+                        continue;
+                    }
+                    if bytes[k] == b'\n' {
+                        out.push(b'\n');
+                    } else {
+                        out.push(b' ');
+                    }
+                    k += 1;
+                }
+                i = k;
+                continue;
+            }
+            out.push(c);
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// Replace the body of every `#[cfg(test)] mod NAME { ... }` block with
+    /// whitespace (newlines preserved). Inline test modules live in
+    /// production source files but are test-only — guard scans must NOT
+    /// classify them as production violations. (Mirrors
+    /// `typed_ir_resolver_guards::strip_inline_test_modules`.)
+    fn strip_inline_test_modules(src: &str) -> String {
+        let bytes = src.as_bytes();
+        let n = bytes.len();
+        let mut out = bytes.to_vec();
+        let needle = b"#[cfg(test)]";
+        let mut i = 0usize;
+        while i + needle.len() <= n {
+            if &bytes[i..i + needle.len()] == needle {
+                let mut j = i + needle.len();
+                let limit = (i + 200).min(n);
+                while j < limit {
+                    if j + 4 <= n && &bytes[j..j + 4] == b"mod " {
+                        break;
+                    }
+                    j += 1;
+                }
+                if j + 4 <= n && &bytes[j..j + 4] == b"mod " {
+                    let mut k = j + 4;
+                    while k < n && bytes[k] != b'{' && bytes[k] != b';' {
+                        k += 1;
+                    }
+                    if k < n && bytes[k] == b'{' {
+                        let mut depth = 1i32;
+                        let mut m = k + 1;
+                        while m < n && depth > 0 {
+                            match bytes[m] {
+                                b'{' => depth += 1,
+                                b'}' => depth -= 1,
+                                _ => {}
+                            }
+                            m += 1;
+                        }
+                        if m > k + 1 {
+                            for slot in &mut out[(k + 1)..(m - 1)] {
+                                if *slot != b'\n' {
+                                    *slot = b' ';
+                                }
+                            }
+                        }
+                        i = m;
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    fn preprocess(src: &str) -> String {
+        strip_inline_test_modules(&strip_comments(src))
+    }
+
+    /// Identifier-boundary matcher: `needle` matches at `line` ONLY when its
+    /// occurrence is bounded by characters that cannot extend an identifier
+    /// (not `[A-Za-z0-9_]`). Used for token guards (`from_eager_meta`,
+    /// `ResolvedElements`) so suffixed names (`ResolvedElementsBuilder`,
+    /// `from_eager_meta_v2`) do not false-match. NOT used for `resolve_type::`
+    /// (a path fragment ending in `::`) or for `PreparedSurfaceProjection`
+    /// (matched as a substring because it is a unique enum name).
+    fn line_contains_identifier(line: &str, needle: &str) -> bool {
+        let bytes = line.as_bytes();
+        let nb = needle.as_bytes();
+        let n = nb.len();
+        if n == 0 || bytes.len() < n {
+            return false;
+        }
+        let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let mut i = 0usize;
+        while i + n <= bytes.len() {
+            if &bytes[i..i + n] == nb {
+                let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+                let after_ok = i + n == bytes.len() || !is_ident_char(bytes[i + n]);
+                if before_ok && after_ok {
+                    return true;
+                }
+            }
+            i += 1;
+        }
+        false
+    }
+
+    fn fmt_match(m: &(String, u32, String)) -> String {
+        format!("({:?}, {}, {:?})", m.0, m.1, m.2)
+    }
+
+    /// Line-precise bidirectional allowlist comparison. Fails on EITHER an
+    /// unallowlisted site OR a stale allowlist entry. (Same contract as
+    /// `typed_ir_resolver_guards::assert_exact_allowlist_match`.)
+    fn assert_exact_allowlist_match(
+        guard_name: &str,
+        actual: &[(String, u32, String)],
+        allowed: &[(&str, u32, &str)],
+    ) {
+        let actual_set: BTreeSet<(String, u32, String)> = actual.iter().cloned().collect();
+        let allowed_set: BTreeSet<(String, u32, String)> = allowed
+            .iter()
+            .map(|(p, ln, pat)| (p.to_string(), *ln, pat.to_string()))
+            .collect();
+
+        let unexpected: Vec<_> = actual_set
+            .iter()
+            .filter(|t| !allowed_set.contains(*t))
+            .map(fmt_match)
+            .collect();
+        let stale: Vec<_> = allowed_set
+            .iter()
+            .filter(|t| !actual_set.contains(*t))
+            .map(fmt_match)
+            .collect();
+
+        if unexpected.is_empty() && stale.is_empty() {
+            return;
+        }
+
+        let mut msg = format!("\n\n=== {guard_name} ===\n");
+        if !unexpected.is_empty() {
+            msg.push_str(
+                "\nUnallowlisted single-resolution-engine site introduced. A NEW \
+                 production use of a doomed symbol is forbidden while the second \
+                 engine is being deleted. Route through the canonical typed-IR \
+                 dispatch (SemanticQueryKey -> ProjectSemanticDispatch::execute) \
+                 instead. If this is a legitimately new site (it almost never is), \
+                 add it to the allowlist with a justification:\n",
+            );
+            for entry in &unexpected {
+                msg.push_str("    ");
+                msg.push_str(entry);
+                msg.push('\n');
+            }
+        }
+        if !stale.is_empty() {
+            msg.push_str(
+                "\nAllowlisted entry NOT FOUND in source — a later stage removed \
+                 this site (good!). Remove the stale entry so the ledger keeps \
+                 shrinking; line number may have shifted:\n",
+            );
+            for entry in &stale {
+                msg.push_str("    ");
+                msg.push_str(entry);
+                msg.push('\n');
+            }
+        }
+        msg.push('\n');
+        panic!("{msg}");
+    }
+
+    /// File-level bidirectional allowlist comparison. Fails on EITHER a
+    /// production file containing the symbol that is NOT allowlisted OR an
+    /// allowlisted file that no longer contains the symbol. The
+    /// architecturally meaningful "new production site" for a symbol pervasive
+    /// within its owning module is a NEW FILE referencing it.
+    fn assert_exact_file_allowlist_match(
+        guard_name: &str,
+        actual_files: &[String],
+        allowed: &[&str],
+    ) {
+        let actual_set: BTreeSet<String> = actual_files.iter().cloned().collect();
+        let allowed_set: BTreeSet<String> = allowed.iter().map(|s| s.to_string()).collect();
+
+        let unexpected: Vec<&String> = actual_set
+            .iter()
+            .filter(|f| !allowed_set.contains(*f))
+            .collect();
+        let stale: Vec<&String> = allowed_set
+            .iter()
+            .filter(|f| !actual_set.contains(*f))
+            .collect();
+
+        if unexpected.is_empty() && stale.is_empty() {
+            return;
+        }
+
+        let mut msg = format!("\n\n=== {guard_name} ===\n");
+        if !unexpected.is_empty() {
+            msg.push_str(
+                "\nNEW production file references a doomed single-resolution-engine \
+                 symbol. The redundant OXC `resolve_type` engine / prepared-surface \
+                 walker is being deleted — do NOT wire it into a new file. Route \
+                 through the canonical typed-IR dispatch instead:\n",
+            );
+            for f in &unexpected {
+                msg.push_str("    ");
+                msg.push_str(f);
+                msg.push('\n');
+            }
+        }
+        if !stale.is_empty() {
+            msg.push_str(
+                "\nAllowlisted file no longer references the symbol — a later stage \
+                 removed the last reference (good!). Remove the stale entry so the \
+                 ledger keeps shrinking:\n",
+            );
+            for f in &stale {
+                msg.push_str("    ");
+                msg.push_str(f);
+                msg.push('\n');
+            }
+        }
+        msg.push('\n');
+        panic!("{msg}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Scanners
+    // -----------------------------------------------------------------------
+
+    /// Line-precise scan: every production line containing `needle` at an
+    /// identifier boundary. Used for the token guards.
+    fn scan_identifier_sites(needle: &str) -> Vec<(String, u32, String)> {
+        let files = collect_production_rs_files();
+        let mut out: Vec<(String, u32, String)> = Vec::new();
+        for (path, rel) in &files {
+            let src = match fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let stripped = preprocess(&src);
+            for (idx, line) in stripped.split('\n').enumerate() {
+                if line_contains_identifier(line, needle) {
+                    out.push((rel.clone(), (idx + 1) as u32, needle.to_string()));
+                }
+            }
+        }
+        out
+    }
+
+    /// Line-precise scan for a literal substring (no identifier-boundary
+    /// requirement). Used for the `read_surface_members` DEFINITION pattern
+    /// `fn read_surface_members(`, which cannot suffix-collide.
+    fn scan_literal_sites(needle: &str) -> Vec<(String, u32, String)> {
+        let files = collect_production_rs_files();
+        let mut out: Vec<(String, u32, String)> = Vec::new();
+        for (path, rel) in &files {
+            let src = match fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let stripped = preprocess(&src);
+            for (idx, line) in stripped.split('\n').enumerate() {
+                if line.contains(needle) {
+                    out.push((rel.clone(), (idx + 1) as u32, needle.to_string()));
+                }
+            }
+        }
+        out
+    }
+
+    /// File-level scan: every production file containing `needle` as a
+    /// substring (post-preprocess). Used for the pervasive symbols.
+    fn scan_files_containing(needle: &str) -> Vec<String> {
+        let files = collect_production_rs_files();
+        let mut out: Vec<String> = Vec::new();
+        for (path, rel) in &files {
+            let src = match fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let stripped = preprocess(&src);
+            if stripped.contains(needle) {
+                out.push(rel.clone());
+            }
+        }
+        out
+    }
+
+    // -----------------------------------------------------------------------
+    // Guard 1: `from_eager_meta` — the eager macro-surface producer.
+    //
+    // `ResolvedMacroSurface::from_eager_meta(meta)` wraps the OXC engine's
+    // `ResolvedMacroMeta` output into the cutover seam's `Eager` arm. Every
+    // production call selects the redundant eager (OXC) surface; the
+    // consolidation flips these to the canonical typed-IR macro payload and
+    // then DELETES `from_eager_meta` and the `Eager` arm (codex Stage 2 row).
+    // No NEW production caller may be added.
+    //
+    // Line-precise allowlist (few sites, exact site matters):
+    //   * `imported_surface.rs:515` — the `from_eager_meta` DEFINITION (the
+    //     seam constructor). Deleted when the `Eager` arm is removed.
+    //   * `macro_shapes.rs:984/1105/1405/1508` + `slot_binding_graph.rs:984` —
+    //     the five macro-authority consumer call sites (Stage 2 flips these
+    //     to the canonical macro payload).
+    //
+    // Test-only `from_eager_meta` probes in
+    // `src/test_only_imported_macro_surface.rs` are NOT a production rail and
+    // are excluded by the `test_only_` predicate in `collect_production_rs_files`.
+    // -----------------------------------------------------------------------
+    const FROM_EAGER_META_ALLOWLIST: &[(&str, u32, &str)] = &[
+        (
+            "crates/verter_session/src/resolver_core/component_meta/imported_surface.rs",
+            515,
+            "from_eager_meta",
+        ),
+        (
+            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
+            984,
+            "from_eager_meta",
+        ),
+        (
+            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
+            1105,
+            "from_eager_meta",
+        ),
+        (
+            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
+            1405,
+            "from_eager_meta",
+        ),
+        (
+            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
+            1508,
+            "from_eager_meta",
+        ),
+        (
+            "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
+            984,
+            "from_eager_meta",
+        ),
+    ];
+
+    #[test]
+    fn no_new_from_eager_meta_production_site() {
+        let actual = scan_identifier_sites("from_eager_meta");
+        assert_exact_allowlist_match(
+            "no_new_from_eager_meta_production_site",
+            &actual,
+            FROM_EAGER_META_ALLOWLIST,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Guard 2: duplicate `read_surface_members` — the split Stage 4 collapses.
+    //
+    // There are TWO copies of the node->members surface reader:
+    //   * `meta_resolve/projectors/mod.rs:418` (`pub(crate) fn ...`), whose
+    //     doc-comment says "Mirrors `slot_binding_graph::read_surface_members`",
+    //   * `meta_resolve/slot_binding_graph.rs:390` (`fn ...`).
+    // The consolidation collapses these to ONE shared reader. The guard scans
+    // the DEFINITION pattern `fn read_surface_members(` (call sites are not
+    // duplication and are not scanned). A NEW third definition fails; when
+    // Stage 4 collapses to one, the allowlist shrinks to a single entry.
+    // -----------------------------------------------------------------------
+    const READ_SURFACE_MEMBERS_DEF_ALLOWLIST: &[(&str, u32, &str)] = &[
+        (
+            "crates/verter_session/src/meta_resolve/projectors/mod.rs",
+            418,
+            "fn read_surface_members(",
+        ),
+        (
+            "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
+            390,
+            "fn read_surface_members(",
+        ),
+    ];
+
+    #[test]
+    fn no_new_duplicate_read_surface_members_definition() {
+        let actual = scan_literal_sites("fn read_surface_members(");
+        assert_exact_allowlist_match(
+            "no_new_duplicate_read_surface_members_definition",
+            &actual,
+            READ_SURFACE_MEMBERS_DEF_ALLOWLIST,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Guard 3: `resolve_type::` — the OXC resolver engine module path.
+    //
+    // `resolve_type::` is a path fragment into the eager OXC resolution engine
+    // `verter_parser::utils::oxc::vue::script::resolve_type` (referenced as
+    // `crate::utils::oxc::vue::resolve_type::` within verter_parser /
+    // verter_compiler, and `verter_compiler::utils::oxc::vue::resolve_type::`
+    // from verter_session). The consolidation deletes the query-time engine
+    // (codex Stages 2/5/6); the lowering front-end `verter_type_expr_oxc::
+    // lower_ts_type` is NOT this engine and references none of these tokens.
+    //
+    // File-level allowlist (pervasive within the rail; a NEW file referencing
+    // the engine is the meaningful violation). The 32 current files span the
+    // engine itself, its `ResolvedElements`/`AnalyzedExternalTypeSource`/
+    // `cache_keys::NamedTypeCache` output + cache types, and the query-time
+    // consumers (frontier / eval-program / prepared-decl rails). Each later
+    // stage that deletes a file removes its entry.
+    // -----------------------------------------------------------------------
+    const RESOLVE_TYPE_PATH_FILE_ALLOWLIST: &[&str] = &[
+        "crates/verter_compiler/src/script/macros.rs",
+        "crates/verter_compiler/src/tsc/script.rs",
+        "crates/verter_parser/src/utils/oxc/vue/script/bindings.rs",
+        "crates/verter_parser/src/utils/oxc/vue/script/macros.rs",
+        "crates/verter_parser/src/utils/oxc/vue/script/mod.rs",
+        "crates/verter_parser/src/utils/oxc/vue/script/options.rs",
+        "crates/verter_parser/src/utils/oxc/vue/script/setup.rs",
+        "crates/verter_session/src/host_manage/eval_program.rs",
+        "crates/verter_session/src/host_manage/jsdoc_resolve.rs",
+        "crates/verter_session/src/host_manage/prepared_decl.rs",
+        "crates/verter_session/src/host_manage.rs",
+        "crates/verter_session/src/host_resolve/external_macro_collector.rs",
+        "crates/verter_session/src/host_resolve/external_type_resolution.rs",
+        "crates/verter_session/src/host_resolve/frontier_engine.rs",
+        "crates/verter_session/src/host_resolve/frontier_helpers.rs",
+        "crates/verter_session/src/host_test_seed.rs",
+        "crates/verter_session/src/lib.rs",
+        "crates/verter_session/src/project_type_store.rs",
+        "crates/verter_session/src/resolver_core/component_meta/mod.rs",
+        "crates/verter_session/src/resolver_core/component_meta/projected_type_expr.rs",
+        "crates/verter_session/src/resolver_core/component_meta_query_engine/mod.rs",
+        "crates/verter_session/src/resolver_core/external_macro_types.rs",
+        "crates/verter_session/src/resolver_core/external_type_body.rs",
+        "crates/verter_session/src/resolver_core/host_resolver_context.rs",
+        "crates/verter_session/src/resolver_core/resolver_context.rs",
+        "crates/verter_session/src/resolver_core/session_resolver_context.rs",
+        "crates/verter_session/src/resolver_core/shallow_file_state.rs",
+        "crates/verter_session/src/resolver_core/surface_projector.rs",
+        "crates/verter_session/src/resolver_core/symbol_resolver.rs",
+        "crates/verter_session/src/semantic_query.rs",
+        "crates/verter_session/src/semantic_query_memo/mod.rs",
+        "crates/verter_session/src/types.rs",
+    ];
+
+    #[test]
+    fn no_new_resolve_type_engine_path_production_file() {
+        let actual = scan_files_containing("resolve_type::");
+        assert_exact_file_allowlist_match(
+            "no_new_resolve_type_engine_path_production_file",
+            &actual,
+            RESOLVE_TYPE_PATH_FILE_ALLOWLIST,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Guard 4: `ResolvedElements` — the OXC engine's output type.
+    //
+    // `ResolvedElements` is the eager OXC resolver's resolved props/emits/
+    // slots/native output struct. It is the second engine's result type and
+    // is deleted with the engine (codex Stages 2/5). `lower_ts_type` produces
+    // `TypeExpr`, never `ResolvedElements`, so the front-end is not flagged.
+    //
+    // File-level allowlist (32 files: the engine, its consumers, and the
+    // caches that store `Arc<ResolvedElements>`). Identifier-boundary matching
+    // is used by the scanner so a hypothetical `ResolvedElementsBuilder` would
+    // not satisfy a stale entry, but `ResolvedElements` is already unique.
+    // -----------------------------------------------------------------------
+    const RESOLVED_ELEMENTS_FILE_ALLOWLIST: &[&str] = &[
+        "crates/verter_compiler/src/compile/mod.rs",
+        "crates/verter_compiler/src/compile/types.rs",
+        "crates/verter_compiler/src/script/macros.rs",
+        "crates/verter_compiler/src/script/mod.rs",
+        "crates/verter_compiler/src/tsc/script.rs",
+        "crates/verter_parser/src/utils/oxc/vue/script/macros.rs",
+        "crates/verter_parser/src/utils/oxc/vue/script/mod.rs",
+        "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/decl.rs",
+        "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/elements.rs",
+        "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/external.rs",
+        "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/infer.rs",
+        "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/mod.rs",
+        "crates/verter_parser/src/utils/oxc/vue/script/setup.rs",
+        "crates/verter_session/src/host_manage/eval_program.rs",
+        "crates/verter_session/src/host_manage/jsdoc_resolve.rs",
+        "crates/verter_session/src/host_manage/prepared_decl.rs",
+        "crates/verter_session/src/host_manage.rs",
+        "crates/verter_session/src/host_resolve/external_macro_collector.rs",
+        "crates/verter_session/src/host_resolve/external_type_resolution.rs",
+        "crates/verter_session/src/host_resolve/frontier_engine.rs",
+        "crates/verter_session/src/host_resolve/frontier_helpers.rs",
+        "crates/verter_session/src/owned_artifacts/mod.rs",
+        "crates/verter_session/src/owned_artifacts/type_resolution_context.rs",
+        "crates/verter_session/src/resolver_core/component_meta/mod.rs",
+        "crates/verter_session/src/resolver_core/component_meta/projected_type_expr.rs",
+        "crates/verter_session/src/resolver_core/external_macro_types.rs",
+        "crates/verter_session/src/resolver_core/external_type_body.rs",
+        "crates/verter_session/src/resolver_core/surface_projector.rs",
+        "crates/verter_session/src/resolver_core/symbol_resolver.rs",
+        "crates/verter_session/src/semantic_query.rs",
+        "crates/verter_session/src/semantic_query_memo/mod.rs",
+        "crates/verter_session/src/types.rs",
+    ];
+
+    #[test]
+    fn no_new_resolved_elements_production_file() {
+        let actual = scan_files_containing("ResolvedElements");
+        assert_exact_file_allowlist_match(
+            "no_new_resolved_elements_production_file",
+            &actual,
+            RESOLVED_ELEMENTS_FILE_ALLOWLIST,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Guard 5: `PreparedSurfaceProjection` — the prepared-surface walker.
+    //
+    // `PreparedSurfaceProjection` is the output enum of the prepared-decl
+    // fallback surface walker (`component_meta_query_engine`), a SECOND surface
+    // engine distinct from the canonical `surface_view_from_base_node`. Codex
+    // Stage 4 deletes the walker (and its `prepared_surface_db` /
+    // `prepared_member_db` caches); no NEW file may wire it in.
+    //
+    // File-level allowlist (4 files — the walker's owning module). The
+    // comment-only mention in `component_meta_caches.rs` is stripped by
+    // `preprocess`, so it is correctly absent from this ledger.
+    // -----------------------------------------------------------------------
+    const PREPARED_SURFACE_PROJECTION_FILE_ALLOWLIST: &[&str] = &[
+        "crates/verter_session/src/resolver_core/component_meta_query_engine/mod.rs",
+        "crates/verter_session/src/resolver_core/component_meta_query_engine/prepared_surface.rs",
+        "crates/verter_session/src/resolver_core/component_meta_query_engine/routed_expr.rs",
+        "crates/verter_session/src/resolver_core/component_meta_query_engine/surface.rs",
+    ];
+
+    #[test]
+    fn no_new_prepared_surface_projection_production_file() {
+        let actual = scan_files_containing("PreparedSurfaceProjection");
+        assert_exact_file_allowlist_match(
+            "no_new_prepared_surface_projection_production_file",
+            &actual,
+            PREPARED_SURFACE_PROJECTION_FILE_ALLOWLIST,
+        );
+    }
+
+    // =======================================================================
+    // Discriminator self-tests — PROVE each guard can fail on a planted site.
+    //
+    // A guard that cannot fail is a stub (CLAUDE.md Stub Prevention). Each
+    // test below feeds the comparison primitive a synthetic "planted" input
+    // representing a NEW non-allowlisted site and asserts the comparison
+    // reports a violation; it then feeds the real allowlist against itself and
+    // asserts no violation. Because the comparison primitives
+    // (`assert_exact_allowlist_match` / `assert_exact_file_allowlist_match`)
+    // PANIC on a mismatch, the planted-site cases assert via
+    // `std::panic::catch_unwind` that the panic fires.
+    // =======================================================================
+
+    /// Helper: returns `true` iff `f` panicked (i.e. the guard reported a
+    /// violation). Suppresses the default panic hook so the planted-failure
+    /// output does not clutter the test log.
+    fn guard_reports_violation(f: impl FnOnce() + std::panic::UnwindSafe) -> bool {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(f);
+        std::panic::set_hook(prev);
+        result.is_err()
+    }
+
+    #[test]
+    fn line_precise_guard_discriminates_planted_site() {
+        // A planted NEW site at a fake, non-allowlisted path MUST be flagged.
+        let planted: Vec<(String, u32, String)> = vec![(
+            "crates/verter_session/src/some_new_consumer.rs".to_string(),
+            42,
+            "from_eager_meta".to_string(),
+        )];
+        assert!(
+            guard_reports_violation(|| assert_exact_allowlist_match(
+                "discriminator",
+                &planted,
+                FROM_EAGER_META_ALLOWLIST,
+            )),
+            "line-precise guard must FAIL on a planted new `from_eager_meta` \
+             site at a non-allowlisted path — a guard that cannot fail is a stub"
+        );
+
+        // The real allowlist fed against itself MUST NOT be flagged.
+        let real: Vec<(String, u32, String)> = FROM_EAGER_META_ALLOWLIST
+            .iter()
+            .map(|(p, ln, pat)| (p.to_string(), *ln, pat.to_string()))
+            .collect();
+        assert!(
+            !guard_reports_violation(|| assert_exact_allowlist_match(
+                "discriminator",
+                &real,
+                FROM_EAGER_META_ALLOWLIST,
+            )),
+            "line-precise guard must PASS when the actual set equals the allowlist"
+        );
+
+        // A planted REMOVED site (allowlist entry with no matching actual)
+        // MUST also be flagged — the shrinking-ledger / stale-entry half.
+        let one_missing: Vec<(String, u32, String)> = real.iter().skip(1).cloned().collect();
+        assert!(
+            guard_reports_violation(|| assert_exact_allowlist_match(
+                "discriminator",
+                &one_missing,
+                FROM_EAGER_META_ALLOWLIST,
+            )),
+            "line-precise guard must FAIL on a stale allowlist entry (a site \
+             that no longer exists) — this is what forces the ledger to shrink"
+        );
+    }
+
+    #[test]
+    fn file_level_guard_discriminates_planted_file() {
+        // A planted NEW file referencing the symbol MUST be flagged.
+        let mut planted: Vec<String> = PREPARED_SURFACE_PROJECTION_FILE_ALLOWLIST
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        planted.push("crates/verter_session/src/brand_new_walker_consumer.rs".to_string());
+        assert!(
+            guard_reports_violation(|| assert_exact_file_allowlist_match(
+                "discriminator",
+                &planted,
+                PREPARED_SURFACE_PROJECTION_FILE_ALLOWLIST,
+            )),
+            "file-level guard must FAIL when a NEW non-allowlisted file \
+             references `PreparedSurfaceProjection` — a guard that cannot fail \
+             is a stub"
+        );
+
+        // The real allowlist fed against itself MUST NOT be flagged.
+        let real: Vec<String> = PREPARED_SURFACE_PROJECTION_FILE_ALLOWLIST
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(
+            !guard_reports_violation(|| assert_exact_file_allowlist_match(
+                "discriminator",
+                &real,
+                PREPARED_SURFACE_PROJECTION_FILE_ALLOWLIST,
+            )),
+            "file-level guard must PASS when the actual file set equals the allowlist"
+        );
+
+        // A planted REMOVED file (allowlisted but absent from actual) MUST be
+        // flagged — the stale-entry / shrinking-ledger half.
+        let one_missing: Vec<String> = real.iter().skip(1).cloned().collect();
+        assert!(
+            guard_reports_violation(|| assert_exact_file_allowlist_match(
+                "discriminator",
+                &one_missing,
+                PREPARED_SURFACE_PROJECTION_FILE_ALLOWLIST,
+            )),
+            "file-level guard must FAIL on a stale allowlisted file (no longer \
+             references the symbol) — this is what forces the ledger to shrink"
+        );
+    }
+
+    #[test]
+    fn scanner_excludes_test_and_probe_files() {
+        // The production-source collector MUST exclude `*_tests.rs`,
+        // `tests.rs`, `tests/`-segment files, and `test_only_*` probes — the
+        // `from_eager_meta` probes in `test_only_imported_macro_surface.rs`
+        // must NOT appear as production sites (else the allowlist would need
+        // 3 extra entries and the guard would mis-classify a test probe as a
+        // production rail).
+        assert!(
+            is_test_or_probe_file("crates/x/src/foo_tests.rs"),
+            "`*_tests.rs` sibling must be excluded"
+        );
+        assert!(
+            is_test_or_probe_file("crates/x/src/tests.rs"),
+            "`tests.rs` must be excluded"
+        );
+        assert!(
+            is_test_or_probe_file("crates/x/src/tests/regress.rs"),
+            "file under a `tests/` segment must be excluded"
+        );
+        assert!(
+            is_test_or_probe_file("crates/verter_session/src/test_only_imported_macro_surface.rs"),
+            "`test_only_*` probe body must be excluded"
+        );
+        // A genuine production file must NOT be excluded.
+        assert!(
+            !is_test_or_probe_file(
+                "crates/verter_session/src/resolver_core/component_meta/imported_surface.rs"
+            ),
+            "a genuine production source file must NOT be excluded"
+        );
+
+        // End-to-end: the collected production set must include the
+        // `from_eager_meta` DEFINITION file but NOT the test-only probe file.
+        let files = collect_production_rs_files();
+        let rels: BTreeSet<String> = files.into_iter().map(|(_, rel)| rel).collect();
+        assert!(
+            rels.contains(
+                "crates/verter_session/src/resolver_core/component_meta/imported_surface.rs"
+            ),
+            "production collector must include the `from_eager_meta` definition file"
+        );
+        assert!(
+            !rels.contains("crates/verter_session/src/test_only_imported_macro_surface.rs"),
+            "production collector must exclude the `test_only_*` probe body"
+        );
+    }
+
+    #[test]
+    fn preprocess_erases_comments_and_inline_test_modules() {
+        // A doc/line comment mention of a forbidden token must be erased, so a
+        // comment can never trip (or satisfy) a guard. This pins the
+        // `component_meta_caches.rs` comment-only `PreparedSurfaceProjection`
+        // exclusion.
+        let with_comment = "\
+/// Mentions PreparedSurfaceProjection in a doc comment.\n\
+// also from_eager_meta here\n\
+pub fn live() {}\n";
+        let processed = preprocess(with_comment);
+        assert!(
+            !processed.contains("PreparedSurfaceProjection"),
+            "preprocess must erase comment references to PreparedSurfaceProjection"
+        );
+        assert!(
+            !line_contains_identifier(&processed, "from_eager_meta"),
+            "preprocess must erase comment references to from_eager_meta"
+        );
+
+        // An inline `#[cfg(test)] mod tests { ... }` body must be erased.
+        let with_inline_test = "\
+pub fn live() {}\n\
+#[cfg(test)]\n\
+mod tests {\n\
+    fn t() { let _ = from_eager_meta(); }\n\
+}\n";
+        let processed = preprocess(with_inline_test);
+        assert!(
+            !line_contains_identifier(&processed, "from_eager_meta"),
+            "preprocess must erase #[cfg(test)] mod tests bodies"
+        );
+
+        // Live production code is preserved.
+        let live = "pub fn caller() { let _ = from_eager_meta(meta); }\n";
+        assert!(
+            line_contains_identifier(&preprocess(live), "from_eager_meta"),
+            "preprocess must preserve live production references"
+        );
+
+        // Identifier-boundary discipline: a suffixed name is NOT a hit.
+        assert!(
+            !line_contains_identifier("let _ = from_eager_meta_v2();", "from_eager_meta"),
+            "identifier-boundary matcher must not match `from_eager_meta_v2`"
+        );
+    }
+}

@@ -138,6 +138,19 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "Single Resolution Engine Rule",
+        &[
+            // Stage 0 consolidation guards (shrinking-ledger): forbid a NEW
+            // production site of the doomed eager OXC `resolve_type` engine /
+            // prepared-surface walker while the second engine is deleted.
+            "no_new_from_eager_meta_production_site",
+            "no_new_duplicate_read_surface_members_definition",
+            "no_new_resolve_type_engine_path_production_file",
+            "no_new_resolved_elements_production_file",
+            "no_new_prepared_surface_projection_production_file",
+        ],
+    ),
+    (
         "Two Template Codegen Paths",
         &[
             // Codegen path independence — the VDOM / IDE split is
