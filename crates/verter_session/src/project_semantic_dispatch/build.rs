@@ -478,8 +478,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // strict warm-read validator. Structural args (`Global`-scoped
             // primitives, literal-union key sets) contribute nothing.
             let observed_self_roots = self.observed_self_roots_from_nodes(args.iter().copied());
+            // Builtin-utility results are NEVER macro-T own-body (codex
+            // BINDING design): `defineProps<Omit<Vendor, K>>()` surfaces
+            // members that came from `Vendor` via the utility, none of
+            // which the author wrote in the macro T body. Downgrade the
+            // provenance to structural so the utility's produced members
+            // report `declared_in_macro_type_arg = false`. (A carrier
+            // `CarrierProps extends Omit<Vendor, K>` is the SEPARATE
+            // direct-decl case: CarrierProps's own body is stamped below
+            // and only its `extends`-reached members go through this
+            // utility path as structural.)
             let output: crate::project_semantic_dispatch::walk::QueryBuildOutput = self
-                .build_builtin_utility(base, decl_name.as_ref(), args, context)
+                .build_builtin_utility(
+                    base,
+                    decl_name.as_ref(),
+                    args,
+                    context.into_structural_provenance(),
+                )
                 .into();
             return output.with_observed_self_roots(observed_self_roots);
         }
@@ -544,6 +559,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // survives. The legacy `body_mode`-only wrapper at
                 // [`Self::shallow_lower_type_expr`] rebuilds
                 // `Published(mode)` and would clobber the demand axis.
+                // Provenance downgrades to structural (codex BINDING Stage
+                // 1): a type-parameter default is a substituted value, not
+                // the macro-T own body.
                 self.shallow_lower_type_expr_with_context(
                     default,
                     &env,
@@ -552,7 +570,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope_payload.as_ref(),
                     &shadowing,
                     &mut substitutions,
-                    context,
+                    context.into_structural_provenance(),
                 )
             } else if body_mode == crate::semantic_query::ProjectionMode::Skeleton {
                 // Skeleton mode preserves open generics.
@@ -628,16 +646,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // along the decl body would then reach the publication-edge
         // loops and emit the spurious member edges that the
         // ChatMessages `outputSchema|execute` leak captured.
-        let mut result = self.shallow_lower_type_expr_with_context(
-            &prepared.body,
+        // Surface-provenance handling for the declaration body (codex
+        // BINDING design — own-body vs reference discrimination). The bit
+        // is stamped only for members lowered from an INLINE object
+        // literal that is the macro-T own body; members reached through a
+        // REFERENCE arm decay to structural. See
+        // `lower_decl_body_with_provenance` for the per-arm rule (inline
+        // `Object` arms keep the caller's provenance; `Ref` arms — an
+        // author intersection `A & B`'s named refs, or an interface's
+        // `extends Base` heritage `Ref` — go structural).
+        let mut result = self.lower_decl_body_with_provenance(
+            &prepared,
             &env,
             &scope,
-            &prepared.name_resolution,
             scope_payload.as_ref(),
             &shadowing,
             &mut substitutions,
             context,
         );
+        // Member-index overlay (carries the caller's provenance):
+        // `member_index` holds the declaration's OWN-body direct members.
+        // It APPENDS own members not yet on the surface (the heritage /
+        // member-index split) and RE-STAMPS any surface member that
+        // matches an own-body index entry. With per-arm body lowering the
+        // own `Object` arm members already carry the correct bit, so the
+        // re-stamp is a no-op for those; the overlay remains the authority
+        // for own members appended from `member_index` and is the safety
+        // net for surfaces where the own members were lowered structurally.
         result = self.backfill_member_index_surface(
             result,
             &prepared,
@@ -709,6 +744,122 @@ impl<'a> ProjectSemanticDispatch<'a> {
         .with_observed_self_roots(observed_self_roots)
     }
 
+    /// Lower a prepared declaration's `body` carrying the macro-surface
+    /// provenance with own-body-vs-heritage discrimination (codex
+    /// BINDING design).
+    ///
+    /// - **Alias**: the body is the author-written macro type argument
+    ///   (`defineProps<A & B>()` → `A & B`). Every member is own-body, so
+    ///   the whole body is lowered with the caller's `context` (an
+    ///   author intersection's arms keep `MacroTypeArgOwnBody`).
+    /// - **Interface / Class**: the body folds `extends` heritage into an
+    ///   `Intersection` whose heritage arms are `Ref` / `DeclRef` nodes
+    ///   and whose own-body arms are `Object` nodes. Each arm is lowered
+    ///   individually: own-body `Object` (and `Parenthesized(Object)`)
+    ///   arms keep the caller's provenance; heritage `Ref`-shaped arms
+    ///   downgrade to structural so inherited members surface with
+    ///   `declared_in_macro_type_arg = false`. A plain interface body
+    ///   (single `Object`, no `extends`) keeps the caller's provenance.
+    ///
+    /// This is per-arm SHAPE discrimination gated on `kind`, not arm
+    /// order: declaration-merged interfaces (every own slice an `Object`
+    /// arm) and `extends` heritage (always a `Ref` arm) are both handled
+    /// correctly.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_decl_body_with_provenance(
+        &self,
+        prepared: &PreparedTypeDecl,
+        env: &FxHashMap<String, SemanticNodeId>,
+        scope: &NodeScopeId,
+        scope_payload: Option<&crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
+        shadowing: &crate::resolver_core::scope_shadowing::ScopeShadowing,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        use verter_type_expr::TypeExpr;
+
+        // Whether an intersection arm is an own-body member-bearing arm
+        // (an inline `Object` literal, or a `Parenthesized` wrapper of
+        // one) vs a reference carrier (`Ref` / anything else).
+        //
+        // This is the precise eager `from_root_body` rule: a member is
+        // `declared_in_macro_type_arg = true` only when it was lowered
+        // from an inline object LITERAL at the macro-T own body. Members
+        // reached through a named REFERENCE arm inside an intersection
+        // (`defineProps<A & B>()`, or an interface's `extends Base`
+        // heritage `Ref`) are NOT literally written in the macro T body,
+        // so their provenance decays to structural (`false`). A single
+        // direct reference at the macro-T root (`defineProps<Props>()`)
+        // is the other `true` case — its OWN-body members carry the bit
+        // because `Instantiate(Props)` lowers Props's own object body
+        // under the caller's provenance (the non-intersection arm below).
+        fn arm_is_own_body(arm: &TypeExpr) -> bool {
+            match arm {
+                TypeExpr::Object(_) => true,
+                TypeExpr::Parenthesized(inner) => arm_is_own_body(inner),
+                _ => false,
+            }
+        }
+
+        match &prepared.body {
+            TypeExpr::Intersection(arms) => {
+                // Per-arm provenance: inline-object own-body arms keep the
+                // caller's provenance; reference arms (heritage `extends`
+                // Refs, or named refs in an author intersection `A & B`)
+                // decay to structural. Re-intern the merged Intersection
+                // so the consumer-visible shape is unchanged.
+                let structural = context.into_structural_provenance();
+                let arm_ids: Vec<SemanticNodeId> = arms
+                    .iter()
+                    .map(|arm| {
+                        let arm_context = if arm_is_own_body(arm) {
+                            context
+                        } else {
+                            structural
+                        };
+                        self.shallow_lower_type_expr_with_context(
+                            arm,
+                            env,
+                            scope,
+                            &prepared.name_resolution,
+                            scope_payload,
+                            shadowing,
+                            substitutions,
+                            arm_context,
+                        )
+                    })
+                    .collect();
+                if arm_ids.is_empty() {
+                    self.graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
+                } else if arm_ids.len() == 1 {
+                    arm_ids[0]
+                } else {
+                    self.graph().intern_node_with_scope(
+                        SemanticNodeData::Intersection(Arc::from(arm_ids.into_boxed_slice())),
+                        scope.clone(),
+                    )
+                }
+            }
+            // Non-intersection body: a plain inline `Object` (own-body
+            // members → caller provenance), or a single reference / other
+            // shape. For a single direct reference at the macro-T root the
+            // caller's provenance flows into the referenced decl's own
+            // object body (which surfaces own members `true`, heritage
+            // `false` via this same per-arm split one level down).
+            _ => self.shallow_lower_type_expr_with_context(
+                &prepared.body,
+                env,
+                scope,
+                &prepared.name_resolution,
+                scope_payload,
+                shadowing,
+                substitutions,
+                context,
+            ),
+        }
+    }
+
     pub(super) fn backfill_member_index_surface(
         &self,
         result: SemanticNodeId,
@@ -730,24 +881,58 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return result;
         }
 
-        let mut existing: FxHashSet<Arc<str>> = surface
+        // `member_index` is the declaration's OWN-body direct-member
+        // index (codex BINDING design — authoritative own-member
+        // overlay). `PreparedTypeDecl::build_member_index` populates it
+        // from direct Object members only, skipping heritage `extends`
+        // `Ref` arms. So a member present in `member_index` is
+        // author-declared in this declaration's own body; under a
+        // macro-type-argument own-body instantiation it carries
+        // `declared_in_macro_type_arg = true`.
+        let own_body_bit = context.is_macro_type_arg_own_body();
+        let existing: FxHashSet<Arc<str>> = surface
             .members
             .iter()
             .map(|member| Arc::clone(&member.name))
             .collect();
-        let mut added = prepared
+
+        // (1) RE-STAMP existing surface members that are own-body index
+        // entries. The interface body was lowered STRUCTURALLY (heritage
+        // arms must stay `false`), so own members already on the surface
+        // carry `false`; the overlay marks exactly the own-body ones
+        // `own_body_bit`. Heritage members (not in `member_index`) are
+        // left untouched. This is the "replace/mark, not only append"
+        // requirement — without it a plain "append missing" overlay
+        // would leave own members `false` after structural body lowering.
+        let mut restamped_any = false;
+        let mut members: Vec<SurfaceMember> = surface
+            .members
+            .iter()
+            .map(|member| {
+                if own_body_bit
+                    && !member.declared_in_macro_type_arg
+                    && prepared.member_index.contains_key(member.name.as_ref())
+                {
+                    restamped_any = true;
+                    SurfaceMember {
+                        declared_in_macro_type_arg: true,
+                        ..member.clone()
+                    }
+                } else {
+                    member.clone()
+                }
+            })
+            .collect();
+
+        // (2) APPEND own-body members not yet on the surface. Member
+        // VALUE lowering downgrades to structural provenance: a nested
+        // object inside the member's type is NOT the macro-T own body —
+        // only the member's PRESENCE on this declaration is.
+        let mut added: Vec<SurfaceMember> = prepared
             .member_index
             .iter()
             .filter(|(name, _)| !existing.contains(name.as_str()))
             .map(|(name, member)| {
-                // Honour the caller's
-                // `ProjectionReductionContext`. The previous
-                // hardcoded `Published(Expanded)` would reify nested
-                // operators along the appended members even when the
-                // instantiation arrived under `StructuralTransit`,
-                // re-introducing the publication-edge emissions the
-                // walk.rs intermediate-hop demotion is meant to
-                // prevent.
                 let value = self.shallow_lower_type_expr_with_context(
                     &member.ty,
                     env,
@@ -756,34 +941,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope_payload,
                     shadowing,
                     substitutions,
-                    context,
+                    context.into_structural_provenance(),
                 );
-                // SAFETY: `backfill_member_index_surface` adds the
-                // members reached via the prepared decl's heritage
-                // chain (member_index is populated from extends /
-                // implements during prepared-decl construction).
-                // These members did NOT appear in the prepared decl's
-                // own body — they reached the surface via heritage.
-                // `false` is the structural truth.
                 SurfaceMember {
                     name: Arc::from(name.as_str()),
                     value,
                     optional: member.optional,
                     readonly: member.readonly,
                     is_method: member.is_method,
-                    declared_in_macro_type_arg: false,
+                    declared_in_macro_type_arg: own_body_bit,
                 }
             })
             .collect::<Vec<_>>();
-        if added.is_empty() {
+
+        if added.is_empty() && !restamped_any {
             return result;
         }
 
         added.sort_unstable_by(|left, right| left.name.as_ref().cmp(right.name.as_ref()));
-        let mut members = surface.members.iter().cloned().collect::<Vec<_>>();
-        for member in &added {
-            existing.insert(Arc::clone(&member.name));
-        }
         members.extend(added);
         self.graph().intern_node_with_scope(
             SemanticNodeData::Object(SurfaceView {

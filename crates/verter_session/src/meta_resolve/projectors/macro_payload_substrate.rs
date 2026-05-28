@@ -245,6 +245,9 @@ pub(crate) fn resolve_payload_surface_with_scope(
             payload_node,
             macro_index,
             expansion_kind,
+            // Emit-class payloads are structural (props-axis bit is
+            // always false for emits).
+            crate::semantic_query::SurfaceProvenanceContext::Structural,
             diag_sink,
         );
     }
@@ -267,6 +270,9 @@ pub(crate) fn resolve_payload_surface_with_scope(
             payload_node,
             macro_index,
             expansion_kind,
+            // Emit-class payloads are structural (props-axis bit is
+            // always false for emits).
+            crate::semantic_query::SurfaceProvenanceContext::Structural,
             diag_sink,
         );
     }
@@ -293,6 +299,9 @@ pub(crate) fn resolve_payload_surface_with_scope(
                 payload_node,
                 macro_index,
                 expansion_kind,
+                // Emit-class payloads are structural (props-axis bit is
+                // always false for emits).
+                crate::semantic_query::SurfaceProvenanceContext::Structural,
                 diag_sink,
             );
         }

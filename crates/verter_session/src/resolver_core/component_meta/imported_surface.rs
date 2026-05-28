@@ -391,39 +391,15 @@ impl ImportedMacroSurface {
         QueryResult::Value(names)
     }
 
-    /// Resolve the imported declaration to its one-level
-    /// [`MacroSurfaceView`](crate::project_semantic_dispatch::enumerate::MacroSurfaceView)
-    /// — named members (with their TS member metadata) + call
-    /// signatures.
-    ///
-    /// This is the surface-level accessor the macro-shape
-    /// interpretation drives: the lazy arm reads member optionality /
-    /// `declared_in_macro_type_arg` and extracts `defineEmits`
-    /// call-signature event names from this view, exactly as the eager
-    /// rail reads them off `ResolvedElements`.
-    ///
-    /// Composition (path-precise): dispatch `ResolveDecl` to obtain the
-    /// root node, then hand it to the single shared surface enumerator
-    /// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::surface_view_from_base_node`],
-    /// which owns the declaration-placeholder unwrap + Intersection
-    /// member/call-signature accumulation. The enumerator reads only the
-    /// one-level surface — member VALUE types are projected lazily by
-    /// [`Self::project_named_member`] / [`Self::raise_member_value`],
-    /// never eagerly walked here.
-    ///
-    /// Bumps the bridge-demand counter exactly once per call (matching
-    /// the once-per-public-accessor discipline of the other accessors).
-    ///
-    /// Failure / empty semantics mirror [`Self::enumerate_member_names`]:
-    /// the root `ResolveDecl` `Error` / `Recursive` variants propagate,
-    /// and a resolved root with no enumerable surface yields
-    /// `QueryResult::Value(MacroSurfaceView::default())` (empty).
     pub(crate) fn resolve_surface_view(
         &self,
         ctx: &dyn ResolverContext,
+        provenance: crate::semantic_query::SurfaceProvenanceContext,
     ) -> QueryResult<crate::project_semantic_dispatch::enumerate::MacroSurfaceView> {
         bump_projection_counter();
         let dispatch = ctx.dispatch();
+        // Step 1: resolve the imported declaration root (the same root
+        // `resolve_root` returns).
         let root = match dispatch.execute(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: self.identity.top_level_scope(),
             name: Arc::clone(&self.identity.type_name),
@@ -432,8 +408,21 @@ impl ImportedMacroSurface {
             QueryResult::Error(err) => return QueryResult::Error(err),
             QueryResult::Recursive(node) => return QueryResult::Recursive(node),
         };
+        // Step 2: read the one-level surface through the single shared
+        // surface enumerator, carrying the caller's macro-surface
+        // provenance (codex BINDING design). The
+        // enumerator owns the DeclPlaceholder unwrap + `A & B`
+        // Intersection accumulation and preserves the surface's call
+        // signatures (the `defineEmits` call-signature event extractor
+        // reads them) — the empty-path `Published(Shallow)` synthesis
+        // would have DROPPED call signatures, so we read the surface
+        // directly via the enumerator instead. When `provenance ==
+        // MacroTypeArgOwnBody` the enumerator's DeclPlaceholder unwrap
+        // stamps the imported declaration's OWN-body members
+        // `declared_in_macro_type_arg = true` and heritage-reached
+        // members stay `false`.
         let view = dispatch
-            .surface_view_from_base_node(root)
+            .surface_view_from_base_node(root, provenance)
             .unwrap_or_default();
         QueryResult::Value(view)
     }
@@ -550,7 +539,14 @@ impl ResolvedMacroSurface {
         match self {
             ResolvedMacroSurface::Eager(eager) => eager.props.clone(),
             ResolvedMacroSurface::LazyImported(surface) => {
-                let view = match surface.resolve_surface_view(ctx) {
+                // Props carry macro-T own-body provenance so the imported
+                // declaration's own-body members surface with
+                // `declared_in_macro_type_arg = true` (codex BINDING design)
+                // (continued).
+                let view = match surface.resolve_surface_view(
+                    ctx,
+                    crate::semantic_query::SurfaceProvenanceContext::MacroTypeArgOwnBody,
+                ) {
                     QueryResult::Value(view) => view,
                     QueryResult::Error(_) | QueryResult::Recursive(_) => return Vec::new(),
                 };
@@ -609,7 +605,12 @@ impl ResolvedMacroSurface {
         match self {
             ResolvedMacroSurface::Eager(eager) => eager.emits.clone(),
             ResolvedMacroSurface::LazyImported(surface) => {
-                let view = match surface.resolve_surface_view(ctx) {
+                // Emits are structural — `declared_in_macro_type_arg` is
+                // a props-axis concern, always `false` for emit members.
+                let view = match surface.resolve_surface_view(
+                    ctx,
+                    crate::semantic_query::SurfaceProvenanceContext::Structural,
+                ) {
                     QueryResult::Value(view) => view,
                     QueryResult::Error(_) | QueryResult::Recursive(_) => return Vec::new(),
                 };
@@ -730,7 +731,12 @@ impl ResolvedMacroSurface {
         match self {
             ResolvedMacroSurface::Eager(eager) => eager.slots.clone(),
             ResolvedMacroSurface::LazyImported(surface) => {
-                let view = match surface.resolve_surface_view(ctx) {
+                // Slots are structural — `declared_in_macro_type_arg` is
+                // a props-axis concern, always `false` for slot members.
+                let view = match surface.resolve_surface_view(
+                    ctx,
+                    crate::semantic_query::SurfaceProvenanceContext::Structural,
+                ) {
                     QueryResult::Value(view) => view,
                     QueryResult::Error(_) | QueryResult::Recursive(_) => return Vec::new(),
                 };

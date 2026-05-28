@@ -523,6 +523,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             scope.clone(),
                         );
                     } else {
+                        // Type arguments are NOT the macro-T own body
+                        // (codex BINDING design): `defineProps<Foo<Bar>>()`
+                        // has `Bar` as a generic argument substituted into
+                        // `Foo`'s body — `Foo`'s own members are own-body,
+                        // `Bar`'s members are not. Lower args structurally.
+                        let arg_context = reduction_context.into_structural_provenance();
                         let arg_ids: Vec<SemanticNodeId> = type_arguments
                             .iter()
                             .map(|arg| {
@@ -534,7 +540,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     scope_payload,
                                     shadowing,
                                     substitutions,
-                                    reduction_context,
+                                    arg_context,
                                 )
                             })
                             .collect();
@@ -572,6 +578,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if type_arguments.is_empty() && !decl_routes_through_instantiate {
                     anchor
                 } else {
+                    // Type arguments lower structurally — they are
+                    // substituted INTO the decl body, never the macro-T
+                    // own body themselves (codex BINDING design). The
+                    // `Instantiate` itself keeps the caller's provenance:
+                    // `build_instantiate` stamps the (non-utility) decl's
+                    // OWN-body members with it and downgrades to
+                    // structural for builtin-utility targets
+                    // (`Omit`/`Pick` sources are never own-body).
+                    let arg_context = reduction_context.into_structural_provenance();
                     let arg_ids: Vec<SemanticNodeId> = type_arguments
                         .iter()
                         .map(|arg| {
@@ -583,7 +598,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope_payload,
                                 shadowing,
                                 substitutions,
-                                reduction_context,
+                                arg_context,
                             )
                         })
                         .collect();
@@ -655,6 +670,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 for member in &obj.properties {
                     match member {
                         ObjectMember::Property(prop) => {
+                            // Member VALUE lowering downgrades to
+                            // structural provenance (codex BINDING Stage
+                            // 1): a nested object inside this member's
+                            // type (`{ outer: { inner: T } }`) is NOT the
+                            // macro-T own body — only THIS object's
+                            // direct members are. Stamping the value with
+                            // macro provenance would mis-mark `inner`.
                             let value = self.shallow_lower_type_expr_with_context(
                                 &prop.ty,
                                 env,
@@ -663,29 +685,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope_payload,
                                 shadowing,
                                 substitutions,
-                                reduction_context,
+                                reduction_context.into_structural_provenance(),
                             );
-                            // SAFETY: graph-native object expression
-                            // lowering (`TypeExpr::Object` →
-                            // SurfaceView) runs recursively at every
-                            // nesting level. `ObjectMember::Property`
-                            // carries no producer-side
-                            // `declared_in_macro_type_arg` fact. The
-                            // macro-T own-body flag is propagated
-                            // through the parser-side
-                            // `ResolvedProp` chain into the analyzer's
-                            // `AnalyzedPropField` and surfaces in
-                            // `evaluated_types.props` / the macro
-                            // shape synthesizers — NOT through this
-                            // generic graph-native lowering path.
-                            // `false` is the structural truth here.
+                            // `declared_in_macro_type_arg` reflects the
+                            // surface-provenance context: when this object
+                            // is lowered directly at the macro
+                            // type-argument's own body (an inline
+                            // `defineProps<{ a: string }>()` literal, the
+                            // directly-referenced declaration's own body
+                            // via `build_instantiate`, or an explicit
+                            // Object arm of an intersection literal) the
+                            // member is author-declared in the macro T.
+                            // Otherwise (`Structural`) it is `false`.
+                            // This is the canonical typed-IR producer of
+                            // the bit; the parser-side `ResolvedProp`
+                            // chain and the prepared-surface walker are
+                            // the other producers the shared resolver
+                            // consolidates onto this path.
                             members.push(SurfaceMember {
                                 name: Arc::from(prop.name.as_str()),
                                 value,
                                 optional: prop.optional,
                                 readonly: prop.readonly,
                                 is_method: false,
-                                declared_in_macro_type_arg: false,
+                                declared_in_macro_type_arg: reduction_context
+                                    .is_macro_type_arg_own_body(),
                             });
                         }
                         ObjectMember::Method(method) => {
@@ -705,6 +729,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             // deferred shell.
                             let function_expr =
                                 TypeExpr::Function(Arc::new(method.function.clone()));
+                            // Method VALUE (its function shape) lowers
+                            // structurally — see the `ObjectMember::Property`
+                            // companion note. Only the method's presence on
+                            // THIS object is macro-T own-body, not the
+                            // function's nested parameter/return objects.
                             let value = self.shallow_lower_type_expr_with_context(
                                 &function_expr,
                                 env,
@@ -713,22 +742,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope_payload,
                                 shadowing,
                                 substitutions,
-                                reduction_context,
+                                reduction_context.into_structural_provenance(),
                             );
-                            // SAFETY: graph-native object method
-                            // lowering. See companion SAFETY comment
-                            // for `ObjectMember::Property` above —
-                            // the macro-T own-body fact is propagated
-                            // through the analyzer surface, not via
-                            // generic object lowering. `false` is the
-                            // structural truth.
+                            // `declared_in_macro_type_arg` mirrors the
+                            // `ObjectMember::Property` arm: a method
+                            // literally written in the macro type
+                            // argument's own body is author-declared.
                             members.push(SurfaceMember {
                                 name: Arc::from(method.name.as_str()),
                                 value,
                                 optional: method.optional,
                                 readonly: false,
                                 is_method: true,
-                                declared_in_macro_type_arg: false,
+                                declared_in_macro_type_arg: reduction_context
+                                    .is_macro_type_arg_own_body(),
                             });
                         }
                         ObjectMember::CallSignature(func) => {

@@ -3222,7 +3222,11 @@ fn ax_hybrid_may_reduce_operator_predicate_is_purely_structural() {
         ),
     ];
     for (demand, mode, expected) in cases {
-        let ctx = ProjectionReductionContext { mode, demand };
+        let ctx = ProjectionReductionContext {
+            mode,
+            demand,
+            provenance: crate::semantic_query::SurfaceProvenanceContext::Structural,
+        };
         assert_eq!(
             may_reduce_operator(ctx),
             expected,

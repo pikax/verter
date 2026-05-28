@@ -178,22 +178,19 @@ fn define_props_shape_eager_lazy_equivalent() {
         "lazy arm prop names/order MUST match the eager arm exactly",
     );
 
-    // Per-field optionality + TypeExpr equivalence.
+    // Per-field optionality + TypeExpr + `declared_in_macro_type_arg`
+    // equivalence.
     //
-    // NOTE on `declared_in_macro_type_arg`: this field is
-    // ARCHITECTURALLY parser-side-only. `lower.rs` documents that the
-    // macro-T own-body flag is propagated through the parser
-    // `ResolvedProp` → `AnalyzedPropField` → `evaluated_types.props`
-    // chain, NOT through the generic graph-native `SurfaceView`
-    // lowering — `SurfaceMember.declared_in_macro_type_arg` is
-    // structurally `false` there. So the lazy arm (which resolves an
-    // imported declaration's typed-IR surface, with no macro-call-site
-    // context) cannot reconstruct this bit and structurally reports
-    // `false`. The production `synthesize_define_props...` dominant
-    // path sources the bit from `evaluated_types.props`, not the macro
-    // surface, so this is not a published-surface regression. The test
-    // asserts the lazy structural truth (`false`) below rather than
-    // requiring eager==lazy on this single field.
+    // `declared_in_macro_type_arg` (codex BINDING consolidation Stage
+    // 1): the canonical typed-IR surface now CARRIES this bit. The lazy
+    // arm resolves the imported declaration through the macro-aware
+    // shared path (`surface_view_from_base_node` evaluating the
+    // `DeclPlaceholder` under `SurfaceProvenanceContext::MacroTypeArgOwnBody`),
+    // so the imported declaration's OWN-body members surface with
+    // `declared_in_macro_type_arg = true` — field-for-field equivalent
+    // to the eager OXC rail's `from_root_body` stamping. The earlier
+    // "parser-side-only / lazy reports false" characterisation is
+    // RETIRED: the dispatch is now the canonical producer of the bit.
     for (e, l) in eager.iter().zip(lazy.iter()) {
         assert_eq!(
             e.is_optional, l.is_optional,
@@ -206,18 +203,34 @@ fn define_props_shape_eager_lazy_equivalent() {
             "TypeExpr mismatch for prop `{}`: eager={:?} lazy={:?}",
             e.name, e.type_expr, l.type_expr,
         );
+        assert_eq!(
+            e.declared_in_macro_type_arg, l.declared_in_macro_type_arg,
+            "declared_in_macro_type_arg mismatch for prop `{}` \
+             (eager={}, lazy={}) — the canonical surface MUST carry the \
+             own-body provenance field-for-field equivalent to the eager \
+             rail (codex BINDING Stage 1)",
+            e.name, e.declared_in_macro_type_arg, l.declared_in_macro_type_arg,
+        );
     }
 
-    // Structural truth of the lazy arm: the typed-IR `SurfaceView`
-    // carries no macro-T own-body fact, so every reconstructed prop
-    // reports `declared_in_macro_type_arg == false`. This pins the
-    // documented architecture (parser-side fact, not graph-side) so a
-    // future change that silently started inventing the bit on the
-    // graph path would fail here.
+    // Positive own-body assertion: every member of `Props`'s own body
+    // is author-declared in the macro T argument, so BOTH arms MUST
+    // report `declared_in_macro_type_arg = true`. A lazy arm that lost
+    // the provenance (the pre-Stage-1 `surface_view_from_base_node`
+    // without the `MacroTypeArgOwnBody` context) reported `false` here
+    // — this is the discrimination guard for the bit.
     assert!(
-        lazy.iter().all(|p| !p.declared_in_macro_type_arg),
-        "lazy-arm props must report declared_in_macro_type_arg=false \
-         (parser-side fact, structurally absent from the typed-IR surface)",
+        lazy.iter().all(|p| p.declared_in_macro_type_arg),
+        "every own-body prop of `Props` MUST carry \
+         declared_in_macro_type_arg=true on the canonical surface; got {:?}",
+        lazy.iter()
+            .map(|p| (p.name.clone(), p.declared_in_macro_type_arg))
+            .collect::<Vec<_>>(),
+    );
+    assert!(
+        eager.iter().all(|p| p.declared_in_macro_type_arg),
+        "eager arm own-body props must also report \
+         declared_in_macro_type_arg=true (the equivalence baseline)",
     );
 
     // Negative: `b` is the ONLY optional prop. Rules out a lazy arm

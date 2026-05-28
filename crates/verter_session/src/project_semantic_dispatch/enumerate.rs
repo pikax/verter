@@ -252,7 +252,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Resolve a base node to its one-level [`MacroSurfaceView`] —
-    /// named members + call signatures.
+    /// named members + call signatures — carrying the caller's
+    /// surface provenance (codex BINDING design).
     ///
     /// This is the surface-level sibling of
     /// [`Self::key_names_from_base_node`]: where the key-name enumerator
@@ -262,17 +263,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `declared_in_macro_type_arg` and extract `defineEmits`
     /// call-signature event names without a second walk.
     ///
+    /// `provenance` threads the macro-type-argument own-body entry
+    /// context into the DeclPlaceholder unwrap below: when
+    /// `MacroTypeArgOwnBody` the unwrapped declaration's OWN-body members
+    /// surface with `declared_in_macro_type_arg = true`; heritage /
+    /// utility / member-value lowering stay `false` (the lowering edge
+    /// downgrades them). `Structural` is the no-op default that the
+    /// emits / slots readers pass — `declared_in_macro_type_arg` is a
+    /// props-axis concern.
+    ///
     /// Composition (mirrors the enumerator):
     ///
     /// - `Object(view)` → return the view's members + call signatures
-    ///   directly.
+    ///   directly. The members already carry the provenance bit stamped
+    ///   at lowering time (the DeclPlaceholder unwrap below interns the
+    ///   instantiated body under the provenance-bearing context).
     /// - `Intersection(arms)` → accumulate the union of every
     ///   **resolvable** arm's members (first-writer-wins on a duplicate
     ///   member name, matching TS intersection member precedence) and
-    ///   concatenate every arm's call signatures. Returns `None` only
-    ///   when no arm is resolvable.
+    ///   concatenate every arm's call signatures. The provenance flows
+    ///   into each arm so an own-body intersection literal arm keeps the
+    ///   bit. Returns `None` only when no arm is resolvable.
     /// - `DeclPlaceholder` → `Instantiate` the bare declaration body
-    ///   under `Published(Expanded)` (same as the enumerator) and read
+    ///   under `Published(Expanded)` carrying the provenance, then read
     ///   the unwrapped surface.
     /// - Everything else (primitives, deferred shells, unions, …) →
     ///   `None`. A `Union` carrier has no single member surface a macro
@@ -287,8 +300,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(crate) fn surface_view_from_base_node(
         &self,
         base: SemanticNodeId,
+        provenance: crate::semantic_query::SurfaceProvenanceContext,
     ) -> Option<MacroSurfaceView> {
-        let resolved = self.evaluate_deferred_semantic_node(base);
+        // Read the raw node and dispatch per shape. We deliberately do
+        // NOT pre-evaluate via `evaluate_deferred_semantic_node_with_context`
+        // (codex BINDING design): the `Published(Expanded)` evaluator
+        // EAGERLY MERGES an intersection body into a single Object,
+        // re-resolving any carrier (`Ref`) arm under the top-level
+        // provenance — which would re-stamp a heritage `extends Base` arm
+        // `declared_in_macro_type_arg = true`. Instead, the
+        // `DeclPlaceholder` arm below instantiates the macro-T root under
+        // the caller's provenance (so `build_instantiate`'s per-arm body
+        // lowering bakes own-body Object arms `true` and heritage `Ref`
+        // arms structural), and the `Intersection` arm merges the
+        // already-lowered arms with STRUCTURAL recursion — preserving each
+        // arm's baked provenance without re-stamping carriers.
+        let resolved = base;
         let data = self.graph().node_data(resolved)?;
         match data.as_ref() {
             SemanticNodeData::Object(view) => Some(MacroSurfaceView {
@@ -302,7 +329,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let mut seen: FxHashSet<Arc<str>> = FxHashSet::default();
                 let mut any_resolvable = false;
                 for arm in arms.iter() {
-                    if let Some(arm_view) = self.surface_view_from_base_node(*arm) {
+                    // Recurse into already-resolved intersection arms with
+                    // STRUCTURAL provenance: each arm's own-body-vs-heritage
+                    // provenance was already decided when `build_instantiate`
+                    // lowered the declaration body per-arm (own-body Object
+                    // arms baked `true`, reference arms `false`). An
+                    // already-resolved Object arm carries its baked bit
+                    // verbatim; a still-deferred carrier arm (a heritage
+                    // `Ref`) re-resolves STRUCTURALLY here — re-applying the
+                    // caller's macro provenance would wrongly re-stamp the
+                    // heritage members `true`.
+                    if let Some(arm_view) = self.surface_view_from_base_node(
+                        *arm,
+                        crate::semantic_query::SurfaceProvenanceContext::Structural,
+                    ) {
                         any_resolvable = true;
                         for member in arm_view.members {
                             // First-writer-wins: an earlier intersection
@@ -334,12 +374,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                     context: crate::semantic_query::ProjectionReductionContext::published(
                         crate::semantic_query::ProjectionMode::Expanded,
-                    ),
+                    )
+                    .with_provenance(provenance),
                 }) {
                     crate::semantic_query::QueryResult::Value(instantiated)
                         if instantiated != resolved =>
                     {
-                        self.surface_view_from_base_node(instantiated)
+                        self.surface_view_from_base_node(instantiated, provenance)
                     }
                     _ => None,
                 }

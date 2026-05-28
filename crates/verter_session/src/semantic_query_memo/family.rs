@@ -96,6 +96,15 @@ pub(super) enum FamilyKey {
     Instantiate {
         base: DeclIdentity,
         args: Arc<[SemanticNodeId]>,
+        /// Surface-provenance dimension (codex BINDING design). A
+        /// macro-type-argument own-body instantiation and a plain
+        /// structural instantiation of the SAME decl + args produce
+        /// distinct surfaces (`declared_in_macro_type_arg` differs), so
+        /// they MUST NOT collide on one family slot. The mode still maps
+        /// to `ModeSlot`; this keeps the provenance variants apart at
+        /// the family-identity level so per-mode backfill stays within
+        /// one provenance family.
+        provenance: crate::semantic_query::SurfaceProvenanceContext,
     },
     ProjectMember {
         base: SemanticNodeId,
@@ -131,6 +140,14 @@ pub(super) enum FamilyKey {
     ProjectPath {
         base: SemanticNodeId,
         path: Arc<[PathSegment]>,
+        /// Surface-provenance dimension (codex BINDING design). A
+        /// macro-type-argument own-body path projection (the empty-path
+        /// macro-payload surface read) and a plain structural path
+        /// projection of the SAME `(base, path)` produce distinct
+        /// surfaces (`declared_in_macro_type_arg` differs on the
+        /// expanded DeclPlaceholder's own-body members), so they MUST
+        /// NOT collide on one family slot.
+        provenance: crate::semantic_query::SurfaceProvenanceContext,
     },
     /// Included for completeness so `family_and_slot` is total, but
     /// [`SemanticQueryKey::ResolvedNamedType`] bypasses the family memo at
@@ -414,6 +431,7 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             FamilyKey::Instantiate {
                 base: base.clone(),
                 args: Arc::clone(args),
+                provenance: context.provenance,
             },
             context_to_slot(*context),
         ),
@@ -487,6 +505,7 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             FamilyKey::ProjectPath {
                 base: *base,
                 path: Arc::clone(path),
+                provenance: context.provenance,
             },
             context_to_slot(*context),
         ),

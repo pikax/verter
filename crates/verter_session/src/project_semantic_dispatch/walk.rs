@@ -435,6 +435,18 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         self.context.mode
     }
 
+    /// Surface-provenance accessor (codex BINDING design). The macro
+    /// type-argument own-body entry context flows from the
+    /// `ProjectPath`'s context onto the walker; the `DeclPlaceholder`
+    /// expansion below preserves it onto its `Instantiate` dispatch so
+    /// the unwrapped declaration's own-body members are stamped
+    /// `declared_in_macro_type_arg = true`. Member-value sub-walks
+    /// downgrade to structural at the point they re-dispatch.
+    #[inline]
+    fn provenance(&self) -> crate::semantic_query::SurfaceProvenanceContext {
+        self.context.provenance
+    }
+
     fn graph(&self) -> &Arc<SemanticGraphStore> {
         self.dispatch.graph()
     }
@@ -1548,12 +1560,22 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     return;
                 }
                 drop(data);
+                // Preserve the walker's surface provenance onto the
+                // `Instantiate` expansion (codex BINDING design): when
+                // the empty-path `ProjectPath` macro-payload surface read
+                // entered under `MacroTypeArgOwnBody`, the unwrapped
+                // declaration's own-body members must be stamped
+                // `declared_in_macro_type_arg = true`. A bare
+                // `published(self.mode())` here would drop the provenance
+                // and the macro-T-root own-body members would all report
+                // `false`.
                 let expanded = match self.dispatch.execute(SemanticQueryKey::Instantiate {
                     base: identity,
                     args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                     context: crate::semantic_query::ProjectionReductionContext::published(
                         self.mode(),
-                    ),
+                    )
+                    .with_provenance(self.provenance()),
                 }) {
                     QueryResult::Value(id) => id,
                     QueryResult::Recursive(id) => {
@@ -2065,12 +2087,20 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // dispatch with empty args for shallow-surface
                 // synthesis to keep generic helpers' Conditional-arm
                 // distribution intact.
+                //
+                // Preserve the walker's surface provenance (codex BINDING design)
+                // (continued): `defineProps<Foo<Bar>>()` makes `Foo`'s
+                // OWN-body members macro-T own-body. `Bar` is a generic
+                // argument substituted INTO `Foo`'s body and is lowered
+                // structurally at the `Ref` arm, so only `Foo`'s own
+                // members carry the bit.
                 match self.dispatch.execute(SemanticQueryKey::Instantiate {
                     base: identity.clone(),
                     args: args_clone,
                     context: crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
-                    ),
+                    )
+                    .with_provenance(self.provenance()),
                 }) {
                     QueryResult::Value(body) => {
                         // Continue the walk into the materialised body.
@@ -2117,12 +2147,22 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     decl_name: Arc::clone(name),
                 };
                 drop(data);
+                // Preserve the walker's surface provenance onto the
+                // DeclPlaceholder unwrap (codex BINDING design): the
+                // mode/demand stay transit-Navigate (carrier-stop
+                // semantics for the shallow surface walk), but a
+                // `MacroTypeArgOwnBody` walker stamps the unwrapped
+                // declaration's OWN-body members `declared_in_macro_type_arg
+                // = true`. A bare `structural_transit_with_mode(Navigate)`
+                // here drops the provenance and the macro-T-root own-body
+                // members all report `false`.
                 match self.dispatch.execute(SemanticQueryKey::Instantiate {
                     base: identity.clone(),
                     args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                     context: crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
-                    ),
+                    )
+                    .with_provenance(self.provenance()),
                 }) {
                     QueryResult::Value(body) => {
                         work.push(Frame::Visit { node: body, target });

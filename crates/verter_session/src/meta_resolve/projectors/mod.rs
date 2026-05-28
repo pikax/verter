@@ -467,6 +467,39 @@ pub(crate) fn macro_expansion_for_cycle(
     }
 }
 
+/// Surface-provenance for a macro payload's own-body members (codex
+/// BINDING design).
+///
+/// `defineProps<T>()` and `withDefaults(defineProps<T>(), …)` resolve a
+/// PROP surface whose members the author literally wrote in the macro
+/// type argument `T`; those members must carry
+/// [`verter_session::semantic_query::SurfaceMember::declared_in_macro_type_arg`]
+/// `= true`. The bit is consumed by
+/// `verter_audit::PublishedSurfacePolicy::Refined` to distinguish
+/// author-declared props from heritage-reached props on the PROPS axis
+/// only. Every other macro kind (emits / slots / options / model /
+/// expose) resolves a structural surface — the bit is always `false`
+/// downstream for those kinds — so they lower with
+/// [`SurfaceProvenanceContext::Structural`].
+#[inline]
+#[must_use]
+pub(crate) fn macro_payload_surface_provenance(
+    macro_kind: AnalyzedMacroKind,
+) -> crate::semantic_query::SurfaceProvenanceContext {
+    match macro_kind {
+        AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
+            crate::semantic_query::SurfaceProvenanceContext::MacroTypeArgOwnBody
+        }
+        AnalyzedMacroKind::DefineEmits
+        | AnalyzedMacroKind::DefineSlots
+        | AnalyzedMacroKind::DefineModel
+        | AnalyzedMacroKind::DefineExpose
+        | AnalyzedMacroKind::DefineOptions => {
+            crate::semantic_query::SurfaceProvenanceContext::Structural
+        }
+    }
+}
+
 /// Resolve a type-based macro's payload through `ResolveMacroPayload`.
 ///
 /// Lowers the macro's `parsed_type_argument` to a [`SemanticNodeId`] in
@@ -491,12 +524,21 @@ pub(crate) fn resolve_macro_payload(
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
 ) -> Option<SemanticNodeId> {
     let parsed_arg = mac.parsed_type_argument.as_ref()?;
+    // Surface-provenance for the macro type argument's own body (codex
+    // BINDING design). Props / withDefaults carry the macro-T own-body
+    // provenance so members written directly in `defineProps<T>()`'s `T`
+    // surface with `declared_in_macro_type_arg = true`. Emits / slots /
+    // options / model / expose are structural — their
+    // `declared_in_macro_type_arg` is always `false` downstream (the bit
+    // is a props-axis concern consumed by `PublishedSurfacePolicy::Refined`).
+    let macro_provenance = macro_payload_surface_provenance(macro_kind);
     let type_args: Arc<[SemanticNodeId]> = match dispatch.lower_type_expr_in_scope_with_context(
         file,
         parsed_arg,
         crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
             ProjectionMode::Navigate,
-        ),
+        )
+        .with_provenance(macro_provenance),
     ) {
         Some(node) => Arc::from(vec![node].into_boxed_slice()),
         None => {
@@ -609,23 +651,29 @@ pub(crate) fn resolve_macro_payload(
     Some(payload_node)
 }
 
-/// Resolve the empty-path `ProjectPath` surface for a payload node.
-///
-/// Returns the surface node on success. On `Recursive` or `Error`,
-/// appends a diagnostic to `diag_sink` and returns `None`.
 pub(crate) fn resolve_payload_surface(
     dispatch: &ProjectSemanticDispatch<'_>,
     payload_node: SemanticNodeId,
     macro_index: usize,
     expansion_kind: MacroExpansionKind,
+    provenance: crate::semantic_query::SurfaceProvenanceContext,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
 ) -> Option<SemanticNodeId> {
+    // The empty-path `ProjectPath` carries the macro's surface
+    // provenance (codex BINDING design): for a props payload that
+    // resolved to a `DeclRef` carrier (`defineProps<FooProps>()`), the
+    // walker's `DeclPlaceholder` expansion preserves the
+    // `MacroTypeArgOwnBody` provenance onto its `Instantiate`, so
+    // `FooProps`'s OWN-body members surface with
+    // `declared_in_macro_type_arg = true`. Structural-provenance kinds
+    // (emits / slots / …) pass `Structural` and observe `false`.
     let surface_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: payload_node,
         path: empty_path(),
         context: crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Shallow,
-        ),
+        )
+        .with_provenance(provenance),
     });
     emit_dispatch_dep_signature_facts(dispatch.ctx, &surface_read.dep_signature);
     if !surface_read.walker_diagnostics.is_empty() {

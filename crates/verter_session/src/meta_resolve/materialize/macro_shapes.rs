@@ -120,6 +120,10 @@ fn record_published_field_edges_for_macro_shape(
         payload_node,
         macro_index,
         expansion_kind,
+        // Match the projector's per-kind provenance so the published-
+        // field-edge surface node is read from the SAME cache slot the
+        // projector populates (props macro-T own-body vs structural).
+        crate::meta_resolve::projectors::macro_payload_surface_provenance(macro_kind),
         &mut discard_diag,
     )
     .unwrap_or(payload_node);

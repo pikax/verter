@@ -575,27 +575,103 @@ pub enum ReductionDemand {
     StructuralTransit,
 }
 
-/// Projection reduction context — the `(mode, demand)` pair threaded
-/// through every operator dispatch (`Instantiate` / `KeyOf` /
-/// `MappedType` and the builtin-utility dispatch that composes them).
+/// Surface-provenance axis — codex BINDING design.
+///
+/// Records whether the surface members produced by a lowering /
+/// instantiation reached the surface as the **macro type-argument's own
+/// body** (the SFC author literally wrote the member name inside
+/// `defineProps<T>()`'s `T`) versus a plain structural lowering
+/// (heritage descent, member-value lowering, generic substitution, any
+/// non-macro-root query).
+///
+/// This is the typed-IR equivalent of the parser's `from_root_body`
+/// flag and the prepared-surface walker's body-vs-heritage entry
+/// context. It is the single input that lets the canonical dispatch
+/// stamp [`SurfaceMember::declared_in_macro_type_arg`] correctly without
+/// a post-resolution name-set classification (which would misclassify
+/// `Omit`-then-reintroduce, intersection collisions, and external-ref
+/// arms).
+///
+/// Folded into the [`crate::semantic_query_memo::FamilyKey`] identity
+/// for the context-bearing `Instantiate` / `ProjectPath` families so a
+/// macro-root surface and a plain structural surface of the SAME node
+/// never collide on one memo slot. It is NOT an env-hash dimension (R21)
+/// — it is a query-identity dimension, like the projection mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SurfaceProvenanceContext {
+    /// Plain structural lowering. Object members reached here carry
+    /// `declared_in_macro_type_arg = false`. This is the default for
+    /// every query that is not a macro-type-argument own-body entry —
+    /// heritage descent, member-value lowering, generic substitution,
+    /// relation-engine transit, and all non-macro queries.
+    #[default]
+    Structural,
+    /// The lowering / instantiation is entering the
+    /// `defineProps<T>()` / `withDefaults(defineProps<T>(), …)` type
+    /// argument's OWN body. Object members lowered directly at this
+    /// entry (an inline `TSTypeLiteral`, the directly-referenced
+    /// declaration's own body, or an explicit Object arm of an
+    /// intersection literal) carry `declared_in_macro_type_arg = true`.
+    /// Heritage-backfilled members, utility-target sources
+    /// (`Omit`/`Pick`), mapped-produced members, and member VALUE
+    /// bodies downgrade to [`Self::Structural`].
+    MacroTypeArgOwnBody,
+}
+
+/// Projection reduction context — the `(mode, demand, provenance)`
+/// tuple threaded through every operator dispatch (`Instantiate` /
+/// `KeyOf` / `MappedType` and the builtin-utility dispatch that
+/// composes them).
 ///
 /// The cache slot is per-context so a `StructuralTransit/Shallow`
 /// result does not collide with a `Published/Shallow` result on the
-/// same node — they are distinct evaluations.
+/// same node — they are distinct evaluations. The `provenance` axis is
+/// folded into `FamilyKey` for `Instantiate` / `ProjectPath` (codex
+/// BINDING design) so a macro-root surface and a structural surface of
+/// the same node cache in distinct slots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProjectionReductionContext {
     pub mode: ProjectionMode,
     pub demand: ReductionDemand,
+    /// Surface-provenance axis (codex BINDING design). Defaults to
+    /// [`SurfaceProvenanceContext::Structural`]; only the macro
+    /// type-argument own-body entry points opt into
+    /// [`SurfaceProvenanceContext::MacroTypeArgOwnBody`]. Part of the
+    /// query identity (folded into `FamilyKey` for `Instantiate` /
+    /// `ProjectPath`), so a macro-root surface and a structural surface
+    /// of the same node cache in distinct slots.
+    pub provenance: SurfaceProvenanceContext,
 }
 
 impl ProjectionReductionContext {
     /// Construct a `Published` context with the supplied mode. The
     /// canonical entry point for the publication pipeline (projector,
     /// component-meta materialisation, typeinfo, explicit path walks).
+    ///
+    /// Provenance defaults to [`SurfaceProvenanceContext::Structural`].
     pub const fn published(mode: ProjectionMode) -> Self {
         Self {
             mode,
             demand: ReductionDemand::Published,
+            provenance: SurfaceProvenanceContext::Structural,
+        }
+    }
+
+    /// Construct a `Published` context entering the macro
+    /// type-argument's OWN body — codex BINDING design.
+    ///
+    /// Used by the macro-payload projector entry points
+    /// (`defineProps<T>()` / `withDefaults`) so the object members
+    /// lowered directly at the macro-T root carry
+    /// `declared_in_macro_type_arg = true`. Heritage descent,
+    /// member-value lowering, and utility-target sources downgrade to
+    /// [`SurfaceProvenanceContext::Structural`] internally (see
+    /// `lower.rs` / `build_instantiate`).
+    pub const fn published_macro_type_arg_body(mode: ProjectionMode) -> Self {
+        Self {
+            mode,
+            demand: ReductionDemand::Published,
+            provenance: SurfaceProvenanceContext::MacroTypeArgOwnBody,
         }
     }
 
@@ -608,6 +684,7 @@ impl ProjectionReductionContext {
         Self {
             mode: ProjectionMode::Shallow,
             demand: ReductionDemand::StructuralTransit,
+            provenance: SurfaceProvenanceContext::Structural,
         }
     }
 
@@ -628,7 +705,49 @@ impl ProjectionReductionContext {
         Self {
             mode,
             demand: ReductionDemand::StructuralTransit,
+            provenance: SurfaceProvenanceContext::Structural,
         }
+    }
+
+    /// Return a copy with the surface provenance downgraded to
+    /// [`SurfaceProvenanceContext::Structural`].
+    ///
+    /// Used at every lowering edge that leaves the macro type-argument's
+    /// own body — member VALUE lowering, heritage descent, utility-type
+    /// source/target lowering, mapped-type production — so a nested
+    /// object inside a member value is NOT mis-stamped as macro-root
+    /// own-body.
+    #[must_use]
+    pub const fn into_structural_provenance(self) -> Self {
+        Self {
+            mode: self.mode,
+            demand: self.demand,
+            provenance: SurfaceProvenanceContext::Structural,
+        }
+    }
+
+    /// Return a copy with the surface provenance replaced by `provenance`
+    /// (mode + demand preserved). Used by the path walker's
+    /// `DeclPlaceholder` expansion to carry the caller's provenance onto
+    /// the unwrap `Instantiate`.
+    #[must_use]
+    pub const fn with_provenance(self, provenance: SurfaceProvenanceContext) -> Self {
+        Self {
+            mode: self.mode,
+            demand: self.demand,
+            provenance,
+        }
+    }
+
+    /// Whether this context is entering the macro type-argument's own
+    /// body (the single predicate the object-member lowering consults to
+    /// decide `declared_in_macro_type_arg`).
+    #[must_use]
+    pub const fn is_macro_type_arg_own_body(self) -> bool {
+        matches!(
+            self.provenance,
+            SurfaceProvenanceContext::MacroTypeArgOwnBody
+        )
     }
 }
 

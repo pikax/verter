@@ -441,16 +441,39 @@ impl PreparedTypeDecl {
         obj: &verter_type_expr::ObjectExpr,
     ) {
         for member in &obj.properties {
-            if let ObjectMember::Property(prop) = member {
-                // entry API: only insert if not already present
-                member_index
-                    .entry(prop.name.clone())
-                    .or_insert_with(|| PreparedMember {
-                        ty: prop.ty.clone(),
-                        optional: prop.optional,
-                        readonly: prop.readonly,
-                        is_method: false,
-                    });
+            match member {
+                ObjectMember::Property(prop) => {
+                    // entry API: only insert if not already present
+                    member_index
+                        .entry(prop.name.clone())
+                        .or_insert_with(|| PreparedMember {
+                            ty: prop.ty.clone(),
+                            optional: prop.optional,
+                            readonly: prop.readonly,
+                            is_method: false,
+                        });
+                }
+                ObjectMember::Method(method) => {
+                    // Own method members are also direct own-body members
+                    // — index them so the macro-surface own-member overlay
+                    // (`build_instantiate` → `backfill_member_index_surface`)
+                    // can stamp `declared_in_macro_type_arg` for an own
+                    // interface method (e.g. `interface Slots { default(): VNode[] }`).
+                    // The value is the method's function shape, mirroring
+                    // the generic object lowering that materialises methods
+                    // as canonical `Function` nodes.
+                    member_index
+                        .entry(method.name.clone())
+                        .or_insert_with(|| PreparedMember {
+                            ty: verter_type_expr::TypeExpr::Function(std::sync::Arc::new(
+                                method.function.clone(),
+                            )),
+                            optional: method.optional,
+                            readonly: false,
+                            is_method: true,
+                        });
+                }
+                _ => {}
             }
         }
     }
