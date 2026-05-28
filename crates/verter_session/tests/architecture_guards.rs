@@ -12815,7 +12815,7 @@ mod single_resolution_engine_guards {
     // No NEW production caller may be added.
     //
     // Line-precise allowlist (few sites, exact site matters):
-    //   * `imported_surface.rs:794` — the `from_eager_meta` DEFINITION (the
+    //   * `imported_surface.rs:841` — the `from_eager_meta` DEFINITION (the
     //     seam constructor). Deleted when the `Eager` arm is removed.
     //   * `macro_shapes.rs:988/1109/1409/1512` + `slot_binding_graph.rs:991` —
     //     the five macro-authority consumer call sites (the producer flip
@@ -12830,7 +12830,7 @@ mod single_resolution_engine_guards {
     const FROM_EAGER_META_ALLOWLIST: &[(&str, u32, &str)] = &[
         (
             "crates/verter_session/src/resolver_core/component_meta/imported_surface.rs",
-            794,
+            841,
             "from_eager_meta",
         ),
         (
