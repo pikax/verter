@@ -738,6 +738,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         .collect();
 
     publish_merged_bindings(
+        ctx.ctx,
         &dispatch,
         &graph_native_bindings,
         resolved_macros,
@@ -963,22 +964,34 @@ pub(crate) fn compute_bindings_via_graph(
 }
 
 pub(crate) fn publish_merged_bindings(
+    ctx: &dyn ResolverContext,
     dispatch: &ProjectSemanticDispatch<'_>,
     graph_native: &[GraphNativeBindingEntry],
     resolved_macros: &[ResolvedMacroMeta],
     expanded: &mut ExpandedComponentTypes,
     existing_names: &mut FxHashSet<String>,
 ) {
+    // Materialise each `defineSlots` macro's slot member set through the
+    // `ResolvedMacroSurface` enum (eager arm returns `.slots` verbatim,
+    // so this is bit-identical to the pre-migration direct `.slots`
+    // read; the lazy-imported arm reconstructs function-like slot
+    // members with their bindings). The owned vector outlives the
+    // borrowed `parser_index` below.
+    let slot_field_sets: Vec<Vec<verter_semantic::analysis::AnalyzedSlotField>> = resolved_macros
+        .iter()
+        .filter(|r| r.macro_kind == AnalyzedMacroKind::DefineSlots)
+        .map(|resolved| {
+            crate::resolver_core::ResolvedMacroSurface::from_eager_meta(resolved).slot_members(ctx)
+        })
+        .collect();
+
     // Index parser-path bindings by `(slot_name, binding_name)`.
     let mut parser_index: FxHashMap<
         (Arc<str>, Arc<str>),
         &verter_semantic::analysis::AnalyzedSlotFieldBinding,
     > = FxHashMap::default();
-    for resolved in resolved_macros
-        .iter()
-        .filter(|r| r.macro_kind == AnalyzedMacroKind::DefineSlots)
-    {
-        for slot in &resolved.slots {
+    for slots in &slot_field_sets {
+        for slot in slots {
             for binding in &slot.bindings {
                 parser_index.insert(
                     (
