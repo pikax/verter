@@ -105,6 +105,13 @@ pub(super) enum FamilyKey {
         /// the family-identity level so per-mode backfill stays within
         /// one provenance family.
         provenance: crate::semantic_query::SurfaceProvenanceContext,
+        /// Member-merge role dimension (codex BINDING design for the
+        /// type-resolution unification). A heritage-arm instantiation
+        /// (`MemberMergeRole::Heritage`) and a structural instantiation of
+        /// the SAME decl + args produce distinct surfaces (the inherited
+        /// members carry distinct merge roles), so they MUST NOT collide on
+        /// one family slot. Orthogonal to `provenance`.
+        merge_role: crate::semantic_query::MemberMergeRole,
     },
     ProjectMember {
         base: SemanticNodeId,
@@ -148,6 +155,12 @@ pub(super) enum FamilyKey {
         /// expanded DeclPlaceholder's own-body members), so they MUST
         /// NOT collide on one family slot.
         provenance: crate::semantic_query::SurfaceProvenanceContext,
+        /// Member-merge role dimension (codex BINDING design for the
+        /// type-resolution unification). The empty-path Shallow projection
+        /// of a heritage carrier under `MemberMergeRole::Heritage` produces a
+        /// distinct surface from a structural projection of the same
+        /// `(base, path)`, so they MUST NOT collide on one family slot.
+        merge_role: crate::semantic_query::MemberMergeRole,
     },
     /// Included for completeness so `family_and_slot` is total, but
     /// [`SemanticQueryKey::ResolvedNamedType`] bypasses the family memo at
@@ -432,6 +445,7 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
                 base: base.clone(),
                 args: Arc::clone(args),
                 provenance: context.provenance,
+                merge_role: context.merge_role,
             },
             context_to_slot(*context),
         ),
@@ -506,6 +520,7 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
                 base: *base,
                 path: Arc::clone(path),
                 provenance: context.provenance,
+                merge_role: context.merge_role,
             },
             context_to_slot(*context),
         ),

@@ -349,8 +349,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         // source member's structural shape — only the
                         // value's type-param occurrences change.
                         // Preserve the upstream
-                        // `declared_in_macro_type_arg` fact.
+                        // `declared_in_macro_type_arg` fact and merge role.
                         declared_in_macro_type_arg: member.declared_in_macro_type_arg,
+                        merge_role: member.merge_role,
                     });
                 }
                 let mut new_call_signatures = Vec::with_capacity(surface.call_signatures.len());

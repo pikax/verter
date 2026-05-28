@@ -646,6 +646,7 @@ pub(crate) fn preserve_package_backed_symbolic_refs_node(
                         readonly: materialised_member.readonly,
                         is_method: materialised_member.is_method,
                         declared_in_macro_type_arg: materialised_member.declared_in_macro_type_arg,
+                        merge_role: materialised_member.merge_role,
                     });
                     continue;
                 }
@@ -666,6 +667,7 @@ pub(crate) fn preserve_package_backed_symbolic_refs_node(
                     readonly: materialised_member.readonly,
                     is_method: materialised_member.is_method,
                     declared_in_macro_type_arg: materialised_member.declared_in_macro_type_arg,
+                    merge_role: materialised_member.merge_role,
                 });
             }
             if !any_changed {

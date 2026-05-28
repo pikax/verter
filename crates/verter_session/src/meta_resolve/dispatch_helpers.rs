@@ -1261,6 +1261,7 @@ pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
             mode: base_mode,
             demand,
             provenance: crate::semantic_query::SurfaceProvenanceContext::Structural,
+            merge_role: crate::semantic_query::MemberMergeRole::Authored,
         },
     )?;
     let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
@@ -1270,6 +1271,7 @@ pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
             mode: terminal_mode,
             demand,
             provenance: crate::semantic_query::SurfaceProvenanceContext::Structural,
+            merge_role: crate::semantic_query::MemberMergeRole::Authored,
         },
     });
     let projected = match read.value {

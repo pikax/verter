@@ -662,6 +662,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 readonly: readonly_in_all,
                 is_method: false,
                 declared_in_macro_type_arg: false,
+                // A synthesized union common member is reached THROUGH the
+                // union, not the macro-T own body or a heritage overlay —
+                // `Authored` (it never shadows / is shadowed).
+                merge_role: crate::semantic_query::MemberMergeRole::Authored,
             });
         }
         Some(MacroSurfaceView {

@@ -144,6 +144,59 @@ pub(super) fn resolve_expr(
     (expr, record.expect("typeinfo request emits audit"))
 }
 
+/// Resolve `name` to its carrier node (in `Navigate`, so heritage /
+/// intersection arms stay un-merged carriers) and then run the EMPTY-PATH
+/// `Shallow` `ProjectPath` terminal-surface synthesiser on it, projecting the
+/// synthesised one-level surface to a [`TypeExpr`].
+///
+/// This is the typeinfo-primary exercise for the empty-path Shallow
+/// projection (`expand_empty_path_shallow_terminal_surface`) — the load-bearing
+/// path the unification stage makes carry the COMPLETE surface fact set and the
+/// heritage-vs-authored merge. `resolve_named_symbol` alone dispatches
+/// `Instantiate` (not an empty-path `ProjectPath`), so it does NOT exercise the
+/// synthesiser; this helper does.
+pub(super) fn shallow_surface_expr(host: &VerterHost, canonical_id: &str, name: &str) -> TypeExpr {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{
+        ProjectionReductionContext, ResolveDeclKey, ScopeId, SemanticQueryApi, SemanticQueryKey,
+    };
+
+    let store_view = host.resolver_store_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+
+    // Base = the declaration CARRIER (a `DeclPlaceholder`), NOT a
+    // pre-instantiated body. The empty-path Shallow synthesiser's decl-root
+    // unwrap re-establishes the consuming declaration's KIND (interface/class
+    // vs alias) and classifies its heritage arms — exactly the base shape the
+    // U3 `resolve_surface_view` replacement consumes. Resolving via
+    // `ResolveDecl` (rather than `resolve_named_symbol`, which instantiates)
+    // keeps that carrier intact.
+    let base = match dispatch.execute(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: ScopeId {
+            canonical_id: Arc::from(canonical_id),
+            local_scope: None,
+        },
+        name: Arc::from(name),
+    })) {
+        crate::semantic_query::QueryResult::Value(node) => node,
+        other => panic!("{name} must resolve to a declaration carrier: {other:?}"),
+    };
+
+    let terminal = match dispatch.execute(SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(Vec::new().into_boxed_slice()),
+        context: ProjectionReductionContext::published(ProjectionMode::Shallow),
+    }) {
+        crate::semantic_query::QueryResult::Value(node) => node,
+        other => panic!("empty-path Shallow projection of {name} failed: {other:?}"),
+    };
+    dispatch
+        .raise_node_to_type_expr(terminal)
+        .unwrap_or_else(|| panic!("{name} empty-path Shallow surface must project to TypeExpr"))
+}
+
 pub(super) fn evaluate_expr(
     host: &VerterHost,
     scope: &str,
@@ -228,6 +281,38 @@ pub(super) fn object_index_signatures(expr: &TypeExpr) -> Vec<IndexSignature> {
         .iter()
         .filter_map(|member| match member {
             ObjectMember::IndexSignature(sig) => Some(sig.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Call signatures (`(args): ret`) carried on an object surface. Discriminates
+/// the empty-path Shallow projection's call-signature carriage — the prior
+/// projection dropped these.
+pub(super) fn object_call_signatures(expr: &TypeExpr) -> Vec<FunctionExpr> {
+    let TypeExpr::Object(object) = expr else {
+        panic!("expected object type, got {expr:?}");
+    };
+    object
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::CallSignature(function) => Some(function.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Construct signatures (`new (args): ret`) carried on an object surface.
+pub(super) fn object_construct_signatures(expr: &TypeExpr) -> Vec<FunctionExpr> {
+    let TypeExpr::Object(object) = expr else {
+        panic!("expected object type, got {expr:?}");
+    };
+    object
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::ConstructSignature(function) => Some(function.clone()),
             _ => None,
         })
         .collect()

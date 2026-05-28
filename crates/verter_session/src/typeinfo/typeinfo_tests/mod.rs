@@ -49,6 +49,7 @@ mod no_infer;
 mod recursive_conditional;
 mod recursive_union;
 mod relation_semantics;
+mod shallow_surface_facts;
 mod substitution_types;
 mod support;
 mod table_like;

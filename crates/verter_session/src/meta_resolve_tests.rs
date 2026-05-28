@@ -10948,6 +10948,7 @@ defineProps<{ value: Foo }>()
                         readonly: false,
                         is_method: false,
                         declared_in_macro_type_arg: false,
+                        merge_role: crate::semantic_query::MemberMergeRole::Authored,
                     },
                     SurfaceMember {
                         name: StdArc::from("b"),
@@ -10956,6 +10957,7 @@ defineProps<{ value: Foo }>()
                         readonly: false,
                         is_method: false,
                         declared_in_macro_type_arg: false,
+                        merge_role: crate::semantic_query::MemberMergeRole::Authored,
                     },
                     SurfaceMember {
                         name: StdArc::from("c"),
@@ -10964,6 +10966,7 @@ defineProps<{ value: Foo }>()
                         readonly: false,
                         is_method: false,
                         declared_in_macro_type_arg: false,
+                        merge_role: crate::semantic_query::MemberMergeRole::Authored,
                     },
                 ]
                 .into_boxed_slice(),
@@ -10991,6 +10994,7 @@ defineProps<{ value: Foo }>()
                         readonly: false,
                         is_method: false,
                         declared_in_macro_type_arg: false,
+                        merge_role: crate::semantic_query::MemberMergeRole::Authored,
                     },
                     SurfaceMember {
                         name: StdArc::from("b"),
@@ -10999,6 +11003,7 @@ defineProps<{ value: Foo }>()
                         readonly: false,
                         is_method: false,
                         declared_in_macro_type_arg: false,
+                        merge_role: crate::semantic_query::MemberMergeRole::Authored,
                     },
                     SurfaceMember {
                         name: StdArc::from("c"),
@@ -11007,6 +11012,7 @@ defineProps<{ value: Foo }>()
                         readonly: false,
                         is_method: false,
                         declared_in_macro_type_arg: false,
+                        merge_role: crate::semantic_query::MemberMergeRole::Authored,
                     },
                 ]
                 .into_boxed_slice(),

@@ -710,6 +710,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 is_method: false,
                                 declared_in_macro_type_arg: reduction_context
                                     .is_macro_type_arg_own_body(),
+                                // Leaf stamping of the surface-merge role from
+                                // the threaded context (codex BINDING design):
+                                // an interface/class own `Object` arm flows
+                                // `OwnBody`, a heritage reference arm flows
+                                // `Heritage`, everything else stays `Authored`.
+                                merge_role: reduction_context.merge_role(),
                             });
                         }
                         ObjectMember::Method(method) => {
@@ -756,6 +762,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 is_method: true,
                                 declared_in_macro_type_arg: reduction_context
                                     .is_macro_type_arg_own_body(),
+                                // Leaf stamping of the surface-merge role —
+                                // mirrors the `Property` arm.
+                                merge_role: reduction_context.merge_role(),
                             });
                         }
                         ObjectMember::CallSignature(func) => {

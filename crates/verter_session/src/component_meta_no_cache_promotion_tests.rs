@@ -64,6 +64,7 @@ fn intern_three_member_object(host: &VerterHost) -> SemanticNodeId {
             readonly: false,
             is_method: false,
             declared_in_macro_type_arg: false,
+            merge_role: crate::semantic_query::MemberMergeRole::Authored,
         };
         leaf = graph.intern_node(SemanticNodeData::Object(SurfaceView {
             members: Arc::from(vec![member].into_boxed_slice()),
@@ -94,6 +95,7 @@ fn intern_single_member_object(host: &VerterHost, name: &'static str) -> Semanti
         readonly: false,
         is_method: false,
         declared_in_macro_type_arg: false,
+        merge_role: crate::semantic_query::MemberMergeRole::Authored,
     };
     graph.intern_node(SemanticNodeData::Object(SurfaceView {
         members: Arc::from(vec![member].into_boxed_slice()),

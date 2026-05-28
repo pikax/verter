@@ -219,9 +219,26 @@ impl QueryBuildOutput {
 /// Transient walker-internal surface representation. Not interned in the
 /// semantic graph — only the final merged surface is interned via
 /// `SemanticNodeData::Object` once synthesis completes.
+///
+/// Carries the COMPLETE one-level surface fact set so the empty-path Shallow
+/// projection (`expand_empty_path_shallow_terminal_surface`) reconstructs a
+/// full `SurfaceView` rather than dropping signatures (the load-bearing fix
+/// for the type-resolution unification): named members PLUS call signatures,
+/// construct signatures, index signatures, and the keyspace. Members stay
+/// shallow — each `value` is a `SemanticNodeId`, never an expanded body.
 #[derive(Debug, Clone, Default)]
 pub struct ShallowSurface {
     pub members: Vec<ShallowSurfaceMember>,
+    /// Call signatures (`(args): ret`) carried verbatim from the contributing
+    /// `SurfaceView`. Each id is a `Function`-shaped node.
+    pub call_signatures: Vec<SemanticNodeId>,
+    /// Construct signatures (`new (args): ret`) carried verbatim.
+    pub construct_signatures: Vec<SemanticNodeId>,
+    /// Index signatures (`[k: K]: V`) carried verbatim.
+    pub index_signatures: Vec<crate::semantic_query::IndexSignature>,
+    /// Keyspace node when the surface is a mapped/keyspace carrier; `None`
+    /// for an ordinary object surface.
+    pub keyspace: Option<SemanticNodeId>,
 }
 
 /// One member contribution while the walker is merging arms. Carries the
@@ -229,11 +246,12 @@ pub struct ShallowSurface {
 /// can implement the TS rules (intersection: required-wins +
 /// readonly-OR; union: members in all arms).
 ///
-/// `declared_in_macro_type_arg` propagates the provenance bit from
+/// `declared_in_macro_type_arg` propagates the macro own-body bit from
 /// `SurfaceMember` through the dispatch walker's intermediate state so
 /// `surface_view_from_shallow` can reconstruct an accurate `SurfaceView`.
-/// Intersection / union merges OR the bit across arms: a member that is
-/// own-body in ANY arm reaches the merged surface as own-body.
+/// `merge_role` propagates the surface-merge role (OwnBody / Heritage /
+/// Authored) so the intersection merge can apply own-body-shadows-heritage
+/// ONLY to real interface/class heritage (not authored intersections).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShallowSurfaceMember {
     pub name: Arc<str>,
@@ -242,6 +260,7 @@ pub struct ShallowSurfaceMember {
     pub readonly: bool,
     pub is_method: bool,
     pub declared_in_macro_type_arg: bool,
+    pub merge_role: crate::semantic_query::MemberMergeRole,
 }
 
 impl ShallowSurface {
@@ -251,17 +270,17 @@ impl ShallowSurface {
     #[inline]
     #[must_use]
     pub fn empty() -> Self {
-        Self {
-            members: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Build a `ShallowSurface` from a `SurfaceView`. The members are
     /// cloned shallowly — `value` is a `SemanticNodeId` (Copy), so the
     /// clone cost is one Arc bump for `name`. `declared_in_macro_type_arg`
-    /// propagates from each `SurfaceMember` so the walker's intermediate
-    /// state preserves the own-body-vs-heritage provenance bit through
-    /// intersection / union merges.
+    /// and `merge_role` propagate from each `SurfaceMember` so the walker's
+    /// intermediate state preserves the provenance bit AND the merge role
+    /// through intersection / union merges. Call / construct / index
+    /// signatures and the keyspace are carried verbatim so the empty-path
+    /// Shallow projection no longer drops them.
     #[must_use]
     pub fn from_object(view: &SurfaceView) -> Self {
         Self {
@@ -275,8 +294,13 @@ impl ShallowSurface {
                     readonly: m.readonly,
                     is_method: m.is_method,
                     declared_in_macro_type_arg: m.declared_in_macro_type_arg,
+                    merge_role: m.merge_role,
                 })
                 .collect(),
+            call_signatures: view.call_signatures.to_vec(),
+            construct_signatures: view.construct_signatures.to_vec(),
+            index_signatures: view.index_signatures.to_vec(),
+            keyspace: view.keyspace,
         }
     }
 }
@@ -1841,11 +1865,14 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         LAST_SHALLOW_WALKER_MAX_FRAMES.store(0, Ordering::Relaxed);
 
         // Worklist seeded with a Visit on the input node, contributing
-        // to the root slot.
+        // to the root slot. No role override at the root — roles are baked at
+        // lowering / assigned at heritage-arm descent.
         let mut work: Vec<Frame> = Vec::with_capacity(8);
         work.push(Frame::Visit {
             node,
             target: BufferTarget::Root,
+            member_role_override: None,
+            heritage_overlay_body: false,
         });
 
         while let Some(frame) = work.pop() {
@@ -1867,7 +1894,12 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 break;
             }
             match frame {
-                Frame::Visit { node: cur, target } => {
+                Frame::Visit {
+                    node: cur,
+                    target,
+                    member_role_override,
+                    heritage_overlay_body,
+                } => {
                     tracing::trace!(
                         target: "verter::dispatch::walk",
                         node = ?cur,
@@ -1893,6 +1925,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     self.visit_shallow_node(
                         cur,
                         target,
+                        member_role_override,
+                        heritage_overlay_body,
                         &mut work,
                         &mut intersection_buffers,
                         &mut union_buffers,
@@ -1905,6 +1939,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     arm_index,
                     buffer_id,
                     kind,
+                    member_role_override,
+                    heritage_overlay,
                 } => {
                     if arm_index >= arms.len() {
                         // No more arms — the queued FlushIntersection /
@@ -1929,13 +1965,34 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // sits beneath it on the worklist.
                     if arm_index + 1 < arms.len() {
                         work.push(Frame::VisitArmAt {
-                            arms,
+                            arms: Arc::clone(&arms),
                             arm_index: arm_index + 1,
                             buffer_id,
                             kind,
+                            member_role_override,
+                            heritage_overlay,
                         });
                     }
-                    work.push(Frame::Visit { node: arm, target });
+                    // Per-arm role override (codex BINDING design): a
+                    // heritage-overlay body's REFERENCE-carrier arms are
+                    // `extends`/`implements` heritage — visit them with
+                    // `Some(Heritage)` so their inherited members (which the
+                    // base lowered as its own body) become `Heritage` relative
+                    // to the consuming declaration. The own `Object` arm keeps
+                    // its lowered `OwnBody` role (no override). Ordinary
+                    // intersections / unions just inherit the parent override.
+                    let arm_role_override =
+                        if heritage_overlay && !arm_is_object_surface(self.graph(), arm) {
+                            Some(crate::semantic_query::MemberMergeRole::Heritage)
+                        } else {
+                            member_role_override
+                        };
+                    work.push(Frame::Visit {
+                        node: arm,
+                        target,
+                        member_role_override: arm_role_override,
+                        heritage_overlay_body: false,
+                    });
                 }
                 Frame::FlushIntersection {
                     buffer_id,
@@ -1970,7 +2027,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                 });
                         }
                     }
-                    let merged = merge_union_surfaces(&arm_surfaces);
+                    let merged = merge_union_surfaces(self.graph(), &arm_surfaces);
                     self.contribute_surface(
                         parent_target,
                         &mut root_contribution,
@@ -2004,6 +2061,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         &mut self,
         cur: SemanticNodeId,
         target: BufferTarget,
+        member_role_override: Option<crate::semantic_query::MemberMergeRole>,
+        heritage_overlay_body: bool,
         work: &mut Vec<Frame>,
         intersection_buffers: &mut rustc_hash::FxHashMap<usize, Vec<Option<ShallowSurface>>>,
         union_buffers: &mut rustc_hash::FxHashMap<usize, Vec<Option<ShallowSurface>>>,
@@ -2025,8 +2084,19 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         };
         match &*data {
             SemanticNodeData::Object(view) => {
-                let surface = ShallowSurface::from_object(view);
+                let mut surface = ShallowSurface::from_object(view);
                 drop(data);
+                // Apply the heritage role override (codex BINDING design):
+                // when this Object was reached through a consuming
+                // declaration's `extends`/`implements` heritage carrier, its
+                // members (which the base lowered as its OWN body) become
+                // `Heritage` relative to the consuming declaration, so the
+                // own-body-shadows-heritage merge fires.
+                if let Some(role) = member_role_override {
+                    for member in &mut surface.members {
+                        member.merge_role = role;
+                    }
+                }
                 self.contribute_surface(
                     target,
                     root_contribution,
@@ -2054,6 +2124,12 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         arm_index: 0,
                         buffer_id,
                         kind: ArmKind::Intersection,
+                        // Propagate the parent override to ordinary arms; the
+                        // heritage-overlay flag (set by the decl-root unwrap
+                        // for an interface/class body) makes the per-arm
+                        // descent stamp reference arms `Heritage`.
+                        member_role_override,
+                        heritage_overlay: heritage_overlay_body,
                     });
                 }
             }
@@ -2074,6 +2150,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         arm_index: 0,
                         buffer_id,
                         kind: ArmKind::Union,
+                        member_role_override,
+                        heritage_overlay: false,
                     });
                 }
             }
@@ -2103,8 +2181,25 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     .with_provenance(self.provenance()),
                 }) {
                     QueryResult::Value(body) => {
-                        // Continue the walk into the materialised body.
-                        work.push(Frame::Visit { node: body, target });
+                        // Continue the walk into the materialised body. If the
+                        // instantiated declaration is an interface/class, its
+                        // body is an `extends`/`implements` heritage overlay —
+                        // mark it so the per-arm descent stamps reference arms
+                        // `Heritage`. Propagate any inbound override (this
+                        // decl-root may itself be a heritage carrier).
+                        let heritage_overlay_body = matches!(
+                            self.dispatch.prepared_decl_kind(&identity),
+                            Some(
+                                verter_semantic::analysis::type_eval::TypeDeclKind::Interface
+                                    | verter_semantic::analysis::type_eval::TypeDeclKind::Class
+                            )
+                        );
+                        work.push(Frame::Visit {
+                            node: body,
+                            target,
+                            member_role_override,
+                            heritage_overlay_body,
+                        });
                     }
                     QueryResult::Recursive(_) => {
                         self.walker_diagnostics
@@ -2165,7 +2260,22 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     .with_provenance(self.provenance()),
                 }) {
                     QueryResult::Value(body) => {
-                        work.push(Frame::Visit { node: body, target });
+                        // Interface/class declaration body → heritage overlay
+                        // (its reference arms are `extends`/`implements`). The
+                        // own `Object` arm keeps its lowered `OwnBody` role.
+                        let heritage_overlay_body = matches!(
+                            self.dispatch.prepared_decl_kind(&identity),
+                            Some(
+                                verter_semantic::analysis::type_eval::TypeDeclKind::Interface
+                                    | verter_semantic::analysis::type_eval::TypeDeclKind::Class
+                            )
+                        );
+                        work.push(Frame::Visit {
+                            node: body,
+                            target,
+                            member_role_override,
+                            heritage_overlay_body,
+                        });
                     }
                     QueryResult::Recursive(_) => {
                         self.walker_diagnostics
@@ -2256,6 +2366,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         arm_index: 0,
                         buffer_id,
                         kind: ArmKind::Union,
+                        member_role_override,
+                        heritage_overlay: false,
                     });
                 }
             }
@@ -2286,9 +2398,14 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             SemanticNodeData::Alias(alias_target) => {
                 let target_id = *alias_target;
                 drop(data);
+                // Follow the alias, preserving the role override + heritage
+                // flag so an identity-alias wrapper of a heritage carrier /
+                // interface body keeps its role classification.
                 work.push(Frame::Visit {
                     node: target_id,
                     target,
+                    member_role_override,
+                    heritage_overlay_body,
                 });
             }
             SemanticNodeData::DeclRef { identity } => {
@@ -2314,9 +2431,16 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                 None,
                             );
                         } else {
+                            // Resolve the carrier, preserving the role
+                            // override so a heritage `DeclRef` arm keeps its
+                            // `Heritage` override flowing into the resolved
+                            // declaration's body (cross-file / same-file
+                            // heritage members surface as `Heritage`).
                             work.push(Frame::Visit {
                                 node: resolved,
                                 target,
+                                member_role_override,
+                                heritage_overlay_body,
                             });
                         }
                     }
@@ -2659,10 +2783,20 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // macro's T body — it is reached structurally via
                     // the mapper. `false` is the structural truth.
                     declared_in_macro_type_arg: false,
+                    // A mapped-produced member is synthesized via the mapper,
+                    // never an interface/class heritage overlay — `Authored`
+                    // (it never shadows / is shadowed).
+                    merge_role: crate::semantic_query::MemberMergeRole::Authored,
                 }
             })
             .collect();
-        Some(ShallowSurface { members })
+        Some(ShallowSurface {
+            members,
+            call_signatures: Vec::new(),
+            construct_signatures: Vec::new(),
+            index_signatures: Vec::new(),
+            keyspace: None,
+        })
     }
 }
 
@@ -2697,6 +2831,24 @@ enum Frame {
     Visit {
         node: SemanticNodeId,
         target: BufferTarget,
+        /// Surface-merge role override (codex BINDING design for the
+        /// type-resolution unification): when `Some(role)`, every member of
+        /// the Object surface this node yields is stamped `role`, overriding
+        /// the role baked at lowering. Set to `Some(Heritage)` for a
+        /// declaration's `extends`/`implements` heritage carrier arm so the
+        /// inherited members (which `Base` lowered as its OWN body) become
+        /// `Heritage` RELATIVE to the consuming declaration — enabling the
+        /// own-body-shadows-heritage merge. Propagates verbatim through
+        /// carrier hops (Alias / DeclRef / Instantiate) so a cross-file
+        /// heritage carrier chain keeps the override down to the Object.
+        member_role_override: Option<crate::semantic_query::MemberMergeRole>,
+        /// True when this node is the body of an interface/class declaration
+        /// (an `extends`/`implements` heritage overlay). When the node is an
+        /// `Intersection`, its REFERENCE-carrier arms are heritage and are
+        /// visited with `member_role_override = Some(Heritage)`; the own
+        /// `Object` arm keeps its lowered `OwnBody` role. Only meaningful for
+        /// the immediate decl-body Intersection; sub-visits default to false.
+        heritage_overlay_body: bool,
     },
     /// Iterator frame for an Intersection / Union arm list. Pops at
     /// each step, pushes a `Visit` for the current arm and a fresh
@@ -2707,6 +2859,14 @@ enum Frame {
         arm_index: usize,
         buffer_id: usize,
         kind: ArmKind,
+        /// Surface-merge role override propagated to each arm's `Visit`
+        /// (carrier inheritance — a heritage carrier's arms keep the
+        /// override). `None` for ordinary intersections / unions.
+        member_role_override: Option<crate::semantic_query::MemberMergeRole>,
+        /// True when the parent node is an interface/class heritage-overlay
+        /// body: REFERENCE-carrier arms get `Some(Heritage)`, own `Object`
+        /// arms keep their lowered role.
+        heritage_overlay: bool,
     },
     FlushIntersection {
         buffer_id: usize,
@@ -2725,6 +2885,27 @@ enum Frame {
 enum ArmKind {
     Intersection,
     Union,
+}
+
+/// Whether an intersection arm node is an inline own-body `Object` surface
+/// (vs a reference carrier — `DeclRef` / `InstantiationRef` /
+/// `DeclPlaceholder` / alias chain to a reference).
+///
+/// Used by the empty-path Shallow walker to classify a heritage-overlay
+/// body's arms: an `Object` arm is the consuming declaration's OWN body
+/// (members keep their lowered `OwnBody` role); any other arm is the
+/// `extends`/`implements` heritage carrier (its members are overridden to
+/// `Heritage`). An `Alias` is followed one hop so an identity-alias wrapper of
+/// an own-body object is still classified as own-body.
+fn arm_is_object_surface(graph: &SemanticGraphStore, arm: SemanticNodeId) -> bool {
+    match graph.node_data(arm) {
+        Some(data) => match &*data {
+            SemanticNodeData::Object(_) => true,
+            SemanticNodeData::Alias(target) => arm_is_object_surface(graph, *target),
+            _ => false,
+        },
+        None => false,
+    }
 }
 
 /// Merge per-arm intersection surfaces under TS rules:
@@ -2748,79 +2929,173 @@ fn merge_intersection_surfaces_with_graph(
     if live.len() == 1 {
         return Some(live[0].clone());
     }
-    // Aggregate members by name. Track all distinct value ids per
-    // member so a later pass can merge them into an Intersection
-    // node when they diverge.
-    let mut by_name: indexmap::IndexMap<Arc<str>, MergedMember> = indexmap::IndexMap::new();
+    // Aggregate members by name. For each name track the own-body values and
+    // the heritage/authored values separately so the P2-1 own-body-shadows-
+    // heritage rule can apply ONLY to real interface/class heritage.
+    let mut by_name: indexmap::IndexMap<Arc<str>, MergedMemberAccum> = indexmap::IndexMap::new();
     for surface in &live {
         for member in &surface.members {
-            match by_name.get_mut(&member.name) {
-                Some(existing) => {
-                    existing.optional = existing.optional && member.optional;
-                    existing.readonly = existing.readonly || member.readonly;
-                    existing.is_method = existing.is_method || member.is_method;
-                    // Own-body in any arm wins on the merged surface
-                    // (TS intersection of `{x: own} & {x: heritage}` is
-                    // observably the own-body `x`).
-                    existing.declared_in_macro_type_arg =
-                        existing.declared_in_macro_type_arg || member.declared_in_macro_type_arg;
-                    if !existing.values.contains(&member.value) {
-                        existing.values.push(member.value);
-                    }
-                }
-                None => {
-                    by_name.insert(
-                        Arc::clone(&member.name),
-                        MergedMember {
-                            name: Arc::clone(&member.name),
-                            values: vec![member.value],
-                            optional: member.optional,
-                            readonly: member.readonly,
-                            is_method: member.is_method,
-                            declared_in_macro_type_arg: member.declared_in_macro_type_arg,
-                        },
-                    );
-                }
-            }
+            let accum = by_name
+                .entry(Arc::clone(&member.name))
+                .or_insert_with(|| MergedMemberAccum::new(&member.name));
+            accum.absorb(member);
         }
     }
     let members: Vec<ShallowSurfaceMember> = by_name
         .into_values()
-        .map(|m| {
-            let value = if m.values.len() == 1 {
-                m.values[0]
-            } else {
-                merge_value_nodes_recursive(graph, &m.values)
-            };
-            ShallowSurfaceMember {
-                name: m.name,
-                value,
-                optional: m.optional,
-                readonly: m.readonly,
-                is_method: m.is_method,
-                declared_in_macro_type_arg: m.declared_in_macro_type_arg,
-            }
-        })
+        .map(|accum| accum.finish(graph))
         .collect();
-    Some(ShallowSurface { members })
+
+    // Carry the non-member surface facts through the intersection. Call /
+    // construct signatures concatenate across arms (TS `A & B` of two
+    // call-signature carriers exposes BOTH overload sets); index signatures
+    // concatenate; the keyspace is the first arm's keyspace (an ordinary
+    // object intersection carries none). De-dup to keep interned identity
+    // stable.
+    let mut call_signatures: Vec<SemanticNodeId> = Vec::new();
+    let mut construct_signatures: Vec<SemanticNodeId> = Vec::new();
+    let mut index_signatures: Vec<crate::semantic_query::IndexSignature> = Vec::new();
+    let mut keyspace: Option<SemanticNodeId> = None;
+    for surface in &live {
+        for sig in &surface.call_signatures {
+            if !call_signatures.contains(sig) {
+                call_signatures.push(*sig);
+            }
+        }
+        for sig in &surface.construct_signatures {
+            if !construct_signatures.contains(sig) {
+                construct_signatures.push(*sig);
+            }
+        }
+        for sig in &surface.index_signatures {
+            if !index_signatures.contains(sig) {
+                index_signatures.push(sig.clone());
+            }
+        }
+        if keyspace.is_none() {
+            keyspace = surface.keyspace;
+        }
+    }
+
+    Some(ShallowSurface {
+        members,
+        call_signatures,
+        construct_signatures,
+        index_signatures,
+        keyspace,
+    })
 }
 
-/// Working aggregation for one merged member during intersection
-/// surface synthesis. Tracks all contributing value ids so a follow-up
-/// pass can merge them when they diverge across arms.
-///
-/// `declared_in_macro_type_arg` is OR-ed across arms: a member that
-/// reaches the merged surface as own-body in ANY arm propagates the
-/// own-body bit forward. This mirrors the TS semantic that an
-/// own-body declaration in any intersection arm makes the member
-/// own-body on the merged surface.
-struct MergedMember {
+/// Working aggregation for one merged member name during intersection surface
+/// synthesis. Separates own-body contributor values from heritage/authored
+/// contributor values so the P2-1 own-body-shadows-heritage rule applies ONLY
+/// to real interface/class heritage overlays (not authored intersections).
+struct MergedMemberAccum {
     name: Arc<str>,
-    values: Vec<SemanticNodeId>,
+    /// Distinct value nodes from `OwnBody` contributors.
+    own_body_values: Vec<SemanticNodeId>,
+    /// Distinct value nodes from `Heritage` / `Authored` contributors.
+    other_values: Vec<SemanticNodeId>,
+    /// True iff at least one contributor was `Heritage` (a real
+    /// interface/class `extends`/`implements` overlay).
+    saw_heritage: bool,
+    /// True iff at least one contributor was `OwnBody`.
+    saw_own_body: bool,
     optional: bool,
     readonly: bool,
     is_method: bool,
     declared_in_macro_type_arg: bool,
+}
+
+impl MergedMemberAccum {
+    fn new(name: &Arc<str>) -> Self {
+        Self {
+            name: Arc::clone(name),
+            own_body_values: Vec::new(),
+            other_values: Vec::new(),
+            saw_heritage: false,
+            saw_own_body: false,
+            // `optional` is required-wins (AND across arms); seed `true` so the
+            // first absorb sets the truth.
+            optional: true,
+            readonly: false,
+            is_method: false,
+            declared_in_macro_type_arg: false,
+        }
+    }
+
+    fn absorb(&mut self, member: &ShallowSurfaceMember) {
+        use crate::semantic_query::MemberMergeRole;
+        self.optional = self.optional && member.optional;
+        self.readonly = self.readonly || member.readonly;
+        self.is_method = self.is_method || member.is_method;
+        self.declared_in_macro_type_arg =
+            self.declared_in_macro_type_arg || member.declared_in_macro_type_arg;
+        match member.merge_role {
+            MemberMergeRole::OwnBody => {
+                self.saw_own_body = true;
+                if !self.own_body_values.contains(&member.value) {
+                    self.own_body_values.push(member.value);
+                }
+            }
+            MemberMergeRole::Heritage => {
+                self.saw_heritage = true;
+                if !self.other_values.contains(&member.value) {
+                    self.other_values.push(member.value);
+                }
+            }
+            MemberMergeRole::Authored => {
+                if !self.other_values.contains(&member.value) {
+                    self.other_values.push(member.value);
+                }
+            }
+        }
+    }
+
+    fn finish(self, graph: &SemanticGraphStore) -> ShallowSurfaceMember {
+        use crate::semantic_query::MemberMergeRole;
+        // P2-1 own-body-shadows-heritage: when the name has an own-body
+        // contributor AND a heritage contributor, the derived own-body member
+        // SHADOWS the inherited one (`interface Props extends Base { dup }` =>
+        // `Props['dup']` is the own `dup`, not `own & heritage`). The heritage
+        // values are dropped entirely. Authored intersections never set
+        // `saw_heritage`, so `type Props = Base & { dup }` falls through to the
+        // intersect branch and keeps `number & string`.
+        let (values, role): (Vec<SemanticNodeId>, MemberMergeRole) =
+            if self.saw_own_body && self.saw_heritage {
+                (self.own_body_values, MemberMergeRole::OwnBody)
+            } else {
+                // Intersect every distinct contributor value. Own-body values
+                // first preserves authored arm order for the common case.
+                let mut values = self.own_body_values;
+                for v in self.other_values {
+                    if !values.contains(&v) {
+                        values.push(v);
+                    }
+                }
+                let role = if self.saw_own_body {
+                    MemberMergeRole::OwnBody
+                } else if self.saw_heritage {
+                    MemberMergeRole::Heritage
+                } else {
+                    MemberMergeRole::Authored
+                };
+                (values, role)
+            };
+        let value = match values.as_slice() {
+            [single] => *single,
+            _ => merge_value_nodes_recursive(graph, &values),
+        };
+        ShallowSurfaceMember {
+            name: self.name,
+            value,
+            optional: self.optional,
+            readonly: self.readonly,
+            is_method: self.is_method,
+            declared_in_macro_type_arg: self.declared_in_macro_type_arg,
+            merge_role: role,
+        }
+    }
 }
 
 /// Merge the contributing value ids into a single semantic node. When
@@ -2868,12 +3143,31 @@ fn merge_value_nodes_recursive(
     )))
 }
 
-/// Merge per-arm union surfaces: a member survives iff present in EVERY
-/// arm. The merged member's value is the union of the arms' values.
-/// Returns the merged surface when at least one member survives;
-/// returns `Some(empty)` when no common members exist; returns None
-/// only when the arm surfaces vector is empty (defensive).
-fn merge_union_surfaces(arm_surfaces: &[Option<ShallowSurface>]) -> Option<ShallowSurface> {
+/// Merge per-arm union surfaces under the TS-correct common-member rule,
+/// matching the Stage 1.5 reader's `union_common_member_surface`:
+///
+/// - A member survives iff it is present (by name) in EVERY resolvable arm.
+/// - Its value is the UNION of the per-arm member value nodes (`(A | B)['k']`
+///   is `A['k'] | B['k']`).
+/// - `optional` iff optional in ANY arm; `readonly` iff readonly in ALL arms.
+/// - `is_method` / `declared_in_macro_type_arg` are `false`; the merge role is
+///   [`MemberMergeRole::Authored`] — a synthesized common member is reached
+///   THROUGH the union, never the macro-T own body or a heritage overlay, so
+///   it must not pretend to be own-body / heritage.
+/// - A union has no single call/construct/index surface, so the merged surface
+///   carries none.
+///
+/// Returns `Some(empty)` when there are no common members (a disjoint union
+/// resolved, it simply has no common members) or when any arm is a non-Object
+/// (`None`) surface — a union with an unreadable / non-Object arm has no
+/// common Object members. Returns `None` only when the arm vector is empty
+/// (defensive).
+fn merge_union_surfaces(
+    graph: &SemanticGraphStore,
+    arm_surfaces: &[Option<ShallowSurface>],
+) -> Option<ShallowSurface> {
+    use crate::semantic_query::MemberMergeRole;
+
     if arm_surfaces.is_empty() {
         return None;
     }
@@ -2886,32 +3180,67 @@ fn merge_union_surfaces(arm_surfaces: &[Option<ShallowSurface>]) -> Option<Shall
     if live.is_empty() {
         return Some(ShallowSurface::empty());
     }
-    let mut common: indexmap::IndexMap<Arc<str>, ShallowSurfaceMember> = indexmap::IndexMap::new();
-    for member in &live[0].members {
+    let mut members: Vec<ShallowSurfaceMember> = Vec::new();
+    for first_member in &live[0].members {
+        let mut per_arm_values: Vec<SemanticNodeId> = Vec::with_capacity(live.len());
+        let mut optional_in_any = false;
+        let mut readonly_in_all = true;
         let mut present_in_all = true;
-        for other in live.iter().skip(1) {
-            if !other.members.iter().any(|m| m.name == member.name) {
-                present_in_all = false;
-                break;
+        for arm in &live {
+            match arm.members.iter().find(|m| m.name == first_member.name) {
+                Some(arm_member) => {
+                    per_arm_values.push(arm_member.value);
+                    optional_in_any |= arm_member.optional;
+                    readonly_in_all &= arm_member.readonly;
+                }
+                None => {
+                    present_in_all = false;
+                    break;
+                }
             }
         }
-        if present_in_all {
-            common.insert(Arc::clone(&member.name), member.clone());
+        if !present_in_all {
+            continue;
         }
+        // Value type = union of the per-arm member values. A single shared
+        // value node stays as-is (no singleton union wrapper).
+        let value = if per_arm_values.len() == 1 {
+            per_arm_values[0]
+        } else {
+            graph.intern_node(SemanticNodeData::Union(Arc::from(
+                per_arm_values.into_boxed_slice(),
+            )))
+        };
+        members.push(ShallowSurfaceMember {
+            name: Arc::clone(&first_member.name),
+            value,
+            optional: optional_in_any,
+            readonly: readonly_in_all,
+            is_method: false,
+            declared_in_macro_type_arg: false,
+            merge_role: MemberMergeRole::Authored,
+        });
     }
     Some(ShallowSurface {
-        members: common.into_values().collect(),
+        members,
+        call_signatures: Vec::new(),
+        construct_signatures: Vec::new(),
+        index_signatures: Vec::new(),
+        keyspace: None,
     })
 }
 
 fn surface_view_from_shallow(surface: &ShallowSurface) -> SurfaceView {
-    // `declared_in_macro_type_arg` is propagated from each
-    // `ShallowSurfaceMember`. The dispatch walker preserves the bit
-    // through intersection / union merges (own-body in any arm wins;
-    // mapped-type synthesis seeds `false` as the structural truth for
-    // composed members; `from_object` clones the bit from
-    // `SurfaceMember`). Round-tripping through `ShallowSurface` is
-    // therefore lossless for the provenance bit.
+    // `declared_in_macro_type_arg` and `merge_role` propagate from each
+    // `ShallowSurfaceMember`. The dispatch walker preserves both through
+    // intersection / union merges, so round-tripping through
+    // `ShallowSurface` is lossless for the member provenance.
+    //
+    // Call / construct / index signatures and the keyspace are carried
+    // verbatim from the `ShallowSurface` — the empty-path Shallow projection
+    // no longer drops them (the load-bearing fix for the type-resolution
+    // unification). `has_index_signature` is derived from the carried index
+    // signatures so it stays consistent with them.
     let members: Vec<SurfaceMember> = surface
         .members
         .iter()
@@ -2922,17 +3251,16 @@ fn surface_view_from_shallow(surface: &ShallowSurface) -> SurfaceView {
             readonly: m.readonly,
             is_method: m.is_method,
             declared_in_macro_type_arg: m.declared_in_macro_type_arg,
+            merge_role: m.merge_role,
         })
         .collect();
     SurfaceView {
         members: Arc::from(members.into_boxed_slice()),
-        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        index_signatures: Arc::from(
-            Vec::<crate::semantic_query::IndexSignature>::new().into_boxed_slice(),
-        ),
-        keyspace: None,
-        has_index_signature: false,
+        call_signatures: Arc::from(surface.call_signatures.clone().into_boxed_slice()),
+        construct_signatures: Arc::from(surface.construct_signatures.clone().into_boxed_slice()),
+        index_signatures: Arc::from(surface.index_signatures.clone().into_boxed_slice()),
+        keyspace: surface.keyspace,
+        has_index_signature: !surface.index_signatures.is_empty(),
     }
 }
 

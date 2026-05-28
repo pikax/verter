@@ -618,7 +618,47 @@ pub enum SurfaceProvenanceContext {
     MacroTypeArgOwnBody,
 }
 
-/// Projection reduction context — the `(mode, demand, provenance)`
+/// Member-merge role — the surface-merge provenance axis (codex BINDING
+/// design for the type-resolution unification). Orthogonal to
+/// [`SurfaceProvenanceContext`] (which records macro-type-argument own-body
+/// participation): a plain non-macro `resolve_named_symbol` carries
+/// `SurfaceProvenanceContext::Structural` yet still needs the merge role to
+/// implement TS derived-member precedence.
+///
+/// The role drives the intersection surface merge's own-body-shadows-heritage
+/// decision (`merge_intersection_surfaces_with_graph`): an interface/class
+/// `extends`/`implements` overlay shadows (the derived `OwnBody` member wins
+/// over the inherited `Heritage` member), but an authored intersection
+/// (`type Props = Base & { dup }`) does NOT shadow — its arms intersect.
+///
+/// Stamped at the object-member lowering leaf from the threaded
+/// [`ProjectionReductionContext::merge_role`], exactly like
+/// `declared_in_macro_type_arg` is stamped from the provenance axis. The role
+/// is RELATIVE to the consuming declaration: a member inherited through an
+/// `interface Props extends Base` arm is `Heritage` even though it is
+/// `Base`'s own-body member, because the consuming declaration's heritage-arm
+/// context flows into the carrier resolution.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum MemberMergeRole {
+    /// Reached via an authored reference / synthesized construction — an
+    /// authored intersection's reference arm (`type Props = Base & { … }`'s
+    /// `Base`), a union common-member, a mapped-type produced member, or any
+    /// plain structural object lowering. Authored members do NOT participate
+    /// in own-body-shadows-heritage; duplicate authored members intersect.
+    #[default]
+    Authored,
+    /// Declared in the consuming declaration's OWN body (an inline object
+    /// literal at the declaration / macro-T own body). For an interface/class
+    /// the own-body member SHADOWS an inherited `Heritage` member of the same
+    /// name (TS derived-member precedence).
+    OwnBody,
+    /// Reached via a REAL interface/class `extends`/`implements` heritage
+    /// overlay of the consuming declaration. SHADOWED by an `OwnBody` member
+    /// of the same name.
+    Heritage,
+}
+
+/// Projection reduction context — the `(mode, demand, provenance, merge_role)`
 /// tuple threaded through every operator dispatch (`Instantiate` /
 /// `KeyOf` / `MappedType` and the builtin-utility dispatch that
 /// composes them).
@@ -641,6 +681,15 @@ pub struct ProjectionReductionContext {
     /// `ProjectPath`), so a macro-root surface and a structural surface
     /// of the same node cache in distinct slots.
     pub provenance: SurfaceProvenanceContext,
+    /// Member-merge role axis (codex BINDING design for the type-resolution
+    /// unification). Orthogonal to [`Self::provenance`]; drives the
+    /// own-body-shadows-heritage decision in the intersection surface merge.
+    /// Defaults to [`MemberMergeRole::Authored`]; the consuming declaration's
+    /// per-arm lowering (`lower_decl_body_with_provenance`) and the walker's
+    /// heritage-arm propagation set `OwnBody` / `Heritage`. Folded into
+    /// `FamilyKey` for `Instantiate` / `ProjectPath` so a heritage-arm
+    /// surface and a structural surface of the same node cache distinctly.
+    pub merge_role: MemberMergeRole,
 }
 
 impl ProjectionReductionContext {
@@ -648,12 +697,14 @@ impl ProjectionReductionContext {
     /// canonical entry point for the publication pipeline (projector,
     /// component-meta materialisation, typeinfo, explicit path walks).
     ///
-    /// Provenance defaults to [`SurfaceProvenanceContext::Structural`].
+    /// Provenance defaults to [`SurfaceProvenanceContext::Structural`];
+    /// merge role defaults to [`MemberMergeRole::Authored`].
     pub const fn published(mode: ProjectionMode) -> Self {
         Self {
             mode,
             demand: ReductionDemand::Published,
             provenance: SurfaceProvenanceContext::Structural,
+            merge_role: MemberMergeRole::Authored,
         }
     }
 
@@ -672,6 +723,7 @@ impl ProjectionReductionContext {
             mode,
             demand: ReductionDemand::Published,
             provenance: SurfaceProvenanceContext::MacroTypeArgOwnBody,
+            merge_role: MemberMergeRole::Authored,
         }
     }
 
@@ -685,6 +737,7 @@ impl ProjectionReductionContext {
             mode: ProjectionMode::Shallow,
             demand: ReductionDemand::StructuralTransit,
             provenance: SurfaceProvenanceContext::Structural,
+            merge_role: MemberMergeRole::Authored,
         }
     }
 
@@ -706,6 +759,7 @@ impl ProjectionReductionContext {
             mode,
             demand: ReductionDemand::StructuralTransit,
             provenance: SurfaceProvenanceContext::Structural,
+            merge_role: MemberMergeRole::Authored,
         }
     }
 
@@ -717,17 +771,22 @@ impl ProjectionReductionContext {
     /// source/target lowering, mapped-type production — so a nested
     /// object inside a member value is NOT mis-stamped as macro-root
     /// own-body.
+    ///
+    /// The [`Self::merge_role`] axis is PRESERVED — downgrading the macro
+    /// own-body provenance does not change a member's heritage/own/authored
+    /// merge role (the two axes are orthogonal).
     #[must_use]
     pub const fn into_structural_provenance(self) -> Self {
         Self {
             mode: self.mode,
             demand: self.demand,
             provenance: SurfaceProvenanceContext::Structural,
+            merge_role: self.merge_role,
         }
     }
 
     /// Return a copy with the surface provenance replaced by `provenance`
-    /// (mode + demand preserved). Used by the path walker's
+    /// (mode + demand + merge_role preserved). Used by the path walker's
     /// `DeclPlaceholder` expansion to carry the caller's provenance onto
     /// the unwrap `Instantiate`.
     #[must_use]
@@ -736,6 +795,23 @@ impl ProjectionReductionContext {
             mode: self.mode,
             demand: self.demand,
             provenance,
+            merge_role: self.merge_role,
+        }
+    }
+
+    /// Return a copy with the member-merge role replaced by `merge_role`
+    /// (mode + demand + provenance preserved). Used by
+    /// `lower_decl_body_with_provenance` to stamp an interface/class own
+    /// `Object` arm `OwnBody` and a heritage reference arm `Heritage`, and by
+    /// the empty-path Shallow walker to propagate the heritage role into a
+    /// deferred-carrier resolution.
+    #[must_use]
+    pub const fn with_merge_role(self, merge_role: MemberMergeRole) -> Self {
+        Self {
+            mode: self.mode,
+            demand: self.demand,
+            provenance: self.provenance,
+            merge_role,
         }
     }
 
@@ -748,6 +824,14 @@ impl ProjectionReductionContext {
             self.provenance,
             SurfaceProvenanceContext::MacroTypeArgOwnBody
         )
+    }
+
+    /// The member-merge role this context stamps onto object members it
+    /// lowers (the single accessor the object-member lowering consults to
+    /// set [`SurfaceMember::merge_role`]).
+    #[must_use]
+    pub const fn merge_role(self) -> MemberMergeRole {
+        self.merge_role
     }
 }
 
@@ -831,6 +915,18 @@ pub struct SurfaceMember {
     /// for the structural definition. Propagated through the prepared-surface
     /// walker and `surface_member_to_expanded_field`.
     pub declared_in_macro_type_arg: bool,
+    /// Surface-merge role (codex BINDING design for the type-resolution
+    /// unification). Distinguishes a member declared in the consuming
+    /// declaration's OWN body ([`MemberMergeRole::OwnBody`]) from one reached
+    /// via REAL interface/class `extends`/`implements` heritage
+    /// ([`MemberMergeRole::Heritage`]) and from an authored-reference /
+    /// synthesized member ([`MemberMergeRole::Authored`]). Drives the
+    /// own-body-shadows-heritage decision in the intersection surface merge
+    /// (`merge_intersection_surfaces_with_graph`). Stamped at the
+    /// object-member lowering leaf from
+    /// [`ProjectionReductionContext::merge_role`], orthogonal to
+    /// `declared_in_macro_type_arg` (which is macro-only).
+    pub merge_role: MemberMergeRole,
 }
 
 /// One index signature (`{ [K: K_T]: V_T }` or `{ readonly [K: K_T]: V_T }`)

@@ -928,6 +928,7 @@ fn required_member(name: &str, value: crate::semantic_query::SemanticNodeId) -> 
         readonly: false,
         is_method: false,
         declared_in_macro_type_arg: false,
+        merge_role: crate::semantic_query::MemberMergeRole::Authored,
     }
 }
 
@@ -939,6 +940,7 @@ fn optional_member(name: &str, value: crate::semantic_query::SemanticNodeId) -> 
         readonly: false,
         is_method: false,
         declared_in_macro_type_arg: false,
+        merge_role: crate::semantic_query::MemberMergeRole::Authored,
     }
 }
 
@@ -2914,6 +2916,7 @@ fn ax_hybrid_key_of_carrier_stops_under_structural_transit() {
             readonly: false,
             is_method: false,
             declared_in_macro_type_arg: false,
+            merge_role: crate::semantic_query::MemberMergeRole::Authored,
         },
         SurfaceMember {
             name: Arc::from("b"),
@@ -2922,6 +2925,7 @@ fn ax_hybrid_key_of_carrier_stops_under_structural_transit() {
             readonly: false,
             is_method: false,
             declared_in_macro_type_arg: false,
+            merge_role: crate::semantic_query::MemberMergeRole::Authored,
         },
     ])));
 
@@ -2998,6 +3002,7 @@ fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
             readonly: false,
             is_method: false,
             declared_in_macro_type_arg: false,
+            merge_role: crate::semantic_query::MemberMergeRole::Authored,
         },
         SurfaceMember {
             name: Arc::from("b"),
@@ -3006,6 +3011,7 @@ fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
             readonly: false,
             is_method: false,
             declared_in_macro_type_arg: false,
+            merge_role: crate::semantic_query::MemberMergeRole::Authored,
         },
     ])));
 
@@ -3116,6 +3122,7 @@ fn ax_hybrid_userland_mypick_follows_same_carrier_stop_as_builtin_pick() {
             readonly: false,
             is_method: false,
             declared_in_macro_type_arg: false,
+            merge_role: crate::semantic_query::MemberMergeRole::Authored,
         },
     ])));
 
@@ -3226,6 +3233,7 @@ fn ax_hybrid_may_reduce_operator_predicate_is_purely_structural() {
             mode,
             demand,
             provenance: crate::semantic_query::SurfaceProvenanceContext::Structural,
+            merge_role: crate::semantic_query::MemberMergeRole::Authored,
         };
         assert_eq!(
             may_reduce_operator(ctx),

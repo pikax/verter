@@ -1494,6 +1494,7 @@ fn materialize_object_surface(
             // value is materialised, the structural fact is carried
             // through unchanged from the upstream `SurfaceMember`.
             declared_in_macro_type_arg: member.declared_in_macro_type_arg,
+            merge_role: member.merge_role,
         });
     }
 

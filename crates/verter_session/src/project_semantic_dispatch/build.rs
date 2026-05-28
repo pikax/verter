@@ -803,6 +803,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
         .with_observed_self_roots(observed_self_roots)
     }
 
+    /// Resolve the typed declaration kind of a prepared declaration rooted at
+    /// `identity` (Alias vs Interface vs Class).
+    ///
+    /// Used by the empty-path Shallow walker to decide whether a declaration
+    /// body's reference arms are REAL interface/class heritage (which shadows)
+    /// or an authored intersection (which intersects) — the P2-1
+    /// distinguishing fact. Returns `None` when the prepared decl cannot be
+    /// recovered, in which case the caller treats the body as non-heritage.
+    pub(super) fn prepared_decl_kind(
+        &self,
+        identity: &DeclIdentity,
+    ) -> Option<verter_semantic::analysis::type_eval::TypeDeclKind> {
+        let scope = NodeScopeId::File {
+            canonical_id: Arc::clone(&identity.canonical_id),
+            whole_hash: identity.whole_hash,
+            local_scope: None,
+        };
+        let base = self
+            .graph()
+            .intern_node_with_scope(SemanticNodeData::Opaque(QueryError::Miss), scope);
+        let adapter = SessionDispatchHost::new(self.ctx);
+        let ri =
+            ResolvedRootIdentity::new(identity.canonical_id.as_ref(), identity.decl_name.as_ref());
+        adapter
+            .resolve_prepared_type_decl(base, &ri)
+            .map(|prepared| prepared.kind)
+    }
+
     /// Lower a prepared declaration's `body` carrying the macro-surface
     /// provenance with own-body-vs-heritage discrimination (codex
     /// BINDING design).
@@ -860,21 +888,42 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
 
+        // Member-merge role for this declaration's REFERENCE arms (codex
+        // BINDING design for the type-resolution unification). A reference arm
+        // of an interface/class body is REAL `extends`/`implements` heritage —
+        // its inherited members are `Heritage` and SHADOWED by the own-body
+        // members. A reference arm of a type-alias body is an AUTHORED
+        // intersection arm (`type Props = Base & { dup }`) — its members are
+        // `Authored` and must NOT shadow (they intersect). This is the single
+        // distinguishing fact P2-1 turns on, read from the typed
+        // `prepared.kind`.
+        use crate::semantic_query::MemberMergeRole;
+        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        let reference_arm_role = match prepared.kind {
+            TypeDeclKind::Interface | TypeDeclKind::Class => MemberMergeRole::Heritage,
+            TypeDeclKind::Alias => MemberMergeRole::Authored,
+        };
+
         match &prepared.body {
             TypeExpr::Intersection(arms) => {
-                // Per-arm provenance: inline-object own-body arms keep the
-                // caller's provenance; reference arms (heritage `extends`
-                // Refs, or named refs in an author intersection `A & B`)
-                // decay to structural. Re-intern the merged Intersection
-                // so the consumer-visible shape is unchanged.
-                let structural = context.into_structural_provenance();
+                // Per-arm provenance + merge role: inline-object own-body arms
+                // keep the caller's provenance and carry `OwnBody`; reference
+                // arms (heritage `extends` Refs for interface/class, or named
+                // refs in an author intersection `A & B` for an alias) decay to
+                // structural provenance and carry `reference_arm_role`. The
+                // own-body arm's members thus SHADOW heritage members of the
+                // same name in the surface merge, while authored-intersection
+                // arms intersect. Re-intern the merged Intersection so the
+                // consumer-visible shape is unchanged.
                 let arm_ids: Vec<SemanticNodeId> = arms
                     .iter()
                     .map(|arm| {
                         let arm_context = if arm_is_own_body(arm) {
-                            context
+                            context.with_merge_role(MemberMergeRole::OwnBody)
                         } else {
-                            structural
+                            context
+                                .into_structural_provenance()
+                                .with_merge_role(reference_arm_role)
                         };
                         self.shallow_lower_type_expr_with_context(
                             arm,
@@ -901,11 +950,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
             // Non-intersection body: a plain inline `Object` (own-body
-            // members → caller provenance), or a single reference / other
-            // shape. For a single direct reference at the macro-T root the
-            // caller's provenance flows into the referenced decl's own
+            // members → caller provenance + `OwnBody`), or a single reference /
+            // other shape. For a single direct reference at the macro-T root
+            // the caller's provenance flows into the referenced decl's own
             // object body (which surfaces own members `true`, heritage
-            // `false` via this same per-arm split one level down).
+            // `false` via this same per-arm split one level down). A plain
+            // inline object body carries `OwnBody` so a later intersection
+            // (e.g. via declaration merging) shadows heritage correctly.
+            TypeExpr::Object(_) | TypeExpr::Parenthesized(_) => self
+                .shallow_lower_type_expr_with_context(
+                    &prepared.body,
+                    env,
+                    scope,
+                    &prepared.name_resolution,
+                    scope_payload,
+                    shadowing,
+                    substitutions,
+                    context.with_merge_role(MemberMergeRole::OwnBody),
+                ),
             _ => self.shallow_lower_type_expr_with_context(
                 &prepared.body,
                 env,
@@ -1009,6 +1071,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     readonly: member.readonly,
                     is_method: member.is_method,
                     declared_in_macro_type_arg: own_body_bit,
+                    // `member_index` is the declaration's OWN-body direct
+                    // member index (heritage `extends` arms are excluded), so
+                    // an appended member is own-body — it SHADOWS an inherited
+                    // heritage member of the same name.
+                    merge_role: crate::semantic_query::MemberMergeRole::OwnBody,
                 }
             })
             .collect::<Vec<_>>();
@@ -2355,6 +2422,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 readonly,
                 is_method: false,
                 declared_in_macro_type_arg: false,
+                // Mapped-type produced members are synthesized by the mapped
+                // construction, never an interface/class heritage overlay —
+                // `Authored` (they do not participate in own-body shadowing).
+                merge_role: crate::semantic_query::MemberMergeRole::Authored,
             });
             project_member_edges.push((value, produced_name));
         }
