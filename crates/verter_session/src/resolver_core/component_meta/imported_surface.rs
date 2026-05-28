@@ -100,7 +100,11 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::types::AnalyzedMacroKind;
+use verter_semantic::analysis::types::{
+    AnalyzedEmitField, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField,
+    AnalyzedSlotFieldBinding,
+};
+use verter_type_expr::{LiteralValue, TypeExpr, TypeExprScope};
 
 use crate::resolver_core::{
     ResolvedJsdocBlock, ResolvedNativeProp, ResolvedTypeDeclaration, ResolverContext,
@@ -386,6 +390,61 @@ impl ImportedMacroSurface {
         let names = dispatch.key_names_from_base_node(root).unwrap_or_default();
         QueryResult::Value(names)
     }
+
+    /// Resolve the imported declaration to its one-level
+    /// [`MacroSurfaceView`](crate::project_semantic_dispatch::enumerate::MacroSurfaceView)
+    /// — named members (with their TS member metadata) + call
+    /// signatures.
+    ///
+    /// This is the surface-level accessor the macro-shape
+    /// interpretation drives: the lazy arm reads member optionality /
+    /// `declared_in_macro_type_arg` and extracts `defineEmits`
+    /// call-signature event names from this view, exactly as the eager
+    /// rail reads them off `ResolvedElements`.
+    ///
+    /// Composition (path-precise): dispatch `ResolveDecl` to obtain the
+    /// root node, then hand it to the single shared surface enumerator
+    /// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::surface_view_from_base_node`],
+    /// which owns the declaration-placeholder unwrap + Intersection
+    /// member/call-signature accumulation. The enumerator reads only the
+    /// one-level surface — member VALUE types are projected lazily by
+    /// [`Self::project_named_member`] / [`Self::raise_member_value`],
+    /// never eagerly walked here.
+    ///
+    /// Bumps the bridge-demand counter exactly once per call (matching
+    /// the once-per-public-accessor discipline of the other accessors).
+    ///
+    /// Failure / empty semantics mirror [`Self::enumerate_member_names`]:
+    /// the root `ResolveDecl` `Error` / `Recursive` variants propagate,
+    /// and a resolved root with no enumerable surface yields
+    /// `QueryResult::Value(MacroSurfaceView::default())` (empty).
+    pub(crate) fn resolve_surface_view(
+        &self,
+        ctx: &dyn ResolverContext,
+    ) -> QueryResult<crate::project_semantic_dispatch::enumerate::MacroSurfaceView> {
+        bump_projection_counter();
+        let dispatch = ctx.dispatch();
+        let root = match dispatch.execute(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: self.identity.top_level_scope(),
+            name: Arc::clone(&self.identity.type_name),
+        })) {
+            QueryResult::Value(node) => node,
+            QueryResult::Error(err) => return QueryResult::Error(err),
+            QueryResult::Recursive(node) => return QueryResult::Recursive(node),
+        };
+        let view = dispatch
+            .surface_view_from_base_node(root)
+            .unwrap_or_default();
+        QueryResult::Value(view)
+    }
+
+    /// Raise a member value node back to a [`TypeExpr`] through the
+    /// shared structural raiser. Returns `None` when the node has no
+    /// raisable shape (the caller substitutes `TypeExpr::Unknown`,
+    /// matching the eager rail's missing-`type_expr` fallback).
+    fn raise_member_value(ctx: &dyn ResolverContext, node: SemanticNodeId) -> Option<TypeExpr> {
+        ctx.dispatch().raise_node_to_type_expr(node)
+    }
 }
 
 /// Eager-resolved-macro newtype mirroring the existing public
@@ -438,6 +497,310 @@ pub enum ResolvedMacroSurface {
     /// Degenerate "no macro surface" arm — used by callers that
     /// distinguish "macro absent" from "macro present but empty".
     Empty,
+}
+
+impl ResolvedMacroSurface {
+    /// Wrap an existing eager [`crate::resolver_core::ResolvedMacroMeta`]
+    /// surface as a [`ResolvedMacroSurface::Eager`].
+    ///
+    /// This is the seam between the OXC-resolved-elements rail (which
+    /// produces `ResolvedMacroMeta`) and the shared macro-shape
+    /// interpretation. Every macro-shape consumer wraps the matching
+    /// `ResolvedMacroMeta` here before reading its members through the
+    /// shared [`Self::prop_members`] / [`Self::emit_members`] /
+    /// [`Self::slot_members`] accessors. The eager arm returns the
+    /// stored fields verbatim, so the wrap-then-read round-trip is
+    /// bit-identical to a direct `.props` / `.emits` / `.slots` read.
+    #[must_use]
+    pub(crate) fn from_eager_meta(meta: &crate::resolver_core::ResolvedMacroMeta) -> Self {
+        ResolvedMacroSurface::Eager(Box::new(EagerResolvedMacro {
+            macro_index: meta.macro_index,
+            macro_kind: meta.macro_kind,
+            type_name: meta.type_name.clone(),
+            import_source: meta.import_source.clone(),
+            surface_is_authoritative: meta.surface_is_authoritative,
+            declaration: meta.declaration.clone(),
+            native_props: meta.native_props.clone(),
+            props: meta.props.clone(),
+            emits: meta.emits.clone(),
+            slots: meta.slots.clone(),
+            jsdoc: meta.jsdoc.clone(),
+        }))
+    }
+
+    /// The `defineProps` member set this surface contributes.
+    ///
+    /// **The single shared prop interpretation both arms feed.** Raw
+    /// `keyof` candidate names ARE the prop candidates (codex
+    /// per-macro-kind guidance); the shared shape producers
+    /// (`synthesize_define_props_shape_from_known_surface_with_authority`)
+    /// apply defaults / optionality / value-type projection on top.
+    ///
+    /// - [`Self::Eager`] → the stored `props` vector verbatim
+    ///   (bit-identical to the pre-migration direct field read).
+    /// - [`Self::LazyImported`] → resolve the imported declaration's
+    ///   one-level surface and reconstruct one [`AnalyzedPropField`] per
+    ///   named member, carrying the member's `optional` /
+    ///   `declared_in_macro_type_arg` metadata and the lazily-projected
+    ///   value `TypeExpr`. Call signatures are NOT props — they are
+    ///   ignored here.
+    /// - [`Self::Empty`] → empty.
+    #[must_use]
+    pub(crate) fn prop_members(&self, ctx: &dyn ResolverContext) -> Vec<AnalyzedPropField> {
+        match self {
+            ResolvedMacroSurface::Eager(eager) => eager.props.clone(),
+            ResolvedMacroSurface::LazyImported(surface) => {
+                let view = match surface.resolve_surface_view(ctx) {
+                    QueryResult::Value(view) => view,
+                    QueryResult::Error(_) | QueryResult::Recursive(_) => return Vec::new(),
+                };
+                let scope = TypeExprScope::new(surface.identity.canonical_id.as_ref());
+                view.members
+                    .iter()
+                    .map(|member| {
+                        let type_expr = ImportedMacroSurface::raise_member_value(ctx, member.value);
+                        let type_expr_scope = type_expr.is_some().then(|| scope.clone());
+                        AnalyzedPropField {
+                            name: member.name.as_ref().to_string(),
+                            is_optional: member.optional,
+                            span: verter_span::Span::default(),
+                            type_annotation: None,
+                            type_expr,
+                            type_expr_scope,
+                            description: None,
+                            tags: Vec::new(),
+                            resolution_source:
+                                verter_semantic::analysis::types::TypeResolutionSource::default(),
+                            resolution_error: None,
+                            declared_in_macro_type_arg: member.declared_in_macro_type_arg,
+                        }
+                    })
+                    .collect()
+            }
+            ResolvedMacroSurface::Empty => Vec::new(),
+        }
+    }
+
+    /// The `defineEmits` member set this surface contributes.
+    ///
+    /// **The single shared emit interpretation both arms feed.**
+    /// Property-style keys come from raw member names, BUT
+    /// **call-signature emits MUST extract event names from the call
+    /// signatures, NOT from `keyof`** (codex BINDING guidance — a
+    /// `{ (e: 'change', v: number): void }` surface has its event name
+    /// in the first call-signature parameter, never in the member-name
+    /// set). The shared shape producer
+    /// (`synthesize_define_emits_shape_from_known_surface`) consumes the
+    /// reconstructed field set unchanged.
+    ///
+    /// - [`Self::Eager`] → the stored `emits` vector verbatim (the eager
+    ///   OXC rail already extracted call-signature event names into
+    ///   `AnalyzedEmitField` records at parse time).
+    /// - [`Self::LazyImported`] → reconstruct one [`AnalyzedEmitField`]
+    ///   per property-style member name PLUS one per call-signature
+    ///   event name (the call signature's first parameter literal — a
+    ///   `String` literal or a `Union` of `String` literals — yields the
+    ///   event name(s); the remaining parameters form the payload
+    ///   tuple). De-duplicated by event name, first-writer-wins,
+    ///   matching the eager projector's `retain`.
+    /// - [`Self::Empty`] → empty.
+    #[must_use]
+    pub(crate) fn emit_members(&self, ctx: &dyn ResolverContext) -> Vec<AnalyzedEmitField> {
+        match self {
+            ResolvedMacroSurface::Eager(eager) => eager.emits.clone(),
+            ResolvedMacroSurface::LazyImported(surface) => {
+                let view = match surface.resolve_surface_view(ctx) {
+                    QueryResult::Value(view) => view,
+                    QueryResult::Error(_) | QueryResult::Recursive(_) => return Vec::new(),
+                };
+                let scope = TypeExprScope::new(surface.identity.canonical_id.as_ref());
+                let mut emits: Vec<AnalyzedEmitField> = Vec::new();
+
+                // Call-signature emits: the event name is the FIRST
+                // parameter's string literal (or union of string
+                // literals); the payload is the call-signature function
+                // with the event-name parameter STRIPPED — i.e.
+                // `(e: 'change', v: number) => void` yields event
+                // `change` with payload `(v: number) => void`.
+                //
+                // This mirrors the eager
+                // `surface_projector::project_macro_surfaces` rail: OXC
+                // resolves `elements.emits[i].type_expr` to the
+                // event-name-stripped function, which the projector
+                // copies verbatim into `payload_expr`. The lazy arm must
+                // NOT read the event name from `keyof` (which would
+                // surface numeric tuple indices, never the event name)
+                // and must drop the leading event-name parameter so the
+                // published payload TypeExpr matches the eager rail.
+                for sig_node in &view.call_signatures {
+                    let Some(TypeExpr::Function(func)) =
+                        ImportedMacroSurface::raise_member_value(ctx, *sig_node)
+                    else {
+                        continue;
+                    };
+                    let Some(first) = func.parameters.first() else {
+                        continue;
+                    };
+                    // Payload function: same return type + type params,
+                    // parameters with the leading event-name parameter
+                    // dropped.
+                    let payload_fn = TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr {
+                        parameters: func.parameters.iter().skip(1).cloned().collect(),
+                        return_type: func.return_type.clone(),
+                        type_parameters: func.type_parameters.clone(),
+                    }));
+                    let mut push_event = |name: String| {
+                        emits.push(AnalyzedEmitField {
+                            name,
+                            span: verter_span::Span::default(),
+                            payload_type: None,
+                            payload_expr: Some(payload_fn.clone()),
+                            payload_expr_scope: Some(scope.clone()),
+                            description: None,
+                            tags: Vec::new(),
+                        });
+                    };
+                    match &first.ty {
+                        TypeExpr::Literal(LiteralValue::String(name)) => push_event(name.clone()),
+                        TypeExpr::Union(types) => {
+                            for ty in types.iter() {
+                                if let TypeExpr::Literal(LiteralValue::String(name)) = ty {
+                                    push_event(name.clone());
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Property-style emits: each named member is an event,
+                // its value type is the payload. This mirrors the eager
+                // `surface_projector` precedence exactly — the
+                // property-style fallback fires ONLY when no
+                // call-signature emits were found (a mixed interface's
+                // named members do NOT add events alongside its call
+                // signatures).
+                if emits.is_empty() {
+                    for member in &view.members {
+                        let payload_expr =
+                            ImportedMacroSurface::raise_member_value(ctx, member.value);
+                        let payload_expr_scope = payload_expr.is_some().then(|| scope.clone());
+                        emits.push(AnalyzedEmitField {
+                            name: member.name.as_ref().to_string(),
+                            span: verter_span::Span::default(),
+                            payload_type: None,
+                            payload_expr,
+                            payload_expr_scope,
+                            description: None,
+                            tags: Vec::new(),
+                        });
+                    }
+                }
+
+                // De-duplicate by event name, first-writer-wins (the
+                // eager projector applies the same `retain`).
+                let mut seen = std::collections::HashSet::new();
+                emits.retain(|emit| seen.insert(emit.name.clone()));
+                emits
+            }
+            ResolvedMacroSurface::Empty => Vec::new(),
+        }
+    }
+
+    /// The `defineSlots` member set this surface contributes.
+    ///
+    /// **The single shared slot interpretation both arms feed.** Raw
+    /// member names are slot candidates ONLY (codex BINDING guidance);
+    /// the lazy arm MUST keep function-like slot members and extract the
+    /// binding / return shape, FILTERING non-function members. The
+    /// shared shape producer
+    /// (`synthesize_define_slots_shape_from_known_surface`) and the
+    /// slot-binding graph consume the reconstructed slot fields.
+    ///
+    /// - [`Self::Eager`] → the stored `slots` vector verbatim.
+    /// - [`Self::LazyImported`] → reconstruct one [`AnalyzedSlotField`]
+    ///   per **function-like** member (the value raises to a
+    ///   `TypeExpr::Function`); non-function members are filtered. The
+    ///   slot's `bindings` come from the function's first parameter
+    ///   object's properties (`binding_expr` = each property's value
+    ///   type); the `return_expr` comes from the function's return type.
+    /// - [`Self::Empty`] → empty.
+    #[must_use]
+    pub(crate) fn slot_members(&self, ctx: &dyn ResolverContext) -> Vec<AnalyzedSlotField> {
+        match self {
+            ResolvedMacroSurface::Eager(eager) => eager.slots.clone(),
+            ResolvedMacroSurface::LazyImported(surface) => {
+                let view = match surface.resolve_surface_view(ctx) {
+                    QueryResult::Value(view) => view,
+                    QueryResult::Error(_) | QueryResult::Recursive(_) => return Vec::new(),
+                };
+                let scope = TypeExprScope::new(surface.identity.canonical_id.as_ref());
+                view.members
+                    .iter()
+                    .filter_map(|member| {
+                        // Slot members are function-like
+                        // (`(props) => VNode[]`). A non-function member
+                        // is NOT a slot — filter it out. The value is
+                        // raised once; a non-`Function` raise drops the
+                        // member.
+                        let value = ImportedMacroSurface::raise_member_value(ctx, member.value)?;
+                        let func = match &value {
+                            TypeExpr::Function(func) => func,
+                            _ => return None,
+                        };
+                        let bindings = func
+                            .parameters
+                            .first()
+                            .map(|param| binding_fields_from_param_ty(&param.ty, &scope))
+                            .unwrap_or_default();
+                        let return_expr = func.return_type.as_ref().map(|rt| (**rt).clone());
+                        let return_expr_scope = return_expr.is_some().then(|| scope.clone());
+                        Some(AnalyzedSlotField {
+                            name: member.name.as_ref().to_string(),
+                            is_required: !member.optional,
+                            span: verter_span::Span::default(),
+                            bindings,
+                            return_type: None,
+                            return_expr,
+                            return_expr_scope,
+                            description: None,
+                            tags: Vec::new(),
+                        })
+                    })
+                    .collect()
+            }
+            ResolvedMacroSurface::Empty => Vec::new(),
+        }
+    }
+}
+
+/// Reconstruct a slot's binding fields from its function's first
+/// parameter type. The parameter is the slot props object
+/// (`(props: { item: string }) => …`); each object property becomes one
+/// [`AnalyzedSlotFieldBinding`] carrying the property's value `TypeExpr`
+/// as `binding_expr`. A non-object parameter (or a function with no
+/// parameter) yields no bindings — matching the eager rail, which only
+/// records bindings for the slot-props-object form.
+fn binding_fields_from_param_ty(
+    param_ty: &TypeExpr,
+    scope: &TypeExprScope,
+) -> Vec<AnalyzedSlotFieldBinding> {
+    let TypeExpr::Object(obj) = param_ty else {
+        return Vec::new();
+    };
+    obj.properties
+        .iter()
+        .filter_map(|member| match member {
+            verter_type_expr::ObjectMember::Property(prop) => Some(AnalyzedSlotFieldBinding {
+                name: prop.name.clone(),
+                type_annotation: None,
+                binding_expr: Some(prop.ty.clone()),
+                binding_expr_scope: Some(scope.clone()),
+                span: verter_span::Span::default(),
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Bump the

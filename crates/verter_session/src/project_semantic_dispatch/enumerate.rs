@@ -14,8 +14,40 @@ use rustc_hash::FxHashSet;
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
     HashValue, LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
+    SurfaceMember,
 };
 use verter_semantic::facts::registry::{FactKey, InternedName, SymbolSpace};
+
+/// One-level surface view of an imported macro target's resolved root,
+/// reduced to the two fields the macro-shape interpretation consumes:
+/// the named members (with their TS member metadata) and the call
+/// signatures.
+///
+/// This is the typed-IR equivalent of the eager OXC
+/// `ResolvedElements` member surface. Both the `defineProps` /
+/// `defineEmits` / `defineSlots` shape producers and the slot-binding
+/// graph read members and call signatures off this view rather than
+/// re-deriving them from `keyof`-level names.
+///
+/// Constructed by
+/// [`ProjectSemanticDispatch::surface_view_from_base_node`], which owns
+/// the declaration-placeholder unwrap and the `A & B` Intersection
+/// accumulation (member union, call-signature concatenation) so the
+/// bridge does not re-implement either.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MacroSurfaceView {
+    /// Named members of the surface, in declaration order. Carries the
+    /// full `SurfaceMember` metadata (`optional`, `is_method`,
+    /// `declared_in_macro_type_arg`, the value node) so the lazy macro
+    /// interpretation reconstructs `AnalyzedPropField` /
+    /// `AnalyzedSlotField` records bit-equivalently to the eager rail.
+    pub(crate) members: Vec<SurfaceMember>,
+    /// Call signatures of the surface, in declaration order. Each id is
+    /// a `Function`-shaped node whose first parameter is the event-name
+    /// literal — the `defineEmits` call-signature event extractor walks
+    /// these.
+    pub(crate) call_signatures: Vec<SemanticNodeId>,
+}
 
 /// Worklist frame for the iterative `key_names_from_base_node`
 /// driver. `Expand` advances one node; `Combine*` reduces the top N
@@ -216,6 +248,105 @@ impl<'a> ProjectSemanticDispatch<'a> {
             _ => {
                 results.push(None);
             }
+        }
+    }
+
+    /// Resolve a base node to its one-level [`MacroSurfaceView`] —
+    /// named members + call signatures.
+    ///
+    /// This is the surface-level sibling of
+    /// [`Self::key_names_from_base_node`]: where the key-name enumerator
+    /// returns member NAMES only, this returns the full
+    /// [`SurfaceMember`] records plus the surface's call signatures, so
+    /// the lazy macro-shape interpretation can read member optionality /
+    /// `declared_in_macro_type_arg` and extract `defineEmits`
+    /// call-signature event names without a second walk.
+    ///
+    /// Composition (mirrors the enumerator):
+    ///
+    /// - `Object(view)` → return the view's members + call signatures
+    ///   directly.
+    /// - `Intersection(arms)` → accumulate the union of every
+    ///   **resolvable** arm's members (first-writer-wins on a duplicate
+    ///   member name, matching TS intersection member precedence) and
+    ///   concatenate every arm's call signatures. Returns `None` only
+    ///   when no arm is resolvable.
+    /// - `DeclPlaceholder` → `Instantiate` the bare declaration body
+    ///   under `Published(Expanded)` (same as the enumerator) and read
+    ///   the unwrapped surface.
+    /// - Everything else (primitives, deferred shells, unions, …) →
+    ///   `None`. A `Union` carrier has no single member surface a macro
+    ///   payload reads, so it collapses to `None` here — the eager rail
+    ///   never produces a macro surface from a bare union either.
+    ///
+    /// The walk is depth-bounded by the declaration graph: it expands a
+    /// placeholder at most one `Instantiate` deep and recurses only
+    /// through Intersection arms, never through member value bodies (a
+    /// member's value type is projected lazily by the caller via
+    /// [`crate::resolver_core::ImportedMacroSurface::project_named_member`]).
+    pub(crate) fn surface_view_from_base_node(
+        &self,
+        base: SemanticNodeId,
+    ) -> Option<MacroSurfaceView> {
+        let resolved = self.evaluate_deferred_semantic_node(base);
+        let data = self.graph().node_data(resolved)?;
+        match data.as_ref() {
+            SemanticNodeData::Object(view) => Some(MacroSurfaceView {
+                members: view.members.to_vec(),
+                call_signatures: view.call_signatures.to_vec(),
+            }),
+            SemanticNodeData::Intersection(arms) => {
+                let arms = Arc::clone(arms);
+                drop(data);
+                let mut merged = MacroSurfaceView::default();
+                let mut seen: FxHashSet<Arc<str>> = FxHashSet::default();
+                let mut any_resolvable = false;
+                for arm in arms.iter() {
+                    if let Some(arm_view) = self.surface_view_from_base_node(*arm) {
+                        any_resolvable = true;
+                        for member in arm_view.members {
+                            // First-writer-wins: an earlier intersection
+                            // arm's member shadows a later arm's member
+                            // of the same name (TS member-precedence on
+                            // `A & B`).
+                            if seen.insert(Arc::clone(&member.name)) {
+                                merged.members.push(member);
+                            }
+                        }
+                        merged.call_signatures.extend(arm_view.call_signatures);
+                    }
+                }
+                any_resolvable.then_some(merged)
+            }
+            SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder {
+                canonical_id,
+                name,
+                whole_hash,
+            }) => {
+                let identity = crate::semantic_query::DeclIdentity {
+                    canonical_id: Arc::clone(canonical_id),
+                    whole_hash: *whole_hash,
+                    decl_name: Arc::clone(name),
+                };
+                drop(data);
+                match self.execute(crate::semantic_query::SemanticQueryKey::Instantiate {
+                    base: identity,
+                    args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                    context: crate::semantic_query::ProjectionReductionContext::published(
+                        crate::semantic_query::ProjectionMode::Expanded,
+                    ),
+                }) {
+                    crate::semantic_query::QueryResult::Value(instantiated)
+                        if instantiated != resolved =>
+                    {
+                        self.surface_view_from_base_node(instantiated)
+                    }
+                    _ => None,
+                }
+            }
+            // Primitives, deferred shells, unions, literals, type params,
+            // … have no single member surface a macro payload reads.
+            _ => None,
         }
     }
 
