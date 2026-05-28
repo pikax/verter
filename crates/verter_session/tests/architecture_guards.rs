@@ -12103,7 +12103,7 @@ mod single_resolution_engine_guards {
                     // declaration as an import. Walk back over the path segments
                     // (`ident ::` / `::`) and intervening whitespace to the start
                     // of the statement and require a `use` keyword there.
-                    if resolve_type_segment_is_in_use_stmt(bytes, i, is_ident_char) {
+                    if resolve_type_segment_is_in_use_stmt(bytes, i) {
                         // Skip whitespace after the segment to find what follows.
                         let mut k = after_idx;
                         while k < bytes.len()
@@ -12135,50 +12135,78 @@ mod single_resolution_engine_guards {
         out
     }
 
-    /// True iff the `resolve_type` segment at byte index `seg` is part of a
-    /// `use` / `pub use` declaration: walking left over `::`, identifier path
-    /// segments, and whitespace reaches a `use` keyword (at an identifier
-    /// boundary) before any other statement-breaking token.
-    fn resolve_type_segment_is_in_use_stmt(
-        bytes: &[u8],
-        seg: usize,
-        is_ident_char: impl Fn(u8) -> bool,
-    ) -> bool {
-        let mut j = seg;
-        loop {
-            // Skip whitespace to the left.
-            while j > 0 && matches!(bytes[j - 1], b' ' | b'\n' | b'\t') {
-                j -= 1;
-            }
-            if j == 0 {
-                return false;
-            }
-            // A `::` path separator — keep walking left past it.
-            if j >= 2 && &bytes[j - 2..j] == b"::" {
-                j -= 2;
+    /// Byte spans `[start, end)` of every `use` / `pub use` declaration in
+    /// `bytes`, from the `use` keyword through (and including) its terminating
+    /// `;`. Brace-aware: a `;` nested inside a `{ … }` group cannot terminate
+    /// the statement (use-trees contain no bare `;` before the terminator), so
+    /// grouped and arbitrarily-nested trees (`use a::{b, c::{d, e}};`,
+    /// multi-line trees, etc.) are captured whole. `use` is a reserved keyword
+    /// in Rust, so any identifier-boundary `use` is the keyword — never a path
+    /// segment — which is why anchoring on it and scanning RIGHT is robust where
+    /// reverse-engineering a path prefix by walking LEFT is not.
+    fn use_statement_spans(bytes: &[u8]) -> Vec<(usize, usize)> {
+        let n = bytes.len();
+        let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+        let mut i = 0usize;
+        while i + 3 <= n {
+            if &bytes[i..i + 3] == b"use"
+                && (i == 0 || !is_ident_char(bytes[i - 1]))
+                && (i + 3 == n || !is_ident_char(bytes[i + 3]))
+            {
+                let mut depth = 0i32;
+                let mut j = i + 3;
+                let mut end = n;
+                while j < n {
+                    match bytes[j] {
+                        b'{' => depth += 1,
+                        b'}' => depth -= 1,
+                        b';' if depth == 0 => {
+                            end = j + 1;
+                            break;
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                spans.push((i, end));
+                i = end;
                 continue;
             }
-            // An identifier path segment — consume it and keep walking.
-            if is_ident_char(bytes[j - 1]) {
-                while j > 0 && is_ident_char(bytes[j - 1]) {
-                    j -= 1;
-                }
-                // The identifier we just consumed: is it the `use` keyword at an
-                // identifier boundary?
-                if &bytes[j..]
-                    .iter()
-                    .take_while(|&&b| is_ident_char(b))
-                    .copied()
-                    .collect::<Vec<u8>>()[..]
-                    == b"use"
-                {
-                    return true;
-                }
-                continue;
-            }
-            // Anything else (`;`, `{`, `=`, `(`, etc.) is not a use-path prefix.
-            return false;
+            i += 1;
         }
+        spans
+    }
+
+    /// True iff the `resolve_type` segment at byte index `seg` lies inside a
+    /// `use` / `pub use` declaration. This is decided structurally — by whether
+    /// `seg` falls within a `use`-statement span (see `use_statement_spans`) —
+    /// rather than by reverse-engineering the path prefix. That makes it robust
+    /// to EVERY use-tree grouping/nesting form, including ones where the byte
+    /// immediately to the left of `resolve_type` is NOT `::` / an identifier:
+    ///
+    ///   * leading group:    `use a::{resolve_type::X};`          (`{` to the left)
+    ///   * sibling group:    `use a::{b::Y, resolve_type::X};`    (`, ` to the left)
+    ///   * deep nesting:     `use a::{b::{resolve_type::X}};`
+    ///   * mid-group alias:  `use a::{resolve_type::X as Z, b};`
+    ///   * `as` module alias inside a group: `use a::{resolve_type as rt};`
+    ///   * multi-line trees and `pub use`.
+    ///
+    /// **Glob imports are OUT OF SCOPE (intentional, do NOT chase).** A
+    /// `use …::resolve_type::*;` binds the module's entire export set under
+    /// unknown local names; a per-file parser cannot enumerate those names
+    /// without the module's export list (a cross-file fact this single-file scan
+    /// deliberately does not load). Bare-call sites of glob-imported engine
+    /// symbols are therefore not counted here. This boundary is safe: the
+    /// re-exporting/glob-importing file is itself caught by its own
+    /// `resolve_type` path token, and once the consolidation deletes the engine
+    /// (Stages 5/6) the Rust compiler hard-errors on any dangling reference to a
+    /// removed symbol. Glob / macro-generated / cross-file-re-export forms are
+    /// explicitly not pursued.
+    fn resolve_type_segment_is_in_use_stmt(bytes: &[u8], seg: usize) -> bool {
+        use_statement_spans(bytes)
+            .into_iter()
+            .any(|(start, end)| seg >= start && seg < end)
     }
 
     /// Parse the tail of a `use …::resolve_type::<tail>` declaration starting at
@@ -12340,51 +12368,22 @@ mod single_resolution_engine_guards {
     ///
     /// A statement is blanked from its `use` keyword through its terminating
     /// `;` (brace-aware, so a `;` inside an inline expression cannot occur in a
-    /// `use` — `use` items contain no `;` before the terminator). The argument
+    /// `use` — `use` items contain no `;` before the terminator). Statement
+    /// extents come from the shared `use_statement_spans` finder, so grouped /
+    /// arbitrarily-nested / multi-line trees are blanked whole. The argument
     /// must already be `preprocess`ed.
     fn strip_resolve_type_use_statements(src: &str) -> String {
         let bytes = src.as_bytes();
-        let n = bytes.len();
         let mut out = bytes.to_vec();
-        let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-        let mut i = 0usize;
-        while i + 3 <= n {
-            // Find a `use` keyword at an identifier boundary.
-            if &bytes[i..i + 3] == b"use"
-                && (i == 0 || !is_ident_char(bytes[i - 1]))
-                && (i + 3 == n || !is_ident_char(bytes[i + 3]))
-            {
-                // Find the terminating `;` (use items never contain a bare `;`
-                // before the terminator); track brace depth for grouped imports.
-                let mut depth = 0i32;
-                let mut j = i + 3;
-                let mut end = None;
-                while j < n {
-                    match bytes[j] {
-                        b'{' => depth += 1,
-                        b'}' => depth -= 1,
-                        b';' if depth == 0 => {
-                            end = Some(j);
-                            break;
-                        }
-                        _ => {}
-                    }
-                    j += 1;
-                }
-                let stmt_end = end.unwrap_or(n);
-                let stmt = &src[i..stmt_end];
-                // Only blank it if it references the `resolve_type` module.
-                if count_resolve_type_module_targets(stmt) > 0 {
-                    for slot in &mut out[i..stmt_end] {
-                        if *slot != b'\n' {
-                            *slot = b' ';
-                        }
+        for (start, end) in use_statement_spans(bytes) {
+            // Only blank it if it references the `resolve_type` module.
+            if count_resolve_type_module_targets(&src[start..end]) > 0 {
+                for slot in &mut out[start..end] {
+                    if *slot != b'\n' {
+                        *slot = b' ';
                     }
                 }
-                i = stmt_end;
-                continue;
             }
-            i += 1;
         }
         String::from_utf8_lossy(&out).into_owned()
     }
@@ -13547,6 +13546,60 @@ pub fn run(p: &Program) {\n\
         assert!(s.contains("RE") && !s.contains("ResolvedElements"));
         assert!(s.contains("RuntimeType"));
 
+        // NESTED use-tree: the `resolve_type` segment is itself INSIDE an
+        // enclosing `{ … }` group, so the byte BEFORE it is `{` (not `::` or an
+        // identifier). The parser must still recognise it as a use-tree segment
+        // and collect the leaf bound under `resolve_type::{ … }`. (This is the
+        // [P2] form the left-walk predicate previously rejected.)
+        let s = collect_resolve_type_imported_symbols(&preprocess(
+            "use verter_compiler::utils::oxc::vue::{resolve_type::{analyze_external_type_program}};",
+        ));
+        assert!(
+            s.contains("analyze_external_type_program"),
+            "nested `…::{{resolve_type::{{SYMBOL}}}}` must bind SYMBOL"
+        );
+
+        // Nested with SIBLING items in the enclosing group, mid-group alias, and
+        // a deeper sub-group — every leaf bound under `resolve_type` is collected,
+        // siblings from OTHER modules are ignored.
+        let s = collect_resolve_type_imported_symbols(&preprocess(
+            "use crate::a::{\n    other::Thing,\n    resolve_type::{build_type_context, ResolvedElements as RE, sub::{RuntimeType}},\n    more::Else,\n};",
+        ));
+        assert!(s.contains("build_type_context"));
+        assert!(s.contains("RE") && !s.contains("ResolvedElements"));
+        assert!(s.contains("RuntimeType"));
+        assert!(
+            !s.contains("Thing") && !s.contains("Else"),
+            "sibling-module leaves must NOT be attributed to the engine"
+        );
+
+        // Nested form reached via `resolve_type as M` inside an enclosing group —
+        // the module alias is bound (its later `M::foo` calls then count).
+        let s = collect_resolve_type_imported_symbols(&preprocess(
+            "use crate::a::{resolve_type as rt, other::Thing};",
+        ));
+        assert!(
+            s.contains("rt") && !s.contains("Thing"),
+            "module alias inside an enclosing group must bind the alias only"
+        );
+
+        // `pub use` with the engine segment nested inside an enclosing group.
+        let s = collect_resolve_type_imported_symbols(&preprocess(
+            "pub use crate::a::{resolve_type::ResolvedEmit};",
+        ));
+        assert!(s.contains("ResolvedEmit"));
+
+        // Nested BARE module import (`…::{resolve_type}`) inside an enclosing
+        // group binds NO callable symbol — later `resolve_type::foo` uses are
+        // path tokens, already tallied by the module-target counter.
+        let s = collect_resolve_type_imported_symbols(&preprocess(
+            "use crate::a::{resolve_type, other::Thing};",
+        ));
+        assert!(
+            s.is_empty(),
+            "nested bare `…::{{resolve_type}}` binds no callable symbol"
+        );
+
         // Module alias → the alias name (its `M::foo` uses are then counted).
         let s = collect_resolve_type_imported_symbols(&preprocess(
             "use verter_compiler::utils::oxc::vue::resolve_type as rt;",
@@ -13596,6 +13649,122 @@ pub fn run(p: &Program) {\n\
             1,
             "a BARE `ResolvedElements` use (the imported name, unqualified) MUST \
              be counted"
+        );
+    }
+
+    #[test]
+    fn nested_use_tree_engine_import_is_parsed_and_counted() {
+        // MANDATORY [P2] discriminator for the nested-use-tree parsing gap.
+        //
+        // A `resolve_type` segment nested INSIDE an enclosing `{ … }` group has
+        // `{` (or `, ` after a sibling) immediately to its left, not `::` / an
+        // identifier. The OLD `resolve_type_segment_is_in_use_stmt` predicate
+        // walked left over only `::` separators and identifier segments and bailed
+        // (returned `false`) the instant it met `{` / `,`. So the nested import
+        // was NEVER recorded as a bound symbol, and extra BARE calls to that
+        // already-imported engine function did not raise the per-file ledger —
+        // the guard would stay GREEN while query-time engine use grew inside an
+        // allowlisted file.
+
+        // The exact form codex flagged: engine module nested one level deep.
+        let nested_src = "\
+use verter_compiler::utils::oxc::vue::{resolve_type::{analyze_external_type_program}};\n\
+pub fn run(p: &Program) {\n\
+    let _ = analyze_external_type_program(p);\n\
+}\n";
+
+        // --- Prove the OLD logic MISSED this (the bug is real, the fix exercised).
+        // Inline replica of the pre-fix left-walk predicate: walk left over only
+        // `::` and identifier path segments, requiring a `use` keyword before any
+        // other token. On the nested form the char before `resolve_type` is `{`,
+        // so this returns `false` and the symbol is never collected.
+        fn old_segment_is_in_use_stmt(bytes: &[u8], seg: usize) -> bool {
+            let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+            let mut j = seg;
+            loop {
+                while j > 0 && matches!(bytes[j - 1], b' ' | b'\n' | b'\t') {
+                    j -= 1;
+                }
+                if j == 0 {
+                    return false;
+                }
+                if j >= 2 && &bytes[j - 2..j] == b"::" {
+                    j -= 2;
+                    continue;
+                }
+                if is_ident_char(bytes[j - 1]) {
+                    while j > 0 && is_ident_char(bytes[j - 1]) {
+                        j -= 1;
+                    }
+                    if bytes[j..]
+                        .iter()
+                        .take_while(|&&b| is_ident_char(b))
+                        .copied()
+                        .collect::<Vec<u8>>()
+                        == b"use"
+                    {
+                        return true;
+                    }
+                    continue;
+                }
+                // `{`, `,`, etc. — OLD logic gives up here.
+                return false;
+            }
+        }
+        let pp = preprocess(nested_src);
+        let seg = pp
+            .find("resolve_type")
+            .expect("fixture contains a `resolve_type` segment");
+        assert!(
+            !old_segment_is_in_use_stmt(pp.as_bytes(), seg),
+            "PRECONDITION (proves the bug): the OLD left-walk predicate REJECTS a \
+             `resolve_type` segment nested inside an enclosing `{{ … }}` group — \
+             so pre-fix the nested import bound NO symbol and bare calls were \
+             invisible to the ledger"
+        );
+
+        // --- Prove the NEW logic collects the nested import.
+        let syms = collect_resolve_type_imported_symbols(&pp);
+        assert!(
+            syms.contains("analyze_external_type_program"),
+            "the NEW parser MUST bind the engine symbol imported via a nested \
+             use-tree (`…::{{resolve_type::{{SYMBOL}}}}`)"
+        );
+
+        // --- Prove the ledger actually FIRES on the nested-import file: an extra
+        // bare call to the already-imported engine function must raise the count.
+        let two_calls = "\
+use verter_compiler::utils::oxc::vue::{resolve_type::{analyze_external_type_program}};\n\
+pub fn run(p: &Program) {\n\
+    let _ = analyze_external_type_program(p);\n\
+    let _ = analyze_external_type_program(p);\n\
+}\n";
+        // The module-path token count is INVARIANT (one `resolve_type::` token in
+        // both) — proving the path-token proxy is blind here, exactly as in the
+        // non-nested discriminator above.
+        assert_eq!(
+            count_resolve_type_module_targets(&preprocess(nested_src)),
+            count_resolve_type_module_targets(&preprocess(two_calls)),
+            "path-token proxy is invariant under the added bare call (both have a \
+             single nested `resolve_type::` token)"
+        );
+        // The engine-use ledger RISES with the added bare call — only possible
+        // because the NEW parser bound the nested import.
+        let one = count_resolve_type_engine_use(&pp);
+        let two = count_resolve_type_engine_use(&preprocess(two_calls));
+        assert_eq!(
+            one, 2,
+            "nested-import file with ONE call: 1 path token + 1 bare call"
+        );
+        assert_eq!(
+            two, 3,
+            "nested-import file with TWO calls: 1 path token + 2 bare calls — the \
+             ledger FIRES on in-file growth through a nested use-tree import"
+        );
+        assert!(
+            two > one,
+            "adding a bare call to a NESTED-imported engine symbol MUST raise the \
+             engine-use ledger (it stayed flat under the OLD parser)"
         );
     }
 
