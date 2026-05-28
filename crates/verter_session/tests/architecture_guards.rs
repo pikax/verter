@@ -11082,3 +11082,279 @@ fn surface_member_arch_guard_self_test_detects_inverted_order() {
         "self-test: inverted-order body must have cache call AFTER raise"
     );
 }
+
+// ===========================================================================
+// Typed-IR bridge — ImportedMacroSurface containment guards
+// ===========================================================================
+//
+// The `ImportedMacroSurface` lazy typed-IR bridge
+// (`crates/verter_session/src/resolver_core/component_meta/imported_surface.rs`)
+// MUST remain confined to `verter_session`'s resolver-core layer — it is a
+// `pub(crate)`-dispatching internal abstraction that composes
+// `SemanticQueryKey::ResolveDecl` + `ProjectPath` and does not belong
+// in:
+//
+// - `verter_semantic` (the semantic extractor — owns analysis snapshots,
+//   not host dispatch),
+// - `verter_protocol` (transport-facing DTOs — must remain
+//   serializable shapes, never typed-IR bridge identities),
+// - `verter_ffi` (NAPI/WASM adapter — host objects must not leak the
+//   bridge type into the FFI surface),
+// - the TypeScript compat layers under `packages/component-meta/*`
+//   (consumers of the public component-meta payload).
+//
+// Additionally, the bridge's public accessors MUST take an explicit
+// `&dyn ResolverContext` parameter. Zero-arg `&self` accessors that
+// secretly dispatch through TLS would violate R25 / R31: hidden lazy
+// reads behind `&self` would hide dispatch cost, dep-signature merge,
+// and cache-suppress propagation from the call site. The guard below
+// scans the bridge module for any public method (`pub fn` /
+// `pub(crate) fn`) on `impl ImportedMacroSurface` and asserts the
+// signature carries a `ResolverContext` parameter.
+
+/// Containment guard — `ImportedMacroSurface` does not appear in
+/// `verter_semantic`.
+#[test]
+fn imported_macro_surface_not_in_verter_semantic() {
+    let root = workspace_root();
+    let semantic_src = root.join("crates/verter_semantic/src");
+    let mut hits: Vec<String> = Vec::new();
+    walk_dir_collect_rs(&semantic_src, &mut |path: &std::path::Path| {
+        let src = std::fs::read_to_string(path).unwrap_or_default();
+        for (lineno, line) in src.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                continue;
+            }
+            if line.contains("ImportedMacroSurface") {
+                let rel = path
+                    .strip_prefix(&root)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                hits.push(format!("{rel}:{}: {}", lineno + 1, line.trim()));
+            }
+        }
+    });
+    assert!(
+        hits.is_empty(),
+        "guard `imported_macro_surface_not_in_verter_semantic`: \
+         `verter_semantic/src/**` MUST NOT reference `ImportedMacroSurface`. \
+         The bridge is `verter_session`-internal typed-IR dispatch \
+         infrastructure; `verter_semantic` owns analysis snapshots, not \
+         host dispatch. Offending lines:\n  {}",
+        hits.join("\n  "),
+    );
+}
+
+/// Containment guard — `ImportedMacroSurface` does not appear in
+/// `verter_protocol`, `verter_ffi`, `verter_napi`, `verter_wasm`,
+/// or the TypeScript compat layers under `packages/component-meta/`.
+///
+/// The bridge is internal typed-IR infrastructure. Leaking it into a
+/// protocol DTO, an FFI host object, or a JS compat shape would
+/// promote internal dispatch identity into the public API surface —
+/// exactly the seam codex BINDING prohibits.
+#[test]
+fn imported_macro_surface_not_in_protocol_or_ffi() {
+    let root = workspace_root();
+    // Substring-based scan across each scope. Substring is
+    // sufficient because the bridge identifier is unique
+    // (`ImportedMacroSurface`) and the scopes are small enough
+    // that a per-file walk is fast.
+    let scopes: &[&str] = &[
+        "crates/verter_protocol/src",
+        "crates/verter_ffi/src",
+        "crates/verter_napi/src",
+        "crates/verter_wasm/src",
+        "packages/component-meta/src",
+        "packages/component-meta/compat/src",
+    ];
+    let mut hits: Vec<String> = Vec::new();
+    for scope in scopes {
+        let scope_path = root.join(scope);
+        if !scope_path.is_dir() {
+            // Some scopes may not exist in every checkout (e.g.
+            // `packages/component-meta/compat/src` if the compat
+            // layer is still empty). The guard tolerates absent
+            // scopes — what matters is that any extant source
+            // file in any present scope is clean.
+            continue;
+        }
+        walk_dir_collect_rs_and_ts(&scope_path, &mut |path: &std::path::Path| {
+            let src = std::fs::read_to_string(path).unwrap_or_default();
+            for (lineno, line) in src.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                    continue;
+                }
+                if line.contains("ImportedMacroSurface") {
+                    let rel = path
+                        .strip_prefix(&root)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    hits.push(format!("{rel}:{}: {}", lineno + 1, line.trim()));
+                }
+            }
+        });
+    }
+    assert!(
+        hits.is_empty(),
+        "guard `imported_macro_surface_not_in_protocol_or_ffi`: \
+         `ImportedMacroSurface` MUST NOT appear in protocol DTOs, FFI \
+         adapters, or JS compat layers. The bridge is internal typed-IR \
+         dispatch infrastructure — leaking it into a public boundary \
+         promotes an internal identity into a published API. Offending \
+         lines:\n  {}",
+        hits.join("\n  "),
+    );
+}
+
+/// Explicit-dispatch guard — every public bridge accessor takes
+/// a `ResolverContext` parameter.
+///
+/// Scans the bridge module's `impl ImportedMacroSurface` block via
+/// `syn` and asserts each `pub fn` / `pub(crate) fn` method (other
+/// than constructors / pure-identity accessors) carries a
+/// `ResolverContext` parameter. Constructors and identity accessors
+/// are exempt because they perform no dispatch — the bridge's
+/// invariant is that *dispatching* accessors take explicit
+/// `&dyn ResolverContext`.
+///
+/// Allowlist:
+///
+/// - `new` — pure constructor.
+/// - `identity` — returns a borrowed `&ImportedDeclarationIdentity`;
+///   no dispatch.
+///
+/// Any other public method MUST carry a `ResolverContext` parameter.
+#[test]
+fn imported_macro_surface_accessors_take_explicit_resolver_context() {
+    use syn::visit::Visit;
+
+    let root = workspace_root();
+    let bridge_path =
+        root.join("crates/verter_session/src/resolver_core/component_meta/imported_surface.rs");
+    let src = std::fs::read_to_string(&bridge_path).unwrap_or_else(|e| {
+        panic!(
+            "imported-macro-surface guard: cannot read bridge module `{}`: {e}",
+            bridge_path.display()
+        )
+    });
+    let parsed = syn::parse_file(&src).unwrap_or_else(|e| {
+        panic!(
+            "imported-macro-surface guard: bridge module `{}` failed to parse via syn: {e}",
+            bridge_path.display()
+        )
+    });
+
+    /// Method names exempt from the `ResolverContext` requirement.
+    /// All other public / crate-public methods on the bridge
+    /// MUST take a `ResolverContext` parameter.
+    const EXEMPT: &[&str] = &["new", "identity"];
+
+    struct BridgeVisitor {
+        in_imported_macro_surface_impl: bool,
+        violations: Vec<String>,
+        matched_methods: Vec<String>,
+    }
+
+    impl<'ast> Visit<'ast> for BridgeVisitor {
+        fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+            // Only walk `impl ImportedMacroSurface` blocks.
+            let is_target = if let syn::Type::Path(tp) = &*item.self_ty {
+                tp.path
+                    .segments
+                    .last()
+                    .map(|s| s.ident == "ImportedMacroSurface")
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            if !is_target {
+                return;
+            }
+            self.in_imported_macro_surface_impl = true;
+            syn::visit::visit_item_impl(self, item);
+            self.in_imported_macro_surface_impl = false;
+        }
+
+        fn visit_impl_item_fn(&mut self, method: &'ast syn::ImplItemFn) {
+            if !self.in_imported_macro_surface_impl {
+                return;
+            }
+            // Only check `pub` / `pub(crate)` methods. Private
+            // helpers (`fn helper` without `pub`) are exempt.
+            let is_visible = matches!(method.vis, syn::Visibility::Public(_))
+                || matches!(method.vis, syn::Visibility::Restricted(_));
+            if !is_visible {
+                return;
+            }
+            let name = method.sig.ident.to_string();
+            self.matched_methods.push(name.clone());
+            if EXEMPT.contains(&name.as_str()) {
+                return;
+            }
+            // Look for at least one parameter whose type-syntax
+            // contains `ResolverContext`. The actual binding may
+            // be `ctx: &dyn ResolverContext` or
+            // `ctx: &impl ResolverContext`; matching by name
+            // substring on the tokenised type catches both.
+            let has_resolver_ctx = method.sig.inputs.iter().any(|input| match input {
+                syn::FnArg::Typed(pat) => {
+                    let token_str = quote::quote!(#pat).to_string();
+                    token_str.contains("ResolverContext")
+                }
+                syn::FnArg::Receiver(_) => false,
+            });
+            if !has_resolver_ctx {
+                self.violations.push(format!(
+                    "method `{name}` is public on `impl ImportedMacroSurface` \
+                     but does NOT take a `ResolverContext` parameter — \
+                     zero-arg `&self` dispatch accessors violate the \
+                     R25/R31 explicit-dispatch contract"
+                ));
+            }
+        }
+    }
+
+    let mut visitor = BridgeVisitor {
+        in_imported_macro_surface_impl: false,
+        violations: Vec::new(),
+        matched_methods: Vec::new(),
+    };
+    visitor.visit_file(&parsed);
+    assert!(
+        !visitor.matched_methods.is_empty(),
+        "guard `imported_macro_surface_accessors_take_explicit_resolver_context`: \
+         scan found NO public methods on `impl ImportedMacroSurface` — the bridge \
+         module's shape changed in a way that makes this guard meaningless. \
+         Update the visitor to track the new shape.",
+    );
+    assert!(
+        visitor.violations.is_empty(),
+        "guard `imported_macro_surface_accessors_take_explicit_resolver_context`: \
+         every dispatching public accessor on `ImportedMacroSurface` MUST take \
+         an explicit `ResolverContext` parameter. Zero-arg `&self` accessors \
+         that secretly dispatch through TLS would violate R25/R31 (hidden \
+         lazy reads behind `&self`). Offending methods:\n  {}",
+        visitor.violations.join("\n  "),
+    );
+}
+
+/// Walk a directory and apply `cb` to every `.rs` or `.ts` file.
+/// Shared by the protocol / FFI / compat scan above.
+fn walk_dir_collect_rs_and_ts(dir: &std::path::Path, cb: &mut dyn FnMut(&std::path::Path)) {
+    for entry in walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_file())
+    {
+        let path = entry.path();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if matches!(ext, "rs" | "ts" | "tsx") {
+            cb(path);
+        }
+    }
+}
