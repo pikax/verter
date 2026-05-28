@@ -65,6 +65,23 @@ export type AuthoredIntersection = HeritageBase & {
 // readonly if all arms readonly.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// JSDoc-bearing members: the typeinfo surface carries the leading JSDoc as
+// SPANS (description span + per-tag spans), sliced from the declaring file on
+// demand. No owned strings on the surface.
+// ---------------------------------------------------------------------------
+
+export interface DocumentedSurface {
+  /** the documented field */
+  documented: string;
+  /**
+   * multi-line description here.
+   * @deprecated use somethingElse
+   */
+  tagged: number;
+  undocumented: boolean;
+}
+
 export interface UnionArmA {
   shared: string;
   onlyA: number;

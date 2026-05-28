@@ -75,9 +75,21 @@ impl VerterHost {
         };
 
         let graph = host_ctx.project_type_store().semantic_graph();
-        match graph.node_data(terminal).as_deref() {
-            Some(SemanticNodeData::Object(view)) => Some(TypeInfoSurface::build(graph, view)),
-            _ => None,
-        }
+        let surface = match graph.node_data(terminal).as_deref() {
+            Some(SemanticNodeData::Object(view)) => TypeInfoSurface::build(graph, view),
+            _ => return None,
+        };
+
+        // Enrich each member with its leading-JSDoc spans, sliced from the
+        // member's DECLARATION file's cache-owned source (`IndexedReady`'s
+        // retained `eval_source`). `build` is a pure graph projection that holds
+        // no source, so this source-touching step lives at the host layer. An
+        // inherited member's JSDoc is read from its origin (heritage base) file
+        // via the member's `declaration_origin` — see
+        // `TypeInfoSurface::with_member_jsdoc_spans`.
+        Some(surface.with_member_jsdoc_spans(|canonical| {
+            self.ensure_indexed_ready(canonical)
+                .map(|indexed| Arc::clone(&indexed.eval_source))
+        }))
     }
 }

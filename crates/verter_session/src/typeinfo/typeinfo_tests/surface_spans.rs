@@ -753,6 +753,110 @@ fn member_build_uses_declaration_origin_for_scopeless_value() {
     assert_eq!(ann.span, Span::new(9, 20));
 }
 
+// ---------------------------------------------------------------------------
+// (11) JSDoc as SPANS on the surface (U2-2): a member's leading `/** doc */`
+//      block is carried as a description span (+ per-tag spans), sliced from
+//      the DECLARING file. The surface holds NO owned JSDoc string.
+//
+// FAILS pre-U2 (the surface carried no JSDoc fields at all), PASSES post-fix:
+// `jsdoc_description_span` slices to the exact doc text in the declaring file.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn member_jsdoc_description_span_slices_to_exact_doc_text() {
+    let host = make_host_with_footprint();
+    upsert_ts(&host, FILE, SHALLOW_SURFACE_FACTS);
+
+    let surface = host
+        .resolve_shallow_surface(FILE, "DocumentedSurface")
+        .expect("DocumentedSurface must resolve to a one-level surface");
+
+    // `documented` has `/** the documented field */`.
+    let documented = member(&surface, "documented");
+    let desc_span = documented.jsdoc_description_span.as_ref().expect(
+        "`documented` must carry a JSDoc description span (it has a leading `/** */` block)",
+    );
+    assert_eq!(
+        slice(SHALLOW_SURFACE_FACTS, desc_span, FILE),
+        "the documented field",
+        "description span must slice to the exact doc text from the declaring file"
+    );
+
+    // NEGATIVE: the description span must NOT slice to the member name / type.
+    assert_ne!(
+        slice(SHALLOW_SURFACE_FACTS, desc_span, FILE),
+        "documented",
+        "description span must not slice to the member name"
+    );
+
+    // `undocumented` has no leading JSDoc → no description span.
+    let undocumented = member(&surface, "undocumented");
+    assert!(
+        undocumented.jsdoc_description_span.is_none(),
+        "a member with no leading JSDoc must carry NO description span (a `Some` here is a \
+         false-positive attach)"
+    );
+    assert!(
+        undocumented.jsdoc_tag_spans.is_empty(),
+        "an undocumented member carries no tag spans"
+    );
+}
+
+#[test]
+fn member_jsdoc_tag_spans_slice_to_exact_tag_tokens() {
+    let host = make_host_with_footprint();
+    upsert_ts(&host, FILE, SHALLOW_SURFACE_FACTS);
+
+    let surface = host
+        .resolve_shallow_surface(FILE, "DocumentedSurface")
+        .expect("DocumentedSurface must resolve");
+
+    // `tagged` has a multi-line description AND `@deprecated use somethingElse`.
+    let tagged = member(&surface, "tagged");
+    let desc_span = tagged
+        .jsdoc_description_span
+        .as_ref()
+        .expect("`tagged` must carry a description span");
+    let desc_text = slice(SHALLOW_SURFACE_FACTS, desc_span, FILE);
+    assert!(
+        desc_text.contains("multi-line description here."),
+        "description span must cover the multi-line description; got {desc_text:?}"
+    );
+    // The description span must STOP before the first tag (it must not swallow
+    // the `@deprecated` line).
+    assert!(
+        !desc_text.contains("@deprecated"),
+        "description span must end before the first tag; got {desc_text:?}"
+    );
+
+    // Exactly one tag (`@deprecated`).
+    assert_eq!(
+        tagged.jsdoc_tag_spans.len(),
+        1,
+        "`tagged` carries exactly one tag (`@deprecated`); got {:?}",
+        tagged
+            .jsdoc_tag_spans
+            .iter()
+            .map(|t| slice(SHALLOW_SURFACE_FACTS, &t.name_span, FILE))
+            .collect::<Vec<_>>()
+    );
+    let tag = &tagged.jsdoc_tag_spans[0];
+    assert_eq!(
+        slice(SHALLOW_SURFACE_FACTS, &tag.name_span, FILE),
+        "deprecated",
+        "tag name span slices to the bare tag name (no `@`)"
+    );
+    let text_span = tag
+        .text_span
+        .as_ref()
+        .expect("`@deprecated use somethingElse` carries tag text");
+    assert_eq!(
+        slice(SHALLOW_SURFACE_FACTS, text_span, FILE),
+        "use somethingElse",
+        "tag text span slices to the exact tag text"
+    );
+}
+
 // NOTE on the prepared-member append path (`build.rs`
 // `backfill_member_index_surface`, the codex#2 P1 / Claude P2-b front): the
 // overlay's APPEND branch (which copies each `PreparedMember`'s `spans` +

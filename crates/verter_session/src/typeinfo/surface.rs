@@ -93,6 +93,19 @@ pub struct SurfaceMemberOrigin {
     pub merge_role: MemberMergeRole,
 }
 
+/// One JSDoc tag on a [`TypeInfoSurfaceMember`], carried as SPANS into the
+/// declaring file (never owned `String`). A consumer slices `name_span` for the
+/// tag name (without the leading `@`) and `text_span` for the tag text.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct JsdocTagSpan {
+    /// Span of the tag NAME (the identifier after `@`, e.g. `deprecated`), in
+    /// the declaring file's coordinates.
+    pub name_span: CanonicalSpan,
+    /// Span of the tag TEXT (everything after the tag name on the tag's
+    /// line(s)), when the tag carries text. `None` for a bare tag (`@internal`).
+    pub text_span: Option<CanonicalSpan>,
+}
+
 /// One member of a [`TypeInfoSurface`].
 ///
 /// `value` is a reference-style [`SemanticNodeId`] under the shallow-by-default
@@ -122,6 +135,19 @@ pub struct TypeInfoSurfaceMember {
     /// (vs reached via heritage / Omit / intersection). Display/provenance
     /// flag carried verbatim from the graph member.
     pub declared_in_macro_type_arg: bool,
+    /// Span of the member's leading JSDoc DESCRIPTION text (the comment body
+    /// before the first `@tag`), in the member's DECLARATION file. `None` when
+    /// the member has no leading JSDoc, or its JSDoc has only tags and no
+    /// description. Carries a SPAN only — the consumer slices the doc text on
+    /// demand (no owned `String` on the surface). Populated at the host accessor
+    /// layer from the member's [`SurfaceMemberOrigin::canonical_file`] + the
+    /// member declaration span; [`TypeInfoSurface::build`] leaves it `None`
+    /// because the pure graph projection holds no source.
+    pub jsdoc_description_span: Option<CanonicalSpan>,
+    /// Spans of the member's leading JSDoc TAGS (`@deprecated`, `@param`, …), in
+    /// declaration order. Empty when the member has no leading JSDoc or no tags.
+    /// Each entry carries the tag name + text spans (never owned `String`).
+    pub jsdoc_tag_spans: Arc<[JsdocTagSpan]>,
     /// Typed origin + merge role.
     pub origin: SurfaceMemberOrigin,
 }
@@ -221,6 +247,84 @@ impl TypeInfoSurface {
             has_index_signature: view.has_index_signature,
         }
     }
+
+    /// Enrich each member with its leading-JSDoc DESCRIPTION + TAG spans, sliced
+    /// from the member's DECLARATION file.
+    ///
+    /// `build` is a pure graph projection that holds no source, so JSDoc spans
+    /// (which require locating the leading `/** */` block in the declaring file)
+    /// are populated HERE, at the host accessor layer that can read the source.
+    /// `source_for(canonical)` returns the cache-owned source of a canonical
+    /// file (the host passes `IndexedReady.eval_source`), or `None` when it is
+    /// unavailable.
+    ///
+    /// Each member's JSDoc is located via its DECLARATION origin
+    /// ([`SurfaceMemberOrigin::canonical_file`], which U1 made survive
+    /// substitution) + the member's name-token offset — so an INHERITED member's
+    /// JSDoc is read from the heritage base's file (the member's real
+    /// declaration), NOT the consuming declaration's file (P2-2). Members
+    /// without a name span (synthetic / multi-origin) or without a declaration
+    /// file are left without JSDoc spans. Carries SPANS only — no owned
+    /// `String`.
+    #[must_use]
+    pub fn with_member_jsdoc_spans<F>(self, source_for: F) -> Self
+    where
+        F: Fn(&str) -> Option<Arc<str>>,
+    {
+        use std::collections::HashMap;
+
+        // Cache one source read per declaration file across members.
+        let mut sources: HashMap<Arc<str>, Option<Arc<str>>> = HashMap::new();
+
+        let members: Vec<TypeInfoSurfaceMember> = self
+            .members
+            .iter()
+            .map(|member| {
+                let enriched = (|| {
+                    let file = member.origin.canonical_file.as_ref()?;
+                    // The member's name-token offset anchors the leading-JSDoc
+                    // search in its DECLARATION file.
+                    let name_span = member.name_span.as_ref()?;
+                    let source = sources
+                        .entry(Arc::clone(file))
+                        .or_insert_with(|| source_for(file.as_ref()))
+                        .clone()?;
+                    let spans = verter_semantic::analysis::jsdoc::jsdoc_block_spans_at_offset(
+                        source.as_ref(),
+                        name_span.span.start,
+                    )?;
+                    let description_span = spans
+                        .description
+                        .map(|span| CanonicalSpan::new(Arc::clone(file), span));
+                    let tag_spans: Vec<JsdocTagSpan> = spans
+                        .tags
+                        .into_iter()
+                        .map(|tag| JsdocTagSpan {
+                            name_span: CanonicalSpan::new(Arc::clone(file), tag.name),
+                            text_span: tag
+                                .text
+                                .map(|span| CanonicalSpan::new(Arc::clone(file), span)),
+                        })
+                        .collect();
+                    Some((description_span, tag_spans))
+                })();
+
+                match enriched {
+                    Some((description_span, tag_spans)) => TypeInfoSurfaceMember {
+                        jsdoc_description_span: description_span,
+                        jsdoc_tag_spans: Arc::from(tag_spans.into_boxed_slice()),
+                        ..member.clone()
+                    },
+                    None => member.clone(),
+                }
+            })
+            .collect();
+
+        Self {
+            members: Arc::from(members.into_boxed_slice()),
+            ..self
+        }
+    }
 }
 
 /// The canonical origin file a node was first lowered in, when it is a
@@ -262,6 +366,13 @@ fn build_member(graph: &SemanticGraphStore, member: &SurfaceMember) -> TypeInfoS
         readonly: member.readonly,
         is_method: member.is_method,
         declared_in_macro_type_arg: member.declared_in_macro_type_arg,
+        // JSDoc spans require the declaring file's source to locate the leading
+        // comment block, which the pure graph projection does NOT hold. The host
+        // accessor (`resolve_shallow_surface`) enriches these after `build` via
+        // `TypeInfoSurface::with_member_jsdoc_spans`. A pure-graph build leaves
+        // them empty — never a "not implemented" placeholder.
+        jsdoc_description_span: None,
+        jsdoc_tag_spans: Arc::from(Vec::new().into_boxed_slice()),
         origin: SurfaceMemberOrigin {
             canonical_file: canonical,
             declaration_span,
