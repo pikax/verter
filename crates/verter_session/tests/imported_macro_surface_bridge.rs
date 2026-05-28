@@ -113,6 +113,47 @@ defineProps<{ payload: Big['wanted'] }>();
 <template><div /></template>
 "#;
 
+// ---------------------------------------------------------------------------
+// Member-enumeration fixtures
+// ---------------------------------------------------------------------------
+
+/// Flat three-member surface. Used by the enumeration round-trip
+/// and "returns all top-level members" discriminators — the
+/// member-name set is unambiguous (`a`, `b`, `c`), and each member
+/// has a primitive value type so `project_named_member` round-trips
+/// to a distinct node per member.
+const ENUM_TYPES_TS: &str = r#"
+export interface Surface {
+  a: number;
+  b: string;
+  c: boolean;
+}
+"#;
+
+const ENUM_TYPES_TS_PATH: &str = "/w/enum_types.ts";
+
+/// Path-precision fixture: `Surface` has exactly two members —
+/// `wanted` (whose value type is the deeply-nested `Heavy`) and
+/// `other` (a primitive). Enumeration MUST return `["wanted",
+/// "other"]` as the name-level surface WITHOUT projecting
+/// `Heavy`'s members. `Heavy` is intentionally several levels deep
+/// so that a naive enumeration that expanded each member's value
+/// type would issue multiple `ProjectPath` dispatches — the
+/// discriminator asserts ZERO such dispatches occur.
+const ENUM_PATH_PRECISE_TS: &str = r#"
+export interface Heavy {
+  level_one: { level_two: { level_three: { value: number } } };
+  sibling: Array<{ deep: { nested: { final: boolean } } }>;
+}
+
+export interface Surface {
+  wanted: Heavy;
+  other: number;
+}
+"#;
+
+const ENUM_PATH_PRECISE_TS_PATH: &str = "/w/enum_path_precise.ts";
+
 // Canonical paths used by every test.
 const HOST_VUE_PATH: &str = "/w/host.vue";
 const TYPES_TS_PATH: &str = "/w/types.ts";
@@ -148,23 +189,93 @@ fn build_host_with_types(types_source: &'static str) -> Arc<VerterHost> {
     host
 }
 
+/// Build a hermetic host containing a single non-SFC types file at
+/// `path` with `source`. Unlike [`build_host_with_types`] this does
+/// not require an SFC entry — the enumeration discriminators drive
+/// the bridge probe directly against the declaration, so no SFC
+/// resolution is needed. The file is injected into the workspace
+/// (so the resolver can read it) AND upserted into the host (so it
+/// is parsed + shallow-indexed).
+fn build_host_with_single_types_file(path: &str, source: &'static str) -> Arc<VerterHost> {
+    let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    workspace.inject_file(path.into(), Arc::from(source));
+    let ws: Arc<dyn WorkspaceAccess> = workspace;
+    let host = Arc::new(VerterHost::new(
+        HostConfig {
+            audit_enabled: true,
+            footprint_capture: true,
+            ..HostConfig::default()
+        },
+        ws,
+    ));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(path.into()),
+        input_id: path.into(),
+        source: Arc::from(source),
+        file_kind: FileKind::NonSfc,
+        aliases: vec![],
+    });
+    host
+}
+
+/// Normalise an `enumerate_member_names` result into a sorted
+/// `Vec<String>` for set-style assertions. Panics with a
+/// discriminating message if the result is not `Value`.
+fn enum_names_sorted(result: QueryResult<Vec<Arc<str>>>) -> Vec<String> {
+    match result {
+        QueryResult::Value(names) => {
+            let mut v: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+            v.sort();
+            v
+        }
+        QueryResult::Error(err) => panic!(
+            "enumerate_member_names MUST resolve the imported declaration \
+             and read its member-name surface — got Error({err:?}). A tree \
+             without the `enumerate_member_names` accessor does not compile \
+             this test; this rules out a stub returning Miss unconditionally."
+        ),
+        QueryResult::Recursive(_) => {
+            panic!("top-level enumerate_member_names must not return Recursive sentinel")
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Minimal test observer for counter assertions
 // ---------------------------------------------------------------------------
 
-/// Counts `AuditEvent::ImportedMacroSurfaceProjection`
-/// dispatches on a per-thread TLS observer slot. Other events
-/// are ignored so the probe's invariant is decoupled from the
-/// full session-side counter wiring.
+/// Counts `AuditEvent::ImportedMacroSurfaceProjection` dispatches
+/// (the bridge-demand counter) AND the per-member projection
+/// counters (`SemanticQueryProjectPathCold` /
+/// `SemanticQueryProjectPathWarm`) on a per-thread TLS observer
+/// slot. Other events are ignored so the probe's invariant is
+/// decoupled from the full session-side counter wiring.
+///
+/// The per-member projection counters are tracked so the
+/// path-precision discriminator
+/// (`enumerate_member_names_is_path_precise_not_member_expansion`)
+/// can assert enumeration performs ZERO member-value projection:
+/// `enumerate_member_names` composes `ResolveDecl` + the shared
+/// `keyof`-level enumerator `key_names_from_base_node` (name-level
+/// only), so it must never issue a `ProjectPath` / `ProjectMember`
+/// dispatch. A naive implementation that walked each member's value
+/// type would bump the project-path counters once per member.
 #[derive(Debug, Default)]
 struct ProjectionCounter {
     projections: AtomicU64,
+    project_path_ops: AtomicU64,
 }
 
 impl AuditObserver for ProjectionCounter {
     fn record_event(&self, event: AuditEvent) {
-        if matches!(event, AuditEvent::ImportedMacroSurfaceProjection) {
-            self.projections.fetch_add(1, Ordering::Relaxed);
+        match event {
+            AuditEvent::ImportedMacroSurfaceProjection => {
+                self.projections.fetch_add(1, Ordering::Relaxed);
+            }
+            AuditEvent::SemanticQueryProjectPathCold | AuditEvent::SemanticQueryProjectPathWarm => {
+                self.project_path_ops.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
         }
     }
 }
@@ -173,6 +284,14 @@ impl ProjectionCounter {
     #[inline]
     fn count(&self) -> u64 {
         self.projections.load(Ordering::Relaxed)
+    }
+
+    /// Number of `ProjectPath` / `ProjectMember` dispatches
+    /// observed — i.e. per-member value projections. Enumeration
+    /// must leave this at 0.
+    #[inline]
+    fn project_path_ops(&self) -> u64 {
+        self.project_path_ops.load(Ordering::Relaxed)
     }
 }
 
@@ -412,5 +531,248 @@ fn imported_macro_surface_bumps_projection_counter_per_call() {
          emits, observed {observed}. Double-emit (would yield \
          {}) and missed-emit (would yield 0) are both ruled out.",
         expected * 2,
+    );
+}
+
+// ===========================================================================
+// Member enumeration discriminators
+// ===========================================================================
+//
+// `ImportedMacroSurface::enumerate_member_names` is the name-level
+// (`keyof`) surface accessor. Every test below references the
+// `ImportedMacroSurfaceProbe::enumerate_member_names` accessor that
+// did NOT exist before this change, so none of them even compile
+// against a tree without the enumeration accessor. Each assertion is
+// discriminating against a meaningfully-different behaviour (wrong
+// member set, eager member-value expansion, broken round-trip,
+// mis-wired counter) — not merely "any result".
+
+// ---------------------------------------------------------------------------
+// Enum Test 1 — enumeration returns the full top-level member set
+// ---------------------------------------------------------------------------
+
+/// `enumerate_member_names` over the flat `Surface { a; b; c }`
+/// declaration MUST return exactly `["a", "b", "c"]`.
+///
+/// Discriminators:
+/// - the result is `Value` (not `Error(Miss)`) — enumeration
+///   reached the declaration through `ResolveDecl` dispatch;
+/// - the name SET equals `{a, b, c}` exactly — a stub returning an
+///   empty vec, a subset, or a superset fails. The shared
+///   `projected_surface_member_names` extractor sorts + dedups, so
+///   we compare against the sorted expectation.
+#[test]
+fn enumerate_member_names_returns_all_top_level_members() {
+    let host = build_host_with_single_types_file(ENUM_TYPES_TS_PATH, ENUM_TYPES_TS);
+    let probe = ImportedMacroSurfaceProbe::new(
+        Arc::from(ENUM_TYPES_TS_PATH),
+        Arc::from("Surface"),
+        [0u8; 16],
+    );
+
+    let names = enum_names_sorted(probe.enumerate_member_names(&host));
+
+    assert_eq!(
+        names,
+        vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        "enumerate_member_names MUST return the complete top-level member \
+         name set of `Surface` — exactly {{a, b, c}}. A stub returning an \
+         empty vec, a partial set, or extra names fails here. Observed: \
+         {names:?}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Enum Test 2 (PRIMARY) — enumeration is path-precise, not expansion
+// ---------------------------------------------------------------------------
+
+/// Path-precision: enumerating `Surface { wanted: Heavy; other }`
+/// returns the NAME-level surface `["wanted", "other"]` WITHOUT
+/// projecting `Heavy`'s members.
+///
+/// The discriminating signal is the per-member projection counter:
+/// `enumerate_member_names` composes `ResolveDecl` + the shared
+/// `keyof`-level enumerator `key_names_from_base_node` (name-level
+/// only), so it must issue ZERO `ProjectPath` / `ProjectMember`
+/// dispatches. A naive implementation that expanded each member's
+/// value type (walking into `Heavy.level_one.level_two...`) would
+/// bump `SemanticQueryProjectPath{Cold,Warm}` once per projected
+/// member — this test asserts that counter stays at 0.
+///
+/// This is the test that WOULD FAIL against an eager-expanding
+/// implementation: the name set could even be correct, but the
+/// `project_path_ops == 0` assertion catches the eager walk.
+#[test]
+fn enumerate_member_names_is_path_precise_not_member_expansion() {
+    let host = build_host_with_single_types_file(ENUM_PATH_PRECISE_TS_PATH, ENUM_PATH_PRECISE_TS);
+    let probe = ImportedMacroSurfaceProbe::new(
+        Arc::from(ENUM_PATH_PRECISE_TS_PATH),
+        Arc::from("Surface"),
+        [0u8; 16],
+    );
+
+    let counter = Arc::new(ProjectionCounter::default());
+    let _guard = install_observer(Arc::clone(&counter) as Arc<dyn AuditObserver>);
+
+    let names = enum_names_sorted(probe.enumerate_member_names(&host));
+
+    // Discriminator 1: the name-level surface is exactly the two
+    // declared members. `Heavy`'s members (`level_one`, `sibling`,
+    // and their descendants) must NOT leak into the surface — only
+    // `Surface`'s own keys.
+    assert_eq!(
+        names,
+        vec!["other".to_string(), "wanted".to_string()],
+        "enumerate_member_names MUST return ONLY `Surface`'s own member \
+         names ({{wanted, other}}) — `Heavy`'s members must not be flattened \
+         into the surface. Observed: {names:?}",
+    );
+
+    // Discriminator 2 (load-bearing): enumeration performed ZERO
+    // per-member value projections. `wanted: Heavy` is a deeply
+    // nested type; an implementation that expanded member values
+    // would issue at least one `ProjectPath`/`ProjectMember`
+    // dispatch and bump this counter. Name-level enumeration issues
+    // none.
+    let project_path_ops = counter.project_path_ops();
+    assert_eq!(
+        project_path_ops, 0,
+        "enumerate_member_names MUST be path-precise (name-level only): it \
+         composes ResolveDecl + the shared `keyof`-level enumerator \
+         (`key_names_from_base_node`), which reads member NAMES off the \
+         declaration surface and issues ZERO ProjectPath/ProjectMember \
+         dispatches. Observed {project_path_ops} per-member projection(s) — \
+         a non-zero count means the enumeration eagerly walked `Heavy`'s \
+         member values, violating R14/R28 path precision.",
+    );
+
+    // Discriminator 3: enumeration still fired its own bridge-demand
+    // counter exactly once (one `enumerate_member_names` call). This
+    // confirms discriminator 2's zero is "no projection work", not
+    // "no work / observer never installed".
+    let bridge_demand = counter.count();
+    assert_eq!(
+        bridge_demand, 1,
+        "enumerate_member_names MUST bump the bridge-demand counter exactly \
+         once per call — observed {bridge_demand}. A 0 here would mean the \
+         observer saw no bridge activity at all, which would make \
+         discriminator 2's `project_path_ops == 0` vacuous.",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Enum Test 3 — enumerate then project round-trips
+// ---------------------------------------------------------------------------
+
+/// The two accessors compose cleanly: every name from
+/// `enumerate_member_names` is a valid input to
+/// `project_named_member`, and each resolves to a DISTINCT member
+/// node.
+///
+/// Discriminators:
+/// - enumeration returns `{a, b, c}`;
+/// - each name projects to a `Value` (the name is a real member);
+/// - the three projected node ids are pairwise distinct — rules out
+///   a stub `project_named_member` that returned the same node (or
+///   the root) regardless of the name. Distinct primitive member
+///   types (`number`/`string`/`boolean`) guarantee distinct nodes.
+#[test]
+fn enumerate_then_project_named_member_round_trips() {
+    let host = build_host_with_single_types_file(ENUM_TYPES_TS_PATH, ENUM_TYPES_TS);
+    let probe = ImportedMacroSurfaceProbe::new(
+        Arc::from(ENUM_TYPES_TS_PATH),
+        Arc::from("Surface"),
+        [0u8; 16],
+    );
+
+    let names = enum_names_sorted(probe.enumerate_member_names(&host));
+    assert_eq!(
+        names,
+        vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        "round-trip precondition: enumeration must yield {{a, b, c}}; got {names:?}",
+    );
+
+    // Each enumerated name must be a valid projection input.
+    let mut projected_ids = Vec::new();
+    for name in &names {
+        match probe.project_named_member(&host, name, ProjectionMode::Navigate) {
+            QueryResult::Value(id) => projected_ids.push(id),
+            other => panic!(
+                "every name from enumerate_member_names MUST be a valid input \
+                 to project_named_member — projecting `{name}` failed with \
+                 {other:?}. A name the enumeration reported but the projection \
+                 cannot resolve means the two accessors disagree on the surface.",
+            ),
+        }
+    }
+
+    // The three members have distinct primitive types, so their
+    // projected member nodes must be pairwise distinct. A stub that
+    // returned a constant node id (or the declaration root) for
+    // every member would collapse these and fail.
+    assert_eq!(
+        projected_ids.len(),
+        3,
+        "expected three projected member ids"
+    );
+    assert_ne!(
+        projected_ids[0], projected_ids[1],
+        "members `a` (number) and `b` (string) MUST project to distinct \
+         member nodes — a constant-return stub would collapse them",
+    );
+    assert_ne!(
+        projected_ids[1], projected_ids[2],
+        "members `b` (string) and `c` (boolean) MUST project to distinct \
+         member nodes — a constant-return stub would collapse them",
+    );
+    assert_ne!(
+        projected_ids[0], projected_ids[2],
+        "members `a` (number) and `c` (boolean) MUST project to distinct \
+         member nodes — a constant-return stub would collapse them",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Enum Test 4 — enumeration bumps the bridge-demand counter once per call
+// ---------------------------------------------------------------------------
+
+/// Counter-wiring discriminator for enumeration: each
+/// `enumerate_member_names` call fires
+/// `AuditEvent::ImportedMacroSurfaceProjection` exactly once — not
+/// zero (missing emit), not twice (double emit), and not once-per-
+/// member (which would scale with the surface width).
+///
+/// Drives N=5 enumeration calls over the 3-member `Surface` and
+/// asserts the counter equals 5 (NOT 15 = 5×3 members, NOT 0). The
+/// "not 15" property specifically rules out a mis-wiring that bumped
+/// the counter per enumerated member instead of per accessor entry.
+#[test]
+fn enumerate_member_names_bumps_projection_counter() {
+    let host = build_host_with_single_types_file(ENUM_TYPES_TS_PATH, ENUM_TYPES_TS);
+    let probe = ImportedMacroSurfaceProbe::new(
+        Arc::from(ENUM_TYPES_TS_PATH),
+        Arc::from("Surface"),
+        [0u8; 16],
+    );
+
+    let counter = Arc::new(ProjectionCounter::default());
+    let _guard = install_observer(Arc::clone(&counter) as Arc<dyn AuditObserver>);
+
+    const ITERATIONS: u64 = 5;
+    for _ in 0..ITERATIONS {
+        let _ = probe.enumerate_member_names(&host);
+    }
+
+    let observed = counter.count();
+    assert_eq!(
+        observed,
+        ITERATIONS,
+        "enumerate_member_names MUST bump `ImportedMacroSurfaceProjection` \
+         exactly once per call. Drove {ITERATIONS} enumeration calls over a \
+         3-member surface — expected {ITERATIONS} emits, observed {observed}. \
+         A 0 (missing emit), a {} (double emit), or a {} (per-member emit, \
+         scaling with surface width) are all ruled out.",
+        ITERATIONS * 2,
+        ITERATIONS * 3,
     );
 }
