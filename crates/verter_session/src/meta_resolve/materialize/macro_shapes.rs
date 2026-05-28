@@ -326,6 +326,7 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                     }
                 } else if let Some((shape, source)) =
                     synthesize_define_props_shape_from_known_surface_with_authority(
+                        query_engine.ctx,
                         macro_index,
                         snapshot,
                         resolved_macros,
@@ -363,6 +364,7 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                     );
                 } else if !define_props_has_direct_local_root(mac)
                     && define_props_fields_fast_path_allowed(
+                        query_engine.ctx,
                         mac,
                         macro_index,
                         resolved_macros,
@@ -371,6 +373,7 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                 {
                     if let Some((shape, source)) =
                         synthesize_define_props_shape_from_known_surface_with_authority(
+                            query_engine.ctx,
                             macro_index,
                             snapshot,
                             resolved_macros,
@@ -600,6 +603,7 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                     projection_hits += 1;
                 } else if let Some((shape, source)) =
                     synthesize_define_emits_shape_from_known_surface(
+                        query_engine.ctx,
                         macro_index,
                         snapshot,
                         resolved_macros,
@@ -729,6 +733,7 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                     });
                 if !define_slots_needs_projection_rescue {
                     if let Some((shape, source)) = synthesize_define_slots_shape_from_known_surface(
+                        query_engine.ctx,
                         macro_index,
                         resolved_macros,
                     ) {
@@ -946,6 +951,7 @@ impl MacroShapeSource {
 }
 
 pub(crate) fn define_props_fields_fast_path_allowed(
+    ctx: &dyn crate::resolver_core::ResolverContext,
     mac: &AnalyzedMacro,
     macro_index: usize,
     resolved_macros: &[ResolvedMacroMeta],
@@ -968,10 +974,16 @@ pub(crate) fn define_props_fields_fast_path_allowed(
         _ => return false,
     }
 
+    // Presence-gate the candidate surfaces through the
+    // `ResolvedMacroSurface` enum (eager arm returns `.props`
+    // verbatim, so this is bit-identical to the pre-migration
+    // `!resolved.props.is_empty()` filter).
     let mut macro_surfaces = resolved_macros.iter().filter(|resolved| {
         resolved.macro_index == macro_index
             && resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps
-            && !resolved.props.is_empty()
+            && !crate::resolver_core::ResolvedMacroSurface::from_eager_meta(resolved)
+                .prop_members(ctx)
+                .is_empty()
     });
     let Some(first_surface) = macro_surfaces.next() else {
         return false;
@@ -1055,6 +1067,7 @@ pub(crate) fn define_props_known_surface_shortcut_allowed(
 }
 
 pub(crate) fn synthesize_define_props_shape_from_known_surface_with_authority(
+    ctx: &dyn crate::resolver_core::ResolverContext,
     macro_index: usize,
     snapshot: &FileAnalysisSnapshot,
     resolved_macros: &[ResolvedMacroMeta],
@@ -1073,16 +1086,29 @@ pub(crate) fn synthesize_define_props_shape_from_known_surface_with_authority(
 
     let mac = snapshot.macros.get(macro_index)?;
     let allow_known_surface_shortcuts = !define_props_has_direct_local_root(mac);
+    // Read the matching macro's prop member set through the
+    // `ResolvedMacroSurface` enum rather than the direct `.props`
+    // field. The eager arm returns `ResolvedMacroMeta.props` verbatim
+    // so this gate is bit-identical to the pre-migration
+    // `!resolved.props.is_empty()` filter; the surface seam is what
+    // lets the lazy-imported arm reconstruct the member set on demand.
     let resolved_macro = if allow_known_surface_shortcuts {
-        let mut macro_surfaces = resolved_macros.iter().filter(|resolved| {
-            resolved.macro_index == macro_index
-                && resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps
-                && !resolved.props.is_empty()
-                && (!require_authoritative_surface || resolved.surface_is_authoritative)
-        });
+        let mut macro_surfaces = resolved_macros
+            .iter()
+            .filter(|resolved| {
+                resolved.macro_index == macro_index
+                    && resolved.macro_kind
+                        == verter_semantic::analysis::AnalyzedMacroKind::DefineProps
+                    && (!require_authoritative_surface || resolved.surface_is_authoritative)
+            })
+            .filter_map(|resolved| {
+                let members = crate::resolver_core::ResolvedMacroSurface::from_eager_meta(resolved)
+                    .prop_members(ctx);
+                (!members.is_empty()).then_some((resolved, members))
+            });
         let first = macro_surfaces.next();
         if macro_surfaces.next().is_none()
-            && first.is_some_and(|resolved| {
+            && first.as_ref().is_some_and(|(resolved, _)| {
                 mac.type_references
                     .iter()
                     .any(|type_name| type_name == &resolved.type_name)
@@ -1095,8 +1121,8 @@ pub(crate) fn synthesize_define_props_shape_from_known_surface_with_authority(
     } else {
         None
     };
-    let expanded_fields_cover_resolved_macro = resolved_macro.is_none_or(|resolved_macro| {
-        resolved_macro.props.iter().all(|prop| {
+    let expanded_fields_cover_resolved_macro = resolved_macro.as_ref().is_none_or(|(_, props)| {
+        props.iter().all(|prop| {
             evaluated_types
                 .props
                 .iter()
@@ -1127,9 +1153,9 @@ pub(crate) fn synthesize_define_props_shape_from_known_surface_with_authority(
                 declared_in_macro_type_arg: field.declared_in_macro_type_arg,
             });
         }
-    } else if let Some(resolved_macro) = resolved_macro {
-        properties.reserve(resolved_macro.props.len());
-        for prop in &resolved_macro.props {
+    } else if let Some((_, props)) = resolved_macro {
+        properties.reserve(props.len());
+        for prop in &props {
             let field = evaluated_types
                 .props
                 .iter()
@@ -1315,6 +1341,7 @@ pub(crate) fn reuse_expanded_define_emits_shape(
 }
 
 pub(crate) fn synthesize_define_emits_shape_from_known_surface(
+    ctx: &dyn crate::resolver_core::ResolverContext,
     macro_index: usize,
     snapshot: &FileAnalysisSnapshot,
     resolved_macros: &[ResolvedMacroMeta],
@@ -1361,11 +1388,24 @@ pub(crate) fn synthesize_define_emits_shape_from_known_surface(
         ));
     }
 
-    let mut matching_macros = resolved_macros.iter().filter(|resolved| {
-        resolved.macro_index == macro_index
-            && resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits
-            && !resolved.emits.is_empty()
-    });
+    // Read the matching macro's emit member set through the
+    // `ResolvedMacroSurface` enum. The eager arm returns
+    // `ResolvedMacroMeta.emits` verbatim, so this gate is bit-identical
+    // to the pre-migration `!resolved.emits.is_empty()` filter. The
+    // lazy-imported arm reconstructs the emit set — including
+    // call-signature event names extracted from the resolved surface's
+    // call signatures (NOT from `keyof`).
+    let mut matching_macros = resolved_macros
+        .iter()
+        .filter(|resolved| {
+            resolved.macro_index == macro_index
+                && resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits
+        })
+        .filter_map(|resolved| {
+            let emits = crate::resolver_core::ResolvedMacroSurface::from_eager_meta(resolved)
+                .emit_members(ctx);
+            (!emits.is_empty()).then_some(emits)
+        });
     let resolved_macro = matching_macros.next();
     if matching_macros.next().is_some() {
         return None;
@@ -1375,9 +1415,9 @@ pub(crate) fn synthesize_define_emits_shape_from_known_surface(
     let mut diagnostics = Vec::new();
     let mut properties = Vec::new();
 
-    if let Some(resolved_macro) = resolved_macro {
-        properties.reserve(resolved_macro.emits.len());
-        for emit in &resolved_macro.emits {
+    if let Some(emits) = resolved_macro {
+        properties.reserve(emits.len());
+        for emit in &emits {
             let field = evaluated_types
                 .emits
                 .iter()
@@ -1443,6 +1483,7 @@ pub(crate) fn synthesize_define_emits_shape_from_known_surface(
 }
 
 pub(crate) fn synthesize_define_slots_shape_from_known_surface(
+    ctx: &dyn crate::resolver_core::ResolverContext,
     macro_index: usize,
     resolved_macros: &[ResolvedMacroMeta],
 ) -> Option<(ShapeResult, MacroShapeSource)> {
@@ -1450,12 +1491,25 @@ pub(crate) fn synthesize_define_slots_shape_from_known_surface(
         ExpandedObjectShape, ExpandedProperty, ExpansionResult,
     };
 
-    let mut matching_macros = resolved_macros.iter().filter(|resolved| {
-        resolved.macro_index == macro_index
-            && resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots
-            && !resolved.slots.is_empty()
-    });
-    let resolved_macro = matching_macros.next()?;
+    // Read the matching macro's slot member set through the
+    // `ResolvedMacroSurface` enum. The eager arm returns
+    // `ResolvedMacroMeta.slots` verbatim, so this gate is bit-identical
+    // to the pre-migration `!resolved.slots.is_empty()` filter. The
+    // lazy-imported arm reconstructs the slot set — filtering
+    // non-function members and extracting bindings / return shape from
+    // function-like members.
+    let mut matching_macros = resolved_macros
+        .iter()
+        .filter(|resolved| {
+            resolved.macro_index == macro_index
+                && resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots
+        })
+        .filter_map(|resolved| {
+            let slots = crate::resolver_core::ResolvedMacroSurface::from_eager_meta(resolved)
+                .slot_members(ctx);
+            (!slots.is_empty()).then_some(slots)
+        });
+    let resolved_slots = matching_macros.next()?;
     if matching_macros.next().is_some() {
         return None;
     }
@@ -1467,8 +1521,7 @@ pub(crate) fn synthesize_define_slots_shape_from_known_surface(
     // do not gate on it. `false` is the structural truth at the
     // slot ExpandedProperty layer because the producer type does
     // not encode the distinction.
-    let properties = resolved_macro
-        .slots
+    let properties = resolved_slots
         .iter()
         .map(|slot| ExpandedProperty {
             name: slot.name.clone(),

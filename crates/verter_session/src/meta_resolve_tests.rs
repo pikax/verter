@@ -4677,14 +4677,18 @@ fn define_props_macro_shape_reuses_expanded_fields_directly() {
         name: "Props".into(),
         type_arguments: Vec::new().into(),
     };
-    let (shape, source) = synthesize_define_props_shape_from_known_surface_with_authority(
-        0,
-        &snapshot,
-        &[],
-        &evaluated,
-        Some(&lowered),
-        true,
-    )
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let (shape, source) = crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+        synthesize_define_props_shape_from_known_surface_with_authority(
+            ctx,
+            0,
+            &snapshot,
+            &[],
+            &evaluated,
+            Some(&lowered),
+            true,
+        )
+    })
     .expect("single defineProps macros should synthesize the object shape from expanded fields");
     let prop_names: Vec<&str> = shape
         .value
@@ -4836,14 +4840,18 @@ fn define_props_macro_shape_prefers_resolved_macro_when_expanded_fields_are_inco
         type_arguments: Vec::new().into(),
     };
 
-    let (shape, source) = synthesize_define_props_shape_from_known_surface_with_authority(
-        0,
-        &snapshot,
-        &resolved_macros,
-        &evaluated,
-        Some(&lowered),
-        true,
-    )
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let (shape, source) = crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+        synthesize_define_props_shape_from_known_surface_with_authority(
+            ctx,
+            0,
+            &snapshot,
+            &resolved_macros,
+            &evaluated,
+            Some(&lowered),
+            true,
+        )
+    })
     .expect("defineProps should merge the wider resolved macro surface when expanded fields are incomplete");
     let prop_names: Vec<&str> = shape
         .value
@@ -4886,8 +4894,11 @@ fn define_props_fields_fast_path_allows_direct_object_literals() {
     let lowered =
         verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("{ title: string }");
 
+    let host = VerterHost::new_standalone(HostConfig::default());
     assert!(
-        define_props_fields_fast_path_allowed(&mac, 0, &[], Some(&lowered)),
+        crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+            define_props_fields_fast_path_allowed(ctx, &mac, 0, &[], Some(&lowered))
+        }),
         "direct object literals should keep using the fields fast path"
     );
 }
@@ -4966,13 +4977,17 @@ fn define_props_fields_fast_path_rejects_complex_heritage_refs() {
     }];
     let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("LinkProps");
 
+    let host = VerterHost::new_standalone(HostConfig::default());
     assert!(
-        !define_props_fields_fast_path_allowed(
-            &snapshot.macros[0],
-            0,
-            &resolved_macros,
-            Some(&lowered)
-        ),
+        !crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+            define_props_fields_fast_path_allowed(
+                ctx,
+                &snapshot.macros[0],
+                0,
+                &resolved_macros,
+                Some(&lowered),
+            )
+        }),
         "utility/heritage refs should not use the fields fast path just because shallow prop_fields exist"
     );
     assert!(
@@ -5071,8 +5086,11 @@ fn define_props_fields_fast_path_rejects_multi_surface_macro_candidates() {
     ];
     let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("LinkProps");
 
+    let host = VerterHost::new_standalone(HostConfig::default());
     assert!(
-        !define_props_fields_fast_path_allowed(&mac, 0, &resolved_macros, Some(&lowered)),
+        !crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+            define_props_fields_fast_path_allowed(ctx, &mac, 0, &resolved_macros, Some(&lowered))
+        }),
         "a defineProps macro with multiple resolved surfaces should not collapse to a single fields-only shape"
     );
 }
