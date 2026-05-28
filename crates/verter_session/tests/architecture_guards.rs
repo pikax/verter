@@ -12815,9 +12815,9 @@ mod single_resolution_engine_guards {
     // No NEW production caller may be added.
     //
     // Line-precise allowlist (few sites, exact site matters):
-    //   * `imported_surface.rs:515` — the `from_eager_meta` DEFINITION (the
+    //   * `imported_surface.rs:530` — the `from_eager_meta` DEFINITION (the
     //     seam constructor). Deleted when the `Eager` arm is removed.
-    //   * `macro_shapes.rs:984/1105/1405/1508` + `slot_binding_graph.rs:984` —
+    //   * `macro_shapes.rs:988/1109/1409/1512` + `slot_binding_graph.rs:984` —
     //     the five macro-authority consumer call sites (Stage 2 flips these
     //     to the canonical macro payload).
     //
@@ -12830,27 +12830,27 @@ mod single_resolution_engine_guards {
     const FROM_EAGER_META_ALLOWLIST: &[(&str, u32, &str)] = &[
         (
             "crates/verter_session/src/resolver_core/component_meta/imported_surface.rs",
-            515,
+            530,
             "from_eager_meta",
         ),
         (
             "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
-            984,
+            988,
             "from_eager_meta",
         ),
         (
             "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
-            1105,
+            1109,
             "from_eager_meta",
         ),
         (
             "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
-            1405,
+            1409,
             "from_eager_meta",
         ),
         (
             "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
-            1508,
+            1512,
             "from_eager_meta",
         ),
         (

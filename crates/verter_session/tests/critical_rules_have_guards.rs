@@ -135,14 +135,13 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "no_text_based_macro_surface_projection_helpers",
             "no_role_inference_from_name_suffix",
             "no_pick_or_omit_string_prefix_check",
-        ],
-    ),
-    (
-        "Single Resolution Engine Rule",
-        &[
-            // Stage 0 consolidation guards (shrinking-ledger): forbid a NEW
-            // production site of the doomed eager OXC `resolve_type` engine /
-            // prepared-surface walker while the second engine is deleted.
+            // Single-resolution-engine shrinking-ledger guards: there is
+            // exactly ONE query-time type-resolution engine (the canonical
+            // typed-IR dispatch). These forbid a NEW production site of the
+            // doomed eager OXC `resolve_type` engine / prepared-surface walker
+            // while the second engine is deleted across the consolidation
+            // stages. The rule is codified in this section + "Shared Optimized
+            // Codebase" (no separate heading).
             "no_new_from_eager_meta_production_site",
             "no_new_duplicate_read_surface_members_definition",
             "no_new_resolve_type_engine_path_production_file",
