@@ -46,6 +46,124 @@ pub fn parse_jsdoc_tag_type_payload(input: &str) -> TypeExpr {
     }
 }
 
+/// Extract the leading `{Type}` brace payload from a JSDoc tag's text, if the
+/// text begins with one (`{Foo} rest` → `"Foo"`). Depth-aware so nested braces
+/// (`{Record<string, {nested: true}>}`) match the right closing brace. Returns
+/// the payload substring and the remainder after the closing brace.
+fn split_jsdoc_brace_payload(text: &str) -> Option<(&str, &str)> {
+    let trimmed = text.trim_start();
+    let rest = trimmed.strip_prefix('{')?;
+    let mut depth = 0u32;
+    for (i, ch) in rest.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                if depth == 0 {
+                    return Some((rest[..i].trim(), rest[i + 1..].trim_start()));
+                }
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Lower the leading `{Type}` brace payload of a JSDoc tag's text into a
+/// [`TypeExpr`] via [`parse_jsdoc_tag_type_payload`]. `None` when the tag has no
+/// text or its text does not begin with a `{...}` payload.
+///
+/// This is the producer-side bridge that makes a JSDoc `{Type}` an ORDINARY
+/// type: the returned `TypeExpr` is stored on the same shallow-analysis carrier
+/// a TS annotation populates, so it resolves through the shared dispatch with no
+/// JSDoc-specific resolution path.
+fn lower_jsdoc_tag_type(text: Option<&str>) -> Option<TypeExpr> {
+    let (payload, _rest) = split_jsdoc_brace_payload(text?)?;
+    if payload.is_empty() {
+        return None;
+    }
+    Some(parse_jsdoc_tag_type_payload(payload))
+}
+
+/// The `TypeExpr` declared by a leading JSDoc `@type {T}` annotation on the
+/// declaration whose binding/name token starts at `target_start`, if present.
+///
+/// Used by shallow analysis to give a JSDoc-typed JS value (`/** @type {Foo} */
+/// const x = ...`) the SAME `type_annotation` a TS `const x: Foo` carries — the
+/// JSDoc type is a first-class regular type, not a separate path. Returns `None`
+/// when there is no leading JSDoc, no `@type` tag, or the tag carries no
+/// `{...}` payload.
+pub fn extract_jsdoc_type_at_offset(source: &str, target_start: u32) -> Option<TypeExpr> {
+    let raw = find_leading_jsdoc_near_offset(source, target_start)?;
+    let (_description, tags) = parse_jsdoc(raw);
+    // `@type` is the explicit value-type annotation. A `@typedef`'s OWN type
+    // also lives in its leading `{...}` payload (`/** @typedef {Foo} Bar */`),
+    // so accept it here too for the rare inline form.
+    tags.iter()
+        .find(|tag| matches!(tag.name.as_str(), "type" | "typedef"))
+        .and_then(|tag| lower_jsdoc_tag_type(tag.text.as_deref()))
+}
+
+/// The return-type `TypeExpr` declared by a leading JSDoc `@returns {T}` (or
+/// `@return {T}`) on the declaration whose name token starts at `target_start`.
+/// `None` when absent. Used to type a JSDoc-documented function's return when no
+/// TS return annotation is present.
+pub fn extract_jsdoc_return_type_at_offset(source: &str, target_start: u32) -> Option<TypeExpr> {
+    let raw = find_leading_jsdoc_near_offset(source, target_start)?;
+    let (_description, tags) = parse_jsdoc(raw);
+    tags.iter()
+        .find(|tag| matches!(tag.name.as_str(), "returns" | "return"))
+        .and_then(|tag| lower_jsdoc_tag_type(tag.text.as_deref()))
+}
+
+/// The `@param {T} name` parameter types declared by a leading JSDoc block on
+/// the declaration whose name token starts at `target_start`, keyed by
+/// parameter name. Each entry's `TypeExpr` is the lowered `{T}` payload. Empty
+/// when there is no leading JSDoc or no `@param` tags carry a `{...}` payload.
+/// Used to type a JSDoc-documented function's parameters that lack a TS
+/// annotation.
+pub fn extract_jsdoc_param_types_at_offset(
+    source: &str,
+    target_start: u32,
+) -> Vec<(String, TypeExpr)> {
+    let Some(raw) = find_leading_jsdoc_near_offset(source, target_start) else {
+        return Vec::new();
+    };
+    let (_description, tags) = parse_jsdoc(raw);
+    let mut params = Vec::new();
+    for tag in &tags {
+        if !matches!(tag.name.as_str(), "param" | "arg" | "argument") {
+            continue;
+        }
+        let Some(text) = tag.text.as_deref() else {
+            continue;
+        };
+        let Some((payload, rest)) = split_jsdoc_brace_payload(text) else {
+            continue;
+        };
+        if payload.is_empty() {
+            continue;
+        }
+        // The parameter name is the first whitespace-delimited token after the
+        // `{T}` payload (`@param {Foo} value description`). An optional name is
+        // written `[value]` in JSDoc; strip the brackets to recover the name.
+        let Some(raw_name) = rest.split_whitespace().next() else {
+            continue;
+        };
+        let name = raw_name
+            .trim_start_matches('[')
+            .split(['=', ']'])
+            .next()
+            .unwrap_or(raw_name)
+            .trim();
+        if name.is_empty() {
+            continue;
+        }
+        params.push((name.to_string(), parse_jsdoc_tag_type_payload(payload)));
+    }
+    params
+}
+
 fn find_leading_jsdoc_from_comments<'a>(
     comments: &[Comment],
     target_start: u32,
@@ -132,6 +250,17 @@ fn is_jsdoc_prefix_token(token: &str) -> bool {
             | "static"
             | "override"
             | "accessor"
+            // Declaration-leading keywords: a JSDoc block precedes the WHOLE
+            // declaration (`/** @type {T} */ const x = ...`), but the offset a
+            // value / function extractor has is the binding NAME (`x`), so the
+            // walk back from the name crosses the `const` / `let` / `var` /
+            // `function` keyword before reaching the comment. These are real
+            // declaration leaders, so attaching the leading JSDoc through them
+            // is correct (the same as crossing `export`).
+            | "const"
+            | "let"
+            | "var"
+            | "function"
     )
 }
 

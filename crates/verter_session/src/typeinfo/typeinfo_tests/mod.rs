@@ -31,6 +31,7 @@ mod function_advanced;
 mod generic_defaults;
 mod index_signatures;
 mod indexed_utilities;
+mod jsdoc_types;
 mod jsx;
 mod mapped_modifiers;
 mod mapped_template;

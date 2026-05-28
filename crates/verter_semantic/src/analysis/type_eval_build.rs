@@ -555,12 +555,24 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
 // ---------------------------------------------------------------------------
 
 fn extract_function(func: &Function<'_>, source: &str, env: &mut EvalEnv) {
-    let name = match &func.id {
-        Some(id) => id.name.to_string(),
+    let (name, name_offset) = match &func.id {
+        Some(id) => (id.name.to_string(), id.span.start),
         None => return,
     };
 
-    let sig = extract_function_signature(func, source);
+    let mut sig = extract_function_signature(func, source);
+    // A JSDoc-documented function's `@param {T} name` / `@returns {T}` tags ARE
+    // the parameter / return type annotations when the TS annotation is absent
+    // (JSDoc-typed JS is first-class). Backfill them through the SAME lowering a
+    // TS annotation uses so the function type resolves through the shared
+    // dispatch with no JSDoc-specific path. TS annotations always win (we only
+    // touch params/return that lacked one).
+    enrich_function_signature_with_jsdoc(
+        &mut sig,
+        source,
+        name_offset,
+        func.return_type.is_some(),
+    );
     let kind = if func.r#async {
         ValueDeclKind::AsyncFunction
     } else {
@@ -577,14 +589,59 @@ fn extract_function(func: &Function<'_>, source: &str, env: &mut EvalEnv) {
     });
 }
 
+/// Backfill a function signature's parameter / return types from a leading
+/// JSDoc block, for the parameters / return that carried NO TS annotation.
+///
+/// `has_ts_return` records whether the function had an explicit TS return
+/// annotation; when it did, the JSDoc `@returns` is ignored (the TS annotation
+/// is authoritative). Each backfilled type is the lowered `{T}` payload from
+/// [`crate::analysis::jsdoc`], stored on the same `FunctionParam.ty` /
+/// `FunctionSignature.return_type` carrier a TS annotation would populate.
+fn enrich_function_signature_with_jsdoc(
+    sig: &mut FunctionSignature,
+    source: &str,
+    name_offset: u32,
+    has_ts_return: bool,
+) {
+    let param_types = crate::analysis::jsdoc::extract_jsdoc_param_types_at_offset(source, name_offset);
+    if !param_types.is_empty() {
+        for param in &mut sig.parameters {
+            // Only fill a parameter whose type is still the `Any` placeholder
+            // (`lower_function_params` defaults to `Any` when no TS annotation
+            // is present) — a real TS annotation is never overwritten.
+            if !matches!(param.ty, TypeExpr::Primitive(PrimitiveName::Any)) {
+                continue;
+            }
+            let Some(param_name) = param.name.as_deref() else {
+                continue;
+            };
+            if let Some((_, jsdoc_ty)) = param_types.iter().find(|(n, _)| n == param_name) {
+                param.ty = jsdoc_ty.clone();
+            }
+        }
+    }
+
+    // A TS return annotation is authoritative; only consult `@returns` when the
+    // function declared no TS return type. `extract_function_signature` may have
+    // body-inferred a return type, but an explicit JSDoc `@returns` is a stated
+    // annotation and takes priority over body inference.
+    if !has_ts_return {
+        if let Some(jsdoc_return) =
+            crate::analysis::jsdoc::extract_jsdoc_return_type_at_offset(source, name_offset)
+        {
+            sig.return_type = Some(jsdoc_return);
+        }
+    }
+}
+
 fn extract_variable(
     decl: &VariableDeclarator<'_>,
     kind: VariableDeclarationKind,
     source: &str,
     env: &mut EvalEnv,
 ) {
-    let name = match &decl.id {
-        BindingPattern::BindingIdentifier(id) => id.name.to_string(),
+    let (name, name_offset) = match &decl.id {
+        BindingPattern::BindingIdentifier(id) => (id.name.to_string(), id.span.start),
         _ => return,
     };
 
@@ -601,6 +658,17 @@ fn extract_variable(
         .type_annotation
         .as_ref()
         .map(|ta| lower_ts_type(&ta.type_annotation, source));
+
+    // No TS annotation → a leading JSDoc `@type {T}` IS the explicit type
+    // annotation (TS treats `/** @type {Foo} */ const x = ...` exactly like
+    // `const x: Foo`). Lower it through the JSDoc-private OXC bridge into the
+    // SAME `type_annotation` carrier a TS annotation populates, so it resolves
+    // through the shared dispatch with no JSDoc-specific resolution path. The
+    // JSDoc `@type` takes priority over initializer inference below, matching
+    // TS's explicit-annotation precedence.
+    if type_annotation.is_none() {
+        type_annotation = crate::analysis::jsdoc::extract_jsdoc_type_at_offset(source, name_offset);
+    }
 
     // Extract function signature from arrow functions or function expressions
     let mut function_signature = None;
