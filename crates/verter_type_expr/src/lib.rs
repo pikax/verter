@@ -21,6 +21,7 @@ use serde::ser::Serialize;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, LazyLock};
+use verter_span::Span;
 
 // ---------------------------------------------------------------------------
 // Send + Sync invariant
@@ -307,11 +308,11 @@ pub fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
                     type_expr_from_json(r)
                 }
             });
-            Some(TypeExpr::Function(Arc::new(FunctionExpr {
-                parameters: params,
-                return_type: ret.map(Arc::new),
-                type_parameters: json_to_type_params(v.get("typeParameters"))?,
-            })))
+            Some(TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
+                params,
+                ret.map(Arc::new),
+                json_to_type_params(v.get("typeParameters"))?,
+            ))))
         }
         "ref" => {
             let name = v.get("name")?.as_str()?.to_string();
@@ -492,29 +493,29 @@ fn json_array_to_type_exprs(v: &serde_json::Value) -> Option<Vec<TypeExpr>> {
 fn json_to_object_member(v: &serde_json::Value) -> Option<ObjectMember> {
     let mk = v.get("memberKind")?.as_str()?;
     match mk {
-        "property" => Some(ObjectMember::Property(ObjectProperty {
-            name: v.get("name")?.as_str()?.to_string(),
-            ty: type_expr_from_json(v.get("ty")?)?,
-            optional: v.get("optional").and_then(|o| o.as_bool()).unwrap_or(false),
-            readonly: v.get("readonly").and_then(|o| o.as_bool()).unwrap_or(false),
-        })),
-        "indexSignature" => Some(ObjectMember::IndexSignature(IndexSignature {
-            key_name: v.get("keyName")?.as_str()?.to_string(),
-            key_type: type_expr_from_json(v.get("keyType")?)?,
-            value_type: type_expr_from_json(v.get("valueType")?)?,
-            readonly: v.get("readonly").and_then(|o| o.as_bool()).unwrap_or(false),
-        })),
+        "property" => Some(ObjectMember::Property(ObjectProperty::synthetic(
+            v.get("name")?.as_str()?.to_string(),
+            type_expr_from_json(v.get("ty")?)?,
+            v.get("optional").and_then(|o| o.as_bool()).unwrap_or(false),
+            v.get("readonly").and_then(|o| o.as_bool()).unwrap_or(false),
+        ))),
+        "indexSignature" => Some(ObjectMember::IndexSignature(IndexSignature::synthetic(
+            v.get("keyName")?.as_str()?.to_string(),
+            type_expr_from_json(v.get("keyType")?)?,
+            type_expr_from_json(v.get("valueType")?)?,
+            v.get("readonly").and_then(|o| o.as_bool()).unwrap_or(false),
+        ))),
         "callSignature" => Some(ObjectMember::CallSignature(json_to_function_expr(
             v.get("function")?,
         )?)),
         "constructSignature" => Some(ObjectMember::ConstructSignature(json_to_function_expr(
             v.get("function")?,
         )?)),
-        "method" => Some(ObjectMember::Method(MethodSignature {
-            name: v.get("name")?.as_str()?.to_string(),
-            function: json_to_function_expr(v.get("function")?)?,
-            optional: v.get("optional").and_then(|o| o.as_bool()).unwrap_or(false),
-        })),
+        "method" => Some(ObjectMember::Method(MethodSignature::synthetic(
+            v.get("name")?.as_str()?.to_string(),
+            json_to_function_expr(v.get("function")?)?,
+            v.get("optional").and_then(|o| o.as_bool()).unwrap_or(false),
+        ))),
         _ => None,
     }
 }
@@ -524,22 +525,21 @@ fn json_to_func_params(v: &serde_json::Value) -> Option<Vec<FunctionParam>> {
         v.as_array()?
             .iter()
             .filter_map(|p| {
-                Some(FunctionParam {
-                    name: p.get("name").and_then(|n| n.as_str().map(String::from)),
-                    ty: type_expr_from_json(p.get("ty")?)?,
-                    optional: p.get("optional").and_then(|o| o.as_bool()).unwrap_or(false),
-                    rest: p.get("rest").and_then(|o| o.as_bool()).unwrap_or(false),
-                })
+                Some(FunctionParam::synthetic(
+                    p.get("name").and_then(|n| n.as_str().map(String::from)),
+                    type_expr_from_json(p.get("ty")?)?,
+                    p.get("optional").and_then(|o| o.as_bool()).unwrap_or(false),
+                    p.get("rest").and_then(|o| o.as_bool()).unwrap_or(false),
+                ))
             })
             .collect(),
     )
 }
 
 fn json_to_function_expr(v: &serde_json::Value) -> Option<FunctionExpr> {
-    Some(FunctionExpr {
-        parameters: json_to_func_params(v.get("parameters")?)?,
-        return_type: v
-            .get("returnType")
+    Some(FunctionExpr::synthetic(
+        json_to_func_params(v.get("parameters")?)?,
+        v.get("returnType")
             .and_then(|ret| {
                 if ret.is_null() {
                     None
@@ -548,8 +548,8 @@ fn json_to_function_expr(v: &serde_json::Value) -> Option<FunctionExpr> {
                 }
             })
             .map(Arc::new),
-        type_parameters: json_to_type_params(v.get("typeParameters"))?,
-    })
+        json_to_type_params(v.get("typeParameters"))?,
+    ))
 }
 
 fn json_to_type_params(v: Option<&serde_json::Value>) -> Option<Vec<TypeParam>> {
@@ -761,52 +761,303 @@ pub enum ObjectMember {
     Method(MethodSignature),
 }
 
+/// OXC-derived declaration-site spans for a named member (property or method).
+///
+/// Stamped once during shallow OXC lowering (the sole place the AST offsets
+/// exist) and carried verbatim through the IR into the semantic graph payload.
+/// Every span is in the owning file's source coordinates. `None` only for a
+/// genuinely synthetic member (one with no single source site); never as a
+/// "not implemented" placeholder.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct MemberSpans {
+    /// Span of the whole member declaration (`name?: T` / `name(): T`).
+    pub declaration: Option<Span>,
+    /// Span of the member's name token.
+    pub name: Option<Span>,
+    /// Span of the member's type-annotation (the `T` after `:`), when present.
+    pub type_annotation: Option<Span>,
+}
+
+impl MemberSpans {
+    /// Spans for a member where ONLY the name span is known (an aggregate
+    /// surface synthesized from per-field analysis, where the field tracks the
+    /// name span but the declaration is not a single contiguous source range).
+    ///
+    /// An empty span (`start >= end`, e.g. a default placeholder) carries no
+    /// real provenance, so it maps to `None` rather than fabricating a byte-0
+    /// span — honest absence, never a wrong offset.
+    #[must_use]
+    pub fn name_only(name: Span) -> Self {
+        Self {
+            declaration: None,
+            name: (!name.is_empty()).then_some(name),
+            type_annotation: None,
+        }
+    }
+}
+
+/// OXC-derived spans for a call / construct / method function signature.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct FunctionSpans {
+    /// Span of the whole signature declaration.
+    pub signature: Option<Span>,
+    /// Span of the return-type annotation, when present.
+    pub return_type: Option<Span>,
+}
+
+/// OXC-derived spans for an index signature (`[k: K]: V`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct IndexSignatureSpans {
+    /// Span of the whole index-signature declaration.
+    pub declaration: Option<Span>,
+    /// Span of the key declaration (`[k: K]` parameter / key-type).
+    pub key: Option<Span>,
+    /// Span of the value-type annotation.
+    pub value: Option<Span>,
+}
+
 /// A named property in an object type.
+///
+/// `spans` carries OXC declaration-site provenance (see [`MemberSpans`]) and is
+/// in-memory-only — it is intentionally excluded from the JSON wire shape (the
+/// manual `to_json_value` / `type_expr_from_json` helpers do not serialize it).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct ObjectProperty {
     pub name: String,
     pub ty: TypeExpr,
     pub optional: bool,
     pub readonly: bool,
+    /// OXC declaration-site spans (in-memory provenance; not serialized).
+    #[serde(skip)]
+    pub spans: MemberSpans,
+}
+
+impl ObjectProperty {
+    /// Construct a property with NO source spans (a synthesized property with
+    /// no single declaration site — e.g. a test fixture or a derived member).
+    #[must_use]
+    pub fn synthetic(name: String, ty: TypeExpr, optional: bool, readonly: bool) -> Self {
+        Self {
+            name,
+            ty,
+            optional,
+            readonly,
+            spans: MemberSpans::default(),
+        }
+    }
+
+    /// Construct a property carrying its OXC declaration-site spans.
+    #[must_use]
+    pub fn with_spans(
+        name: String,
+        ty: TypeExpr,
+        optional: bool,
+        readonly: bool,
+        spans: MemberSpans,
+    ) -> Self {
+        Self {
+            name,
+            ty,
+            optional,
+            readonly,
+            spans,
+        }
+    }
 }
 
 /// An index signature: `[key: KeyType]: ValueType`.
+///
+/// `spans` carries OXC declaration-site provenance and is in-memory-only.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct IndexSignature {
     pub key_name: String,
     pub key_type: TypeExpr,
     pub value_type: TypeExpr,
     pub readonly: bool,
+    /// OXC declaration-site spans (in-memory provenance; not serialized).
+    #[serde(skip)]
+    pub spans: IndexSignatureSpans,
+}
+
+impl IndexSignature {
+    /// Construct an index signature with NO source spans.
+    #[must_use]
+    pub fn synthetic(
+        key_name: String,
+        key_type: TypeExpr,
+        value_type: TypeExpr,
+        readonly: bool,
+    ) -> Self {
+        Self {
+            key_name,
+            key_type,
+            value_type,
+            readonly,
+            spans: IndexSignatureSpans::default(),
+        }
+    }
+
+    /// Construct an index signature carrying its OXC declaration-site spans.
+    #[must_use]
+    pub fn with_spans(
+        key_name: String,
+        key_type: TypeExpr,
+        value_type: TypeExpr,
+        readonly: bool,
+        spans: IndexSignatureSpans,
+    ) -> Self {
+        Self {
+            key_name,
+            key_type,
+            value_type,
+            readonly,
+            spans,
+        }
+    }
 }
 
 /// A method signature in an object type.
+///
+/// `spans` carries OXC declaration-site provenance and is in-memory-only.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct MethodSignature {
     pub name: String,
     pub function: FunctionExpr,
     pub optional: bool,
+    /// OXC declaration-site spans (in-memory provenance; not serialized).
+    #[serde(skip)]
+    pub spans: MemberSpans,
+}
+
+impl MethodSignature {
+    /// Construct a method signature with NO source spans.
+    #[must_use]
+    pub fn synthetic(name: String, function: FunctionExpr, optional: bool) -> Self {
+        Self {
+            name,
+            function,
+            optional,
+            spans: MemberSpans::default(),
+        }
+    }
+
+    /// Construct a method signature carrying its OXC declaration-site spans.
+    #[must_use]
+    pub fn with_spans(
+        name: String,
+        function: FunctionExpr,
+        optional: bool,
+        spans: MemberSpans,
+    ) -> Self {
+        Self {
+            name,
+            function,
+            optional,
+            spans,
+        }
+    }
 }
 
 /// A function type expression.
+///
+/// `spans` carries OXC declaration-site provenance and is in-memory-only.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct FunctionExpr {
     pub parameters: Vec<FunctionParam>,
     pub return_type: Option<Arc<TypeExpr>>,
     pub type_parameters: Vec<TypeParam>,
+    /// OXC signature / return spans (in-memory provenance; not serialized).
+    #[serde(skip)]
+    pub spans: FunctionSpans,
+}
+
+impl FunctionExpr {
+    /// Construct a function expression with NO source spans.
+    #[must_use]
+    pub fn synthetic(
+        parameters: Vec<FunctionParam>,
+        return_type: Option<Arc<TypeExpr>>,
+        type_parameters: Vec<TypeParam>,
+    ) -> Self {
+        Self {
+            parameters,
+            return_type,
+            type_parameters,
+            spans: FunctionSpans::default(),
+        }
+    }
+
+    /// Construct a function expression carrying its OXC spans.
+    #[must_use]
+    pub fn with_spans(
+        parameters: Vec<FunctionParam>,
+        return_type: Option<Arc<TypeExpr>>,
+        type_parameters: Vec<TypeParam>,
+        spans: FunctionSpans,
+    ) -> Self {
+        Self {
+            parameters,
+            return_type,
+            type_parameters,
+            spans,
+        }
+    }
 }
 
 /// A function parameter.
+///
+/// `span` is the OXC parameter span (in-memory provenance; not serialized).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct FunctionParam {
     pub name: Option<String>,
     pub ty: TypeExpr,
     pub optional: bool,
     pub rest: bool,
+    /// OXC span of the whole parameter (in-memory provenance; not serialized).
+    #[serde(skip)]
+    pub span: Option<Span>,
+}
+
+impl FunctionParam {
+    /// Construct a parameter with NO source span.
+    #[must_use]
+    pub fn synthetic(name: Option<String>, ty: TypeExpr, optional: bool, rest: bool) -> Self {
+        Self {
+            name,
+            ty,
+            optional,
+            rest,
+            span: None,
+        }
+    }
+
+    /// Construct a parameter carrying its OXC span.
+    #[must_use]
+    pub fn with_span(
+        name: Option<String>,
+        ty: TypeExpr,
+        optional: bool,
+        rest: bool,
+        span: Option<Span>,
+    ) -> Self {
+        Self {
+            name,
+            ty,
+            optional,
+            rest,
+            span,
+        }
+    }
 }
 
 /// A type parameter declaration: `T extends Constraint = Default`.

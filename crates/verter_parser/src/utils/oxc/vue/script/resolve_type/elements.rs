@@ -11,7 +11,7 @@
 use oxc_ast::ast::*;
 use oxc_span::GetSpan;
 use std::sync::Arc;
-use verter_type_expr::{FunctionExpr, FunctionParam, PrimitiveName, TypeExpr};
+use verter_type_expr::{FunctionExpr, FunctionParam, FunctionSpans, PrimitiveName, TypeExpr};
 use verter_type_expr_oxc::lower_ts_type;
 
 use crate::common::Span;
@@ -51,12 +51,13 @@ pub(super) fn lower_call_signature_payload(
             .as_ref()
             .map(|ta| lower_ts_type(&ta.type_annotation, source_str))
             .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-        parameters.push(FunctionParam {
+        parameters.push(FunctionParam::with_span(
             name,
             ty,
-            optional: param.optional,
-            rest: false,
-        });
+            param.optional,
+            false,
+            Some(param.span.into()),
+        ));
     }
     if let Some(rest) = &call_sig.params.rest {
         let name = if let BindingPattern::BindingIdentifier(id) = &rest.rest.argument {
@@ -69,23 +70,32 @@ pub(super) fn lower_call_signature_payload(
             .as_ref()
             .map(|ta| lower_ts_type(&ta.type_annotation, source_str))
             .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-        parameters.push(FunctionParam {
+        parameters.push(FunctionParam::with_span(
             name,
             ty,
-            optional: false,
-            rest: true,
-        });
+            false,
+            true,
+            Some(rest.span.into()),
+        ));
     }
     let return_type = call_sig
         .return_type
         .as_ref()
         .map(|rt| Arc::new(lower_ts_type(&rt.type_annotation, source_str)))
         .unwrap_or_else(|| Arc::new(TypeExpr::Primitive(PrimitiveName::Void)));
-    TypeExpr::Function(Arc::new(FunctionExpr {
+    let fn_spans = FunctionSpans {
+        signature: Some(call_sig.span.into()),
+        return_type: call_sig
+            .return_type
+            .as_ref()
+            .map(|rt| rt.type_annotation.span().into()),
+    };
+    TypeExpr::Function(Arc::new(FunctionExpr::with_spans(
         parameters,
-        return_type: Some(return_type),
-        type_parameters: Vec::new(),
-    }))
+        Some(return_type),
+        Vec::new(),
+        fn_spans,
+    )))
 }
 
 use super::{
@@ -652,12 +662,13 @@ fn lower_function_shape(
             .as_ref()
             .map(|ta| lower_ts_type(&ta.type_annotation, source_str))
             .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-        parameters.push(FunctionParam {
+        parameters.push(FunctionParam::with_span(
             name,
             ty,
-            optional: param.optional,
-            rest: false,
-        });
+            param.optional,
+            false,
+            Some(param.span.into()),
+        ));
     }
     if let Some(rest) = &params.rest {
         let name = if let BindingPattern::BindingIdentifier(id) = &rest.rest.argument {
@@ -670,21 +681,30 @@ fn lower_function_shape(
             .as_ref()
             .map(|ta| lower_ts_type(&ta.type_annotation, source_str))
             .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-        parameters.push(FunctionParam {
+        parameters.push(FunctionParam::with_span(
             name,
             ty,
-            optional: false,
-            rest: true,
-        });
+            false,
+            true,
+            Some(rest.span.into()),
+        ));
     }
     let return_type_expr = return_type
         .map(|rt| Arc::new(lower_ts_type(rt, source_str)))
         .unwrap_or_else(|| Arc::new(TypeExpr::Primitive(PrimitiveName::Void)));
-    TypeExpr::Function(Arc::new(FunctionExpr {
+    // No enclosing signature node is available here (parameters and return
+    // type arrive separately), so `signature` stays `None`; the return-type
+    // span is recovered from the supplied return-type node.
+    let fn_spans = FunctionSpans {
+        signature: None,
+        return_type: return_type.map(|rt| rt.span().into()),
+    };
+    TypeExpr::Function(Arc::new(FunctionExpr::with_spans(
         parameters,
-        return_type: Some(return_type_expr),
-        type_parameters: Vec::new(),
-    }))
+        Some(return_type_expr),
+        Vec::new(),
+        fn_spans,
+    )))
 }
 
 pub(super) fn callable_signature_text<'a>(

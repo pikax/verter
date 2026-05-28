@@ -20,9 +20,11 @@ use oxc_ast::ast::{
     TSModuleDeclarationName, TSSignature, TSTypeAliasDeclaration, TSTypeParameterDeclaration,
     VariableDeclarationKind, VariableDeclarator,
 };
+use oxc_span::GetSpan;
 use verter_type_expr::{
-    FunctionExpr, FunctionParam, IndexSignature, MethodSignature, ObjectExpr, ObjectMember,
-    PrimitiveName, TypeExpr, TypeExprScope, TypeParam, ValueRef,
+    FunctionExpr, FunctionParam, FunctionSpans, IndexSignature, IndexSignatureSpans, MemberSpans,
+    MethodSignature, ObjectExpr, ObjectMember, PrimitiveName, TypeExpr, TypeExprScope, TypeParam,
+    ValueRef,
 };
 use verter_type_expr_oxc::{lower_ts_type, property_key_name};
 
@@ -391,6 +393,7 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
     // Extract public instance shape from class body
     let mut members = Vec::new();
     let mut ctor_sig = None;
+    let mut ctor_fn_spans = FunctionSpans::default();
 
     for element in &decl.body.body {
         match element {
@@ -404,12 +407,23 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
                             .as_ref()
                             .map(|ta| lower_ts_type(&ta.type_annotation, source))
                             .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-                        members.push(ObjectMember::Property(verter_type_expr::ObjectProperty {
-                            name: prop_name,
-                            ty,
-                            optional: prop.optional,
-                            readonly: prop.readonly,
-                        }));
+                        let spans = MemberSpans {
+                            declaration: Some(prop.span.into()),
+                            name: Some(prop.key.span().into()),
+                            type_annotation: prop
+                                .type_annotation
+                                .as_ref()
+                                .map(|ta| ta.type_annotation.span().into()),
+                        };
+                        members.push(ObjectMember::Property(
+                            verter_type_expr::ObjectProperty::with_spans(
+                                prop_name,
+                                ty,
+                                prop.optional,
+                                prop.readonly,
+                                spans,
+                            ),
+                        ));
                     }
                 }
             }
@@ -419,17 +433,40 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
                 {
                     if method.kind == MethodDefinitionKind::Constructor {
                         ctor_sig = Some(extract_function_signature(&method.value, source));
+                        ctor_fn_spans = FunctionSpans {
+                            signature: Some(method.span.into()),
+                            return_type: method
+                                .value
+                                .return_type
+                                .as_ref()
+                                .map(|rt| rt.type_annotation.span().into()),
+                        };
                     } else if let Some(method_name) = property_key_name(&method.key) {
                         let func = extract_function_signature(&method.value, source);
-                        members.push(ObjectMember::Method(MethodSignature {
-                            name: method_name,
-                            function: FunctionExpr {
-                                parameters: func.parameters,
-                                return_type: func.return_type.map(Arc::new),
-                                type_parameters: func.type_parameters,
-                            },
-                            optional: method.optional,
-                        }));
+                        let fn_spans = FunctionSpans {
+                            signature: Some(method.value.span.into()),
+                            return_type: method
+                                .value
+                                .return_type
+                                .as_ref()
+                                .map(|rt| rt.type_annotation.span().into()),
+                        };
+                        let member_spans = MemberSpans {
+                            declaration: Some(method.span.into()),
+                            name: Some(method.key.span().into()),
+                            type_annotation: None,
+                        };
+                        members.push(ObjectMember::Method(MethodSignature::with_spans(
+                            method_name,
+                            FunctionExpr::with_spans(
+                                func.parameters,
+                                func.return_type.map(Arc::new),
+                                func.type_parameters,
+                                fn_spans,
+                            ),
+                            method.optional,
+                            member_spans,
+                        )));
                     }
                 }
             }
@@ -495,11 +532,12 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
         type_parameters: Vec::new(),
     });
     let constructor_shape = ObjectExpr {
-        properties: vec![ObjectMember::ConstructSignature(FunctionExpr {
-            parameters: constructor_signature.parameters.clone(),
-            return_type: constructor_signature.return_type.clone().map(Arc::new),
-            type_parameters: constructor_signature.type_parameters.clone(),
-        })],
+        properties: vec![ObjectMember::ConstructSignature(FunctionExpr::with_spans(
+            constructor_signature.parameters.clone(),
+            constructor_signature.return_type.clone().map(Arc::new),
+            constructor_signature.type_parameters.clone(),
+            ctor_fn_spans,
+        ))],
     };
 
     env.add_value(ValueDeclInfo {
@@ -711,14 +749,16 @@ fn extract_object_literal(obj: &ObjectExpression<'_>, source: &str) -> ObjectExp
             ObjectPropertyKind::ObjectProperty(p) => {
                 if let Some(name) = property_key_name(&p.key) {
                     let ty = infer_expression_type(&p.value, source);
+                    let spans = MemberSpans {
+                        declaration: Some(p.span.into()),
+                        name: Some(p.key.span().into()),
+                        // Value-inferred property: there is no source type
+                        // annotation to anchor.
+                        type_annotation: None,
+                    };
                     push_object_property_with_override(
                         &mut members,
-                        verter_type_expr::ObjectProperty {
-                            name,
-                            ty,
-                            optional: false,
-                            readonly: false,
-                        },
+                        verter_type_expr::ObjectProperty::with_spans(name, ty, false, false, spans),
                     );
                 }
             }
@@ -743,14 +783,16 @@ fn extract_object_literal_as_type(obj: &ObjectExpression<'_>, source: &str) -> T
             ObjectPropertyKind::ObjectProperty(p) => {
                 if let Some(name) = property_key_name(&p.key) {
                     let ty = infer_expression_type(&p.value, source);
+                    let spans = MemberSpans {
+                        declaration: Some(p.span.into()),
+                        name: Some(p.key.span().into()),
+                        // Value-inferred property: there is no source type
+                        // annotation to anchor.
+                        type_annotation: None,
+                    };
                     push_object_property_with_override(
                         &mut members,
-                        verter_type_expr::ObjectProperty {
-                            name,
-                            ty,
-                            optional: false,
-                            readonly: false,
-                        },
+                        verter_type_expr::ObjectProperty::with_spans(name, ty, false, false, spans),
                     );
                 }
             }
@@ -917,11 +959,19 @@ fn infer_expression_type(expr: &Expression<'_>, source: &str) -> TypeExpr {
         Expression::TemplateLiteral(_) => TypeExpr::Primitive(PrimitiveName::String),
         Expression::ArrowFunctionExpression(arrow) => {
             let sig = extract_arrow_signature(arrow, source);
-            TypeExpr::Function(Arc::new(FunctionExpr {
-                parameters: sig.parameters,
-                return_type: sig.return_type.map(Arc::new),
-                type_parameters: sig.type_parameters,
-            }))
+            let fn_spans = FunctionSpans {
+                signature: Some(arrow.span.into()),
+                return_type: arrow
+                    .return_type
+                    .as_ref()
+                    .map(|rt| rt.type_annotation.span().into()),
+            };
+            TypeExpr::Function(Arc::new(FunctionExpr::with_spans(
+                sig.parameters,
+                sig.return_type.map(Arc::new),
+                sig.type_parameters,
+                fn_spans,
+            )))
         }
         Expression::TSAsExpression(ts_as) => {
             // `as const` should preserve the underlying literal/object surface
@@ -1088,14 +1138,15 @@ fn widen_literal_type(expr: TypeExpr) -> TypeExpr {
                 .map(widen_object_member)
                 .collect(),
         })),
-        TypeExpr::Function(function) => TypeExpr::Function(Arc::new(FunctionExpr {
-            parameters: function.parameters.clone(),
-            return_type: function
+        TypeExpr::Function(function) => TypeExpr::Function(Arc::new(FunctionExpr::with_spans(
+            function.parameters.clone(),
+            function
                 .return_type
                 .as_ref()
                 .map(|return_type| Arc::new(widen_literal_type(return_type.as_ref().clone()))),
-            type_parameters: function.type_parameters.clone(),
-        })),
+            function.type_parameters.clone(),
+            function.spans,
+        ))),
         other => other,
     }
 }
@@ -1110,33 +1161,38 @@ fn widen_object_member(member: ObjectMember) -> ObjectMember {
             signature.value_type = widen_literal_type(signature.value_type);
             ObjectMember::IndexSignature(signature)
         }
-        ObjectMember::CallSignature(function) => ObjectMember::CallSignature(FunctionExpr {
-            parameters: function.parameters,
-            return_type: function
-                .return_type
-                .as_ref()
-                .map(|return_type| Arc::new(widen_literal_type(return_type.as_ref().clone()))),
-            type_parameters: function.type_parameters,
-        }),
-        ObjectMember::ConstructSignature(function) => {
-            ObjectMember::ConstructSignature(FunctionExpr {
-                parameters: function.parameters,
-                return_type: function
+        ObjectMember::CallSignature(function) => {
+            ObjectMember::CallSignature(FunctionExpr::with_spans(
+                function.parameters,
+                function
                     .return_type
                     .as_ref()
                     .map(|return_type| Arc::new(widen_literal_type(return_type.as_ref().clone()))),
-                type_parameters: function.type_parameters,
-            })
+                function.type_parameters,
+                function.spans,
+            ))
+        }
+        ObjectMember::ConstructSignature(function) => {
+            ObjectMember::ConstructSignature(FunctionExpr::with_spans(
+                function.parameters,
+                function
+                    .return_type
+                    .as_ref()
+                    .map(|return_type| Arc::new(widen_literal_type(return_type.as_ref().clone()))),
+                function.type_parameters,
+                function.spans,
+            ))
         }
         ObjectMember::Method(mut method) => {
             method.function =
-                FunctionExpr {
-                    parameters: method.function.parameters,
-                    return_type: method.function.return_type.as_ref().map(|return_type| {
+                FunctionExpr::with_spans(
+                    method.function.parameters,
+                    method.function.return_type.as_ref().map(|return_type| {
                         Arc::new(widen_literal_type(return_type.as_ref().clone()))
                     }),
-                    type_parameters: method.function.type_parameters,
-                };
+                    method.function.type_parameters,
+                    method.function.spans,
+                );
             ObjectMember::Method(method)
         }
     }
@@ -1171,12 +1227,23 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                 .as_ref()
                 .map(|ta| lower_ts_type(&ta.type_annotation, source))
                 .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-            Some(ObjectMember::Property(verter_type_expr::ObjectProperty {
-                name,
-                ty,
-                optional: prop.optional,
-                readonly: prop.readonly,
-            }))
+            let spans = MemberSpans {
+                declaration: Some(prop.span.into()),
+                name: Some(prop.key.span().into()),
+                type_annotation: prop
+                    .type_annotation
+                    .as_ref()
+                    .map(|ta| ta.type_annotation.span().into()),
+            };
+            Some(ObjectMember::Property(
+                verter_type_expr::ObjectProperty::with_spans(
+                    name,
+                    ty,
+                    prop.optional,
+                    prop.readonly,
+                    spans,
+                ),
+            ))
         }
         TSSignature::TSMethodSignature(method) => {
             let name = property_key_name(&method.key)?;
@@ -1190,15 +1257,29 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                 .as_ref()
                 .map(|tp| lower_type_param_decls(tp, source))
                 .unwrap_or_default();
-            Some(ObjectMember::Method(MethodSignature {
+            let fn_spans = FunctionSpans {
+                signature: Some(method.span.into()),
+                return_type: method
+                    .return_type
+                    .as_ref()
+                    .map(|rt| rt.type_annotation.span().into()),
+            };
+            let member_spans = MemberSpans {
+                declaration: Some(method.span.into()),
+                name: Some(method.key.span().into()),
+                type_annotation: None,
+            };
+            Some(ObjectMember::Method(MethodSignature::with_spans(
                 name,
-                function: FunctionExpr {
-                    parameters: params,
-                    return_type: return_type.map(Arc::new),
+                FunctionExpr::with_spans(
+                    params,
+                    return_type.map(Arc::new),
                     type_parameters,
-                },
-                optional: method.optional,
-            }))
+                    fn_spans,
+                ),
+                method.optional,
+                member_spans,
+            )))
         }
         TSSignature::TSCallSignatureDeclaration(call) => {
             let params = lower_function_params(&call.params, source);
@@ -1211,31 +1292,47 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                 .as_ref()
                 .map(|tp| lower_type_param_decls(tp, source))
                 .unwrap_or_default();
-            Some(ObjectMember::CallSignature(FunctionExpr {
-                parameters: params,
-                return_type: return_type.map(Arc::new),
+            let fn_spans = FunctionSpans {
+                signature: Some(call.span.into()),
+                return_type: call
+                    .return_type
+                    .as_ref()
+                    .map(|rt| rt.type_annotation.span().into()),
+            };
+            Some(ObjectMember::CallSignature(FunctionExpr::with_spans(
+                params,
+                return_type.map(Arc::new),
                 type_parameters,
-            }))
+                fn_spans,
+            )))
         }
         TSSignature::TSIndexSignature(idx) => {
-            let (key_name, key_type) = if let Some(param) = idx.parameters.first() {
+            let (key_name, key_type, key_span) = if let Some(param) = idx.parameters.first() {
                 (
                     param.name.to_string(),
                     lower_ts_type(&param.type_annotation.type_annotation, source),
+                    Some(param.span.into()),
                 )
             } else {
                 (
                     "key".to_string(),
                     TypeExpr::Primitive(PrimitiveName::String),
+                    None,
                 )
             };
             let value_type = lower_ts_type(&idx.type_annotation.type_annotation, source);
-            Some(ObjectMember::IndexSignature(IndexSignature {
+            let spans = IndexSignatureSpans {
+                declaration: Some(idx.span.into()),
+                key: key_span,
+                value: Some(idx.type_annotation.type_annotation.span().into()),
+            };
+            Some(ObjectMember::IndexSignature(IndexSignature::with_spans(
                 key_name,
                 key_type,
                 value_type,
-                readonly: idx.readonly,
-            }))
+                idx.readonly,
+                spans,
+            )))
         }
         TSSignature::TSConstructSignatureDeclaration(ctor) => {
             let params = lower_function_params(&ctor.params, source);
@@ -1248,11 +1345,19 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                 .as_ref()
                 .map(|tp| lower_type_param_decls(tp, source))
                 .unwrap_or_default();
-            Some(ObjectMember::ConstructSignature(FunctionExpr {
-                parameters: params,
-                return_type: return_type.map(Arc::new),
+            let fn_spans = FunctionSpans {
+                signature: Some(ctor.span.into()),
+                return_type: ctor
+                    .return_type
+                    .as_ref()
+                    .map(|rt| rt.type_annotation.span().into()),
+            };
+            Some(ObjectMember::ConstructSignature(FunctionExpr::with_spans(
+                params,
+                return_type.map(Arc::new),
                 type_parameters,
-            }))
+                fn_spans,
+            )))
         }
     }
 }
@@ -1271,12 +1376,7 @@ fn lower_function_params(params: &FormalParameters<'_>, source: &str) -> Vec<Fun
                 .as_ref()
                 .map(|ta| lower_ts_type(&ta.type_annotation, source))
                 .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-            FunctionParam {
-                name,
-                ty,
-                optional: param.optional,
-                rest: false,
-            }
+            FunctionParam::with_span(name, ty, param.optional, false, Some(param.span.into()))
         })
         .chain(params.rest.as_ref().map(|rest| {
             let name = match &rest.rest.argument {
@@ -1288,12 +1388,7 @@ fn lower_function_params(params: &FormalParameters<'_>, source: &str) -> Vec<Fun
                 .as_ref()
                 .map(|ta| lower_ts_type(&ta.type_annotation, source))
                 .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-            FunctionParam {
-                name,
-                ty,
-                optional: false,
-                rest: true,
-            }
+            FunctionParam::with_span(name, ty, false, true, Some(rest.span.into()))
         }))
         .collect()
 }

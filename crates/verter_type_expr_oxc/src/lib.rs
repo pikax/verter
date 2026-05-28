@@ -29,8 +29,9 @@ use oxc_span::GetSpan;
 use std::sync::Arc;
 
 use verter_type_expr::{
-    FunctionExpr, FunctionParam, IndexSignature, MappedModifier, MethodSignature, ObjectExpr,
-    ObjectMember, ObjectProperty, PrimitiveName, TupleElement, TypeExpr, TypeParam, ValueRef,
+    FunctionExpr, FunctionParam, FunctionSpans, IndexSignature, IndexSignatureSpans,
+    MappedModifier, MemberSpans, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty,
+    PrimitiveName, TupleElement, TypeExpr, TypeParam, ValueRef,
 };
 
 /// Lower an OXC `TSType` node into a `TypeExpr`.
@@ -112,18 +113,21 @@ pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
 
         // -- Constructor type --
         TSType::TSConstructorType(ctor) => {
-            let func = normalize_function_type_params(FunctionExpr {
-                parameters: lower_formal_parameters(&ctor.params, source),
-                return_type: Some(Arc::new(lower_ts_type(
+            let func = normalize_function_type_params(FunctionExpr::with_spans(
+                lower_formal_parameters(&ctor.params, source),
+                Some(Arc::new(lower_ts_type(
                     &ctor.return_type.type_annotation,
                     source,
                 ))),
-                type_parameters: ctor
-                    .type_parameters
+                ctor.type_parameters
                     .as_ref()
                     .map(|tp| lower_type_params(tp, source))
                     .unwrap_or_default(),
-            });
+                FunctionSpans {
+                    signature: Some(ctor.span.into()),
+                    return_type: Some(ctor.return_type.type_annotation.span().into()),
+                },
+            ));
             TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: vec![ObjectMember::ConstructSignature(func)],
             }))
@@ -367,81 +371,120 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
                 .map(|ta| lower_ts_type(&ta.type_annotation, source))
                 .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
 
-            Some(ObjectMember::Property(ObjectProperty {
+            let spans = MemberSpans {
+                declaration: Some(prop.span.into()),
+                name: Some(prop.key.span().into()),
+                type_annotation: prop
+                    .type_annotation
+                    .as_ref()
+                    .map(|ta| ta.type_annotation.span().into()),
+            };
+            Some(ObjectMember::Property(ObjectProperty::with_spans(
                 name,
                 ty,
-                optional: prop.optional,
-                readonly: prop.readonly,
-            }))
+                prop.optional,
+                prop.readonly,
+                spans,
+            )))
         }
         TSSignature::TSMethodSignature(method) => {
             let name = property_key_name(&method.key)?;
-            let func = normalize_function_type_params(FunctionExpr {
-                parameters: lower_formal_parameters(&method.params, source),
-                return_type: method
+            let func = normalize_function_type_params(FunctionExpr::with_spans(
+                lower_formal_parameters(&method.params, source),
+                method
                     .return_type
                     .as_ref()
                     .map(|rt| Arc::new(lower_ts_type(&rt.type_annotation, source))),
-                type_parameters: method
+                method
                     .type_parameters
                     .as_ref()
                     .map(|tp| lower_type_params(tp, source))
                     .unwrap_or_default(),
-            });
-            Some(ObjectMember::Method(MethodSignature {
+                FunctionSpans {
+                    signature: Some(method.span.into()),
+                    return_type: method
+                        .return_type
+                        .as_ref()
+                        .map(|rt| rt.type_annotation.span().into()),
+                },
+            ));
+            let spans = MemberSpans {
+                declaration: Some(method.span.into()),
+                name: Some(method.key.span().into()),
+                type_annotation: None,
+            };
+            Some(ObjectMember::Method(MethodSignature::with_spans(
                 name,
-                function: func,
-                optional: method.optional,
-            }))
+                func,
+                method.optional,
+                spans,
+            )))
         }
         TSSignature::TSCallSignatureDeclaration(call) => {
-            let func = normalize_function_type_params(FunctionExpr {
-                parameters: lower_formal_parameters(&call.params, source),
-                return_type: call
-                    .return_type
+            let func = normalize_function_type_params(FunctionExpr::with_spans(
+                lower_formal_parameters(&call.params, source),
+                call.return_type
                     .as_ref()
                     .map(|rt| Arc::new(lower_ts_type(&rt.type_annotation, source))),
-                type_parameters: call
-                    .type_parameters
+                call.type_parameters
                     .as_ref()
                     .map(|tp| lower_type_params(tp, source))
                     .unwrap_or_default(),
-            });
+                FunctionSpans {
+                    signature: Some(call.span.into()),
+                    return_type: call
+                        .return_type
+                        .as_ref()
+                        .map(|rt| rt.type_annotation.span().into()),
+                },
+            ));
             Some(ObjectMember::CallSignature(func))
         }
         TSSignature::TSIndexSignature(idx) => {
-            let (key_name, key_type) = if let Some(param) = idx.parameters.first() {
+            let (key_name, key_type, key_span) = if let Some(param) = idx.parameters.first() {
                 let name = param.name.to_string();
                 let ty = lower_ts_type(&param.type_annotation.type_annotation, source);
-                (name, ty)
+                (name, ty, Some(param.span.into()))
             } else {
                 (
                     "key".to_string(),
                     TypeExpr::Primitive(PrimitiveName::String),
+                    None,
                 )
             };
 
             let value_type = lower_ts_type(&idx.type_annotation.type_annotation, source);
-            Some(ObjectMember::IndexSignature(IndexSignature {
+            let spans = IndexSignatureSpans {
+                declaration: Some(idx.span.into()),
+                key: key_span,
+                value: Some(idx.type_annotation.type_annotation.span().into()),
+            };
+            Some(ObjectMember::IndexSignature(IndexSignature::with_spans(
                 key_name,
                 key_type,
                 value_type,
-                readonly: idx.readonly,
-            }))
+                idx.readonly,
+                spans,
+            )))
         }
         TSSignature::TSConstructSignatureDeclaration(ctor) => {
-            let func = normalize_function_type_params(FunctionExpr {
-                parameters: lower_formal_parameters(&ctor.params, source),
-                return_type: ctor
-                    .return_type
+            let func = normalize_function_type_params(FunctionExpr::with_spans(
+                lower_formal_parameters(&ctor.params, source),
+                ctor.return_type
                     .as_ref()
                     .map(|rt| Arc::new(lower_ts_type(&rt.type_annotation, source))),
-                type_parameters: ctor
-                    .type_parameters
+                ctor.type_parameters
                     .as_ref()
                     .map(|tp| lower_type_params(tp, source))
                     .unwrap_or_default(),
-            });
+                FunctionSpans {
+                    signature: Some(ctor.span.into()),
+                    return_type: ctor
+                        .return_type
+                        .as_ref()
+                        .map(|rt| rt.type_annotation.span().into()),
+                },
+            ));
             Some(ObjectMember::ConstructSignature(func))
         }
     }
@@ -497,18 +540,21 @@ fn lower_tuple_element(elem: &TSTupleElement<'_>, source: &str) -> TupleElement 
 }
 
 fn lower_function_type(func: &TSFunctionType<'_>, source: &str) -> FunctionExpr {
-    normalize_function_type_params(FunctionExpr {
-        parameters: lower_formal_parameters(&func.params, source),
-        return_type: Some(Arc::new(lower_ts_type(
+    normalize_function_type_params(FunctionExpr::with_spans(
+        lower_formal_parameters(&func.params, source),
+        Some(Arc::new(lower_ts_type(
             &func.return_type.type_annotation,
             source,
         ))),
-        type_parameters: func
-            .type_parameters
+        func.type_parameters
             .as_ref()
             .map(|tp| lower_type_params(tp, source))
             .unwrap_or_default(),
-    })
+        FunctionSpans {
+            signature: Some(func.span.into()),
+            return_type: Some(func.return_type.type_annotation.span().into()),
+        },
+    ))
 }
 
 fn lower_formal_parameters(params: &FormalParameters<'_>, source: &str) -> Vec<FunctionParam> {
@@ -522,12 +568,7 @@ fn lower_formal_parameters(params: &FormalParameters<'_>, source: &str) -> Vec<F
                 .as_ref()
                 .map(|ta| lower_ts_type(&ta.type_annotation, source))
                 .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-            FunctionParam {
-                name,
-                ty,
-                optional: param.optional,
-                rest: false,
-            }
+            FunctionParam::with_span(name, ty, param.optional, false, Some(param.span().into()))
         })
         .chain(params.rest.as_ref().map(|rest| {
             let name = binding_pattern_name(&rest.rest.argument);
@@ -536,12 +577,7 @@ fn lower_formal_parameters(params: &FormalParameters<'_>, source: &str) -> Vec<F
                 .as_ref()
                 .map(|ta| lower_ts_type(&ta.type_annotation, source))
                 .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-            FunctionParam {
-                name,
-                ty,
-                optional: false,
-                rest: true,
-            }
+            FunctionParam::with_span(name, ty, false, true, Some(rest.span().into()))
         }))
         .collect()
 }
@@ -742,29 +778,34 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
 
 fn normalize_object_member_type_params(member: &ObjectMember, scope: &[TypeParam]) -> ObjectMember {
     match member {
-        ObjectMember::Property(prop) => ObjectMember::Property(ObjectProperty {
-            name: prop.name.clone(),
-            ty: normalize_type_parameter_refs(&prop.ty, scope),
-            optional: prop.optional,
-            readonly: prop.readonly,
-        }),
-        ObjectMember::IndexSignature(sig) => ObjectMember::IndexSignature(IndexSignature {
-            key_name: sig.key_name.clone(),
-            key_type: normalize_type_parameter_refs(&sig.key_type, scope),
-            value_type: normalize_type_parameter_refs(&sig.value_type, scope),
-            readonly: sig.readonly,
-        }),
+        ObjectMember::Property(prop) => ObjectMember::Property(ObjectProperty::with_spans(
+            prop.name.clone(),
+            normalize_type_parameter_refs(&prop.ty, scope),
+            prop.optional,
+            prop.readonly,
+            prop.spans,
+        )),
+        ObjectMember::IndexSignature(sig) => {
+            ObjectMember::IndexSignature(IndexSignature::with_spans(
+                sig.key_name.clone(),
+                normalize_type_parameter_refs(&sig.key_type, scope),
+                normalize_type_parameter_refs(&sig.value_type, scope),
+                sig.readonly,
+                sig.spans,
+            ))
+        }
         ObjectMember::CallSignature(func) => {
             ObjectMember::CallSignature(normalize_nested_function_type_params(func, scope))
         }
         ObjectMember::ConstructSignature(func) => {
             ObjectMember::ConstructSignature(normalize_nested_function_type_params(func, scope))
         }
-        ObjectMember::Method(method) => ObjectMember::Method(MethodSignature {
-            name: method.name.clone(),
-            function: normalize_nested_function_type_params(&method.function, scope),
-            optional: method.optional,
-        }),
+        ObjectMember::Method(method) => ObjectMember::Method(MethodSignature::with_spans(
+            method.name.clone(),
+            normalize_nested_function_type_params(&method.function, scope),
+            method.optional,
+            method.spans,
+        )),
     }
 }
 
@@ -773,23 +814,25 @@ fn normalize_nested_function_type_params(func: &FunctionExpr, scope: &[TypeParam
     let nested_scope = normalize_type_parameter_decls(func.type_parameters.clone());
     combined_scope.extend(nested_scope.clone());
 
-    FunctionExpr {
-        parameters: func
-            .parameters
+    FunctionExpr::with_spans(
+        func.parameters
             .iter()
-            .map(|param| FunctionParam {
-                name: param.name.clone(),
-                ty: normalize_type_parameter_refs(&param.ty, &combined_scope),
-                optional: param.optional,
-                rest: param.rest,
+            .map(|param| {
+                FunctionParam::with_span(
+                    param.name.clone(),
+                    normalize_type_parameter_refs(&param.ty, &combined_scope),
+                    param.optional,
+                    param.rest,
+                    param.span,
+                )
             })
             .collect(),
-        return_type: func
-            .return_type
+        func.return_type
             .as_ref()
             .map(|ret| Arc::new(normalize_type_parameter_refs(ret.as_ref(), &combined_scope))),
-        type_parameters: nested_scope,
-    }
+        nested_scope,
+        func.spans,
+    )
 }
 
 // ---------------------------------------------------------------------------
