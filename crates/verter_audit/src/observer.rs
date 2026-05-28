@@ -344,6 +344,25 @@ pub enum AuditEvent {
     /// that the memo failed to serve (e.g. evicted under FIFO
     /// pressure).
     RecursiveSubstituteMemoHit,
+    /// One call to a public
+    /// [`ImportedMacroSurface`] projection accessor (either
+    /// `resolve_root` or `project_named_member`).
+    ///
+    /// Producer: every public method on
+    /// `verter_session::resolver_core::ImportedMacroSurface` bumps
+    /// this counter exactly once at entry, before any dispatch
+    /// work. The counter is the observability hook that lets
+    /// later analyses verify whether consumers reach the typed-IR
+    /// bridge or a parallel resolution rail.
+    ///
+    /// Until a consumer adopts the bridge in production the
+    /// counter stays at 0 across audited production requests.
+    /// The discriminator tests in
+    /// `crates/verter_session/tests/imported_macro_surface_bridge.rs`
+    /// drive the counter explicitly through hermetic fixtures —
+    /// that is the only context where a non-zero value is
+    /// expected today.
+    ImportedMacroSurfaceProjection,
 }
 
 /// Trait implemented by anything wanting to receive audit events.

@@ -2029,7 +2029,16 @@ substitute_conditional_rebuild: number,
  * reports its hit count; before the memo wires this counter
  * stays at 0.
  */
-recursive_substitute_memo_hits: number, };
+recursive_substitute_memo_hits: number, 
+/**
+ * [`crate::AuditEvent::ImportedMacroSurfaceProjection`]
+ * dispatches at the public `ImportedMacroSurface` accessors
+ * in `verter_session::resolver_core`. Stays at 0 across
+ * audited production requests until a consumer adopts the
+ * bridge in production; hermetic discriminators drive the
+ * counter explicitly through test-only probes.
+ */
+imported_macro_surface_projection: number, };
 
 /**
  * Scheduler-side attribution captured at first dispatch of an audited

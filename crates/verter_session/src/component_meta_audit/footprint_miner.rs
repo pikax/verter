@@ -376,6 +376,9 @@ pub fn mine_footprint(
             as u32,
         recursive_substitute_memo_hits: ctx.recursive_substitute_memo_hits.load(Ordering::Relaxed)
             as u32,
+        imported_macro_surface_projection: ctx
+            .imported_macro_surface_projection
+            .load(Ordering::Relaxed) as u32,
     };
 
     // Truncation counters: combine the accumulator-side counters

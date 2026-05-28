@@ -627,4 +627,11 @@ pub struct ResolverHotPathCounters {
     /// reports its hit count; before the memo wires this counter
     /// stays at 0.
     pub recursive_substitute_memo_hits: u32,
+    /// [`crate::AuditEvent::ImportedMacroSurfaceProjection`]
+    /// dispatches at the public `ImportedMacroSurface` accessors
+    /// in `verter_session::resolver_core`. Stays at 0 across
+    /// audited production requests until a consumer adopts the
+    /// bridge in production; hermetic discriminators drive the
+    /// counter explicitly through test-only probes.
+    pub imported_macro_surface_projection: u32,
 }

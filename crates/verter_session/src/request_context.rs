@@ -650,6 +650,17 @@ pub struct RequestContext {
     /// `substitute_with_change_tracking` entry, not the public
     /// surface).
     pub recursive_substitute_memo_hits: AtomicU64,
+    /// [`crate::resolver_core::ImportedMacroSurface`] projection
+    /// accessor invocations. Bumped exactly once per public
+    /// `resolve_root` or `project_named_member` call. The counter
+    /// is the empirical hook that lets later analyses confirm
+    /// consumers reach the typed-IR bridge rather than a parallel
+    /// rail. Until a consumer adopts the bridge in production the
+    /// counter stays at 0 in audited production requests; the
+    /// hermetic discriminators in
+    /// `tests/imported_macro_surface_bridge.rs` drive it
+    /// explicitly.
+    pub imported_macro_surface_projection: AtomicU64,
     /// Per-request observation set for recursive substitution
     /// identity triples — used by the unique/repeated classifier
     /// at the recursive helper's entry. The set is per-request so
@@ -930,6 +941,7 @@ impl RequestContext {
             substitute_mapped_rebuild: AtomicU64::new(0),
             substitute_conditional_rebuild: AtomicU64::new(0),
             recursive_substitute_memo_hits: AtomicU64::new(0),
+            imported_macro_surface_projection: AtomicU64::new(0),
             recursive_substitute_seen: parking_lot::Mutex::new(rustc_hash::FxHashSet::default()),
             mapped_member_seen: parking_lot::Mutex::new(rustc_hash::FxHashSet::default()),
             mapper_source_ordinals: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
@@ -1428,6 +1440,10 @@ impl verter_audit::AuditObserver for RequestContext {
             }
             verter_audit::AuditEvent::RecursiveSubstituteMemoHit => {
                 self.recursive_substitute_memo_hits
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::ImportedMacroSurfaceProjection => {
+                self.imported_macro_surface_projection
                     .fetch_add(1, Ordering::Relaxed);
             }
         }
