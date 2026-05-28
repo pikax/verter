@@ -1,0 +1,303 @@
+#![deny(missing_docs)]
+//! Span-rich, typeinfo-owned one-level surface value.
+//!
+//! [`TypeInfoSurface`] is the typeinfo-owned PUBLIC projection of the shared
+//! semantic graph's one-level surface ([`SurfaceView`]). It is a THIN
+//! projection — it reads the span-rich GRAPH payloads
+//! ([`SurfaceMember::spans`], [`SemanticNodeData::Function`]'s
+//! `signature_span` / `return_type_span`, [`IndexSignature::spans`]) and pairs
+//! each span with its node's canonical origin file (from
+//! [`SemanticGraphStore::node_scope`]). It does NOT recompute meaning, does NOT
+//! re-resolve types, and does NOT scan source text.
+//!
+//! Architectural rule (CLAUDE.md — "typeinfo carries SPANS, never owned
+//! `String` type text"): every field is a span, an id, a flag, or an interned
+//! `Arc<str>` name. A consumer slices the source at the span on demand at the
+//! FFI / consumer boundary. This mirrors Verter's `CodeTransform` discipline.
+//!
+//! Spans originate at the OXC lowering sites (once, during shallow analysis)
+//! and travel verbatim through the `verter_type_expr` IR into the graph
+//! payloads. A `None` span here means the underlying fact is genuinely
+//! synthetic (a union common-member, a mapped-produced member, a composed
+//! signature) with no single source declaration site — never a "not
+//! implemented" placeholder.
+
+use std::sync::Arc;
+
+use verter_span::Span;
+
+use crate::semantic_query::{
+    IndexSignature, MemberMergeRole, NodeScopeId, SemanticNodeData, SemanticNodeId, SurfaceMember,
+    SurfaceView,
+};
+use crate::semantic_query_memo::SemanticGraphStore;
+
+/// A byte-offset span anchored to a canonical file.
+///
+/// [`verter_span::Span`] alone is the `[start, end)` offset pair with no file
+/// identity; a surface member's origin can be a DIFFERENT file from the
+/// declaration that referenced it (an inherited member originates in its
+/// heritage base's file), so the span MUST carry the canonical file id. The
+/// offsets are in that file's source coordinate system (the SFC-extracted
+/// `<script>` content for `.vue`, the raw source otherwise) — the same
+/// coordinates the OXC lowering stamped.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CanonicalSpan {
+    /// Canonical file id the span's offsets index into.
+    pub file: Arc<str>,
+    /// `[start, end)` byte offsets in that file's source.
+    pub span: Span,
+}
+
+impl CanonicalSpan {
+    /// Pair a `verter_span::Span` with the canonical file it indexes into.
+    #[must_use]
+    pub fn new(file: Arc<str>, span: Span) -> Self {
+        Self { file, span }
+    }
+
+    /// Pair a span with a file id, when both the file and the span are present.
+    /// `None` when either component is absent (a synthetic / multi-origin fact).
+    fn from_parts(file: Option<&Arc<str>>, span: Option<Span>) -> Option<Self> {
+        match (file, span) {
+            (Some(file), Some(span)) => Some(Self::new(Arc::clone(file), span)),
+            _ => None,
+        }
+    }
+}
+
+/// How a [`TypeInfoSurfaceMember`] arrived on the surface — the typed origin +
+/// merge role (codex `SurfaceMemberOrigin`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SurfaceMemberOrigin {
+    /// The canonical file the member's value node was first lowered in (the
+    /// member ORIGIN). For an inherited member this is the heritage base's
+    /// file, not the consuming declaration's. `None` for a structural /
+    /// `Global`-scoped value node (a primitive, a shared literal union) whose
+    /// origin is not a single declaration file.
+    pub canonical_file: Option<Arc<str>>,
+    /// Span of the member's whole declaration in `canonical_file`, when the
+    /// graph member recorded one. `None` for a synthetic member.
+    pub declaration_span: Option<CanonicalSpan>,
+    /// The surface-merge role of the member (own-body / heritage / authored).
+    /// Drives the own-body-shadows-heritage semantics; surfaced so consumers
+    /// can distinguish a derived member from an inherited one.
+    pub merge_role: MemberMergeRole,
+}
+
+/// One member of a [`TypeInfoSurface`].
+///
+/// `value` is a reference-style [`SemanticNodeId`] under the shallow-by-default
+/// rule — the member's body is NOT eagerly expanded. A consumer that needs the
+/// body issues a path projection rooted at `value`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypeInfoSurfaceMember {
+    /// Interned member name.
+    pub name: Arc<str>,
+    /// Span of the member's NAME at its declaration site (in the origin file's
+    /// coordinates). `None` when the member is synthesized (a union
+    /// common-member, a mapped-produced member) and has no single source site.
+    pub name_span: Option<CanonicalSpan>,
+    /// Shallow value node (a `SemanticNodeId`, never an expanded body).
+    pub value: SemanticNodeId,
+    /// Span of the member's TYPE ANNOTATION at its declaration site, when the
+    /// graph member recorded one. `None` for synthesized members or method-
+    /// style members (no `: T` annotation).
+    pub type_annotation_span: Option<CanonicalSpan>,
+    /// `?`-optional member.
+    pub optional: bool,
+    /// `readonly` member.
+    pub readonly: bool,
+    /// Method-style member (`name(): T`) vs property-style (`name: T`).
+    pub is_method: bool,
+    /// Whether the member was declared in a Vue macro type argument's OWN body
+    /// (vs reached via heritage / Omit / intersection). Display/provenance
+    /// flag carried verbatim from the graph member.
+    pub declared_in_macro_type_arg: bool,
+    /// Typed origin + merge role.
+    pub origin: SurfaceMemberOrigin,
+}
+
+/// One call (`(args): ret`) or construct (`new (args): ret`) signature on a
+/// [`TypeInfoSurface`]. Carries the signature node id plus the signature /
+/// parameter / return-type spans recorded on the graph `Function` node.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypeInfoSurfaceSignature {
+    /// The `Function`-shaped signature node.
+    pub node: SemanticNodeId,
+    /// Span of the whole signature in the origin file, when the graph node
+    /// recorded one.
+    pub signature_span: Option<CanonicalSpan>,
+    /// Spans of each parameter, in declaration order. An entry is `None` when
+    /// that parameter had no recorded span (a synthetic parameter).
+    pub parameter_spans: Arc<[Option<CanonicalSpan>]>,
+    /// Span of the return-type annotation, when present.
+    pub return_type_span: Option<CanonicalSpan>,
+}
+
+/// One index signature (`[k: K]: V` / `readonly [k: K]: V`) on a
+/// [`TypeInfoSurface`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypeInfoIndexSignature {
+    /// Key-type node.
+    pub key_type: SemanticNodeId,
+    /// Value-type node.
+    pub value_type: SemanticNodeId,
+    /// Span of the key declaration (`[k: K]`), when recorded.
+    pub key_span: Option<CanonicalSpan>,
+    /// Span of the value-type annotation, when recorded.
+    pub value_span: Option<CanonicalSpan>,
+    /// Span of the whole index-signature declaration, when recorded.
+    pub declaration_span: Option<CanonicalSpan>,
+    /// `readonly` index signature.
+    pub readonly: bool,
+}
+
+/// A span-rich, typeinfo-owned one-level surface.
+///
+/// Built FROM a graph [`SurfaceView`] plus the graph's per-node scope. Holds
+/// NO owned type / display strings — only spans, ids, flags, and interned
+/// names. `Clone` + `Send + Sync` (all fields are `Arc`-backed or `Copy`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypeInfoSurface {
+    /// Named members in declaration order.
+    pub members: Arc<[TypeInfoSurfaceMember]>,
+    /// Call signatures in declaration order.
+    pub call_signatures: Arc<[TypeInfoSurfaceSignature]>,
+    /// Construct signatures in declaration order.
+    pub construct_signatures: Arc<[TypeInfoSurfaceSignature]>,
+    /// Index signatures.
+    pub index_signatures: Arc<[TypeInfoIndexSignature]>,
+    /// Keyspace node, when the surface is a mapped/keyspace carrier.
+    pub keyspace: Option<SemanticNodeId>,
+    /// Whether the surface has at least one index signature.
+    pub has_index_signature: bool,
+}
+
+impl TypeInfoSurface {
+    /// Build a span-rich surface from a graph [`SurfaceView`].
+    ///
+    /// THIN projection: every span comes from the graph payload that already
+    /// carries it (stamped once at the OXC lowering site and interned on the
+    /// node), paired with the node's canonical origin file from
+    /// [`SemanticGraphStore::node_scope`]. No source text is scanned and no
+    /// type is re-resolved.
+    #[must_use]
+    pub fn build(graph: &SemanticGraphStore, view: &SurfaceView) -> Self {
+        let members: Vec<TypeInfoSurfaceMember> = view
+            .members
+            .iter()
+            .map(|member| build_member(graph, member))
+            .collect();
+        let call_signatures: Vec<TypeInfoSurfaceSignature> = view
+            .call_signatures
+            .iter()
+            .map(|node| build_signature(graph, *node))
+            .collect();
+        let construct_signatures: Vec<TypeInfoSurfaceSignature> = view
+            .construct_signatures
+            .iter()
+            .map(|node| build_signature(graph, *node))
+            .collect();
+        let index_signatures: Vec<TypeInfoIndexSignature> = view
+            .index_signatures
+            .iter()
+            .map(|sig| build_index_signature(graph, sig))
+            .collect();
+        Self {
+            members: Arc::from(members.into_boxed_slice()),
+            call_signatures: Arc::from(call_signatures.into_boxed_slice()),
+            construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
+            index_signatures: Arc::from(index_signatures.into_boxed_slice()),
+            keyspace: view.keyspace,
+            has_index_signature: view.has_index_signature,
+        }
+    }
+}
+
+/// The canonical origin file a node was first lowered in, when it is a
+/// single-declaration-file scope. `None` for `Global` / non-file scopes (a
+/// primitive, a structural composed node).
+fn node_origin_file(graph: &SemanticGraphStore, node: SemanticNodeId) -> Option<Arc<str>> {
+    match graph.node_scope(node) {
+        Some(NodeScopeId::File { canonical_id, .. }) => Some(canonical_id),
+        _ => None,
+    }
+}
+
+fn build_member(graph: &SemanticGraphStore, member: &SurfaceMember) -> TypeInfoSurfaceMember {
+    // The member's spans are in its VALUE node's origin file (the member
+    // origin) — for a cross-file inherited member this is the heritage base's
+    // file, not the consuming declaration's.
+    let canonical = node_origin_file(graph, member.value);
+    let name_span = CanonicalSpan::from_parts(canonical.as_ref(), member.spans.name);
+    let declaration_span = CanonicalSpan::from_parts(canonical.as_ref(), member.spans.declaration);
+    let type_annotation_span =
+        CanonicalSpan::from_parts(canonical.as_ref(), member.spans.type_annotation);
+
+    TypeInfoSurfaceMember {
+        name: Arc::clone(&member.name),
+        name_span,
+        value: member.value,
+        type_annotation_span,
+        optional: member.optional,
+        readonly: member.readonly,
+        is_method: member.is_method,
+        declared_in_macro_type_arg: member.declared_in_macro_type_arg,
+        origin: SurfaceMemberOrigin {
+            canonical_file: canonical,
+            declaration_span,
+            merge_role: member.merge_role,
+        },
+    }
+}
+
+fn build_signature(graph: &SemanticGraphStore, node: SemanticNodeId) -> TypeInfoSurfaceSignature {
+    let canonical = node_origin_file(graph, node);
+    let (signature_span, parameter_spans, return_type_span) = match graph.node_data(node) {
+        Some(data) => match &*data {
+            SemanticNodeData::Function {
+                params,
+                signature_span,
+                return_type_span,
+                ..
+            } => {
+                let sig = CanonicalSpan::from_parts(canonical.as_ref(), *signature_span);
+                let ret = CanonicalSpan::from_parts(canonical.as_ref(), *return_type_span);
+                let param_spans: Vec<Option<CanonicalSpan>> = params
+                    .iter()
+                    .map(|p| CanonicalSpan::from_parts(canonical.as_ref(), p.span))
+                    .collect();
+                (sig, param_spans, ret)
+            }
+            _ => (None, Vec::new(), None),
+        },
+        None => (None, Vec::new(), None),
+    };
+
+    TypeInfoSurfaceSignature {
+        node,
+        signature_span,
+        parameter_spans: Arc::from(parameter_spans.into_boxed_slice()),
+        return_type_span,
+    }
+}
+
+fn build_index_signature(
+    graph: &SemanticGraphStore,
+    sig: &IndexSignature,
+) -> TypeInfoIndexSignature {
+    // The index signature's declaration / key / value spans share the file the
+    // value-type node was lowered in (the declaring file). Key/value sub-spans
+    // are recorded on the graph `IndexSignature` payload.
+    let canonical =
+        node_origin_file(graph, sig.value_type).or_else(|| node_origin_file(graph, sig.key_type));
+    TypeInfoIndexSignature {
+        key_type: sig.key_type,
+        value_type: sig.value_type,
+        key_span: CanonicalSpan::from_parts(canonical.as_ref(), sig.spans.key),
+        value_span: CanonicalSpan::from_parts(canonical.as_ref(), sig.spans.value),
+        declaration_span: CanonicalSpan::from_parts(canonical.as_ref(), sig.spans.declaration),
+        readonly: sig.readonly,
+    }
+}

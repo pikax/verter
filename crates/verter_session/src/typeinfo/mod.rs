@@ -29,10 +29,16 @@ pub mod evaluate_type_expression;
 pub mod raise;
 pub mod resolve_named_symbol;
 pub(crate) mod scratch_cache;
+pub mod shallow_surface;
+pub mod surface;
 pub mod symbol_inventory;
 pub mod types;
 
 pub use resolve_named_symbol::ResolveMode;
+pub use surface::{
+    CanonicalSpan, SurfaceMemberOrigin, TypeInfoIndexSignature, TypeInfoSurface,
+    TypeInfoSurfaceMember, TypeInfoSurfaceSignature,
+};
 pub use types::{
     EvaluateTypeExpressionRequest, ImportSpec, NamedImport, SymbolEntry, SymbolKind, TypeArgList,
 };
