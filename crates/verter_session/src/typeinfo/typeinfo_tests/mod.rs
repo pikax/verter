@@ -53,6 +53,7 @@ mod relation_semantics;
 mod shallow_surface_facts;
 mod substitution_types;
 mod support;
+mod surface_jsdoc_provenance;
 mod surface_spans;
 mod table_like;
 mod template_literal_inference;
