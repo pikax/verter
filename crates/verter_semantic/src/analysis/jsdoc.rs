@@ -254,22 +254,54 @@ pub fn extract_jsdoc_near_offset(
 /// text. Used as a name-based fallback for expanded-only props that have no
 /// span on the AST (`ExpandedProperty` carries no span).
 ///
-/// Searches for `name :` or `name ?:` patterns where `name` is a complete
-/// identifier (not a substring of another). For each candidate, attempts to
-/// extract the leading JSDoc using `extract_jsdoc_near_offset`. Returns the
-/// first occurrence with non-empty JSDoc, or `(None, Vec::new())` if none.
+/// Searches for `name :`, `name ?:`, or method-style `name (` patterns where
+/// `name` is a complete identifier (not a substring of another). For each
+/// candidate, attempts to extract the leading JSDoc using
+/// `extract_jsdoc_near_offset`. Returns the first occurrence with non-empty
+/// JSDoc, or `(None, Vec::new())` if none.
 pub fn extract_jsdoc_for_property_name(
     source: &str,
     prop_name: &str,
+) -> (Option<String>, Vec<JsdocTag>) {
+    extract_jsdoc_for_property_name_in_range(source, prop_name, 0, source.len())
+}
+
+/// Span-scoped variant of [`extract_jsdoc_for_property_name`]: searches for the
+/// member declaration site ONLY within the byte range `[range_start,
+/// range_end)`.
+///
+/// This is the declaration-provenance JSDoc lookup. A file may declare the same
+/// property name in two declarations (only one of which is the heritage base an
+/// inherited member came from); a file-wide first match would attach the wrong
+/// declaration's JSDoc. Scoping the search to the declaring declaration's full
+/// span (`AnalyzedExternalTypeSource::local_symbol_span`) attaches the correct
+/// leading JSDoc. The match accepts property-style (`name:` / `name?:`) AND
+/// method-style (`name(` — e.g. `default(props): any`) members.
+///
+/// `range_start` / `range_end` are clamped to the source bounds. An empty or
+/// inverted range yields `(None, Vec::new())`.
+pub fn extract_jsdoc_for_property_name_in_range(
+    source: &str,
+    prop_name: &str,
+    range_start: usize,
+    range_end: usize,
 ) -> (Option<String>, Vec<JsdocTag>) {
     if prop_name.is_empty() {
         return (None, Vec::new());
     }
     let bytes = source.as_bytes();
+    let range_end = range_end.min(bytes.len());
+    if range_start >= range_end {
+        return (None, Vec::new());
+    }
     let pat = prop_name.as_bytes();
-    let mut search_start = 0usize;
+    let mut search_start = range_start;
 
-    while let Some(rel) = source[search_start..].find(prop_name) {
+    while let Some(rel) = source.get(search_start..range_end).and_then(|window| {
+        window
+            .find(prop_name)
+            .filter(|rel| search_start + rel + pat.len() <= range_end)
+    }) {
         let abs = search_start + rel;
         let after = abs + pat.len();
 
@@ -284,7 +316,12 @@ pub fn extract_jsdoc_for_property_name(
             if cursor < bytes.len() && bytes[cursor] == b'?' {
                 cursor += 1;
             }
-            if cursor < bytes.len() && bytes[cursor] == b':' {
+            // Property-style (`name:` / `name?:`) OR method-style (`name(`,
+            // e.g. an interface method member `default(props): any`). A
+            // method-style member declares its leading JSDoc the same way a
+            // property does, so the same `extract_jsdoc_near_offset` resolves
+            // it from the member-name offset.
+            if cursor < bytes.len() && (bytes[cursor] == b':' || bytes[cursor] == b'(') {
                 let (description, tags) = extract_jsdoc_near_offset(source, abs as u32);
                 if description.is_some() || !tags.is_empty() {
                     return (description, tags);
@@ -429,5 +466,71 @@ export declare abstract class Value {}
         let raw = "/** Simple description. */";
         let (description, _) = super::parse_jsdoc(raw);
         assert_eq!(description.as_deref(), Some("Simple description."));
+    }
+
+    #[test]
+    fn extract_in_range_scopes_to_declaring_declaration_span() {
+        use super::extract_jsdoc_for_property_name_in_range;
+        // Two declarations declare `base` with DIFFERENT JSDoc. A file-wide
+        // search would return the FIRST (`Decoy.base`); scoping to the SECOND
+        // declaration's byte range must return the second declaration's JSDoc.
+        let source = "interface Decoy {\n  /** DECOY base doc */\n  base: string\n}\n\
+                      interface BaseProps {\n  /** correct base doc */\n  base: number\n}";
+        // Whole-file search returns the first textual match (the decoy).
+        let (whole, _) = super::extract_jsdoc_for_property_name(source, "base");
+        assert_eq!(
+            whole.as_deref(),
+            Some("DECOY base doc"),
+            "whole-file search returns the first textual `base:` (the decoy) — \
+             this is exactly the bug span-scoping fixes",
+        );
+        // Scope to the second declaration's span: returns the correct doc.
+        let second_start = source
+            .find("interface BaseProps")
+            .expect("BaseProps declaration present");
+        let (scoped, _) =
+            extract_jsdoc_for_property_name_in_range(source, "base", second_start, source.len());
+        assert_eq!(
+            scoped.as_deref(),
+            Some("correct base doc"),
+            "scoping the search to BaseProps's span MUST return BaseProps's JSDoc, \
+             NOT the file-first Decoy match",
+        );
+    }
+
+    #[test]
+    fn extract_in_range_matches_method_style_members() {
+        use super::extract_jsdoc_for_property_name_in_range;
+        // A method-style member (`default(props): any`) declares leading JSDoc.
+        // The matcher must accept the `name(` form (not only `name:`).
+        let source =
+            "interface Slots {\n  /** the default slot */\n  default(props: { x: string }): any\n}";
+        let (desc, _) =
+            extract_jsdoc_for_property_name_in_range(source, "default", 0, source.len());
+        assert_eq!(
+            desc.as_deref(),
+            Some("the default slot"),
+            "method-style member `default(props): any` MUST get its leading JSDoc \
+             (the matcher accepts `name(`)",
+        );
+    }
+
+    #[test]
+    fn extract_in_range_empty_or_inverted_range_yields_none() {
+        use super::extract_jsdoc_for_property_name_in_range;
+        let source = "interface X {\n  /** doc */\n  foo: number\n}";
+        // Inverted range.
+        let (desc, tags) = extract_jsdoc_for_property_name_in_range(source, "foo", 30, 10);
+        assert!(
+            desc.is_none() && tags.is_empty(),
+            "inverted range yields none"
+        );
+        // Range that excludes the `foo:` declaration site (only the header).
+        let header_end = source.find('{').expect("brace") + 1;
+        let (desc2, tags2) = extract_jsdoc_for_property_name_in_range(source, "foo", 0, header_end);
+        assert!(
+            desc2.is_none() && tags2.is_empty(),
+            "a range that excludes the member declaration site yields none",
+        );
     }
 }

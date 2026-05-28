@@ -212,6 +212,20 @@ impl AnalyzedExternalTypeSource {
             .map(|symbol| symbol.span)
     }
 
+    /// Enumerate every locally-declared type symbol name (interface /
+    /// type-alias / class) paired with its full declaration span.
+    ///
+    /// Used by the imported-macro-surface JSDoc reattachment to scope a
+    /// source-text JSDoc search to the SINGLE declaration that declares a
+    /// given member, rather than a file-wide first match — when a file
+    /// declares the same property name in two declarations, scoping to the
+    /// declaring declaration's span attaches the correct leading JSDoc.
+    pub fn local_type_symbol_spans(&self) -> impl Iterator<Item = (&str, Span)> {
+        self.local_type_symbols
+            .iter()
+            .map(|(name, symbol)| (name.as_str(), symbol.span))
+    }
+
     pub fn local_type_symbol(&self, symbol_name: &str) -> Option<&AnalyzedExternalTypeSymbol> {
         self.local_type_symbols.get(symbol_name)
     }

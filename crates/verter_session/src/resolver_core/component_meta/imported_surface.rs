@@ -461,6 +461,51 @@ impl ImportedMacroSurface {
         ctx.dispatch().raise_node_to_type_expr(node)
     }
 
+    /// The canonical file a member's value node was first lowered in — the
+    /// member ORIGIN. Read from the value node's origin sidecar
+    /// ([`SemanticGraphStore::node_scope`]). For an INHERITED member
+    /// (`interface Props extends Base`) the origin is the heritage BASE's
+    /// file, not the root declaration's. Returns `None` for a structural /
+    /// `Global`-scoped value node (a primitive, a shared literal-union)
+    /// whose origin is not a single declaration file.
+    fn member_origin_canonical(
+        ctx: &dyn ResolverContext,
+        member_value: SemanticNodeId,
+    ) -> Option<Arc<str>> {
+        match ctx
+            .project_type_store()
+            .semantic_graph()
+            .node_scope(member_value)
+        {
+            Some(crate::semantic_query::NodeScopeId::File { canonical_id, .. }) => {
+                Some(canonical_id)
+            }
+            _ => None,
+        }
+    }
+
+    /// The [`TypeExprScope`] for a member's paired `*_expr` field.
+    ///
+    /// The scope names the file whose OXC parse produced the typed
+    /// expression — consumers walking nested `TypeExpr::Ref` nodes resolve
+    /// them in THAT file (see [`TypeExprScope`]). For an INHERITED member the
+    /// type-expr was written in the heritage BASE's file, so the scope MUST
+    /// be the member's ORIGIN file ([`Self::member_origin_canonical`]), not
+    /// the derived/root declaration's file: a base-file member typed as a
+    /// `LocalAlias` raises to `Ref("LocalAlias")`, and the root-file scope
+    /// would make later typed-IR resolution look in the WRONG file (a Miss /
+    /// a cross-file mis-binding). Falls back to the surface root scope when
+    /// the value node carries no single-file origin (a structural node).
+    fn member_expr_scope(
+        ctx: &dyn ResolverContext,
+        member_value: SemanticNodeId,
+        root_scope: &TypeExprScope,
+    ) -> TypeExprScope {
+        Self::member_origin_canonical(ctx, member_value)
+            .map(|canonical| TypeExprScope::new(canonical.as_ref()))
+            .unwrap_or_else(|| root_scope.clone())
+    }
+
     /// Reattach a member's JSDoc (`description` + `tags`) from the cached
     /// parse artifact of the member's ORIGIN file — the display sidecar.
     ///
@@ -469,15 +514,29 @@ impl ImportedMacroSurface {
     /// where the member's declaration was lowered. For an INHERITED member
     /// (`interface Props extends Base`) that scope is the heritage BASE's
     /// file, not the root declaration's — so the JSDoc follows the member
-    /// ORIGIN, exactly as the brief requires. We read that file's
-    /// cache-owned `IndexedReady.eval_source` (the canonical post-parse
-    /// source artifact — no re-resolution, no fresh parse) and run the
-    /// shared name-based JSDoc extractor
-    /// ([`verter_semantic::analysis::jsdoc::extract_jsdoc_for_property_name`],
-    /// the same helper the eager expanded-only fallback uses). This mirrors
+    /// ORIGIN, exactly as the brief requires.
+    ///
+    /// **Declaration provenance (not a file-wide first match).** A single
+    /// file may declare the same property name in TWO declarations (only one
+    /// of which is the heritage base an inherited member came from), and a
+    /// member may be method-style (`default(props): any`). A whole-file
+    /// `name:` search would attach the FIRST textual match — possibly the
+    /// wrong declaration — and miss method members entirely. So we scope the
+    /// JSDoc search to the DECLARING declaration's span: enumerate the origin
+    /// file's local type declarations
+    /// ([`AnalyzedExternalTypeSource::local_type_symbol_spans`]), keep those
+    /// whose span declares `member_name` as a direct member, and — when more
+    /// than one declaration declares the name — disambiguate by matching the
+    /// member's VALUE NODE against each candidate declaration's same-named
+    /// member value node (the cache-owned own-surface read; structural
+    /// interning makes the inherited member's value node identical to the
+    /// declaring declaration's). The search itself reads the file's
+    /// cache-owned `IndexedReady.eval_source` (no re-resolution, no fresh
+    /// parse) and accepts property- AND method-style members. This mirrors
     /// the eager rail's `enrich_projected_jsdoc`, which resolves each
     /// member's JSDoc from its declaration source by span; the lazy rail
-    /// resolves by member name because the typed IR is span-free.
+    /// resolves by member name + declaration span because the typed IR is
+    /// span-free.
     ///
     /// Returns `(None, empty)` when the origin scope is unknown, the source
     /// is unavailable, or no leading JSDoc is present — matching the eager
@@ -490,21 +549,181 @@ impl ImportedMacroSurface {
         Option<String>,
         Vec<verter_semantic::analysis::types::JsdocTag>,
     ) {
-        let Some(crate::semantic_query::NodeScopeId::File { canonical_id, .. }) = ctx
-            .project_type_store()
-            .semantic_graph()
-            .node_scope(member_value)
-        else {
+        let Some(canonical_id) = Self::member_origin_canonical(ctx, member_value) else {
             return (None, Vec::new());
         };
         let Some(indexed) = ctx.ensure_indexed_ready(canonical_id.as_ref()) else {
             return (None, Vec::new());
         };
-        verter_semantic::analysis::jsdoc::extract_jsdoc_for_property_name(
-            indexed.eval_source.as_ref(),
-            member_name,
-        )
+        let source = indexed.eval_source.as_ref();
+
+        // Determine the declaring declaration's span so the JSDoc search is
+        // scoped to it (not a file-wide first match). When the origin file's
+        // type analysis is unavailable, fall back to the whole-file search
+        // (the prior behaviour — still correct for single-declaration files).
+        if let Some((start, end)) =
+            Self::declaring_decl_span(ctx, source, &canonical_id, member_value, member_name)
+        {
+            return verter_semantic::analysis::jsdoc::extract_jsdoc_for_property_name_in_range(
+                source,
+                member_name,
+                start,
+                end,
+            );
+        }
+
+        verter_semantic::analysis::jsdoc::extract_jsdoc_for_property_name(source, member_name)
     }
+
+    /// Resolve the `(start, end)` byte span of the declaration in
+    /// `canonical_id` that declares `member_name` as the member carried by
+    /// `member_value`. Returns `None` when the origin file's type analysis is
+    /// unavailable, or no local declaration declares the member name (e.g. it
+    /// was reached from a deeper file) so the caller falls back to the
+    /// whole-file search.
+    ///
+    /// Disambiguation when several declarations in the file declare the same
+    /// member name: resolve each candidate declaration's own one-level
+    /// surface through the cache-owned dispatch and keep the candidate whose
+    /// same-named member's value node equals `member_value`. Structural
+    /// interning guarantees an inherited member's value node is identical to
+    /// the declaring declaration's member value node, so the match is exact
+    /// and data-driven (no name-suffix / ordinal heuristic).
+    ///
+    /// The origin file's declaration index is the cache-owned
+    /// `external_type_analysis` artifact (declaration names + full spans) —
+    /// no re-parse, no re-resolution.
+    fn declaring_decl_span(
+        ctx: &dyn ResolverContext,
+        source: &str,
+        canonical_id: &Arc<str>,
+        member_value: SemanticNodeId,
+        member_name: &str,
+    ) -> Option<(usize, usize)> {
+        let analysis = ctx.external_type_analysis(canonical_id.as_ref())?;
+        // Candidate declarations: those whose full span contains a
+        // source-level declaration of `member_name` (property- or
+        // method-style). A declaration with no `member_name` declaration in
+        // its span cannot be the origin.
+        let mut candidates: Vec<(usize, usize)> = analysis
+            .local_type_symbol_spans()
+            .filter_map(|(_name, span)| {
+                let start = span.start as usize;
+                let end = (span.end as usize).min(source.len());
+                if start >= end {
+                    return None;
+                }
+                // A declaration "declares" the member if the member-name
+                // declaration site exists in its span — even when that site
+                // carries no leading JSDoc (so a JSDoc-less declaring
+                // declaration still anchors the scope and is not skipped in
+                // favour of a later JSDoc-bearing decoy). The presence probe
+                // does not require JSDoc.
+                member_decl_site_in_range(source, member_name, start, end).then_some((start, end))
+            })
+            .collect();
+
+        match candidates.len() {
+            0 => None,
+            1 => Some(candidates.remove(0)),
+            _ => {
+                // Ambiguous: multiple declarations declare the member name.
+                // Disambiguate by the member's value node identity.
+                let dispatch = ctx.dispatch();
+                for &(start, end) in &candidates {
+                    // The declaration name whose span starts at `start`.
+                    let Some(decl_name) = analysis
+                        .local_type_symbol_spans()
+                        .find(|(_n, s)| s.start as usize == start)
+                        .map(|(n, _s)| n.to_string())
+                    else {
+                        continue;
+                    };
+                    let root =
+                        match dispatch.execute(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                            scope: ScopeId {
+                                canonical_id: Arc::clone(canonical_id),
+                                local_scope: None,
+                            },
+                            name: Arc::from(decl_name.as_str()),
+                        })) {
+                            QueryResult::Value(node) => node,
+                            QueryResult::Error(_) | QueryResult::Recursive(_) => continue,
+                        };
+                    let Some(view) = dispatch.surface_view_from_base_node(
+                        root,
+                        crate::semantic_query::SurfaceProvenanceContext::Structural,
+                    ) else {
+                        continue;
+                    };
+                    if view
+                        .members
+                        .iter()
+                        .any(|m| m.name.as_ref() == member_name && m.value == member_value)
+                    {
+                        return Some((start, end));
+                    }
+                }
+                // No value-node match (e.g. same-typed duplicate whose value
+                // nodes structurally collapse). Fall back to the whole-file
+                // search rather than guess a declaration.
+                None
+            }
+        }
+    }
+}
+
+/// Whether `source[range_start..range_end)` contains a direct declaration of
+/// `member_name` (property-style `name:` / `name?:` or method-style `name(`),
+/// independent of whether that site carries leading JSDoc. Used by
+/// [`ImportedMacroSurface::declaring_decl_span`] to anchor a declaring
+/// declaration whose member has no JSDoc, so a later JSDoc-bearing decoy
+/// declaration does not win the scope.
+fn member_decl_site_in_range(
+    source: &str,
+    member_name: &str,
+    range_start: usize,
+    range_end: usize,
+) -> bool {
+    if member_name.is_empty() {
+        return false;
+    }
+    let bytes = source.as_bytes();
+    let range_end = range_end.min(bytes.len());
+    if range_start >= range_end {
+        return false;
+    }
+    let pat = member_name.as_bytes();
+    let mut search_start = range_start;
+    while let Some(rel) = source.get(search_start..range_end).and_then(|window| {
+        window
+            .find(member_name)
+            .filter(|rel| search_start + rel + pat.len() <= range_end)
+    }) {
+        let abs = search_start + rel;
+        let after = abs + pat.len();
+        let boundary_before = abs == 0 || !is_ident_continue(bytes[abs - 1]);
+        let boundary_after = after >= bytes.len() || !is_ident_continue(bytes[after]);
+        if boundary_before && boundary_after {
+            let mut cursor = after;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if cursor < bytes.len() && bytes[cursor] == b'?' {
+                cursor += 1;
+            }
+            if cursor < bytes.len() && (bytes[cursor] == b':' || bytes[cursor] == b'(') {
+                return true;
+            }
+        }
+        search_start = abs + 1;
+    }
+    false
+}
+
+#[inline]
+fn is_ident_continue(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
 }
 
 /// Eager-resolved-macro newtype mirroring the existing public
@@ -621,12 +840,19 @@ impl ResolvedMacroSurface {
                     QueryResult::Value(view) => view,
                     QueryResult::Error(_) | QueryResult::Recursive(_) => return Vec::new(),
                 };
-                let scope = TypeExprScope::new(surface.identity.canonical_id.as_ref());
+                let root_scope = TypeExprScope::new(surface.identity.canonical_id.as_ref());
                 view.members
                     .iter()
                     .map(|member| {
                         let type_expr = ImportedMacroSurface::raise_member_value(ctx, member.value);
-                        let type_expr_scope = type_expr.is_some().then(|| scope.clone());
+                        // Scope the paired `type_expr` to the member's ORIGIN
+                        // file (see [`ImportedMacroSurface::member_expr_scope`]):
+                        // for an inherited member the type-expr was written in
+                        // the heritage base's file, so a nested `Ref` must
+                        // resolve THERE, not in the root declaration's file.
+                        let type_expr_scope = type_expr.is_some().then(|| {
+                            ImportedMacroSurface::member_expr_scope(ctx, member.value, &root_scope)
+                        });
                         // Display sidecar (cache-owned): the published
                         // `type_annotation` display string is rendered from
                         // the cache-owned typed `type_expr` — NOT re-parsed
@@ -704,7 +930,7 @@ impl ResolvedMacroSurface {
                     QueryResult::Value(view) => view,
                     QueryResult::Error(_) | QueryResult::Recursive(_) => return Vec::new(),
                 };
-                let scope = TypeExprScope::new(surface.identity.canonical_id.as_ref());
+                let root_scope = TypeExprScope::new(surface.identity.canonical_id.as_ref());
                 let mut emits: Vec<AnalyzedEmitField> = Vec::new();
 
                 // Call-signature emits: the event name is the FIRST
@@ -740,13 +966,18 @@ impl ResolvedMacroSurface {
                         return_type: func.return_type.clone(),
                         type_parameters: func.type_parameters.clone(),
                     }));
+                    // Scope the payload to the call signature's ORIGIN file:
+                    // an inherited call-signature emit carries its payload
+                    // `Ref`s from the heritage base's file.
+                    let payload_scope =
+                        ImportedMacroSurface::member_expr_scope(ctx, *sig_node, &root_scope);
                     let mut push_event = |name: String| {
                         emits.push(AnalyzedEmitField {
                             name,
                             span: verter_span::Span::default(),
                             payload_type: None,
                             payload_expr: Some(payload_fn.clone()),
-                            payload_expr_scope: Some(scope.clone()),
+                            payload_expr_scope: Some(payload_scope.clone()),
                             description: None,
                             tags: Vec::new(),
                         });
@@ -775,7 +1006,12 @@ impl ResolvedMacroSurface {
                     for member in &view.members {
                         let payload_expr =
                             ImportedMacroSurface::raise_member_value(ctx, member.value);
-                        let payload_expr_scope = payload_expr.is_some().then(|| scope.clone());
+                        // Scope the payload to the member's ORIGIN file (an
+                        // inherited property-style emit's payload `Ref`s live
+                        // in the heritage base's file).
+                        let payload_expr_scope = payload_expr.is_some().then(|| {
+                            ImportedMacroSurface::member_expr_scope(ctx, member.value, &root_scope)
+                        });
                         // Display sidecar: payload text rendered from the
                         // cache-owned typed `payload_expr`; JSDoc reattached
                         // by member origin (see `member_display_jsdoc`).
@@ -841,7 +1077,7 @@ impl ResolvedMacroSurface {
                     QueryResult::Value(view) => view,
                     QueryResult::Error(_) | QueryResult::Recursive(_) => return Vec::new(),
                 };
-                let scope = TypeExprScope::new(surface.identity.canonical_id.as_ref());
+                let root_scope = TypeExprScope::new(surface.identity.canonical_id.as_ref());
                 view.members
                     .iter()
                     .filter_map(|member| {
@@ -855,6 +1091,11 @@ impl ResolvedMacroSurface {
                             TypeExpr::Function(func) => func,
                             _ => return None,
                         };
+                        // Scope binding + return `*_expr` to the slot member's
+                        // ORIGIN file: an inherited slot's binding/return
+                        // `Ref`s were written in the heritage base's file.
+                        let scope =
+                            ImportedMacroSurface::member_expr_scope(ctx, member.value, &root_scope);
                         let bindings = func
                             .parameters
                             .first()

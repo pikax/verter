@@ -508,6 +508,207 @@ fn interface_extends_imported_generic_base_with_substitution() {
 }
 
 // ===========================================================================
+// Class C — inherited-member `*_expr_scope` follows the member ORIGIN file
+// ===========================================================================
+
+#[test]
+fn inherited_member_type_expr_scope_is_origin_file_not_root() {
+    // owner imports Props (props.ts); Props extends BaseProps (base.ts);
+    // BaseProps's `base` member is typed as a `LocalAlias` declared IN the
+    // base file. The inherited member raises to `Ref("LocalAlias")`, and its
+    // paired `type_expr_scope` MUST be the BASE file (`/w/base.ts`) — the file
+    // where `LocalAlias` is declared and where later typed-IR resolution must
+    // look. Pre-fix the scope was stamped with the ROOT declaration's file
+    // (`/w/props.ts`), where `LocalAlias` does NOT exist → a wrong-file lookup
+    // (Miss / cross-file mis-binding). This fixture pins the scope to the
+    // member origin.
+    let owner: &'static str =
+        Box::leak(vue_importing("./props", "defineProps", "Props").into_boxed_str());
+    let props = "import type { BaseProps } from './base'\n\
+                 export interface Props extends BaseProps {\n  own: string\n}";
+    // The base file declares a LOCAL alias and types `base` as that alias.
+    let base = "type LocalAlias = { nested: number }\n\
+                export interface BaseProps {\n  base: LocalAlias\n}";
+    let host = build_host(&[
+        (OWNER_VUE_PATH, owner, FileKind::VueSfc),
+        ("/w/props.ts", props, FileKind::NonSfc),
+        ("/w/base.ts", base, FileKind::NonSfc),
+    ]);
+
+    let lazy_members = lazy("/w/props.ts", "Props").lazy_prop_members(&host);
+    let base_field = lazy_members
+        .iter()
+        .find(|p| p.name == "base")
+        .expect("inherited `base` member must be present");
+    let own = lazy_members.iter().find(|p| p.name == "own").expect("own");
+
+    // The inherited member's type-expr is the shallow `Ref("LocalAlias")`
+    // (shallow-by-default): the alias body is NOT inlined at the surface.
+    assert_eq!(
+        base_field.type_expr,
+        Some(verter_type_expr::TypeExpr::named("LocalAlias")),
+        "inherited `base` must raise to the shallow alias `Ref` (the alias body \
+         stays un-inlined); got {:?}",
+        base_field.type_expr,
+    );
+
+    // THE DISCRIMINATOR: the paired `type_expr_scope` is the member ORIGIN
+    // file (`/w/base.ts`), NOT the root declaration's file (`/w/props.ts`).
+    // Pre-fix this was `/w/props.ts` and `LocalAlias` would resolve in the
+    // WRONG file.
+    assert_eq!(
+        base_field.type_expr_scope.as_ref().map(|s| s.as_str()),
+        Some("/w/base.ts"),
+        "inherited `base` member's type_expr_scope MUST be the heritage base's \
+         file (`/w/base.ts`) where `LocalAlias` is declared — NOT the root \
+         declaration's file; got {:?}",
+        base_field.type_expr_scope,
+    );
+    // The OWN member stays scoped to the root declaration's file.
+    assert_eq!(
+        own.type_expr_scope.as_ref().map(|s| s.as_str()),
+        Some("/w/props.ts"),
+        "own-body `own` member's type_expr_scope MUST be the root declaration's \
+         file (`/w/props.ts`); got {:?}",
+        own.type_expr_scope,
+    );
+
+    // Proof the chosen scope is the RESOLVABLE one: `LocalAlias` is declared
+    // ONLY in `/w/base.ts`. A `ResolveDecl` for `LocalAlias` in the member's
+    // scope file (`/w/base.ts`) RESOLVES; the same `ResolveDecl` in the ROOT
+    // declaration's file (`/w/props.ts`) MISSES. So stamping the inherited
+    // member with the root scope (the pre-fix bug) would route alias
+    // resolution into the wrong file → Miss; the origin scope routes it to
+    // the file where the alias actually lives.
+    let scope_file = base_field
+        .type_expr_scope
+        .as_ref()
+        .expect("inherited base has a scope")
+        .as_str();
+    let resolves_in_scope_file = matches!(
+        lazy(
+            Box::leak(scope_file.to_string().into_boxed_str()),
+            "LocalAlias"
+        )
+        .resolve_root(&host),
+        verter_session::semantic_query::QueryResult::Value(_)
+    );
+    let resolves_in_root_file = matches!(
+        lazy("/w/props.ts", "LocalAlias").resolve_root(&host),
+        verter_session::semantic_query::QueryResult::Value(_)
+    );
+    assert!(
+        resolves_in_scope_file,
+        "`LocalAlias` MUST resolve in the inherited member's scope file ({scope_file}) — \
+         the scope points at the file where the alias is declared",
+    );
+    assert!(
+        !resolves_in_root_file,
+        "`LocalAlias` MUST NOT resolve in the ROOT declaration's file (/w/props.ts) — \
+         this is exactly why the pre-fix root-file scope produced a wrong-file lookup",
+    );
+}
+
+// ===========================================================================
+// Class C — inherited-member JSDoc keys on DECLARATION provenance
+// ===========================================================================
+
+#[test]
+fn inherited_member_jsdoc_keys_on_declaring_declaration_not_file_first_match() {
+    // The base file declares the SAME property name (`base`) in TWO
+    // declarations with DIFFERENT JSDoc and DIFFERENT types. Only `BaseProps`
+    // is the heritage base of `Props`; `Decoy` is an unrelated declaration
+    // that appears FIRST in the file. A file-wide first-match JSDoc lookup
+    // would attach `Decoy`'s JSDoc (the first textual `base:`); the
+    // declaration-provenance lookup MUST attach `BaseProps`'s JSDoc.
+    let owner: &'static str =
+        Box::leak(vue_importing("./props", "defineProps", "Props").into_boxed_str());
+    let props = "import type { BaseProps } from './base'\n\
+                 export interface Props extends BaseProps {\n  own: string\n}";
+    // `Decoy` is declared FIRST (its `base:` is the first textual match) and
+    // carries a DECOY JSDoc + a different type (`string`) so the inherited
+    // member's value node (`number`) disambiguates structurally.
+    let base = "export interface Decoy {\n  /** DECOY base doc */\n  base: string\n}\n\
+                export interface BaseProps {\n  /** correct base doc */\n  base: number\n}";
+    let host = build_host(&[
+        (OWNER_VUE_PATH, owner, FileKind::VueSfc),
+        ("/w/props.ts", props, FileKind::NonSfc),
+        ("/w/base.ts", base, FileKind::NonSfc),
+    ]);
+
+    let lazy_members = lazy("/w/props.ts", "Props").lazy_prop_members(&host);
+    let base_field = lazy_members
+        .iter()
+        .find(|p| p.name == "base")
+        .expect("inherited `base` member must be present");
+
+    // Sanity: the inherited member is BaseProps's `base: number`, not Decoy's
+    // `base: string` — the carrier-complete reader followed the heritage edge.
+    assert_eq!(
+        base_field.type_expr,
+        Some(verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Number
+        )),
+        "inherited `base` must be BaseProps's `number`, not Decoy's `string`; got {:?}",
+        base_field.type_expr,
+    );
+
+    // THE DISCRIMINATOR: the JSDoc is BaseProps's (the DECLARING declaration),
+    // NOT Decoy's first-textual-match JSDoc. Pre-fix the file-wide search
+    // attached `DECOY base doc` (the first `base:` site in the file).
+    assert_eq!(
+        base_field.description.as_deref(),
+        Some("correct base doc"),
+        "inherited `base` JSDoc MUST come from the DECLARING declaration \
+         (`BaseProps`), NOT the file-first `Decoy.base`; got {:?}",
+        base_field.description,
+    );
+    assert_ne!(
+        base_field.description.as_deref(),
+        Some("DECOY base doc"),
+        "inherited `base` JSDoc must NOT be the decoy declaration's doc \
+         (file-wide first-match bug)",
+    );
+}
+
+#[test]
+fn inherited_method_style_member_jsdoc_is_reattached() {
+    // A method-style member (`default(props): any`) carries leading JSDoc.
+    // The pre-fix name-search matched only `name:` / `name?:` and MISSED
+    // method-style members entirely (their declaration site is `name(`), so
+    // their JSDoc was dropped. This fixture pins method-style JSDoc
+    // reattachment for an inherited slot member.
+    let owner: &'static str =
+        Box::leak(vue_importing("./slots", "defineSlots", "Slots").into_boxed_str());
+    let slots = "import type { BaseSlots } from './base'\n\
+                 export interface Slots extends BaseSlots {}";
+    let base = "export interface BaseSlots {\n  \
+                /** the default slot */\n  default(props: { item: string }): any\n}";
+    let host = build_host(&[
+        (OWNER_VUE_PATH, owner, FileKind::VueSfc),
+        ("/w/slots.ts", slots, FileKind::NonSfc),
+        ("/w/base.ts", base, FileKind::NonSfc),
+    ]);
+
+    let lazy_members = lazy("/w/slots.ts", "Slots").lazy_slot_members(&host);
+    let default_slot = lazy_members
+        .iter()
+        .find(|s| s.name == "default")
+        .expect("inherited method-style slot `default` must be present");
+
+    // THE DISCRIMINATOR: the method-style member's JSDoc is reattached.
+    // Pre-fix the `name:`-only matcher never matched `default(` so the
+    // description was None.
+    assert_eq!(
+        default_slot.description.as_deref(),
+        Some("the default slot"),
+        "method-style inherited slot `default(props): any` MUST get its leading \
+         JSDoc reattached (the matcher accepts `name(`); got {:?}",
+        default_slot.description,
+    );
+}
+
+// ===========================================================================
 // Class C — imported defineSlots binding display metadata
 // ===========================================================================
 
