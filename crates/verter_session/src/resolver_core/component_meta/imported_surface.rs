@@ -85,18 +85,44 @@
 //!    is safe to `Clone`, store, and pass across thread
 //!    boundaries.
 //!
+//! # Macro-surface accessor (the canonical path)
+//!
+//! The [`ResolvedMacroSurface::LazyImported`] arm's
+//! `prop_members` / `emit_members` / `slot_members` read the
+//! imported declaration's one-level surface through
+//! [`crate::project_semantic_dispatch::ProjectSemanticDispatch::surface_view_from_base_node`],
+//! carrying the macro-surface
+//! [`crate::semantic_query::SurfaceProvenanceContext`] (props enter
+//! under `MacroTypeArgOwnBody` so own-body members surface with
+//! `declared_in_macro_type_arg = true`; emits/slots are structural).
+//! This is the macro-aware shared resolver — the imported
+//! declaration's own-body-vs-heritage provenance is decided by the
+//! per-arm declaration-body lowering inside `build_instantiate`, not
+//! by a private walk. The earlier `ResolveDecl`-only surface read
+//! lost the provenance bit (every member reported `false`); reading
+//! through the provenance-carrying surface reader restores it.
+//!
 //! # Current behaviour
 //!
-//! The bridge is pure typed-IR infrastructure. The existing
-//! eager resolution rail still produces
-//! [`crate::resolver_core::ResolvedImportedMacroSurface`] for
-//! every imported macro target — the bridge is added in
-//! parallel as an opt-in surface for callers ready to drive
-//! typed-IR dispatch directly. The
-//! [`AuditEvent::ImportedMacroSurfaceProjection`] counter fires
-//! once per public bridge accessor entry, so observability of
-//! the bridge's fire rate is available immediately even before
-//! a consumer adopts it.
+//! The bridge is pure typed-IR infrastructure. The existing eager
+//! resolution rail still produces
+//! [`crate::resolver_core::ResolvedImportedMacroSurface`] for every
+//! imported macro target — production has NOT flipped onto the
+//! [`ResolvedMacroSurface::LazyImported`] arm; the canonical path is
+//! proven field-for-field equivalent to the eager arm (including
+//! `declared_in_macro_type_arg`) by the equivalence discriminators in
+//! `tests/canonical_macro_surface_equivalence.rs` and
+//! `tests/stage2b1_macro_authority_equivalence.rs`. The
+//! [`AuditEvent::ImportedMacroSurfaceProjection`] counter fires once
+//! per public bridge accessor entry.
+//!
+//! The auxiliary identity accessors
+//! ([`ImportedMacroSurface::resolve_root`],
+//! [`ImportedMacroSurface::project_named_member`],
+//! [`ImportedMacroSurface::enumerate_member_names`]) remain for
+//! test-harness coverage of the underlying `ResolveDecl` /
+//! `ProjectPath` / `key_names_from_base_node` composition; they are
+//! not on the production macro-surface path.
 
 use std::sync::Arc;
 
