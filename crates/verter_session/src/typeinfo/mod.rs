@@ -1,10 +1,10 @@
 #![deny(missing_docs)]
 //! Public host typeinfo substrate.
 //!
-//! Three audited / non-audited host methods that expose the
-//! shallow-state symbol inventory and the dispatch-backed type
-//! evaluation surface to downstream consumers (the `@verter/typeinfo`
-//! TS package, MCP tools, IDE integrations).
+//! Audited / non-audited host methods that expose the shallow-state
+//! symbol inventory and the dispatch-backed type evaluation surface
+//! to downstream consumers (the `@verter/typeinfo` TS package, MCP
+//! tools, IDE integrations).
 //!
 //! Public methods (per §5 of the typeinfo plan):
 //!
@@ -17,12 +17,24 @@
 //! 3. [`crate::VerterHost::evaluate_type_expression_with_audit`] —
 //!    audited evaluation of a synthetic type expression in a
 //!    file scope, with an optional host-owned scratch cache.
+//! 4. [`crate::VerterHost::resolve_shallow_surface`] — resolves a
+//!    named declaration to its span-rich, one-level
+//!    [`surface::TypeInfoSurface`] (members + call / construct / index
+//!    signatures + the keyspace) WITHOUT expanding member bodies. The
+//!    shallow-by-default rule holds: each member `value` is a
+//!    reference-style node, never an eagerly expanded object. Every
+//!    span on the returned surface is a [`surface::CanonicalSpan`]
+//!    (byte offsets + the canonical declaration file), so a consumer
+//!    slices the source on demand at the FFI / consumer boundary —
+//!    the surface itself holds NO owned type / display strings.
 //!
 //! Sub-modules:
 //! - [`types`] — public DTOs (`SymbolEntry`, `EvaluateTypeExpressionRequest`, …).
 //! - [`symbol_inventory`] — `list_file_symbols` impl.
 //! - [`resolve_named_symbol`] — `resolve_named_symbol_with_audit` impl.
 //! - [`evaluate_type_expression`] — `evaluate_type_expression_with_audit` impl.
+//! - [`shallow_surface`] — `resolve_shallow_surface` impl.
+//! - [`surface`] — the span-rich [`surface::TypeInfoSurface`] projection.
 //! - [`scratch_cache`] — host-owned LRU for typeinfo scratch URIs.
 
 pub mod evaluate_type_expression;

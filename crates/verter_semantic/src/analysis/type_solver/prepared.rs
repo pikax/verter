@@ -234,6 +234,18 @@ pub struct PreparedMember {
     pub optional: bool,
     pub readonly: bool,
     pub is_method: bool,
+    /// OXC declaration-site spans of this member, carried verbatim from the
+    /// IR [`verter_type_expr::ObjectProperty::spans`] /
+    /// [`verter_type_expr::ObjectMethod::spans`] so the macro-surface
+    /// own-member overlay (`backfill_member_index_surface`) appends members
+    /// with their real spans instead of `MemberSpans::default()`.
+    pub spans: verter_type_expr::MemberSpans,
+    /// Canonical file the member's declaration lives in — the defining file of
+    /// the owning [`PreparedTypeDecl`] (its `root_identity.canonical_id`),
+    /// stamped at `build_member_index`. The overlay pairs the member's
+    /// `spans` with this file. Empty for a member indexed without a known
+    /// defining file (test-only fixtures).
+    pub declaration_origin: String,
 }
 
 /// A cross-file dependency reference in a prepared declaration.
@@ -430,7 +442,16 @@ impl PreparedTypeDecl {
     ///   Nested transparent intersections are flattened so declaration-merged
     ///   interfaces still expose members from earlier object slices.
     pub fn build_member_index(&mut self) {
-        Self::index_transparent_object_members(&mut self.member_index, &self.body);
+        // The defining file of this declaration is the declaration site of
+        // every own-body member it indexes (heritage Ref parts are skipped),
+        // so each `PreparedMember` is stamped with it. The macro-surface
+        // overlay pairs the member's `spans` with this file.
+        let declaration_origin = self.root_identity.canonical_id.clone();
+        Self::index_transparent_object_members(
+            &mut self.member_index,
+            &self.body,
+            &declaration_origin,
+        );
     }
 
     /// Index direct object members into the member_index map.
@@ -439,6 +460,7 @@ impl PreparedTypeDecl {
     fn index_object_members(
         member_index: &mut rustc_hash::FxHashMap<String, PreparedMember>,
         obj: &verter_type_expr::ObjectExpr,
+        declaration_origin: &str,
     ) {
         for member in &obj.properties {
             match member {
@@ -451,6 +473,11 @@ impl PreparedTypeDecl {
                             optional: prop.optional,
                             readonly: prop.readonly,
                             is_method: false,
+                            // Carry the IR property's OXC declaration-site
+                            // spans + this declaration's defining file so the
+                            // overlay append is span-rich.
+                            spans: prop.spans,
+                            declaration_origin: declaration_origin.to_string(),
                         });
                 }
                 ObjectMember::Method(method) => {
@@ -471,6 +498,10 @@ impl PreparedTypeDecl {
                             optional: method.optional,
                             readonly: false,
                             is_method: true,
+                            // Carry the IR method's OXC member spans + defining
+                            // file.
+                            spans: method.spans,
+                            declaration_origin: declaration_origin.to_string(),
                         });
                 }
                 _ => {}
@@ -481,16 +512,19 @@ impl PreparedTypeDecl {
     fn index_transparent_object_members(
         member_index: &mut rustc_hash::FxHashMap<String, PreparedMember>,
         body: &TypeExpr,
+        declaration_origin: &str,
     ) {
         match body {
-            TypeExpr::Object(obj) => Self::index_object_members(member_index, obj),
+            TypeExpr::Object(obj) => {
+                Self::index_object_members(member_index, obj, declaration_origin)
+            }
             TypeExpr::Intersection(parts) => {
                 for part in parts.iter().rev() {
-                    Self::index_transparent_object_members(member_index, part);
+                    Self::index_transparent_object_members(member_index, part, declaration_origin);
                 }
             }
             TypeExpr::Parenthesized(inner) => {
-                Self::index_transparent_object_members(member_index, inner);
+                Self::index_transparent_object_members(member_index, inner, declaration_origin);
             }
             _ => {}
         }
@@ -941,6 +975,90 @@ mod tests {
             "the method member's value type must be a Function shape, got {:?}",
             greet.ty,
         );
+    }
+
+    #[test]
+    fn prepared_member_index_carries_spans_and_declaration_origin() {
+        // The member-index producer (`index_object_members`) must carry the IR
+        // member's OXC declaration-site spans AND stamp the declaration's
+        // defining file (`root_identity.canonical_id`) onto each
+        // `PreparedMember`. The macro-surface overlay
+        // (`backfill_member_index_surface` in verter_session) reads these so an
+        // appended own-body member reaches the graph `SurfaceMember` span-rich
+        // instead of `MemberSpans::default()` (the codex#2 P1 / Claude P2-b
+        // finding).
+        //
+        // Discrimination: before the fix `PreparedMember` had no `spans` field
+        // (it could not carry them) and no `declaration_origin`; the producer
+        // dropped `prop.spans` / `method.spans`. This test pins BOTH the
+        // property and method branches carrying NON-default spans + the
+        // defining file. If the producer reverted to dropping spans, the
+        // `prop_spans.name` / `method_spans.declaration` assertions FAIL (they
+        // would be `None`), and the `declaration_origin` equality FAILS.
+        use verter_span::Span;
+        use verter_type_expr::MemberSpans;
+
+        let prop_spans = MemberSpans {
+            declaration: Some(Span::new(10, 30)),
+            name: Some(Span::new(10, 15)),
+            type_annotation: Some(Span::new(17, 30)),
+        };
+        let method_spans = MemberSpans {
+            declaration: Some(Span::new(40, 60)),
+            name: Some(Span::new(40, 45)),
+            type_annotation: None,
+        };
+        let body = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty::with_spans(
+                    "label".into(),
+                    TypeExpr::Primitive(PrimitiveName::String),
+                    false,
+                    false,
+                    prop_spans,
+                )),
+                ObjectMember::Method(verter_type_expr::MethodSignature::with_spans(
+                    "greet".into(),
+                    verter_type_expr::FunctionExpr::synthetic(
+                        vec![],
+                        Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
+                        vec![],
+                    ),
+                    false,
+                    method_spans,
+                )),
+            ],
+        }));
+
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/decl_origin.ts", "Slots"),
+            TypeDeclKind::Interface,
+            body,
+        );
+        decl.build_member_index();
+
+        // PROPERTY member: real spans + the declaration's defining file.
+        let label = decl.member("label").expect("property `label` indexed");
+        assert_eq!(
+            label.spans, prop_spans,
+            "PreparedMember must carry the property's OXC spans verbatim, not default()"
+        );
+        assert_eq!(
+            label.declaration_origin, "/decl_origin.ts",
+            "PreparedMember must stamp the declaration's defining file"
+        );
+
+        // METHOD member: real spans + the declaration's defining file.
+        let greet = decl.member("greet").expect("method `greet` indexed");
+        assert_eq!(
+            greet.spans, method_spans,
+            "PreparedMember must carry the method's OXC spans verbatim, not default()"
+        );
+        assert_eq!(greet.declaration_origin, "/decl_origin.ts");
+
+        // NEGATIVE: a genuinely-absent member is still absent (the producer did
+        // not fabricate entries).
+        assert!(decl.member("missing").is_none());
     }
 
     #[test]

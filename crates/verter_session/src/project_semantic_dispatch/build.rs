@@ -1075,9 +1075,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     optional: member.optional,
                     readonly: member.readonly,
                     is_method: member.is_method,
-                    // `PreparedMember` (the `member_index` entry) carries no
-                    // declaration-site span, so spans are absent here.
-                    spans: verter_type_expr::MemberSpans::default(),
+                    // The `PreparedMember` (the `member_index` entry) now
+                    // carries the IR member's OXC declaration-site spans + the
+                    // declaration's defining file, so the append is span-rich.
+                    spans: member.spans,
+                    declaration_origin: (!member.declaration_origin.is_empty())
+                        .then(|| Arc::from(member.declaration_origin.as_str())),
                     declared_in_macro_type_arg: own_body_bit,
                     // `member_index` is the declaration's OWN-body direct
                     // member index (heritage `extends` arms are excluded), so
@@ -2435,8 +2438,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // `Authored` (they do not participate in own-body shadowing).
                 merge_role: crate::semantic_query::MemberMergeRole::Authored,
                 // Mapped-produced member: synthesized from a key domain, no
-                // single source declaration site.
+                // single source declaration site — no spans, no declaration file.
                 spans: verter_type_expr::MemberSpans::default(),
+                declaration_origin: None,
             });
             project_member_edges.push((value, produced_name));
         }

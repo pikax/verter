@@ -106,6 +106,25 @@ pub enum NodeScopeId {
     },
 }
 
+impl NodeScopeId {
+    /// The canonical origin file this scope binds to, when it is a
+    /// declaration-bound [`NodeScopeId::File`] scope. `None` for the
+    /// structural / scope-less [`NodeScopeId::Global`] origin.
+    ///
+    /// This is the declaration-site file id a surface member / index
+    /// signature stamps as its `declaration_origin` at lowering — the file
+    /// the member's `name` / `: T` annotation actually lives in, independent
+    /// of where the member's VALUE type resolves (a member whose value is an
+    /// unresolved / scope-less node still has a real declaration file).
+    #[must_use]
+    pub fn canonical_file(&self) -> Option<Arc<str>> {
+        match self {
+            Self::Global => None,
+            Self::File { canonical_id, .. } => Some(Arc::clone(canonical_id)),
+        }
+    }
+}
+
 /// Resolved-declaration lookup key. Two callers from the same scope for the
 /// same name produce the same key and dedup automatically.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -920,6 +939,17 @@ pub struct SurfaceMember {
     /// `None` components for genuinely synthetic members (union common-members,
     /// mapped-produced members) with no single source site.
     pub spans: verter_type_expr::MemberSpans,
+    /// Canonical file the member's DECLARATION (its `name` / `: T` annotation)
+    /// lives in — set from the LOWERING scope of the object the member is
+    /// declared in, NOT from the member's value-type node. A member declared in
+    /// file F has its name/decl/type spans in F regardless of where its value
+    /// type resolves; in particular an unresolved / scope-less value
+    /// (`{ present: MissingType }`) does NOT erase the member's real
+    /// declaration file. The span-rich [`crate::typeinfo::TypeInfoSurface`]
+    /// projection pairs the [`Self::spans`] offsets with THIS file. `None` only
+    /// for genuinely synthetic / multi-origin members (union common-members,
+    /// mapped-produced members) — the same members whose `spans` are absent.
+    pub declaration_origin: Option<Arc<str>>,
     /// Whether this member was explicitly declared in the macro's type
     /// argument's own body (vs reached via heritage / Omit / intersection
     /// from an external source). See
@@ -956,6 +986,13 @@ pub struct IndexSignature {
     /// node interning but never enters `parse_stable_hash`. `None` components
     /// for a synthetic index signature with no source site.
     pub spans: verter_type_expr::IndexSignatureSpans,
+    /// Canonical file the index-signature DECLARATION lives in — set from the
+    /// LOWERING scope of the object it is declared in, NOT from the value-type
+    /// node. Mirrors [`SurfaceMember::declaration_origin`]: a `[k: string]:
+    /// MissingType` index signature whose value type is unresolved /
+    /// scope-less still has a real declaration file. `None` only for a
+    /// genuinely synthetic index signature.
+    pub declaration_origin: Option<Arc<str>>,
 }
 
 /// One-level surface view of a semantic node. Members are ordered to keep

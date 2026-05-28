@@ -349,9 +349,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         // source member's structural shape — only the
                         // value's type-param occurrences change.
                         // Preserve the upstream
-                        // `declared_in_macro_type_arg` fact, merge role, and
-                        // the member's OXC declaration-site spans.
+                        // `declared_in_macro_type_arg` fact, merge role, the
+                        // member's OXC declaration-site spans, and its
+                        // declaration file (substitution does not move the
+                        // member's declaration site).
                         spans: member.spans,
+                        declaration_origin: member.declaration_origin.clone(),
                         declared_in_macro_type_arg: member.declared_in_macro_type_arg,
                         merge_role: member.merge_role,
                     });
@@ -388,8 +391,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         key_type: sub_key,
                         value_type: sub_value,
                         readonly: signature.readonly,
-                        // Preserve the index signature's OXC spans.
+                        // Preserve the index signature's OXC spans + declaration file.
                         spans: signature.spans,
+                        declaration_origin: signature.declaration_origin.clone(),
                     });
                 }
                 let new_keyspace = match surface.keyspace {

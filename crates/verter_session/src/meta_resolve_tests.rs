@@ -19,6 +19,13 @@ use verter_type_expr::{PrimitiveName, TypeExpr};
 /// equivalence is asserted by normalising spans on both sides. This still
 /// discriminates the property under test (names / shape / types / modifiers /
 /// optionality / body structure remain compared).
+///
+/// TODO(follow-up: U2): thread real member spans through
+/// `ProjectedMember` / `ProjectedSurface` →
+/// `projected_surface_to_type_expr`, then DELETE this `strip_spans` masking
+/// and compare spans directly. U1 stamped the declaration-origin + real spans
+/// onto the graph `SurfaceMember` (read by `resolve_shallow_surface`); the
+/// projected types are the remaining span-free boundary.
 fn strip_spans(expr: &TypeExpr) -> TypeExpr {
     use std::sync::Arc as StdArc;
     use verter_type_expr::{
@@ -11063,6 +11070,7 @@ defineProps<{ value: Foo }>()
                         declared_in_macro_type_arg: false,
                         merge_role: crate::semantic_query::MemberMergeRole::Authored,
                         spans: Default::default(),
+                        declaration_origin: None,
                     },
                     SurfaceMember {
                         name: StdArc::from("b"),
@@ -11073,6 +11081,7 @@ defineProps<{ value: Foo }>()
                         declared_in_macro_type_arg: false,
                         merge_role: crate::semantic_query::MemberMergeRole::Authored,
                         spans: Default::default(),
+                        declaration_origin: None,
                     },
                     SurfaceMember {
                         name: StdArc::from("c"),
@@ -11083,6 +11092,7 @@ defineProps<{ value: Foo }>()
                         declared_in_macro_type_arg: false,
                         merge_role: crate::semantic_query::MemberMergeRole::Authored,
                         spans: Default::default(),
+                        declaration_origin: None,
                     },
                 ]
                 .into_boxed_slice(),
@@ -11112,6 +11122,7 @@ defineProps<{ value: Foo }>()
                         declared_in_macro_type_arg: false,
                         merge_role: crate::semantic_query::MemberMergeRole::Authored,
                         spans: Default::default(),
+                        declaration_origin: None,
                     },
                     SurfaceMember {
                         name: StdArc::from("b"),
@@ -11122,6 +11133,7 @@ defineProps<{ value: Foo }>()
                         declared_in_macro_type_arg: false,
                         merge_role: crate::semantic_query::MemberMergeRole::Authored,
                         spans: Default::default(),
+                        declaration_origin: None,
                     },
                     SurfaceMember {
                         name: StdArc::from("c"),
@@ -11132,6 +11144,7 @@ defineProps<{ value: Foo }>()
                         declared_in_macro_type_arg: false,
                         merge_role: crate::semantic_query::MemberMergeRole::Authored,
                         spans: Default::default(),
+                        declaration_origin: None,
                     },
                 ]
                 .into_boxed_slice(),

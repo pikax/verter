@@ -1027,6 +1027,13 @@ pub(crate) fn projected_surface_to_type_expr(surface: &ProjectedSurface) -> Opti
         return surface.call_signatures.first().cloned();
     }
 
+    // TODO(follow-up: U2): thread real member spans here; reverts the
+    // strip_spans masking in meta_resolve_tests.rs. `ProjectedMember` /
+    // `ProjectedSurface` are the U2 span-threading boundary — they carry no
+    // member-level span, so this reconstruction emits `MemberSpans::default()`.
+    // U1's `resolve_shallow_surface` bypasses this path (it reads the span-rich
+    // graph `SurfaceMember` directly); spans are threaded through the projected
+    // types in U2.
     let mut properties = surface
         .members
         .iter()
@@ -1039,6 +1046,8 @@ pub(crate) fn projected_surface_to_type_expr(surface: &ProjectedSurface) -> Opti
                         member.name.clone(),
                         (**function).clone(),
                         member.optional,
+                        // TODO(follow-up: U2): thread real member spans here;
+                        // reverts the strip_spans masking in meta_resolve_tests.rs.
                         MemberSpans::default(),
                     ));
                 }
@@ -1049,6 +1058,8 @@ pub(crate) fn projected_surface_to_type_expr(surface: &ProjectedSurface) -> Opti
                 member.ty.clone(),
                 member.optional,
                 member.readonly,
+                // TODO(follow-up: U2): thread real member spans here; reverts
+                // the strip_spans masking in meta_resolve_tests.rs.
                 MemberSpans::default(),
             ))
         })
@@ -1079,6 +1090,10 @@ pub(crate) fn projected_surface_to_type_expr(surface: &ProjectedSurface) -> Opti
 
     if surface.has_index_signature {
         // Fully synthetic open-surface index signature — no source site.
+        // TODO(follow-up: U2): thread real index-signature spans here; reverts
+        // the strip_spans masking in meta_resolve_tests.rs. `ProjectedSurface`
+        // carries only a `has_index_signature` bool, not the key/value nodes or
+        // their spans, so this reconstruction is synthetic.
         properties.push(ObjectMember::IndexSignature(IndexSignature::with_spans(
             "key".to_string(),
             TypeExpr::Primitive(PrimitiveName::String),

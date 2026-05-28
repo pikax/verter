@@ -6,7 +6,11 @@
 //! projection — it reads the span-rich GRAPH payloads
 //! ([`SurfaceMember::spans`], [`SemanticNodeData::Function`]'s
 //! `signature_span` / `return_type_span`, [`IndexSignature::spans`]) and pairs
-//! each span with its node's canonical origin file (from
+//! each span with its DECLARATION file. For a named member / index signature
+//! that file is the member's own `declaration_origin` (stamped from the
+//! lowering scope of the declaring object), so a member whose VALUE type is
+//! unresolved / scope-less still reports its real declaration file; for a
+//! signature it is the signature node's canonical origin file (from
 //! [`SemanticGraphStore::node_scope`]). It does NOT recompute meaning, does NOT
 //! re-resolve types, and does NOT scan source text.
 //!
@@ -70,11 +74,15 @@ impl CanonicalSpan {
 /// merge role (codex `SurfaceMemberOrigin`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SurfaceMemberOrigin {
-    /// The canonical file the member's value node was first lowered in (the
-    /// member ORIGIN). For an inherited member this is the heritage base's
-    /// file, not the consuming declaration's. `None` for a structural /
-    /// `Global`-scoped value node (a primitive, a shared literal union) whose
-    /// origin is not a single declaration file.
+    /// The canonical file the member's DECLARATION lives in — its `name` /
+    /// `: T` annotation site, taken from the graph member's
+    /// `declaration_origin` (set from the LOWERING scope of the object that
+    /// declares the member). For an inherited member this is the heritage
+    /// base's file, not the consuming declaration's. Crucially this is NOT the
+    /// member's VALUE-node scope: a member whose value is an unresolved /
+    /// scope-less node still reports its real declaration file. `None` only for
+    /// a genuinely synthetic / multi-origin member (a union common-member, a
+    /// mapped-produced member) with no single declaration file.
     pub canonical_file: Option<Arc<str>>,
     /// Span of the member's whole declaration in `canonical_file`, when the
     /// graph member recorded one. `None` for a synthetic member.
@@ -226,10 +234,20 @@ fn node_origin_file(graph: &SemanticGraphStore, node: SemanticNodeId) -> Option<
 }
 
 fn build_member(graph: &SemanticGraphStore, member: &SurfaceMember) -> TypeInfoSurfaceMember {
-    // The member's spans are in its VALUE node's origin file (the member
-    // origin) — for a cross-file inherited member this is the heritage base's
-    // file, not the consuming declaration's.
-    let canonical = node_origin_file(graph, member.value);
+    // The member's spans are in its DECLARATION file — the file the object
+    // declaring this member was lowered in (`SurfaceMember::declaration_origin`,
+    // set from the lowering scope). For a cross-file inherited member that is
+    // the heritage base's file (the member is declared there), not the
+    // consuming declaration's. This is NOT the member's VALUE-node scope: a
+    // member whose value is an unresolved / scope-less node
+    // (`{ present: MissingType }`) still has a real declaration file, so its
+    // real spans must NOT be masked to `None`. Fall back to the value node's
+    // origin only when the member carries no declaration origin (a synthetic
+    // member also has no spans, so the pairing still yields `None`).
+    let canonical = member
+        .declaration_origin
+        .clone()
+        .or_else(|| node_origin_file(graph, member.value));
     let name_span = CanonicalSpan::from_parts(canonical.as_ref(), member.spans.name);
     let declaration_span = CanonicalSpan::from_parts(canonical.as_ref(), member.spans.declaration);
     let type_annotation_span =
@@ -287,11 +305,16 @@ fn build_index_signature(
     graph: &SemanticGraphStore,
     sig: &IndexSignature,
 ) -> TypeInfoIndexSignature {
-    // The index signature's declaration / key / value spans share the file the
-    // value-type node was lowered in (the declaring file). Key/value sub-spans
-    // are recorded on the graph `IndexSignature` payload.
-    let canonical =
-        node_origin_file(graph, sig.value_type).or_else(|| node_origin_file(graph, sig.key_type));
+    // The index signature's declaration / key / value spans are in the file
+    // the declaring object was lowered in (`IndexSignature::declaration_origin`,
+    // set from the lowering scope) — NOT the value-type node's scope, which is
+    // `None` for a scope-less value (`[k: string]: MissingType`). Fall back to
+    // the value / key node origin only when no declaration origin is recorded.
+    let canonical = sig
+        .declaration_origin
+        .clone()
+        .or_else(|| node_origin_file(graph, sig.value_type))
+        .or_else(|| node_origin_file(graph, sig.key_type));
     TypeInfoIndexSignature {
         key_type: sig.key_type,
         value_type: sig.value_type,

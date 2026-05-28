@@ -373,9 +373,16 @@ fn public_accessor_projects_full_surface_with_flags_and_roles() {
         .expect("`dup` must carry a name span");
     assert_eq!(slice(SHALLOW_SURFACE_FACTS, dup_name, FILE), "dup");
 
-    // Structural shallow proof: no member's value expanded into an object
-    // surface (an Expanded projection WOULD expand member bodies). The members
-    // here are primitives / references, never `Object`.
+    // DISCRIMINATING structural shallow proof: the `nested` member is
+    // OBJECT-ALIAS-typed (`nested: HeritageBase`). Under the shallow-by-default
+    // rule its value MUST stay a reference carrier — an Expanded / eager
+    // projection WOULD materialise it into an `Object` node. A primitive-only
+    // member set (the pre-fix fixture) made this loop vacuous; `nested`
+    // discriminates because it is the one member that COULD become an object.
+    assert!(
+        names.contains(&"nested"),
+        "object-alias-typed member `nested` present; got {names:?}"
+    );
     let graph_store_view = host.resolver_store_view();
     let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx =
@@ -384,6 +391,17 @@ fn public_accessor_projects_full_surface_with_flags_and_roles() {
         use crate::resolver_core::ResolverContext;
         host_ctx.project_type_store().semantic_graph()
     };
+    let nested = member(&surface, "nested");
+    assert!(
+        !matches!(
+            graph.node_data(nested.value).as_deref(),
+            Some(crate::semantic_query::SemanticNodeData::Object(_))
+        ),
+        "Shallow projection must NOT eagerly expand the object-alias member `nested` into an \
+         Object surface (would indicate an Expanded Instantiate); value node = {:?}",
+        nested.value
+    );
+    // Every other member also stays a non-object shallow value.
     for m in surface.members.iter() {
         let is_object = matches!(
             graph.node_data(m.value).as_deref(),
@@ -397,3 +415,352 @@ fn public_accessor_projects_full_surface_with_flags_and_roles() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// (8) DISCRIMINATING shallow proof: a member whose declared type is a NESTED
+//     OBJECT stays a SHALLOW REFERENCE carrier — its value node is NOT an
+//     `Object` surface (which an Expanded projection would have materialised).
+//
+// Test (7)'s `!is_object` loop used primitive / reference members, so it passes
+// even if the implementation accidentally expanded a member into an object. A
+// nested-object member discriminates: it WOULD become an `Object` node under an
+// eager / Expanded projection, and must stay a shallow `DeclRef`-style carrier
+// under the Shallow projection. (codex#2 P2)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn nested_object_member_stays_shallow_reference_not_materialized() {
+    const NESTED: &str = "/src/nested.ts";
+    // `outer`'s declared type is a NESTED named alias whose body is an object.
+    // Under the shallow-by-default rule the published `outer` member's value is
+    // a reference carrier, NOT the expanded `{ inner: string }` object surface.
+    let src = "export interface Nested {\n  \
+         outer: Inner;\n  \
+         leaf: string;\n}\n\
+         export interface Inner {\n  inner: string;\n}\n";
+
+    let host = make_host_with_workspace_files_footprint(&[(NESTED, src)]);
+
+    let surface = host
+        .resolve_shallow_surface(NESTED, "Nested")
+        .expect("Nested must resolve to a one-level surface");
+
+    let graph_store_view = host.resolver_store_view();
+    let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::new(&host, &graph_store_view, overlay);
+    let graph = {
+        use crate::resolver_core::ResolverContext;
+        host_ctx.project_type_store().semantic_graph()
+    };
+
+    // The nested-object member `outer` MUST stay a shallow reference — its value
+    // node is NOT an `Object` surface. An Expanded / eager projection would have
+    // materialised `{ inner: string }` here; the Shallow projection must not.
+    let outer = member(&surface, "outer");
+    let outer_data = graph.node_data(outer.value);
+    assert!(
+        !matches!(
+            outer_data.as_deref(),
+            Some(crate::semantic_query::SemanticNodeData::Object(_))
+        ),
+        "nested-object member `outer` must stay a SHALLOW reference carrier, not be \
+         materialised into an Object surface; value node data = {:?}",
+        outer_data.as_deref()
+    );
+
+    // POSITIVE: the member is still present with its real declaration span in
+    // THIS file (the shallow carrier is span-rich, not stripped).
+    let outer_name = outer
+        .name_span
+        .as_ref()
+        .expect("`outer` must carry a name span in its declaration file");
+    assert_eq!(slice(src, outer_name, NESTED), "outer");
+    let outer_ann = outer
+        .type_annotation_span
+        .as_ref()
+        .expect("`outer` must carry a type-annotation span");
+    assert_eq!(
+        slice(src, outer_ann, NESTED),
+        "Inner",
+        "the annotation span slices to the reference name, not an inlined object"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (9) DECLARATION-ORIGIN span loss (codex#1 P1): a member whose VALUE type is an
+//     UNRESOLVED (scope-less) node still reports its REAL declaration spans,
+//     anchored to its DECLARATION file — NOT `None`.
+//
+// `export interface Broken { present: MissingType; }` — `MissingType` is
+// unresolved, so the member's VALUE lowers to a scope-less `Opaque(Miss)` node
+// whose `node_scope` is `None`. Before the declaration-origin fix the public
+// surface anchored the member's spans to `node_origin_file(member.value)` →
+// `None`, masking the member's REAL OXC name / decl / type-annotation spans.
+// This test FAILS pre-fix (spans report `None`) and PASSES post-fix.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn member_with_unresolved_value_type_keeps_real_declaration_spans() {
+    const BROKEN: &str = "/src/broken.ts";
+    // `MissingType` is never declared → the member value is a scope-less node.
+    let src = "export interface Broken {\n  present: MissingType;\n}\n";
+
+    let host = make_host_with_workspace_files_footprint(&[(BROKEN, src)]);
+
+    let surface = host
+        .resolve_shallow_surface(BROKEN, "Broken")
+        .expect("Broken must resolve to a one-level surface despite the unresolved member type");
+
+    let present = member(&surface, "present");
+
+    // The member's DECLARATION file is BROKEN — independent of where its value
+    // type (fails to) resolve.
+    assert_eq!(
+        present.origin.canonical_file.as_deref(),
+        Some(BROKEN),
+        "member with an unresolved value type must still report its declaration file"
+    );
+
+    // NAME span: present + slices to `present` in BROKEN.
+    let name_span = present.name_span.as_ref().expect(
+        "member `present` must carry a NAME span even though its value type is unresolved \
+         (the declaration site is real; a `None` here is the masking defect)",
+    );
+    assert_eq!(slice(src, name_span, BROKEN), "present");
+
+    // TYPE-ANNOTATION span: present + slices to the (unresolved) `MissingType`.
+    let ann_span = present.type_annotation_span.as_ref().expect(
+        "member `present` must carry a TYPE-ANNOTATION span anchored to its declaration file",
+    );
+    assert_eq!(
+        slice(src, ann_span, BROKEN),
+        "MissingType",
+        "the annotation span slices to the unresolved type name in the declaration file"
+    );
+
+    // DECLARATION span: present + covers `present: MissingType`.
+    let decl_span = present
+        .origin
+        .declaration_span
+        .as_ref()
+        .expect("member `present` must carry a DECLARATION span");
+    let decl_text = slice(src, decl_span, BROKEN);
+    assert!(
+        decl_text.starts_with("present") && decl_text.contains("MissingType"),
+        "declaration span must cover `present: MissingType`; got {decl_text:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (10) INDEX-SIGNATURE declaration-origin span loss (codex#1 P1): an index
+//      signature whose key AND value nodes are SCOPE-LESS (`Global`) still
+//      reports its real decl / key / value spans anchored to its DECLARATION
+//      file, taken from `IndexSignature::declaration_origin`.
+//
+// This drives `TypeInfoSurface::build` → `build_index_signature` directly with
+// a hand-built graph `IndexSignature`: the key + value nodes are interned
+// scope-less (so `node_origin_file(value)` / `node_origin_file(key)` BOTH yield
+// `None` — the pre-fix heuristic), but the payload carries real `spans` + a real
+// `declaration_origin`. Pre-fix `build_index_signature` ignored
+// `declaration_origin` and anchored to the value/key node scope → `None` → the
+// spans were masked to `None` (FAIL). Post-fix it uses `declaration_origin` →
+// the declaration file (PASS). Building the payload directly is the honest test:
+// a normally-lowered inline `[k: string]: V` interns its `string` key WITH the
+// declaring scope, which would mask the defect end-to-end.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn index_signature_build_uses_declaration_origin_for_scopeless_nodes() {
+    use crate::semantic_query::{IndexSignature, SemanticNodeData, SurfaceView};
+    use verter_span::Span;
+
+    const FILE: &str = "/src/idx_decl.ts";
+
+    let host = make_host_with_footprint();
+    let graph_store_view = host.resolver_store_view();
+    let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::new(&host, &graph_store_view, overlay);
+    let graph = {
+        use crate::resolver_core::ResolverContext;
+        host_ctx.project_type_store().semantic_graph()
+    };
+
+    // SCOPE-LESS key + value nodes (interned via the unscoped `intern_node` →
+    // `NodeScopeId::Global` → `node_scope` is `None`).
+    let key_node = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::String,
+    ));
+    let value_node = graph.intern_node(SemanticNodeData::Opaque(
+        crate::semantic_query::QueryError::Miss,
+    ));
+    // Precondition: BOTH key + value nodes yield NO origin file, so the pre-fix
+    // `node_origin_file(value).or(key)` fallback chain yields `None`.
+    assert!(
+        graph
+            .node_scope(value_node)
+            .and_then(|s| s.canonical_file())
+            .is_none()
+            && graph
+                .node_scope(key_node)
+                .and_then(|s| s.canonical_file())
+                .is_none(),
+        "test precondition: key + value nodes must yield no origin file (the pre-fix path)"
+    );
+
+    let sig = IndexSignature {
+        key_type: key_node,
+        value_type: value_node,
+        readonly: false,
+        spans: verter_type_expr::IndexSignatureSpans {
+            declaration: Some(Span::new(0, 24)),
+            key: Some(Span::new(1, 10)),
+            value: Some(Span::new(13, 23)),
+        },
+        // The index signature's DECLARATION file — set from the lowering scope
+        // at production time; the only correct span anchor.
+        declaration_origin: Some(std::sync::Arc::from(FILE)),
+    };
+    let view = SurfaceView {
+        members: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+        call_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+        construct_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+        index_signatures: std::sync::Arc::from(vec![sig].into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: true,
+    };
+
+    let surface = TypeInfoSurface::build(graph, &view);
+    assert_eq!(surface.index_signatures.len(), 1);
+    let idx = &surface.index_signatures[0];
+
+    // DECL / KEY / VALUE spans are all present and anchored to the DECLARATION
+    // file — NOT `None` (the masking defect), NOT a value/key node file.
+    let decl = idx
+        .declaration_span
+        .as_ref()
+        .expect("index signature must carry a DECLARATION span via declaration_origin");
+    assert_eq!(
+        decl.file.as_ref(),
+        FILE,
+        "declaration span must anchor to the declaration file, not the scope-less value node"
+    );
+    assert_eq!(decl.span, Span::new(0, 24));
+
+    let key = idx
+        .key_span
+        .as_ref()
+        .expect("index signature must carry a KEY span via declaration_origin");
+    assert_eq!(key.file.as_ref(), FILE);
+    assert_eq!(key.span, Span::new(1, 10));
+
+    let value = idx
+        .value_span
+        .as_ref()
+        .expect("index signature must carry a VALUE span via declaration_origin");
+    assert_eq!(value.file.as_ref(), FILE);
+    assert_eq!(value.span, Span::new(13, 23));
+}
+
+// ---------------------------------------------------------------------------
+// (10b) MEMBER declaration-origin span loss — `build_member` consumption unit
+//       test. Mirrors (10): a member with a SCOPE-LESS value node but a real
+//       `declaration_origin` reports its spans anchored to the declaration
+//       file. This is the same consumption the prepared-member append
+//       (`build.rs` `backfill_member_index_surface`) feeds — that overlay now
+//       stamps `declaration_origin` from `PreparedMember`, and this proves the
+//       projection honours it for a scope-less value. FAILS pre-fix (value
+//       node scope `None` → spans `None`), PASSES post-fix.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn member_build_uses_declaration_origin_for_scopeless_value() {
+    use crate::semantic_query::{MemberMergeRole, SemanticNodeData, SurfaceMember, SurfaceView};
+    use verter_span::Span;
+
+    const FILE: &str = "/src/member_decl.ts";
+
+    let host = make_host_with_footprint();
+    let graph_store_view = host.resolver_store_view();
+    let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::new(&host, &graph_store_view, overlay);
+    let graph = {
+        use crate::resolver_core::ResolverContext;
+        host_ctx.project_type_store().semantic_graph()
+    };
+
+    // SCOPE-LESS value node — `node_origin_file(value)` is `None` (pre-fix path).
+    let value_node = graph.intern_node(SemanticNodeData::Opaque(
+        crate::semantic_query::QueryError::Miss,
+    ));
+    // Precondition: the value node yields NO origin file (the pre-fix path).
+    // `intern_node` (unscoped) → `Global` scope → `node_scope` is `None` OR
+    // `Some(Global)`; either way the value-node-origin fallback is `None`.
+    assert!(
+        graph
+            .node_scope(value_node)
+            .and_then(|s| s.canonical_file())
+            .is_none(),
+        "test precondition: value node must yield no origin file (scope-less / Global)"
+    );
+
+    let built_member = SurfaceMember {
+        name: std::sync::Arc::from("present"),
+        value: value_node,
+        optional: false,
+        readonly: false,
+        is_method: false,
+        spans: verter_type_expr::MemberSpans {
+            declaration: Some(Span::new(0, 20)),
+            name: Some(Span::new(0, 7)),
+            type_annotation: Some(Span::new(9, 20)),
+        },
+        // The member's DECLARATION file — the only correct anchor for a member
+        // whose value is scope-less.
+        declaration_origin: Some(std::sync::Arc::from(FILE)),
+        declared_in_macro_type_arg: false,
+        merge_role: MemberMergeRole::OwnBody,
+    };
+    let view = SurfaceView {
+        members: std::sync::Arc::from(vec![built_member].into_boxed_slice()),
+        call_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+        construct_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+        index_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    };
+
+    let surface = TypeInfoSurface::build(graph, &view);
+    let present = member(&surface, "present");
+    assert_eq!(
+        present.origin.canonical_file.as_deref(),
+        Some(FILE),
+        "member origin must come from declaration_origin, not the scope-less value node"
+    );
+    let name = present
+        .name_span
+        .as_ref()
+        .expect("member with scope-less value must still carry a NAME span via declaration_origin");
+    assert_eq!(name.file.as_ref(), FILE);
+    assert_eq!(name.span, Span::new(0, 7));
+    let ann = present
+        .type_annotation_span
+        .as_ref()
+        .expect("member must carry a TYPE-ANNOTATION span via declaration_origin");
+    assert_eq!(ann.file.as_ref(), FILE);
+    assert_eq!(ann.span, Span::new(9, 20));
+}
+
+// NOTE on the prepared-member append path (`build.rs`
+// `backfill_member_index_surface`, the codex#2 P1 / Claude P2-b front): the
+// overlay's APPEND branch is not reachable through `resolve_shallow_surface`
+// (empirically: every own-body member is already present on the structurally
+// lowered surface, so the overlay early-returns without appending). The
+// producer fix — `PreparedMember` now carrying `spans` + `declaration_origin`,
+// consumed at `build.rs` so the append is span-rich instead of
+// `MemberSpans::default()` — is discriminated at its production site by
+// `verter_semantic`'s `prepared_member_index_carries_spans_and_declaration_origin`
+// test; the consumption projection is covered by
+// `member_build_uses_declaration_origin_for_scopeless_value` above.

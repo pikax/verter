@@ -646,6 +646,7 @@ pub(crate) fn preserve_package_backed_symbolic_refs_node(
                         readonly: materialised_member.readonly,
                         is_method: materialised_member.is_method,
                         spans: materialised_member.spans,
+                        declaration_origin: materialised_member.declaration_origin.clone(),
                         declared_in_macro_type_arg: materialised_member.declared_in_macro_type_arg,
                         merge_role: materialised_member.merge_role,
                     });
@@ -668,6 +669,7 @@ pub(crate) fn preserve_package_backed_symbolic_refs_node(
                     readonly: materialised_member.readonly,
                     is_method: materialised_member.is_method,
                     spans: materialised_member.spans,
+                    declaration_origin: materialised_member.declaration_origin.clone(),
                     declared_in_macro_type_arg: materialised_member.declared_in_macro_type_arg,
                     merge_role: materialised_member.merge_role,
                 });

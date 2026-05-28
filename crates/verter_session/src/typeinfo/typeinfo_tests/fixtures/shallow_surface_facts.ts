@@ -39,9 +39,16 @@ export interface HeritageBase {
 
 // REAL interface heritage (extends): the derived `dup: string` SHADOWS the
 // inherited `dup: number`. Observable `HeritageDerived['dup']` is `string`.
+//
+// `nested` is an OBJECT-ALIAS-typed member: under the shallow-by-default rule
+// its published `value` is a reference carrier, NOT the expanded
+// `{ dup, baseOnly }` object surface. This makes the "Shallow, not Expanded"
+// proof DISCRIMINATING — an eager / Expanded projection WOULD materialise
+// `nested` into an `Object` node.
 export interface HeritageDerived extends HeritageBase {
   dup: string;
   derivedOnly: string;
+  nested: HeritageBase;
 }
 
 // AUTHORED intersection (`&`): the own `dup: string` does NOT shadow the

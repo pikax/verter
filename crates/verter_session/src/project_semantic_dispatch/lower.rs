@@ -711,6 +711,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 // Carry the IR member's OXC declaration-site
                                 // spans verbatim onto the graph payload.
                                 spans: prop.spans,
+                                // The member's DECLARATION lives in THIS object's
+                                // lowering file — independent of where its value
+                                // type resolves (an unresolved `MissingType` value
+                                // is scope-less but the member still declares here).
+                                declaration_origin: scope.canonical_file(),
                                 declared_in_macro_type_arg: reduction_context
                                     .is_macro_type_arg_own_body(),
                                 // Leaf stamping of the surface-merge role from
@@ -765,6 +770,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 is_method: true,
                                 // Carry the IR method's OXC member spans.
                                 spans: method.spans,
+                                // Declaration file of THIS method (see the
+                                // `Property` companion note).
+                                declaration_origin: scope.canonical_file(),
                                 declared_in_macro_type_arg: reduction_context
                                     .is_macro_type_arg_own_body(),
                                 // Leaf stamping of the surface-merge role —
@@ -838,6 +846,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 readonly: sig.readonly,
                                 // Carry the IR index signature's OXC spans.
                                 spans: sig.spans,
+                                // Declaration file of THIS index signature —
+                                // from the object's lowering scope, not the
+                                // (possibly scope-less) value-type node.
+                                declaration_origin: scope.canonical_file(),
                             });
                         }
                     }

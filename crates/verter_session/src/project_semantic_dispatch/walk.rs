@@ -266,6 +266,11 @@ pub struct ShallowSurfaceMember {
     /// empty-path Shallow projection round-trip is lossless for member
     /// provenance.
     pub spans: verter_type_expr::MemberSpans,
+    /// Canonical declaration file of the source member, carried verbatim from
+    /// [`SurfaceMember::declaration_origin`] so the Shallow round-trip pairs
+    /// the member's spans with its real declaration file (not its value-node
+    /// scope).
+    pub declaration_origin: Option<Arc<str>>,
 }
 
 impl ShallowSurface {
@@ -302,6 +307,8 @@ impl ShallowSurface {
                     merge_role: m.merge_role,
                     // Carry the source member's OXC spans verbatim.
                     spans: m.spans,
+                    // Carry the source member's declaration file verbatim.
+                    declaration_origin: m.declaration_origin.clone(),
                 })
                 .collect(),
             call_signatures: view.call_signatures.to_vec(),
@@ -2795,8 +2802,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // (it never shadows / is shadowed).
                     merge_role: crate::semantic_query::MemberMergeRole::Authored,
                     // Mapped-produced member: synthesized from a key domain,
-                    // no single source declaration site.
+                    // no single source declaration site — no spans, no file.
                     spans: verter_type_expr::MemberSpans::default(),
+                    declaration_origin: None,
                 }
             })
             .collect();
@@ -3022,6 +3030,12 @@ struct MergedMemberAccum {
     /// not own-body (intersection / heritage / authored), so the surviving
     /// member references its own first declaration site.
     first_spans: Option<verter_type_expr::MemberSpans>,
+    /// Declaration file of the first `OwnBody` contributor — paired with
+    /// `own_body_spans` so the shadow winner's spans index its own file.
+    own_body_origin: Option<Arc<str>>,
+    /// Declaration file of the first contributor of ANY role — paired with
+    /// `first_spans`.
+    first_origin: Option<Arc<str>>,
 }
 
 impl MergedMemberAccum {
@@ -3040,6 +3054,8 @@ impl MergedMemberAccum {
             declared_in_macro_type_arg: false,
             own_body_spans: None,
             first_spans: None,
+            own_body_origin: None,
+            first_origin: None,
         }
     }
 
@@ -3050,14 +3066,18 @@ impl MergedMemberAccum {
         self.is_method = self.is_method || member.is_method;
         self.declared_in_macro_type_arg =
             self.declared_in_macro_type_arg || member.declared_in_macro_type_arg;
-        // Retain a representative span per the value-selection rule: the first
-        // own-body contributor (the shadow winner) and the first contributor
-        // of any role (the intersection/heritage representative).
+        // Retain a representative span + declaration file per the
+        // value-selection rule: the first own-body contributor (the shadow
+        // winner) and the first contributor of any role (the
+        // intersection/heritage representative). Span and origin are captured
+        // together so the surviving member's spans index its own file.
         if self.first_spans.is_none() {
             self.first_spans = Some(member.spans);
+            self.first_origin = member.declaration_origin.clone();
         }
         if matches!(member.merge_role, MemberMergeRole::OwnBody) && self.own_body_spans.is_none() {
             self.own_body_spans = Some(member.spans);
+            self.own_body_origin = member.declaration_origin.clone();
         }
         match member.merge_role {
             MemberMergeRole::OwnBody => {
@@ -3116,11 +3136,15 @@ impl MergedMemberAccum {
         };
         // The surviving member's spans follow the value-selection rule: an
         // own-body result references the own-body declaration site; otherwise
-        // the first contributor's site.
-        let spans = if matches!(role, MemberMergeRole::OwnBody) {
-            self.own_body_spans.or(self.first_spans).unwrap_or_default()
+        // the first contributor's site. The declaration file is selected in
+        // LOCKSTEP with the spans so the surviving span indexes its own file.
+        let (spans, declaration_origin) = if matches!(role, MemberMergeRole::OwnBody) {
+            match (self.own_body_spans, self.own_body_origin) {
+                (Some(spans), origin) => (spans, origin),
+                (None, _) => (self.first_spans.unwrap_or_default(), self.first_origin),
+            }
         } else {
-            self.first_spans.unwrap_or_default()
+            (self.first_spans.unwrap_or_default(), self.first_origin)
         };
         ShallowSurfaceMember {
             name: self.name,
@@ -3131,6 +3155,7 @@ impl MergedMemberAccum {
             declared_in_macro_type_arg: self.declared_in_macro_type_arg,
             merge_role: role,
             spans,
+            declaration_origin,
         }
     }
 }
@@ -3257,8 +3282,10 @@ fn merge_union_surfaces(
             declared_in_macro_type_arg: false,
             merge_role: MemberMergeRole::Authored,
             // Union common-member: the name appears in every arm, so there is
-            // no single source declaration site — genuinely synthetic.
+            // no single source declaration site — genuinely synthetic. No spans
+            // and no single declaration file (a multi-origin fact).
             spans: verter_type_expr::MemberSpans::default(),
+            declaration_origin: None,
         });
     }
     Some(ShallowSurface {
@@ -3294,6 +3321,8 @@ fn surface_view_from_shallow(surface: &ShallowSurface) -> SurfaceView {
             merge_role: m.merge_role,
             // Carry the walker's preserved OXC spans back onto the graph member.
             spans: m.spans,
+            // Carry the preserved declaration file back onto the graph member.
+            declaration_origin: m.declaration_origin.clone(),
         })
         .collect();
     SurfaceView {

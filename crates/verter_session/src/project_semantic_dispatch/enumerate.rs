@@ -667,8 +667,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // `Authored` (it never shadows / is shadowed).
                 merge_role: crate::semantic_query::MemberMergeRole::Authored,
                 // Union common-member: present in every arm, no single source
-                // declaration site — genuinely synthetic.
+                // declaration site — genuinely synthetic. No spans and no
+                // single declaration file (a multi-origin fact).
                 spans: verter_type_expr::MemberSpans::default(),
+                declaration_origin: None,
             });
         }
         Some(MacroSurfaceView {
