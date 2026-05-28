@@ -755,12 +755,16 @@ fn member_build_uses_declaration_origin_for_scopeless_value() {
 
 // NOTE on the prepared-member append path (`build.rs`
 // `backfill_member_index_surface`, the codex#2 P1 / Claude P2-b front): the
-// overlay's APPEND branch is not reachable through `resolve_shallow_surface`
-// (empirically: every own-body member is already present on the structurally
-// lowered surface, so the overlay early-returns without appending). The
-// producer fix — `PreparedMember` now carrying `spans` + `declaration_origin`,
-// consumed at `build.rs` so the append is span-rich instead of
-// `MemberSpans::default()` — is discriminated at its production site by
-// `verter_semantic`'s `prepared_member_index_carries_spans_and_declaration_origin`
-// test; the consumption projection is covered by
+// overlay's APPEND branch (which copies each `PreparedMember`'s `spans` +
+// `declaration_origin` onto the appended `SurfaceMember`) is exercised
+// directly by `project_semantic_dispatch::tests`'
+// `backfill_member_index_surface_carries_prepared_member_spans_and_origin`,
+// which interns an empty Object surface, supplies a prepared member with
+// NON-default spans + origin, and asserts the appended member carries them
+// (it FAILS if the transfer reverts to `MemberSpans::default()` /
+// `declaration_origin: None`). The PRODUCER side — `PreparedMember` carrying
+// `spans` + `declaration_origin`, stamped at `build_member_index` — is
+// discriminated separately by `verter_semantic`'s
+// `prepared_member_index_carries_spans_and_declaration_origin`. The
+// scope-less-value projection consumed by `build_member` is covered by
 // `member_build_uses_declaration_origin_for_scopeless_value` above.

@@ -930,13 +930,17 @@ pub struct SurfaceMember {
     /// OXC declaration-site spans for this member, stamped during shallow
     /// lowering and carried verbatim from the `verter_type_expr` IR
     /// ([`verter_type_expr::MemberSpans`]). Coordinates are in the member's
-    /// OWN origin file (the file recorded by the value node's
-    /// [`NodeScopeId::File`] scope) — for a cross-file inherited member this
-    /// is the heritage base's file, not the consuming declaration's. Spans are
-    /// content-version facts: they participate in node interning
-    /// (provenance-aware: an identical same-file shape at a different source
-    /// location interns to a distinct node) but never enter `parse_stable_hash`.
-    /// `None` components for genuinely synthetic members (union common-members,
+    /// declaring file — the file recorded by [`Self::declaration_origin`], set
+    /// from the LOWERING scope of the object the member is declared in (NOT the
+    /// member's value-type node). The span-rich
+    /// [`crate::typeinfo::TypeInfoSurface`] projection indexes these offsets
+    /// against `declaration_origin`; a member whose value lowers to a
+    /// scope-less node still reports its real declaration spans against that
+    /// file. Spans are content-version facts: BOTH `spans` and
+    /// `declaration_origin` participate in node interning / graph identity
+    /// (eq + hash) — an identical same-file shape at a different source location
+    /// interns to a distinct node — but never enter `parse_stable_hash`. `None`
+    /// components for genuinely synthetic members (union common-members,
     /// mapped-produced members) with no single source site.
     pub spans: verter_type_expr::MemberSpans,
     /// Canonical file the member's DECLARATION (its `name` / `: T` annotation)

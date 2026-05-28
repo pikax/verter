@@ -1593,6 +1593,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         projected_member.name,
                         (**function).clone(),
                         projected_member.optional,
+                        // TODO(follow-up: U2): thread real member spans here (see D1)
                         MemberSpans::default(),
                     )));
                     continue;
@@ -1603,6 +1604,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 projected_member.ty,
                 projected_member.optional,
                 projected_member.readonly,
+                // TODO(follow-up: U2): thread real member spans here (see D1)
                 MemberSpans::default(),
             )));
         }
@@ -1653,12 +1655,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             }
             if member.is_method {
                 if let TypeExpr::Function(function) = &member.ty {
-                    // `PreparedMember` carries no member-level span; the
-                    // function shape's own spans are preserved via the clone.
+                    // `PreparedMember` now carries member-level `spans` +
+                    // `declaration_origin` (stamped at `build_member_index`),
+                    // but this prepared-Pick reconstruction does not yet thread
+                    // them through (U2 boundary); the function shape's own spans
+                    // are preserved via the clone.
                     properties.push(ObjectMember::Method(MethodSignature::with_spans(
                         member_name.clone(),
                         (**function).clone(),
                         member.optional,
+                        // TODO(follow-up: U2): thread real member spans here (see D1)
                         MemberSpans::default(),
                     )));
                     continue;
@@ -1669,6 +1675,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 member.ty.clone(),
                 member.optional,
                 member.readonly,
+                // TODO(follow-up: U2): thread real member spans here (see D1)
                 MemberSpans::default(),
             )));
         }

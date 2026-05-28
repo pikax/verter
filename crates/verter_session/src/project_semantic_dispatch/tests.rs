@@ -7551,3 +7551,114 @@ fn memo_refuses_insertion_on_cache_suppress_true_via_pathological_input() {
         "warm-read cache_suppress must always be false (suppressed builds never reach memo)",
     );
 }
+
+// ── Member-index overlay carries the prepared member's spans + origin.
+//
+// `backfill_member_index_surface` (build.rs) APPENDS own-body members
+// from `prepared.member_index` that are not yet on the surface, and must
+// copy each `PreparedMember`'s OXC declaration-site `spans` +
+// `declaration_origin` onto the appended graph `SurfaceMember` (so a
+// macro-T own-member overlay reaches the span-rich `TypeInfoSurface`
+// instead of `MemberSpans::default()`).
+//
+// This pins that TRANSFER directly — the step the verter_semantic
+// producer proof and the `build_member` unit do NOT exercise (the former
+// proves the `PreparedMember` carries spans; the latter proves
+// `TypeInfoSurface::build` consumes a hand-built `SurfaceMember`). The
+// test is DISCRIMINATING: if the append stamps `MemberSpans::default()` /
+// `declaration_origin: None`, the `spans` equality assertion sees
+// all-`None` and the origin assertion sees `None`, both diverging from
+// the prepared NON-default values, so the test FAILS.
+#[test]
+fn backfill_member_index_surface_carries_prepared_member_spans_and_origin() {
+    use verter_semantic::analysis::type_eval::TypeDeclKind;
+    use verter_semantic::analysis::type_solver::prepared::PreparedMember;
+    use verter_span::Span;
+    use verter_type_expr::{MemberSpans, PrimitiveName, TypeExpr};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    // (1) An EMPTY Object-result surface: every prepared member is absent,
+    // so the overlay takes the APPEND path for it.
+    let result = intern_object_with_members(&graph, Vec::new());
+
+    // (2) A prepared decl whose `member_index` carries ONE own-body member
+    // with NON-default spans (all three components distinct + non-empty)
+    // and a NON-empty declaration origin. The member type is a primitive,
+    // which `shallow_lower_type_expr_with_context` lowers hermetically (no
+    // host routing), keeping this a focused unit on the append transfer.
+    let expected_spans = MemberSpans {
+        declaration: Some(Span::new(100, 130)),
+        name: Some(Span::new(100, 105)),
+        type_annotation: Some(Span::new(107, 130)),
+    };
+    let expected_origin = "/overlay_origin.ts";
+
+    let mut prepared = PreparedTypeDecl::new(
+        ResolvedRootIdentity::new(expected_origin, "Slots"),
+        TypeDeclKind::Interface,
+        TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+            properties: Vec::new(),
+        })),
+    );
+    prepared.member_index.insert(
+        "label".to_string(),
+        PreparedMember {
+            ty: TypeExpr::Primitive(PrimitiveName::String),
+            optional: false,
+            readonly: false,
+            is_method: false,
+            spans: expected_spans,
+            declaration_origin: expected_origin.to_string(),
+        },
+    );
+
+    // (3) Minimal lowering context (mirrors the `build_instantiate` call
+    // site): no bound type params, the decl-file scope, no scope payload.
+    let env: rustc_hash::FxHashMap<String, SemanticNodeId> = rustc_hash::FxHashMap::default();
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from(expected_origin),
+        whole_hash: [0u8; 16],
+        local_scope: None,
+    };
+    let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(None);
+    let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+    let context = crate::semantic_query::ProjectionReductionContext::published_macro_type_arg_body(
+        ProjectionMode::Shallow,
+    );
+
+    let overlaid = dispatch.backfill_member_index_surface(
+        result,
+        &prepared,
+        &env,
+        &scope,
+        None,
+        &shadowing,
+        &mut substitutions,
+        context,
+    );
+
+    // (4) Read back the appended member and pin spans + origin to the
+    // prepared NON-default values (NOT `MemberSpans::default()` / `None`).
+    let view = require_object_surface(&graph, overlaid, "member-index overlay append");
+    let appended = surface_get_member(&view, "label");
+
+    assert_eq!(
+        appended.spans, expected_spans,
+        "appended own-body member must carry the PreparedMember's OXC spans \
+         verbatim, not MemberSpans::default() — build.rs append transfer",
+    );
+    assert_ne!(
+        appended.spans,
+        MemberSpans::default(),
+        "guards against an append regression that stamps MemberSpans::default()",
+    );
+    assert_eq!(
+        appended.declaration_origin.as_deref(),
+        Some(expected_origin),
+        "appended own-body member must carry the PreparedMember's declaration \
+         origin, not None — build.rs append transfer",
+    );
+}
