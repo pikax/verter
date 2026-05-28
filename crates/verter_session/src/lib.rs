@@ -211,6 +211,103 @@ pub mod invalidation_domain;
 pub mod loop5_instrumentation;
 pub(crate) mod mapper_binder_registry;
 pub mod meta;
+
+/// Test-only re-exports for integration tests in `tests/`.
+///
+/// Items under this module are NOT a public API — they are
+/// hidden from documentation and exist purely so integration
+/// tests can probe internal invariants (e.g. the content-addressed
+/// `MapperFingerprint` substrate). Production code MUST NOT
+/// import from here. The architecture guard
+/// `test_only_module_is_only_consumed_by_test_files` (see
+/// `tests/architecture_guards.rs`) pins this contract.
+#[doc(hidden)]
+pub mod test_only {
+    /// Test-only probe for the content-addressed `MapperFingerprint`
+    /// primitive. The wrapper exposes the minimal surface needed by
+    /// `tests/mapper_fingerprint_content_addressed.rs` without
+    /// promoting the internal `MapperFingerprint` / `MapperBinderRegistry`
+    /// types to the crate's public API.
+    ///
+    /// The `private_interfaces` lint fires here because the wrapper
+    /// methods are `pub` while the wrapped `MapperFingerprint`
+    /// stays `pub(crate)`. The whole purpose of the wrapper is to
+    /// keep the inner type out of the public API while still
+    /// letting integration tests drive it — so the lint is
+    /// deliberately suppressed.
+    pub mod mapper_fingerprint {
+        use std::sync::Arc;
+
+        use verter_type_expr::{MappedModifier, TypeExpr};
+
+        use crate::mapper_binder_registry::{MapperBinderRegistry, MapperFingerprint};
+
+        /// Public newtype around the internal `MapperFingerprint`.
+        /// This is what `tests/mapper_fingerprint_content_addressed.rs`
+        /// asserts equality / inequality on. The newtype keeps the
+        /// inner type out of the public API surface while still
+        /// letting integration tests drive its observable
+        /// behaviour.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub struct Fingerprint(MapperFingerprint);
+
+        /// Owning wrapper around the internal `MapperBinderRegistry`
+        /// so the test can drive `ordinal_for` end-to-end without
+        /// reaching into the host. Constructing a fresh registry
+        /// keeps the test hermetic — no shared state across tests.
+        pub struct Registry(MapperBinderRegistry);
+
+        /// Probe substrate. Free functions on this zero-sized type
+        /// keep the test's call sites readable: every probe entry
+        /// is `MapperFingerprintProbe::*`.
+        pub struct MapperFingerprintProbe;
+
+        impl MapperFingerprintProbe {
+            /// Build a content-addressed fingerprint from the
+            /// same components the production lowering passes.
+            #[inline]
+            pub fn from_components(
+                source: &Arc<TypeExpr>,
+                value: &Arc<TypeExpr>,
+                optional: MappedModifier,
+                readonly: MappedModifier,
+                name_type: Option<&Arc<TypeExpr>>,
+            ) -> Fingerprint {
+                Fingerprint(MapperFingerprint::from_components(
+                    source, value, optional, readonly, name_type,
+                ))
+            }
+
+            /// Construct a fresh, empty `MapperBinderRegistry` so
+            /// each test has independent ordinal state.
+            #[inline]
+            pub fn fresh_registry() -> Registry {
+                Registry(MapperBinderRegistry::new())
+            }
+
+            /// Get / assign the stable ordinal for
+            /// `(canonical, display_name, fingerprint)` against the
+            /// test's owned registry.
+            #[inline]
+            pub fn ordinal_for(
+                registry: &Registry,
+                canonical: &Arc<str>,
+                display_name: &Arc<str>,
+                fp: Fingerprint,
+            ) -> u16 {
+                registry.0.ordinal_for(canonical, display_name, fp.0)
+            }
+
+            /// Test-only accessor for the raw `u64` content hash.
+            /// Used by the stack-safety test to assert the
+            /// returned fingerprint is non-default.
+            #[inline]
+            pub fn raw(fp: Fingerprint) -> u64 {
+                fp.0.raw()
+            }
+        }
+    }
+}
 pub mod meta_resolve;
 #[cfg(test)]
 mod negative_import_route_tests;

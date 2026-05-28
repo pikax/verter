@@ -3828,6 +3828,14 @@ mod foundations_guards {
         // can reach it; release builds drop the entire module
         // because `debug_assertions` is OFF in release.
         "pub mod tests",
+        // Test-only probe substrate for the content-addressed
+        // `MapperFingerprint` primitive. Consumed by
+        // `tests/mapper_fingerprint_content_addressed.rs`. The
+        // module is `#[doc(hidden)]` and wraps the internal
+        // `pub(crate)` `MapperFingerprint` / `MapperBinderRegistry`
+        // in a newtype so production callers cannot reach the
+        // inner types through it. Not a production API.
+        "pub mod test_only",
         // ─── public re-exports ─────────────────────────────────────
         // re-exports the canonical data types (HostConfig, VerterHost,
         // UpsertRequest, FileKind, CompileProfile, CompileErrorPolicy,
