@@ -14,12 +14,21 @@ use crate::resolver_core::{
 
 mod cold_resolver;
 mod direct_macro;
+mod imported_surface;
 mod projected_type_expr;
 
 #[cfg(test)]
 mod tests;
 
 pub use cold_resolver::resolve_component_meta_parts;
+// Typed-IR bridge for imported macro surfaces — composes
+// `ResolveDecl` + `ProjectPath` dispatch via an explicit
+// `ResolverContext` parameter. See `imported_surface.rs` for the
+// full invariants and the architecture guards in
+// `tests/architecture_guards.rs` that pin its containment.
+pub use imported_surface::{
+    EagerResolvedMacro, ImportedDeclarationIdentity, ImportedMacroSurface, ResolvedMacroSurface,
+};
 pub use projected_type_expr::resolved_elements_to_type_expr_via_type_text;
 // Re-export `projected_macro_surfaces_to_type_expr` so the original
 // `crate::resolver_core::component_meta::projected_macro_surfaces_to_type_expr`

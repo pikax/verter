@@ -71,8 +71,9 @@ pub use component_meta::{
     collect_requested_binding_names, component_meta_resolved_macros, component_meta_type_registry,
     resolve_component_meta_parts, resolved_elements_to_type_expr_via_type_text,
     ComponentMetaEvalOutputs, ComponentMetaResolutionPurpose, ComponentMetaResolverHost,
+    EagerResolvedMacro, ImportedDeclarationIdentity, ImportedMacroSurface,
     ResolvedComponentMetaParts, ResolvedImportedMacroSurface, ResolvedJsdocBlock, ResolvedJsdocTag,
-    ResolvedMacroMeta, ResolvedTypeRegistryMeta,
+    ResolvedMacroMeta, ResolvedMacroSurface, ResolvedTypeRegistryMeta,
 };
 pub use component_meta_query_engine::ComponentMetaQueryEngine;
 pub(crate) use component_meta_query_engine::{
