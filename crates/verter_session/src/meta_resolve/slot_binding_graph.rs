@@ -506,6 +506,13 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         macro_count = snapshot.macros.len(),
     );
     let _enter = span.enter();
+    // Scope the slot-binding synthesis phase on the active request context
+    // so any `Instantiate { Expanded }` dispatched WHILE this guard is held
+    // is attributed to synthesis (bumping
+    // `RequestContext::synthesis_expanded_instantiate_calls`). The eagerness
+    // guard asserts that synthesis-scoped count is zero — synthesis drives
+    // the carrier walk in Navigate / Skeleton, never Expanded.
+    let _synthesis_scope = crate::request_context::SynthesisScopeGuard::enter();
     // Synthesis-entry info event. Per the audit contract the synthesis layer
     // emits at `info` level; the `tracing::info!` here uses the
     // module-path target so subscribers filtered to `verter_session`

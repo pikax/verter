@@ -460,6 +460,51 @@ impl ImportedMacroSurface {
     fn raise_member_value(ctx: &dyn ResolverContext, node: SemanticNodeId) -> Option<TypeExpr> {
         ctx.dispatch().raise_node_to_type_expr(node)
     }
+
+    /// Reattach a member's JSDoc (`description` + `tags`) from the cached
+    /// parse artifact of the member's ORIGIN file — the display sidecar.
+    ///
+    /// The member's value node carries an origin scope
+    /// ([`SemanticGraphStore::node_scope`]) recording the canonical file
+    /// where the member's declaration was lowered. For an INHERITED member
+    /// (`interface Props extends Base`) that scope is the heritage BASE's
+    /// file, not the root declaration's — so the JSDoc follows the member
+    /// ORIGIN, exactly as the brief requires. We read that file's
+    /// cache-owned `IndexedReady.eval_source` (the canonical post-parse
+    /// source artifact — no re-resolution, no fresh parse) and run the
+    /// shared name-based JSDoc extractor
+    /// ([`verter_semantic::analysis::jsdoc::extract_jsdoc_for_property_name`],
+    /// the same helper the eager expanded-only fallback uses). This mirrors
+    /// the eager rail's `enrich_projected_jsdoc`, which resolves each
+    /// member's JSDoc from its declaration source by span; the lazy rail
+    /// resolves by member name because the typed IR is span-free.
+    ///
+    /// Returns `(None, empty)` when the origin scope is unknown, the source
+    /// is unavailable, or no leading JSDoc is present — matching the eager
+    /// rail's "no JSDoc" outcome.
+    fn member_display_jsdoc(
+        ctx: &dyn ResolverContext,
+        member_value: SemanticNodeId,
+        member_name: &str,
+    ) -> (
+        Option<String>,
+        Vec<verter_semantic::analysis::types::JsdocTag>,
+    ) {
+        let Some(crate::semantic_query::NodeScopeId::File { canonical_id, .. }) = ctx
+            .project_type_store()
+            .semantic_graph()
+            .node_scope(member_value)
+        else {
+            return (None, Vec::new());
+        };
+        let Some(indexed) = ctx.ensure_indexed_ready(canonical_id.as_ref()) else {
+            return (None, Vec::new());
+        };
+        verter_semantic::analysis::jsdoc::extract_jsdoc_for_property_name(
+            indexed.eval_source.as_ref(),
+            member_name,
+        )
+    }
 }
 
 /// Eager-resolved-macro newtype mirroring the existing public
@@ -582,15 +627,34 @@ impl ResolvedMacroSurface {
                     .map(|member| {
                         let type_expr = ImportedMacroSurface::raise_member_value(ctx, member.value);
                         let type_expr_scope = type_expr.is_some().then(|| scope.clone());
+                        // Display sidecar (cache-owned): the published
+                        // `type_annotation` display string is rendered from
+                        // the cache-owned typed `type_expr` — NOT re-parsed
+                        // from source text (Typed-IR-Only rule: display text
+                        // is a passthrough projection of the typed form, the
+                        // inverse direction is the banned one). The JSDoc
+                        // sidecar reattaches by member origin (see
+                        // [`Self::member_display_jsdoc`]): for an inherited
+                        // member the origin is the heritage base declaration's
+                        // file (the member value node's scope), not the root
+                        // declaration's file.
+                        let type_annotation = type_expr.as_ref().and_then(
+                            crate::resolver_core::surface_projector::render_type_expr_display,
+                        );
+                        let (description, tags) = ImportedMacroSurface::member_display_jsdoc(
+                            ctx,
+                            member.value,
+                            member.name.as_ref(),
+                        );
                         AnalyzedPropField {
                             name: member.name.as_ref().to_string(),
                             is_optional: member.optional,
                             span: verter_span::Span::default(),
-                            type_annotation: None,
+                            type_annotation,
                             type_expr,
                             type_expr_scope,
-                            description: None,
-                            tags: Vec::new(),
+                            description,
+                            tags,
                             resolution_source:
                                 verter_semantic::analysis::types::TypeResolutionSource::default(),
                             resolution_error: None,
@@ -712,14 +776,25 @@ impl ResolvedMacroSurface {
                         let payload_expr =
                             ImportedMacroSurface::raise_member_value(ctx, member.value);
                         let payload_expr_scope = payload_expr.is_some().then(|| scope.clone());
+                        // Display sidecar: payload text rendered from the
+                        // cache-owned typed `payload_expr`; JSDoc reattached
+                        // by member origin (see `member_display_jsdoc`).
+                        let payload_type = payload_expr.as_ref().and_then(
+                            crate::resolver_core::surface_projector::render_type_expr_display,
+                        );
+                        let (description, tags) = ImportedMacroSurface::member_display_jsdoc(
+                            ctx,
+                            member.value,
+                            member.name.as_ref(),
+                        );
                         emits.push(AnalyzedEmitField {
                             name: member.name.as_ref().to_string(),
                             span: verter_span::Span::default(),
-                            payload_type: None,
+                            payload_type,
                             payload_expr,
                             payload_expr_scope,
-                            description: None,
-                            tags: Vec::new(),
+                            description,
+                            tags,
                         });
                     }
                 }
@@ -787,16 +862,27 @@ impl ResolvedMacroSurface {
                             .unwrap_or_default();
                         let return_expr = func.return_type.as_ref().map(|rt| (**rt).clone());
                         let return_expr_scope = return_expr.is_some().then(|| scope.clone());
+                        // Display sidecar: return-type text rendered from the
+                        // cache-owned typed return; JSDoc reattached by slot
+                        // member origin (see `member_display_jsdoc`).
+                        let return_type = return_expr.as_ref().and_then(
+                            crate::resolver_core::surface_projector::render_type_expr_display,
+                        );
+                        let (description, tags) = ImportedMacroSurface::member_display_jsdoc(
+                            ctx,
+                            member.value,
+                            member.name.as_ref(),
+                        );
                         Some(AnalyzedSlotField {
                             name: member.name.as_ref().to_string(),
                             is_required: !member.optional,
                             span: verter_span::Span::default(),
                             bindings,
-                            return_type: None,
+                            return_type,
                             return_expr,
                             return_expr_scope,
-                            description: None,
-                            tags: Vec::new(),
+                            description,
+                            tags,
                         })
                     })
                     .collect()
@@ -825,7 +911,12 @@ fn binding_fields_from_param_ty(
         .filter_map(|member| match member {
             verter_type_expr::ObjectMember::Property(prop) => Some(AnalyzedSlotFieldBinding {
                 name: prop.name.clone(),
-                type_annotation: None,
+                // Display sidecar: binding type text rendered from the
+                // cache-owned typed value (`prop.ty`) — the display
+                // passthrough projection of the typed form.
+                type_annotation: crate::resolver_core::surface_projector::render_type_expr_display(
+                    &prop.ty,
+                ),
                 binding_expr: Some(prop.ty.clone()),
                 binding_expr_scope: Some(scope.clone()),
                 span: verter_span::Span::default(),

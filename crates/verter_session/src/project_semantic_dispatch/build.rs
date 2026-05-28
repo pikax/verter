@@ -147,6 +147,56 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let has_import_local = shallow.import_targets.contains_key(key.name.as_ref());
 
         if !(has_type_symbol || has_value_symbol || has_export || has_import_local) {
+            // Wildcard re-export fall-through. A `export * from './base'`
+            // barrel carries no direct symbol / named export for `BaseW` —
+            // it is reachable only THROUGH the wildcard chain. When the
+            // requested name is absent from every direct map BUT the file
+            // declares `export *` sources, follow the export graph (the
+            // shared route resolver already implements
+            // direct > aliased > wildcard precedence) to the defining
+            // `(canonical, name)` and resolve THAT declaration. This makes
+            // `ResolveDecl` carrier-complete for wildcard-barrel heritage
+            // (`interface Props extends BaseW` where `BaseW` is reached via
+            // `export *`), parity with the eager OXC rail which already
+            // follows the wildcard through the route frontier. Named
+            // re-exports (`export { X } from`) populate `exports` directly
+            // and never reach this fall-through.
+            if shallow.has_wildcard_reexports() {
+                if let Some((target_canonical, target_name)) =
+                    self.ctx.resolve_named_type_export_target(
+                        key.scope.canonical_id.as_ref(),
+                        key.name.as_ref(),
+                    )
+                {
+                    if target_canonical.as_str() != key.scope.canonical_id.as_ref()
+                        || target_name.as_str() != key.name.as_ref()
+                    {
+                        let resolved_key = ResolveDeclKey {
+                            scope: crate::semantic_query::ScopeId {
+                                canonical_id: Arc::from(target_canonical.as_str()),
+                                local_scope: None,
+                            },
+                            name: Arc::from(target_name.as_str()),
+                        };
+                        // Re-root the barrel-resolved entry on BOTH the
+                        // barrel file (whose wildcard source list selected
+                        // the target) AND the resolved declaration's own
+                        // self-roots, so a content edit to EITHER the
+                        // barrel's `export *` clause or the defining file
+                        // misses the warm read.
+                        let inner = self.build_resolve_decl(&resolved_key);
+                        let barrel_root = (Arc::clone(&key.scope.canonical_id), observed_hash);
+                        let mut roots = inner.observed_self_roots.clone();
+                        if !roots
+                            .iter()
+                            .any(|(c, h)| *c == barrel_root.0 && *h == barrel_root.1)
+                        {
+                            roots.push(barrel_root);
+                        }
+                        return inner.with_observed_self_roots(roots);
+                    }
+                }
+            }
             return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
         }
 
@@ -433,6 +483,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ctx.expanded_instantiate_calls
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
+            // Synthesis-scoped attribution: bump the
+            // synthesis-attributable counter ONLY when the slot-binding
+            // synthesis phase is active. The request-wide counter above
+            // also counts the canonical macro-surface PRODUCER's Expanded
+            // expansions (legitimate); the synthesis-scoped counter isolates
+            // "an Expanded Instantiate fired INSIDE slot-binding synthesis"
+            // — the eagerness defect `enrich_does_not_eagerly_instantiate_carrier`
+            // gates on (must stay zero).
+            crate::request_context::note_expanded_instantiate_for_synthesis_scope();
         }
 
         let decl_canonical = &identity.canonical_id;
@@ -973,6 +1032,48 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
+    /// Read the source surface of an object-filter utility (`Pick` /
+    /// `Omit`), carrier-complete.
+    ///
+    /// The source of `Pick<X, K>` / `Omit<X, K>` is usually a resolved
+    /// `Object` after `evaluate_deferred_semantic_node_with_context` — that
+    /// fast path preserves every signature kind (call / construct / index)
+    /// verbatim. But a CROSS-FILE source (`Omit<ImportedBase, K>` reached
+    /// from a heritage arm) lowers to a `DeclRef` / `InstantiationRef`
+    /// carrier in `Navigate` / `Skeleton`, which the deferred evaluator
+    /// deliberately does NOT unwrap (it would over-evaluate symbolic
+    /// IndexedAccess hops — see `evaluate.rs`). For those carrier sources we
+    /// read the one-level surface through the shared carrier-complete
+    /// reader [`Self::surface_view_from_base_node`] (Structural provenance —
+    /// a Pick/Omit source is never the macro-T own body) and synthesize a
+    /// `SurfaceView` from it. The carrier reader does not surface
+    /// construct/index signatures, so a carrier-sourced `Omit` drops those
+    /// (the cross-file heritage sources that exercise this path are plain
+    /// interfaces / classes without them); the resolved-`Object` fast path
+    /// above keeps them for every non-carrier source.
+    fn object_filter_source_surface(&self, source_resolved: SemanticNodeId) -> Option<SurfaceView> {
+        match self.graph().node_data(source_resolved).as_deref() {
+            Some(SemanticNodeData::Object(view)) => Some(view.clone()),
+            Some(SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. }) => {
+                let macro_view = self.surface_view_from_base_node(
+                    source_resolved,
+                    crate::semantic_query::SurfaceProvenanceContext::Structural,
+                )?;
+                Some(SurfaceView {
+                    members: Arc::from(macro_view.members.into_boxed_slice()),
+                    call_signatures: Arc::from(macro_view.call_signatures.into_boxed_slice()),
+                    construct_signatures: Arc::from(
+                        Vec::<SemanticNodeId>::new().into_boxed_slice(),
+                    ),
+                    index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+                    keyspace: None,
+                    has_index_signature: false,
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// Built-in utility dispatch.
     ///
     /// Routes recognised utility names (`Partial`, `Required`, `Readonly`,
@@ -1375,9 +1476,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // `StructuralTransit(Shallow)`).
                 let source_resolved =
                     self.evaluate_deferred_semantic_node_with_context(source, context);
-                let surface = match graph.node_data(source_resolved).as_deref() {
-                    Some(SemanticNodeData::Object(view)) => view.clone(),
-                    _ => {
+                let surface = match self.object_filter_source_surface(source_resolved) {
+                    Some(view) => view,
+                    None => {
                         let result = self.opaque(QueryError::Miss);
                         record_utility_edges(result);
                         return (QueryResult::Value(result), fence);
@@ -1419,9 +1520,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // resolution (see Pick comment above for chain).
                 let source_resolved =
                     self.evaluate_deferred_semantic_node_with_context(source, context);
-                let surface = match graph.node_data(source_resolved).as_deref() {
-                    Some(SemanticNodeData::Object(view)) => view.clone(),
-                    _ => {
+                let surface = match self.object_filter_source_surface(source_resolved) {
+                    Some(view) => view,
+                    None => {
                         let result = self.opaque(QueryError::Miss);
                         record_utility_edges(result);
                         return (QueryResult::Value(result), fence);

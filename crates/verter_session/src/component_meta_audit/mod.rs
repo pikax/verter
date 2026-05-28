@@ -445,6 +445,10 @@ impl AuditBuilder {
                     self.component_meta_payload.expanded_instantiate_calls = ctx
                         .expanded_instantiate_calls
                         .load(std::sync::atomic::Ordering::Relaxed);
+                    self.component_meta_payload
+                        .synthesis_expanded_instantiate_calls = ctx
+                        .synthesis_expanded_instantiate_calls
+                        .load(std::sync::atomic::Ordering::Relaxed);
                     self.component_meta_payload.memo_insertions = ctx
                         .memo_insertions
                         .load(std::sync::atomic::Ordering::Relaxed);

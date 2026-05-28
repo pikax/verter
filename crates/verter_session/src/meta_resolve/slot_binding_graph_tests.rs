@@ -335,6 +335,64 @@ defineSlots<Slots>()
 }
 
 // ---------------------------------------------------------------------------
+// Test #2b — REGRESSION: synthesis-SCOPED Expanded Instantiate counter
+// ---------------------------------------------------------------------------
+//
+// The request-WIDE `expanded_instantiate_calls` counter (Test #2) also
+// counts the canonical macro-surface PRODUCER's legitimate `Expanded`
+// expansions of imported macro roots — so a cross-file `defineSlots` whose
+// payload imports a heritage chain may bump the request-wide counter from
+// producer work, NOT from synthesis. This test pins the SYNTHESIS-SCOPED
+// counter (`synthesis_expanded_instantiate_calls`), which isolates "an
+// Expanded Instantiate fired INSIDE the slot-binding synthesis" via the
+// `SynthesisScopeGuard` depth marker. It must be ZERO: synthesis drives the
+// carrier walk in Navigate / Skeleton, never the giant-tree Expanded body
+// mode, regardless of producer-phase expansions.
+//
+// The fixture uses a CROSS-FILE heritage slot payload (`Slots` extends an
+// imported `BaseSlots`), exercising the carrier path the carrier-complete
+// surface reader resolves in Skeleton — the path that would have driven an
+// Expanded dispatch had the reader been wired to `Expanded`.
+#[test]
+fn synthesis_scoped_expanded_instantiate_is_zero_for_cross_file_heritage_slots() {
+    let result = AuditedRequest::builder()
+        .files([
+            (
+                "/src/base.ts",
+                "export interface BaseSlots { default(props: { row: string; index: number }): any }",
+            ),
+            (
+                "/src/slots.ts",
+                "import type { BaseSlots } from './base'\nexport interface Slots extends BaseSlots { header(props: { title: string }): any }",
+            ),
+            (
+                "/src/Comp.vue",
+                r#"<script setup lang="ts">
+import type { Slots } from './slots'
+defineSlots<Slots>()
+</script>
+<template><div /></template>
+"#,
+            ),
+        ])
+        .resolve_component_meta("/src/Comp.vue");
+    let (_meta, _resolved, record) = result.expect("audited resolution");
+    let synthesis_scoped = match &record.kind_payload {
+        verter_audit::RequestKindPayload::ComponentMeta(payload) => {
+            payload.synthesis_expanded_instantiate_calls
+        }
+        other => panic!("expected ComponentMeta payload, got {other:?}"),
+    };
+    assert_eq!(
+        synthesis_scoped, 0,
+        "slot-binding synthesis must NOT issue an Expanded Instantiate even for \
+         cross-file heritage slot payloads; observed synthesis-scoped Expanded \
+         Instantiate dispatches={synthesis_scoped} (per-request snapshot from \
+         RequestContext::synthesis_expanded_instantiate_calls)"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Test #3 — CHARACTERIZATION
 // ---------------------------------------------------------------------------
 //

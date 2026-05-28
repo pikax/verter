@@ -119,6 +119,7 @@ uuid = { version = "1.23", features = ["rng-getrandom"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 toml = "1.1"
 verter_parser = { path = "../verter_parser" }
+verter_type_expr = { workspace = true }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }

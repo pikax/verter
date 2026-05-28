@@ -135,6 +135,21 @@ pub struct ComponentMetaPayload {
     #[serde(default, with = "u64_as_decimal_string")]
     #[ts(type = "string")]
     pub expanded_instantiate_calls: u64,
+    /// Synthesis-ATTRIBUTABLE subset of [`Self::expanded_instantiate_calls`]:
+    /// `Instantiate { body_mode: Expanded }` dispatches observed WHILE the
+    /// slot-binding synthesis phase was active on the request. The
+    /// request-wide `expanded_instantiate_calls` also counts the canonical
+    /// macro-surface PRODUCER's legitimate `Expanded` expansions; this
+    /// scoped counter isolates synthesis-phase eagerness. The slot-binding
+    /// eagerness guard `enrich_does_not_eagerly_instantiate_carrier` asserts
+    /// this is ZERO. Snapshotted at request finalisation from
+    /// `RequestContext::synthesis_expanded_instantiate_calls`.
+    ///
+    /// Marked `#[serde(default)]` so existing producers that emit audit JSON
+    /// without this field deserialize cleanly.
+    #[serde(default, with = "u64_as_decimal_string")]
+    #[ts(type = "string")]
+    pub synthesis_expanded_instantiate_calls: u64,
     /// Per-request count of `MemoEntry` insertions published into
     /// the `SemanticGraphStore` warm map during this request.
     /// Mirror of the host-global memo-size delta, partitioned

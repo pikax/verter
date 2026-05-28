@@ -279,11 +279,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   at lowering time (the DeclPlaceholder unwrap below interns the
     ///   instantiated body under the provenance-bearing context).
     /// - `Intersection(arms)` → accumulate the union of every
-    ///   **resolvable** arm's members (first-writer-wins on a duplicate
-    ///   member name, matching TS intersection member precedence) and
-    ///   concatenate every arm's call signatures. The provenance flows
-    ///   into each arm so an own-body intersection literal arm keeps the
-    ///   bit. Returns `None` only when no arm is resolvable.
+    ///   **resolvable** arm's members under TS derived-member precedence:
+    ///   own-body members (`declared_in_macro_type_arg == true`) shadow
+    ///   heritage members of the same name (a two-pass merge — own-body
+    ///   first, then heritage fills unclaimed names — because the heritage
+    ///   fold orders the base arm BEFORE the own-body arm yet the derived
+    ///   member must win). Within each provenance class, first-writer-wins
+    ///   preserves the genuine `A & B` author-intersection arm order. Call
+    ///   signatures from every arm are concatenated. Returns `None` only
+    ///   when no arm is resolvable.
     /// - `Alias(target)` → an identity / utility alias shell
     ///   (`NoInfer<T>`, and any other `build_instantiate` arm that
     ///   interns a pass-through [`SemanticNodeData::Alias`]). The alias
@@ -298,8 +302,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   — rather than downgrading; only the TRANSFORMATIVE utilities
     ///   (`Omit` / `Pick`) reshape the surface and downgrade).
     /// - `DeclPlaceholder` → `Instantiate` the bare declaration body
-    ///   under `Published(Expanded)` carrying the provenance, then read
-    ///   the unwrapped surface.
+    ///   under `Published(Skeleton)` carrying the provenance, then read
+    ///   the unwrapped surface (see [`Self::surface_view_from_decl_identity`]
+    ///   for the Skeleton-not-Expanded coupling).
+    /// - `DeclRef` → resolve through `ResolveDecl` ("aliases follow") to
+    ///   the declaration's `DeclPlaceholder`, then recurse. This is the
+    ///   cross-file heritage carrier arm: `extends Base` where `Base` is
+    ///   imported lowers to a `DeclRef` in `Navigate` / `Skeleton`.
+    /// - `InstantiationRef` → `Instantiate` under the reader's `Skeleton`
+    ///   demand (carrying the captured generic args + the caller's
+    ///   provenance), then recurse. The cross-file generic heritage carrier
+    ///   arm: `extends Base<T>`.
     /// - `Union(arms)` → the TS-correct shallow surface of a union-typed
     ///   macro payload is its COMMON members: a key published only when it
     ///   is present in EVERY arm (mirroring `key_names_from_base_node`'s
@@ -331,12 +344,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // re-resolving any carrier (`Ref`) arm under the top-level
         // provenance — which would re-stamp a heritage `extends Base` arm
         // `declared_in_macro_type_arg = true`. Instead, the
-        // `DeclPlaceholder` arm below instantiates the macro-T root under
-        // the caller's provenance (so `build_instantiate`'s per-arm body
-        // lowering bakes own-body Object arms `true` and heritage `Ref`
-        // arms structural), and the `Intersection` arm merges the
-        // already-lowered arms with STRUCTURAL recursion — preserving each
-        // arm's baked provenance without re-stamping carriers.
+        // `DeclPlaceholder` arm below instantiates the macro-T root in
+        // `Skeleton` (NOT `Expanded`) under the caller's provenance (so
+        // `build_instantiate`'s per-arm body lowering bakes own-body Object
+        // arms `true` and heritage `Ref` arms structural), and the
+        // `Intersection` arm merges the already-lowered arms with STRUCTURAL
+        // recursion — preserving each arm's baked provenance without
+        // re-stamping carriers.
+        //
+        // CARRIER-COMPLETE: a CROSS-FILE heritage `Ref` lowers
+        // lazily to a `DeclRef` / `InstantiationRef` carrier in
+        // `Navigate` / `Skeleton`. The dedicated carrier arms below resolve
+        // those (DeclRef → ResolveDecl → DeclPlaceholder → recurse;
+        // InstantiationRef → Skeleton Instantiate → recurse) so the
+        // inherited members surface. A same-file heritage `Ref` is already
+        // a `DeclPlaceholder` after the root Skeleton-instantiate of an
+        // inline interface body, so both same-file and cross-file heritage
+        // converge on the `DeclPlaceholder` reader without an eager Expand.
         let resolved = base;
         let data = self.graph().node_data(resolved)?;
         match data.as_ref() {
@@ -362,38 +386,58 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::Intersection(arms) => {
                 let arms = Arc::clone(arms);
                 drop(data);
-                let mut merged = MacroSurfaceView::default();
-                let mut seen: FxHashSet<Arc<str>> = FxHashSet::default();
+                // Resolve each arm's surface (STRUCTURAL provenance: each
+                // arm's own-body-vs-heritage provenance was already decided
+                // when `build_instantiate` lowered the declaration body
+                // per-arm — own-body Object arms baked `true`, reference /
+                // heritage arms `false`. Re-applying the caller's macro
+                // provenance would wrongly re-stamp heritage members `true`).
                 let mut any_resolvable = false;
+                let mut arm_views: Vec<MacroSurfaceView> = Vec::with_capacity(arms.len());
                 for arm in arms.iter() {
-                    // Recurse into already-resolved intersection arms with
-                    // STRUCTURAL provenance: each arm's own-body-vs-heritage
-                    // provenance was already decided when `build_instantiate`
-                    // lowered the declaration body per-arm (own-body Object
-                    // arms baked `true`, reference arms `false`). An
-                    // already-resolved Object arm carries its baked bit
-                    // verbatim; a still-deferred carrier arm (a heritage
-                    // `Ref`) re-resolves STRUCTURALLY here — re-applying the
-                    // caller's macro provenance would wrongly re-stamp the
-                    // heritage members `true`.
                     if let Some(arm_view) = self.surface_view_from_base_node(
                         *arm,
                         crate::semantic_query::SurfaceProvenanceContext::Structural,
                     ) {
                         any_resolvable = true;
-                        for member in arm_view.members {
-                            // First-writer-wins: an earlier intersection
-                            // arm's member shadows a later arm's member
-                            // of the same name (TS member-precedence on
-                            // `A & B`).
-                            if seen.insert(Arc::clone(&member.name)) {
-                                merged.members.push(member);
-                            }
-                        }
-                        merged.call_signatures.extend(arm_view.call_signatures);
+                        arm_views.push(arm_view);
                     }
                 }
-                any_resolvable.then_some(merged)
+                if !any_resolvable {
+                    return None;
+                }
+                // Member precedence (TS derived-member shadowing). A
+                // declaration's OWN body (`interface Props extends Base {
+                // dup: string }`) folds to `Intersection([Base,
+                // OwnObject])` — heritage arm FIRST, own-body arm LAST — but
+                // TS semantics make the DERIVED member shadow the inherited
+                // one (`Props['dup']` is `string`, not `number` and not
+                // `string & number`). A naive arm-order first-writer-wins
+                // would keep the heritage `dup` (wrong). So we merge in TWO
+                // passes keyed on the baked provenance: own-body members
+                // (`declared_in_macro_type_arg == true`) win first, then
+                // heritage members fill names not already claimed. Within
+                // each provenance class first-writer-wins preserves the
+                // genuine `A & B` author-intersection arm order (all arms
+                // structural-false → second pass keeps left-to-right order).
+                let mut merged = MacroSurfaceView::default();
+                let mut seen: FxHashSet<Arc<str>> = FxHashSet::default();
+                for own_body_pass in [true, false] {
+                    for arm_view in &arm_views {
+                        for member in &arm_view.members {
+                            if member.declared_in_macro_type_arg != own_body_pass {
+                                continue;
+                            }
+                            if seen.insert(Arc::clone(&member.name)) {
+                                merged.members.push(member.clone());
+                            }
+                        }
+                    }
+                }
+                for arm_view in arm_views {
+                    merged.call_signatures.extend(arm_view.call_signatures);
+                }
+                Some(merged)
             }
             SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder {
                 canonical_id,
@@ -406,11 +450,55 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     decl_name: Arc::clone(name),
                 };
                 drop(data);
+                self.surface_view_from_decl_identity(identity, resolved, provenance)
+            }
+            // Lazy declaration-reference carrier (`Navigate` / `Skeleton`
+            // lowering of a bare `TypeExpr::Ref`). A cross-file heritage
+            // arm (`extends Base` where `Base` is imported) lowers to a
+            // `DeclRef` in the carrier-preserving modes; the Intersection
+            // recursion above reaches it here. Resolve it through
+            // `ResolveDecl` (the same "aliases follow" unwrap the walker
+            // performs) to the declaration's `DeclPlaceholder`, then read
+            // that surface — WITHOUT eagerly expanding (the
+            // `surface_view_from_decl_identity` helper instantiates in
+            // `Skeleton`, never `Expanded`, so the slot-binding eagerness
+            // guard `enrich_does_not_eagerly_instantiate_carrier` stays at
+            // zero synthesis-attributable `Expanded` Instantiate calls).
+            SemanticNodeData::DeclRef { identity } => {
+                let scope = crate::semantic_query::ScopeId {
+                    canonical_id: Arc::clone(&identity.canonical_id),
+                    local_scope: None,
+                };
+                let name = Arc::clone(&identity.decl_name);
+                drop(data);
+                match self.execute(crate::semantic_query::SemanticQueryKey::ResolveDecl(
+                    crate::semantic_query::ResolveDeclKey { scope, name },
+                )) {
+                    crate::semantic_query::QueryResult::Value(decl) if decl != resolved => {
+                        self.surface_view_from_base_node(decl, provenance)
+                    }
+                    _ => None,
+                }
+            }
+            // Lazy generic-application carrier (`Navigate` / `Skeleton`
+            // lowering of a `TypeExpr::Ref` with type arguments). A
+            // cross-file generic heritage arm (`extends Base<string>`)
+            // lowers to an `InstantiationRef`. Instantiate it under the
+            // surface reader's `Skeleton` demand carrying the caller's
+            // provenance, then read the instantiated body's surface. The
+            // `args` are the captured generic arguments, so the substituted
+            // member types surface (generic substitution is semantic
+            // meaning). Like the `DeclRef` arm this never asks for the
+            // `Expanded` body mode.
+            SemanticNodeData::InstantiationRef { base, args } => {
+                let base = base.clone();
+                let args = Arc::clone(args);
+                drop(data);
                 match self.execute(crate::semantic_query::SemanticQueryKey::Instantiate {
-                    base: identity,
-                    args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                    base,
+                    args,
                     context: crate::semantic_query::ProjectionReductionContext::published(
-                        crate::semantic_query::ProjectionMode::Expanded,
+                        crate::semantic_query::ProjectionMode::Skeleton,
                     )
                     .with_provenance(provenance),
                 }) {
@@ -440,6 +528,49 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             // Primitives, deferred shells, literals, type params, … have no
             // single member surface a macro payload reads.
+            _ => None,
+        }
+    }
+
+    /// Instantiate a declaration identity in `Skeleton` mode and read its
+    /// one-level surface (the `DeclPlaceholder` / `DeclRef` carrier path of
+    /// [`Self::surface_view_from_base_node`]).
+    ///
+    /// **Skeleton, never Expanded (the eagerness-guard coupling).** The macro-surface
+    /// reader drives every carrier unwrap in a shallow / carrier-preserving
+    /// mode: an `extends Base` heritage arm folds into an
+    /// `Intersection([Object{own}, DeclRef{Base}])` whose `DeclRef` arm is
+    /// resolved by the `DeclRef` match arm above — itself routing back here
+    /// — so the inherited members surface WITHOUT the reader ever asking
+    /// `build_instantiate` for the `Expanded` body mode. This keeps the
+    /// synthesis-attributable `Expanded` Instantiate count at zero (the
+    /// slot-binding eagerness guard `enrich_does_not_eagerly_instantiate_carrier`).
+    ///
+    /// `Skeleton` (vs `Navigate`) preserves carrier shells for unbound
+    /// generic helpers so a `Conditional` heritage body does not collapse
+    /// to `never`; for the common heritage / intersection / object surface
+    /// the two modes lower identically (both carrier-preserving on `Ref`).
+    /// The caller's `provenance` flows onto the instantiate so the
+    /// declaration's OWN-body members keep `declared_in_macro_type_arg`
+    /// while heritage `Ref` arms decay to structural inside
+    /// `lower_decl_body_with_provenance`.
+    fn surface_view_from_decl_identity(
+        &self,
+        identity: crate::semantic_query::DeclIdentity,
+        resolved: SemanticNodeId,
+        provenance: crate::semantic_query::SurfaceProvenanceContext,
+    ) -> Option<MacroSurfaceView> {
+        match self.execute(crate::semantic_query::SemanticQueryKey::Instantiate {
+            base: identity,
+            args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Skeleton,
+            )
+            .with_provenance(provenance),
+        }) {
+            crate::semantic_query::QueryResult::Value(instantiated) if instantiated != resolved => {
+                self.surface_view_from_base_node(instantiated, provenance)
+            }
             _ => None,
         }
     }

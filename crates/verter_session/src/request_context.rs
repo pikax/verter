@@ -60,6 +60,55 @@ pub fn mark_request_materialization_cache_suppress() {
     }
 }
 
+/// RAII guard scoping the slot-binding synthesis phase on the active
+/// request context. While held, [`RequestContext::synthesis_active_depth`]
+/// is `> 0`, so [`crate::project_semantic_dispatch`]'s `build_instantiate`
+/// attributes any `Expanded` Instantiate to synthesis (bumping
+/// [`RequestContext::synthesis_expanded_instantiate_calls`]).
+///
+/// Re-entrant: nested synthesis frames raise/lower the depth so a balanced
+/// stack always restores the pre-entry depth. A no-op when no
+/// `RequestContext` is installed (the synthetic test-fixture path).
+#[must_use]
+pub struct SynthesisScopeGuard {
+    ctx: Option<Arc<RequestContext>>,
+}
+
+impl SynthesisScopeGuard {
+    /// Enter the synthesis phase: raise the active depth on the current
+    /// request context (if any).
+    pub fn enter() -> Self {
+        let ctx = current_request_context();
+        if let Some(ctx) = ctx.as_ref() {
+            ctx.synthesis_active_depth.fetch_add(1, Ordering::Relaxed);
+        }
+        Self { ctx }
+    }
+}
+
+impl Drop for SynthesisScopeGuard {
+    fn drop(&mut self) {
+        if let Some(ctx) = self.ctx.as_ref() {
+            ctx.synthesis_active_depth.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Bump the synthesis-attributable `Expanded` Instantiate counter on the
+/// active request context IFF the synthesis phase is currently active
+/// ([`RequestContext::synthesis_active_depth`] `> 0`). Called from
+/// `build_instantiate` alongside the request-wide
+/// [`RequestContext::expanded_instantiate_calls`] bump. No-op when no
+/// context is installed or synthesis is not active.
+pub fn note_expanded_instantiate_for_synthesis_scope() {
+    if let Some(ctx) = current_request_context() {
+        if ctx.synthesis_active_depth.load(Ordering::Relaxed) > 0 {
+            ctx.synthesis_expanded_instantiate_calls
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Per-cache hit/miss attribution counter pair. Bumped at the
 /// get/insert boundary of each cache via
 /// [`current_request_context`] so the counts attribute exactly to
@@ -446,7 +495,28 @@ pub struct RequestContext {
     /// the active request. Mirrors host-global
     /// `SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS`; surfaces on
     /// [`verter_audit::ComponentMetaPayload::expanded_instantiate_calls`].
+    ///
+    /// Request-WIDE: bumped on EVERY `Expanded` Instantiate in the request,
+    /// including the canonical macro-surface PRODUCER phase (which legitimately
+    /// expands imported macro roots). NOT a synthesis-purity signal — see
+    /// [`Self::synthesis_expanded_instantiate_calls`] for the synthesis-scoped
+    /// counter the slot-binding eagerness guard asserts.
     pub expanded_instantiate_calls: AtomicU64,
+    /// Re-entrant depth of the slot-binding synthesis phase
+    /// ([`crate::meta_resolve::slot_binding_graph::resolve_slot_bindings_graph_native`]).
+    /// Raised on synthesis entry, lowered on exit (a `Drop` guard restores
+    /// it even on early return). `> 0` means an `Instantiate` dispatch is
+    /// attributable to slot-binding synthesis.
+    pub synthesis_active_depth: AtomicU64,
+    /// `Instantiate { body_mode: Expanded }` dispatches observed WHILE
+    /// [`Self::synthesis_active_depth`] `> 0` — the synthesis-attributable
+    /// subset of [`Self::expanded_instantiate_calls`]. The slot-binding
+    /// eagerness guard `enrich_does_not_eagerly_instantiate_carrier`
+    /// asserts this is ZERO: synthesis must drive the carrier walk in
+    /// `Navigate` / `Skeleton`, never the giant-tree `Expanded` body mode.
+    /// Surfaces on
+    /// [`verter_audit::ComponentMetaPayload::synthesis_expanded_instantiate_calls`].
+    pub synthesis_expanded_instantiate_calls: AtomicU64,
     /// `MemoEntry` insertions published into the `SemanticGraphStore`
     /// warm map during this request (bumped at `warm_publish_one`);
     /// surfaces on
@@ -877,6 +947,8 @@ impl RequestContext {
             compile_sourcemap_us: AtomicU64::new(0),
             compile_code_transform_ops: AtomicU64::new(0),
             expanded_instantiate_calls: AtomicU64::new(0),
+            synthesis_active_depth: AtomicU64::new(0),
+            synthesis_expanded_instantiate_calls: AtomicU64::new(0),
             memo_insertions: AtomicU64::new(0),
             memo_publish_suppressed: AtomicU64::new(0),
             materialization_cache_suppress: AtomicBool::new(false),

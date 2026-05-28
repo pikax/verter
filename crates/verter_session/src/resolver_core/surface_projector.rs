@@ -777,7 +777,7 @@ fn bindings_from_pick_args(
 /// nested call; when it hits zero the renderer returns `None` (the caller
 /// surfaces `type_annotation: None`, and the typed `binding_expr` /
 /// `return_expr` remains authoritative).
-fn render_type_expr_display(expr: &TypeExpr) -> Option<String> {
+pub(crate) fn render_type_expr_display(expr: &TypeExpr) -> Option<String> {
     const MAX_DISPLAY_DEPTH: usize = 64;
     render_type_expr_display_inner(expr, MAX_DISPLAY_DEPTH)
 }

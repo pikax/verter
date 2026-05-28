@@ -443,9 +443,41 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
         .map(|tp| lower_type_param_decls(tp, source))
         .unwrap_or_default();
 
-    let body = TypeExpr::Object(Arc::new(ObjectExpr {
+    // Fold `extends BaseClass` heritage into the body as an
+    // `Intersection`, mirroring `extract_named_interface`. A subclass
+    // inherits the public instance shape of its base: `class Props extends
+    // BaseProps { own }` exposes both `BaseProps`'s members and `own`. The
+    // base is lowered as a `Ref` (resolved later through the shared
+    // resolver), with its `super_type_arguments` lowered as generic args
+    // (`class C extends Base<string>`). Without this fold the class body
+    // carried only its own members and the cross-file heritage was dropped
+    // by every body-driven surface reader (eager OXC rail folds it
+    // separately via `apply_class_heritage_edge`; this is the typed-IR
+    // producer parity).
+    let own_body = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: members,
     }));
+    let body = match &decl.super_class {
+        Some(Expression::Identifier(base_id)) => {
+            let base_name = base_id.name.to_string();
+            let base_args: Vec<TypeExpr> = decl
+                .super_type_arguments
+                .as_ref()
+                .map(|tp| tp.params.iter().map(|p| lower_ts_type(p, source)).collect())
+                .unwrap_or_default();
+            let base_ref = if base_args.is_empty() {
+                TypeExpr::named(base_name)
+            } else {
+                TypeExpr::named_with_args(base_name, base_args)
+            };
+            // Heritage base first, own body last — matches the interface
+            // fold order (`parts.push(base); parts.push(body)`), so the
+            // first-writer-wins member precedence in downstream surface
+            // readers keeps own-body members shadowing inherited ones.
+            TypeExpr::intersection(vec![base_ref, own_body])
+        }
+        _ => own_body,
+    };
 
     env.add_type(TypeDeclInfo {
         name: name.clone(),
