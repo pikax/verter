@@ -11772,6 +11772,13 @@ mod single_resolution_engine_guards {
                         let mut depth = 1i32;
                         let mut m = k + 1;
                         while m < n && depth > 0 {
+                            // Skip string / char / raw-string literals so a
+                            // `{` or `}` inside a literal in the test-mod body
+                            // cannot desync the brace depth counter (P3).
+                            if let Some(next) = skip_literal(bytes, m) {
+                                m = next;
+                                continue;
+                            }
                             match bytes[m] {
                                 b'{' => depth += 1,
                                 b'}' => depth -= 1,
@@ -11796,17 +11803,118 @@ mod single_resolution_engine_guards {
         String::from_utf8_lossy(&out).into_owned()
     }
 
+    /// If `bytes[at]` begins a string, raw-string, byte-string, or char
+    /// literal, return the index just past its closing delimiter; otherwise
+    /// `None`. Used by `strip_inline_test_modules` so braces inside literals
+    /// inside a `#[cfg(test)] mod` body do not desync the depth counter.
+    ///
+    /// A leading `b` (byte string / byte char) is consumed transparently. A
+    /// `'` that does NOT close as a well-formed char literal (i.e. a lifetime
+    /// such as `'a` / `'static`) is reported as `None` — lifetimes contain no
+    /// braces, so leaving them to the byte-by-byte scan is correct.
+    fn skip_literal(bytes: &[u8], at: usize) -> Option<usize> {
+        let n = bytes.len();
+        if at >= n {
+            return None;
+        }
+        // Optional byte-literal prefix: b"..." / br"..." / b'.'
+        let mut start = at;
+        if bytes[start] == b'b' && start + 1 < n && matches!(bytes[start + 1], b'"' | b'\'' | b'r')
+        {
+            start += 1;
+        }
+        if start >= n {
+            return None;
+        }
+        // Raw string: r"..." / r#"..."# / r##"..."## ...
+        if bytes[start] == b'r' {
+            let mut j = start + 1;
+            let mut hashes = 0usize;
+            while j < n && bytes[j] == b'#' {
+                hashes += 1;
+                j += 1;
+            }
+            if j < n && bytes[j] == b'"' {
+                // Closing is `"` followed by `hashes` `#`.
+                let mut k = j + 1;
+                while k < n {
+                    if bytes[k] == b'"' {
+                        let mut h = 0usize;
+                        while h < hashes && k + 1 + h < n && bytes[k + 1 + h] == b'#' {
+                            h += 1;
+                        }
+                        if h == hashes {
+                            return Some(k + 1 + hashes);
+                        }
+                    }
+                    k += 1;
+                }
+                return Some(n);
+            }
+            // `r` not starting a raw string — not a literal here.
+            return None;
+        }
+        // Regular string literal "..." with \" escape handling.
+        if bytes[start] == b'"' {
+            let mut k = start + 1;
+            while k < n {
+                if bytes[k] == b'\\' && k + 1 < n {
+                    k += 2;
+                    continue;
+                }
+                if bytes[k] == b'"' {
+                    return Some(k + 1);
+                }
+                k += 1;
+            }
+            return Some(n);
+        }
+        // Char literal '\u{7b}' / '{' / '\n' / 'a'. Reject lifetimes.
+        if bytes[start] == b'\'' {
+            // Distinguish a char literal from a lifetime by the char-literal
+            // grammar (so a lifetime like `'a` is NOT skipped, which would
+            // otherwise swallow code up to the next `'`):
+            //   * escaped form `'\x…'` — opens with `\`, closes at the next
+            //     unescaped `'` (e.g. `'\n'`, `'\''`, `'\u{7b}'`);
+            //   * simple form `'X'` — exactly one char then `'`.
+            // Anything else (`'a`, `'static`) is a lifetime → not a literal.
+            if start + 1 < n && bytes[start + 1] == b'\\' {
+                let mut k = start + 2;
+                let bound = (start + 16).min(n);
+                while k < bound {
+                    if bytes[k] == b'\'' {
+                        return Some(k + 1);
+                    }
+                    k += 1;
+                }
+                return None;
+            }
+            if start + 2 < n && bytes[start + 2] == b'\'' {
+                return Some(start + 3);
+            }
+            // Lifetime (or malformed) — not a literal.
+            return None;
+        }
+        None
+    }
+
     fn preprocess(src: &str) -> String {
         strip_inline_test_modules(&strip_comments(src))
     }
 
     /// Identifier-boundary matcher: `needle` matches at `line` ONLY when its
     /// occurrence is bounded by characters that cannot extend an identifier
-    /// (not `[A-Za-z0-9_]`). Used for token guards (`from_eager_meta`,
-    /// `ResolvedElements`) so suffixed names (`ResolvedElementsBuilder`,
-    /// `from_eager_meta_v2`) do not false-match. NOT used for `resolve_type::`
-    /// (a path fragment ending in `::`) or for `PreparedSurfaceProjection`
-    /// (matched as a substring because it is a unique enum name).
+    /// (not `[A-Za-z0-9_]`). Used for EVERY token guard so suffixed/embedding
+    /// names never false-match: `from_eager_meta` vs `from_eager_meta_v2`,
+    /// and — critically — `ResolvedElements` vs `ResolvedElementsOwned` (a
+    /// distinct owned-artifact arena type that is NOT the doomed eager-OXC
+    /// output and must not satisfy the `ResolvedElements` ledger). The
+    /// `PreparedSurfaceProjection` enum is also matched at identifier boundary
+    /// (it has no embedding identifier today, but boundary matching keeps a
+    /// hypothetical `PreparedSurfaceProjectionV2` from satisfying a stale
+    /// entry). The only NON-identifier token is `resolve_type`, which is a
+    /// module path segment handled by `scan_resolve_type_module_target_counts`
+    /// (it must match `resolve_type::`, `use …::resolve_type as rt`, etc.).
     fn line_contains_identifier(line: &str, needle: &str) -> bool {
         let bytes = line.as_bytes();
         let nb = needle.as_bytes();
@@ -11827,6 +11935,90 @@ mod single_resolution_engine_guards {
             i += 1;
         }
         false
+    }
+
+    /// Count of identifier-boundary occurrences of `needle` across the whole
+    /// (already preprocessed) source. Non-overlapping. Used by the count-based
+    /// file ledgers so that a NEW use added INSIDE an already-allowlisted file
+    /// raises that file's observed count above its allowlisted count and the
+    /// guard fires (the in-file-growth trap that a file-NAME-set guard misses).
+    fn count_identifier_in_source(src: &str, needle: &str) -> usize {
+        let bytes = src.as_bytes();
+        let nb = needle.as_bytes();
+        let n = nb.len();
+        if n == 0 {
+            return 0;
+        }
+        let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let mut count = 0usize;
+        let mut i = 0usize;
+        while i + n <= bytes.len() {
+            if &bytes[i..i + n] == nb {
+                let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+                let after_ok = i + n == bytes.len() || !is_ident_char(bytes[i + n]);
+                if before_ok && after_ok {
+                    count += 1;
+                    i += n;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        count
+    }
+
+    /// Count of `resolve_type` occurrences that act as a MODULE PATH SEGMENT in
+    /// the (already preprocessed) source. This catches every architecturally
+    /// meaningful use of the doomed OXC engine module — not just the
+    /// `resolve_type::` call/path fragment, but also ALIASED and grouped/bare
+    /// `use` imports that contain no `::` after the segment:
+    ///
+    ///   * `resolve_type::foo` / `…::resolve_type::{…}`  (path / call / glob)
+    ///   * `use …::resolve_type as rt;`                  (ALIASED import — the
+    ///     evasion the substring guard missed)
+    ///   * `use …::{resolve_type, …};` / `use …::resolve_type;`  (bare import)
+    ///   * `pub mod resolve_type;`                       (module declaration)
+    ///
+    /// Concretely: an identifier-boundary `resolve_type` whose next non-space
+    /// token is `::`, `;`, `,`, `}`, or `as` (the path-segment / use-target
+    /// terminators). A trailing identifier char (`resolve_type_dependency…`)
+    /// is excluded by the identifier-boundary check.
+    fn count_resolve_type_module_targets(src: &str) -> usize {
+        let bytes = src.as_bytes();
+        let nb = b"resolve_type";
+        let n = nb.len();
+        let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let mut count = 0usize;
+        let mut i = 0usize;
+        while i + n <= bytes.len() {
+            if &bytes[i..i + n] == nb {
+                let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+                let after_idx = i + n;
+                let after_ok = after_idx == bytes.len() || !is_ident_char(bytes[after_idx]);
+                if before_ok && after_ok {
+                    let mut k = after_idx;
+                    while k < bytes.len()
+                        && (bytes[k] == b' ' || bytes[k] == b'\n' || bytes[k] == b'\t')
+                    {
+                        k += 1;
+                    }
+                    let rest = &src[k..];
+                    let is_target = rest.starts_with("::")
+                        || rest.starts_with(';')
+                        || rest.starts_with(',')
+                        || rest.starts_with('}')
+                        || rest.starts_with("as ")
+                        || rest.starts_with("as\n");
+                    if is_target {
+                        count += 1;
+                        i = after_idx;
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+        count
     }
 
     fn fmt_match(m: &(String, u32, String)) -> String {
@@ -11894,53 +12086,84 @@ mod single_resolution_engine_guards {
         panic!("{msg}");
     }
 
-    /// File-level bidirectional allowlist comparison. Fails on EITHER a
-    /// production file containing the symbol that is NOT allowlisted OR an
-    /// allowlisted file that no longer contains the symbol. The
-    /// architecturally meaningful "new production site" for a symbol pervasive
-    /// within its owning module is a NEW FILE referencing it.
-    fn assert_exact_file_allowlist_match(
+    /// Per-file OCCURRENCE-COUNT shrinking ledger. The allowlist is a map
+    /// `file -> count`; `actual` is the observed `(file, count)` per production
+    /// file (count > 0 only). The comparison fails on ANY of:
+    ///
+    ///   * **in-file growth** — an allowlisted file whose observed count is
+    ///     GREATER than its allowlisted count (a NEW use added inside a file
+    ///     that already had some; the hole a file-NAME-set guard misses);
+    ///   * **new file** — a file with a positive count that is not in the
+    ///     allowlist (the classic new-production-file trap);
+    ///   * **stale / shrunk entry** — an allowlisted file whose observed count
+    ///     is LOWER than allowlisted, or that is gone entirely (a later stage
+    ///     deleted uses, but the entry was not updated). Counts only ever
+    ///     SHRINK as the consolidation deletes the doomed engine, so a mismatch
+    ///     in either direction is a ledger that must be re-derived. The
+    ///     post-consolidation floor is an empty allowlist.
+    ///
+    /// This makes the ledger discriminate at SITE granularity, not just
+    /// file-set granularity, without the line-number churn that would plague a
+    /// `(file, line)` ledger across the 8 cutover stages.
+    fn assert_exact_file_count_allowlist_match(
         guard_name: &str,
-        actual_files: &[String],
-        allowed: &[&str],
+        actual: &[(String, usize)],
+        allowed: &[(&str, usize)],
     ) {
-        let actual_set: BTreeSet<String> = actual_files.iter().cloned().collect();
-        let allowed_set: BTreeSet<String> = allowed.iter().map(|s| s.to_string()).collect();
+        use std::collections::BTreeMap;
+        let actual_map: BTreeMap<&str, usize> =
+            actual.iter().map(|(f, c)| (f.as_str(), *c)).collect();
+        let allowed_map: BTreeMap<&str, usize> = allowed.iter().copied().collect();
 
-        let unexpected: Vec<&String> = actual_set
-            .iter()
-            .filter(|f| !allowed_set.contains(*f))
-            .collect();
-        let stale: Vec<&String> = allowed_set
-            .iter()
-            .filter(|f| !actual_set.contains(*f))
-            .collect();
+        // New file OR in-file growth: observed file with count strictly above
+        // its allowlisted count (allowlisted count is 0 for a non-listed file).
+        let mut grew: Vec<String> = Vec::new();
+        for (f, c) in &actual_map {
+            let allowed_c = allowed_map.get(f).copied().unwrap_or(0);
+            if *c > allowed_c {
+                grew.push(format!("{f}  (observed {c} > allowlisted {allowed_c})"));
+            }
+        }
+        // Stale / shrunk: allowlisted file whose observed count is below its
+        // allowlisted count (0 if the file no longer matches at all).
+        let mut shrank: Vec<String> = Vec::new();
+        for (f, allowed_c) in &allowed_map {
+            let observed = actual_map.get(f).copied().unwrap_or(0);
+            if observed < *allowed_c {
+                shrank.push(format!(
+                    "{f}  (observed {observed} < allowlisted {allowed_c})"
+                ));
+            }
+        }
 
-        if unexpected.is_empty() && stale.is_empty() {
+        if grew.is_empty() && shrank.is_empty() {
             return;
         }
 
         let mut msg = format!("\n\n=== {guard_name} ===\n");
-        if !unexpected.is_empty() {
+        if !grew.is_empty() {
             msg.push_str(
-                "\nNEW production file references a doomed single-resolution-engine \
-                 symbol. The redundant OXC `resolve_type` engine / prepared-surface \
-                 walker is being deleted — do NOT wire it into a new file. Route \
-                 through the canonical typed-IR dispatch instead:\n",
+                "\nNEW production use of a doomed single-resolution-engine symbol \
+                 (a brand-new file, OR a new site INSIDE an already-allowlisted \
+                 file). The redundant OXC `resolve_type` engine / prepared-surface \
+                 walker is being deleted — do NOT add new uses. Route through the \
+                 canonical typed-IR dispatch (SemanticQueryKey -> \
+                 ProjectSemanticDispatch::execute) instead:\n",
             );
-            for f in &unexpected {
+            for f in &grew {
                 msg.push_str("    ");
                 msg.push_str(f);
                 msg.push('\n');
             }
         }
-        if !stale.is_empty() {
+        if !shrank.is_empty() {
             msg.push_str(
-                "\nAllowlisted file no longer references the symbol — a later stage \
-                 removed the last reference (good!). Remove the stale entry so the \
-                 ledger keeps shrinking:\n",
+                "\nAllowlisted count is now LOWER (a later stage deleted uses — \
+                 good!). Update the entry to the new lower count, or remove it if \
+                 the file no longer references the symbol, so the ledger keeps \
+                 shrinking toward the empty post-consolidation floor:\n",
             );
-            for f in &stale {
+            for f in &shrank {
                 msg.push_str("    ");
                 msg.push_str(f);
                 msg.push('\n');
@@ -11995,19 +12218,46 @@ mod single_resolution_engine_guards {
         out
     }
 
-    /// File-level scan: every production file containing `needle` as a
-    /// substring (post-preprocess). Used for the pervasive symbols.
-    fn scan_files_containing(needle: &str) -> Vec<String> {
+    /// File-level COUNT scan: every production file and its identifier-boundary
+    /// occurrence count for `needle` (post-preprocess), count > 0 only. Used by
+    /// the count-based file ledgers for the pervasive token symbols
+    /// (`ResolvedElements`, `PreparedSurfaceProjection`). Identifier-boundary
+    /// matching means `ResolvedElementsOwned` never contributes to the
+    /// `ResolvedElements` count.
+    fn scan_file_identifier_counts(needle: &str) -> Vec<(String, usize)> {
         let files = collect_production_rs_files();
-        let mut out: Vec<String> = Vec::new();
+        let mut out: Vec<(String, usize)> = Vec::new();
         for (path, rel) in &files {
             let src = match fs::read_to_string(path) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
             let stripped = preprocess(&src);
-            if stripped.contains(needle) {
-                out.push(rel.clone());
+            let c = count_identifier_in_source(&stripped, needle);
+            if c > 0 {
+                out.push((rel.clone(), c));
+            }
+        }
+        out
+    }
+
+    /// File-level COUNT scan for the `resolve_type` module path segment
+    /// (calls + aliased/grouped/bare imports + module declaration). Used by the
+    /// `resolve_type` engine-path ledger so an ALIASED import
+    /// (`use …::resolve_type as rt;`) in a new file is caught even though it
+    /// contains no `resolve_type::` substring.
+    fn scan_file_resolve_type_target_counts() -> Vec<(String, usize)> {
+        let files = collect_production_rs_files();
+        let mut out: Vec<(String, usize)> = Vec::new();
+        for (path, rel) in &files {
+            let src = match fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let stripped = preprocess(&src);
+            let c = count_resolve_type_module_targets(&stripped);
+            if c > 0 {
+                out.push((rel.clone(), c));
             }
         }
         out
@@ -12113,9 +12363,9 @@ mod single_resolution_engine_guards {
     }
 
     // -----------------------------------------------------------------------
-    // Guard 3: `resolve_type::` — the OXC resolver engine module path.
+    // Guard 3: `resolve_type` module path — the OXC resolver engine module.
     //
-    // `resolve_type::` is a path fragment into the eager OXC resolution engine
+    // `resolve_type` is the eager OXC resolution engine module
     // `verter_parser::utils::oxc::vue::script::resolve_type` (referenced as
     // `crate::utils::oxc::vue::resolve_type::` within verter_parser /
     // verter_compiler, and `verter_compiler::utils::oxc::vue::resolve_type::`
@@ -12123,52 +12373,111 @@ mod single_resolution_engine_guards {
     // (codex Stages 2/5/6); the lowering front-end `verter_type_expr_oxc::
     // lower_ts_type` is NOT this engine and references none of these tokens.
     //
-    // File-level allowlist (pervasive within the rail; a NEW file referencing
-    // the engine is the meaningful violation). The 32 current files span the
-    // engine itself, its `ResolvedElements`/`AnalyzedExternalTypeSource`/
-    // `cache_keys::NamedTypeCache` output + cache types, and the query-time
-    // consumers (frontier / eval-program / prepared-decl rails). Each later
-    // stage that deletes a file removes its entry.
+    // Count-based per-file ledger (`scan_file_resolve_type_target_counts` →
+    // `count_resolve_type_module_targets`). A path-segment use of the module is
+    // counted whether it is a direct `resolve_type::` path/call, a GROUPED or
+    // BARE `use` import, an ALIASED import (`use …::resolve_type as rt;` — the
+    // evasion a `resolve_type::`-substring scan missed entirely), or the
+    // `pub mod resolve_type;` declaration. The count traps BOTH a brand-new
+    // consumer file AND a new in-file site inside an already-listed file; each
+    // later stage that deletes uses lowers the count (and removes the entry at
+    // zero), shrinking the ledger toward the empty post-consolidation floor.
+    //
+    // The current sites span the engine itself, its
+    // `ResolvedElements`/`AnalyzedExternalTypeSource`/`cache_keys::NamedTypeCache`
+    // output + cache types, and the query-time consumers (frontier /
+    // eval-program / prepared-decl rails).
     // -----------------------------------------------------------------------
-    const RESOLVE_TYPE_PATH_FILE_ALLOWLIST: &[&str] = &[
-        "crates/verter_compiler/src/script/macros.rs",
-        "crates/verter_compiler/src/tsc/script.rs",
-        "crates/verter_parser/src/utils/oxc/vue/script/bindings.rs",
-        "crates/verter_parser/src/utils/oxc/vue/script/macros.rs",
-        "crates/verter_parser/src/utils/oxc/vue/script/mod.rs",
-        "crates/verter_parser/src/utils/oxc/vue/script/options.rs",
-        "crates/verter_parser/src/utils/oxc/vue/script/setup.rs",
-        "crates/verter_session/src/host_manage/eval_program.rs",
-        "crates/verter_session/src/host_manage/jsdoc_resolve.rs",
-        "crates/verter_session/src/host_manage/prepared_decl.rs",
-        "crates/verter_session/src/host_manage.rs",
-        "crates/verter_session/src/host_resolve/external_macro_collector.rs",
-        "crates/verter_session/src/host_resolve/external_type_resolution.rs",
-        "crates/verter_session/src/host_resolve/frontier_engine.rs",
-        "crates/verter_session/src/host_resolve/frontier_helpers.rs",
-        "crates/verter_session/src/host_test_seed.rs",
-        "crates/verter_session/src/lib.rs",
-        "crates/verter_session/src/project_type_store.rs",
-        "crates/verter_session/src/resolver_core/component_meta/mod.rs",
-        "crates/verter_session/src/resolver_core/component_meta/projected_type_expr.rs",
-        "crates/verter_session/src/resolver_core/component_meta_query_engine/mod.rs",
-        "crates/verter_session/src/resolver_core/external_macro_types.rs",
-        "crates/verter_session/src/resolver_core/external_type_body.rs",
-        "crates/verter_session/src/resolver_core/host_resolver_context.rs",
-        "crates/verter_session/src/resolver_core/resolver_context.rs",
-        "crates/verter_session/src/resolver_core/session_resolver_context.rs",
-        "crates/verter_session/src/resolver_core/shallow_file_state.rs",
-        "crates/verter_session/src/resolver_core/surface_projector.rs",
-        "crates/verter_session/src/resolver_core/symbol_resolver.rs",
-        "crates/verter_session/src/semantic_query.rs",
-        "crates/verter_session/src/semantic_query_memo/mod.rs",
-        "crates/verter_session/src/types.rs",
+    const RESOLVE_TYPE_PATH_FILE_ALLOWLIST: &[(&str, usize)] = &[
+        ("crates/verter_compiler/src/script/macros.rs", 1),
+        ("crates/verter_compiler/src/tsc/script.rs", 1),
+        (
+            "crates/verter_parser/src/utils/oxc/vue/script/bindings.rs",
+            1,
+        ),
+        ("crates/verter_parser/src/utils/oxc/vue/script/macros.rs", 1),
+        ("crates/verter_parser/src/utils/oxc/vue/script/mod.rs", 3),
+        (
+            "crates/verter_parser/src/utils/oxc/vue/script/options.rs",
+            1,
+        ),
+        ("crates/verter_parser/src/utils/oxc/vue/script/setup.rs", 1),
+        ("crates/verter_session/src/host_manage/eval_program.rs", 9),
+        ("crates/verter_session/src/host_manage/jsdoc_resolve.rs", 4),
+        ("crates/verter_session/src/host_manage/prepared_decl.rs", 7),
+        ("crates/verter_session/src/host_manage.rs", 6),
+        (
+            "crates/verter_session/src/host_resolve/external_macro_collector.rs",
+            1,
+        ),
+        (
+            "crates/verter_session/src/host_resolve/external_type_resolution.rs",
+            6,
+        ),
+        (
+            "crates/verter_session/src/host_resolve/frontier_engine.rs",
+            4,
+        ),
+        (
+            "crates/verter_session/src/host_resolve/frontier_helpers.rs",
+            4,
+        ),
+        ("crates/verter_session/src/host_test_seed.rs", 1),
+        ("crates/verter_session/src/lib.rs", 2),
+        ("crates/verter_session/src/project_type_store.rs", 5),
+        (
+            "crates/verter_session/src/resolver_core/component_meta/mod.rs",
+            1,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta/projected_type_expr.rs",
+            1,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta_query_engine/mod.rs",
+            3,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/external_macro_types.rs",
+            1,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/external_type_body.rs",
+            1,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/host_resolver_context.rs",
+            1,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/resolver_context.rs",
+            1,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/session_resolver_context.rs",
+            1,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/shallow_file_state.rs",
+            3,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/surface_projector.rs",
+            6,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/symbol_resolver.rs",
+            1,
+        ),
+        ("crates/verter_session/src/semantic_query.rs", 2),
+        ("crates/verter_session/src/semantic_query_memo/mod.rs", 2),
+        ("crates/verter_session/src/types.rs", 1),
     ];
 
     #[test]
     fn no_new_resolve_type_engine_path_production_file() {
-        let actual = scan_files_containing("resolve_type::");
-        assert_exact_file_allowlist_match(
+        let actual = scan_file_resolve_type_target_counts();
+        assert_exact_file_count_allowlist_match(
             "no_new_resolve_type_engine_path_production_file",
             &actual,
             RESOLVE_TYPE_PATH_FILE_ALLOWLIST,
@@ -12178,55 +12487,111 @@ mod single_resolution_engine_guards {
     // -----------------------------------------------------------------------
     // Guard 4: `ResolvedElements` — the OXC engine's output type.
     //
-    // `ResolvedElements` is the eager OXC resolver's resolved props/emits/
-    // slots/native output struct. It is the second engine's result type and
-    // is deleted with the engine (codex Stages 2/5). `lower_ts_type` produces
-    // `TypeExpr`, never `ResolvedElements`, so the front-end is not flagged.
+    // `ResolvedElements` (defined at
+    // `verter_parser/src/utils/oxc/vue/script/resolve_type/mod.rs`) is the
+    // eager OXC resolver's resolved props/emits/slots/native output struct. It
+    // is the second engine's result type and is deleted with the engine (codex
+    // Stages 2/5). `lower_ts_type` produces `TypeExpr`, never `ResolvedElements`,
+    // so the front-end is not flagged.
     //
-    // File-level allowlist (32 files: the engine, its consumers, and the
-    // caches that store `Arc<ResolvedElements>`). Identifier-boundary matching
-    // is used by the scanner so a hypothetical `ResolvedElementsBuilder` would
-    // not satisfy a stale entry, but `ResolvedElements` is already unique.
+    // IDENTIFIER-BOUNDARY matching (`scan_file_identifier_counts` →
+    // `count_identifier_in_source`). This is load-bearing: a plain `.contains`
+    // substring scan ALSO matches `ResolvedElementsOwned`, a DISTINCT
+    // owned-artifact arena struct (defined at
+    // `owned_artifacts/type_resolution_context.rs`, a companion-type entry that
+    // survives the consolidation and is NOT the doomed eager-OXC output). Under
+    // the previous substring scan, `owned_artifacts/mod.rs` and
+    // `owned_artifacts/type_resolution_context.rs` were allowlisted purely
+    // because they contain `ResolvedElementsOwned` — they contain ZERO exact
+    // `ResolvedElements` tokens, so they are correctly DROPPED from this ledger.
+    // `ResolvedElementsOwned` is benign and is never counted here; should it
+    // ever become part of a doomed rail it would get its OWN token + ledger.
+    //
+    // Count-based per-file ledger: the count traps a new in-file site as well
+    // as a new file, and shrinks as later stages delete uses.
     // -----------------------------------------------------------------------
-    const RESOLVED_ELEMENTS_FILE_ALLOWLIST: &[&str] = &[
-        "crates/verter_compiler/src/compile/mod.rs",
-        "crates/verter_compiler/src/compile/types.rs",
-        "crates/verter_compiler/src/script/macros.rs",
-        "crates/verter_compiler/src/script/mod.rs",
-        "crates/verter_compiler/src/tsc/script.rs",
-        "crates/verter_parser/src/utils/oxc/vue/script/macros.rs",
-        "crates/verter_parser/src/utils/oxc/vue/script/mod.rs",
-        "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/decl.rs",
-        "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/elements.rs",
-        "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/external.rs",
-        "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/infer.rs",
-        "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/mod.rs",
-        "crates/verter_parser/src/utils/oxc/vue/script/setup.rs",
-        "crates/verter_session/src/host_manage/eval_program.rs",
-        "crates/verter_session/src/host_manage/jsdoc_resolve.rs",
-        "crates/verter_session/src/host_manage/prepared_decl.rs",
-        "crates/verter_session/src/host_manage.rs",
-        "crates/verter_session/src/host_resolve/external_macro_collector.rs",
-        "crates/verter_session/src/host_resolve/external_type_resolution.rs",
-        "crates/verter_session/src/host_resolve/frontier_engine.rs",
-        "crates/verter_session/src/host_resolve/frontier_helpers.rs",
-        "crates/verter_session/src/owned_artifacts/mod.rs",
-        "crates/verter_session/src/owned_artifacts/type_resolution_context.rs",
-        "crates/verter_session/src/resolver_core/component_meta/mod.rs",
-        "crates/verter_session/src/resolver_core/component_meta/projected_type_expr.rs",
-        "crates/verter_session/src/resolver_core/external_macro_types.rs",
-        "crates/verter_session/src/resolver_core/external_type_body.rs",
-        "crates/verter_session/src/resolver_core/surface_projector.rs",
-        "crates/verter_session/src/resolver_core/symbol_resolver.rs",
-        "crates/verter_session/src/semantic_query.rs",
-        "crates/verter_session/src/semantic_query_memo/mod.rs",
-        "crates/verter_session/src/types.rs",
+    const RESOLVED_ELEMENTS_FILE_ALLOWLIST: &[(&str, usize)] = &[
+        ("crates/verter_compiler/src/compile/mod.rs", 2),
+        ("crates/verter_compiler/src/compile/types.rs", 1),
+        ("crates/verter_compiler/src/script/macros.rs", 2),
+        ("crates/verter_compiler/src/script/mod.rs", 1),
+        ("crates/verter_compiler/src/tsc/script.rs", 5),
+        ("crates/verter_parser/src/utils/oxc/vue/script/macros.rs", 2),
+        ("crates/verter_parser/src/utils/oxc/vue/script/mod.rs", 2),
+        (
+            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/decl.rs",
+            28,
+        ),
+        (
+            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/elements.rs",
+            3,
+        ),
+        (
+            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/external.rs",
+            25,
+        ),
+        (
+            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/infer.rs",
+            5,
+        ),
+        (
+            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/mod.rs",
+            23,
+        ),
+        ("crates/verter_parser/src/utils/oxc/vue/script/setup.rs", 1),
+        ("crates/verter_session/src/host_manage/eval_program.rs", 1),
+        ("crates/verter_session/src/host_manage/jsdoc_resolve.rs", 1),
+        ("crates/verter_session/src/host_manage/prepared_decl.rs", 4),
+        ("crates/verter_session/src/host_manage.rs", 2),
+        (
+            "crates/verter_session/src/host_resolve/external_macro_collector.rs",
+            1,
+        ),
+        (
+            "crates/verter_session/src/host_resolve/external_type_resolution.rs",
+            6,
+        ),
+        (
+            "crates/verter_session/src/host_resolve/frontier_engine.rs",
+            3,
+        ),
+        (
+            "crates/verter_session/src/host_resolve/frontier_helpers.rs",
+            1,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta/mod.rs",
+            4,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta/projected_type_expr.rs",
+            2,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/external_macro_types.rs",
+            3,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/external_type_body.rs",
+            10,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/surface_projector.rs",
+            4,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/symbol_resolver.rs",
+            3,
+        ),
+        ("crates/verter_session/src/semantic_query.rs", 1),
+        ("crates/verter_session/src/semantic_query_memo/mod.rs", 2),
+        ("crates/verter_session/src/types.rs", 1),
     ];
 
     #[test]
     fn no_new_resolved_elements_production_file() {
-        let actual = scan_files_containing("ResolvedElements");
-        assert_exact_file_allowlist_match(
+        let actual = scan_file_identifier_counts("ResolvedElements");
+        assert_exact_file_count_allowlist_match(
             "no_new_resolved_elements_production_file",
             &actual,
             RESOLVED_ELEMENTS_FILE_ALLOWLIST,
@@ -12242,21 +12607,36 @@ mod single_resolution_engine_guards {
     // Stage 4 deletes the walker (and its `prepared_surface_db` /
     // `prepared_member_db` caches); no NEW file may wire it in.
     //
-    // File-level allowlist (4 files — the walker's owning module). The
+    // Count-based per-file ledger (4 files — the walker's owning module),
+    // IDENTIFIER-BOUNDARY matched: although the enum name is unique today,
+    // boundary matching keeps a hypothetical `PreparedSurfaceProjectionV2` from
+    // satisfying a stale entry, and the count traps a new in-file site. The
     // comment-only mention in `component_meta_caches.rs` is stripped by
     // `preprocess`, so it is correctly absent from this ledger.
     // -----------------------------------------------------------------------
-    const PREPARED_SURFACE_PROJECTION_FILE_ALLOWLIST: &[&str] = &[
-        "crates/verter_session/src/resolver_core/component_meta_query_engine/mod.rs",
-        "crates/verter_session/src/resolver_core/component_meta_query_engine/prepared_surface.rs",
-        "crates/verter_session/src/resolver_core/component_meta_query_engine/routed_expr.rs",
-        "crates/verter_session/src/resolver_core/component_meta_query_engine/surface.rs",
+    const PREPARED_SURFACE_PROJECTION_FILE_ALLOWLIST: &[(&str, usize)] = &[
+        (
+            "crates/verter_session/src/resolver_core/component_meta_query_engine/mod.rs",
+            2,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta_query_engine/prepared_surface.rs",
+            41,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta_query_engine/routed_expr.rs",
+            2,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta_query_engine/surface.rs",
+            25,
+        ),
     ];
 
     #[test]
     fn no_new_prepared_surface_projection_production_file() {
-        let actual = scan_files_containing("PreparedSurfaceProjection");
-        assert_exact_file_allowlist_match(
+        let actual = scan_file_identifier_counts("PreparedSurfaceProjection");
+        assert_exact_file_count_allowlist_match(
             "no_new_prepared_surface_projection_production_file",
             &actual,
             PREPARED_SURFACE_PROJECTION_FILE_ALLOWLIST,
@@ -12271,9 +12651,16 @@ mod single_resolution_engine_guards {
     // representing a NEW non-allowlisted site and asserts the comparison
     // reports a violation; it then feeds the real allowlist against itself and
     // asserts no violation. Because the comparison primitives
-    // (`assert_exact_allowlist_match` / `assert_exact_file_allowlist_match`)
+    // (`assert_exact_allowlist_match` / `assert_exact_file_count_allowlist_match`)
     // PANIC on a mismatch, the planted-site cases assert via
     // `std::panic::catch_unwind` that the panic fires.
+    //
+    // The count-based ledger discriminators additionally plant a NEW occurrence
+    // INSIDE an already-allowlisted file (count + 1) and assert the guard fires
+    // — proving SITE-level discrimination, not merely new-file discrimination —
+    // and exercise the scanners against the live tree to prove identifier-
+    // boundary matching (`ResolvedElements` vs `ResolvedElementsOwned`) and
+    // aliased-import detection (`use …::resolve_type as rt`).
     // =======================================================================
 
     /// Helper: returns `true` iff `f` panicked (i.e. the guard reported a
@@ -12334,49 +12721,222 @@ mod single_resolution_engine_guards {
     }
 
     #[test]
-    fn file_level_guard_discriminates_planted_file() {
-        // A planted NEW file referencing the symbol MUST be flagged.
-        let mut planted: Vec<String> = PREPARED_SURFACE_PROJECTION_FILE_ALLOWLIST
+    fn file_level_count_guard_discriminates_planted_file() {
+        let real: Vec<(String, usize)> = PREPARED_SURFACE_PROJECTION_FILE_ALLOWLIST
             .iter()
-            .map(|s| s.to_string())
+            .map(|(f, c)| (f.to_string(), *c))
             .collect();
-        planted.push("crates/verter_session/src/brand_new_walker_consumer.rs".to_string());
-        assert!(
-            guard_reports_violation(|| assert_exact_file_allowlist_match(
-                "discriminator",
-                &planted,
-                PREPARED_SURFACE_PROJECTION_FILE_ALLOWLIST,
-            )),
-            "file-level guard must FAIL when a NEW non-allowlisted file \
-             references `PreparedSurfaceProjection` — a guard that cannot fail \
-             is a stub"
-        );
 
         // The real allowlist fed against itself MUST NOT be flagged.
-        let real: Vec<String> = PREPARED_SURFACE_PROJECTION_FILE_ALLOWLIST
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
         assert!(
-            !guard_reports_violation(|| assert_exact_file_allowlist_match(
+            !guard_reports_violation(|| assert_exact_file_count_allowlist_match(
                 "discriminator",
                 &real,
                 PREPARED_SURFACE_PROJECTION_FILE_ALLOWLIST,
             )),
-            "file-level guard must PASS when the actual file set equals the allowlist"
+            "count guard must PASS when observed counts equal the allowlist"
         );
 
-        // A planted REMOVED file (allowlisted but absent from actual) MUST be
-        // flagged — the stale-entry / shrinking-ledger half.
-        let one_missing: Vec<String> = real.iter().skip(1).cloned().collect();
+        // (a) NEW FILE: a positive count for a non-allowlisted file MUST fire.
+        let mut new_file = real.clone();
+        new_file.push((
+            "crates/verter_session/src/brand_new_walker_consumer.rs".to_string(),
+            1,
+        ));
         assert!(
-            guard_reports_violation(|| assert_exact_file_allowlist_match(
+            guard_reports_violation(|| assert_exact_file_count_allowlist_match(
                 "discriminator",
-                &one_missing,
+                &new_file,
                 PREPARED_SURFACE_PROJECTION_FILE_ALLOWLIST,
             )),
-            "file-level guard must FAIL on a stale allowlisted file (no longer \
-             references the symbol) — this is what forces the ledger to shrink"
+            "count guard must FAIL when a NEW non-allowlisted file references \
+             `PreparedSurfaceProjection` — a guard that cannot fail is a stub"
+        );
+    }
+
+    #[test]
+    fn file_level_count_guard_discriminates_in_file_growth() {
+        // MANDATORY site-level discriminator: bump the count of an
+        // already-allowlisted file by ONE (a new use added INSIDE a file that
+        // PERSISTS past the stage that owns it). A file-NAME-set guard would
+        // stay green here; the count ledger MUST fire. This is the precise
+        // cutover-growth hole the review flagged.
+        let mut grew: Vec<(String, usize)> = RESOLVE_TYPE_PATH_FILE_ALLOWLIST
+            .iter()
+            .map(|(f, c)| (f.to_string(), *c))
+            .collect();
+        // `lib.rs` / `project_type_store.rs` / `semantic_query.rs` all persist
+        // past Stage 6 — pick one and add a synthetic in-file occurrence.
+        let target = "crates/verter_session/src/project_type_store.rs";
+        let slot = grew
+            .iter_mut()
+            .find(|(f, _)| f == target)
+            .expect("project_type_store.rs is allowlisted");
+        let bumped = slot.1 + 1;
+        slot.1 = bumped;
+        assert!(
+            guard_reports_violation(|| assert_exact_file_count_allowlist_match(
+                "discriminator",
+                &grew,
+                RESOLVE_TYPE_PATH_FILE_ALLOWLIST,
+            )),
+            "count guard must FAIL when an already-allowlisted file's observed \
+             count EXCEEDS its allowlisted count (a NEW in-file site) — \
+             {target} bumped to {bumped}; this is the in-file-growth trap a \
+             file-name-set guard misses"
+        );
+    }
+
+    #[test]
+    fn file_level_count_guard_discriminates_shrunk_and_removed() {
+        let real: Vec<(String, usize)> = RESOLVED_ELEMENTS_FILE_ALLOWLIST
+            .iter()
+            .map(|(f, c)| (f.to_string(), *c))
+            .collect();
+
+        // (a) SHRUNK: an allowlisted file whose observed count is now LOWER
+        // (a later stage deleted some uses) MUST fire so the entry is updated.
+        let mut shrunk = real.clone();
+        let target = "crates/verter_session/src/resolver_core/external_type_body.rs";
+        let slot = shrunk
+            .iter_mut()
+            .find(|(f, _)| f == target)
+            .expect("external_type_body.rs is allowlisted");
+        assert!(slot.1 > 1, "precondition: {target} count > 1");
+        slot.1 -= 1;
+        assert!(
+            guard_reports_violation(|| assert_exact_file_count_allowlist_match(
+                "discriminator",
+                &shrunk,
+                RESOLVED_ELEMENTS_FILE_ALLOWLIST,
+            )),
+            "count guard must FAIL when an allowlisted file's observed count is \
+             LOWER than allowlisted — forces the ledger to shrink as uses are \
+             deleted"
+        );
+
+        // (b) REMOVED: an allowlisted file gone entirely from the observed set
+        // (count 0) MUST fire — the stale-entry half.
+        let one_missing: Vec<(String, usize)> = real.iter().skip(1).cloned().collect();
+        assert!(
+            guard_reports_violation(|| assert_exact_file_count_allowlist_match(
+                "discriminator",
+                &one_missing,
+                RESOLVED_ELEMENTS_FILE_ALLOWLIST,
+            )),
+            "count guard must FAIL on a stale allowlisted file that no longer \
+             matches at all — this is what forces the ledger to shrink"
+        );
+    }
+
+    #[test]
+    fn resolved_elements_ledger_excludes_resolved_elements_owned() {
+        // PROOF for the [P1] substring-bug fix: identifier-boundary matching
+        // must NOT count `ResolvedElementsOwned`. The two owned-artifact files
+        // contain ONLY `ResolvedElementsOwned` (zero exact `ResolvedElements`),
+        // so they must be ABSENT from the live `ResolvedElements` count scan —
+        // and the `ResolvedElementsOwned` count scan must find them.
+        let re_counts = scan_file_identifier_counts("ResolvedElements");
+        let owned_counts = scan_file_identifier_counts("ResolvedElementsOwned");
+
+        for owned_file in [
+            "crates/verter_session/src/owned_artifacts/mod.rs",
+            "crates/verter_session/src/owned_artifacts/type_resolution_context.rs",
+        ] {
+            assert!(
+                owned_counts.iter().any(|(f, c)| f == owned_file && *c > 0),
+                "{owned_file} must contain `ResolvedElementsOwned` (the owned \
+                 arena type) — precondition for the discrimination proof"
+            );
+            assert!(
+                !re_counts.iter().any(|(f, _)| f == owned_file),
+                "{owned_file} must NOT appear in the exact `ResolvedElements` \
+                 count scan — identifier-boundary matching must reject the \
+                 `ResolvedElementsOwned` embedding (the .contains substring bug)"
+            );
+            assert!(
+                !RESOLVED_ELEMENTS_FILE_ALLOWLIST
+                    .iter()
+                    .any(|(f, _)| *f == owned_file),
+                "{owned_file} must be DROPPED from the re-derived \
+                 `ResolvedElements` allowlist — it only embeds \
+                 `ResolvedElementsOwned`"
+            );
+        }
+
+        // Unit-level: the matcher itself must reject the embedding.
+        assert_eq!(
+            count_identifier_in_source("let x: ResolvedElementsOwned = y;", "ResolvedElements"),
+            0,
+            "`ResolvedElements` identifier match must not fire on \
+             `ResolvedElementsOwned`"
+        );
+        assert_eq!(
+            count_identifier_in_source("fn f(e: ResolvedElements) {}", "ResolvedElements"),
+            1,
+            "`ResolvedElements` identifier match must fire on the exact token"
+        );
+    }
+
+    #[test]
+    fn resolve_type_guard_detects_aliased_module_import() {
+        // PROOF for the [P1] aliased-import fix. A new production file doing
+        // `use …::resolve_type as rt;` contains NO `resolve_type::` substring,
+        // so the old substring scan stayed green. The module-target counter
+        // MUST count it.
+        assert_eq!(
+            count_resolve_type_module_targets(
+                "use verter_compiler::utils::oxc::vue::resolve_type as rt;\nfn f() { rt::go(); }"
+            ),
+            1,
+            "aliased import `use …::resolve_type as rt;` must be counted (the \
+             evasion the substring guard missed). The `rt::go()` call is NOT a \
+             `resolve_type` reference, so the count is exactly 1"
+        );
+        // A grouped/bare import is also a target.
+        assert_eq!(
+            count_resolve_type_module_targets("use crate::a::resolve_type;"),
+            1,
+            "bare `use …::resolve_type;` import must be counted"
+        );
+        assert_eq!(
+            count_resolve_type_module_targets("use crate::a::{resolve_type, other};"),
+            1,
+            "grouped `use …::{{resolve_type, …}};` import must be counted"
+        );
+        // A direct path/call is a target.
+        assert_eq!(
+            count_resolve_type_module_targets("let _ = resolve_type::ResolvedElements::default();"),
+            1,
+            "direct `resolve_type::` path must be counted"
+        );
+        // The longer identifier `resolve_type_dependency_canonical` is NOT a
+        // module target (identifier-boundary rejects it).
+        assert_eq!(
+            count_resolve_type_module_targets("self.resolve_type_dependency_canonical(id);"),
+            0,
+            "the distinct identifier `resolve_type_dependency_canonical` must \
+             NOT be counted as a `resolve_type` module target"
+        );
+
+        // End-to-end: planting an aliased import as a NEW file's count fires
+        // the count guard.
+        let mut planted: Vec<(String, usize)> = RESOLVE_TYPE_PATH_FILE_ALLOWLIST
+            .iter()
+            .map(|(f, c)| (f.to_string(), *c))
+            .collect();
+        planted.push((
+            "crates/verter_session/src/sneaky_aliased_consumer.rs".to_string(),
+            1,
+        ));
+        assert!(
+            guard_reports_violation(|| assert_exact_file_count_allowlist_match(
+                "discriminator",
+                &planted,
+                RESOLVE_TYPE_PATH_FILE_ALLOWLIST,
+            )),
+            "count guard must FAIL when a NEW file imports the `resolve_type` \
+             module (even aliased) — closing the aliased-import evasion"
         );
     }
 
@@ -12472,6 +13032,287 @@ mod tests {\n\
         assert!(
             !line_contains_identifier("let _ = from_eager_meta_v2();", "from_eager_meta"),
             "identifier-boundary matcher must not match `from_eager_meta_v2`"
+        );
+    }
+
+    #[test]
+    fn read_surface_members_guard_discriminates_planted_definition() {
+        // [P2] Direct discrimination proof for the `read_surface_members`
+        // DEFINITION guard, using its ACTUAL allowlist (previously only the
+        // shared `from_eager_meta` discriminator exercised the line-precise
+        // comparator; this pins the `read_surface_members` ledger itself).
+        let real: Vec<(String, u32, String)> = READ_SURFACE_MEMBERS_DEF_ALLOWLIST
+            .iter()
+            .map(|(p, ln, pat)| (p.to_string(), *ln, pat.to_string()))
+            .collect();
+
+        // Real allowlist against itself MUST pass.
+        assert!(
+            !guard_reports_violation(|| assert_exact_allowlist_match(
+                "discriminator",
+                &real,
+                READ_SURFACE_MEMBERS_DEF_ALLOWLIST,
+            )),
+            "read_surface_members guard must PASS when actual equals allowlist"
+        );
+
+        // A planted THIRD definition at a non-allowlisted path MUST fire — this
+        // is the "new duplicate reader" trap Stage 4 protects.
+        let mut planted = real.clone();
+        planted.push((
+            "crates/verter_session/src/meta_resolve/some_new_reader.rs".to_string(),
+            77,
+            "fn read_surface_members(".to_string(),
+        ));
+        assert!(
+            guard_reports_violation(|| assert_exact_allowlist_match(
+                "discriminator",
+                &planted,
+                READ_SURFACE_MEMBERS_DEF_ALLOWLIST,
+            )),
+            "read_surface_members guard must FAIL on a planted THIRD definition \
+             — a guard that cannot fail is a stub"
+        );
+
+        // A stale entry (one definition removed by Stage 4) MUST fire so the
+        // ledger shrinks toward one shared reader.
+        let one_missing: Vec<(String, u32, String)> = real.iter().skip(1).cloned().collect();
+        assert!(
+            guard_reports_violation(|| assert_exact_allowlist_match(
+                "discriminator",
+                &one_missing,
+                READ_SURFACE_MEMBERS_DEF_ALLOWLIST,
+            )),
+            "read_surface_members guard must FAIL on a stale allowlist entry — \
+             this forces the duplicate-reader ledger to shrink"
+        );
+    }
+
+    #[test]
+    fn strip_inline_test_modules_is_string_literal_aware() {
+        // [P3] A `{` / `}` inside a string, char, or raw-string literal within
+        // a `#[cfg(test)] mod` body must NOT desync the brace-depth counter.
+        // If it did, the strip would end early and a forbidden token AFTER the
+        // literal-bearing line — but still inside the test module — would leak
+        // into the production scan. We plant `from_eager_meta` after such a
+        // line and assert the WHOLE test module body is erased.
+
+        // Unbalanced `{` inside a normal string literal.
+        let src_str = "\
+pub fn live() {}\n\
+#[cfg(test)]\n\
+mod tests {\n\
+    let s = \"unbalanced { brace in string\";\n\
+    let _ = from_eager_meta();\n\
+}\n\
+pub fn after() {}\n";
+        let processed = preprocess(src_str);
+        assert!(
+            !line_contains_identifier(&processed, "from_eager_meta"),
+            "string-literal `{{` must not desync brace counting — the \
+             `from_eager_meta` inside the test module must be erased"
+        );
+        assert!(
+            line_contains_identifier(&processed, "after"),
+            "code AFTER the test module must be preserved (the strip must end \
+             at the real closing brace, not early)"
+        );
+
+        // Unbalanced `}` inside a char literal.
+        let src_char = "\
+#[cfg(test)]\n\
+mod tests {\n\
+    let c = '}';\n\
+    let _ = from_eager_meta();\n\
+}\n\
+pub fn after() {}\n";
+        let processed = preprocess(src_char);
+        assert!(
+            !line_contains_identifier(&processed, "from_eager_meta"),
+            "char-literal `}}` must not desync brace counting"
+        );
+        assert!(
+            line_contains_identifier(&processed, "after"),
+            "code after the char-literal test module must be preserved"
+        );
+
+        // Unbalanced braces inside a raw-string literal with hashes.
+        let src_raw = "\
+#[cfg(test)]\n\
+mod tests {\n\
+    let r = r#\"a } b { c\"#;\n\
+    let _ = from_eager_meta();\n\
+}\n\
+pub fn after() {}\n";
+        let processed = preprocess(src_raw);
+        assert!(
+            !line_contains_identifier(&processed, "from_eager_meta"),
+            "raw-string `}}`/`{{` must not desync brace counting"
+        );
+        assert!(
+            line_contains_identifier(&processed, "after"),
+            "code after the raw-string test module must be preserved"
+        );
+
+        // Control: WITHOUT the fix a lone `}` in a string would have closed the
+        // module early; assert a lifetime (`'a`) is NOT mistaken for a char
+        // literal (it has no closing quote) so real generic code is untouched.
+        let src_lifetime = "\
+#[cfg(test)]\n\
+mod tests {\n\
+    fn g<'a>(x: &'a str) { let _ = from_eager_meta(); }\n\
+}\n\
+pub fn after() {}\n";
+        let processed = preprocess(src_lifetime);
+        assert!(
+            !line_contains_identifier(&processed, "from_eager_meta"),
+            "lifetime `'a` must not be mistaken for a char literal; the test \
+             module body must still be fully erased"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // [P2] `test_only_module_is_only_consumed_by_test_files`.
+    //
+    // `pub mod test_only` (crate root, `lib.rs`) is `#[doc(hidden)]` but
+    // PRODUCTION-COMPILED — it exists purely so integration tests in `tests/`
+    // can probe internal invariants without promoting `pub(crate)` types to the
+    // public API. Its contract (asserted in the module's own doc comment) is:
+    // production code MUST NOT consume it. This guard enforces that contract,
+    // and the `single_resolution_engine_guards` scanners CITE it as the reason
+    // they exclude `test_only_*` probe bodies from their production ledgers — so
+    // it must actually exist.
+    //
+    // Enforcement: scan every production `.rs` under `crates/*/src/**`
+    // (post-`preprocess`, so doc comments and `#[cfg(test)]` bodies are erased;
+    // `test_only_*` files are the probe BODIES themselves and are skipped). Flag
+    // any identifier-boundary `test_only` used as a MODULE PATH SEGMENT
+    // (`test_only::…`, `use …::test_only;`, `use …::test_only as …`, grouped
+    // imports) — i.e. a CONSUMPTION. The module DECLARATION `[pub] mod
+    // test_only` (preceded by the `mod` keyword) is NOT a consumption and is
+    // allowed. Today the only surviving production occurrence is the declaration
+    // in `lib.rs`, so this guard passes; a production `crate::test_only::…`
+    // reference would fail it.
+    // -----------------------------------------------------------------------
+
+    /// True iff `src` (already preprocessed) CONSUMES the `test_only` module:
+    /// an identifier-boundary `test_only` path segment that is not the module
+    /// declaration. Returns the count of such consumptions.
+    fn count_test_only_module_consumptions(src: &str) -> usize {
+        let bytes = src.as_bytes();
+        let nb = b"test_only";
+        let n = nb.len();
+        let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let mut count = 0usize;
+        let mut i = 0usize;
+        while i + n <= bytes.len() {
+            if &bytes[i..i + n] == nb {
+                let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+                let after_idx = i + n;
+                let after_ok = after_idx == bytes.len() || !is_ident_char(bytes[after_idx]);
+                if before_ok && after_ok {
+                    // Is this the module DECLARATION? Look back for the `mod`
+                    // keyword immediately preceding (allowing whitespace).
+                    let mut b = i;
+                    while b > 0
+                        && (bytes[b - 1] == b' ' || bytes[b - 1] == b'\n' || bytes[b - 1] == b'\t')
+                    {
+                        b -= 1;
+                    }
+                    let is_decl = b >= 3 && &bytes[b - 3..b] == b"mod";
+                    // Is it used as a path segment / import target?
+                    let mut k = after_idx;
+                    while k < bytes.len()
+                        && (bytes[k] == b' ' || bytes[k] == b'\n' || bytes[k] == b'\t')
+                    {
+                        k += 1;
+                    }
+                    let rest = &src[k..];
+                    let is_segment = rest.starts_with("::")
+                        || rest.starts_with(';')
+                        || rest.starts_with(',')
+                        || rest.starts_with('}')
+                        || rest.starts_with("as ")
+                        || rest.starts_with("as\n");
+                    if is_segment && !is_decl {
+                        count += 1;
+                        i = after_idx;
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+        count
+    }
+
+    #[test]
+    fn test_only_module_is_only_consumed_by_test_files() {
+        let files = collect_production_rs_files();
+        let mut offenders: Vec<String> = Vec::new();
+        for (path, rel) in &files {
+            let src = match fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let stripped = preprocess(&src);
+            let c = count_test_only_module_consumptions(&stripped);
+            if c > 0 {
+                offenders.push(format!("{rel}  ({c} consumption(s))"));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "\n\nProduction code consumes the `test_only` module. It is a \
+             `#[doc(hidden)]` test-only probe surface (crate root `lib.rs`); \
+             production code MUST NOT import or path into it — route through \
+             the real public API instead. Offending production files:\n    {}\n",
+            offenders.join("\n    ")
+        );
+    }
+
+    #[test]
+    fn test_only_consumption_detector_discriminates() {
+        // The DECLARATION is allowed (this is exactly `lib.rs:225`).
+        assert_eq!(
+            count_test_only_module_consumptions("#[doc(hidden)]\npub mod test_only {\n}\n"),
+            0,
+            "the `pub mod test_only {{ … }}` declaration must NOT count as a \
+             consumption"
+        );
+        assert_eq!(
+            count_test_only_module_consumptions("mod test_only;\n"),
+            0,
+            "a `mod test_only;` declaration must NOT count as a consumption"
+        );
+        // CONSUMPTIONS must all be detected.
+        assert_eq!(
+            count_test_only_module_consumptions("let _ = crate::test_only::probe();"),
+            1,
+            "a `crate::test_only::…` path MUST count as a consumption"
+        );
+        assert_eq!(
+            count_test_only_module_consumptions("use crate::test_only;"),
+            1,
+            "a bare `use crate::test_only;` import MUST count as a consumption"
+        );
+        assert_eq!(
+            count_test_only_module_consumptions("use crate::test_only as probes;"),
+            1,
+            "an aliased `use crate::test_only as …;` import MUST count"
+        );
+        assert_eq!(
+            count_test_only_module_consumptions("use crate::{test_only, other};"),
+            1,
+            "a grouped `use crate::{{test_only, …}}` import MUST count"
+        );
+        // The longer identifier `test_only_imported_macro_surface` is a
+        // different identifier and must NOT count.
+        assert_eq!(
+            count_test_only_module_consumptions("mod test_only_imported_macro_surface;"),
+            0,
+            "the distinct identifier `test_only_imported_macro_surface` must \
+             NOT count as a `test_only` consumption"
         );
     }
 }
