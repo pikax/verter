@@ -11552,18 +11552,33 @@ mod single_resolution_engine_guards {
     use std::fs;
     use std::path::{Path, PathBuf};
 
+    /// The EXPLICIT set of `test_only_*` probe files exempt from the
+    /// production-site ledgers. Restricted by exact path (NOT a `test_only_`
+    /// name prefix) so a FUTURE production module that happens to be named
+    /// `test_only_foo.rs` is NOT silently exempt — it would be scanned like any
+    /// production file and would have to be allowlisted (or, correctly,
+    /// rejected) if it referenced a doomed engine symbol. See the [P2] re-review
+    /// finding: a blanket `test_only_*` prefix exemption is a hole because the
+    /// `test_only_module_is_only_consumed_by_test_files` guard only proves the
+    /// CURRENT `pub mod test_only` module is unconsumed — it says nothing about
+    /// an arbitrary future `test_only_*`-named file.
+    ///
+    /// `test_only_imported_macro_surface.rs` is the sole entry: a
+    /// `#[doc(hidden)] pub mod test_only` probe body (attached via `#[path]`),
+    /// compiled in all builds but a test-only probe by contract (the
+    /// `test_only_module_is_only_consumed_by_test_files` guard pins that it is
+    /// consumed only by test files). It is NOT a production rail, so it is
+    /// exempt from these production-site ledgers.
+    const KNOWN_PROBE_FILES: &[&str] =
+        &["crates/verter_session/src/test_only_imported_macro_surface.rs"];
+
     /// Walk `<repo>/crates/<crate>/src/**` and yield every production
     /// `.rs` file as `(absolute_path, repo_relative_path)`. Excludes
     /// test-only sources exactly as the sibling guards do — `<name>_tests.rs`
     /// and `tests.rs` siblings, and anything under a `tests/` path segment —
-    /// PLUS the `test_only_*` prefix.
-    ///
-    /// The `test_only_` exclusion covers `test_only_imported_macro_surface.rs`:
-    /// it is a `#[doc(hidden)] pub mod test_only` probe body (attached via
-    /// `#[path]`), compiled in all builds but a test-only probe by contract
-    /// (the `test_only_module_is_only_consumed_by_test_files` guard pins that
-    /// it is consumed only by test files). It is NOT a production rail, so it
-    /// is excluded from these production-site ledgers.
+    /// PLUS the explicitly-enumerated `KNOWN_PROBE_FILES` probe bodies (an
+    /// allowlist by exact path, NOT a `test_only_` name prefix; see
+    /// `KNOWN_PROBE_FILES` and `is_test_or_probe_file`).
     fn collect_production_rs_files() -> Vec<(PathBuf, String)> {
         let root = super::workspace_root();
         let crates_dir = root.join("crates");
@@ -11619,11 +11634,23 @@ mod single_resolution_engine_guards {
     }
 
     /// True for files whose contents are test-only: `*_tests.rs` / `tests.rs`
-    /// siblings, anything under a `tests/` segment, or a `test_only_*` probe
-    /// body. See `collect_production_rs_files` for the `test_only_` rationale.
+    /// siblings, anything under a `tests/` segment, or one of the EXPLICITLY
+    /// enumerated `KNOWN_PROBE_FILES` probe bodies (matched by exact
+    /// repo-relative path).
+    ///
+    /// A `test_only_*`-NAMED file that is NOT in `KNOWN_PROBE_FILES` is NOT
+    /// exempt — it is treated as a production file and scanned by the ledgers.
+    /// This closes the [P2] hole where a blanket `test_only_` prefix exemption
+    /// let a future production module named `test_only_foo.rs` add doomed-engine
+    /// uses and be omitted from all ledgers, even though the
+    /// `test_only_module_is_only_consumed_by_test_files` guard never proved that
+    /// arbitrary file to be a probe.
     fn is_test_or_probe_file(rel: &str) -> bool {
         let name = rel.rsplit('/').next().unwrap_or("");
-        if name.ends_with("_tests.rs") || name == "tests.rs" || name.starts_with("test_only_") {
+        if name.ends_with("_tests.rs") || name == "tests.rs" {
+            return true;
+        }
+        if KNOWN_PROBE_FILES.contains(&rel) {
             return true;
         }
         rel.split('/').any(|seg| seg == "tests")
@@ -12021,6 +12048,418 @@ mod single_resolution_engine_guards {
         count
     }
 
+    /// Collect the set of symbols a file imports FROM the doomed `resolve_type`
+    /// engine module via `use` / `pub use` declarations, so their bare call /
+    /// use sites can be counted as ACTUAL engine usage (not just the
+    /// `resolve_type::` path token of the import line).
+    ///
+    /// This closes the in-file import-then-call hole the path-token-only ledger
+    /// missed: a file that already imports `analyze_external_type_program` can
+    /// add MORE bare `analyze_external_type_program(…)` calls without changing
+    /// its `resolve_type` token count. By deriving the imported-symbol set from
+    /// each file's OWN `use` statements (rather than a hand-maintained global
+    /// API list) the counter is structural and self-updating: it reflects
+    /// exactly what each file imports from the engine.
+    ///
+    /// Handles every `use` shape that targets the module:
+    ///   * `use …::resolve_type::SYMBOL;`                  → {SYMBOL}
+    ///   * `use …::resolve_type::SYMBOL as ALIAS;`         → {ALIAS}
+    ///   * `use …::resolve_type::{A, B, C as D};`          → {A, B, D}
+    ///     (grouped, possibly spanning multiple lines)
+    ///   * `use …::resolve_type as M;`                     → {M}  (module alias —
+    ///     subsequent `M::foo()` calls are then counted as engine use)
+    ///   * `use …::resolve_type;` / `use …::{resolve_type};`  → {}  (bare module
+    ///     import — adds no callable symbol; later `resolve_type::foo` uses are
+    ///     already path tokens)
+    ///
+    /// **Scope boundary (intentional, do NOT chase further):** this closes the
+    /// IN-FILE import-then-call class only. A cross-file re-export under a NEW
+    /// name (`pub use …resolve_type::a as b;` in file X, then bare `b()` in a
+    /// DIFFERENT file Y) is out of scope: the re-exporting file X is already
+    /// caught by its own `resolve_type` path token, and after the consolidation
+    /// deletes the engine (Stages 5/6) the compiler catches any dangling
+    /// reference in Y. A re-export under the SAME name (`pub use resolve_type::
+    /// {ResolvedElements};`) likewise needs no symbol-use counting in the
+    /// re-exporting file — the `use` line is stripped before the symbol-use pass
+    /// (see `count_resolve_type_engine_use`), so re-export bindings are never
+    /// double-counted against the path token of the `use` line.
+    ///
+    /// The argument must already be `preprocess`ed (comments + `#[cfg(test)]`
+    /// bodies erased).
+    fn collect_resolve_type_imported_symbols(src: &str) -> BTreeSet<String> {
+        let mut out: BTreeSet<String> = BTreeSet::new();
+        let bytes = src.as_bytes();
+        let nb = b"resolve_type";
+        let n = nb.len();
+        let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let mut i = 0usize;
+        while i + n <= bytes.len() {
+            if &bytes[i..i + n] == nb {
+                let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+                let after_idx = i + n;
+                let after_ok = after_idx == bytes.len() || !is_ident_char(bytes[after_idx]);
+                if before_ok && after_ok {
+                    // Only treat a `resolve_type` segment that is part of a `use`
+                    // declaration as an import. Walk back over the path segments
+                    // (`ident ::` / `::`) and intervening whitespace to the start
+                    // of the statement and require a `use` keyword there.
+                    if resolve_type_segment_is_in_use_stmt(bytes, i, is_ident_char) {
+                        // Skip whitespace after the segment to find what follows.
+                        let mut k = after_idx;
+                        while k < bytes.len()
+                            && (bytes[k] == b' ' || bytes[k] == b'\n' || bytes[k] == b'\t')
+                        {
+                            k += 1;
+                        }
+                        let rest = &src[k..];
+                        if rest.starts_with("::") {
+                            // `use …::resolve_type::<tail>` — tail is a single
+                            // symbol, a `SYMBOL as ALIAS`, or a `{ group }`.
+                            collect_use_tail_symbols(&src[k + 2..], &mut out);
+                        } else if rest.starts_with("as ") || rest.starts_with("as\n") {
+                            // `use …::resolve_type as M;` — module alias M.
+                            let after_as = &src[k + 2..];
+                            if let Some(name) = first_ident(after_as) {
+                                out.insert(name);
+                            }
+                        }
+                        // `use …::resolve_type;` / `…::{resolve_type, …}` (bare
+                        // module import) contributes no callable symbol.
+                    }
+                    i = after_idx;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// True iff the `resolve_type` segment at byte index `seg` is part of a
+    /// `use` / `pub use` declaration: walking left over `::`, identifier path
+    /// segments, and whitespace reaches a `use` keyword (at an identifier
+    /// boundary) before any other statement-breaking token.
+    fn resolve_type_segment_is_in_use_stmt(
+        bytes: &[u8],
+        seg: usize,
+        is_ident_char: impl Fn(u8) -> bool,
+    ) -> bool {
+        let mut j = seg;
+        loop {
+            // Skip whitespace to the left.
+            while j > 0 && matches!(bytes[j - 1], b' ' | b'\n' | b'\t') {
+                j -= 1;
+            }
+            if j == 0 {
+                return false;
+            }
+            // A `::` path separator — keep walking left past it.
+            if j >= 2 && &bytes[j - 2..j] == b"::" {
+                j -= 2;
+                continue;
+            }
+            // An identifier path segment — consume it and keep walking.
+            if is_ident_char(bytes[j - 1]) {
+                while j > 0 && is_ident_char(bytes[j - 1]) {
+                    j -= 1;
+                }
+                // The identifier we just consumed: is it the `use` keyword at an
+                // identifier boundary?
+                if &bytes[j..]
+                    .iter()
+                    .take_while(|&&b| is_ident_char(b))
+                    .copied()
+                    .collect::<Vec<u8>>()[..]
+                    == b"use"
+                {
+                    return true;
+                }
+                continue;
+            }
+            // Anything else (`;`, `{`, `=`, `(`, etc.) is not a use-path prefix.
+            return false;
+        }
+    }
+
+    /// Parse the tail of a `use …::resolve_type::<tail>` declaration starting at
+    /// `tail` (the text just past the `::` after `resolve_type`). Inserts every
+    /// bound symbol name (the alias for `X as Y`, else the leaf identifier) into
+    /// `out`. Handles a single symbol, `SYMBOL as ALIAS`, and a `{ … }` group
+    /// (which may itself nest further `::` paths — only leaf-bound names are
+    /// collected). A trailing glob `*` binds nothing.
+    fn collect_use_tail_symbols(tail: &str, out: &mut BTreeSet<String>) {
+        let tail = tail.trim_start();
+        if let Some(stripped) = tail.strip_prefix('{') {
+            // Grouped: split top-level by commas, recurse per item.
+            let end = match find_matching_brace(stripped) {
+                Some(e) => e,
+                None => stripped.len(),
+            };
+            let inner = &stripped[..end];
+            for item in split_top_level_commas(inner) {
+                let item = item.trim();
+                if item.is_empty() {
+                    continue;
+                }
+                collect_use_tail_symbols(item, out);
+            }
+            return;
+        }
+        // Single path segment: `SYMBOL`, `SYMBOL as ALIAS`, `nested::SYMBOL`,
+        // `nested::{…}`, or a glob `*`.
+        // First, if there is a `::` before any `{`/`,`/`;`, descend into the
+        // sub-path.
+        if let Some(sep) = find_path_separator(tail) {
+            collect_use_tail_symbols(&tail[sep + 2..], out);
+            return;
+        }
+        // Leaf: `SYMBOL` or `SYMBOL as ALIAS`. Strip a trailing `as ALIAS`.
+        let leaf = tail.split([',', '}', ';']).next().unwrap_or("").trim();
+        if leaf.is_empty() || leaf == "*" {
+            return;
+        }
+        if let Some(idx) = find_as_keyword(leaf) {
+            // `SYMBOL as ALIAS` — bind the ALIAS.
+            if let Some(alias) = first_ident(&leaf[idx + 2..]) {
+                out.insert(alias);
+            }
+        } else if let Some(name) = first_ident(leaf) {
+            out.insert(name);
+        }
+    }
+
+    /// Index of the FIRST top-level `::` in `s` that occurs before any of
+    /// `{`, `,`, `}`, `;` (i.e. a path descent inside a single use-tree item).
+    fn find_path_separator(s: &str) -> Option<usize> {
+        let b = s.as_bytes();
+        let mut i = 0usize;
+        while i + 1 < b.len() {
+            match b[i] {
+                b'{' | b',' | b'}' | b';' => return None,
+                b':' if b[i + 1] == b':' => return Some(i),
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Index of an ` as ` keyword (identifier-bounded) in a leaf use item, or
+    /// `None`. Only matches `as` surrounded by whitespace so `Tatlas` etc. never
+    /// false-match.
+    fn find_as_keyword(s: &str) -> Option<usize> {
+        let b = s.as_bytes();
+        let mut i = 0usize;
+        while i + 2 <= b.len() {
+            if &b[i..i + 2] == b"as" {
+                let before_ok = i == 0 || matches!(b[i - 1], b' ' | b'\n' | b'\t');
+                let after_ok = i + 2 == b.len() || matches!(b[i + 2], b' ' | b'\n' | b'\t');
+                if before_ok && after_ok {
+                    return Some(i);
+                }
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// The first identifier (`[A-Za-z0-9_]+`) in `s`, skipping leading
+    /// whitespace. `None` if none.
+    fn first_ident(s: &str) -> Option<String> {
+        let b = s.as_bytes();
+        let is_ident_char = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+        let mut i = 0usize;
+        while i < b.len() && matches!(b[i], b' ' | b'\n' | b'\t') {
+            i += 1;
+        }
+        let start = i;
+        while i < b.len() && is_ident_char(b[i]) {
+            i += 1;
+        }
+        if i > start {
+            Some(s[start..i].to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Index of the `}` that closes the group opened just before `s` (i.e. `s`
+    /// begins just past the opening `{`). Brace-depth aware. `None` if
+    /// unbalanced (caller falls back to end-of-string).
+    fn find_matching_brace(s: &str) -> Option<usize> {
+        let b = s.as_bytes();
+        let mut depth = 0i32;
+        let mut i = 0usize;
+        while i < b.len() {
+            match b[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Split `s` on TOP-LEVEL commas (commas not nested inside `{ … }`), used to
+    /// separate items inside a `use` group. Returns the slices between commas.
+    fn split_top_level_commas(s: &str) -> Vec<&str> {
+        let b = s.as_bytes();
+        let mut out: Vec<&str> = Vec::new();
+        let mut depth = 0i32;
+        let mut start = 0usize;
+        let mut i = 0usize;
+        while i < b.len() {
+            match b[i] {
+                b'{' => depth += 1,
+                b'}' => depth -= 1,
+                b',' if depth == 0 => {
+                    out.push(&s[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        out.push(&s[start..]);
+        out
+    }
+
+    /// Replace every `use` / `pub use` declaration that references the
+    /// `resolve_type` module with equivalent-length whitespace (newlines
+    /// preserved). Used so the imported-symbol-use pass in
+    /// `count_resolve_type_engine_use` does NOT count the symbol-binding
+    /// occurrences inside the import declaration itself — those are already
+    /// represented by the `resolve_type` path token of the `use` line. Real
+    /// call / use sites elsewhere in the file are untouched and DO count.
+    ///
+    /// A statement is blanked from its `use` keyword through its terminating
+    /// `;` (brace-aware, so a `;` inside an inline expression cannot occur in a
+    /// `use` — `use` items contain no `;` before the terminator). The argument
+    /// must already be `preprocess`ed.
+    fn strip_resolve_type_use_statements(src: &str) -> String {
+        let bytes = src.as_bytes();
+        let n = bytes.len();
+        let mut out = bytes.to_vec();
+        let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let mut i = 0usize;
+        while i + 3 <= n {
+            // Find a `use` keyword at an identifier boundary.
+            if &bytes[i..i + 3] == b"use"
+                && (i == 0 || !is_ident_char(bytes[i - 1]))
+                && (i + 3 == n || !is_ident_char(bytes[i + 3]))
+            {
+                // Find the terminating `;` (use items never contain a bare `;`
+                // before the terminator); track brace depth for grouped imports.
+                let mut depth = 0i32;
+                let mut j = i + 3;
+                let mut end = None;
+                while j < n {
+                    match bytes[j] {
+                        b'{' => depth += 1,
+                        b'}' => depth -= 1,
+                        b';' if depth == 0 => {
+                            end = Some(j);
+                            break;
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                let stmt_end = end.unwrap_or(n);
+                let stmt = &src[i..stmt_end];
+                // Only blank it if it references the `resolve_type` module.
+                if count_resolve_type_module_targets(stmt) > 0 {
+                    for slot in &mut out[i..stmt_end] {
+                        if *slot != b'\n' {
+                            *slot = b' ';
+                        }
+                    }
+                }
+                i = stmt_end;
+                continue;
+            }
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// Count BARE identifier-boundary uses of `needle` in `src` — occurrences
+    /// that are NOT immediately preceded by a `::` path separator (ignoring
+    /// intervening whitespace). A `::`-qualified use such as
+    /// `resolve_type::ResolvedElements` is EXCLUDED here because its
+    /// `resolve_type` segment is already tallied by
+    /// `count_resolve_type_module_targets` — counting the trailing `ResolvedElements`
+    /// again would double-count that single full-path site. Bare uses
+    /// (`ResolvedElements`, `build_type_context(…)`, `ResolvedElements::default()`)
+    /// ARE counted: those are the imported-symbol call/use sites the path-token
+    /// proxy missed.
+    fn count_bare_symbol_uses(src: &str, needle: &str) -> usize {
+        let bytes = src.as_bytes();
+        let nb = needle.as_bytes();
+        let n = nb.len();
+        if n == 0 {
+            return 0;
+        }
+        let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let mut count = 0usize;
+        let mut i = 0usize;
+        while i + n <= bytes.len() {
+            if &bytes[i..i + n] == nb {
+                let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+                let after_ok = i + n == bytes.len() || !is_ident_char(bytes[i + n]);
+                if before_ok && after_ok {
+                    // Reject `::`-qualified occurrences (path uses already
+                    // counted as a `resolve_type` module token). Walk left over
+                    // whitespace; if the two chars before are `::`, skip.
+                    let mut b = i;
+                    while b > 0 && matches!(bytes[b - 1], b' ' | b'\n' | b'\t') {
+                        b -= 1;
+                    }
+                    let qualified = b >= 2 && &bytes[b - 2..b] == b"::";
+                    if !qualified {
+                        count += 1;
+                        i += n;
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+        count
+    }
+
+    /// ACTUAL engine-use count for a file: the `resolve_type` module-path-token
+    /// count PLUS the BARE use sites of every symbol the file imports from the
+    /// engine (counted on the source with the importing `use` declarations
+    /// blanked, so import bindings are not double-counted, and excluding
+    /// `::`-qualified uses, so a full `resolve_type::SYMBOL` path is not counted
+    /// twice — once as a `resolve_type` token and once as a `SYMBOL` use).
+    ///
+    /// This is the structural fix for the path-token-PROXY hole: adding a bare
+    /// call to an already-imported engine function now increments the count, so
+    /// the per-file ledger reflects real engine usage rather than a proxy for
+    /// the number of `resolve_type::` path tokens. The argument must already be
+    /// `preprocess`ed.
+    fn count_resolve_type_engine_use(src: &str) -> usize {
+        let path_tokens = count_resolve_type_module_targets(src);
+        let symbols = collect_resolve_type_imported_symbols(src);
+        if symbols.is_empty() {
+            return path_tokens;
+        }
+        let stripped = strip_resolve_type_use_statements(src);
+        let mut symbol_uses = 0usize;
+        for sym in &symbols {
+            symbol_uses += count_bare_symbol_uses(&stripped, sym);
+        }
+        path_tokens + symbol_uses
+    }
+
     fn fmt_match(m: &(String, u32, String)) -> String {
         format!("({:?}, {}, {:?})", m.0, m.1, m.2)
     }
@@ -12241,11 +12680,15 @@ mod single_resolution_engine_guards {
         out
     }
 
-    /// File-level COUNT scan for the `resolve_type` module path segment
-    /// (calls + aliased/grouped/bare imports + module declaration). Used by the
-    /// `resolve_type` engine-path ledger so an ALIASED import
-    /// (`use …::resolve_type as rt;`) in a new file is caught even though it
-    /// contains no `resolve_type::` substring.
+    /// File-level COUNT scan for ACTUAL `resolve_type` engine use: the module
+    /// path-token count (calls + aliased/grouped/bare imports + module
+    /// declaration) PLUS the use sites of every symbol the file imports from the
+    /// engine (`count_resolve_type_engine_use`). Used by the `resolve_type`
+    /// engine ledger so that BOTH an ALIASED import
+    /// (`use …::resolve_type as rt;`, which contains no `resolve_type::`
+    /// substring) in a new file AND a bare call to an already-imported engine
+    /// function inside an existing file are caught — the latter being the
+    /// path-token-proxy hole the [P2] re-review flagged.
     fn scan_file_resolve_type_target_counts() -> Vec<(String, usize)> {
         let files = collect_production_rs_files();
         let mut out: Vec<(String, usize)> = Vec::new();
@@ -12255,7 +12698,7 @@ mod single_resolution_engine_guards {
                 Err(_) => continue,
             };
             let stripped = preprocess(&src);
-            let c = count_resolve_type_module_targets(&stripped);
+            let c = count_resolve_type_engine_use(&stripped);
             if c > 0 {
                 out.push((rel.clone(), c));
             }
@@ -12282,7 +12725,9 @@ mod single_resolution_engine_guards {
     //
     // Test-only `from_eager_meta` probes in
     // `src/test_only_imported_macro_surface.rs` are NOT a production rail and
-    // are excluded by the `test_only_` predicate in `collect_production_rs_files`.
+    // are excluded because that exact path is in `KNOWN_PROBE_FILES` (an
+    // explicit by-path probe allowlist — NOT a `test_only_` name prefix; see
+    // `is_test_or_probe_file`).
     // -----------------------------------------------------------------------
     const FROM_EAGER_META_ALLOWLIST: &[(&str, u32, &str)] = &[
         (
@@ -12374,34 +12819,60 @@ mod single_resolution_engine_guards {
     // lower_ts_type` is NOT this engine and references none of these tokens.
     //
     // Count-based per-file ledger (`scan_file_resolve_type_target_counts` →
-    // `count_resolve_type_module_targets`). A path-segment use of the module is
-    // counted whether it is a direct `resolve_type::` path/call, a GROUPED or
-    // BARE `use` import, an ALIASED import (`use …::resolve_type as rt;` — the
-    // evasion a `resolve_type::`-substring scan missed entirely), or the
-    // `pub mod resolve_type;` declaration. The count traps BOTH a brand-new
-    // consumer file AND a new in-file site inside an already-listed file; each
-    // later stage that deletes uses lowers the count (and removes the entry at
-    // zero), shrinking the ledger toward the empty post-consolidation floor.
+    // `count_resolve_type_engine_use`). The per-file count is ACTUAL engine use:
+    //
+    //   (a) every `resolve_type` MODULE-PATH-TOKEN — a direct `resolve_type::`
+    //       path/call, a GROUPED or BARE `use` import, an ALIASED module import
+    //       (`use …::resolve_type as rt;` — the evasion a `resolve_type::`-
+    //       substring scan missed), or the `pub mod resolve_type;` declaration;
+    //   PLUS
+    //   (b) every BARE use site of a symbol the file IMPORTS from the engine
+    //       (`use …::resolve_type::{analyze_external_type_program, …};` then a
+    //       bare `analyze_external_type_program(…)` call). The imported-symbol
+    //       set is parsed per-file from that file's own `use` statements
+    //       (`collect_resolve_type_imported_symbols`) — structural and
+    //       self-updating, NOT a hand-maintained global API list. Import
+    //       declarations are blanked before counting (so import bindings are not
+    //       double-counted), and `::`-qualified uses are excluded (so a full
+    //       `resolve_type::SYMBOL` path is not counted twice).
+    //
+    // Counting ACTUAL engine USE — not just the path-token PROXY — closes the
+    // [P2] hole the re-review flagged: an already-allowlisted file that imports
+    // an engine function could previously add MORE bare calls to it without
+    // moving its `resolve_type` token count, so a NEW query-time OXC engine use
+    // slipped in while the ledger stayed green. The count now traps a brand-new
+    // consumer file, a new in-file path token, AND a new in-file bare call to an
+    // already-imported engine symbol; each later stage that deletes uses lowers
+    // the count (removing the entry at zero), shrinking toward the empty
+    // post-consolidation floor.
+    //
+    // **Scope boundary:** this closes the IN-FILE import-then-call class. A
+    // cross-file re-export under a NEW name is OUT of scope — the re-exporting
+    // file is caught by its own `resolve_type` path token, and after Stages 5/6
+    // delete the engine the compiler catches any dangling reference. See
+    // `collect_resolve_type_imported_symbols` for the boundary rationale.
     //
     // The current sites span the engine itself, its
     // `ResolvedElements`/`AnalyzedExternalTypeSource`/`cache_keys::NamedTypeCache`
     // output + cache types, and the query-time consumers (frontier /
-    // eval-program / prepared-decl rails).
+    // eval-program / prepared-decl rails). Counts include imported-symbol call
+    // sites, so files that import-and-call engine functions read higher than
+    // their raw `resolve_type::` token count.
     // -----------------------------------------------------------------------
     const RESOLVE_TYPE_PATH_FILE_ALLOWLIST: &[(&str, usize)] = &[
-        ("crates/verter_compiler/src/script/macros.rs", 1),
-        ("crates/verter_compiler/src/tsc/script.rs", 1),
+        ("crates/verter_compiler/src/script/macros.rs", 3),
+        ("crates/verter_compiler/src/tsc/script.rs", 3),
         (
             "crates/verter_parser/src/utils/oxc/vue/script/bindings.rs",
-            1,
+            9,
         ),
-        ("crates/verter_parser/src/utils/oxc/vue/script/macros.rs", 1),
-        ("crates/verter_parser/src/utils/oxc/vue/script/mod.rs", 3),
+        ("crates/verter_parser/src/utils/oxc/vue/script/macros.rs", 4),
+        ("crates/verter_parser/src/utils/oxc/vue/script/mod.rs", 4),
         (
             "crates/verter_parser/src/utils/oxc/vue/script/options.rs",
-            1,
+            3,
         ),
-        ("crates/verter_parser/src/utils/oxc/vue/script/setup.rs", 1),
+        ("crates/verter_parser/src/utils/oxc/vue/script/setup.rs", 21),
         ("crates/verter_session/src/host_manage/eval_program.rs", 9),
         ("crates/verter_session/src/host_manage/jsdoc_resolve.rs", 4),
         ("crates/verter_session/src/host_manage/prepared_decl.rs", 7),
@@ -12416,7 +12887,7 @@ mod single_resolution_engine_guards {
         ),
         (
             "crates/verter_session/src/host_resolve/frontier_engine.rs",
-            4,
+            6,
         ),
         (
             "crates/verter_session/src/host_resolve/frontier_helpers.rs",
@@ -12427,11 +12898,11 @@ mod single_resolution_engine_guards {
         ("crates/verter_session/src/project_type_store.rs", 5),
         (
             "crates/verter_session/src/resolver_core/component_meta/mod.rs",
-            1,
+            4,
         ),
         (
             "crates/verter_session/src/resolver_core/component_meta/projected_type_expr.rs",
-            1,
+            2,
         ),
         (
             "crates/verter_session/src/resolver_core/component_meta_query_engine/mod.rs",
@@ -12439,35 +12910,35 @@ mod single_resolution_engine_guards {
         ),
         (
             "crates/verter_session/src/resolver_core/external_macro_types.rs",
-            1,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/external_type_body.rs",
-            1,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/host_resolver_context.rs",
-            1,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/resolver_context.rs",
-            1,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/session_resolver_context.rs",
-            1,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/shallow_file_state.rs",
             3,
         ),
         (
+            "crates/verter_session/src/resolver_core/external_type_body.rs",
+            19,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/host_resolver_context.rs",
+            2,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/resolver_context.rs",
+            3,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/session_resolver_context.rs",
+            2,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/shallow_file_state.rs",
+            8,
+        ),
+        (
             "crates/verter_session/src/resolver_core/surface_projector.rs",
-            6,
+            17,
         ),
         (
             "crates/verter_session/src/resolver_core/symbol_resolver.rs",
-            1,
+            3,
         ),
         ("crates/verter_session/src/semantic_query.rs", 2),
         ("crates/verter_session/src/semantic_query_memo/mod.rs", 2),
@@ -12941,9 +13412,197 @@ mod single_resolution_engine_guards {
     }
 
     #[test]
+    fn resolve_type_engine_use_counts_imported_symbol_calls_not_just_path_tokens() {
+        // MANDATORY [P2] #1 discriminator. The hole: an already-allowlisted file
+        // that IMPORTS an engine function can add MORE bare calls to it without
+        // moving its `resolve_type` PATH-TOKEN count, so a NEW query-time OXC
+        // engine use slips in while the path-token ledger stays green. This test
+        // plants exactly that and proves the NEW engine-use counter fires where
+        // the OLD path-token-only counter would NOT.
+
+        // A file that imports an engine function and calls it ONCE.
+        let one_call = "\
+use verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program;\n\
+pub fn run(p: &Program) {\n\
+    let _ = analyze_external_type_program(p);\n\
+}\n";
+        // A file IDENTICAL except it adds a SECOND bare call to the same
+        // already-imported engine function (the exact in-file-growth evasion).
+        let two_calls = "\
+use verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program;\n\
+pub fn run(p: &Program) {\n\
+    let _ = analyze_external_type_program(p);\n\
+    let _ = analyze_external_type_program(p);\n\
+}\n";
+
+        // OLD path-token-only counter: BLIND to the added call. The import line
+        // is the ONLY `resolve_type` token in either file, so BOTH count 1 — the
+        // added bare call is invisible. This is the proxy the review flagged.
+        assert_eq!(
+            count_resolve_type_module_targets(&preprocess(one_call)),
+            1,
+            "old path-token counter sees only the `use …::resolve_type::…` import"
+        );
+        assert_eq!(
+            count_resolve_type_module_targets(&preprocess(two_calls)),
+            1,
+            "PROOF the hole is real: the OLD path-token-only counter is INVARIANT \
+             under adding a second bare call to an already-imported engine \
+             function — both the one-call and two-call files count 1, so the \
+             ledger would have stayed GREEN while a NEW engine use was added"
+        );
+
+        // NEW engine-use counter: counts the import path token (1) PLUS each
+        // bare call site, so it RISES with the added call. This is what makes the
+        // ledger reflect ACTUAL engine use rather than the path-token proxy.
+        assert_eq!(
+            count_resolve_type_engine_use(&preprocess(one_call)),
+            2,
+            "new counter = 1 path token + 1 bare `analyze_external_type_program` \
+             call"
+        );
+        assert_eq!(
+            count_resolve_type_engine_use(&preprocess(two_calls)),
+            3,
+            "new counter RISES to 3 (1 path token + 2 bare calls) when the second \
+             call is added — exercising the NEW imported-symbol-use counting, \
+             NOT the old path-token proxy (which stayed at 1)"
+        );
+
+        // End-to-end: bump an already-allowlisted file that imports-and-calls an
+        // engine function by ONE extra bare call and assert the LEDGER fires.
+        // `surface_projector.rs` imports `analyze_external_type_program` and
+        // already calls it; under the path-token proxy a third call would not
+        // move its count. Simulate the observed count rising by 1 above its
+        // allowlisted value and assert the comparison fails.
+        let mut grew: Vec<(String, usize)> = RESOLVE_TYPE_PATH_FILE_ALLOWLIST
+            .iter()
+            .map(|(f, c)| (f.to_string(), *c))
+            .collect();
+        let target = "crates/verter_session/src/resolver_core/surface_projector.rs";
+        let slot = grew.iter_mut().find(|(f, _)| f == target).expect(
+            "surface_projector.rs is allowlisted (imports + calls \
+                     analyze_external_type_program)",
+        );
+        let bumped = slot.1 + 1;
+        slot.1 = bumped;
+        assert!(
+            guard_reports_violation(|| assert_exact_file_count_allowlist_match(
+                "discriminator",
+                &grew,
+                RESOLVE_TYPE_PATH_FILE_ALLOWLIST,
+            )),
+            "ledger must FAIL when {target}'s engine-use count rises by one bare \
+             call to an already-imported engine function ({bumped}) — the \
+             in-file-growth-via-bare-call hole the path-token proxy missed"
+        );
+
+        // And confirm the LIVE tree actually exercises this path: the file's
+        // engine-use count must EXCEED its raw `resolve_type` path-token count
+        // (i.e. the imported-symbol bare-call counting genuinely contributes on
+        // real source, not just on synthetic strings).
+        let src = preprocess(&super::read_workspace_file(target));
+        let path_only = count_resolve_type_module_targets(&src);
+        let engine_use = count_resolve_type_engine_use(&src);
+        assert!(
+            engine_use > path_only,
+            "{target}: live engine-use count ({engine_use}) must exceed the raw \
+             path-token count ({path_only}) — proving bare imported-symbol calls \
+             (e.g. the two `analyze_external_type_program(…)` sites) are counted \
+             by the NEW logic on the real tree, not merely the path tokens"
+        );
+        let syms = collect_resolve_type_imported_symbols(&src);
+        assert!(
+            syms.contains("analyze_external_type_program"),
+            "{target} must import `analyze_external_type_program` for this proof \
+             to exercise imported-symbol call counting"
+        );
+    }
+
+    #[test]
+    fn resolve_type_imported_symbol_parser_handles_use_shapes() {
+        // Unit-level proof that the per-file import parser
+        // (`collect_resolve_type_imported_symbols`) derives the right symbol set
+        // for every `use` shape — this is the structural mechanism that makes the
+        // engine-use counter self-updating rather than a hand-maintained list.
+
+        // Single symbol.
+        let s = collect_resolve_type_imported_symbols(&preprocess(
+            "use crate::a::resolve_type::analyze_external_type_program;",
+        ));
+        assert_eq!(s.len(), 1);
+        assert!(s.contains("analyze_external_type_program"));
+
+        // Symbol with alias → the ALIAS is the local name that gets called.
+        let s = collect_resolve_type_imported_symbols(&preprocess(
+            "use crate::a::resolve_type::ResolvedElements as RE;",
+        ));
+        assert!(s.contains("RE") && !s.contains("ResolvedElements"));
+
+        // Grouped (possibly multi-line) with a mid-group alias.
+        let s = collect_resolve_type_imported_symbols(&preprocess(
+            "use super::resolve_type::{\n    build_type_context, ResolvedElements as RE,\n    RuntimeType,\n};",
+        ));
+        assert!(s.contains("build_type_context"));
+        assert!(s.contains("RE") && !s.contains("ResolvedElements"));
+        assert!(s.contains("RuntimeType"));
+
+        // Module alias → the alias name (its `M::foo` uses are then counted).
+        let s = collect_resolve_type_imported_symbols(&preprocess(
+            "use verter_compiler::utils::oxc::vue::resolve_type as rt;",
+        ));
+        assert!(s.contains("rt") && s.len() == 1);
+
+        // Bare module import binds NO callable symbol (later `resolve_type::foo`
+        // uses are path tokens, not imported-symbol uses).
+        let s = collect_resolve_type_imported_symbols(&preprocess("use crate::a::resolve_type;"));
+        assert!(s.is_empty());
+        let s = collect_resolve_type_imported_symbols(&preprocess(
+            "use crate::a::{resolve_type, other};",
+        ));
+        assert!(s.is_empty());
+
+        // A `use` that does NOT reference resolve_type contributes nothing.
+        let s = collect_resolve_type_imported_symbols(&preprocess(
+            "use crate::a::other_module::Thing;",
+        ));
+        assert!(s.is_empty());
+
+        // The import declaration itself is blanked before the symbol-use pass, so
+        // the bound names in the `use` line are NOT counted as uses.
+        let src =
+            preprocess("use crate::a::resolve_type::analyze_external_type_program;\nfn f() {}\n");
+        let stripped = strip_resolve_type_use_statements(&src);
+        assert_eq!(
+            count_bare_symbol_uses(&stripped, "analyze_external_type_program"),
+            0,
+            "the symbol binding inside the `use` line must be blanked (not \
+             counted as a use) — only real call sites count"
+        );
+
+        // `::`-qualified use is excluded from bare-symbol counting (it is already
+        // a `resolve_type` path token), preventing a double count.
+        assert_eq!(
+            count_bare_symbol_uses(
+                "let _: resolve_type::ResolvedElements = x;",
+                "ResolvedElements"
+            ),
+            0,
+            "a `resolve_type::ResolvedElements` path use must NOT be counted as a \
+             bare symbol use (the `resolve_type` token already tallies it)"
+        );
+        assert_eq!(
+            count_bare_symbol_uses("let _: ResolvedElements = x;", "ResolvedElements"),
+            1,
+            "a BARE `ResolvedElements` use (the imported name, unqualified) MUST \
+             be counted"
+        );
+    }
+
+    #[test]
     fn scanner_excludes_test_and_probe_files() {
         // The production-source collector MUST exclude `*_tests.rs`,
-        // `tests.rs`, `tests/`-segment files, and `test_only_*` probes — the
+        // `tests.rs`, `tests/`-segment files, and the KNOWN probe bodies — the
         // `from_eager_meta` probes in `test_only_imported_macro_surface.rs`
         // must NOT appear as production sites (else the allowlist would need
         // 3 extra entries and the guard would mis-classify a test probe as a
@@ -12962,7 +13621,7 @@ mod single_resolution_engine_guards {
         );
         assert!(
             is_test_or_probe_file("crates/verter_session/src/test_only_imported_macro_surface.rs"),
-            "`test_only_*` probe body must be excluded"
+            "the KNOWN `test_only` probe body must be excluded"
         );
         // A genuine production file must NOT be excluded.
         assert!(
@@ -12984,7 +13643,82 @@ mod single_resolution_engine_guards {
         );
         assert!(
             !rels.contains("crates/verter_session/src/test_only_imported_macro_surface.rs"),
-            "production collector must exclude the `test_only_*` probe body"
+            "production collector must exclude the KNOWN `test_only` probe body"
+        );
+
+        // Every KNOWN_PROBE_FILES entry must actually EXIST on disk — a stale
+        // probe-path exemption (a file that was renamed/deleted) is itself a
+        // hole, because it would silently exempt nothing while implying the
+        // exemption is still needed. This keeps the probe allowlist honest.
+        for probe in KNOWN_PROBE_FILES {
+            assert!(
+                super::workspace_path(probe).is_file(),
+                "KNOWN_PROBE_FILES entry {probe} does not exist on disk — remove \
+                 the stale exemption (or fix the path)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_only_prefix_alone_does_not_exempt_a_rogue_file() {
+        // MANDATORY [P2] #2 discriminator. The OLD exemption skipped ANY
+        // `src/**/test_only_*.rs` file by NAME PREFIX. That is a hole: a future
+        // PRODUCTION module named `test_only_foo.rs` could add `resolve_type` /
+        // `ResolvedElements` uses and be omitted from every ledger, even though
+        // the `test_only_module_is_only_consumed_by_test_files` guard never
+        // proved THAT file to be a probe. The exemption is now an explicit
+        // by-exact-path allowlist (`KNOWN_PROBE_FILES`).
+
+        // A synthetic rogue file that NAME-MATCHES the old `test_only_` prefix
+        // but is NOT a known probe MUST NOT be exempt — it would be scanned like
+        // any production file (and would then need allowlisting, or be rejected,
+        // if it referenced a doomed engine symbol).
+        let rogue = "crates/verter_session/src/test_only_rogue.rs";
+        assert!(
+            !KNOWN_PROBE_FILES.contains(&rogue),
+            "precondition: `test_only_rogue.rs` is NOT a known probe"
+        );
+        assert!(
+            rogue
+                .rsplit('/')
+                .next()
+                .unwrap_or("")
+                .starts_with("test_only_"),
+            "precondition: the rogue file name-matches the OLD `test_only_` \
+             prefix (so under the old rule it WOULD have been exempt)"
+        );
+        assert!(
+            !is_test_or_probe_file(rogue),
+            "a `test_only_*`-named file that is NOT in KNOWN_PROBE_FILES MUST NOT \
+             be exempt — the scanner must see it. Under the OLD `name.starts_with\
+             (\"test_only_\")` rule it would have been silently skipped; this is \
+             the [P2] exemption-too-broad hole"
+        );
+
+        // The KNOWN probe, by contrast, IS exempt (by exact path) — proving the
+        // exemption still works for the legitimate probe, just scoped.
+        assert!(
+            is_test_or_probe_file(KNOWN_PROBE_FILES[0]),
+            "the KNOWN probe path must remain exempt"
+        );
+
+        // Different-named rogue under another crate likewise not exempt.
+        assert!(
+            !is_test_or_probe_file("crates/verter_compiler/src/test_only_sneaky_engine.rs"),
+            "a rogue `test_only_*` file in any crate is scanned unless explicitly \
+             a known probe"
+        );
+
+        // Sanity: a hypothetical world where the rogue file existed and held a
+        // forbidden token. Because `is_test_or_probe_file` returns false for it,
+        // `collect_production_rs_files` WOULD include it (it is walked like any
+        // `src/**` file), so its `resolve_type` / `ResolvedElements` count would
+        // enter the ledger and trip the unallowlisted-file trap. We assert the
+        // gating predicate (the only thing that decides inclusion) admits it.
+        assert!(
+            !is_test_or_probe_file(rogue),
+            "inclusion gate must admit the rogue file so the ledgers can see any \
+             forbidden token it introduces"
         );
     }
 
@@ -13180,12 +13914,16 @@ pub fn after() {}\n";
     // public API. Its contract (asserted in the module's own doc comment) is:
     // production code MUST NOT consume it. This guard enforces that contract,
     // and the `single_resolution_engine_guards` scanners CITE it as the reason
-    // they exclude `test_only_*` probe bodies from their production ledgers — so
-    // it must actually exist.
+    // they exempt the KNOWN probe bodies (`KNOWN_PROBE_FILES`) from their
+    // production ledgers — so it must actually exist. The probe-body exemption
+    // is by EXACT PATH, not a `test_only_` name prefix: a `test_only_*`-named
+    // file that is NOT a known probe is scanned like any production file (see
+    // `is_test_or_probe_file` and `test_only_prefix_alone_does_not_exempt_a_rogue_file`).
     //
     // Enforcement: scan every production `.rs` under `crates/*/src/**`
     // (post-`preprocess`, so doc comments and `#[cfg(test)]` bodies are erased;
-    // `test_only_*` files are the probe BODIES themselves and are skipped). Flag
+    // the KNOWN probe BODIES in `KNOWN_PROBE_FILES` are skipped — they are the
+    // probe surfaces themselves). Flag
     // any identifier-boundary `test_only` used as a MODULE PATH SEGMENT
     // (`test_only::…`, `use …::test_only;`, `use …::test_only as …`, grouped
     // imports) — i.e. a CONSUMPTION. The module DECLARATION `[pub] mod
