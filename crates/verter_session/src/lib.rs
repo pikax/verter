@@ -308,87 +308,21 @@ pub mod test_only {
         }
     }
 
-    /// Typed-IR bridge probe. Lets the hermetic integration
-    /// tests in `tests/imported_macro_surface_bridge.rs`
-    /// exercise the bridge's projection accessors against a
-    /// `&VerterHost` without exposing the `pub(crate)`
-    /// `ResolverContext` trait to the public API. Production
-    /// code MUST NOT consume this module —
+    /// Typed-IR bridge probe + eager macro-surface probe. Lets the
+    /// hermetic integration tests in
+    /// `tests/imported_macro_surface_bridge.rs` and
+    /// `tests/stage2b1_macro_authority_equivalence.rs` exercise the
+    /// bridge's projection accessors and the eager/lazy macro-authority
+    /// equivalence against a `&VerterHost` without exposing the
+    /// `pub(crate)` `ResolverContext` trait to the public API.
+    /// Production code MUST NOT consume this module —
     /// `tests/architecture_guards.rs` enforces.
-    pub mod imported_macro_surface {
-        use std::sync::Arc;
-
-        use crate::resolver_core::{
-            with_bare_host_ctx_for_test, ImportedDeclarationIdentity, ImportedMacroSurface,
-        };
-        use crate::semantic_query::{ProjectionMode, QueryResult, SemanticNodeId};
-        use crate::VerterHost;
-
-        /// Build a bridge identity from `(canonical, type_name)`
-        /// plus a `whole_hash` byte array. Returns a probe whose
-        /// methods take a `&VerterHost` and dispatch through the
-        /// crate-internal `ResolverContext`.
-        ///
-        /// Test fixtures own the byte array directly so the probe
-        /// does not need to know about `verter_session`'s
-        /// internal `Hash16` alias.
-        pub struct ImportedMacroSurfaceProbe(ImportedMacroSurface);
-
-        impl ImportedMacroSurfaceProbe {
-            /// Build a probe targeting the imported declaration
-            /// `(canonical, type_name)` at content hash
-            /// `whole_hash`.
-            #[inline]
-            #[must_use]
-            pub fn new(canonical: Arc<str>, type_name: Arc<str>, whole_hash: [u8; 16]) -> Self {
-                Self(ImportedMacroSurface::new(ImportedDeclarationIdentity::new(
-                    canonical, type_name, whole_hash,
-                )))
-            }
-
-            /// Resolve the imported declaration to its root
-            /// `SemanticNodeId`. Drives
-            /// `ImportedMacroSurface::resolve_root` through a
-            /// hermetic `&dyn ResolverContext` constructed via
-            /// `with_bare_host_ctx_for_test`.
-            ///
-            /// Returns the raw `QueryResult` so the test can
-            /// assert on `Value` / `Error(Miss)` /
-            /// `Error(DeclPlaceholder)` shapes.
-            pub fn resolve_root(&self, host: &VerterHost) -> QueryResult<SemanticNodeId> {
-                with_bare_host_ctx_for_test(host, |ctx| self.0.resolve_root(ctx))
-            }
-
-            /// Project a named member of the imported
-            /// declaration. Drives
-            /// `ImportedMacroSurface::project_named_member`
-            /// through the same hermetic context as
-            /// [`Self::resolve_root`].
-            pub fn project_named_member(
-                &self,
-                host: &VerterHost,
-                name: &str,
-                mode: ProjectionMode,
-            ) -> QueryResult<SemanticNodeId> {
-                with_bare_host_ctx_for_test(host, |ctx| {
-                    self.0.project_named_member(ctx, name, mode)
-                })
-            }
-
-            /// Enumerate the named members of the imported
-            /// declaration. Drives
-            /// `ImportedMacroSurface::enumerate_member_names`
-            /// through the same hermetic context as
-            /// [`Self::resolve_root`].
-            ///
-            /// Returns the raw `QueryResult` so the test can assert
-            /// on the `Value(names)` set as well as the
-            /// `Error(_)` / `Recursive(_)` shapes.
-            pub fn enumerate_member_names(&self, host: &VerterHost) -> QueryResult<Vec<Arc<str>>> {
-                with_bare_host_ctx_for_test(host, |ctx| self.0.enumerate_member_names(ctx))
-            }
-        }
-    }
+    ///
+    /// The body lives in `src/test_only_imported_macro_surface.rs`
+    /// (attached via `#[path]`) so the crate root stays under its line
+    /// ceiling (`tests/no_lib_rs_growth.rs`).
+    #[path = "../test_only_imported_macro_surface.rs"]
+    pub mod imported_macro_surface;
 }
 pub mod meta_resolve;
 #[cfg(test)]

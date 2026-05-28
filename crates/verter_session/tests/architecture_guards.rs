@@ -11358,3 +11358,149 @@ fn walk_dir_collect_rs_and_ts(dir: &std::path::Path, cb: &mut dyn FnMut(&std::pa
         }
     }
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// Stage 2B.1 — macro-authority cluster reads through `ResolvedMacroSurface`
+// ───────────────────────────────────────────────────────────────────────────
+//
+// Stage 2B.1 migrated the two semantics-owning macro-authority consumers —
+// the macro-shape producers (`macro_shapes.rs`) and the slot-binding graph
+// (`slot_binding_graph.rs`) — to read their `defineProps` / `defineEmits` /
+// `defineSlots` member sets through the `ResolvedMacroSurface` enum's shared
+// `prop_members` / `emit_members` / `slot_members` accessors rather than the
+// direct `.props` / `.emits` / `.slots` fields on `ResolvedMacroMeta`.
+//
+// The enum is the seam between the eager OXC-resolved-elements surface (the
+// `Eager` arm, what production produces today) and the lazy typed-IR bridge
+// (the `LazyImported` arm). A direct `.props` field read on a
+// `ResolvedMacroMeta` bypasses the seam — it would interpret the eager arm's
+// fields directly and silently skip the lazy arm, defeating the migration.
+//
+// The binary structural fact this guard checks: in the two migrated modules,
+// the ONLY `.props` / `.emits` / `.slots` field accesses permitted are on
+// `evaluated_types` (the `ExpandedComponentTypes` analyzer surface — NOT a
+// `ResolvedMacroMeta`). Every macro-surface member read on a
+// `ResolvedMacroMeta` must route through
+// `ResolvedMacroSurface::from_eager_meta(..).{prop,emit,slot}_members(ctx)`,
+// which is a METHOD CALL (`*_members(...)`), not a field access. So the scan
+// flags any `ExprField` whose member is `props` / `emits` / `slots` and whose
+// base does not root at the `evaluated_types` binding.
+
+/// Root identifier of a field-access / method-call base chain — the
+/// leftmost segment of `a.b.c` / `a.b().c` etc. Returns `None` for a
+/// base that does not bottom out in a plain path (e.g. a literal,
+/// a parenthesised expression, a macro call).
+fn field_access_base_root(expr: &syn::Expr) -> Option<String> {
+    match expr {
+        syn::Expr::Path(p) => p.path.segments.first().map(|s| s.ident.to_string()),
+        syn::Expr::Field(f) => field_access_base_root(&f.base),
+        syn::Expr::MethodCall(m) => field_access_base_root(&m.receiver),
+        syn::Expr::Index(i) => field_access_base_root(&i.expr),
+        syn::Expr::Reference(r) => field_access_base_root(&r.expr),
+        syn::Expr::Paren(p) => field_access_base_root(&p.expr),
+        syn::Expr::Try(t) => field_access_base_root(&t.expr),
+        syn::Expr::Await(a) => field_access_base_root(&a.base),
+        syn::Expr::Unary(u) => field_access_base_root(&u.expr),
+        syn::Expr::Group(g) => field_access_base_root(&g.expr),
+        _ => None,
+    }
+}
+
+/// Architecture guard — the macro-authority cluster reads macro-surface
+/// members through `ResolvedMacroSurface`, never via direct `.props` /
+/// `.emits` / `.slots` field access on a `ResolvedMacroMeta`.
+///
+/// Pre-migration these modules contained `resolved.props`,
+/// `resolved_macro.emits`, `resolved.slots`, etc. — the guard fails
+/// against that tree. Post-migration those reads route through the
+/// shared accessor (a `*_members(ctx)` method call), so the only
+/// remaining `.props` / `.emits` / `.slots` field accesses are on the
+/// `evaluated_types` analyzer surface (`ExpandedComponentTypes`), which
+/// is explicitly allowed.
+#[test]
+fn macro_authority_reads_surface_not_direct_fields() {
+    use syn::visit::Visit;
+
+    /// The single binding whose `.props` / `.emits` / `.slots` field
+    /// access is permitted: the `ExpandedComponentTypes` analyzer
+    /// surface threaded into the macro-shape producers. It is NOT a
+    /// `ResolvedMacroMeta`, so reading its fields directly does not
+    /// bypass the `ResolvedMacroSurface` seam.
+    const ALLOWED_FIELD_BASE: &str = "evaluated_types";
+    const MACRO_SURFACE_FIELDS: &[&str] = &["props", "emits", "slots"];
+
+    let root = workspace_root();
+    let targets = [
+        "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
+        "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
+    ];
+
+    struct FieldVisitor {
+        rel: String,
+        violations: Vec<String>,
+        flagged_fields: usize,
+    }
+
+    impl<'ast> Visit<'ast> for FieldVisitor {
+        fn visit_expr_field(&mut self, node: &'ast syn::ExprField) {
+            if let syn::Member::Named(ident) = &node.member {
+                let field = ident.to_string();
+                if MACRO_SURFACE_FIELDS.contains(&field.as_str()) {
+                    let base_root = field_access_base_root(&node.base);
+                    // Permit only the `evaluated_types` analyzer surface.
+                    // Anything else (`resolved.props`,
+                    // `resolved_macro.slots`, …) is a direct
+                    // `ResolvedMacroMeta` field read that bypasses the
+                    // `ResolvedMacroSurface` seam.
+                    let allowed = base_root.as_deref() == Some(ALLOWED_FIELD_BASE);
+                    if !allowed {
+                        let base_str = quote::quote!(#node).to_string();
+                        self.violations.push(format!(
+                            "{}: direct `.{field}` field access `{}` (base root: {:?}) — \
+                             macro-surface members MUST be read through \
+                             `ResolvedMacroSurface::from_eager_meta(..).{}_members(ctx)`, \
+                             not via a direct field read on a `ResolvedMacroMeta`",
+                            self.rel,
+                            base_str,
+                            base_root,
+                            field.trim_end_matches('s'),
+                        ));
+                    }
+                }
+            }
+            // Continue walking nested expressions.
+            syn::visit::visit_expr_field(self, node);
+        }
+    }
+
+    let mut all_violations: Vec<String> = Vec::new();
+    let mut total_flagged = 0usize;
+    for rel in targets {
+        let path = root.join(rel);
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("macro-authority guard: cannot read `{rel}`: {e}"));
+        let parsed = syn::parse_file(&src)
+            .unwrap_or_else(|e| panic!("macro-authority guard: `{rel}` failed to parse: {e}"));
+        let mut visitor = FieldVisitor {
+            rel: rel.to_string(),
+            violations: Vec::new(),
+            flagged_fields: 0,
+        };
+        visitor.visit_file(&parsed);
+        total_flagged += visitor.flagged_fields;
+        all_violations.extend(visitor.violations);
+    }
+    let _ = total_flagged;
+
+    assert!(
+        all_violations.is_empty(),
+        "guard `macro_authority_reads_surface_not_direct_fields`: the \
+         macro-authority cluster (`macro_shapes.rs` + `slot_binding_graph.rs`) \
+         MUST read `defineProps` / `defineEmits` / `defineSlots` member sets \
+         through the `ResolvedMacroSurface` enum's `{{prop,emit,slot}}_members` \
+         accessors — never via a direct `.props` / `.emits` / `.slots` field \
+         read on a `ResolvedMacroMeta`. A direct read bypasses the \
+         eager/lazy seam (Stage 2B.1). Offending field accesses:\n  {}",
+        all_violations.join("\n  "),
+    );
+}
