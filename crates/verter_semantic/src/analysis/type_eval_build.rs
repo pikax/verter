@@ -567,12 +567,7 @@ fn extract_function(func: &Function<'_>, source: &str, env: &mut EvalEnv) {
     // TS annotation uses so the function type resolves through the shared
     // dispatch with no JSDoc-specific path. TS annotations always win (we only
     // touch params/return that lacked one).
-    enrich_function_signature_with_jsdoc(
-        &mut sig,
-        source,
-        name_offset,
-        func.return_type.is_some(),
-    );
+    enrich_function_signature_with_jsdoc(&mut sig, source, name_offset, func.return_type.is_some());
     let kind = if func.r#async {
         ValueDeclKind::AsyncFunction
     } else {
@@ -603,7 +598,8 @@ fn enrich_function_signature_with_jsdoc(
     name_offset: u32,
     has_ts_return: bool,
 ) {
-    let param_types = crate::analysis::jsdoc::extract_jsdoc_param_types_at_offset(source, name_offset);
+    let param_types =
+        crate::analysis::jsdoc::extract_jsdoc_param_types_at_offset(source, name_offset);
     if !param_types.is_empty() {
         for param in &mut sig.parameters {
             // Only fill a parameter whose type is still the `Any` placeholder
