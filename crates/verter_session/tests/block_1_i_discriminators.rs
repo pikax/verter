@@ -153,25 +153,39 @@ fn semantic_memo_fact_only_invalidation_drops_slot() {
     // alone. Without this, a fact-only canonical that the legacy
     // signature does not name has no shard for
     // `invalidate_canonical` to drain — leaving the memo entry
-    // orphaned across invalidation. Track 4 fixed the equivalent
-    // path on `MaterializeStructureDb` / `RefCycleResultDb`; codex
-    // P2.B flagged that the memo's `register_reverse_index` was
-    // missed.
-    let register_idx = memo_mod_src
+    // orphaned across invalidation. The registration helper lives in
+    // `semantic_query_memo::reverse_index`; the family memo
+    // (`mod.rs`) routes its publish paths through
+    // `reverse_index::register_reverse_index(...)`.
+    let reverse_index_src = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/semantic_query_memo/reverse_index.rs"),
+    )
+    .expect("read reverse_index.rs");
+    let register_idx = reverse_index_src
         .find("fn register_reverse_index(")
-        .expect("memo must declare register_reverse_index");
-    let register_window =
-        &memo_mod_src[register_idx..register_idx + 4000.min(memo_mod_src.len() - register_idx)];
+        .expect("reverse_index.rs must declare register_reverse_index");
+    let register_window = &reverse_index_src
+        [register_idx..register_idx + 4000.min(reverse_index_src.len() - register_idx)];
     assert!(
         register_window.contains("read_set_signature.canonical_ids()"),
         "register_reverse_index must iterate \
          `read_set_signature.canonical_ids()` so the memo's reverse \
          index drains under every canonical the entry's carrier \
          references — including fact-only canonicals (Parse / \
-         ResolveImports / RouteSurface). Pre-fix iterated only \
-         `dep_signature` (legacy rail), losing fact-only \
-         invalidation. See codex P2.B and the behavioural test \
-         `semantic_memo_invalidate_drains_fact_only_canonical_entry`."
+         ResolveImports / RouteSurface). A registration keyed only on \
+         the legacy `dep_signature` rail would lose fact-only \
+         invalidation. See the behavioural test \
+         `semantic_memo_invalidate_drains_fact_canonical_entry`."
+    );
+    // The family memo must invoke the relocated helper on its publish
+    // paths — without the call sites the registration helper is dead and
+    // fact-only invalidation never drives reverse-index registration.
+    assert!(
+        memo_mod_src.contains("reverse_index::register_reverse_index("),
+        "the family memo (`mod.rs`) must route its publish paths through \
+         `reverse_index::register_reverse_index(...)` so every published \
+         entry registers under each canonical its carrier names."
     );
 }
 
@@ -390,31 +404,58 @@ fn materialize_structure_peek_and_register_use_carrier() {
         .expect("expected MaterializeStructureDb::peek");
     let peek_window =
         &impl_window[peek_offset..peek_offset + 4000.min(impl_window.len() - peek_offset)];
+    // Under the multi-candidate substrate the peek lookup closure
+    // receives each `candidate` from the shared
+    // `ReverseIndexedCandidateStore`; the carrier is the candidate's
+    // `signature` field and the strict gate is
+    // `validate_with_self_roots(ctx, &candidate.self_root_canonicals)`.
     assert!(
-        peek_window.contains(".read_set_signature")
+        peek_window.contains("candidate")
+            && peek_window.contains(".signature")
             && peek_window
-                .contains("validate_with_self_roots(ctx, &entry_arc.self_root_canonicals)"),
-        "MaterializeStructureDb::peek must AND-gate via the carrier's strict \
-         `validate_with_self_roots(ctx, &entry_arc.self_root_canonicals)` so the carrier's \
-         facts rail invalidates a stale entry even when the legacy DepSignature still \
-         validates, AND a same-canonical edit to a self-root (ONLY the `base` node's \
-         declaration-origin file — NOT the consumer materialise scope) rejects the entry \
+                .contains("validate_with_self_roots(ctx, &candidate.self_root_canonicals)"),
+        "MaterializeStructureDb::peek must AND-gate each candidate via the carrier's strict \
+         `candidate.signature.validate_with_self_roots(ctx, &candidate.self_root_canonicals)` so \
+         the carrier's facts rail invalidates a stale entry even when the legacy DepSignature \
+         still validates, AND a same-canonical edit to a self-root (ONLY the `base` node's \
+         declaration-origin file — NOT the consumer materialise scope) rejects the candidate \
          strictly. Pre-fix peek validated only the legacy rail; the pre-self-root tree \
          used the lax `validate`."
     );
 
-    // register_post_publish must key the reverse index under the
-    // carrier's `canonical_ids()`.
+    // The post-publish reverse-index registration relocated into the
+    // shared `ReverseIndexedCandidateStore`: `publish_core` drives its
+    // per-canonical registration from `reverse_index_canonicals`, which
+    // keys the index under the UNION of the carrier's
+    // `signature.canonical_ids()` and the candidate's strict
+    // `self_root_canonicals`. The carrier is the candidate's `signature`
+    // (`ReadSetSignature`) field. Assert against the relocated path so the
+    // guard still proves the reverse index drains every canonical the
+    // carrier references (including fact-only deps).
+    let candidate_store_src = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/cache_runtime/candidate_store.rs"),
+    )
+    .expect("read cache_runtime/candidate_store.rs");
     assert!(
-        caches_src.contains("read_set_signature: &crate::fact_signature_helpers::ReadSetSignature"),
-        "register_post_publish must accept the carrier so the reverse-index drains \
-         every canonical the carrier references (union of legacy + facts canonicals). \
-         Pre-fix the reverse index was keyed only by legacy DepSignature canonicals."
+        candidate_store_src.contains("fn reverse_index_canonicals<V>(")
+            && candidate_store_src.contains("candidate: &Candidate<FactCandidateDiscriminant, V>"),
+        "the shared store's `reverse_index_canonicals` must accept the carrier-bearing \
+         `Candidate` so the reverse index drains every canonical the carrier references \
+         (union of the facts' canonicals + the strict self-roots). Pre-fix the reverse \
+         index was keyed only by legacy DepSignature canonicals."
     );
     assert!(
-        caches_src.contains("read_set_signature.canonical_ids()"),
-        "register_post_publish must iterate `read_set_signature.canonical_ids()` so \
-         fact-only deps register the entry under the changed canonical's reverse-index slot."
+        candidate_store_src.contains("candidate.signature.canonical_ids()"),
+        "reverse_index_canonicals must iterate the carrier's \
+         `candidate.signature.canonical_ids()` so fact-only deps register the candidate \
+         under the changed canonical's reverse-index slot."
+    );
+    assert!(
+        candidate_store_src.contains("reverse_index_canonicals(&candidate)"),
+        "publish_core must drive its per-canonical reverse-index registration from \
+         `reverse_index_canonicals(&candidate)` so every published candidate is \
+         registered under each canonical its carrier names."
     );
 }
 
@@ -531,12 +572,26 @@ fn cooperative_return_only_not_shared_to_joiners() {
          fact tracer."
     );
 
-    // The materialiser routes through the admission API.
+    // The materialiser routes through the admission API. The
+    // multi-candidate substrate funnels the materialiser's
+    // `cooperative_admit_with_post_publish` usage through
+    // `MaterializeStructureDb::get_or_compute_admit`, whose `compute`
+    // closure returns the `singleflight::ComputeAdmission` carrier — the
+    // `ReturnOnly` arm is the overflow / non-cacheable path. Assert BOTH
+    // so the guard still proves overflow outcomes are modelled as
+    // `ComputeAdmission::ReturnOnly` via the cooperative-admission API.
     assert!(
-        mat_src.contains("cooperative_admit_with_post_publish"),
-        "materialize_component_meta_structure must use the \
-         `cooperative_admit_with_post_publish` API so overflow outcomes \
-         are modelled as `ComputeAdmission::ReturnOnly`"
+        mat_src.contains("get_or_compute_admit(&key, ctx, compute)"),
+        "materialize_component_meta_structure must route through the \
+         cooperative-admission `MaterializeStructureDb::get_or_compute_admit` \
+         API so its cold build is a one-winner singleflight"
+    );
+    assert!(
+        mat_src.contains("crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly("),
+        "the materialiser's `get_or_compute_admit` compute closure must \
+         model overflow / non-cacheable outcomes as \
+         `singleflight::ComputeAdmission::ReturnOnly` so they are NOT \
+         broadcast to cooperative joiners"
     );
     // The stack-local `non_cacheable_outcome: RefCell<...>` side
     // channel is retired.
