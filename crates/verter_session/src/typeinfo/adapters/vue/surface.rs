@@ -238,18 +238,50 @@ impl VerterHost {
     /// not re-attempt the cold resolution.
     #[must_use]
     pub fn vue_macro_dtos(&self, request: &VueMacroSurfaceRequest) -> Arc<VueMacroDtos> {
+        // Load the CURRENT `IndexedReady` BEFORE touching the cache. The
+        // request's `root_identity` (a `whole_hash` hint) and `macro_kind` are
+        // caller-supplied and may be STALE (a `whole_hash` captured before an
+        // edit) or WRONG (a kind that disagrees with the snapshot's macro at
+        // this index). Deriving both from the authoritative snapshot here means
+        // a stale `root_identity` can never read an old entry (the live
+        // `whole_hash` keys a fresh slot) and a wrong `macro_kind` can never
+        // read or poison the sibling kind's entry (the derived kind keys the
+        // slot and drives the normalizer dispatch).
+        let Some(indexed) = self.ensure_indexed_ready(request.owner_canonical.as_ref()) else {
+            // SFC not loaded — no surface, no cache entry. Returning the default
+            // bundle WITHOUT publishing (we have no validated key) keeps the
+            // cache free of entries keyed on an unvalidated identity.
+            return Arc::new(VueMacroDtos::default());
+        };
+        let Some(mac) = indexed.snapshot.macros.get(request.macro_index) else {
+            return Arc::new(VueMacroDtos::default());
+        };
+        let whole_hash = indexed.whole_hash;
+        let macro_kind = mac.kind;
+
         let key = VueMacroDtoKey::new(
             Arc::clone(&request.owner_canonical),
-            request.root_identity,
+            whole_hash,
             request.macro_index,
+            macro_kind,
             request.level,
         );
         if let Some(cached) = self.vue_shallow_metadata_store().get(&key) {
             return cached;
         }
 
-        let dtos = match self.resolve_vue_macro_surface(request) {
-            Some(macro_surface) => match request.macro_kind {
+        // Resolve the surface through a request carrying the VALIDATED identity
+        // (live `whole_hash`) and the AUTHORITATIVE kind, so the surface
+        // resolution + normalizer dispatch never trust the caller's hint.
+        let validated_request = VueMacroSurfaceRequest {
+            owner_canonical: Arc::clone(&request.owner_canonical),
+            macro_index: request.macro_index,
+            macro_kind,
+            root_identity: whole_hash,
+            level: request.level,
+        };
+        let dtos = match self.resolve_vue_macro_surface(&validated_request) {
+            Some(macro_surface) => match macro_kind {
                 AnalyzedMacroKind::DefineProps
                 | AnalyzedMacroKind::WithDefaults
                 | AnalyzedMacroKind::DefineModel => VueMacroDtos {

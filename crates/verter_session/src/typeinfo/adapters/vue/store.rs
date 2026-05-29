@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use verter_semantic::analysis::types::{
-    AnalyzedEmitField, AnalyzedPropField, AnalyzedSlotField, Hash16,
+    AnalyzedEmitField, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField, Hash16,
 };
 
 use crate::typeinfo::types::TypeInfoQueryLevel;
@@ -38,7 +38,12 @@ use crate::typeinfo::types::TypeInfoQueryLevel;
 /// Content-addressed (carries `whole_hash`) so a content edit changes the key
 /// and forces a cold rebuild. The [`TypeInfoQueryLevel`] is folded in as a
 /// QUERY-IDENTITY tag (NOT an env-hash dimension) so the same macro resolved at
-/// PublicType vs FullMetadata occupies distinct slots.
+/// PublicType vs FullMetadata occupies distinct slots. The macro KIND is part
+/// of the key so two requests that name the same `(canonical, whole_hash,
+/// macro_index, level)` slot but disagree on the macro kind (a caller bug, or
+/// a snapshot whose macro at that index is a different kind than the caller
+/// believed) cannot read or poison each other's entry — the kind is derived
+/// from the authoritative `IndexedReady` snapshot at insert time.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VueMacroDtoKey {
     /// Canonical id of the `.vue` SFC.
@@ -47,24 +52,31 @@ pub struct VueMacroDtoKey {
     pub whole_hash: Hash16,
     /// Stable index of the macro in the SFC's analysis snapshot.
     pub macro_index: usize,
+    /// The macro kind the cached DTO bundle was normalized for, derived from
+    /// the `IndexedReady` snapshot's `macros[macro_index].kind` (NOT a
+    /// caller-supplied hint). Part of the key so a kind mismatch occupies a
+    /// distinct slot rather than reading / poisoning the sibling kind's entry.
+    pub macro_kind: AnalyzedMacroKind,
     /// Query level — query identity, not an env hash.
     pub level_tag: u8,
 }
 
 impl VueMacroDtoKey {
-    /// Construct a key for `macro_index` in `canonical` at content `whole_hash`
-    /// and query `level`.
+    /// Construct a key for `macro_index` in `canonical` at content `whole_hash`,
+    /// macro `macro_kind`, and query `level`.
     #[must_use]
     pub fn new(
         canonical: Arc<str>,
         whole_hash: Hash16,
         macro_index: usize,
+        macro_kind: AnalyzedMacroKind,
         level: TypeInfoQueryLevel,
     ) -> Self {
         Self {
             canonical,
             whole_hash,
             macro_index,
+            macro_kind,
             level_tag: level.cache_tag(),
         }
     }

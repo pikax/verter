@@ -748,14 +748,127 @@ defineEmits<{ (e: 'change', v: number): void }>();
 </script>
 "#;
 
+// ---------------------------------------------------------------------------
+// (10a) Cache STALE-identity rejection — `vue_macro_dtos` must derive the
+//       `whole_hash` from the LIVE `IndexedReady`, NOT trust the request's
+//       `root_identity` hint. A caller holding a `root_identity` captured
+//       BEFORE an edit must still get the NEW content's DTOs.
+//
+//       Discriminating: pre-fix `vue_macro_dtos` keys on `request.root_identity`,
+//       so a request carrying the stale (pre-edit) hash hits the OLD slot and
+//       returns the v1 props (missing `extra`). Post-fix it keys on the live
+//       `whole_hash`, returning the v2 props.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn vue_macro_dtos_rejects_stale_root_identity_after_edit() {
+    const FILE: &str = "/w/StaleId.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_PROPS_AND_EMITS);
+
+    // Capture the v1 request (its `root_identity` is v1's whole_hash) and warm
+    // the cache for the props macro.
+    let stale_request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
+    let v1 = host.vue_macro_dtos(&stale_request);
+    let mut v1_names: Vec<&str> = v1.props.iter().map(|p| p.name.as_str()).collect();
+    v1_names.sort_unstable();
+    assert_eq!(
+        v1_names,
+        vec!["count", "label"],
+        "v1 props are count + label"
+    );
+
+    // Edit the file. The live `IndexedReady.whole_hash` now differs from the
+    // `stale_request.root_identity` captured above.
+    upsert(&host, FILE, VUE_PROPS_AND_EMITS_EDITED);
+    let live_hash = whole_hash(&host, FILE);
+    assert_ne!(
+        stale_request.root_identity, live_hash,
+        "the edit changed the live whole_hash; the request still holds the stale one"
+    );
+
+    // Re-query with the STALE request (its `root_identity` is the pre-edit
+    // hash). `vue_macro_dtos` must derive `whole_hash` from the LIVE
+    // `IndexedReady` and return the v2 props — never the stale v1 entry.
+    let after_edit = host.vue_macro_dtos(&stale_request);
+    let mut after_names: Vec<&str> = after_edit.props.iter().map(|p| p.name.as_str()).collect();
+    after_names.sort_unstable();
+    assert_eq!(
+        after_names,
+        vec!["count", "extra", "label"],
+        "a stale root_identity must NOT serve the pre-edit DTOs; the live whole_hash keys the v2 slot"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (10b) Cache macro-KIND-mismatch rejection — `vue_macro_dtos` must derive the
+//       macro kind from the snapshot's `macros[macro_index].kind`, NOT trust
+//       the request's `macro_kind` hint, and the kind must be part of the
+//       cache key.
+//
+//       Discriminating: the macro at `macro_index` is genuinely a DefineProps.
+//       A request that LIES (`macro_kind: DefineEmits`) must STILL be normalized
+//       as props (the derived kind wins). Pre-fix the normalizer dispatches on
+//       the request's `DefineEmits` hint → runs the emits normalizer over the
+//       props surface (props empty, the property-style fallback fabricates
+//       events) and — because the pre-fix key omits the kind — poisons the
+//       shared slot. Post-fix props are non-empty and emits empty.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn vue_macro_dtos_rejects_macro_kind_mismatch_without_poisoning_cache() {
+    const FILE: &str = "/w/KindMismatch.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_PROPS_AND_EMITS);
+
+    // The DefineProps macro's index — but we will LIE about its kind in the
+    // request, claiming it is a DefineEmits.
+    let props_index = macro_index_of(&host, FILE, AnalyzedMacroKind::DefineProps);
+    let lying_request = VueMacroSurfaceRequest {
+        owner_canonical: Arc::from(FILE),
+        macro_index: props_index,
+        macro_kind: AnalyzedMacroKind::DefineEmits, // WRONG — the macro is DefineProps.
+        root_identity: whole_hash(&host, FILE),
+        level: TypeInfoQueryLevel::FullMetadata,
+    };
+
+    // COLD call with the lying kind. The derived kind (DefineProps) must win:
+    // the bundle carries PROPS, not the emits the property-style fallback would
+    // fabricate from the props surface.
+    let cold = host.vue_macro_dtos(&lying_request);
+    let mut cold_props: Vec<&str> = cold.props.iter().map(|p| p.name.as_str()).collect();
+    cold_props.sort_unstable();
+    assert_eq!(
+        cold_props,
+        vec!["count", "label"],
+        "the derived DefineProps kind wins; the bundle is props, not the lying-kind emits"
+    );
+    assert!(
+        cold.emits.is_empty(),
+        "a props macro must not produce emits even when the request lies about the kind (negative)"
+    );
+
+    // A truthful DefineProps request at the same index keys the SAME derived
+    // slot (the kind was derived identically) and returns the SAME Arc — the
+    // lying call did not poison or fork the slot.
+    let truthful_request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
+    let truthful = host.vue_macro_dtos(&truthful_request);
+    assert!(
+        Arc::ptr_eq(&cold, &truthful),
+        "the derived-kind slot is shared; the lying request did not poison a separate slot"
+    );
+}
+
 /// The query level is QUERY IDENTITY, not an env-hash dimension (R21). Guard:
-/// the DTO cache key carries the level tag + content hash, NOT any of the five
-/// env hashes. A structural check on the key type — if a future edit folded an
-/// env hash into the key (or dropped the level), this fails to compile / the
-/// field set changes.
+/// the DTO cache key carries the level tag + content hash + macro kind, NOT any
+/// of the five env hashes. A structural check on the key type — if a future
+/// edit folded an env hash into the key (or dropped the level), this fails to
+/// compile / the field set changes.
 ///
-/// Discriminating: asserts the exact key field set. Adding an env-hash field
-/// (e.g. `resolve_env_hash`) or removing `level_tag` breaks the assertion.
+/// Discriminating: destructures the EXACT key field set without `..`, so
+/// adding an owned field (e.g. a `resolve_env_hash`) or removing `level_tag`
+/// fails to compile. Also asserts the level tag is a 1-byte discriminant, not a
+/// 16-byte env hash.
 #[test]
 fn vue_macro_dto_key_carries_level_and_content_not_env_hash() {
     use crate::typeinfo::adapters::vue::store::VueMacroDtoKey;
@@ -764,12 +877,14 @@ fn vue_macro_dto_key_carries_level_and_content_not_env_hash() {
         Arc::from("/w/x.vue"),
         [1u8; 16],
         0,
+        AnalyzedMacroKind::DefineProps,
         TypeInfoQueryLevel::PublicType,
     );
     let b = VueMacroDtoKey::new(
         Arc::from("/w/x.vue"),
         [1u8; 16],
         0,
+        AnalyzedMacroKind::DefineProps,
         TypeInfoQueryLevel::FullMetadata,
     );
     // Distinct level ⇒ distinct key (level is part of identity).
@@ -780,12 +895,48 @@ fn vue_macro_dto_key_carries_level_and_content_not_env_hash() {
         Arc::from("/w/x.vue"),
         [2u8; 16],
         0,
+        AnalyzedMacroKind::DefineProps,
         TypeInfoQueryLevel::PublicType,
     );
     assert_ne!(a, c, "the content hash discriminates the key");
 
-    // The level tag is a small query-identity discriminant (0/1), NOT a 16-byte
-    // env-hash. PublicType and FullMetadata differ by exactly the tag byte.
+    // Distinct macro kind ⇒ distinct key (kind is part of identity — a kind
+    // mismatch must not read / poison the sibling kind's slot).
+    let d = VueMacroDtoKey::new(
+        Arc::from("/w/x.vue"),
+        [1u8; 16],
+        0,
+        AnalyzedMacroKind::DefineEmits,
+        TypeInfoQueryLevel::PublicType,
+    );
+    assert_ne!(a, d, "the macro kind discriminates the key");
+
+    // Structural field-set guard: destructure the WHOLE key without `..`. Any
+    // added owned field breaks this destructure (compile error), forcing a
+    // conscious decision about whether the new field belongs in cache identity.
+    let VueMacroDtoKey {
+        canonical,
+        whole_hash,
+        macro_index,
+        macro_kind,
+        level_tag,
+    } = &a;
+    assert_eq!(canonical.as_ref(), "/w/x.vue");
+    assert_eq!(
+        *whole_hash, [1u8; 16],
+        "the content hash is part of the key"
+    );
+    assert_eq!(*macro_index, 0);
+    assert_eq!(*macro_kind, AnalyzedMacroKind::DefineProps);
+    // The level tag is a small query-identity discriminant (1 byte), NOT a
+    // 16-byte env-hash.
+    assert_eq!(
+        std::mem::size_of_val(level_tag),
+        1,
+        "level_tag is a 1-byte query-identity discriminant, not an env hash"
+    );
+
+    // PublicType and FullMetadata differ by exactly the tag byte.
     assert_eq!(TypeInfoQueryLevel::PublicType.cache_tag(), 0);
     assert_eq!(TypeInfoQueryLevel::FullMetadata.cache_tag(), 1);
     assert_ne!(
