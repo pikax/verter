@@ -94,8 +94,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     is_method: member.is_method,
                     declared_in_macro_type_arg: false,
                     // `PreparedMember` carries the real OXC declaration-site
-                    // spans (stamped at `build_member_index`).
+                    // spans (stamped at `build_member_index`) AND its defining
+                    // file — carry both so spans pair with the correct source.
                     spans: member.spans,
+                    declaration_origin: (!member.declaration_origin.is_empty())
+                        .then(|| std::sync::Arc::from(member.declaration_origin.as_str())),
                 })
             })
         }
@@ -398,8 +401,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         readonly: property.readonly,
                         is_method: false,
                         declared_in_macro_type_arg: false,
-                        // IR property carries its real OXC spans verbatim.
+                        // IR property carries its real OXC spans verbatim; the
+                        // body is projected in `scope_canonical_id` — its file.
                         spans: property.spans,
+                        declaration_origin: Some(std::sync::Arc::from(scope_canonical_id)),
                     })
                 }
                 ObjectMember::Method(method) if requested.contains(method.name.as_str()) => {
@@ -410,8 +415,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         readonly: false,
                         is_method: true,
                         declared_in_macro_type_arg: false,
-                        // IR method carries its real OXC spans verbatim.
+                        // IR method carries its real OXC spans verbatim; the
+                        // body is projected in `scope_canonical_id` — its file.
                         spans: method.spans,
+                        declaration_origin: Some(std::sync::Arc::from(scope_canonical_id)),
                     })
                 }
                 _ => None,
@@ -572,10 +579,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             readonly: member.readonly,
             is_method: member.is_method,
             declared_in_macro_type_arg: false,
-            // `PreparedMember` carries the real OXC declaration-site spans;
-            // the value type may be re-projected above, but the member's own
-            // declaration site is unchanged.
+            // `PreparedMember` carries the real OXC declaration-site spans AND
+            // its defining file; the value type may be re-projected above, but
+            // the member's own declaration site is unchanged.
             spans: member.spans,
+            declaration_origin: (!member.declaration_origin.is_empty())
+                .then(|| std::sync::Arc::from(member.declaration_origin.as_str())),
         })
     }
 

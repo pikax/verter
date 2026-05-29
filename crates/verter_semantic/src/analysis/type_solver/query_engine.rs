@@ -35,10 +35,10 @@ pub struct ProjectedMember {
     /// IR [`verter_type_expr::ObjectProperty::spans`] /
     /// [`verter_type_expr::MethodSignature::spans`].
     ///
-    /// Offsets are in the member's DECLARATION file's source coordinates; the
-    /// file itself is implicit (the projection's scope) and not carried here —
-    /// the component-meta reconstruction (`projected_surface_to_type_expr`) only
-    /// re-emits these offsets onto the IR, which is likewise file-implicit.
+    /// Offsets are in the member's DECLARATION file's source coordinates — the
+    /// file recorded by [`Self::declaration_origin`]. A consumer pairs these
+    /// offsets with that file (NOT with the projection scope, which for a
+    /// cross-file `Pick<ImportedType, ...>` / `A & B` is a DIFFERENT file).
     ///
     /// Spans are content-version facts: they are NOT a query-identity key
     /// dimension and never enter `parse_stable_hash`. `None` components ONLY for
@@ -46,6 +46,19 @@ pub struct ProjectedMember {
     /// member, a generated macro artifact) with no single OXC declaration site —
     /// never as a "not implemented" placeholder.
     pub spans: MemberSpans,
+    /// Canonical file the member's DECLARATION (its `name` / `: T` annotation)
+    /// lives in — mirrors [`SurfaceMember::declaration_origin`] /
+    /// [`PreparedMember::declaration_origin`](super::prepared::PreparedMember::declaration_origin).
+    /// Carried verbatim from the projection source: the graph
+    /// `SurfaceMember::declaration_origin`, the prepared member's defining file,
+    /// or the LOWERING scope of an IR object literal. A consumer pairs the
+    /// [`Self::spans`] offsets with THIS file so a cross-file projected surface
+    /// (`Pick<ImportedType, "x">` where `ImportedType` lives in a different file
+    /// than the importing scope, or a cross-file intersection `A & B`) interprets
+    /// the offsets against the correct source. `None` only for a genuinely
+    /// synthetic / multi-origin member (a union common-member, a mapped-produced
+    /// member) — the same members whose [`Self::spans`] are absent.
+    pub declaration_origin: Option<Arc<str>>,
 }
 
 /// A single projected index signature (`[k: K]: V`) from a type surface.

@@ -4365,3 +4365,96 @@ fn resolve_imported_registry_symbol_resolves_once_under_concurrent_misses() {
         );
     }
 }
+
+/// FIX 3 (U3b fix-cycle, Claude P2): a CROSS-FILE projected surface member
+/// carries the DECLARATION file (`ProjectedMember.declaration_origin`) alongside
+/// its spans, so a consumer pairs the offsets with the correct source.
+///
+/// `Pick<ImportedType, "x">` where `ImportedType` is declared in `/src/base.ts`
+/// but the `Picked` alias (the importing/projection scope) lives in
+/// `/src/comp.ts`. The projected `x` member must report `declaration_origin =
+/// /src/base.ts` and its name span must slice the BASE file to `x` — NOT the
+/// importing `comp.ts` file.
+///
+/// Discriminating: pre-fix `ProjectedMember` carried no `declaration_origin`
+/// field, so a consumer could only assume "file = projection scope"
+/// (`/src/comp.ts`) and would slice the WRONG file. The threaded field makes the
+/// declaration file explicit; slicing `/src/base.ts` at the reported name span
+/// yields `x` (slicing `/src/comp.ts` at the same offsets would not).
+#[test]
+fn projected_member_declaration_origin_points_at_cross_file_declaration() {
+    // The base file declaring `ImportedType`. `x`'s name token is at a byte
+    // offset that, interpreted against `comp.ts`, would land on different text.
+    const BASE_SRC: &str = "export interface ImportedType {\n  x: string\n  y: number\n}\n";
+    const BASE_FILE: &str = "/src/base.ts";
+
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(BASE_FILE.to_string(), Arc::from(BASE_SRC));
+    ws.inject_file(
+        "/src/comp.ts".to_string(),
+        Arc::from(
+            "import type { ImportedType } from './base'\nexport type Picked = Pick<ImportedType, 'x'>\n",
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded(BASE_FILE));
+    assert!(host.ensure_loaded("/src/comp.ts"));
+
+    let mut engine = ComponentMetaQueryEngine::new(&host);
+    let surface = engine
+        .project_prepared_root_surface("/src/comp.ts", "Picked")
+        .expect("Pick<ImportedType, 'x'> must project a surface");
+
+    let member = surface
+        .members
+        .iter()
+        .find(|m| m.name == "x")
+        .unwrap_or_else(|| {
+            panic!(
+                "the picked `x` member must be on the surface; got {:?}",
+                surface.members.iter().map(|m| &m.name).collect::<Vec<_>>()
+            )
+        });
+
+    // The declaration file is `ImportedType`'s file, NOT the importing scope.
+    assert_eq!(
+        member.declaration_origin.as_deref(),
+        Some(BASE_FILE),
+        "cross-file picked member must carry ImportedType's DECLARATION file, \
+         not the importing/projection scope (/src/comp.ts)"
+    );
+
+    // The name span pairs with that declaration file: slicing BASE_SRC at the
+    // reported offsets yields the `x` token.
+    let name_span = member
+        .spans
+        .name
+        .expect("the picked member must carry a real name span from its declaration site");
+    assert_eq!(
+        &BASE_SRC[name_span.start as usize..name_span.end as usize],
+        "x",
+        "the name span must slice the DECLARATION file (base.ts) to the `x` token"
+    );
+
+    // NEGATIVE: the same offsets against the importing file do NOT yield `x` —
+    // proving the file pairing matters (the importing file's bytes at this range
+    // are different text, or the range falls outside it entirely). This is the
+    // bug the threaded declaration file closes.
+    const COMP_SRC: &str =
+        "import type { ImportedType } from './base'\nexport type Picked = Pick<ImportedType, 'x'>\n";
+    let comp_slice = COMP_SRC.get(name_span.start as usize..name_span.end as usize);
+    assert_ne!(
+        comp_slice,
+        Some("x"),
+        "pairing the declaration offsets with the WRONG (importing) file must not yield `x`"
+    );
+}

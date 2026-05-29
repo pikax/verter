@@ -26,8 +26,9 @@ fn surface_with_member(name: &str) -> std::sync::Arc<ProjectedSurface> {
             readonly: false,
             is_method: false,
             declared_in_macro_type_arg: false,
-            // Synthetic test probe with no OXC declaration site — no spans.
+            // Synthetic test probe with no OXC declaration site — no spans/origin.
             spans: verter_type_expr::MemberSpans::default(),
+            declaration_origin: None,
         }],
         call_signatures: Vec::new(),
         construct_signatures: Vec::new(),
@@ -154,6 +155,7 @@ fn projected_surface_to_type_expr_reemits_member_spans() {
             name: Some(Span::new(10, 15)),
             type_annotation: Some(Span::new(17, 23)),
         },
+        declaration_origin: Some(std::sync::Arc::from("/decl.ts")),
     };
     let surface = ProjectedSurface {
         members: vec![member],

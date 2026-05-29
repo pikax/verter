@@ -69,9 +69,12 @@ pub(crate) fn surface_view_to_projected_surface(
             is_method: member.is_method,
             declared_in_macro_type_arg: member.declared_in_macro_type_arg,
             // Graph `SurfaceMember` carries the real OXC declaration-site spans
-            // (stamped during shallow lowering); carry them verbatim onto the
-            // projected member so the reconstruction re-emits them.
+            // (stamped during shallow lowering) AND the member's declaration
+            // file; carry both verbatim so the reconstruction re-emits the spans
+            // paired with the correct file (a cross-file surface's members keep
+            // their own declaring file, not the projection scope).
             spans: member.spans,
+            declaration_origin: member.declaration_origin.clone(),
         })
         .collect();
     let call_signatures = surface
@@ -443,6 +446,11 @@ pub(super) fn projected_surface_from_object_expr(
     let mut construct_signatures = Vec::new();
     let mut index_signatures = Vec::new();
     let mut has_index_signature = false;
+    // An IR object literal's members are declared in the file the literal is
+    // being lowered/projected in — the projection scope. Carry that as each
+    // member's declaration file so its spans pair with the correct source.
+    let declaration_origin: Option<std::sync::Arc<str>> =
+        scope_canonical_id.map(std::sync::Arc::from);
 
     // `from_root_body` is the caller's macro-T own-body flag
     // threaded through the walker. A `TypeExpr::Object` reached at a
@@ -462,6 +470,7 @@ pub(super) fn projected_surface_from_object_expr(
                 declared_in_macro_type_arg: from_root_body,
                 // IR property carries its real OXC spans verbatim.
                 spans: property.spans,
+                declaration_origin: declaration_origin.clone(),
             }),
             ObjectMember::Method(method) => members.push(ProjectedMember {
                 name: method.name.clone(),
@@ -472,6 +481,7 @@ pub(super) fn projected_surface_from_object_expr(
                 declared_in_macro_type_arg: from_root_body,
                 // IR method carries its real OXC spans verbatim.
                 spans: method.spans,
+                declaration_origin: declaration_origin.clone(),
             }),
             ObjectMember::CallSignature(function) => {
                 call_signatures.push(TypeExpr::Function(std::sync::Arc::new(function.clone())));
@@ -526,6 +536,10 @@ pub(super) fn projected_surface_from_object_expr_with_substitutions(
     let mut construct_signatures = Vec::new();
     let mut index_signatures = Vec::new();
     let mut has_index_signature = false;
+    // See companion comment on `projected_surface_from_object_expr`: each member's
+    // declaration file is the projection scope of the IR object literal.
+    let declaration_origin: Option<std::sync::Arc<str>> =
+        scope_canonical_id.map(std::sync::Arc::from);
 
     // `from_root_body` is the caller's macro-T own-body flag
     // threaded through the walker — see companion comment on
@@ -543,6 +557,7 @@ pub(super) fn projected_surface_from_object_expr_with_substitutions(
                 // Generic instantiation rewrites the member's value type but
                 // NOT its source declaration site — carry the real OXC spans.
                 spans: property.spans,
+                declaration_origin: declaration_origin.clone(),
             }),
             ObjectMember::Method(method) => members.push(ProjectedMember {
                 name: method.name.clone(),
@@ -557,6 +572,7 @@ pub(super) fn projected_surface_from_object_expr_with_substitutions(
                 // Generic instantiation rewrites the member's value type but
                 // NOT its source declaration site — carry the real OXC spans.
                 spans: method.spans,
+                declaration_origin: declaration_origin.clone(),
             }),
             ObjectMember::CallSignature(function) => call_signatures.push(TypeExpr::Function(
                 std::sync::Arc::new(substitute_function_expr_if_needed(function, substitutions)),

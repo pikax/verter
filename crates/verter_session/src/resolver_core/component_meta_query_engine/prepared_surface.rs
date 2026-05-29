@@ -846,9 +846,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         is_method: member.is_method,
                         declared_in_macro_type_arg: from_root_body,
                         // `PreparedMember` carries the real OXC declaration-site
-                        // spans; substitution rewrites the value type, not the
-                        // member's own declaration site.
+                        // spans AND its defining file; substitution rewrites the
+                        // value type, not the member's own declaration site. For a
+                        // cross-file `Pick<ImportedType, ...>` this defining file
+                        // is `ImportedType`'s file, NOT the importing scope.
                         spans: member.spans,
+                        declaration_origin: (!member.declaration_origin.is_empty())
+                            .then(|| std::sync::Arc::from(member.declaration_origin.as_str())),
                     };
                     if !type_expr_references_type_params(&member.ty, &prepared.type_parameters) {
                         self.cache_prepared_requested_member(
@@ -1013,8 +1017,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         declared_in_macro_type_arg: from_root_body,
                         // IR property carries its real OXC spans verbatim;
                         // substitution rewrites the value type, not the
-                        // member's own declaration site.
+                        // member's own declaration site. The literal is walked in
+                        // `scope_canonical_id` — that is its declaration file.
                         spans: property.spans,
+                        declaration_origin: Some(std::sync::Arc::from(scope_canonical_id)),
                     })
                 }
                 ObjectMember::Method(method) if method.name == member_name => {
@@ -1029,8 +1035,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         declared_in_macro_type_arg: from_root_body,
                         // IR method carries its real OXC spans verbatim;
                         // substitution rewrites the value type, not the
-                        // member's own declaration site.
+                        // member's own declaration site. The literal is walked in
+                        // `scope_canonical_id` — that is its declaration file.
                         spans: method.spans,
+                        declaration_origin: Some(std::sync::Arc::from(scope_canonical_id)),
                     })
                 }
                 _ => None,
