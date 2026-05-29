@@ -497,9 +497,12 @@ impl VerterHost {
             self.resolve_type_dependency_canonical(augmenter_canonical, specifier)
                 .map(Arc::from)
         };
+        // Bind a shared reference so each probe passes the resolver by
+        // reference without re-borrowing at every call site.
+        let resolver = &resolver;
         let any_non_empty = |target: AugmentationTargetKind| {
             !store
-                .ensure_augmentation_index_populated(&make_key(target), &resolver)
+                .ensure_augmentation_index_populated(&make_key(target), resolver)
                 .entries
                 .is_empty()
         };
