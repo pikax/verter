@@ -1,0 +1,211 @@
+//! `impl VerterHost` — cache-runtime accessors and probes.
+//!
+//! Owns the host-side methods that drive the compile-cache mode
+//! classifier and surface the content-addressed compile-output node:
+//! - [`VerterHost::workspace_aliases_for_canonical`] — configured
+//!   workspace path-aliases for the project that owns a canonical;
+//! - [`VerterHost::owner_has_module_augmentation_dependency`] — the
+//!   closure-aware probe that floors a `Content`-requested compile to
+//!   `Stateless` (so the fact-validated `Session` route runs) whenever
+//!   any module augmentation could reach the owner's declaration graph;
+//! - [`VerterHost::compile_output_pure_content`] — read accessor for the
+//!   project-wide content-addressed `CompileOutputNode_PureContent`;
+//! - [`VerterHost::compile_output_pure_content_entry_count`] — test-only
+//!   helper that integration tests use to verify `Content` mode publishes
+//!   into this node while `Session` / `Stateless` modes do not.
+//!
+//! Construction (field initialisation in `new` /
+//! `new_with_scheduler_config` / `new_standalone` /
+//! `new_standalone_with_scheduler_config`) stays in
+//! [`crate::host_construction`]. Eviction lives in
+//! [`crate::host_construction::VerterHost::drop_all_per_canonical_compile_caches`]
+//! and the per-file invalidation paths under [`crate::host_upsert`].
+
+use std::sync::Arc;
+
+use crate::VerterHost;
+
+impl VerterHost {
+    /// Configured workspace path-aliases for the project that owns
+    /// `canonical`, or an empty vec when no configured project claims it
+    /// (ambient libs, fallback projects, or a workspace without a
+    /// published snapshot).
+    ///
+    /// Used by the compile-cache mode classifier's
+    /// [`crate::compile_cache_mode::has_workspace_alias`] predicate so a
+    /// `Content`-requested compile of a file that resolves an import
+    /// through an alias is correctly recognised as alias-dependent. The
+    /// resolved alias dependency is part of the session resolution state,
+    /// so `Session` mode stays eligible regardless.
+    #[must_use]
+    pub(crate) fn workspace_aliases_for_canonical(
+        &self,
+        canonical: &str,
+    ) -> Vec<verter_workspace::WorkspaceAlias> {
+        use verter_workspace::workspace_snapshot::ProjectPayload;
+        let Some(root) = self.workspace().published_root() else {
+            return Vec::new();
+        };
+        let snapshot = &root.snapshot;
+        let Some(project_id) = snapshot.owners_for_file(canonical).first().copied() else {
+            return Vec::new();
+        };
+        match snapshot
+            .projects
+            .get(project_id.0 as usize)
+            .map(|p| &p.payload)
+        {
+            Some(ProjectPayload::Configured {
+                workspace_aliases, ..
+            }) => workspace_aliases.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// True iff a compile of `canonical` could consume any module
+    /// augmentation reachable from its declaration graph, under the live
+    /// project resolve / lib env.
+    ///
+    /// The compile-cache mode classifier hands the result to
+    /// [`crate::compile_cache_mode::EligibilityInputs::owner_has_module_augmentation`].
+    /// A content-addressed `Content` key carries no augmenter fingerprint,
+    /// so editing an augmenter that contributes to a consumed module would
+    /// leave the key byte-identical and serve stale output; a `true`
+    /// result floors a `Content` request to `Stateless` and routes the
+    /// fact-validated `Session` path instead.
+    ///
+    /// The signal is closure-aware via the augmentation TARGET index, not
+    /// the owner's own declared augmentations: an imported / ambient
+    /// augmenter (`declare module "vue"` in a sibling `.d.ts`) leaves NO
+    /// trace on the owner's `FileArtifacts.augmentations`. The probe set is
+    /// the union of:
+    ///
+    /// * one target per owner import specifier — bare specifiers probe
+    ///   [`AugmentationTargetKind::ExternalSpecifier`], relative specifiers
+    ///   probe [`AugmentationTargetKind::ResolvedRelativeCanonical`]
+    ///   against the import's already-resolved canonical;
+    /// * [`AugmentationTargetKind::GlobalAugmentation`] (a `declare global`
+    ///   block augments every file regardless of imports);
+    /// * one [`AugmentationTargetKind::WildcardAmbient`] per distinct
+    ///   wildcard pattern declared anywhere in the base artifact set (a
+    ///   wildcard ambient applies via a matching import, so it cannot be
+    ///   derived from the owner's specifiers alone — see
+    ///   [`crate::file_artifact_store::FileArtifactStore::declared_wildcard_ambient_patterns`]).
+    ///
+    /// Each target routes through
+    /// [`crate::file_artifact_store::FileArtifactStore::ensure_augmentation_index_populated`],
+    /// which cold-scans + installs on a miss and warm-hits on a hit — the
+    /// index is populated lazily, so a passive `get` would read "empty"
+    /// for a target that simply has not been queried yet. Returns `true`
+    /// as soon as any probed target resolves to a non-empty augmenter set.
+    ///
+    /// The classifier calls this only for `Content` requests (`Session`
+    /// stays `Session` under every reason and `Stateless` is the floor),
+    /// so the scan cost is paid only on the rare explicit `Content`
+    /// opt-in.
+    #[must_use]
+    pub(crate) fn owner_has_module_augmentation_dependency(&self, canonical: &str) -> bool {
+        use crate::file_artifact_store::{AugmentationTargetKey, AugmentationTargetKind};
+        use verter_semantic::facts::registry::InternedSpecifier;
+
+        let store = self.project_type_store.indexed();
+        let env = self.host_view_env_hashes_for(canonical);
+        let project_identity = self.host_view_project_identity_for(canonical);
+        let make_key = |target: AugmentationTargetKind| AugmentationTargetKey {
+            project_identity,
+            resolve_env_hash: env.resolve_env_hash,
+            lib_env_hash: env.lib_env_hash,
+            target,
+        };
+        // The augmenter's relative `declare module "./x"` specifiers
+        // resolve against the augmenter's own canonical through the live
+        // type-dependency resolver — the same authority the
+        // augmentation-stitching pass uses.
+        let resolver = |augmenter_canonical: &str, specifier: &str| {
+            self.resolve_type_dependency_canonical(augmenter_canonical, specifier)
+                .map(Arc::from)
+        };
+        // Bind a shared reference so each probe passes the resolver by
+        // reference without re-borrowing at every call site.
+        let resolver = &resolver;
+        let any_non_empty = |target: AugmentationTargetKind| {
+            !store
+                .ensure_augmentation_index_populated(&make_key(target), resolver)
+                .entries
+                .is_empty()
+        };
+
+        // Collect the per-import probe targets from the owner's own import
+        // specifiers: an external (`declare module "vue"`) or relative
+        // (`declare module "./x"`) augmenter can only reach the owner
+        // through a matching import. `ensure_indexed_ready` materialises
+        // the owner's artifact (and its shallow import table) into the
+        // store on a miss.
+        let mut per_import_targets: Vec<AugmentationTargetKind> = Vec::new();
+        if let Some(indexed) = self.ensure_indexed_ready(canonical) {
+            for import in indexed.shallow_state.import_targets.values() {
+                // Materialise each resolved dependency so a direct-dep
+                // augmenter enters the store BEFORE any target probe runs:
+                // the index cold-scan installs its result on first query,
+                // and an augmenter that has not entered `FileArtifactStore`
+                // contributes nothing (R29). Indexing every dep up front
+                // (rather than interleaved with probing) keeps the result
+                // independent of the unordered import-table iteration.
+                if !import.canonical_id.is_empty() {
+                    let _ = self.ensure_indexed_ready(&import.canonical_id);
+                }
+                let specifier = import.source_specifier.as_str();
+                if specifier.starts_with("./") || specifier.starts_with("../") {
+                    per_import_targets.push(AugmentationTargetKind::ResolvedRelativeCanonical(
+                        Arc::from(import.canonical_id.as_str()),
+                    ));
+                } else if !specifier.contains('*') {
+                    per_import_targets.push(AugmentationTargetKind::ExternalSpecifier(
+                        InternedSpecifier::from(specifier),
+                    ));
+                }
+            }
+        }
+
+        // Probe every target through the (now fully materialised) store.
+        // Ambient kinds apply WITHOUT a precise importer-specifier match —
+        // a global block augments every file and a wildcard ambient
+        // augments any matching import — so they are always probed.
+        for target in per_import_targets {
+            if any_non_empty(target) {
+                return true;
+            }
+        }
+        if any_non_empty(AugmentationTargetKind::GlobalAugmentation) {
+            return true;
+        }
+        for pattern in store.declared_wildcard_ambient_patterns() {
+            if any_non_empty(AugmentationTargetKind::WildcardAmbient(pattern)) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Content-addressed compile-output cache node, shared project-wide.
+    /// Used by the `CompileCacheMode::Content` compile route; the
+    /// fact-validated `Session` route uses the per-profile compile cache
+    /// instead.
+    #[must_use]
+    pub(crate) fn compile_output_pure_content(
+        &self,
+    ) -> &crate::cache_runtime::CompileOutputNodePureContent {
+        self.project_type_store.compile_output_pure_content()
+    }
+
+    /// Number of entries in the content-addressed compile-output cache.
+    /// Used by integration tests to verify that `Content`-mode publishes
+    /// land in this node while `Session` / `Stateless` modes do not.
+    #[cfg(any(test, debug_assertions))]
+    #[must_use]
+    pub fn compile_output_pure_content_entry_count(&self) -> usize {
+        self.project_type_store
+            .compile_output_pure_content()
+            .entry_count()
+    }
+}
