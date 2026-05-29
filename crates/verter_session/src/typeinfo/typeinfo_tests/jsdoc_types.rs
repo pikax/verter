@@ -268,3 +268,148 @@ fn ts_declaration_wins_over_jsdoc_typedef_of_same_name() {
         "the JSDoc typedef body must NOT shadow the TS declaration's surface"
     );
 }
+
+/// `@param {T}` / `@returns {T}` on an ARROW / function-expression value are the
+/// parameter / return annotations exactly like a TS `const f: (x: T) => U`. The
+/// JSDoc'd arrow value `jsdocFn` (param `x` untyped, body returns `{ a, b }`)
+/// must resolve to the SAME signature as the TS-annotated `tsFn`. Pre-fix the
+/// arrow's signature was built but never enriched, so `x` was `any` and the
+/// return was the body-inferred shape — not `Foo` / `Bar`.
+const JSDOC_FN_VALUE_FIXTURE: &str = r#"
+export interface Foo { a: string }
+export interface Bar { b: number }
+
+/**
+ * @param {Foo} x
+ * @returns {Bar}
+ */
+export const jsdocFn = (x) => ({ a: "x", b: 1 });
+
+export const tsFn: (x: Foo) => Bar = (x) => ({ a: "x", b: 1 });
+"#;
+
+/// The single parameter type + the return type of a `typeof fn` function
+/// surface. Panics if `expr` is not a single-parameter function. Param/return
+/// types stay SHALLOW (`Ref`) under the shallow-by-default rule — the function
+/// surface is not deep-expanded.
+fn single_param_and_return(expr: &TypeExpr) -> (TypeExpr, TypeExpr) {
+    let func = function_type(expr);
+    assert_eq!(
+        func.parameters.len(),
+        1,
+        "expected a single-parameter function, got {expr:?}"
+    );
+    let param_ty = func.parameters[0].ty.clone();
+    let return_ty = func
+        .return_type
+        .as_ref()
+        .map(|rt| (**rt).clone())
+        .unwrap_or_else(|| panic!("function must carry a return type, got {expr:?}"));
+    (param_ty, return_ty)
+}
+
+#[test]
+fn jsdoc_param_returns_on_arrow_value_resolve_identically_to_ts_function_annotation() {
+    let host = make_host_with_footprint();
+    upsert_ts(&host, "/fixtures/jsdoc-fn-value.ts", JSDOC_FN_VALUE_FIXTURE);
+
+    let (ts_expr, ts_record) = evaluate_expr(
+        &host,
+        "/fixtures/jsdoc-fn-value.ts",
+        "typeof tsFn",
+        ProjectionMode::Expanded,
+    );
+    let (jsdoc_expr, jsdoc_record) = evaluate_expr(
+        &host,
+        "/fixtures/jsdoc-fn-value.ts",
+        "typeof jsdocFn",
+        ProjectionMode::Expanded,
+    );
+
+    let (ts_param, ts_return) = single_param_and_return(&ts_expr);
+    let (jsdoc_param, jsdoc_return) = single_param_and_return(&jsdoc_expr);
+
+    // The TS-annotated arrow's param is the shallow `Ref { Foo }` and its return
+    // the shallow `Ref { Bar }` — the baseline the JSDoc side must match (a
+    // function surface stays shallow; params/return are NOT deep-expanded).
+    assert_ref(&ts_param, "Foo");
+    assert_ref(&ts_return, "Bar");
+
+    // DISCRIMINATING: the JSDoc'd arrow's parameter must be `Ref { Foo }` (not
+    // the `any` placeholder) and its return `Ref { Bar }` (not the body-inferred
+    // `{ a, b }` object). Both fail pre-fix (the arrow signature was never
+    // enriched): the param stays `Primitive(Any)` and the return is the inferred
+    // object literal.
+    assert_ref(&jsdoc_param, "Foo");
+    assert!(
+        !matches!(jsdoc_param, TypeExpr::Primitive(PrimitiveName::Any)),
+        "the `@param {{Foo}} x` must type the arrow's parameter — a leftover `any` proves the \
+         arrow signature was never enriched from JSDoc (got {jsdoc_param:?})"
+    );
+    assert_ref(&jsdoc_return, "Bar");
+    assert!(
+        !matches!(jsdoc_return, TypeExpr::Object(_)),
+        "the `@returns {{Bar}}` must shadow the body-inferred object return — a leftover object \
+         shape proves `@returns` was ignored (got {jsdoc_return:?})"
+    );
+
+    // The strongest "no separate path" assertion: the JSDoc'd arrow value
+    // resolves to the IDENTICAL parameter / return TypeExpr the TS-annotated
+    // value does (one shared resolver, one lowering).
+    assert_eq!(
+        jsdoc_param, ts_param,
+        "the `@param {{Foo}}`-typed parameter must equal the TS `(x: Foo)` parameter type"
+    );
+    assert_eq!(
+        jsdoc_return, ts_return,
+        "the `@returns {{Bar}}`-typed return must equal the TS `=> Bar` return type"
+    );
+
+    assert_query_mode(&ts_record, ProjectionModeTag::Expanded);
+    assert_query_mode(&jsdoc_record, ProjectionModeTag::Expanded);
+}
+
+/// TS-annotation precedence on an arrow value: an explicit TS annotation on the
+/// parameter / return ALWAYS wins over a conflicting JSDoc `@param`/`@returns`.
+const JSDOC_FN_VALUE_TS_WINS_FIXTURE: &str = r#"
+export interface Foo { a: string }
+export interface Bar { b: number }
+export interface Wrong { z: boolean }
+
+/**
+ * @param {Wrong} x
+ * @returns {Wrong}
+ */
+export const tsAnnotatedFn = (x: Foo): Bar => ({ a: "x", b: 1 });
+"#;
+
+#[test]
+fn ts_annotation_on_arrow_value_wins_over_conflicting_jsdoc() {
+    let host = make_host_with_footprint();
+    upsert_ts(
+        &host,
+        "/fixtures/jsdoc-fn-ts-wins.ts",
+        JSDOC_FN_VALUE_TS_WINS_FIXTURE,
+    );
+
+    let (expr, _) = evaluate_expr(
+        &host,
+        "/fixtures/jsdoc-fn-ts-wins.ts",
+        "typeof tsAnnotatedFn",
+        ProjectionMode::Expanded,
+    );
+    let (param, ret) = single_param_and_return(&expr);
+
+    // The explicit TS annotations win: param is `Ref { Foo }` / return is
+    // `Ref { Bar }`, NOT the JSDoc `Wrong`.
+    assert_ref(&param, "Foo");
+    assert!(
+        !matches!(&param, TypeExpr::Ref { name, .. } if name.as_ref() == "Wrong"),
+        "the explicit TS `(x: Foo)` annotation must win over `@param {{Wrong}}` (got {param:?})"
+    );
+    assert_ref(&ret, "Bar");
+    assert!(
+        !matches!(&ret, TypeExpr::Ref { name, .. } if name.as_ref() == "Wrong"),
+        "the explicit TS `: Bar` return annotation must win over `@returns {{Wrong}}` (got {ret:?})"
+    );
+}

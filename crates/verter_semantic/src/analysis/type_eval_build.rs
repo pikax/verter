@@ -627,10 +627,36 @@ fn enrich_function_signature_with_jsdoc(
     name_offset: u32,
     has_ts_return: bool,
 ) {
+    enrich_params_and_return_with_jsdoc(
+        &mut sig.parameters,
+        &mut sig.return_type,
+        source,
+        name_offset,
+        has_ts_return,
+    );
+}
+
+/// Backfill a parameter list + return type from a leading JSDoc block, for the
+/// parameters / return that carried NO TS annotation. The shared core both
+/// [`FunctionSignature`] (function declarations / initializer signatures) and
+/// an inferred [`FunctionExpr`] `type_annotation` (an arrow / function-
+/// expression value's inferred type) enrich through.
+///
+/// `has_ts_return` records whether the function had an explicit TS return
+/// annotation; when it did, the JSDoc `@returns` is ignored (the TS annotation
+/// is authoritative). Each backfilled type is the lowered `{T}` payload from
+/// [`crate::analysis::jsdoc`].
+fn enrich_params_and_return_with_jsdoc(
+    parameters: &mut [FunctionParam],
+    return_type: &mut Option<TypeExpr>,
+    source: &str,
+    name_offset: u32,
+    has_ts_return: bool,
+) {
     let param_types =
         crate::analysis::jsdoc::extract_jsdoc_param_types_at_offset(source, name_offset);
     if !param_types.is_empty() {
-        for param in &mut sig.parameters {
+        for param in parameters.iter_mut() {
             // Only fill a parameter whose type is still the `Any` placeholder
             // (`lower_function_params` defaults to `Any` when no TS annotation
             // is present) — a real TS annotation is never overwritten.
@@ -647,16 +673,38 @@ fn enrich_function_signature_with_jsdoc(
     }
 
     // A TS return annotation is authoritative; only consult `@returns` when the
-    // function declared no TS return type. `extract_function_signature` may have
-    // body-inferred a return type, but an explicit JSDoc `@returns` is a stated
-    // annotation and takes priority over body inference.
+    // function declared no TS return type. The signature may have body-inferred
+    // a return type, but an explicit JSDoc `@returns` is a stated annotation and
+    // takes priority over body inference.
     if !has_ts_return {
         if let Some(jsdoc_return) =
             crate::analysis::jsdoc::extract_jsdoc_return_type_at_offset(source, name_offset)
         {
-            sig.return_type = Some(jsdoc_return);
+            *return_type = Some(jsdoc_return);
         }
     }
+}
+
+/// Enrich an inferred [`FunctionExpr`] `type_annotation` (built by
+/// `infer_expression_type` from a function-expression initializer) with the
+/// declaration's JSDoc `@param`/`@returns`, bridging the `Arc<TypeExpr>` return
+/// carrier to the shared [`enrich_params_and_return_with_jsdoc`] core.
+fn enrich_function_expr_with_jsdoc(
+    function: &mut Arc<FunctionExpr>,
+    source: &str,
+    name_offset: u32,
+    has_ts_return: bool,
+) {
+    let function = Arc::make_mut(function);
+    let mut return_type = function.return_type.as_ref().map(|rt| (**rt).clone());
+    enrich_params_and_return_with_jsdoc(
+        &mut function.parameters,
+        &mut return_type,
+        source,
+        name_offset,
+        has_ts_return,
+    );
+    function.return_type = return_type.map(Arc::new);
 }
 
 fn extract_variable(
@@ -703,10 +751,31 @@ fn extract_variable(
         function_signature = extract_initializer_function_signature(init, source);
         object_shape = extract_initializer_object_shape(init, source);
 
+        // An arrow / function-expression VALUE documents its parameter / return
+        // types the same way a `function` declaration does: a leading JSDoc
+        // `@param {T} name` / `@returns {T}` IS the annotation when no TS
+        // annotation is present (JSDoc-typed JS is first-class). Enrich the
+        // initializer signature through the SAME lowering a TS annotation uses,
+        // preserving TS precedence — a parameter that carried a TS annotation
+        // keeps it, and a TS return annotation on the initializer suppresses
+        // `@returns`.
+        let has_ts_return = initializer_has_ts_return_annotation(init);
+        if let Some(sig) = function_signature.as_mut() {
+            enrich_function_signature_with_jsdoc(sig, source, name_offset, has_ts_return);
+        }
+
         if type_annotation.is_none() {
             let mut inferred = infer_expression_type(init, source);
             if matches!(var_kind, ValueDeclKind::Let | ValueDeclKind::Var) {
                 inferred = widen_literal_type(inferred);
+            }
+            // The inferred `type_annotation` is the carrier query-time projection
+            // consumes first (it precedes `function_signature`). When inference
+            // produced a function type from a function-expression initializer,
+            // enrich THAT function's params/return from the same JSDoc so the
+            // projected signature is JSDoc-typed (not the un-enriched inference).
+            if let TypeExpr::Function(function) = &mut inferred {
+                enrich_function_expr_with_jsdoc(function, source, name_offset, has_ts_return);
             }
             if !matches!(inferred, TypeExpr::Primitive(PrimitiveName::Any)) {
                 type_annotation = Some(inferred);
@@ -756,6 +825,28 @@ fn extract_initializer_function_signature(
             extract_initializer_function_signature(&paren.expression, source)
         }
         _ => None,
+    }
+}
+
+/// Whether an arrow / function-expression initializer carries an explicit TS
+/// return annotation (`(x) => T` / `function (): T`). Mirrors the unwrap chain
+/// of [`extract_initializer_function_signature`] so a wrapped initializer
+/// (`as` / `satisfies` / parenthesized) is seen through. Used to suppress a
+/// JSDoc `@returns` when the value already states a TS return type.
+fn initializer_has_ts_return_annotation(expr: &Expression<'_>) -> bool {
+    match expr {
+        Expression::ArrowFunctionExpression(arrow) => arrow.return_type.is_some(),
+        Expression::FunctionExpression(func) => func.return_type.is_some(),
+        Expression::TSAsExpression(ts_as) => {
+            initializer_has_ts_return_annotation(&ts_as.expression)
+        }
+        Expression::TSSatisfiesExpression(sat) => {
+            initializer_has_ts_return_annotation(&sat.expression)
+        }
+        Expression::ParenthesizedExpression(paren) => {
+            initializer_has_ts_return_annotation(&paren.expression)
+        }
+        _ => false,
     }
 }
 
