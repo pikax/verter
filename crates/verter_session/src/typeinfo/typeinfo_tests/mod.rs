@@ -66,4 +66,5 @@ mod utility_edge;
 mod utility_top_bottom;
 mod value_inference;
 mod variadic_tuples;
+mod vue_adapter;
 mod wide_deep;
