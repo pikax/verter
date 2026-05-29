@@ -698,6 +698,13 @@ impl VerterHost {
             /// `Content`-mode publish keys the content-addressed entry on the
             /// exact source version that was compiled.
             whole_hash: Hash16,
+            /// The mode classification, computed once under the read lock
+            /// from this request's effective eligibility surface. The
+            /// classifier is the sole authority for the mode decision and
+            /// gates the warm-hit consult, so it must be known BEFORE any
+            /// cache read. Carried out of the block so the audit event and
+            /// the compile/publish routing reuse the single classification.
+            classification: crate::compile_cache_mode::CompileModeClassification,
         }
 
         // Capture scheduler source state at compile START for artifact commit.
@@ -736,17 +743,111 @@ impl VerterHost {
                     })
                     .unwrap_or(0);
 
-                // Warm-hit consult, routed by the requested cache mode.
-                // `Session` validates the fact-validated session slot;
-                // `Content` peeks the pure content-addressed entry;
-                // `Stateless` bypasses both nodes. The warm hit returns
-                // the requested node's output + diagnostics, which are
-                // identical in shape across modes.
+                // Build this request's effective compile input (override-
+                // aware) and classify the cache mode BEFORE any warm-hit
+                // consult. The classifier is the sole authority for the
+                // mode decision and it gates the cache read: a request that
+                // classifies to `Stateless` must not consult any host cache
+                // node, and a `Content` warm hit is valid only when the
+                // request actually classifies to `Content`. A request-time
+                // block / style override removes the session slot but does
+                // not bump `whole_hash` nor evict the content-addressed
+                // entry, so consulting before classification would serve a
+                // stale `Content` entry for an input the override forces to
+                // downgrade. Classifying first closes that gap.
+                let efs = self
+                    .effective_file_state(&canonical_id, Some(profile_hash))
+                    .ok_or_else(|| HostError::MissingSource {
+                        canonical_id: canonical_id.clone(),
+                    })?;
+                let effective_meta = self
+                    .effective_meta(&canonical_id, Some(profile_hash))
+                    .unwrap_or_else(|| parse.meta.clone());
+
+                let style_override_layer = cc_ref.as_ref().and_then(|cc| {
+                    cc.style_overrides
+                        .get(&profile_hash)
+                        .map(|o| o.layer.clone())
+                });
+                let content_override_layer = cc_ref.as_ref().and_then(|cc| {
+                    cc.content_overrides
+                        .get(&profile_hash)
+                        .map(|o| o.layer.clone())
+                });
+                let fallback_last_good = cc_ref.as_ref().and_then(|cc| {
+                    let session_node =
+                        crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                    session_node.peek_last_good(cc, profile_hash)
+                });
+
+                // Style v-bind vars from raw analysis (override-independent)
+                let analysis_snap = self.scheduler.try_get_analysis(&canonical_id);
+                let style_analyses: Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>> =
+                    analysis_snap
+                        .as_ref()
+                        .and_then(|a| a.downcast_data::<HostAnalysisData>())
+                        .map(|ad| Arc::clone(&ad.style_analyses))
+                        .unwrap_or_default();
+
+                let compile_input = CompileInput {
+                    canonical_id: canonical_id.clone(),
+                    source: efs.source,
+                    meta: effective_meta.clone(),
+                    parse_diagnostics: parse.parse_diagnostics.clone(),
+                    src_blocks: parse.src_blocks.clone(),
+                    external_requests: parse.external_requests.clone(),
+                    style_override_layer,
+                    content_override_layer,
+                    macro_type_deps: efs.script_analysis.macro_type_deps.clone(),
+                    script_imports: efs.script_analysis.imports.clone(),
+                    script_macros: efs.script_analysis.macros.clone(),
+                    script_bindings: efs.script_analysis.bindings.clone(),
+                    cached_parse: efs.cached_parse,
+                    style_v_bind_vars: style_analyses
+                        .iter()
+                        .flat_map(|sa| {
+                            sa.v_binds.iter().map(|vb| {
+                                vb.expression
+                                    .split('.')
+                                    .next()
+                                    .unwrap_or(&vb.expression)
+                                    .to_string()
+                            })
+                        })
+                        .collect(),
+                };
+
+                // Classify EXACTLY ONCE per compile, here under the read
+                // lock, so `actual_mode` is known before the warm-hit
+                // consult and reused by the compile / publish routing.
+                let classification = crate::compile_cache_mode::classify_compile_mode(
+                    requested_mode,
+                    &crate::compile_cache_mode::EligibilityInputs {
+                        input: &compile_input,
+                        profile: &query.compile_profile,
+                        config: &self.config,
+                        workspace_aliases: &self.workspace_aliases_for_canonical(&canonical_id),
+                        owner_has_module_augmentation:
+                            crate::compile_cache_mode::has_module_augmentation(
+                                &canonical_id,
+                                self.project_type_store.indexed(),
+                            ),
+                    },
+                );
+                let actual_mode = classification.actual_mode;
+
+                // Warm-hit consult, routed by the ACTUAL (classified) cache
+                // mode. `Session` validates the fact-validated session slot;
+                // `Content` peeks the pure content-addressed entry; a request
+                // that classified to `Stateless` (including a downgraded
+                // `Content`) bypasses both nodes. The warm hit returns the
+                // node's output + diagnostics, which are identical in shape
+                // across modes.
                 struct WarmHit {
                     outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
                     diagnostics: DiagnosticsSnapshot,
                 }
-                let warm_hit: Option<WarmHit> = match requested_mode {
+                let warm_hit: Option<WarmHit> = match actual_mode {
                     CompileCacheMode::Stateless => None,
                     CompileCacheMode::Session => cc_ref.as_ref().and_then(|cc| {
                         let session_node =
@@ -796,11 +897,13 @@ impl VerterHost {
                     }
 
                     if let Some(found) = hit.outputs.get(&node_kind) {
-                        // A warm hit means the request was served for its
-                        // requested mode (Session always hits the session
-                        // node; Content only hits PureContent when it was
-                        // published as Content, i.e. no reason fired), so
-                        // actual == requested and no downgrade reason.
+                        // A warm hit is served only for the classified mode
+                        // (Session always validates the session node; Content
+                        // hits PureContent only when the request classified to
+                        // Content — i.e. no reason fired). A reason-driven
+                        // downgrade routes to Stateless and never reaches this
+                        // consult, so a served warm hit is always
+                        // `actual == requested` with no downgrade reason.
                         return Ok(VirtualFileResponse {
                             id: render_single_id(&canonical_id, &node_kind, &hit_meta, raw_was_lsp),
                             code: found.code.clone(),
@@ -810,81 +913,21 @@ impl VerterHost {
                             diagnostics: hit.diagnostics.clone(),
                             meta: found.meta.clone(),
                             requested_mode,
-                            actual_mode: requested_mode,
-                            downgrade_reason: None,
+                            actual_mode,
+                            downgrade_reason: classification.first_downgrade_reason(),
                         });
                     }
                 }
 
-                // Cache miss — use effective_* helpers for override-aware state
-                let efs = self
-                    .effective_file_state(&canonical_id, Some(profile_hash))
-                    .ok_or_else(|| HostError::MissingSource {
-                        canonical_id: canonical_id.clone(),
-                    })?;
-                let effective_meta = self
-                    .effective_meta(&canonical_id, Some(profile_hash))
-                    .unwrap_or_else(|| parse.meta.clone());
-
-                let style_override_layer = cc_ref.as_ref().and_then(|cc| {
-                    cc.style_overrides
-                        .get(&profile_hash)
-                        .map(|o| o.layer.clone())
-                });
-                let content_override_layer = cc_ref.as_ref().and_then(|cc| {
-                    cc.content_overrides
-                        .get(&profile_hash)
-                        .map(|o| o.layer.clone())
-                });
-                let fallback_last_good = cc_ref.as_ref().and_then(|cc| {
-                    let session_node =
-                        crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
-                    session_node.peek_last_good(cc, profile_hash)
-                });
-
-                // Style v-bind vars from raw analysis (override-independent)
-                let analysis_snap = self.scheduler.try_get_analysis(&canonical_id);
-                let style_analyses: Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>> =
-                    analysis_snap
-                        .as_ref()
-                        .and_then(|a| a.downcast_data::<HostAnalysisData>())
-                        .map(|ad| Arc::clone(&ad.style_analyses))
-                        .unwrap_or_default();
-
                 drop(cc_ref);
 
                 CacheMiss {
-                    compile_input: CompileInput {
-                        canonical_id: canonical_id.clone(),
-                        source: efs.source,
-                        meta: effective_meta.clone(),
-                        parse_diagnostics: parse.parse_diagnostics.clone(),
-                        src_blocks: parse.src_blocks.clone(),
-                        external_requests: parse.external_requests.clone(),
-                        style_override_layer,
-                        content_override_layer,
-                        macro_type_deps: efs.script_analysis.macro_type_deps.clone(),
-                        script_imports: efs.script_analysis.imports.clone(),
-                        script_macros: efs.script_analysis.macros.clone(),
-                        script_bindings: efs.script_analysis.bindings.clone(),
-                        cached_parse: efs.cached_parse,
-                        style_v_bind_vars: style_analyses
-                            .iter()
-                            .flat_map(|sa| {
-                                sa.v_binds.iter().map(|vb| {
-                                    vb.expression
-                                        .split('.')
-                                        .next()
-                                        .unwrap_or(&vb.expression)
-                                        .to_string()
-                                })
-                            })
-                            .collect(),
-                    },
+                    compile_input,
                     fallback_last_good,
                     meta: effective_meta,
                     semantic_hash: parse.semantic_hash,
                     whole_hash: parse.whole_hash,
+                    classification,
                 }
             }
         };
@@ -895,6 +938,7 @@ impl VerterHost {
             meta,
             semantic_hash: captured_semantic_hash,
             whole_hash: captured_whole_hash,
+            classification,
         } = cache_miss;
 
         #[cfg(feature = "session_metrics")]
@@ -916,25 +960,12 @@ impl VerterHost {
             .map(|o| o.hash)
             .unwrap_or(0);
 
-        // Classify the requested cache mode against this request's
-        // eligibility surface, EXACTLY ONCE per compile. The classifier
-        // is the sole authority for the mode decision; this pipeline
-        // only consumes the result. `Session` (the host default) stays
-        // `Session` for every reason; `Content` downgrades to
-        // `Stateless` on any reason; `Stateless` is the floor.
-        let classification = crate::compile_cache_mode::classify_compile_mode(
-            requested_mode,
-            &crate::compile_cache_mode::EligibilityInputs {
-                input: &compile_input,
-                profile: &query.compile_profile,
-                config: &self.config,
-                workspace_aliases: &self.workspace_aliases_for_canonical(&canonical_id),
-                owner_has_module_augmentation: crate::compile_cache_mode::has_module_augmentation(
-                    &canonical_id,
-                    self.project_type_store.indexed(),
-                ),
-            },
-        );
+        // The mode classification was computed once under the read lock
+        // (it gated the warm-hit consult). The classifier is the sole
+        // authority for the mode decision; this pipeline only consumes the
+        // carried result. `Session` (the host default) stays `Session` for
+        // every reason; `Content` downgrades to `Stateless` on any reason;
+        // `Stateless` is the floor.
         let actual_mode = classification.actual_mode;
         let downgrade_reason = classification.first_downgrade_reason();
 
@@ -1030,7 +1061,17 @@ impl VerterHost {
                 Err(diagnostics) => {
                     self.store_latest_diagnostics(&canonical_id, profile_hash, diagnostics.clone());
                     let policy = self.config.compile_error_policy;
-                    if self.config.dev_mode && policy == CompileErrorPolicy::DevServeLastKnownGood {
+                    // `fallback_last_good` is session-published output. A
+                    // `Stateless` compile bypasses ALL host cache reads —
+                    // including this dev-serve-last-good read-back — so it
+                    // never serves the session last-good even on error.
+                    // (`actual_mode == Stateless` is reached either by an
+                    // explicit `Stateless` request or by a downgraded
+                    // `Content` request.)
+                    let serve_last_good = actual_mode != CompileCacheMode::Stateless
+                        && self.config.dev_mode
+                        && policy == CompileErrorPolicy::DevServeLastKnownGood;
+                    if serve_last_good {
                         if let Some(last_good) = fallback_last_good.clone() {
                             (last_good, diagnostics, true, None, None)
                         } else {

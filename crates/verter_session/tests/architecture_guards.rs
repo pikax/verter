@@ -3761,6 +3761,12 @@ mod foundations_guards {
         // so cross-file edits invalidate the consumer's CompileSlot
         // via warm-hit fact-validation without eager invalidation.
         "pub(crate) mod compile_fact_emission",
+        // Compile-cache mode classifier — the sole authority for the
+        // `CompileCacheMode` downgrade decision. `pub(crate)`: the
+        // classification type is an in-crate implementation detail; the
+        // public compile result surface carries only the projected
+        // `actual_mode` + `Option<DowngradeReason>` fields.
+        "pub(crate) mod compile_cache_mode",
         // Shared bounded query-identity retention substrate — the
         // `GlobalRetentionBudget` FIFO total-size cap + the
         // `BoundedCandidateMap` per-slot candidate list. Crate-private:
