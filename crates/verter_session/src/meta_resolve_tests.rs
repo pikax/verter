@@ -9890,14 +9890,14 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 
 /// Producer-chain invariant: when `defineEmits<Emits>()` consumes a local
 /// interface `Emits` that `extends ExternalEmits<T>` from a package, the
-/// `AnalyzedEmitField` produced via the prepared-shape path
-/// (`project_macro_surfaces_from_expanded_shape` →
-/// `projected_emit_fields_from_shape`) must carry the typed call-signature
-/// payload on `payload_expr` (`Tuple` of post-event-name params with the
-/// generic `T` substituted), and `payload_expr_scope` must hold the owner
-/// SFC's canonical id. Without the typed form, downstream consumers fall
-/// back to re-parsing the display `payload_type` text — the Typed-IR-Only
-/// Resolver Rule (CLAUDE.md) forbids that.
+/// `AnalyzedEmitField` produced through the typeinfo emit normalizer must carry
+/// the typed call-signature payload on `payload_expr` (`Tuple` of post-event-name
+/// params with the generic `T` substituted), and `payload_expr_scope` anchors to
+/// the call signature's DECLARING file (the package `.d.ts` where
+/// `(e, payload: T): void` is written) — the SFC-supplied generic argument lives
+/// in the typed `payload_expr` element types, not in the scope. Without the typed
+/// form, downstream consumers fall back to re-parsing the display `payload_type`
+/// text — the Typed-IR-Only Resolver Rule (CLAUDE.md) forbids that.
 #[test]
 fn resolved_macro_emits_carry_payload_expr_for_cross_file_interface_extends() {
     let project = make_project();
@@ -9995,8 +9995,11 @@ defineEmits<Emits>()
 
     assert_eq!(
         payload_expr_scope.as_str(),
-        "/src/App.vue",
-        "payload_expr_scope should anchor to the owner SFC",
+        "/node_modules/reka-ui/index.d.ts",
+        "payload_expr_scope anchors to the call signature's DECLARING file (where \
+         `(e, payload: T): void` is written); the SFC-supplied generic argument \
+         (`string | number`) is encoded in the typed `payload_expr` Tuple's \
+         element types, NOT by re-anchoring the signature's scope to the SFC",
     );
 
     let verter_type_expr::TypeExpr::Tuple { elements, .. } = payload_expr else {

@@ -126,54 +126,29 @@ impl VueMacroSurface {
             .unwrap_or_else(|| TypeExprScope::new(self.owner_canonical.as_ref()))
     }
 
-    /// The scope a call signature's stripped-payload `*_expr` should bind to.
+    /// The scope a call signature's stripped-payload `*_expr` should bind to —
+    /// the signature's DECLARATION-origin file, derived from its spans (each
+    /// [`crate::typeinfo::surface::CanonicalSpan`] carries the file the offsets
+    /// index into). For a cross-file emit interface's call signature the spans
+    /// live in the heritage base's file, so the payload `Ref`s resolve THERE —
+    /// the file the call signature is DECLARED in. This is the correct scope
+    /// even when the SFC instantiates a generic emit interface
+    /// (`Emits extends TabsRootEmits<string | number>`): the call signature is
+    /// declared in the package, and the SFC-supplied generic argument is encoded
+    /// in the typed `payload_expr` (a `Tuple` whose element types carry their
+    /// own scope), NOT by re-anchoring the whole signature's scope to the SFC.
     ///
-    /// The payload is the signature's parameters AFTER the leading event-name
-    /// parameter, so its scope follows the first PAYLOAD parameter's type-node
-    /// scope (`node_scope(param.ty)` → file) — the file whose lowering produced
-    /// that node, which is where the payload's `Ref`s must resolve. This matches
-    /// the member axis ([`Self::member_expr_scope`], which scopes to the value
-    /// node) and handles generic substitution correctly: `interface Emits
-    /// extends TabsRootEmits<string | number>` over an imported `TabsRootEmits<T>
-    /// { (e, payload: T): void }` substitutes the payload `T` to `string |
-    /// number` — a node lowered in the DERIVING SFC — so the payload scope is the
-    /// SFC, not the base file the generic signature was declared in.
-    ///
-    /// Falls back, in order, to: the SIGNATURE node's own scope (for a payload
-    /// param whose node is scope-less — a primitive / composed type — on a
-    /// non-generic imported signature, this keeps the scope at the signature's
-    /// declaration file); the signature's declaration spans; the SFC owner.
+    /// Falls back to the SFC owner when the signature carries no span (a
+    /// synthetic / composed signature).
     fn signature_expr_scope(
         &self,
-        host: &VerterHost,
         sig: &crate::typeinfo::surface::TypeInfoSurfaceSignature,
     ) -> TypeExprScope {
-        let graph = host.project_type_store().semantic_graph();
-        let file_scope = |node: crate::semantic_query::SemanticNodeId| {
-            graph
-                .node_scope(node)
-                .and_then(|scope| scope.canonical_file())
-                .map(|canonical| TypeExprScope::new(canonical.as_ref()))
-        };
-        // First PAYLOAD parameter (index 1 — after the leading event-name param)
-        // of the signature node's `Function` data; its type-node scope is the
-        // payload's lowering file (substituted in the deriving SFC for a generic
-        // signature).
-        let payload_param_scope = match graph.node_data(sig.node).as_deref() {
-            Some(crate::semantic_query::SemanticNodeData::Function { params, .. }) => {
-                params.get(1).and_then(|param| file_scope(param.ty))
-            }
-            _ => None,
-        };
-        payload_param_scope
-            .or_else(|| file_scope(sig.node))
-            .or_else(|| {
-                sig.signature_span
-                    .as_ref()
-                    .or(sig.return_type_span.as_ref())
-                    .or_else(|| sig.parameter_spans.iter().flatten().next())
-                    .map(|cspan| TypeExprScope::new(cspan.file.as_ref()))
-            })
+        sig.signature_span
+            .as_ref()
+            .or(sig.return_type_span.as_ref())
+            .or_else(|| sig.parameter_spans.iter().flatten().next())
+            .map(|cspan| TypeExprScope::new(cspan.file.as_ref()))
             .unwrap_or_else(|| TypeExprScope::new(self.owner_canonical.as_ref()))
     }
 }
@@ -768,20 +743,16 @@ pub fn emits_from_typeinfo_surface(
         // payload `Ref`s resolve in the base file, matching the eager rail's
         // per-signature `member_expr_scope`. Falls back to the SFC owner for a
         // signature written in the SFC's own defineEmits type argument.
-        let payload_scope = macro_surface.signature_expr_scope(host, sig);
+        let payload_scope = macro_surface.signature_expr_scope(sig);
         // `payload_type` (→ `rawType`) is DISPLAY-ONLY — no consumer parses it
-        // (the typed `payload_expr` carries the semantics). Render it as a
-        // CONSISTENT source-span slice of the call signature as written (the
-        // payload function's span on the surface), for both local and cross-file
-        // signatures — `render_type_expr_display` returns `None` for a function
-        // and would diverge per-shape. `None` when the signature carries no span
-        // (a synthetic / composed signature).
-        let payload_type = sig
-            .signature_span
-            .as_ref()
-            .and_then(|cspan| slice_canonical_span(host, cspan))
-            .map(|text| text.trim().trim_end_matches(';').trim_end().to_string())
-            .filter(|text| !text.is_empty());
+        // (the typed `payload_expr` carries the semantics). It mirrors the
+        // payload TUPLE the typed `payload_expr` holds (the `emit('name', ...)`
+        // args AFTER the leading event-name parameter), rendered as
+        // `[label: T, ...]` — matching the typed `payload_expr` form a consumer
+        // would otherwise reconstruct. `render_type_expr_display` renders the
+        // tuple (incl. labelled / optional / rest elements); `None` when an
+        // element type cannot be surfaced as a single inline display fragment.
+        let payload_type = render_type_expr_display(&payload_tuple);
         // The event's JSDoc rides on the call signature itself (the leading
         // `/** */` block documenting `(e: 'change', …): void`), sliced from the
         // signature's typeinfo JSDoc spans — symmetric with the property-style

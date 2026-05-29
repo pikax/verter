@@ -420,22 +420,20 @@ fn cross_file_emit_call_signature_payload_scope_is_base_file() {
 }
 
 // ---------------------------------------------------------------------------
-// (3c) Emit call-signature `payload_type` (display-only `rawType`) is a
-//      CONSISTENT source-span slice of the call signature — for BOTH local and
-//      cross-file signatures.
+// (3c) Emit call-signature `payload_type` (display-only `rawType`) renders the
+//      STRIPPED payload TUPLE (`[label: T, ...]`) — the `emit('name', ...)` args
+//      after the leading event-name parameter — mirroring the typed
+//      `payload_expr`, for BOTH local and cross-file signatures.
 //
-//      Discriminating: pre-fix the call-sig `payload_type` was rendered via
-//      `render_type_expr_display(&payload_fn)`, which returns `None` for a
-//      function — so `payload_type` was `None`. Post-fix it is the trimmed
-//      source slice of the signature span (e.g.
-//      `(e: 'change', value: number): void`), and the SAME slice for the
-//      cross-file case (sourced from the base file). Asserting `is_some()` +
-//      the exact source text discriminates against both the pre-fix `None` and
-//      a normalized (non-source) rendering.
+//      Discriminating: a `payload_type` equal to the whole call-signature
+//      source slice (`(e: 'change', value: number): void`) — the pre-fix
+//      behavior — FAILS this; so does a `None`. The bracketed tuple
+//      (`[value: number]`) is the only value that passes, and it is byte-
+//      identical to what `render_type_expr_display(payload_expr)` would produce.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn emit_call_signature_payload_type_is_consistent_source_slice() {
+fn emit_call_signature_payload_type_is_stripped_payload_tuple() {
     const LOCAL: &str = "/w/EmitsLocalSlice.vue";
     let host = make_host();
     upsert(&host, LOCAL, VUE_EMITS_CALLSIG);
@@ -446,22 +444,27 @@ fn emit_call_signature_payload_type_is_consistent_source_slice() {
         emits_from_typeinfo_surface(&host, &surface)
     };
     let change = local_emits.iter().find(|e| e.name == "change").unwrap();
-    // The display slice is the call signature's source text (trimmed of the
-    // trailing `;`). It is SOME (pre-fix it was None) and is the exact source.
+    // The display is the bracketed payload tuple (event-name param stripped),
+    // NOT the whole call-signature source text.
     assert_eq!(
         change.payload_type.as_deref(),
+        Some("[value: number]"),
+        "the call-sig payload_type is the bracketed stripped-payload tuple"
+    );
+    // Negative: it is NOT the whole call-signature source slice.
+    assert_ne!(
+        change.payload_type.as_deref(),
         Some("(e: 'change', value: number): void"),
-        "the call-sig payload_type is the trimmed source slice of the signature"
+        "the payload_type must not be the whole call-signature source text"
     );
     let select = local_emits.iter().find(|e| e.name == "select").unwrap();
     assert_eq!(
         select.payload_type.as_deref(),
-        Some("(e: 'select', id: string, extra: boolean): void"),
-        "each call-sig event's payload_type is its own signature's source slice"
+        Some("[id: string, extra: boolean]"),
+        "each call-sig event's payload_type is its own stripped-payload tuple"
     );
 
-    // Cross-file: the SAME consistent source-slice behavior, sourced from the
-    // base file the signature was declared in.
+    // Cross-file: the SAME stripped-tuple behavior for an imported signature.
     const BASE: &str = "/w/events.ts";
     const CROSS: &str = "/w/EmitsCrossSlice.vue";
     upsert(&host, BASE, EMIT_BASE);
@@ -474,15 +477,15 @@ fn emit_call_signature_payload_type_is_consistent_source_slice() {
     let cross_change = cross_emits.iter().find(|e| e.name == "change").unwrap();
     assert_eq!(
         cross_change.payload_type.as_deref(),
-        Some("(e: 'change', value: number): void"),
-        "the cross-file call-sig payload_type is a source slice from the base file (consistent)"
+        Some("[value: number]"),
+        "the cross-file call-sig payload_type is the same bracketed stripped-payload tuple"
     );
-    // The cross-file display is byte-identical to the local one (the same
-    // signature text was written in both fixtures) — proving consistency, not a
-    // per-shape divergence.
+    // The cross-file display is byte-identical to the local one (the typed
+    // payload tuple renders identically regardless of declaration site) —
+    // proving consistency, not a per-shape divergence.
     assert_eq!(
         cross_change.payload_type, change.payload_type,
-        "local and cross-file call-sig payload_type render through the SAME source-slice path"
+        "local and cross-file call-sig payload_type render through the SAME tuple-display path"
     );
 }
 
