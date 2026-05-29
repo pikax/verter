@@ -83,6 +83,13 @@ pub enum CompileCacheMode {
     /// resolve / type env-hash dimensions), NOT through fact rail
     /// observation. Suitable for bundler / build-time flows whose
     /// inputs are fully captured by the env-hash dimensions.
+    ///
+    /// Note: under the default [`HostConfig`] (`dev_mode: true` +
+    /// [`CompileErrorPolicy::DevServeLastKnownGood`]) the
+    /// `HasDevLastGood` reason fires on every compile, which downgrades
+    /// every `Content` request to `Stateless`. `Content` therefore only
+    /// takes effect under a non-dev / production config (e.g.
+    /// `dev_mode: false`).
     Content,
     /// Consult the fact-validated session cache. Warm hits validate
     /// the candidate's path-precise `ReadSetSignature` against the
