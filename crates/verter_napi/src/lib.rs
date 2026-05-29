@@ -2804,8 +2804,12 @@ pub struct NapiCompileBatchEntry {
     /// All compilation errors for this file. Empty on success.
     pub errors: Vec<String>,
     pub durationMs: f64,
-    /// `true` iff the slot was already warm in compile_cache before
-    /// this call.
+    /// `true` iff this input was served from a warm cache entry under its
+    /// classified mode — the fact-validated session slot (`Session`) or
+    /// the content-addressed store (`Content`) — as decided by the single
+    /// mode classifier. A request that a reason downgraded to `Stateless`
+    /// never warm-hits and reports `false`. Sourced directly from the
+    /// Rust `CompileBatchEntry.cache_hit` on the compile response.
     pub cacheHit: bool,
     /// Requested compile cache mode ("stateless" / "content" / "session").
     pub requestedMode: String,

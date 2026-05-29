@@ -902,13 +902,18 @@ impl VerterHost {
                     }
 
                     if let Some(found) = hit.outputs.get(&node_kind) {
-                        // A warm hit is served only for the classified mode
-                        // (Session always validates the session node; Content
-                        // hits PureContent only when the request classified to
-                        // Content — i.e. no reason fired). A reason-driven
-                        // downgrade routes to Stateless and never reaches this
-                        // consult, so a served warm hit is always
-                        // `actual == requested` with no downgrade reason.
+                        // A warm hit is served only for the classified mode.
+                        // A `Content` warm hit implies no reason fired —
+                        // a reason would have downgraded the request to
+                        // `Stateless`, which bypasses this consult — so a
+                        // `Content` hit always carries `actual == requested`
+                        // with no downgrade reason. A `Session` warm hit is
+                        // served from the validated session node and may
+                        // still carry `Some(reason)`: `Session` stays
+                        // `Session` under every reason and retains the
+                        // reasons for telemetry, so `downgrade_reason`
+                        // (`first_downgrade_reason()`, below) can be
+                        // `Some(reason)` while `actual == requested`.
                         return Ok(VirtualFileResponse {
                             id: render_single_id(&canonical_id, &node_kind, &hit_meta, raw_was_lsp),
                             code: found.code.clone(),
