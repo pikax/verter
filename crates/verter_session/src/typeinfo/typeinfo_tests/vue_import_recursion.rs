@@ -17,10 +17,12 @@
 
 use std::sync::Arc;
 
+use verter_type_expr::{PrimitiveName, TypeExpr};
+
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    DeclIdentity, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
-    SemanticQueryApi, SemanticQueryKey,
+    DeclIdentity, PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult,
+    SemanticNodeData, SemanticQueryApi, SemanticQueryKey,
 };
 use crate::typeinfo::types::TypeInfoQueryLevel;
 use crate::types::{FileKind, HostConfig, UpsertRequest};
@@ -117,6 +119,102 @@ fn vue_default_object_members(host: &VerterHost, canonical_id: &str) -> Vec<Stri
     }
 }
 
+/// Like [`vue_default_object_members`] but returns `None` when the keyed query
+/// does NOT resolve to a synthesized instance `Object` (an error/miss, or any
+/// non-`Object` node). Used by the provenance-gate negatives: a `.vue`/`.ts`
+/// whose `default` is a USERLAND value (not the synthesized public instance)
+/// must NOT yield a synthesized instance object here.
+fn vue_default_query_object_members(host: &VerterHost, canonical_id: &str) -> Option<Vec<String>> {
+    let store_view = host.resolver_store_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+
+    let whole_hash = host
+        .ensure_indexed_ready(canonical_id)
+        .expect("indexed ready")
+        .whole_hash;
+    let node = match dispatch.execute(SemanticQueryKey::Instantiate {
+        base: DeclIdentity {
+            canonical_id: Arc::from(canonical_id),
+            whole_hash,
+            decl_name: Arc::from("default"),
+        },
+        args: Arc::from(Vec::new().into_boxed_slice()),
+        context: ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+    }) {
+        QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+        QueryResult::Error(_) => return None,
+    };
+    let graph = {
+        use crate::resolver_core::ResolverContext;
+        host_ctx.project_type_store().semantic_graph()
+    };
+    match graph.node_data(node).as_deref() {
+        Some(SemanticNodeData::Object(view)) => {
+            let mut names: Vec<String> = view
+                .members
+                .iter()
+                .map(|m| m.name.as_ref().to_string())
+                .collect();
+            names.sort();
+            Some(names)
+        }
+        _ => None,
+    }
+}
+
+/// Project an EXPANDED member `path` rooted at the keyed
+/// `Instantiate(.vue default)` of `canonical_id` and raise the terminal to a
+/// [`TypeExpr`]. Exercises the SHARED resolver end-to-end: each `$props` /
+/// `child` / `peer` hop drills through the synthesized instance object and any
+/// `InstanceType<typeof Import>` member it carries — the exact recursive
+/// `.vue`-import expansion the convergence guarantees terminates by query
+/// identity.
+fn project_vue_default_path(host: &VerterHost, canonical_id: &str, path: &[&str]) -> TypeExpr {
+    let store_view = host.resolver_store_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+
+    let whole_hash = host
+        .ensure_indexed_ready(canonical_id)
+        .expect("indexed ready")
+        .whole_hash;
+    let base = match dispatch.execute(SemanticQueryKey::Instantiate {
+        base: DeclIdentity {
+            canonical_id: Arc::from(canonical_id),
+            whole_hash,
+            decl_name: Arc::from("default"),
+        },
+        args: Arc::from(Vec::new().into_boxed_slice()),
+        context: ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+    }) {
+        QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+        QueryResult::Error(e) => {
+            panic!("Instantiate(.vue default) base for {canonical_id} errored: {e:?}")
+        }
+    };
+    let segments: Arc<[PathSegment]> = path
+        .iter()
+        .map(|s| PathSegment::Member(Arc::from(*s)))
+        .collect::<Vec<_>>()
+        .into();
+    let terminal = match dispatch.execute(SemanticQueryKey::ProjectPath {
+        base,
+        path: segments,
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    }) {
+        QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+        QueryResult::Error(e) => {
+            panic!("ProjectPath {path:?} for {canonical_id} errored: {e:?}")
+        }
+    };
+    dispatch
+        .raise_node_to_type_expr(terminal)
+        .unwrap_or_else(|| panic!("terminal of {path:?} for {canonical_id} must raise to TypeExpr"))
+}
+
 const A_VUE: &str = r#"<script setup lang="ts">
 defineProps<{ a: number }>();
 defineEmits<{ (e: 'aEvent', v: string): void }>();
@@ -142,6 +240,163 @@ fn instantiate_vue_default_resolves_public_instance_object() {
         vue_default_object_members(&host, A),
         vec!["$emit".to_string(), "$props".to_string()],
         "Instantiate(.vue default) must resolve to the synthesized instance object"
+    );
+
+    // Concrete MEMBER TYPES (not just names): `$props.a` is the primitive
+    // `number` carried verbatim from `defineProps<{ a: number }>()`. A
+    // regression that produced a broad object / opaque shell here (instead of
+    // navigating into the synthesized props object) would NOT raise to
+    // `Primitive(Number)`.
+    assert_eq!(
+        project_vue_default_path(&host, A, &["$props", "a"]),
+        TypeExpr::Primitive(PrimitiveName::Number),
+        "$props.a must be the number primitive from defineProps<{{ a: number }}>()"
+    );
+
+    // `$emit` carries the declared event signature `{ (e: 'aEvent', v: string):
+    // void }`. A bare call-signature object raises to the canonical
+    // `TypeExpr::Function` form, whose FIRST parameter is the `'aEvent'`
+    // event-name literal and whose SECOND is the `string` payload. Asserting the
+    // signature structure (not just the `$emit` name) proves the emit type
+    // survived verbatim into the instance surface — a regression that flattened
+    // `$emit` to a broad object / opaque shell would not expose these params.
+    let emit = project_vue_default_path(&host, A, &["$emit"]);
+    let TypeExpr::Function(emit_fn) = &emit else {
+        panic!("$emit must raise to the event call-signature Function; got {emit:?}");
+    };
+    assert_eq!(
+        emit_fn.parameters.len(),
+        2,
+        "the emit signature has the event name + payload parameters"
+    );
+    assert_eq!(
+        emit_fn.parameters[0].ty,
+        TypeExpr::Literal(verter_type_expr::LiteralValue::String("aEvent".to_string())),
+        "first emit parameter is the 'aEvent' event-name literal"
+    );
+    assert_eq!(
+        emit_fn.parameters[1].ty,
+        TypeExpr::Primitive(PrimitiveName::String),
+        "second emit parameter is the string payload"
+    );
+    assert_eq!(
+        emit_fn.return_type.as_deref(),
+        Some(&TypeExpr::Primitive(PrimitiveName::Void)),
+        "the emit signature returns void"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (gate-1) `.vue` USERLAND-default provenance gate (NEW). A `.vue` whose
+//          `<script lang="ts">` (NOT setup) declares a USERLAND `export default`
+//          whose value type superficially LOOKS like a public instance
+//          (`(): { $props: ... } => ...`) must NOT be mistreated as the
+//          synthesized public instance: the synthesis injection is a no-op
+//          (userland `default` already present), so the resolved
+//          `value_symbol("default")` is the userland Const with
+//          `is_synthesised_vue_default == false`, and the `.vue default` branch
+//          / `resolve_vue_public_type` must NOT fire.
+//
+//          DISCRIMINATING: pre-fix the consumer proof was the FILE classifier
+//          `is_synthesis_candidate(canonical)`, which is TRUE for any `.vue`.
+//          Because the userland arrow default carries a
+//          `function_signature.return_type` ({ $props: { a: number } }), the
+//          pre-fix `build_vue_default_instance` happily lowered THAT userland
+//          return into a synthesized-looking `{ $props }` instance object — so
+//          the keyed query resolved to an `Object` carrying `$props`
+//          (`Some([..])`) AND `resolve_vue_public_type` returned that surface.
+//          Post-fix both gate on the structural provenance flag (false here), so
+//          the keyed query no longer yields a synthesized instance object
+//          (`None`) and `resolve_vue_public_type` returns `None`.
+// ---------------------------------------------------------------------------
+
+const VUE_USERLAND_DEFAULT: &str = r#"<script lang="ts">
+export default (): { $props: { a: number } } => ({ $props: { a: 1 } });
+</script>
+"#;
+
+#[test]
+fn vue_userland_default_is_not_treated_as_synthesized_instance() {
+    const FILE: &str = "/w/UserlandDefault.vue";
+    let host = make_host_with_files(&[(FILE, VUE_USERLAND_DEFAULT)]);
+
+    // Structural provenance fact: the resolved `default` value symbol is the
+    // USERLAND arrow (not the synthesized construct-signature symbol), so its
+    // provenance flag is false. This is the direct fact both consumers now gate
+    // on — asserting it pins the producer side.
+    let indexed = host.ensure_indexed_ready(FILE).expect("indexed");
+    let default_symbol = indexed
+        .shallow_state
+        .value_symbol("default")
+        .expect("the userland export default binds a `default` value symbol");
+    assert!(
+        !default_symbol.is_synthesised_vue_default,
+        "a userland export default must NOT carry the synthesized-default provenance flag"
+    );
+
+    // The `.vue default` branch must NOT fire: the keyed query no longer yields a
+    // synthesized instance object built from the userland return type.
+    assert_eq!(
+        vue_default_query_object_members(&host, FILE),
+        None,
+        "Instantiate(.vue default) must NOT synthesize an instance from a userland default"
+    );
+
+    // ...and the public-type API agrees: no synthesized public component type.
+    assert!(
+        host.resolve_vue_public_type(FILE, TypeInfoQueryLevel::PublicType)
+            .is_none(),
+        "resolve_vue_public_type must return None for a userland-default .vue"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (gate-2) Plain `.ts` provenance gate. A `.ts` file whose USERLAND
+//          `export default` carries a decoy `$props`-bearing return type still
+//          has NO public component type — a `.ts` is never an SFC. The fixture
+//          deliberately HAS a `default` value symbol (with a
+//          `function_signature.return_type`) so the gate is exercised on the
+//          provenance flag rather than trivially passing on a missing `default`.
+//
+//          NEGATIVE GUARD: `is_synthesised_vue_default == false` for the
+//          userland `.ts` default, so neither the keyed `.vue default` branch
+//          nor `resolve_vue_public_type` may synthesize an instance. (The prior
+//          interface-only `.ts` test is caught by the missing-`default` check
+//          regardless of the gate; this one is NOT — it pins that a present
+//          userland default is rejected by the provenance flag.)
+// ---------------------------------------------------------------------------
+
+const TS_USERLAND_DEFAULT: &str =
+    "export default (): { $props: { a: number } } => ({ $props: { a: 1 } });\n";
+
+#[test]
+fn plain_ts_userland_default_has_no_synthesized_instance() {
+    const FILE: &str = "/w/ts_default.ts";
+    let host = make_host_with_files(&[(FILE, TS_USERLAND_DEFAULT)]);
+
+    // The `.ts` default IS present but is userland — flag is false.
+    let indexed = host.ensure_indexed_ready(FILE).expect("indexed");
+    let default_symbol = indexed
+        .shallow_state
+        .value_symbol("default")
+        .expect("the .ts export default binds a `default` value symbol");
+    assert!(
+        !default_symbol.is_synthesised_vue_default,
+        "a plain .ts userland default must NOT carry the synthesized-default flag"
+    );
+
+    // The `.vue default` branch must NOT fire for a `.ts` file.
+    assert_eq!(
+        vue_default_query_object_members(&host, FILE),
+        None,
+        "Instantiate(default) must NOT synthesize an instance for a plain .ts default"
+    );
+
+    // And the public-type API returns None.
+    assert!(
+        host.resolve_vue_public_type(FILE, TypeInfoQueryLevel::PublicType)
+            .is_none(),
+        "a plain .ts file has no .vue public component type"
     );
 }
 

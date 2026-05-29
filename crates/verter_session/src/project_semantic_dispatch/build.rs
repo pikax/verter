@@ -465,6 +465,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `IndexedReady` (the same artifact that roots the memo entry below).
         let indexed = self.ctx.ensure_indexed_ready(decl_canonical.as_ref())?;
         let default_symbol = indexed.shallow_state.value_symbol("default")?;
+        // PROVENANCE gate (prefer-direct-structural-facts-over-heuristics): only
+        // the SYNTHESIZED `.vue` public-instance `default` symbol drives this
+        // branch. A USERLAND `export default` in a `.vue`'s `<script>` (synthesis
+        // skipped, userland default present) carries `is_synthesised_vue_default
+        // == false` — even when its value type superficially looks like an
+        // instance (`(): { $props: ... } => ...`) — so it falls through to the
+        // ordinary prepared-decl path instead of being mistreated as the public
+        // instance.
+        if !default_symbol.is_synthesised_vue_default {
+            return None;
+        }
         let instance_shape: TypeExpr = default_symbol
             .function_signature
             .as_ref()?
@@ -670,11 +681,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         //
         // Without this branch the query would fall through to
         // `resolve_prepared_type_decl` below (a `.vue` has no prepared `default`
-        // TYPE decl) and miss. The branch is gated on the SAME
-        // `is_synthesis_candidate` predicate the injection used, so a userland
-        // `export default class` in a `.ts` file is never hijacked, and it
-        // requires `args.is_empty()` (the synthesized default takes no type
-        // arguments).
+        // TYPE decl) and miss. The branch is gated on the STRUCTURAL PROVENANCE
+        // flag `is_synthesised_vue_default` of the resolved `default` value
+        // symbol (NOT the file-classifier `is_synthesis_candidate`), so a
+        // userland `export default` — in a `.ts` file OR in a `.vue`'s
+        // `<script>` block — is never hijacked even when its value type looks
+        // instance-shaped. It requires `args.is_empty()` (the synthesized
+        // default takes no type arguments).
         //
         // Termination is by query identity (NO depth bound): the memo's
         // same-key `Instantiate` recursion sentinel (`mod.rs`) returns
@@ -683,9 +696,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // re-entry while the instance shape is lowering.
         if decl_name.as_ref() == "default"
             && args.is_empty()
-            && crate::resolver_core::vue_default_synth::is_synthesis_candidate(
-                decl_canonical.as_ref(),
-            )
+            && self
+                .ctx
+                .ensure_indexed_ready(decl_canonical.as_ref())
+                .and_then(|indexed| {
+                    indexed
+                        .shallow_state
+                        .value_symbol("default")
+                        .map(|sym| sym.is_synthesised_vue_default)
+                })
+                .unwrap_or(false)
         {
             if let Some(output) =
                 self.build_vue_default_instance(decl_canonical, decl_whole_hash, &scope, context)

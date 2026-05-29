@@ -76,17 +76,19 @@ impl VerterHost {
         // direct-lowering route.
         //
         // Materialize the `.vue`'s `IndexedReady` first (idempotent — warm hits
-        // reuse it) to observe the live `whole_hash`. Gate on the synthesized
-        // `default` instance symbol BEFORE dispatching so a plain `.ts` file (no
-        // synthesized `default`) or a `.vue` with no type-based macros returns
-        // `None` here — the public API stays honest about which canonicals have a
-        // public component type, matching the `build_instantiate` branch's own
-        // `is_synthesis_candidate` gate.
+        // reuse it) to observe the live `whole_hash`. Gate on the SYNTHESIZED
+        // `default` instance symbol's STRUCTURAL PROVENANCE flag BEFORE
+        // dispatching so a plain `.ts` file (no synthesized `default`), a `.vue`
+        // with no type-based macros, or a `.vue` carrying a USERLAND
+        // `export default` (synthesis skipped) returns `None` here — the public
+        // API stays honest about which canonicals have a synthesized public
+        // component type, matching the `build_instantiate` branch's own
+        // `is_synthesised_vue_default` gate.
         let indexed = self.ensure_indexed_ready(canonical_id)?;
-        if !crate::resolver_core::vue_default_synth::is_synthesis_candidate(canonical_id) {
+        let default_symbol = indexed.shallow_state.value_symbol("default")?;
+        if !default_symbol.is_synthesised_vue_default {
             return None;
         }
-        let default_symbol = indexed.shallow_state.value_symbol("default")?;
         // The synthesized default carries a construct-signature return type (the
         // instance object); its absence means no public instance surface.
         default_symbol

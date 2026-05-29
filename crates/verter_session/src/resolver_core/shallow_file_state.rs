@@ -147,6 +147,22 @@ pub struct ShallowValueSymbol {
     pub object_shape: Option<ObjectExpr>,
     /// Enum member values — populated for `ValueDeclKind::Enum`.
     pub enum_members: Option<rustc_hash::FxHashMap<String, TypeExpr>>,
+    /// Structural PROVENANCE fact: `true` only for the synthesized `default`
+    /// VALUE symbol that [`super::vue_default_synth::synthesise_vue_default_value_symbol`]
+    /// fabricates for a `.vue` SFC's implicit public instance (the construct
+    /// signature returning `{ $props, $emit, $slots }`). `false` for EVERY
+    /// userland-declared value symbol — including a userland `export default`
+    /// in a `.vue`'s `<script>` block.
+    ///
+    /// This is the direct consumer proof that a resolved `default` IS the
+    /// synthesized public instance. Synthesized-default consumers
+    /// (`build_vue_default_instance`, the `.vue default` branch in
+    /// `build_instantiate`, `resolve_vue_public_type`, the synthesized-default
+    /// convergence in `build_typeof`) gate on this flag rather than on the
+    /// file-classifier `is_synthesis_candidate`, so a `.vue` with a USERLAND
+    /// `export default` (synthesis skipped, userland default present) is never
+    /// mistreated as the synthesized public instance.
+    pub is_synthesised_vue_default: bool,
 }
 
 /// A reference to an imported symbol that needs cross-file resolution.
@@ -538,6 +554,11 @@ impl ShallowFileState {
                         function_signature: decl.function_signature.clone(),
                         object_shape: decl.object_shape.clone(),
                         enum_members,
+                        // Userland value symbols from the eval env are NEVER the
+                        // synthesized `.vue` public instance (that one is
+                        // fabricated by `vue_default_synth` and inserted via
+                        // `insert_synthesised_value_symbol`).
+                        is_synthesised_vue_default: false,
                     },
                 );
             }
