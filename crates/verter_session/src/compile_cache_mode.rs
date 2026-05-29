@@ -83,8 +83,13 @@ pub(crate) struct CompileModeClassification {
     pub(crate) requested_mode: CompileCacheMode,
     /// The mode the runtime actually runs under (after downgrade).
     pub(crate) actual_mode: CompileCacheMode,
-    /// All triggering reasons in priority order. Empty when
-    /// `actual_mode == requested_mode`.
+    /// All triggering eligibility reasons in priority order, retained for
+    /// telemetry whenever any predicate fires — even when the mode does
+    /// NOT change. A `Session` request stays `Session` under every reason,
+    /// so this vector is frequently non-empty while
+    /// `actual_mode == requested_mode`. The vector is empty only in two
+    /// cases: the `Stateless` floor (which ignores all reasons) and the
+    /// no-reason case (no predicate fired).
     pub(crate) downgrade_reasons: SmallVec<[DowngradeReason; 2]>,
 }
 
