@@ -1026,6 +1026,53 @@ mod tests {
         );
     }
 
+    // The OTHER source-anchored entry point: a leading `@type {{a: number}}`
+    // value annotation (consumed by `extract_jsdoc_type_at_offset`) must also
+    // produce FILE-coordinate member spans. This caller drives off the block-span
+    // scanner, so it exercises a different code path than `collect_jsdoc_typedefs`
+    // above — both must rebase correctly. Pre-fix the `a` name span was
+    // wrapper-local and sliced the wrong source text.
+    #[test]
+    fn extract_jsdoc_type_at_offset_member_spans_are_file_coordinates() {
+        use super::extract_jsdoc_type_at_offset;
+        use verter_type_expr::ObjectMember;
+
+        // The declaration name token `x` is what the caller anchors on; the
+        // leading JSDoc `@type {{a: number}}` block precedes it. Leading text
+        // pushes the payload well past byte 0.
+        let source = "const PADDING = 0;\n/** @type {{a: number}} */\nconst x = { a: 1 };\n";
+        let name_offset = source.find("x =").expect("the `x` binding is present") as u32;
+
+        let ty = extract_jsdoc_type_at_offset(source, name_offset)
+            .expect("the `@type {{a: number}}` annotation must lower to a type");
+        let TypeExpr::Object(object) = &ty else {
+            panic!("`@type {{a: number}}` must lower to an object, got {ty:?}");
+        };
+        let ObjectMember::Property(prop) = &object.properties[0] else {
+            panic!("expected `a` property, got {:?}", object.properties[0]);
+        };
+        assert_eq!(prop.name, "a");
+
+        let name_span = prop
+            .spans
+            .name
+            .expect("the `@type` member must carry its name span");
+        assert_eq!(
+            name_span.slice(source),
+            "a",
+            "the `@type` member NAME span must slice the file to the `a` token",
+        );
+        let type_span = prop
+            .spans
+            .type_annotation
+            .expect("the `@type` member must carry its type-annotation span");
+        assert_eq!(
+            type_span.slice(source),
+            "number",
+            "the `@type` member TYPE span must slice the file to the `number` token",
+        );
+    }
+
     #[test]
     fn jsdoc_block_spans_extend_tag_text_through_continuation_lines() {
         use super::jsdoc_block_spans_at_offset;
