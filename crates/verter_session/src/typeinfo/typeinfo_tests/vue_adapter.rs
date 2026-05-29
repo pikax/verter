@@ -314,3 +314,108 @@ fn define_slots_normalizer_filters_to_functions_and_extracts_bindings() {
         "header slot has one binding (title)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// (5) defineModel normalizer — the synthesized model prop from analyzer facts.
+//
+//     Discriminating: a defineModel type arg is the model VALUE type (`string`),
+//     which has NO object surface. The model prop name + type must come from
+//     the analyzer-synthesized `prop_fields`, NOT the (empty) surface members.
+// ---------------------------------------------------------------------------
+
+const VUE_MODEL: &str = r#"<script setup lang="ts">
+const model = defineModel<string>('title');
+</script>
+"#;
+
+#[test]
+fn define_model_normalizer_produces_synthesized_model_prop_from_analyzer_facts() {
+    const FILE: &str = "/w/ModelComp.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_MODEL);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineModel);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("defineModel resolves an (empty-surface) VueMacroSurface");
+    // The surface itself is EMPTY (defineModel's type arg is the model value
+    // type, not a props object) — negative assertion.
+    assert!(
+        surface.surface.members.is_empty(),
+        "defineModel macro surface carries no object members"
+    );
+
+    let props = props_from_typeinfo_surface(&host, &surface);
+    assert_eq!(props.len(), 1, "defineModel synthesizes exactly one prop");
+    let model = &props[0];
+    assert_eq!(
+        model.name, "title",
+        "the model prop is named after the model"
+    );
+    assert!(
+        model.declared_in_macro_type_arg,
+        "the model prop is declared at the macro site"
+    );
+    assert!(
+        model.type_expr.is_some(),
+        "the model prop carries its typed form"
+    );
+    // The re-anchored scope is the SFC owner, not the empty analyzer scope.
+    assert_eq!(
+        model.type_expr_scope.as_ref().map(|s| s.as_str()),
+        Some(FILE),
+        "the model prop's type_expr_scope is re-anchored to the SFC owner"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (6) withDefaults — the props surface comes from the inner defineProps type
+//     arg; the `is_optional` on AnalyzedPropField stays the RAW type-arg
+//     optionality (defaults flip `required` DOWNSTREAM at PropAnalysis, not on
+//     AnalyzedPropField). This matches the eager surface_projector rail.
+//
+//     Discriminating: the props must be present (withDefaults resolves through
+//     the inner type arg); `size` (which has a default) must keep is_optional
+//     == its declared optionality, NOT be force-flipped here.
+// ---------------------------------------------------------------------------
+
+const VUE_WITH_DEFAULTS: &str = r#"<script setup lang="ts">
+interface Props {
+  size?: number;
+  label: string;
+}
+withDefaults(defineProps<Props>(), { size: 10 });
+</script>
+"#;
+
+#[test]
+fn with_defaults_normalizer_uses_inner_props_surface_with_raw_optionality() {
+    const FILE: &str = "/w/WithDefaults.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_WITH_DEFAULTS);
+
+    // `withDefaults` surfaces as both a WithDefaults macro AND the inner
+    // DefineProps macro. The props normalizer resolves the props surface from
+    // either props-contributing macro; assert through the DefineProps macro
+    // (the inner one carries the type arg).
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("withDefaults' inner defineProps resolves a surface");
+    let props = props_from_typeinfo_surface(&host, &surface);
+
+    let mut names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["label", "size"], "both props surface");
+
+    let size = props.iter().find(|p| p.name == "size").unwrap();
+    // `size?` is declared optional; defaults do NOT change AnalyzedPropField
+    // optionality (that is a PropAnalysis-layer concern). The field keeps its
+    // raw declared optionality — matching the eager rail.
+    assert!(
+        size.is_optional,
+        "size keeps its declared `?` optionality at the AnalyzedPropField layer"
+    );
+    let label = props.iter().find(|p| p.name == "label").unwrap();
+    assert!(!label.is_optional, "label is required (no `?`)");
+}
