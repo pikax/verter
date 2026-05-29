@@ -115,9 +115,38 @@ fn define_props_normalizer_produces_fields_with_surface_readonly_and_jsdoc() {
         count.declared_in_macro_type_arg,
         "count is declared in the macro type arg's own body"
     );
+    // Concrete typed form + scope (not just `is_some()`): `count: number` raises
+    // to the `number` primitive, scoped to the SFC where it was lowered.
+    assert!(
+        matches!(
+            count.type_expr,
+            Some(verter_type_expr::TypeExpr::Primitive(
+                verter_type_expr::PrimitiveName::Number
+            ))
+        ),
+        "count.type_expr is the `number` primitive, got {:?}",
+        count.type_expr
+    );
+    assert_eq!(
+        count.type_expr_scope.as_ref().map(|s| s.as_str()),
+        Some(FILE),
+        "count.type_expr_scope is the SFC the prop was declared in"
+    );
 
     let label = props.iter().find(|p| p.name == "label").unwrap();
     assert!(label.is_optional, "label? is optional");
+    // `label?: string` → the `string` primitive (the `?` is the optional flag,
+    // not part of the value type).
+    assert!(
+        matches!(
+            label.type_expr,
+            Some(verter_type_expr::TypeExpr::Primitive(
+                verter_type_expr::PrimitiveName::String
+            ))
+        ),
+        "label.type_expr is the `string` primitive, got {:?}",
+        label.type_expr
+    );
 
     // `AnalyzedPropField` carries no readonly axis (it is recovered downstream),
     // but the RICHER readonly fact the U3c flip will read lives on the typeinfo
@@ -252,6 +281,82 @@ fn define_emits_normalizer_property_style_fallback() {
         names,
         vec!["change", "remove"],
         "property-style emit names come from the member names"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (3a) Mixed emit interface — a call signature AND a property member. The
+//      call-signature precedence means the property member's event is EXCLUDED
+//      (matching the eager projector: property-style fires ONLY when NO
+//      call-sig emit was found).
+//
+//      Discriminating: a naive "union of call-sig + property events" would
+//      surface `notAnEvent` alongside `change`; the precedence rule excludes
+//      it. Also asserts the call-sig payload's stripped tuple shape + SFC scope.
+// ---------------------------------------------------------------------------
+
+const VUE_EMITS_MIXED: &str = r#"<script setup lang="ts">
+defineEmits<{
+  (e: 'change', value: number): void;
+  notAnEvent: [flag: boolean];
+}>();
+</script>
+"#;
+
+#[test]
+fn define_emits_normalizer_mixed_callsig_excludes_property_members() {
+    const FILE: &str = "/w/EmitsMixed.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_EMITS_MIXED);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineEmits);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("mixed defineEmits resolves a surface");
+    let emits = emits_from_typeinfo_surface(&host, &surface);
+
+    let names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["change"],
+        "the call-signature event fires; the property member is EXCLUDED (call-sig precedence)"
+    );
+    // Explicit negative: the property member did NOT become an event.
+    assert!(
+        !emits.iter().any(|e| e.name == "notAnEvent"),
+        "a property member must NOT add an event alongside a call signature (negative)"
+    );
+
+    // The call-sig payload is the stripped function `(value: number) => void` —
+    // the leading event-name parameter is dropped, leaving one parameter typed
+    // `number`.
+    let change = &emits[0];
+    let verter_type_expr::TypeExpr::Function(func) = change
+        .payload_expr
+        .as_ref()
+        .expect("change payload_expr is the stripped function")
+    else {
+        panic!("change payload must be a Function");
+    };
+    assert_eq!(
+        func.parameters.len(),
+        1,
+        "the leading event-name param is stripped, leaving the payload param"
+    );
+    assert!(
+        matches!(
+            func.parameters[0].ty,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        ),
+        "the surviving payload param is typed `number`, got {:?}",
+        func.parameters[0].ty
+    );
+    // The payload scope is the SFC (the signature was written in the SFC's own
+    // defineEmits type argument).
+    assert_eq!(
+        change.payload_expr_scope.as_ref().map(|s| s.as_str()),
+        Some(FILE),
+        "the local call-sig payload scope is the SFC"
     );
 }
 
@@ -601,9 +706,17 @@ fn define_model_normalizer_produces_synthesized_model_prop_from_analyzer_facts()
         model.declared_in_macro_type_arg,
         "the model prop is declared at the macro site"
     );
+    // Concrete typed form (not just `is_some()`): `defineModel<string>('title')`
+    // synthesizes a model prop typed `string`.
     assert!(
-        model.type_expr.is_some(),
-        "the model prop carries its typed form"
+        matches!(
+            model.type_expr,
+            Some(verter_type_expr::TypeExpr::Primitive(
+                verter_type_expr::PrimitiveName::String
+            ))
+        ),
+        "the model prop's type_expr is the `string` model value type, got {:?}",
+        model.type_expr
     );
     // The re-anchored scope is the SFC owner, not the empty analyzer scope.
     assert_eq!(
@@ -910,6 +1023,13 @@ fn vue_public_type_carries_synthesized_instance_members_without_component_meta()
     let host = make_host();
     upsert(&host, FILE, VUE_FULL_COMPONENT);
 
+    // Component-meta call hook: the host records every `get_component_meta*`
+    // entry in `MetaProvenance::get_component_meta_calls`. Reset it AFTER upsert
+    // so we measure exactly the public-type resolution below.
+    host.provenance().reset();
+    let calls_before = host.provenance().snapshot().get_component_meta_calls;
+    assert_eq!(calls_before, 0, "counter reset to zero before the query");
+
     let public_surface = host
         .resolve_vue_public_type(FILE, TypeInfoQueryLevel::PublicType)
         .expect("a .vue with type-based macros has a public component type");
@@ -924,6 +1044,17 @@ fn vue_public_type_carries_synthesized_instance_members_without_component_meta()
         members,
         vec!["$emit", "$props", "$slots"],
         "the public component type carries the synthesized instance members"
+    );
+
+    // The PROOF: resolving the public type through typeinfo invoked
+    // component-meta ZERO times. This is the architectural contract — a `.vue`
+    // public type resolves through the shared typeinfo surface path, NOT
+    // `get_component_meta`. A regression that routed PublicType through
+    // component-meta would bump this counter.
+    let calls_after = host.provenance().snapshot().get_component_meta_calls;
+    assert_eq!(
+        calls_after, 0,
+        "resolve_vue_public_type must NOT invoke get_component_meta (typeinfo-only path)"
     );
 }
 
@@ -1292,6 +1423,11 @@ fn vue_macro_dto_key_carries_level_and_content_not_env_hash() {
 
 #[test]
 fn vue_macro_surface_carries_spans_not_owned_type_strings() {
+    use crate::typeinfo::surface::{
+        CanonicalSpan, JsdocTagSpan, SurfaceMemberOrigin, TypeInfoIndexSignature, TypeInfoSurface,
+        TypeInfoSurfaceMember, TypeInfoSurfaceSignature,
+    };
+
     const FILE: &str = "/w/SpanComp.vue";
     let host = make_host();
     upsert(&host, FILE, VUE_PROPS);
@@ -1299,18 +1435,73 @@ fn vue_macro_surface_carries_spans_not_owned_type_strings() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
     let surface = host.resolve_vue_macro_surface(&request).expect("surface");
 
-    // Structural: every member exposes a span-bearing origin + value node id,
-    // and JSDoc as SPANS — there is no owned type-text String field on the
-    // surface member (the `TypeInfoSurfaceMember` type has no `type_annotation:
-    // String`). Assert the span-bearing fields are reachable.
-    for member in surface.surface.members.iter() {
-        // `value` is a node id (not an expanded body), `name` is interned.
-        let _node_id: crate::semantic_query::SemanticNodeId = member.value;
-        let _name: &Arc<str> = &member.name;
-        // JSDoc is a span (Option<CanonicalSpan>), never an owned doc String on
-        // the surface.
-        let _desc_span: &Option<crate::typeinfo::surface::CanonicalSpan> =
-            &member.jsdoc_description_span;
+    // The surface MUST carry members for this fixture (a stub returning an empty
+    // surface would defeat the structural guard below).
+    assert!(
+        !surface.surface.members.is_empty(),
+        "the props surface carries members (non-empty guard)"
+    );
+
+    // Whole-struct destructure WITHOUT `..` — the field set is a compile-time
+    // guard. Adding ANY owned `String` type-text / JSDoc-text field to the
+    // surface (the exact regression the spans-not-strings rule forbids) breaks
+    // THIS destructure. Each binding's type is annotated to pin "span / id /
+    // flag / interned name", never an owned `String` type body.
+    let TypeInfoSurface {
+        members,
+        call_signatures,
+        construct_signatures,
+        index_signatures,
+        keyspace,
+        has_index_signature,
+    } = &surface.surface;
+    let _members: &Arc<[TypeInfoSurfaceMember]> = members;
+    let _call_signatures: &Arc<[TypeInfoSurfaceSignature]> = call_signatures;
+    let _construct_signatures: &Arc<[TypeInfoSurfaceSignature]> = construct_signatures;
+    let _index_signatures: &Arc<[TypeInfoIndexSignature]> = index_signatures;
+    let _keyspace: &Option<crate::semantic_query::SemanticNodeId> = keyspace;
+    let _has_index_signature: &bool = has_index_signature;
+
+    for member in members.iter() {
+        let TypeInfoSurfaceMember {
+            name,
+            name_span,
+            value,
+            type_annotation_span,
+            optional,
+            readonly,
+            is_method,
+            declared_in_macro_type_arg,
+            jsdoc_description_span,
+            jsdoc_tag_spans,
+            origin,
+        } = member;
+        // Interned name (not an owned type body) + node-id value (not an
+        // expanded body).
+        let _name: &Arc<str> = name;
+        let _value: &crate::semantic_query::SemanticNodeId = value;
+        // Every text-bearing field is a SPAN (`CanonicalSpan`), never a
+        // `String`. The type annotations below would fail to compile if any
+        // field were widened to an owned `String`.
+        let _name_span: &Option<CanonicalSpan> = name_span;
+        let _type_annotation_span: &Option<CanonicalSpan> = type_annotation_span;
+        let _jsdoc_description_span: &Option<CanonicalSpan> = jsdoc_description_span;
+        let _jsdoc_tag_spans: &Arc<[JsdocTagSpan]> = jsdoc_tag_spans;
+        // Flags are `bool`.
+        let _optional: &bool = optional;
+        let _readonly: &bool = readonly;
+        let _is_method: &bool = is_method;
+        let _declared_in_macro_type_arg: &bool = declared_in_macro_type_arg;
+        // Origin carries the declaration file id + spans + merge role — no owned
+        // type text.
+        let SurfaceMemberOrigin {
+            canonical_file,
+            declaration_span,
+            merge_role,
+        } = origin;
+        let _canonical_file: &Option<Arc<str>> = canonical_file;
+        let _declaration_span: &Option<CanonicalSpan> = declaration_span;
+        let _merge_role: &crate::semantic_query::MemberMergeRole = merge_role;
     }
 
     // The whole surface is `Eq + Hash` (a structural value of spans/ids/flags),

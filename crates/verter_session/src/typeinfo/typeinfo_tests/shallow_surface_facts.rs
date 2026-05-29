@@ -264,3 +264,53 @@ fn union_common_member_value_unions_and_readonly_intersects() {
         props["ro"]
     );
 }
+
+// ---------------------------------------------------------------------------
+// (N) `ShallowSurfaceRequest` query LEVEL is a no-op for a plain-TS named
+//     declaration — PublicType and FullMetadata resolve the IDENTICAL one-level
+//     surface (the level divergence only bites for `.vue` carriers, which the
+//     Vue adapter owns).
+//
+//     Discriminating: the level is threaded as query identity. For a plain TS
+//     decl both levels MUST return the same surface — if a future change made
+//     the named-decl path branch on the level (a `.vue`-only concern leaking
+//     into the plain-TS accessor), the two surfaces would diverge and this
+//     equality fails.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn shallow_surface_request_level_is_noop_for_plain_ts_named_decl() {
+    use crate::typeinfo::types::{ShallowSurfaceRequest, TypeInfoQueryLevel};
+    use std::sync::Arc;
+
+    let host = make_host_with_footprint();
+    upsert(&host);
+
+    let public = host
+        .resolve_shallow_surface_for(&ShallowSurfaceRequest::new(
+            Arc::from(FILE),
+            Arc::from("HybridSurface"),
+            TypeInfoQueryLevel::PublicType,
+        ))
+        .expect("HybridSurface resolves at PublicType");
+    let full = host
+        .resolve_shallow_surface_for(&ShallowSurfaceRequest::new(
+            Arc::from(FILE),
+            Arc::from("HybridSurface"),
+            TypeInfoQueryLevel::FullMetadata,
+        ))
+        .expect("HybridSurface resolves at FullMetadata");
+
+    // The surfaces are structurally identical — a plain TS named declaration has
+    // no public-vs-full distinction.
+    assert_eq!(
+        public, full,
+        "PublicType and FullMetadata resolve the SAME surface for a plain-TS named decl"
+    );
+    // Sanity: the surface is the real HybridSurface (carries its call signature
+    // + members), not an empty stub that would make the equality trivial.
+    assert!(
+        !public.call_signatures.is_empty(),
+        "the resolved surface is the real HybridSurface (non-trivial equality)"
+    );
+}
