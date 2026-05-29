@@ -115,6 +115,7 @@ the lib + ambient corpus.
 | `MaterializeStructureDb` | Query-identity (multi-candidate) | `MaterializationCacheKey { decl: ResolvedDeclSlotIdentity, projection_path, projection_mode, normalized_type_args, options_hash }` | Fact-validated per candidate |
 | `RefCycleResultDb`, `SemanticGraphStore` query nodes | Query-identity (multi-candidate) | `ResolvedDeclSlotIdentity` (slot) + `VersionedDeclIdentity` payload | Fact-validated per candidate |
 | `ComponentMetaResultDb` | Query-identity (multi-candidate) | Owner identity (per R8) | Fact-validated per candidate |
+| `CompileSlot.fact_dep_signature` (per-profile compile cache) | Profile-keyed (`CompileProfile`) on `compile_slots: FxHashMap<u64, CompileSlot>` | `(canonical, compile_profile_hash)` (no version hash in the key; `semantic_hash` + override-hashes ride on the slot value) | Carrier is `ReadSetSignature { facts, overflowed }`. Cold-build producer routes the finalised tracer through `SignatureAdmission::from_finalise(...)`; `Cacheable(sig)` → `compile_slots.insert(CompileSlot { fact_dep_signature: sig, .. })`; `NonCacheable` (overflow / unresolved provenance / self-root conflict / route-generation dependency) → skip-publish refusal, fresh value returned to caller without admitting. Empty (`facts.is_empty() && !overflowed`) is a valid admitted state — the warm-hit oracle validates vacuously and falls back to the `semantic_hash` / override-hash pre-filter |
 
 `parse_stable_hash` is a structural hash over the file's
 post-shallow-analysis decl skeleton (names, kinds, member name lists,

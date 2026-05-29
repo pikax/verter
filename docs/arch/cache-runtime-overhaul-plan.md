@@ -699,50 +699,43 @@ at `crates/verter_session/src/resolver_core/mod.rs:576` is the
 substrate. The new cache runtime is a typed wrapper layer on top of
 the existing primitives, not a parallel substrate.
 
-Block 2 lands four things and **nothing else**:
+Block 2a lands one thing: rehome `cooperative_admission.rs` to
+`cache_runtime/singleflight.rs` preserving the live API and
+semantics. The new trait surface + lookup/publish runtime land in the
+merged cutover block (B2b+B4) with their first real consumers.
 
-1. a pure rename of `cooperative_admission.rs` into
-   `cache_runtime/singleflight.rs` (and the sibling test file move);
-2. a re-export of the existing `ComputeAdmission` enum as
-   `CacheAdmission`, collapsing the type-parameter list from `<V, Entry>`
-   to `<V>` in the same commit (substrate wraps the unwrapped value in
-   `Arc::new(...)` at admission — the producer-side `Entry` parameter
-   is retired);
-3. the `ArtifactNode` and `QueryNode` trait definitions, the
-   `ComputeCtx` context struct, the `Candidate<V>` / `QuerySlot<V>`
-   multi-candidate structures, and the `cache_runtime::lookup` /
-   `cache_runtime::query::lookup` entry points;
-4. the multi-candidate `publish` pipeline with the post-compute
-   self-root revalidation gate.
+Concretely, Block 2a:
 
-Block 2 does **NOT** introduce `SignatureAdmission` — that lands in
-Block 3.
+1. moves `cooperative_admission.rs` → `cache_runtime/singleflight.rs`
+   (and the sibling test file `cooperative_admission_tests.rs` →
+   `cache_runtime/singleflight_tests.rs`), preserving the
+   `ComputeAdmission<V, Entry>` enum (`Cacheable(Entry)` /
+   `ReturnOnly(V)` / `Failed`), all three `cooperative_*` entry
+   points, and the `project: FnOnce(&Entry) -> V` closure model
+   verbatim;
+2. updates every `crate::cooperative_admission::*` import to
+   `crate::cache_runtime::singleflight::*`;
+3. removes the `pub mod cooperative_admission;` declaration from
+   `lib.rs` and adds `pub(crate) mod singleflight;` under
+   `cache_runtime`.
+
+The cache-runtime trait surface and lookup/publish runtime are NOT
+part of this block; they land in the merged cutover (§4) with their
+first real consumers. This block touches nothing beyond the rename.
 
 #### Changes
 
-Create the module tree `crates/verter_session/src/cache_runtime/`:
+This block is a pure rehome. It does not create the cache-runtime
+trait surface or any new module beyond the rename; the trait surface
+and lookup/publish runtime land in the merged cutover (§4) with their
+first real consumers.
 
-- `mod.rs` — public re-exports.
-- `world_snapshot.rs` — landed by Block 1.
-- `admission.rs` — `CacheAdmission<V>` re-export of
-  `singleflight::CacheAdmission`. Block 3 adds `SignatureAdmission`
-  here.
-- `singleflight.rs` — RENAMED FROM `cooperative_admission.rs`.
-- `artifact.rs` — `ArtifactNode` trait + `lookup<N: ArtifactNode>`.
-- `query.rs` — `QueryNode` trait + `Candidate<V>`, `QuerySlot<V>`,
-  `PublishOutcome`, `lookup<N: QueryNode>`,
-  `publish<N: QueryNode>`. `NonAdmissionReason` itself is owned by
-  `verter_audit::structured_event` (leaf-substrate; B10) and
-  re-exported here via
-  `pub use verter_audit::structured_event::NonAdmissionReason;` so
-  publish-pipeline callers continue to see it on the
-  `cache_runtime::query` path without `verter_audit` ever depending
-  on `verter_session`.
-- `store.rs` — typed wrapper over `ValidatedFactCache<K, V>`.
-- `metrics.rs` — `CacheNodeMetrics` (Block 10 fills the ten counter
-  fields).
-- `memory_policy.rs` — placeholder; Block 10 fills it.
-- `tests.rs` — module-level unit tests.
+The two changes under `crates/verter_session/src/cache_runtime/`:
+
+- add `pub(crate) mod singleflight;` to `cache_runtime/mod.rs`
+  (alongside the already-landed `world_snapshot`);
+- `singleflight.rs` — RENAMED FROM `cooperative_admission.rs`,
+  preserving the live API and semantics verbatim.
 
 The verbatim API that moves over from
 `cooperative_admission.rs` (verified against the current tree — every
@@ -750,13 +743,13 @@ callable accounted for):
 
 ```
 cooperative_admission::ComputeAdmission<V, Entry>    (:152)
-    → cache_runtime::admission::CacheAdmission<V>   (Entry parameter retired)
+    → cache_runtime::singleflight::ComputeAdmission<V, Entry>
 cooperative_admission::cooperative_get_or_insert     (:542)
-    → cache_runtime::singleflight::get_or_insert
+    → cache_runtime::singleflight::cooperative_get_or_insert
 cooperative_admission::cooperative_get_or_insert_with_post_publish (:659)
-    → cache_runtime::singleflight::get_or_insert_with_post_publish
+    → cache_runtime::singleflight::cooperative_get_or_insert_with_post_publish
 cooperative_admission::cooperative_admit_with_post_publish (:896)
-    → cache_runtime::singleflight::admit_with_post_publish
+    → cache_runtime::singleflight::cooperative_admit_with_post_publish
 cooperative_admission::InflightTable<K>              (:204)
     → cache_runtime::singleflight::InflightTable
 cooperative_admission::InflightSlot                  (:167)
@@ -779,462 +772,50 @@ cooperative_admission::remove_published_entry_with_cleanup (:459)
     → cache_runtime::singleflight::remove_published_entry_with_cleanup
 ```
 
-No new symbols are introduced beyond the trait/context types below;
-no symbols are dropped. The `CacheAdmission` enum keeps its three
-variants but collapses to a single type parameter:
+No symbols are renamed and no symbols are dropped. The
+`ComputeAdmission<V, Entry>` enum keeps its three variants AND both
+type parameters verbatim — the stored carrier (`Entry`) and the
+projected value (`V`) are semantically distinct (the carrier holds
+the dep-signature / self-root / generation metadata that a joiner
+view-validates against; the value is what the caller receives), so
+they must not be collapsed.
 
-```rust
-// crates/verter_session/src/cache_runtime/admission.rs
-pub enum CacheAdmission<V> {
-    /// Cold-computed value to be admitted. The cache wraps the value
-    /// in `Arc::new(...)` at admission and stores `Arc<V>`; future
-    /// warm hits return cheap `Arc<V>` clones.
-    Cacheable(V),
-    /// Valid result the producer hands back to the immediate caller
-    /// but the substrate MUST NOT admit (overflow / budget /
-    /// cancellation / generation supersession / unresolved
-    /// provenance). The substrate constructs `Arc::new(value)` for
-    /// the caller without storing, without registering reverse-index
-    /// metadata, and without invoking `post_publish`.
-    ReturnOnly(V),
-    /// Computation produced no value (e.g. an unindexed file
-    /// short-circuit). No value flows to the caller; the substrate
-    /// surfaces `LookupError::Failed`.
-    Failed,
-}
-```
+The bare `cooperative_get_or_insert` entry point currently has no
+in-crate caller (every cache routes through
+`cooperative_get_or_insert_with_post_publish`); it is retained as the
+minimal admission shape and annotated `#[allow(dead_code)]` rather
+than dropped, so the primitive keeps its complete API surface.
 
-All nine existing callers migrate `Cacheable(Arc::new(value))` →
-`Cacheable(value)` in the same commit. The same-commit rename moves
-`cooperative_admission_tests.rs` (954 lines, sibling file verified in
-tree) to `cache_runtime/singleflight_tests.rs`; the `pub mod
-cooperative_admission_tests;` declaration in
-`crates/verter_session/src/lib.rs` is updated to point at the new
-path. After the rename, no `cooperative_admission*` file remains in
-the tree.
+The same move relocates `cooperative_admission_tests.rs` to
+`cache_runtime/singleflight_tests.rs` (it is a `#[cfg(test)] #[path]`
+child `mod` of `singleflight`, so the move is a rename plus the
+parent's `#[path]` update — there is no `lib.rs` test-mod
+declaration). After the move, no `cooperative_admission*` file
+remains in the tree; the structural guard
+`tests/cache_runtime_singleflight_rehome.rs` asserts both the absence
+of the old paths and the presence of the new ones.
 
-Trait surface:
+Repoint the rehome-sensitive guard
+`tests/block_1_i_discriminators.rs::cooperative_return_only_not_shared_to_joiners`
+to read the canonical `cache_runtime/singleflight.rs` path.
 
-```rust
-// crates/verter_session/src/cache_runtime/artifact.rs
-use crate::cache_runtime::admission::CacheAdmission;
-use crate::cache_runtime::world_snapshot::WorldSnapshot;
-use crate::cache_runtime::query::FactReadSet;
-use crate::resolver_core::resolver_context::ResolverContext;
-
-/// Context handed to every cold compute. Non-owning borrows only.
-pub struct ComputeCtx<'a> {
-    pub tracer: &'a mut FactReadSet,
-    pub resolver: &'a dyn ResolverContext,
-    pub deadline: Option<std::time::Instant>,
-}
-
-/// Artifact node: content-addressed cache (skill `R5`/`R6` content hash in key).
-///
-/// NO `'static` bound on the trait itself — nodes are constructed
-/// per-request and may borrow short-lived host references (e.g.
-/// `ResolvedImportFactsNode<'h> { host: &'h VerterHost }`). The
-/// associated `Key` and `Value` types are `'static` because they
-/// flow into long-lived cache storage; the impl-of-trait is
-/// short-lived because the cache stores `Arc<Value>` and never
-/// retains the node impl itself.
-///
-/// `Value` is the UNWRAPPED domain type and is NEVER itself
-/// `Arc<_>`. The substrate wraps in `Arc::new(...)` AT ADMISSION.
-/// There is no producer-side `Entry` type.
-pub trait ArtifactNode: Send + Sync {
-    type Key: Eq + std::hash::Hash + Clone + Send + Sync + 'static;
-    type Value: Send + Sync + 'static;
-    fn compute(
-        &self,
-        key: &Self::Key,
-        snapshot: &WorldSnapshot,
-        ctx: &mut ComputeCtx<'_>,
-    ) -> CacheAdmission<Self::Value>;
-    fn post_publish(&self, _key: &Self::Key, _value: &std::sync::Arc<Self::Value>) {}
-    fn weight_bytes(&self, _value: &std::sync::Arc<Self::Value>) -> usize { 0 }
-}
-
-#[derive(Debug)]
-pub enum LookupError {
-    /// `compute` returned `CacheAdmission::Failed`.
-    Failed,
-    /// Cancellation was observed on the `ResolverContext` before the
-    /// caller received a value.
-    Cancelled,
-}
-
-/// Canonical 4-arg lookup. Substrate consumes `node` by short-lived
-/// reference and stores `Arc<Value>`. Warm hits return a cheap
-/// `Arc<Value>` clone; cold `Cacheable` admits and returns the
-/// admitted `Arc`; cold `ReturnOnly` returns a fresh `Arc` without
-/// admitting; `Failed` returns `Err(LookupError::Failed)`.
-///
-/// Visibility is `pub(crate)` because the signature names
-/// `&dyn ResolverContext`, which is itself `pub(crate)` — a `pub fn`
-/// signature exposing a `pub(crate)` trait would trip
-/// `clippy::private_interfaces`. Callers all live inside
-/// `verter_session`.
-pub(crate) fn lookup<N: ArtifactNode>(
-    node: &N,
-    key: &N::Key,
-    snapshot: &WorldSnapshot,
-    ctx: &dyn ResolverContext,
-) -> Result<std::sync::Arc<N::Value>, LookupError> {
-    let inflight = ctx.inflight_table_for::<N>();
-    let dedup = (key.clone(), snapshot.compat_token);
-    match singleflight::get_or_insert_with_post_publish(
-        inflight,
-        dedup,
-        // Warm-read validator: every cached entry stores its
-        // `ReadSetSignature` and `validated_at_generation`. A warm
-        // hit revalidates against the live `StoreView` via
-        // `ReadSetSignature::validate_with_self_roots`; mismatch
-        // forces fall-through to a cold rebuild (singleflight
-        // collapses concurrent fall-throughs onto one flight).
-        |entry: &CacheEntry<std::sync::Arc<N::Value>>| -> bool {
-            entry.validated_at_generation == snapshot.generation
-                && entry.signature.validate_with_self_roots(ctx, &[])
-        },
-        // Cold compute closure — only one flight wins this race.
-        || {
-            let mut tracer = FactReadSet::with_capacity(64);
-            let mut compute = ComputeCtx {
-                tracer: &mut tracer,
-                resolver: ctx,
-                deadline: None,
-            };
-            let admission = node.compute(key, snapshot, &mut compute);
-            let sig_admission = SignatureAdmission::from_finalise(tracer.finalise());
-            match (admission, sig_admission) {
-                (CacheAdmission::Cacheable(value), SignatureAdmission::Cacheable(signature)) => {
-                    let arc = std::sync::Arc::new(value);
-                    Ok(CacheEntry {
-                        value: arc,
-                        signature,
-                        validated_at_generation: snapshot.generation,
-                    })
-                }
-                // Tracer overflow promotes a would-be cacheable to
-                // `ReturnOnly`; non-admission also routes here.
-                (CacheAdmission::Cacheable(value), SignatureAdmission::NonCacheable)
-                | (CacheAdmission::ReturnOnly(value), _) => {
-                    Err(singleflight::ColdOutcome::ReturnOnly(std::sync::Arc::new(value)))
-                }
-                (CacheAdmission::Failed, _) => Err(singleflight::ColdOutcome::Failed),
-            }
-        },
-        // Post-publish hook — forwards to the node's optional hook.
-        |entry: &CacheEntry<std::sync::Arc<N::Value>>| {
-            node.post_publish(key, &entry.value);
-        },
-    ) {
-        singleflight::GetOrInsertOutcome::WarmHit(entry)
-        | singleflight::GetOrInsertOutcome::ColdAdmitted(entry) => {
-            Ok(std::sync::Arc::clone(&entry.value))
-        }
-        singleflight::GetOrInsertOutcome::ReturnOnly(arc) => Ok(arc),
-        singleflight::GetOrInsertOutcome::Failed => Err(LookupError::Failed),
-        singleflight::GetOrInsertOutcome::Cancelled => Err(LookupError::Cancelled),
-    }
-}
-```
-
-```rust
-// crates/verter_session/src/cache_runtime/query.rs
-use crate::cache_runtime::admission::CacheAdmission;
-use crate::cache_runtime::artifact::{ComputeCtx, LookupError};
-use crate::cache_runtime::world_snapshot::WorldSnapshot;
-use crate::fact_signature_helpers::ReadSetSignature;
-use crate::resolver_core::resolver_context::ResolverContext;
-use crate::versioned_decl_identity::VersionedDeclIdentity;
-
-pub trait QueryNode: Send + Sync {
-    type Key: Eq + std::hash::Hash + Clone + Send + Sync + 'static;
-    type Candidate: Send + Sync + 'static;
-    type Value: Send + Sync + 'static;
-    fn compute(
-        &self,
-        key: &Self::Key,
-        snapshot: &WorldSnapshot,
-        ctx: &mut ComputeCtx<'_>,
-    ) -> CacheAdmission<Self::Value>;
-    fn candidate_for(&self, value: &std::sync::Arc<Self::Value>) -> std::sync::Arc<Self::Candidate>;
-    fn matches_view(
-        &self,
-        candidate: &Self::Candidate,
-        snapshot: &WorldSnapshot,
-        ctx: &dyn ResolverContext,
-    ) -> bool;
-    fn post_publish(&self, _key: &Self::Key, _value: &std::sync::Arc<Self::Value>) {}
-    fn weight_bytes(&self, _value: &std::sync::Arc<Self::Value>) -> usize { 0 }
-}
-
-/// Per-candidate record stored inside `QuerySlot`. Multi-candidate
-/// storage isolates concurrent overlay variants (skill `R20`).
-pub struct Candidate<V> {
-    pub value: std::sync::Arc<V>,
-    pub fact_dep_signature: ReadSetSignature,
-    pub versioned_identity: Option<VersionedDeclIdentity>,
-    pub admitted_generation: u64,
-    /// Strict self-root canonicals. The corresponding `FileWholeHash`
-    /// for each canonical lives in `fact_dep_signature.facts` as a
-    /// `FactKey::FileWholeHash` observation, recorded by the
-    /// fact-tracer during cold compute. The warm-read validator and
-    /// the publish-time gate both pass `&self_root_canonicals` to
-    /// `ReadSetSignature::validate_with_self_roots(ctx, &…)` (see
-    /// `crates/verter_session/src/fact_signature_helpers.rs:732`),
-    /// which scans `facts` for matching `FileWholeHash` observations
-    /// and compares against the live `StoreView` via `ResolverContext`.
-    /// Empty for `Global`-origin candidates with no file ancestor.
-    pub self_root_canonicals: smallvec::SmallVec<[std::sync::Arc<str>; 2]>,
-}
-
-pub struct QuerySlot<V> {
-    pub candidates: arc_swap::ArcSwap<smallvec::SmallVec<[std::sync::Arc<Candidate<V>>; 2]>>,
-}
-
-#[derive(Debug)]
-pub enum PublishOutcome {
-    /// Candidate admitted; slot now holds it.
-    Admitted,
-    /// Candidate rejected post-compute because a self-root anchor was
-    /// edited mid-compute. Caller receives the computed value (the
-    /// producer already paid for compute), but the substrate admits
-    /// nothing.
-    RejectedSupersededSelfRoot,
-    /// Admission refused for non-self-root reasons (overflow, budget,
-    /// cancellation, generation supersession, unresolved provenance).
-    NotAdmitted(NonAdmissionReason),
-}
-
-// Re-export the leaf-substrate enum so callers see it on the
-// `cache_runtime::query` path without depending on `verter_audit`
-// directly. The canonical definition lives in
-// `crates/verter_audit/src/structured_event.rs` (Block 10).
-pub use verter_audit::structured_event::NonAdmissionReason;
-
-// `NonAdmissionReason` is OWNED by `verter_audit::structured_event`
-// (Block 10) — `verter_audit` is the leaf observability substrate
-// (see `CLAUDE.md` "Shared Optimized Codebase" — it depends only on
-// `verter_span` and never on higher crates). The publish-pipeline
-// here re-exports it so callers see the symbol on the
-// `cache_runtime::query` path without dragging `verter_audit`
-// into a back-edge on `verter_session`:
-//
-//     pub use verter_audit::structured_event::NonAdmissionReason;
-//
-// The enum's canonical definition lives in Block 10's
-// `structured_event.rs` diff — see `pub enum NonAdmissionReason` in
-// `crates/verter_audit/src/structured_event.rs`. A single
-// definition site; one canonical path with one re-export rail.
-
-/// Cold compute + admit pipeline for query nodes.
-///
-/// Step 1 (post-compute self-root revalidation): re-validate every
-/// self-root canonical against the LIVE `StoreView` via
-/// `ReadSetSignature::validate_with_self_roots(ctx, &self_root_canonicals)`.
-/// Mismatch (or overflow) fails — return `RejectedSupersededSelfRoot`.
-/// The substrate does NOT call a nonexistent
-/// `snapshot.current_whole_hash(canonical)` method; the recorded
-/// `FileWholeHash` lives inside `fact_dep_signature.facts`, the
-/// validator finds it there and compares against the authoritative
-/// source through the `ResolverContext`.
-///
-/// Step 2 (admit + RCU candidate push + reverse-index + post_publish):
-/// gated by step 1.
-/// `pub(crate)` for the same reason as `lookup<N: QueryNode>` and the
-/// artifact `lookup` — the signature names `&dyn ResolverContext`,
-/// which is itself `pub(crate)` (`resolver_core::resolver_context.rs:152`);
-/// a `pub fn` signature exposing a `pub(crate)` trait would trip
-/// `clippy::private_interfaces`. Callers all live inside
-/// `verter_session::cache_runtime`.
-pub(crate) fn publish<N: QueryNode>(
-    cache: &QueryCache<N>,
-    key: &N::Key,
-    candidate: Candidate<N::Value>,
-    ctx: &dyn ResolverContext,
-) -> PublishOutcome {
-    if !candidate.fact_dep_signature.validate_with_self_roots(
-        ctx,
-        &candidate.self_root_canonicals,
-    ) {
-        return PublishOutcome::RejectedSupersededSelfRoot;
-    }
-    cache.admit_candidate(key, std::sync::Arc::new(candidate));
-    PublishOutcome::Admitted
-}
-
-/// `pub(crate)` for the same reason as the artifact `lookup` —
-/// `&dyn ResolverContext` is a `pub(crate)` trait, so a `pub fn`
-/// signature would trip `clippy::private_interfaces`. Multi-candidate
-/// warm read scans every candidate against the live `StoreView`; the
-/// first to validate is returned. Failed candidates short-circuit
-/// rejection; on exhaustion the query collapses onto a singleflight
-/// cold compute and routes through `publish` (which re-validates
-/// every recorded self-root canonical mid-compute via
-/// `ReadSetSignature::validate_with_self_roots`).
-pub(crate) fn lookup<N: QueryNode>(
-    node: &N,
-    key: &N::Key,
-    snapshot: &WorldSnapshot,
-    ctx: &dyn ResolverContext,
-) -> Result<std::sync::Arc<N::Value>, LookupError> {
-    let cache = ctx.query_cache_for::<N>();
-    // 1. Multi-candidate warm read — iterate slot candidates and
-    //    return the first whose `fact_dep_signature` validates AND
-    //    whose `validated_at_generation` is not stale.
-    if let Some(slot) = cache.peek_slot(key) {
-        for candidate in slot.candidates.load().iter() {
-            if candidate.admitted_generation == snapshot.generation
-                && candidate
-                    .fact_dep_signature
-                    .validate_with_self_roots(ctx, &candidate.self_root_canonicals)
-                && node.matches_view(&node.candidate_for(&candidate.value), snapshot, ctx)
-            {
-                return Ok(std::sync::Arc::clone(&candidate.value));
-            }
-        }
-    }
-    // 2. Cold compute under singleflight — collapses concurrent cold
-    //    fall-throughs (warm-miss or warm-rejection) onto one flight
-    //    per `(key, snapshot.compat_token)`. On a successful cacheable
-    //    outcome, route through `publish` which enforces the
-    //    post-compute self-root revalidation gate before admitting
-    //    the candidate to the multi-candidate slot. `ReturnOnly` /
-    //    `Failed` short-circuit before any admission.
-    //
-    //    H14 (singleflight required for every cold cacheable node):
-    //    every cold compute path on a QueryNode flows through
-    //    `singleflight::get_or_insert` — never directly. The query
-    //    layer does NOT use `get_or_insert_with_post_publish` (the
-    //    artifact variant) because `publish<N: QueryNode>` is the
-    //    canonical admission path for multi-candidate slots and
-    //    already owns the post-publish accounting; the singleflight
-    //    primitive only needs to dedup the cold compute itself.
-    let inflight = ctx.query_inflight_for::<N>();
-    let dedup = (key.clone(), snapshot.compat_token);
-    match singleflight::get_or_insert(
-        inflight,
-        dedup,
-        // Cold compute closure — exactly one flight wins this race;
-        // every other concurrent caller observes the winner's result.
-        || {
-            let mut tracer = FactReadSet::with_capacity(64);
-            let mut compute = ComputeCtx { tracer: &mut tracer, resolver: ctx, deadline: None };
-            let admission = node.compute(key, snapshot, &mut compute);
-            let sig = SignatureAdmission::from_finalise(tracer.finalise());
-            match (admission, sig) {
-                (CacheAdmission::Cacheable(value), SignatureAdmission::Cacheable(signature)) => {
-                    let arc = std::sync::Arc::new(value);
-                    let candidate = Candidate {
-                        value: std::sync::Arc::clone(&arc),
-                        fact_dep_signature: signature,
-                        versioned_identity: None,
-                        admitted_generation: snapshot.generation,
-                        self_root_canonicals: smallvec::smallvec![],
-                    };
-                    // `publish` revalidates self-roots and admits the
-                    // candidate into the multi-candidate slot. The
-                    // computed `Arc` is returned to every joiner
-                    // regardless of admit outcome (the producer
-                    // already paid for compute).
-                    let _ = publish(cache, key, candidate, ctx);
-                    Ok(arc)
-                }
-                (CacheAdmission::Cacheable(value), SignatureAdmission::NonCacheable)
-                | (CacheAdmission::ReturnOnly(value), _) => {
-                    Err(singleflight::ColdOutcome::ReturnOnly(std::sync::Arc::new(value)))
-                }
-                (CacheAdmission::Failed, _) => Err(singleflight::ColdOutcome::Failed),
-            }
-        },
-    ) {
-        singleflight::GetOrInsertOutcome::WarmHit(arc)
-        | singleflight::GetOrInsertOutcome::ColdAdmitted(arc) => Ok(arc),
-        singleflight::GetOrInsertOutcome::ReturnOnly(arc) => Ok(arc),
-        singleflight::GetOrInsertOutcome::Failed => Err(LookupError::Failed),
-        singleflight::GetOrInsertOutcome::Cancelled => Err(LookupError::Cancelled),
-    }
-}
-
-pub struct QueryCache<N: QueryNode> { /* … */ }
-
-/// Re-export of the tracer used by Block 3 + Block 10. Substrate
-/// exports `FactReadSet` from `crate::resolver_core` (verified at
-/// `crates/verter_session/src/resolver_core/mod.rs:49`), NOT from
-/// `crate::fact_signature_helpers`. Keep this re-export aligned with
-/// the substrate path; an out-of-date path would fail to resolve.
-pub use crate::resolver_core::FactReadSet;
-```
-
-**Storage discipline.** The cache substrate stores `Arc<Value>` keyed
-by `Key` (both `'static`). The substrate does NOT box `dyn
-ArtifactNode` and does NOT retain the node impl after a lookup
-completes. Long-lived state lives in `Arc<Value>` only.
-
-**Multi-candidate semantics.** Warm reads iterate candidates; for
-each candidate the validator calls
-`candidate.fact_dep_signature.validate_with_self_roots(ctx, &candidate.self_root_canonicals)`
-which walks the candidate's recorded facts, matches
-`FactKey::FileWholeHash` observations against each canonical in
-`self_root_canonicals`, AND compares every other fact against the
-live `StoreView`. The first candidate to validate is returned; failed
-candidates are rejected as stale and iteration continues; on
-exhaustion the query falls through to cold compute.
-
-**Per-query-family self-root validation matrix** (Block 4 populates
-the per-row implementations; Block 2 names the contract):
-
-| Query family | `self_root_canonicals` content |
-|---|---|
-| `MaterializeStructureDb` | base node's declaration-origin file canonical (empty for `Global` origin) |
-| `RefCycleResultDb` | BFS root file canonical + every visited declaration's file canonical |
-| `SemanticGraphStore` query nodes | keyed canonical for `ResolveDecl` / `TypeOf` / `Instantiate` / `ResolveMacroPayload`; file-derived origin canonical for nodeid-keyed kinds |
-| `ComponentMetaResultDb` | owner canonical |
-| `MemberShapeCacheDb` | scope file canonical + observation-generation anchor canonical |
-| `RouteDb` per-name / barrel / effective-set | source canonical |
-| `CompileOutputNode_FactValidatedSession` | source canonical |
-
-Worked example: `ResolvedImportFacts` as an `ArtifactNode`:
-
-```rust
-pub struct ResolvedImportFactsNode<'h> { pub host: &'h VerterHost }
-
-impl<'h> ArtifactNode for ResolvedImportFactsNode<'h> {
-    type Key = ResolvedImportFactsKey;          // landed by Block 4
-    type Value = ResolvedImportFacts;           // existing host type
-    fn compute(
-        &self,
-        key: &Self::Key,
-        snapshot: &WorldSnapshot,
-        ctx: &mut ComputeCtx<'_>,
-    ) -> CacheAdmission<Self::Value> {
-        let indexed = match self.host.indexed_ready_for(&key.canonical, key.content_hash) {
-            Some(idx) => idx,
-            None => return CacheAdmission::Failed,
-        };
-        let facts = self.host.resolve_imports(indexed, snapshot, ctx);
-        CacheAdmission::Cacheable(facts)
-    }
-    fn weight_bytes(&self, value: &std::sync::Arc<Self::Value>) -> usize {
-        value.estimated_bytes()
-    }
-}
-```
 
 #### Legacy Deletions
 
+- REMOVE `pub mod cooperative_admission;` (and the
+  `cooperative_admission_tests` mod declaration) from `lib.rs`.
 - DELETE `crates/verter_session/src/cooperative_admission.rs` after
   contents move to `cache_runtime/singleflight.rs`. No forwarder.
 - MIGRATE
   `crates/verter_session/src/cooperative_admission_tests.rs` →
   `crates/verter_session/src/cache_runtime/singleflight_tests.rs`.
   Rename only; preserve every test function name, every fixture,
-  every helper. Update the `pub mod` declaration in `lib.rs`.
-- DELETE every `use crate::cooperative_admission::*` import across
-  the call sites enumerated in the rename table; update to
-  `use crate::cache_runtime::{CacheAdmission, singleflight::*};`.
+  every helper.
+- UPDATE every `use crate::cooperative_admission::*` import across
+  the call sites enumerated in the rename table to
+  `use crate::cache_runtime::singleflight::*` (`ComputeAdmission`
+  and the `cooperative_*` entry points resolve through this path —
+  `CacheAdmission` is NOT a symbol this rehome lands).
 
 #### Verification
 
@@ -1249,113 +830,49 @@ pnpm install --frozen-lockfile
 
 #### Discriminating tests
 
-- `crates/verter_session/tests/cache_runtime_singleflight.rs::cold_cacheable_node_computes_once_for_two_joiners`
-  — fails any implementation lacking generic singleflight. Spawns two
-  concurrent threads cold-requesting the same key; asserts the
-  compute closure runs exactly once (`compute_call_count == 1`) and
-  both threads receive equal values. Discriminating: a regression
-  that constructed two parallel `Arc<Value>`s would fail the equality
-  assertion AND increment the counter.
-- `crates/verter_session/tests/cache_runtime_return_only.rs::return_only_does_not_publish_reverse_index_or_persist`
-  — stub `ArtifactNode` returns `CacheAdmission::ReturnOnly(value)`;
-  asserts the caller receives `value` but cache map has zero
-  entries, post-publish counter is zero, reverse-index registration
-  counter is zero, persistent-write counter is zero.
-- `crates/verter_session/tests/cache_runtime_uses_validated_fact_cache_substrate.rs::query_node_storage_layers_on_validated_fact_cache_not_a_parallel_map`
-  — walks every module under
-  `crates/verter_session/src/cache_runtime/**/*.rs` via
-  `syn::parse_file`; rejects any module-level storage type whose
-  backing is not `ValidatedFactCache<_, _>` or
-  `BoundedCandidateMap<_, _>`. A synthetic `cache_runtime/_test_only_parallel_map.rs`
-  fixture string containing `pub(crate) struct ForbiddenMap<K, V> { inner: DashMap<K, V> }`
-  is asserted to trip the predicate.
-- `crates/verter_session/tests/cache_runtime_no_cooperative_admission_module.rs::cooperative_admission_module_does_not_exist_after_cutover`
+The rehome is structural; the discriminators pin the move (not new
+behaviour — the primitive's behavioural tests move verbatim with it).
+
+- `crates/verter_session/tests/cache_runtime_singleflight_rehome.rs::singleflight_primitive_lives_under_cache_runtime`
   — reads the `src/` directory listing; asserts
-  `cache_runtime/singleflight.rs` exists and
-  `cooperative_admission.rs` does not.
-- `crates/verter_session/tests/artifact_node_lifetime.rs::resolved_import_facts_node_compiles_with_short_lifetime`
-  — constructs `ResolvedImportFactsNode<'h> { host: &'h VerterHost }`
-  from a stack-allocated host reference; invokes
-  `cache_runtime::lookup::<ResolvedImportFactsNode<'_>>(&node, &key, &snapshot, ctx)`.
-  Sibling trybuild fail-test fixture
-  `tests/trybuild/artifact_node_static_bound.rs` carries the
-  synthetic `pub trait ArtifactNode: Send + Sync + 'static` form and
-  asserts it fails to compile with the expected error.
-- `crates/verter_session/tests/artifact_node_storage_uses_arc_value.rs::artifact_cache_does_not_box_dyn_artifact_node`
-  — walks `cache_runtime/store.rs` + `cache_runtime/artifact.rs` via
-  `syn::parse_file`; asserts no field type matches
-  `Box<dyn ArtifactNode<…>>` or `Arc<dyn ArtifactNode<…>>`. Only
-  `Arc<Value>` enters long-lived storage.
-- `crates/verter_session/tests/artifact_node_entry_type_removed.rs::artifact_node_has_no_entry_associated_type`
-  — walks the `ArtifactNode` and `QueryNode` trait definitions via
-  `syn::parse_file`; asserts neither trait declares `type Entry`.
-  Positive: only `Key`, `Value` (and `Candidate` for `QueryNode`).
-  Negative: a regression re-introducing `type Entry: Send + Sync + 'static`
-  fails the assertion.
-- `crates/verter_session/tests/cache_admission_holds_value_not_arc.rs::cacheable_arm_holds_unwrapped_value`
-  — walks `cache_runtime/admission.rs`; asserts (i) the enum carries
-  exactly one type parameter `V`; (ii) `Cacheable(_)` carries a single
-  field of type `V` (NOT `Arc<V>`); (iii) `ReturnOnly(_)` carries `V`;
-  (iv) `Failed` carries no field.
-- `crates/verter_session/tests/artifact_node_value_algebra.rs::artifact_node_value_algebra_compiles_for_worked_nodes`
-  — walks every worked `ArtifactNode` / `QueryNode` impl in the
-  workspace via `syn::parse_file`. For each impl, parses the
-  `type Value` and `fn compute` body and asserts: (1) `type Value` is
-  NEVER syntactically `Arc<...>`; (2) every `CacheAdmission::Cacheable(_)`
-  / `ReturnOnly(_)` argument expression yields a bare `Self::Value`-typed
-  value. A regression writing `CacheAdmission::Cacheable(Arc::new(body))`
-  where `body: FlowLoweredBody` fails the assertion.
-- `crates/verter_session/tests/query_node_publish_revalidation.rs::publish_rejects_candidate_when_self_root_edited_mid_compute`
-  — admits a candidate whose `self_root_canonicals = [fileA]` and
-  whose `fact_dep_signature.facts` records
-  `FactKey::FileWholeHash(fileA) = hashA`. Edits `fileA` so the live
-  `StoreView` reports `hashA'`. Calls `publish(&cache, &key, candidate, ctx)`.
-  Positive: returns `PublishOutcome::RejectedSupersededSelfRoot`;
-  slot has zero candidates; reverse-index counter is zero;
-  `post_publish` counter is zero.
+  `cache_runtime/singleflight.rs` and
+  `cache_runtime/singleflight_tests.rs` exist AND the crate-root
+  `cooperative_admission.rs` / `cooperative_admission_tests.rs` do
+  not. Discriminating: FAILS on the pre-rehome layout (primitive at
+  the crate root), PASSES once rehomed.
+- `crates/verter_session/tests/cache_runtime_singleflight_rehome.rs::rehomed_singleflight_owns_the_verbatim_primitive_api`
+  — reads `cache_runtime/singleflight.rs`; asserts it still declares
+  `pub enum ComputeAdmission<V, Entry>` with all three variants
+  (`Cacheable(Entry)` / `ReturnOnly(V)` / `Failed`) and all three
+  `cooperative_*` entry points. Discriminating: a rehome that
+  collapsed the two type parameters or dropped an entry point fails.
+- `crates/verter_session/tests/block_1_i_discriminators.rs::cooperative_return_only_not_shared_to_joiners`
+  — reads the rehomed `cache_runtime/singleflight.rs` and asserts the
+  `ReturnOnly` arm marks `non_cacheable_winner` (so joiners fork and
+  cold-recompute) rather than broadcasting `V` through a channel.
+  This is the rehome-sensitive guard repointed by this block.
 
 #### Owning-doc updates
 
 - `.claude/skills/type-cache-architecture/SKILL.md` — replace any
-  `cooperative_admission` references with
-  `cache_runtime::singleflight`; add an `ArtifactNode` / `QueryNode`
-  trait synopsis. Append a new
-  `## Typed CacheAdmission gate (CRITICAL)` section: every cache
-  producer returns `CacheAdmission<V>` (`Cacheable(V)` /
-  `ReturnOnly(V)` / `Failed`; single type parameter, no producer-side
-  `Entry` type, the substrate wraps in `Arc::new(...)` at admission)
-  — the substrate never admits a `ReturnOnly` result and never
-  registers reverse-index metadata or persistent artifacts on
-  `ReturnOnly`/`Failed`. Cite the guards
-  `return_only_does_not_publish_reverse_index_or_persist`,
-  `artifact_node_has_no_entry_associated_type`,
-  `cacheable_arm_holds_unwrapped_value`, and
-  `cold_cacheable_node_computes_once_for_two_joiners`. New
-  `CRITICAL_RULE_GUARDS` entry:
-  `("Typed CacheAdmission gate", &["return_only_does_not_publish_reverse_index_or_persist", "cold_cacheable_node_computes_once_for_two_joiners", "artifact_node_has_no_entry_associated_type", "cacheable_arm_holds_unwrapped_value"])`.
-- `docs/arch/fact-based-cache.md` — append a "Cache runtime trait
-  surface" subsection enumerating the trait shape, the multi-candidate
-  `QuerySlot` shape, and the worked `ResolvedImportFactsNode` example.
+  `cooperative_admission` path references with
+  `cache_runtime::singleflight`.
 
 #### Public API mirrors
 
-- Rust crate (`verter_session`): `pub` re-exports of `CacheAdmission`,
-  `ArtifactNode`, `QueryNode`, `WorldSnapshot` from
-  `cache_runtime::*`.
+The rehomed primitive stays crate-internal — `cache_runtime` and its
+`singleflight` submodule are both `pub(crate)`.
+
+- Rust crate (`verter_session`): `pub(crate)` rehome only; no new
+  public surface.
 - NAPI / WASM / protocol DTO / TS types / JS wrappers / compat: no
   exposure in this block.
 
 #### Blocks blocked by this block
 
-- B3 (`SignatureAdmission` defines itself against B2's renamed
-  `CacheAdmission`).
-- B4 (artifact-node + query-node enumeration consumes these traits).
-- B5 (mode plumbing layers over this substrate).
-- B7 (scheduler `DedupeHook` consumes scheduler-side dedupe before
-  cache-runtime singleflight runs in the calling crate).
-- B9 (`PersistentArtifactNode` sealed-trait extends `ArtifactNode`).
-- B10 (memory policy + audit instrument through the trait).
-- B11 (flow-return dispatches through `ArtifactNode`).
+- B4 (the merged cutover builds its `ArtifactNode` / `QueryNode`
+  trait surface and lookup/publish runtime on top of the rehomed
+  `singleflight` primitive).
 
 ### 3. Typed `SignatureAdmission` + `CompileSlot` retyping
 
@@ -1474,8 +991,11 @@ signatures (every site is in the migration commit):
 Producer contract: any cold compute that observes the tracer's
 `finalise()` overflowing returns `CacheAdmission::ReturnOnly(value)`.
 The cache substrate does NOT admit; the value is returned to the
-caller; subsequent cold callers cold-recompute. Joiners fork (Block 2
-`ReturnOnly` semantics).
+caller; subsequent cold callers cold-recompute. `ReturnOnly` is
+winner-only: joiners fork and cold-recompute because there is no
+carrier to validate against their own view (it carries no `Entry` /
+dep-signature carrier, so a joiner cannot view-validate it). It is
+NOT broadcast or shared to joiners.
 
 #### Legacy Deletions
 
@@ -1588,6 +1108,20 @@ granularity, and lands the
 `SemanticQueryKey::Instantiate { base: ResolvedDeclSlotIdentity }`
 migration.
 
+This block (merged B2b+B4) also owns the new lookup/publish runtime —
+the `ComputeCtx` context, the `ArtifactNode` / `QueryNode` traits, the
+node-facing `CacheAdmission<V>`, the `Candidate<V>` / `QuerySlot<V>`
+multi-candidate structures, and the `lookup` / `query::lookup` /
+`publish` entry points — and migrates ALL direct production
+cooperative-admission callers in one change; no old direct caller
+path remains. `QueryCache<N>` wraps the existing `ValidatedFactCache`
+/ bounded-candidate substrate, not a parallel validation map. These
+are landed as compile-real implementations against today's substrate,
+each with its first real consumer in the same change. After this
+cutover, direct production use of `singleflight::cooperative_*` is
+rejected outside `cache_runtime`; the primitive remains internal
+implementation, not a second public path.
+
 #### Changes
 
 Per-row, one `ArtifactNode` or `QueryNode` impl is created.
@@ -1638,6 +1172,20 @@ Per-row, one `ArtifactNode` or `QueryNode` impl is created.
 expected_whole_hash`. Query-identity keys stay free of `whole_hash`.
 Discriminating test:
 `analysis_ready_bitflag_containment::broader_scope_candidate_satisfies_narrower_query_at_same_whole_hash`.
+
+**Per-query-family self-root validation contract.** This cutover owns
+the per-query-family self-root validation contract. Each query
+family's `self_root_canonicals` content:
+
+| Query family | `self_root_canonicals` content |
+|---|---|
+| `MaterializeStructureDb` | base node's declaration-origin file canonical (empty for `Global` origin) |
+| `RefCycleResultDb` | BFS root file canonical + every visited declaration's file canonical |
+| `SemanticGraphStore` query nodes | keyed canonical for `ResolveDecl` / `TypeOf` / `Instantiate` / `ResolveMacroPayload`; file-derived origin canonical for nodeid-keyed kinds |
+| `ComponentMetaResultDb` | owner canonical |
+| `MemberShapeCacheDb` | scope file canonical + observation-generation anchor canonical |
+| `RouteDb` per-name / barrel / effective-set | source canonical |
+| `CompileOutputNode_FactValidatedSession` | source canonical |
 
 **Sub-caches consumed by `ComponentMetaResultDb` (NOT standalone
 query-identity slots — listed for inventory completeness):**

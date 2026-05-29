@@ -264,6 +264,36 @@ the key.
 version hashes (for query-identity caches). Signatures and version
 info live on the cached value.
 
+The `SemanticGraphStore` family memo applies R6 to its
+`SemanticQueryKey::Instantiate.base` and
+`SemanticQueryKey::ResolveMacroPayload.owner` fields (mirrored on the
+`FamilyKey` memo identity). These carry a content-free
+`DeclKey { canonical_id, decl_name }` — the versioned `DeclIdentity`
+type (`{ canonical_id, whole_hash, decl_name }`) survives as a
+value-side payload for `SemanticNodeData::{TypeParam, DeclRef,
+InstantiationRef}` and `ShallowDiagnostic`, but is forbidden inside
+any derived-`Hash` query-identity key. The cold-build path
+(`build_instantiate`, `build_resolve_macro_payload`) re-sources the
+live file content version from
+`ResolverContext::ensure_indexed_ready(canonical_id).whole_hash` at
+value-compute time and rolls it into the published `MemoEntry`'s
+`ReadSetSignature.facts` + `self_root_canonicals` rails. Non-file
+bases (`__builtin__`, empty global, `<synthetic>`) do NOT fabricate a
+`FileWholeHash` self-root — they root via `args` nodes only. A
+real-file base whose `ensure_indexed_ready` returns `None` is a stale
+key and returns `cache_suppress = true`. Each `(family, slot)` in
+`FamilySlots` holds a candidate list capped at
+`FAMILY_SLOT_CANDIDATE_CAP = 4` (per-slot multi-candidate); two
+content-versions of the same content-free key coexist as distinct
+candidates inside one slot under R20 overlay isolation. Admission
+identity is the pair `(validated_at_generation, ReadSetSignature.facts)`
+— same exact discriminant replaces in place; a different view appends
+at the back; cap overflow FIFO-evicts the oldest. Warm lookup scans
+every candidate and returns the FIRST whose
+`validate_with_self_roots(ctx, ...)` passes against the caller's live
+view; `validated_at_generation` is LRU-recency metadata, NOT a
+semantic-validity oracle.
+
 **R7.** Shared semantic materialisations key by
 `ResolvedDeclSlotIdentity` (content-free) as the cache slot identity.
 The cached value carries `VersionedDeclIdentity` (with content /
@@ -471,6 +501,63 @@ across `entries.insert` + `post_publish`, and `post_publish` does
 the `live_counter` increment, and the budget admission are one
 fenced write-side step.
 
+**Per-MapK publish linearization (by-flight-key shape).** In the
+`cooperative_admit_with_post_publish_by_flight_key` adapter the published
+map key (`MapK`) is independent of the in-flight coalescing identity
+(`FlightK`) — e.g. two overlays on the same cache key flight on distinct
+`FlightK` lanes but publish under one `MapK`. Both can become cold winners
+and both reach the publish path, so the second publish DISPLACES the first
+and the displaced entry must receive `removal_cleanup`. The `publish_fence`
+is a SHARED read guard: it serializes publish-vs-`clear` (write guard) but
+does NOT serialize publisher-vs-publisher. A bare `map.insert` plus a
+post-hoc cleanup of the returned displaced value is therefore unsound — the
+displacing publisher can run `removal_cleanup` for an entry whose own
+`post_publish` has not yet run, underflowing a `live_counter` (the matching
+bump never happened) or orphaning a reverse-index registration. The full
+publish triple (insert/replace → displaced `removal_cleanup` → new
+`post_publish`) must be ONE operation atomic per `MapK` against other
+publishers. The substrate (`publish_entry_linearized_per_map_key`) rides
+the map's per-key shard lock — `DashMap::entry` holds the shard write guard
+for the `Entry`'s lifetime, and a `DashMap` shards by key — rather than a
+new global lock; contention stays per-shard, identical to a plain insert. A
+displaced entry is then observable only to a shard guard acquired AFTER the
+displaced publisher released its own, i.e. after that entry's `post_publish`
+completed: the displacing publisher's cleanup is the linearized successor of
+the displaced publisher's completed publish. Consequence: a hook published
+under this linearized shape MUST NOT re-enter the SAME `entries` map (it
+would self-deadlock on the held shard write guard) — the by-flight-key
+consumers' hooks are lock-free `live_counter` atomics or touch a SEPARATE
+`CanonicalReverseIndex` map, so they are safe.
+
+**Path-split: the unified-key form does NOT linearize.** The unified-key
+entry point (`cooperative_admit_with_post_publish`, `MapK == FlightK`)
+coalesces every caller of one key onto ONE cold compute via the in-flight
+table, so there is exactly ONE publisher per key and the map slot is always
+vacant at publish — no overwrite ever occurs and there is no
+publisher-vs-publisher to serialize. It therefore publishes through
+`publish_entry_insert_then_post_publish`: `map.insert` takes, mutates, and
+RELEASES the shard guard, then `post_publish` runs with NO shard guard held.
+This is REQUIRED, not merely permitted: the two budgeted unified consumers
+(`MaterializeStructureDb`, `RefCycleResultDb`) run a FIFO
+`register_post_publish` → `evict_budget_victim` → `entries.remove_if(victim)`
+re-entry on the SAME map from inside `post_publish`. Were the unified path to
+hold the shard write guard across `post_publish` (the linearized shape), a
+victim hashing to the just-published key's shard would deadlock the
+publishing thread on a non-reentrant same-shard write-lock acquisition. The
+two publish shapes are selected by `cooperative_admit_impl`'s
+`linearize_publish` flag (the public by-flight-key wrapper passes `true`, the
+unified wrapper passes `false`); both ride the one winner/joiner state
+machine. Discriminators:
+`by_flight_key_displaced_cleanup_runs_after_its_own_post_publish` proves the
+by-flight-key ORDERING (A's `post_publish` happens-before B's cleanup-of-A
+via an event log + a signed-counter low-water invariant), distinct from the
+aggregate-count test `by_flight_key_overwrite_cleans_up_displaced_entry` which
+only proves the counts net out; and
+`unified_budgeted_post_publish_eviction_does_not_self_deadlock` proves the
+unified path's deadlock-freedom (a cap-1 budgeted cache whose `post_publish`
+re-enters the map to evict a same-shard victim during publication completes
+under a 5s watchdog — it hangs against the linearized shape).
+
 `SemanticGraphStore::invalidate_all` (the project-generation bump)
 clears EVERY `SemanticNodeId`-keyed semantic cache on the store — the
 family memo, the in-flight admission table, the relation memo, the
@@ -498,10 +585,94 @@ Concrete substrate (the per-domain target form):
   `StoreViewCompatToken`-keyed singleflight.
 
 Bounded signature size: a `fact_dep_signature` is capped at 1024
-entries. Beyond that the producer consumes a hierarchical fact
-(downstream materialisation `semantic_hash`) instead of flattening
-transitive facts. Overflow produces `FactSignatureOverflow` audit
-event + candidate is admitted as `NonCacheable`.
+entries (`FACT_SIGNATURE_CAP`). Beyond that the producer consumes a
+hierarchical fact (downstream materialisation `semantic_hash`)
+instead of flattening transitive facts. The path-precise tracer
+carries the overflow as a structural bit on the
+[`ReadSetSignature`](../../crates/verter_session/src/fact_signature_helpers.rs)
+carrier: `ReadSetSignature { facts: Arc<[FactVersionRef]>,
+overflowed: bool }`, with `is_cacheable()` returning `!overflowed`
+(emptiness is NOT a non-cacheable condition — only overflow is).
+Empty and overflow are structurally distinguishable at the carrier
+type; the warm-hit oracle cannot conflate them. Overflow produces
+`FactSignatureOverflow` audit event + candidate is admitted as
+`NonCacheable`.
+
+## Typed SignatureAdmission gate (CRITICAL)
+
+Producers convert their finalised fact tracer into a typed
+admission verdict via
+[`SignatureAdmission::from_finalise(FactReadSetFinalise)`](../../crates/verter_session/src/cache_runtime/admission.rs).
+The verdict has two arms:
+
+- `SignatureAdmission::Cacheable(ReadSetSignature)` — the tracer
+  finalised with a bounded path-precise signature. The producer
+  publishes its cache entry under this signature; the warm-hit
+  oracle validates it against the live store view on every read.
+- `SignatureAdmission::NonCacheable(NonAdmissionReason)` — the
+  tracer overflowed, the provenance is unresolved, the self-root
+  closure is incomplete, or another structured refusal applies.
+  The verdict carries the typed refusal reason
+  (`SignatureOverflow`, `UnresolvedProvenance`, `SelfRootConflict`,
+  `RouteGenerationDependency`, `ForcedTestRefusal`,
+  `IntrinsicNonCacheable`, etc.) for audit.
+
+Production callsites pattern-match on `SignatureAdmission` directly:
+`Cacheable(sig)` admits the entry through the cache substrate,
+`NonCacheable(_)` refuses it. The two consumer families differ in
+how they route the refusal:
+
+- **Cooperative cache-runtime producers** (imported registry,
+  materialize-structure, ref-cycle) construct
+  `CacheAdmission::ReturnOnly { value, reason }` so the cooperative
+  joiners receive the value without admitting a shared cache entry.
+  The typed reason is bridged from the producer's
+  `SignatureAdmission::NonCacheable(reason)` arm to the lowering
+  site via a per-thread TLS slot
+  (`cache_runtime::set_return_only_reason` /
+  `cache_runtime::take_return_only_reason`) so the reason reaches
+  `CacheAdmission::ReturnOnly { reason }` honestly instead of
+  defaulting to `SignatureOverflow`.
+- **Non-cooperative producers that own their carrier slot**
+  (notably `CompileSlot.fact_dep_signature: ReadSetSignature` on
+  the compile-tier cold-build path) route the `NonCacheable(_)`
+  arm to a **skip-publish refusal**: the producer holds the
+  freshly computed result, returns it to its single caller, and
+  refuses the `compile_slots.insert` so no slot lands. A prior
+  successful slot for the same `(canonical, profile)` is
+  ADDITIONALLY removed (not just left in place) so the carrier
+  invariant `present in compile_slots ⇒ admitted cache entry for
+  the current version` survives a recompute that overflows. The
+  companion scheduler artifact commit is gated on `Cacheable`
+  admission so the overflowed result is not observable through
+  `try_get_artifact` either.
+
+`SignatureAdmission::into_cacheable()` is a test-fixture / owned
+projection helper that returns the carrier as
+`Option<ReadSetSignature>` (or `None` on refusal). It is consumed
+by test scaffolds that need the owned rail; production callsites
+match on the variants directly.
+
+Hard rules:
+
+- Direct construction of `Arc::from(Vec::<FactVersionRef>::new())`
+  outside `ReadSetSignature::empty()` / `ReadSetSignature::overflow()`
+  (allocated through the substrate helper
+  `fact_signature_helpers::empty_fact_signature`) is forbidden.
+  The legacy `finalise_signature_or_empty` helper that collapsed
+  `Overflow → empty signature → publish anyway` was deleted; no
+  caller may resurrect that path.
+- `ReadSetSignature` carries facts + overflow only. The cache
+  entry's world-generation lives on `CacheEntry<V>` alongside the
+  value (`validated_at_generation`). Conflating generation onto
+  the signature blurs the responsibility boundary.
+- Empty and overflow are different states. `ReadSetSignature::empty()`
+  is cacheable (an empty fact rail validates vacuously on warm
+  hits); `ReadSetSignature::overflow()` is not.
+
+The new guards are registered in
+[`CRITICAL_RULE_GUARDS`](../../crates/verter_session/tests/critical_rules_have_guards.rs)
+under the `Typed SignatureAdmission gate` entry.
 
 ### Environment & GC
 
