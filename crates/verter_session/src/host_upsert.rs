@@ -329,6 +329,31 @@ impl VerterHost {
             }
         }
 
+        // ── Content-addressed compile-output node ──
+        // `CompileOutputNode_PureContent` keys on
+        // `(canonical, content_hash, env_*, profile, source_map_policy)`.
+        // A `whole_hash` change moves the canonical to a NEW content_hash,
+        // so any prior-version Content entries for this canonical become
+        // unreachable but stay in the store — concurrent edits would let
+        // them accumulate without bound. The targeted invalidation path
+        // (`invalidate_compile_slots`) already calls `remove_canonical`
+        // here; mirror that on source-content edits so the live entry
+        // count stays bounded by the live-content-reachable set. The
+        // per-canonical reverse index makes this O(prev_entries) on the
+        // SHARD owning `canonical`, no global scan.
+        //
+        // Same-content edits (`whole_hash_changed == false`) hit the
+        // quintuple-unchanged fast path above and never reach this
+        // branch, so the live content key is preserved.
+        if whole_hash_changed {
+            self.compile_output_pure_content()
+                .remove_canonical(&canonical_id);
+            crate::host_manage::push_cache_drained_at_upsert(
+                "compile_output_pure_content",
+                &canonical_id,
+            );
+        }
+
         // ── DerivedRawState (derived_raw_cache_db) — source-derived caches ──
         // The matrix invalidates DerivedRawState on a source-content trigger.
         // Resolved-meta + tsc-extract + raw-template-analysis are

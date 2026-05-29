@@ -378,3 +378,48 @@ fn content_request_with_side_effect_only_relative_augmenter_downgrades_to_statel
         "a downgraded Content request must NOT publish a content-addressed entry"
     );
 }
+
+#[test]
+fn upsert_evicts_prior_content_entries_for_canonical() {
+    // The content-addressed compile node keys on
+    // `(canonical, content_hash, env_*, profile, source_map_policy)`. An
+    // edit to a canonical changes its `content_hash`, so the prior
+    // version's Content entry becomes unreachable — but without an
+    // explicit eviction on upsert it would still occupy a slot in the
+    // store. Repeated edits would accumulate one entry per content
+    // version per canonical, growing without bound.
+    //
+    // The upsert path's `whole_hash_changed` branch (the same place
+    // `ProfileState.content_overrides` is cleared) MUST also evict the
+    // canonical's prior content-keyed entries via
+    // `compile_output_pure_content().remove_canonical(canonical)`.
+    //
+    // Discriminator: after N edits that each publish exactly one
+    // Content entry, the live store size must equal 1 (the live
+    // content's entry), not N. Pre-fix this assertion fails at N=2
+    // (count grows monotonically). Post-fix the count stays at 1
+    // regardless of N.
+    let host = host();
+    let profile = content_profile();
+    const N: usize = 5;
+
+    for i in 0..N {
+        let n_lit = i + 1;
+        // Each iteration upserts a SLIGHTLY different SFC content so
+        // `whole_hash` changes. The SFC stays fact-free so the request
+        // actually runs as Content (no downgrade reasons fire).
+        let src = format!(
+            "<script setup lang=\"ts\">const n = {n_lit}</script><template><div>{{{{ n }}}}</div></template>"
+        );
+        upsert_vue(&host, "/Edit.vue", &src);
+        let _ = compile(&host, "/Edit.vue", &profile);
+        // After every iteration, exactly one entry exists — the prior
+        // version's entry was evicted by the upsert path.
+        assert_eq!(
+            host.compile_output_pure_content_entry_count(),
+            1,
+            "after edit #{n_lit} the content-addressed store must contain exactly one entry \
+             (the live content); the prior version's entry must have been evicted on upsert"
+        );
+    }
+}
