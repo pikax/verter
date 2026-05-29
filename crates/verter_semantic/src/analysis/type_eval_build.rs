@@ -159,7 +159,36 @@ pub fn build_eval_env(program: &Program<'_>, source: &str) -> EvalEnv {
         }
     }
 
+    // JSDoc `@typedef {T} Name` declarations are first-class REGULAR types: a
+    // `/** @typedef {{a: number}} Alias */` block declares `Alias` exactly like
+    // a TS `type Alias = { a: number }`. Register them on the SAME type-symbol
+    // registry the TS declarations above populated, so a later `@type {Alias}`
+    // or bare `Alias` reference resolves through the shared dispatch with no
+    // JSDoc-specific path. This runs AFTER the statement walk so a real TS
+    // declaration of the same name always wins (TS-decl precedence).
+    register_jsdoc_typedefs(&program.comments, source, &mut env);
+
     env
+}
+
+/// Register each JSDoc `@typedef {T} Name` from the program's comments as a
+/// `TypeDeclInfo` alias, skipping any name a TS declaration already claimed
+/// (TS-decl precedence).
+fn register_jsdoc_typedefs(comments: &[oxc_ast::Comment], source: &str, env: &mut EvalEnv) {
+    for typedef in crate::analysis::jsdoc::collect_jsdoc_typedefs(comments, source) {
+        if env.type_symbols.contains_key(&typedef.name) {
+            // A real TS `type`/`interface`/`class` of this name was registered
+            // during the statement walk; it is authoritative.
+            continue;
+        }
+        env.add_type(TypeDeclInfo {
+            name: typedef.name,
+            declaration_id: 0,
+            kind: TypeDeclKind::Alias,
+            type_parameters: Vec::new(),
+            body: typedef.body,
+        });
+    }
 }
 
 fn extract_from_declaration(decl: &Declaration<'_>, source: &str, env: &mut EvalEnv) {

@@ -164,6 +164,91 @@ pub fn extract_jsdoc_param_types_at_offset(
     params
 }
 
+/// A JSDoc `@typedef {T} Name` declaration recovered from a comment block: a
+/// named TYPE whose body is the lowered `{T}` payload.
+///
+/// This is the producer-side bridge that makes a JSDoc `@typedef` a first-class
+/// REGULAR type — shallow analysis registers each one as a `TypeDeclInfo`
+/// (kind `Alias`) on the SAME registry a TS `type Name = T` populates, so a
+/// later `@type {Name}` / `Name` reference resolves through the shared dispatch
+/// with no JSDoc-specific resolution path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsdocTypedef {
+    /// The typedef's declared name (the identifier after the `{T}` payload).
+    pub name: String,
+    /// The typedef's body, lowered from its `{T}` payload via
+    /// [`parse_jsdoc_tag_type_payload`].
+    pub body: TypeExpr,
+}
+
+/// Recover every `@typedef {T} Name` declaration from the program's JSDoc block
+/// comments, in source order.
+///
+/// Each `@typedef` whose text begins with a `{T}` payload followed by a name
+/// token yields a [`JsdocTypedef`] carrying the lowered body. A `@typedef` with
+/// no brace payload (the `@property`-aggregation form) or no name token is
+/// skipped — only the braced form is a self-contained alias body. Used by
+/// `build_eval_env` to register JSDoc typedefs as ordinary type declarations.
+pub fn collect_jsdoc_typedefs(comments: &[Comment], source: &str) -> Vec<JsdocTypedef> {
+    let mut typedefs = Vec::new();
+    for comment in comments {
+        if !comment.is_block()
+            || !matches!(
+                comment.content,
+                CommentContent::Jsdoc | CommentContent::JsdocLegal
+            )
+        {
+            continue;
+        }
+        let start = comment.span.start as usize;
+        let end = comment.span.end as usize;
+        let Some(raw) = source.get(start..end) else {
+            continue;
+        };
+        let (_description, tags) = parse_jsdoc(raw);
+        for tag in &tags {
+            if tag.name.as_str() != "typedef" {
+                continue;
+            }
+            let Some(text) = tag.text.as_deref() else {
+                continue;
+            };
+            // `@typedef {T} Name` — the body is the `{T}` payload, the name is
+            // the first identifier token after the closing brace.
+            let Some((payload, rest)) = split_jsdoc_brace_payload(text) else {
+                continue;
+            };
+            if payload.is_empty() {
+                continue;
+            }
+            let Some(raw_name) = rest.split_whitespace().next() else {
+                continue;
+            };
+            let name = raw_name.trim();
+            if name.is_empty() || !is_jsdoc_typedef_name(name) {
+                continue;
+            }
+            typedefs.push(JsdocTypedef {
+                name: name.to_string(),
+                body: parse_jsdoc_tag_type_payload(payload),
+            });
+        }
+    }
+    typedefs
+}
+
+/// Whether `name` is a plain identifier usable as a `@typedef` name (the
+/// closing-brace-following token must be a bare type name, not punctuation /
+/// another `{`).
+fn is_jsdoc_typedef_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' || c == '$' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
 fn find_leading_jsdoc_from_comments<'a>(
     comments: &[Comment],
     target_start: u32,
@@ -677,6 +762,60 @@ mod tests {
         assert!(
             description.is_none() && tags.is_empty(),
             "an undocumented `bare!: boolean` field must yield no JSDoc; got {description:?}"
+        );
+    }
+
+    #[test]
+    fn collect_jsdoc_typedefs_lowers_braced_typedef_to_alias_body() {
+        use super::collect_jsdoc_typedefs;
+        use oxc_allocator::Allocator;
+        use oxc_parser::Parser;
+        use oxc_span::SourceType;
+        use verter_type_expr::ObjectMember;
+
+        let source = "/** @typedef {{a: number}} Alias */\n";
+        let allocator = Allocator::default();
+        let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
+        let typedefs = collect_jsdoc_typedefs(&ret.program.comments, source);
+
+        assert_eq!(typedefs.len(), 1, "one `@typedef` must be recovered");
+        assert_eq!(typedefs[0].name, "Alias");
+        // The brace payload `{a: number}` lowers to an object body with a single
+        // `a: number` member — the SAME body a TS `type Alias = { a: number }`
+        // produces via `lower_ts_type`.
+        let TypeExpr::Object(object) = &typedefs[0].body else {
+            panic!(
+                "typedef body must lower to an object, got {:?}",
+                typedefs[0].body
+            );
+        };
+        assert_eq!(object.properties.len(), 1);
+        match &object.properties[0] {
+            ObjectMember::Property(prop) => {
+                assert_eq!(prop.name, "a");
+                assert_eq!(prop.ty, TypeExpr::Primitive(PrimitiveName::Number));
+            }
+            other => panic!("expected `a` property, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn collect_jsdoc_typedefs_skips_payloadless_typedef() {
+        use super::collect_jsdoc_typedefs;
+        use oxc_allocator::Allocator;
+        use oxc_parser::Parser;
+        use oxc_span::SourceType;
+
+        // The `@property`-aggregation form (`@typedef Foo` with no `{T}`) carries
+        // no self-contained alias body; it must be skipped, not registered as an
+        // empty/`Unknown` alias.
+        let source = "/** @typedef Foo\n * @property {number} a\n */\n";
+        let allocator = Allocator::default();
+        let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
+        let typedefs = collect_jsdoc_typedefs(&ret.program.comments, source);
+        assert!(
+            typedefs.is_empty(),
+            "a payload-less `@typedef Foo` must not be registered as an alias; got {typedefs:?}"
         );
     }
 
