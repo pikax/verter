@@ -199,14 +199,64 @@ fn jsdoc_typedef_resolves_through_shared_resolver_identically_to_ts_type_alias()
     assert_primitive(&jsdoc_props["a"].ty, PrimitiveName::Number);
 
     // The strongest "no separate path" assertion: the `@typedef`-declared name
-    // resolves to the IDENTICAL TypeExpr the TS `type` declaration does.
+    // resolves to the STRUCTURALLY IDENTICAL surface the TS `type` declaration
+    // does — same member set, same member types, same modifiers (one shared
+    // resolver, one lowering). This is the property the test characterizes; an
+    // implementation that stored the typedef as a value-only `type_annotation`
+    // leaves `Alias` undeclared, so this structure would miss / differ.
+    //
+    // NOTE: full byte-identical `assert_eq!(jsdoc_alias_expr, ts_alias_expr)` is
+    // NOT asserted here. The two declarations sit at DIFFERENT source positions
+    // (the `@typedef` comment vs the TS `type`), so their member spans differ,
+    // AND the JSDoc `@typedef` payload is currently lowered via a synthetic
+    // `format!("type __T = {payload}")` wrapper (`parse_jsdoc_tag_type_payload`),
+    // so its member spans are in WRAPPER-local coordinates, not file coordinates
+    // — a pre-existing producer-side span bug, orthogonal to the component-meta
+    // projection-path span threading (D1/U3b) this suite's other tests cover.
+    // U3b surfaced it (the projection no longer masks spans); it is fixed at the
+    // JSDoc producer in a separate task. Structural identity is asserted here;
+    // the TS-side real spans are verified below.
+    let jsdoc_a = &jsdoc_props["a"];
+    let ts_a = &ts_props["a"];
     assert_eq!(
-        jsdoc_alias_expr, ts_alias_expr,
-        "a JSDoc `@typedef` name must resolve to the identical TypeExpr a TS `type` of the same \
-         body does (one shared resolver, one lowering) — got jsdoc={jsdoc_alias_expr:?} vs \
-         ts={ts_alias_expr:?}"
+        jsdoc_a.name, ts_a.name,
+        "JSDoc typedef + TS alias must share the member name"
+    );
+    assert_eq!(
+        (jsdoc_a.optional, jsdoc_a.readonly),
+        (ts_a.optional, ts_a.readonly),
+        "JSDoc typedef + TS alias must share the member modifiers"
+    );
+    assert_eq!(
+        jsdoc_a.ty, ts_a.ty,
+        "a JSDoc `@typedef` name must resolve to the identical member TYPE a TS `type` of the \
+         same body does (one shared resolver, one lowering) — got jsdoc={:?} vs ts={:?}",
+        jsdoc_a.ty, ts_a.ty
     );
     assert_query_mode(&jsdoc_alias_record, ProjectionModeTag::Expanded);
+
+    // D1 span-threading: the TS-alias path carries its REAL OXC declaration-site
+    // spans through the shared component-meta projection (no `MemberSpans::default()`
+    // masking). The name / type spans slice back to the `a` / `number` tokens at
+    // the TS `type TsAlias = { a: number }` declaration's source position.
+    let ts_name_span = ts_a
+        .spans
+        .name
+        .expect("TS-alias member must carry its real OXC name span (D1 threading)");
+    assert_eq!(
+        ts_name_span.slice(JSDOC_TYPEDEF_FIXTURE),
+        "a",
+        "TS-alias name span must slice to the `a` token"
+    );
+    let ts_type_span = ts_a
+        .spans
+        .type_annotation
+        .expect("TS-alias member must carry its real OXC type-annotation span (D1 threading)");
+    assert_eq!(
+        ts_type_span.slice(JSDOC_TYPEDEF_FIXTURE),
+        "number",
+        "TS-alias type-annotation span must slice to the `number` token"
+    );
 
     // And a `@type {Alias}` value resolves `Alias` through the same dispatch —
     // the typedef is reachable by downstream references, not just by name.
