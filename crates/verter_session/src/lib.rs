@@ -76,6 +76,7 @@ mod request_store_view_derived_hash_tests;
 // ImportedRegistryDb is exercised by the §12.A12 perf gate.
 pub(crate) mod bounded_query_retention;
 pub(crate) mod cache_runtime;
+pub(crate) mod compile_cache_mode;
 pub(crate) mod compile_fact_emission;
 pub mod component_meta_caches;
 #[cfg(test)]
