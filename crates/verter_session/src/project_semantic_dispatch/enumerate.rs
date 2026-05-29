@@ -204,20 +204,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 results.push(Some(Vec::new()));
             }
             // C16: DeclPlaceholder — expand via Instantiate before
-            // enumerating keys.
+            // enumerating keys. The placeholder's `whole_hash` is
+            // payload-only diagnostic context; the `Instantiate` key
+            // is content-free (R6) and `build_instantiate` re-sources
+            // the live content hash from `ensure_indexed_ready` at
+            // value-build time.
             SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder {
                 canonical_id,
                 name,
-                whole_hash,
+                whole_hash: _,
             }) => {
-                let identity = crate::semantic_query::DeclIdentity {
+                let base = crate::semantic_query::DeclKey {
                     canonical_id: Arc::clone(canonical_id),
-                    whole_hash: *whole_hash,
                     decl_name: Arc::clone(name),
                 };
                 drop(data);
                 match self.execute(crate::semantic_query::SemanticQueryKey::Instantiate {
-                    base: identity,
+                    base,
                     args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                     // Key-name enumeration consumes the body's structural
                     // shape (Object members, Union arms, etc.) — Expanded
@@ -495,7 +498,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let args = Arc::clone(args);
                 drop(data);
                 match self.execute(crate::semantic_query::SemanticQueryKey::Instantiate {
-                    base,
+                    base: base.to_decl_key(),
                     args,
                     context: crate::semantic_query::ProjectionReductionContext::published(
                         crate::semantic_query::ProjectionMode::Skeleton,
@@ -561,7 +564,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         provenance: crate::semantic_query::SurfaceProvenanceContext,
     ) -> Option<MacroSurfaceView> {
         match self.execute(crate::semantic_query::SemanticQueryKey::Instantiate {
-            base: identity,
+            base: identity.to_decl_key(),
             args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             context: crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Skeleton,

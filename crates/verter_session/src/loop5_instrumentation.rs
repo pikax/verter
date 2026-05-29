@@ -907,9 +907,7 @@ mod tests {
 
     #[test]
     fn kind_index_for_key_distinct_for_each_variant() {
-        use crate::semantic_query::{
-            DeclIdentity, IndexKey, ResolveDeclKey, ScopeId, SemanticQueryKey,
-        };
+        use crate::semantic_query::{DeclKey, IndexKey, ResolveDeclKey, ScopeId, SemanticQueryKey};
         use crate::ProjectionMode;
 
         let dummy_id: Arc<str> = Arc::from("/x");
@@ -917,9 +915,8 @@ mod tests {
             canonical_id: Arc::clone(&dummy_id),
             local_scope: None,
         };
-        let identity = DeclIdentity {
+        let identity = DeclKey {
             canonical_id: Arc::clone(&dummy_id),
-            whole_hash: [0u8; 16],
             decl_name: Arc::from("X"),
         };
         let dummy_node = crate::semantic_query::SemanticNodeId(1);

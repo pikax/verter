@@ -396,7 +396,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         );
                     }
                     return match self.execute(SemanticQueryKey::Instantiate {
-                        base: builtin_identity,
+                        base: builtin_identity.to_decl_key(),
                         args: Arc::from(arg_ids.into_boxed_slice()),
                         context: reduction_context,
                     }) {
@@ -603,7 +603,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         })
                         .collect();
                     match self.execute(SemanticQueryKey::Instantiate {
-                        base: decl_identity,
+                        base: decl_identity.to_decl_key(),
                         args: Arc::from(arg_ids.into_boxed_slice()),
                         context: reduction_context,
                     }) {

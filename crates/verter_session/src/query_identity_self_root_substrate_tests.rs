@@ -237,7 +237,9 @@ fn exported_type_signature_is_provenance_pure() {
         SymbolSpace::Type,
         observed_hash,
     )
-    .expect("the observed version's artifact is recoverable");
+    .into_cacheable()
+    .expect("the observed version's artifact is recoverable")
+    .facts;
 
     assert!(
         has_self_root(&signature, canonical, observed_hash),
@@ -274,6 +276,7 @@ fn exported_type_signature_is_provenance_pure() {
             SymbolSpace::Type,
             fabricated,
         )
+        .into_cacheable()
         .is_none(),
         "fact_signature_for_exported_type MUST return None for an observed hash with \
          no content-addressed artifact — a builder that re-read current content \
@@ -309,7 +312,9 @@ fn canonical_member_signature_is_provenance_pure() {
         SymbolSpace::Type,
         observed_hash,
     )
-    .expect("the observed version's artifact is recoverable");
+    .into_cacheable()
+    .expect("the observed version's artifact is recoverable")
+    .facts;
 
     assert!(
         has_self_root(&signature, canonical, observed_hash),
@@ -341,6 +346,7 @@ fn canonical_member_signature_is_provenance_pure() {
             SymbolSpace::Type,
             fabricated,
         )
+        .into_cacheable()
         .is_none(),
         "fact_signature_for_canonical_member MUST return None for an observed hash \
          with no content-addressed artifact — a builder that re-read current \
@@ -373,7 +379,9 @@ fn canonical_surface_signature_is_provenance_pure() {
         canonical,
         observed_hash,
     )
-    .expect("the observed version's artifact is recoverable");
+    .into_cacheable()
+    .expect("the observed version's artifact is recoverable")
+    .facts;
 
     assert!(
         has_self_root(&signature, canonical, observed_hash),
@@ -399,6 +407,7 @@ fn canonical_surface_signature_is_provenance_pure() {
         crate::fact_signature_helpers::fact_signature_for_canonical_surface(
             ctx, canonical, fabricated,
         )
+        .into_cacheable()
         .is_none(),
         "fact_signature_for_canonical_surface MUST return None for an observed hash \
          with no content-addressed artifact — a builder that re-read current \

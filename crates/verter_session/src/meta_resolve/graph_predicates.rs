@@ -411,8 +411,8 @@ pub(crate) fn declaration_body_prefers_inline_materialization_node(
 ///   2. **Slow path** — cooperative-admission via
 ///      `ref_cycle_db_get_or_compute`; the BFS body
 ///      ([`bfs_compute_inner`]) runs synchronously in the
-///      `compute` closure (per the `cache_runtime::singleflight`
-///      synchronous-compute contract), capturing `&dyn ResolverContext` directly. On
+///      `compute` closure (per singleflight's synchronous-
+///      compute contract), capturing `&dyn ResolverContext` directly. On
 ///      cooperative-admission failure (revalidation rejected the entry),
 ///      falls back to an uncached recompute so the caller never sees
 ///      a publishing miss.
@@ -466,10 +466,10 @@ pub(crate) fn ref_root_reaches_transitive_cycle_node(
 
     // Slow path: cooperative-admission with synchronous compute. The
     // closure captures `&dyn ResolverContext` by reference — Rust borrow safe
-    // because `cooperative_get_or_insert_with_post_publish` runs the
-    // compute closure on the calling thread (per its
-    // synchronous-compute contract documented in
-    // `cache_runtime::singleflight`).
+    // because the query-identity `query::lookup` split-publish path (which
+    // `ref_cycle_db_get_or_compute` drives) runs the compute closure on
+    // the calling thread (per the synchronous-compute contract documented
+    // in `cache_runtime/singleflight.rs`).
     let read_opt = crate::component_meta_caches::ref_cycle_db_get_or_compute(
         db,
         root_identity,
@@ -577,7 +577,7 @@ pub(crate) fn bfs_compute_inner(
         let current_decl_name_for_test = Arc::clone(&current.decl_name);
 
         let key = SemanticQueryKey::Instantiate {
-            base: current,
+            base: current.to_decl_key(),
             args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             // Skeleton mode preserves open generics so body lowering
             // produces TypeParam graph nodes for T-refs (not

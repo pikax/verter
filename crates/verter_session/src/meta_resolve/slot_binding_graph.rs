@@ -449,7 +449,7 @@ fn slot_param_root_is_symbolic_only(
             // mapped/keyof members while walking the skeleton.
             use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
             let key = SemanticQueryKey::Instantiate {
-                base: base.clone(),
+                base: base.to_decl_key(),
                 args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                 context:
                     crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
@@ -646,7 +646,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
             break 'macro_loop;
         }
         let macro_payload_read = dispatch.execute_read(SemanticQueryKey::ResolveMacroPayload {
-            owner: owner.clone(),
+            owner: owner.to_decl_key(),
             macro_index,
             macro_kind: AnalyzedMacroKind::DefineSlots,
             type_args: type_args.clone(),

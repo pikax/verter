@@ -194,6 +194,66 @@ impl DeclIdentity {
             decl_name: Arc::from(display_name),
         }
     }
+
+    /// Project this identity onto a content-free [`DeclKey`] suitable
+    /// for use as a query-identity cache key component. The version
+    /// (`whole_hash`) is dropped — query-identity keys hold no
+    /// content/version hashes (R6); per-value version rooting lives
+    /// on the cached `MemoEntry`'s `ReadSetSignature.facts` and
+    /// `self_root_canonicals`, re-sourced at value-build time from the
+    /// live indexed view.
+    #[must_use]
+    pub fn to_decl_key(&self) -> DeclKey {
+        DeclKey {
+            canonical_id: Arc::clone(&self.canonical_id),
+            decl_name: Arc::clone(&self.decl_name),
+        }
+    }
+}
+
+/// Content-free declaration key used as a query-identity component
+/// inside derived-`Hash` `SemanticQueryKey` / `FamilyKey` variants.
+///
+/// Two file-content versions of "same decl" produce equal `DeclKey`s;
+/// version-rooting lives entirely on the cached value via the
+/// multi-candidate `FamilySlots` substrate (each candidate carries its
+/// own `ReadSetSignature.facts` + `self_root_canonicals`). The build
+/// path re-sources the owning file's content hash from
+/// [`ResolverContext::ensure_indexed_ready`] at value-compute time
+/// (R6 + R20).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DeclKey {
+    /// Canonical id of the declaring file. Empty for the global /
+    /// structural sentinel; `"__builtin__"` for built-in utility
+    /// carriers (`Pick`, `Omit`, …); a concrete canonical otherwise.
+    pub canonical_id: Arc<str>,
+    /// Stable declaring-entity name (interface, type alias, class,
+    /// script-setup sentinel, `"Pick"` / `"Omit"` for builtins, etc.).
+    pub decl_name: Arc<str>,
+}
+
+impl DeclKey {
+    /// Project a [`DeclIdentity`] onto its content-free [`DeclKey`].
+    #[must_use]
+    pub fn from_identity(identity: &DeclIdentity) -> Self {
+        DeclKey {
+            canonical_id: Arc::clone(&identity.canonical_id),
+            decl_name: Arc::clone(&identity.decl_name),
+        }
+    }
+
+    /// Build a built-in utility decl key (`Pick` / `Omit` / `Extract`
+    /// / `Exclude` / `NonNullable` / `Required` / `Partial` / `Readonly`
+    /// / `ReturnType` / …). The `canonical_id` is the `"__builtin__"`
+    /// sentinel; builtins root self-version through their `args` nodes
+    /// (no file fact).
+    #[must_use]
+    pub fn builtin(name: &str) -> Self {
+        DeclKey {
+            canonical_id: Arc::from("__builtin__"),
+            decl_name: Arc::from(name),
+        }
+    }
 }
 
 /// Per-domain symbol space tag. Distinguishes declarations sharing
@@ -1446,8 +1506,13 @@ pub enum SemanticQueryKey {
     /// The memo splits per context so `(Shallow, StructuralTransit)`
     /// and `(Shallow, Published)` evaluations do not collide on a
     /// single shared entry.
+    ///
+    /// `base` is a content-free [`DeclKey`] (R6) — version-rooting
+    /// lives on the cached value's `ReadSetSignature.facts` and
+    /// `self_root_canonicals`, re-sourced at value-build time from
+    /// the live indexed view.
     Instantiate {
-        base: DeclIdentity,
+        base: DeclKey,
         args: Arc<[SemanticNodeId]>,
         context: ProjectionReductionContext,
     },
@@ -1585,8 +1650,13 @@ pub enum SemanticQueryKey {
     ///   and `type_args[0]`.
     /// - `DefineExpose` / `DefineOptions`: 0 args → `Opaque(Miss)`;
     ///   else `type_args[0]` unchanged.
+    ///
+    /// `owner` is a content-free [`DeclKey`] (R6) — version-rooting
+    /// lives on the cached value's `ReadSetSignature.facts` and
+    /// `self_root_canonicals`, re-sourced at value-build time from
+    /// the live indexed view.
     ResolveMacroPayload {
-        owner: DeclIdentity,
+        owner: DeclKey,
         macro_index: usize,
         macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
         type_args: Arc<[SemanticNodeId]>,
@@ -2300,7 +2370,7 @@ pub trait SemanticQueryApi {
     }
     fn instantiate(
         &self,
-        base: DeclIdentity,
+        base: DeclKey,
         args: Arc<[SemanticNodeId]>,
         body_mode: ProjectionMode,
     ) -> QueryResult<SemanticNodeId> {
@@ -2389,7 +2459,7 @@ mod tests {
     /// instantiations of the same base must not alias to one cache entry.
     #[test]
     fn instantiate_keys_disambiguate_by_args() {
-        let base = DeclIdentity::synthetic("Foo");
+        let base = DeclKey::from_identity(&DeclIdentity::synthetic("Foo"));
         let string_id = SemanticNodeId(1);
         let number_id = SemanticNodeId(2);
         let a = SemanticQueryKey::Instantiate {
@@ -2558,7 +2628,7 @@ mod tests {
         //
         // The current assertion is the structural invariant: same
         // `(base, args, body_mode)` triple constructs an equal key.
-        let base = DeclIdentity::synthetic("Foo");
+        let base = DeclKey::from_identity(&DeclIdentity::synthetic("Foo"));
         let args = Arc::from(vec![SemanticNodeId(2)].into_boxed_slice());
         let key = SemanticQueryKey::Instantiate {
             base: base.clone(),

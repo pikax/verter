@@ -153,15 +153,16 @@ pub(crate) const SEMANTIC_SURFACE_MEMBER: &str = "semanticSurfaceMember";
 /// against, captured once at the value source. The self-root
 /// `FileWholeHash` and both parse facts are pinned to that observed
 /// version — the helper never re-reads current content. Returns
-/// `None` (refuse shared-cache admission) when the observed version's
-/// parse-fact registry cannot be recovered.
+/// [`crate::cache_runtime::SignatureAdmission::NonCacheable`] (refuse
+/// shared-cache admission) when the observed version's parse-fact
+/// registry cannot be recovered.
 pub(crate) fn engine_fact_signature_for_canonical_member(
     ctx: &dyn ResolverContext,
     canonical_id: &str,
     exporter: &str,
     member: &str,
     observed_hash: crate::resolver_core::ResolverHash16,
-) -> Option<std::sync::Arc<[crate::resolver_core::FactVersionRef]>> {
+) -> crate::cache_runtime::SignatureAdmission {
     crate::fact_signature_helpers::fact_signature_for_canonical_member(
         ctx,
         canonical_id,
@@ -184,14 +185,15 @@ pub(crate) fn engine_fact_signature_for_canonical_member(
 /// against, captured once at the value source. The self-root
 /// `FileWholeHash` and all three parse facts are pinned to that
 /// observed version — the helper never re-reads current content.
-/// Returns `None` (refuse shared-cache admission) when the observed
-/// version's parse-fact registry cannot be recovered.
+/// Returns [`crate::cache_runtime::SignatureAdmission::NonCacheable`]
+/// (refuse shared-cache admission) when the observed version's
+/// parse-fact registry cannot be recovered.
 pub(crate) fn engine_fact_signature_for_exported_type(
     ctx: &dyn ResolverContext,
     canonical_id: &str,
     type_name: &str,
     observed_hash: crate::resolver_core::ResolverHash16,
-) -> Option<std::sync::Arc<[crate::resolver_core::FactVersionRef]>> {
+) -> crate::cache_runtime::SignatureAdmission {
     crate::fact_signature_helpers::fact_signature_for_exported_type(
         ctx,
         canonical_id,
@@ -223,9 +225,11 @@ pub(crate) fn engine_fact_signature_for_exported_type(
 /// ([`crate::resolver_core::prepared_decl::PreparedDeclBundle::owner_whole_hash`]),
 /// NOT a current-content re-read. Each
 /// `engine_fact_signature_for_exported_type` sub-signature is pinned
-/// to its own observed hash. Returns `None` (refuse shared-cache
-/// admission) when any observed version's parse-fact registry cannot
-/// be recovered.
+/// to its own observed hash. Returns
+/// [`crate::cache_runtime::SignatureAdmission::NonCacheable`] (refuse
+/// shared-cache admission) when any observed version's parse-fact
+/// registry cannot be recovered — the non-cacheable reason from the
+/// failing sub-signature propagates through.
 ///
 /// `routed_decl` is `Some((routed_canonical, routed_symbol,
 /// observed_routed_hash))` when the resolved declaring canonical
@@ -241,26 +245,33 @@ pub(crate) fn engine_fact_signature_for_prepared_target(
     decl_symbol: &str,
     observed_decl_hash: crate::resolver_core::ResolverHash16,
     routed_decl: Option<(&str, &str, crate::resolver_core::ResolverHash16)>,
-) -> Option<std::sync::Arc<[crate::resolver_core::FactVersionRef]>> {
-    let mut entries: Vec<crate::resolver_core::FactVersionRef> =
-        engine_fact_signature_for_exported_type(
-            ctx,
-            active_scope,
-            target_name,
-            observed_active_scope_hash,
-        )?
-        .to_vec();
+) -> crate::cache_runtime::SignatureAdmission {
+    use crate::cache_runtime::SignatureAdmission;
+    let active_admission = engine_fact_signature_for_exported_type(
+        ctx,
+        active_scope,
+        target_name,
+        observed_active_scope_hash,
+    );
+    let mut entries: Vec<crate::resolver_core::FactVersionRef> = match active_admission {
+        SignatureAdmission::Cacheable(sig) => sig.facts.to_vec(),
+        SignatureAdmission::NonCacheable(reason) => {
+            return SignatureAdmission::NonCacheable(reason);
+        }
+    };
     if decl_canonical != active_scope || decl_symbol != target_name {
-        entries.extend(
-            engine_fact_signature_for_exported_type(
-                ctx,
-                decl_canonical,
-                decl_symbol,
-                observed_decl_hash,
-            )?
-            .iter()
-            .cloned(),
+        let decl_admission = engine_fact_signature_for_exported_type(
+            ctx,
+            decl_canonical,
+            decl_symbol,
+            observed_decl_hash,
         );
+        match decl_admission {
+            SignatureAdmission::Cacheable(sig) => entries.extend(sig.facts.iter().cloned()),
+            SignatureAdmission::NonCacheable(reason) => {
+                return SignatureAdmission::NonCacheable(reason);
+            }
+        }
     }
     // The FINAL routed declaring canonical — the third self-root the
     // cache key never encodes. Root it only when it is a genuinely
@@ -268,19 +279,23 @@ pub(crate) fn engine_fact_signature_for_prepared_target(
     // the original declaring canonical is already rooted above.
     if let Some((routed_canonical, routed_symbol, observed_routed_hash)) = routed_decl {
         if routed_canonical != active_scope && routed_canonical != decl_canonical {
-            entries.extend(
-                engine_fact_signature_for_exported_type(
-                    ctx,
-                    routed_canonical,
-                    routed_symbol,
-                    observed_routed_hash,
-                )?
-                .iter()
-                .cloned(),
+            let routed_admission = engine_fact_signature_for_exported_type(
+                ctx,
+                routed_canonical,
+                routed_symbol,
+                observed_routed_hash,
             );
+            match routed_admission {
+                SignatureAdmission::Cacheable(sig) => entries.extend(sig.facts.iter().cloned()),
+                SignatureAdmission::NonCacheable(reason) => {
+                    return SignatureAdmission::NonCacheable(reason);
+                }
+            }
         }
     }
-    Some(std::sync::Arc::from(entries))
+    SignatureAdmission::Cacheable(crate::fact_signature_helpers::ReadSetSignature::new(
+        std::sync::Arc::from(entries),
+    ))
 }
 
 /// A prepared type declaration bundled with the keyed canonical's
@@ -408,7 +423,8 @@ pub(crate) fn engine_fact_signature_for_materialize_memo(
     observed_scope: &crate::resolver_core::MaterializeScopeObservation,
     observed_scope_syntactic_export_set: crate::resolver_core::ParseFactRef,
     materialized_dep_signature: &crate::semantic_query::DepSignature,
-) -> Option<std::sync::Arc<[crate::resolver_core::FactVersionRef]>> {
+) -> crate::cache_runtime::SignatureAdmission {
+    use crate::cache_runtime::{NonAdmissionReason, SignatureAdmission};
     use crate::resolver_core::FactVersionRef;
     use crate::semantic_query::DepVersion;
 
@@ -423,7 +439,14 @@ pub(crate) fn engine_fact_signature_for_materialize_memo(
     );
 
     if observed_scope_syntactic_export_set.canonical_id.as_str() != scope_canonical_id {
-        return None;
+        // The supplied parse fact resolves to a DIFFERENT canonical
+        // than the keyed scope — provenance is resolved (we have a
+        // parse fact), just attributed to the wrong file. This is a
+        // self-root / canonical conflict, not unresolved provenance:
+        // the fact is fully attributed, only its self-root identity
+        // disagrees with the keyed scope. Audit telemetry tracks the
+        // two failure modes distinctly.
+        return SignatureAdmission::NonCacheable(NonAdmissionReason::SelfRootConflict);
     }
 
     let mut entries = Vec::with_capacity(2 + materialized_dep_signature.len());
@@ -444,7 +467,9 @@ pub(crate) fn engine_fact_signature_for_materialize_memo(
                     // single observation; a disagreement is a torn
                     // read and refuses shared admission.
                     if *observed_hash != observed_scope_whole_hash {
-                        return None;
+                        return SignatureAdmission::NonCacheable(
+                            NonAdmissionReason::SelfRootConflict,
+                        );
                     }
                     continue;
                 }
@@ -463,11 +488,15 @@ pub(crate) fn engine_fact_signature_for_materialize_memo(
                 // refuse shared memo admission rather than rooting
                 // the entry with a fact that cannot catch a content
                 // edit to the observed canonical.
-                return None;
+                return SignatureAdmission::NonCacheable(
+                    NonAdmissionReason::RouteGenerationDependency,
+                );
             }
         }
     }
-    Some(std::sync::Arc::from(entries))
+    SignatureAdmission::Cacheable(crate::fact_signature_helpers::ReadSetSignature::new(
+        std::sync::Arc::from(entries),
+    ))
 }
 
 /// Build a two-canonical `DepSignature` (used for DB caches whose

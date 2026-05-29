@@ -613,6 +613,7 @@ fn family_map_publish_registers_canonical_to_entries_reverse_index() {
 /// `canonical_to_entries_count` assertion would FAIL.
 #[test]
 fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/helper_test.ts"),
@@ -648,6 +649,7 @@ fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
         },
     ]));
     store.warm_publish_one(
+        &host,
         &key,
         &QueryResult::Value(value),
         &walker_diagnostics,
@@ -959,7 +961,9 @@ fn node_arena_invalidation_preserves_global_scope() {
 fn invalidate_canonical_evicts_instantiate_entries_that_read_that_canonical_body() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
-    let base = crate::semantic_query::DeclIdentity::synthetic("Foo");
+    let base = crate::semantic_query::DeclKey::from_identity(
+        &crate::semantic_query::DeclIdentity::synthetic("Foo"),
+    );
     let arg = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let key = SemanticQueryKey::Instantiate {
         base,
@@ -1006,7 +1010,9 @@ fn invalidate_canonical_evicts_instantiate_entries_that_read_that_canonical_body
 fn invalidate_canonical_keeps_instantiate_entries_whose_bases_are_unrelated() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
-    let base = crate::semantic_query::DeclIdentity::synthetic("Foo");
+    let base = crate::semantic_query::DeclKey::from_identity(
+        &crate::semantic_query::DeclIdentity::synthetic("Foo"),
+    );
     let arg = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let key = SemanticQueryKey::Instantiate {
         base,
@@ -2064,6 +2070,7 @@ fn invalidate_all_closes_torn_publish_window_against_cold_winner() {
 /// aborted case, never a healthy one).
 #[test]
 fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
 
     let aborted_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
@@ -2081,6 +2088,7 @@ fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
     let aborted_parent = Arc::new(InflightEntry::new());
     aborted_parent.state.lock().aborted = true;
     store.warm_publish_one_if_absent(
+        &host,
         aborted_key.clone(),
         QueryResult::Value(node),
         crate::fact_signature_helpers::ReadSetSignature::empty(),
@@ -2106,6 +2114,7 @@ fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
     // refusal.
     let healthy_parent = Arc::new(InflightEntry::new());
     store.warm_publish_one_if_absent(
+        &host,
         healthy_key.clone(),
         QueryResult::Value(node),
         crate::fact_signature_helpers::ReadSetSignature::empty(),

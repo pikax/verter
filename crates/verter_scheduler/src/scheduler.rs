@@ -668,6 +668,47 @@ impl Scheduler {
         }
     }
 
+    /// Evict the artifact snapshot for `(file_id, profile_hash)` only
+    /// when the stored snapshot is no newer than `max_generation`.
+    ///
+    /// Called by the host when a compile path refuses cache admission
+    /// (e.g. an overflowed fact signature) and any prior artifact for
+    /// the same `(canonical, profile)` produced at or before the
+    /// caller's start-of-compile generation must not remain observable
+    /// via `try_get_artifact`. The symmetric counterpart to
+    /// [`commit_artifact`](Self::commit_artifact): commit publishes the
+    /// snapshot, this evicts it under the generation gate.
+    ///
+    /// Generation gate. The slow refused compile that started at
+    /// generation `N` may reach this call AFTER a fresh successful
+    /// compile at generation `N+k` has landed a newer artifact via
+    /// `commit_artifact`. Unconditionally removing would clobber the
+    /// newer artifact (since `commit_artifact` rejects stale publishes
+    /// via the node generation check, the inverse asymmetry would be a
+    /// silent data race). The caller passes its captured compile-start
+    /// generation as `max_generation`; the eviction proceeds only when
+    /// the stored snapshot's `generation <= max_generation`.
+    ///
+    /// No-op when the node or the per-profile slot is absent, OR when
+    /// the stored snapshot is newer than `max_generation`. Does NOT
+    /// touch generation, source, or analysis state — only the
+    /// `(profile_hash → snapshot)` entry on the artifact map.
+    pub fn remove_artifact_if_not_newer_than(
+        &self,
+        file_id: &str,
+        profile_hash: u64,
+        max_generation: u64,
+    ) {
+        if let Some(node) = self.nodes.get(file_id) {
+            // Race-free remove-if: `DashMap::remove_if` runs the
+            // predicate under the per-shard lock so a concurrent
+            // `commit_artifact` cannot land a newer snapshot between
+            // the read and the remove.
+            node.artifacts
+                .remove_if(&profile_hash, |_, snap| snap.generation <= max_generation);
+        }
+    }
+
     /// Get the shared overlay map.
     pub fn overlay(&self) -> &Arc<OverlayMap> {
         &self.overlay
@@ -3764,5 +3805,142 @@ mod tests {
             }
             other => panic!("expected Source ready, got {other:?}"),
         }
+    }
+
+    /// Discriminator: `remove_artifact_if_not_newer_than(file, profile,
+    /// N)` MUST NOT clobber an artifact whose stored generation is
+    /// strictly greater than `N`.
+    ///
+    /// Race scenario: a slow compile started at generation `N` reaches
+    /// its refusal arm AFTER a faster compile at `N+k` (k > 0) has
+    /// already committed a fresh artifact. The slow compile's
+    /// captured start-generation is `N`; passing `max_generation = N`
+    /// to this eviction MUST observe the stored `generation = N+k > N`
+    /// and skip the remove. The newer artifact at `N+k` survives;
+    /// `try_get_artifact` continues to serve it.
+    ///
+    /// The symmetric `commit_artifact` already rejects publishes whose
+    /// generation does not match the node's current generation; this
+    /// eviction is the inverse asymmetry: a slow refused compile must
+    /// not delete a newer winner.
+    ///
+    /// Discriminating property: an unconditional
+    /// `node.artifacts.remove(&profile_hash)` would delete the newer
+    /// artifact and `try_get_artifact` would return `None` after the
+    /// call. The generation-aware `remove_if(..., snap.generation <=
+    /// max_generation)` preserves the newer artifact and
+    /// `try_get_artifact` returns the same `Arc` it returned before.
+    #[test]
+    fn remove_artifact_if_not_newer_than_preserves_newer_generation_artifact() {
+        let loader = Arc::new(MemorySourceLoader::new());
+        loader.insert("/a.vue".to_string(), Arc::from("a v1"));
+        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader.clone());
+
+        // Drive the node to a stable generation N with Source +
+        // Analysis committed.
+        let h = sched.submit_request(Request {
+            file_id: "/a.vue".to_string(),
+            target: TargetStage::Analysis,
+            priority: Priority::Interactive,
+            source: Some(Arc::from("a v1")),
+            file_kind: None,
+            request_context: None,
+        });
+        sched.drive_all();
+        let gen_n = match h.try_get().unwrap() {
+            CompletionState::Ready(RequestResult::Analysis(s)) => s.generation,
+            _ => panic!("expected Analysis ready at gen N"),
+        };
+
+        // Commit a successful artifact at generation N. This is the
+        // "slow compile's view" — the artifact it expects to evict if
+        // its refusal arm runs.
+        sched.commit_artifact(
+            "/a.vue",
+            42,
+            crate::node::ArtifactSnapshot {
+                generation: gen_n,
+                profile_hash: 42,
+                data: Arc::new(crate::node::EmptyData),
+            },
+        );
+        assert!(
+            sched.try_get_artifact("/a.vue", 42).is_some(),
+            "fixture invariant: an artifact must be committed at gen N \
+             so the race scenario is reproducible — without it the \
+             newer-artifact survival assertion is vacuous."
+        );
+
+        // Advance to generation N+1 (k = 1, sufficient for the
+        // discriminator). A re-upsert is the natural generation bump.
+        sched.submit_request(Request {
+            file_id: "/a.vue".to_string(),
+            target: TargetStage::Analysis,
+            priority: Priority::Interactive,
+            source: Some(Arc::from("a v2")),
+            file_kind: None,
+            request_context: None,
+        });
+        sched.drive_all();
+        let gen_n_plus_k = sched.try_get_source("/a.vue").unwrap().generation;
+        assert!(
+            gen_n_plus_k > gen_n,
+            "fixture invariant: the second upsert must bump the node \
+             generation strictly past gen N (observed gen_n = {gen_n}, \
+             gen_n_plus_k = {gen_n_plus_k})"
+        );
+
+        // The "fast successful compile at N+k" commits a fresh artifact
+        // at the bumped generation. This is the artifact the slow
+        // refused compile must NOT clobber.
+        sched.commit_artifact(
+            "/a.vue",
+            42,
+            crate::node::ArtifactSnapshot {
+                generation: gen_n_plus_k,
+                profile_hash: 42,
+                data: Arc::new(crate::node::EmptyData),
+            },
+        );
+        assert!(
+            sched.try_get_artifact("/a.vue", 42).is_some(),
+            "fixture invariant: the fresh artifact at gen N+k must be \
+             committed — without it the race scenario does not run."
+        );
+
+        // The slow refused compile reaches its eviction arm carrying
+        // its captured START generation (gen_n). The eviction MUST be
+        // gated on `stored_generation <= max_generation`. Since the
+        // stored snapshot is at gen_n_plus_k > gen_n, the remove must
+        // be a no-op.
+        sched.remove_artifact_if_not_newer_than("/a.vue", 42, gen_n);
+
+        // KEY DISCRIMINATOR: the newer artifact at gen N+k MUST
+        // survive. An unconditional remove would clobber it and this
+        // assertion would fail.
+        assert!(
+            sched.try_get_artifact("/a.vue", 42).is_some(),
+            "DISCRIMINATOR: a slow refused compile at gen N MUST NOT \
+             clobber a fresher artifact at gen N+k. An unconditional \
+             `remove_artifact(file, profile)` would delete the newer \
+             artifact; the generation-gated \
+             `remove_artifact_if_not_newer_than(file, profile, N)` \
+             observes `stored_generation = N+k > N` and skips the \
+             remove. (gen_n = {gen_n}, gen_n_plus_k = {gen_n_plus_k})"
+        );
+
+        // Symmetric positive case: a same-or-older max_generation MUST
+        // actually evict. Otherwise the new method would never remove
+        // anything — masking the legitimate refused-compile-cleanup
+        // path. Pass the CURRENT stored generation (N+k); the eviction
+        // should proceed.
+        sched.remove_artifact_if_not_newer_than("/a.vue", 42, gen_n_plus_k);
+        assert!(
+            sched.try_get_artifact("/a.vue", 42).is_none(),
+            "carrier invariant: `remove_artifact_if_not_newer_than` \
+             with `max_generation >= stored.generation` MUST evict \
+             the snapshot — the eviction is the normal-case behavior \
+             on the host's compile-refusal arm."
+        );
     }
 }

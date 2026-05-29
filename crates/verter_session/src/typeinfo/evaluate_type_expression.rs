@@ -271,10 +271,13 @@ fn evaluate_inner(
         whole_hash: shallow.whole_hash,
         local_scope: None,
     };
-    let identity =
-        crate::semantic_query::DeclIdentity::from_scope(&scope_node, Arc::from(SCRATCH_ALIAS_NAME));
+    let _ = &scope_node;
+    let base = crate::semantic_query::DeclKey {
+        canonical_id: Arc::clone(&scratch_canonical),
+        decl_name: Arc::from(SCRATCH_ALIAS_NAME),
+    };
     let instantiate_key = SemanticQueryKey::Instantiate {
-        base: identity,
+        base,
         args: Arc::from(Vec::new().into_boxed_slice()),
         context: crate::semantic_query::ProjectionReductionContext::published(req.mode),
     };
@@ -363,16 +366,15 @@ fn materialize_through_aliases(
                 crate::semantic_query::QueryError::DeclPlaceholder {
                     canonical_id,
                     name,
-                    whole_hash,
+                    whole_hash: _,
                 },
             )) => {
-                let identity = crate::semantic_query::DeclIdentity {
+                let base = crate::semantic_query::DeclKey {
                     canonical_id: Arc::clone(canonical_id),
-                    whole_hash: *whole_hash,
                     decl_name: Arc::clone(name),
                 };
                 let key = SemanticQueryKey::Instantiate {
-                    base: identity,
+                    base,
                     args: Arc::from(Vec::new().into_boxed_slice()),
                     context: crate::semantic_query::ProjectionReductionContext::published(mode),
                 };

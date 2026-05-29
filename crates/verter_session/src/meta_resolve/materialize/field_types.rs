@@ -359,12 +359,16 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
             // caller below; only the shared-cache admission is refused.
             let observed_scope_syntactic_export_set =
                 captured_scope_observation.syntactic_export_set.clone()?;
-            let fact_sig = crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
+            match crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
                 &captured_scope_observation,
                 observed_scope_syntactic_export_set,
                 &captured_value.dep_signature,
-            )?;
-            Some((captured_value, fact_sig))
+            ) {
+                crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
+                    Some((captured_value, sig.facts))
+                }
+                crate::cache_runtime::SignatureAdmission::NonCacheable(_) => None,
+            }
         });
         }
     }

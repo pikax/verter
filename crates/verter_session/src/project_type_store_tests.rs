@@ -375,7 +375,7 @@ fn seed_all_three_sub_states(host: &super::VerterHost, canonical: &str) {
                 last_access_tick: 0,
                 tsx: None,
                 template_analysis: None,
-                fact_dep_signature: std::sync::Arc::from(Vec::new()),
+                fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
             },
         );
     }

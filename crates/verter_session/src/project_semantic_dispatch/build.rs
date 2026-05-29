@@ -18,10 +18,10 @@ use super::{
     SessionDispatchHost, ShallowRelation,
 };
 use crate::semantic_query::{
-    BranchSelection, DeclIdentity, DepSignature, HostResolvedNamedTypeKey, IndexSignature,
-    LiteralValue, NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind,
-    ProjectionMode, QueryError, QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeData,
-    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SurfaceMember, SurfaceView, ValueRootKey,
+    BranchSelection, DepSignature, HostResolvedNamedTypeKey, IndexSignature, LiteralValue,
+    NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode,
+    QueryError, QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeData, SemanticNodeId,
+    SemanticQueryApi, SemanticQueryKey, SurfaceMember, SurfaceView, ValueRootKey,
 };
 
 /// Encode a [`ProjectionReductionContext`] as a compact u32 bit
@@ -455,7 +455,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   reference visited at the shell level, sourced from the bound arg.
     pub(super) fn build_instantiate(
         &self,
-        identity: &DeclIdentity,
+        identity: &crate::semantic_query::DeclKey,
         args: &Arc<[SemanticNodeId]>,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
@@ -501,7 +501,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         let decl_canonical = &identity.canonical_id;
         let decl_name = &identity.decl_name;
-        let decl_whole_hash = identity.whole_hash;
+        // R6 / R20: the key is content-free. Re-source the base file's
+        // content version from the live indexed view at value-build
+        // time, so the cached `MemoEntry` self-roots on the current
+        // generation's whole_hash. Three classes of non-file base
+        // exist and must NOT invent a synthetic `FileWholeHash`:
+        //  - the global / structural sentinel (`canonical_id == ""`);
+        //  - built-in utility carriers (`canonical_id == "__builtin__"`);
+        //  - synthetic test identities (`canonical_id == "<synthetic>"`).
+        // These bases root self-version through their `args` nodes
+        // only (no file fact). A real-file base whose `ensure_indexed_ready`
+        // returns `None` (the file is unknown to the live view) is a
+        // stale key — the build cannot publish a cacheable result and
+        // returns `cache_suppress` below.
+        let decl_canonical_str = decl_canonical.as_ref();
+        let is_non_file_base = decl_canonical_str.is_empty()
+            || decl_canonical_str == "__builtin__"
+            || decl_canonical_str == "<synthetic>";
+        let live_indexed: Option<Arc<crate::project_type_store::IndexedReady>> = if is_non_file_base
+        {
+            None
+        } else {
+            self.ctx.ensure_indexed_ready(decl_canonical_str)
+        };
+        let decl_whole_hash: crate::semantic_query::HashValue = match &live_indexed {
+            Some(indexed) => indexed.whole_hash,
+            None => crate::semantic_query::HashValue::default(),
+        };
 
         // Intern a scope-carrying placeholder so DispatchHost methods
         // (utility_source, resolve_prepared_type_decl, etc.) can look
@@ -568,12 +594,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
         //
         // The prepared decl is recovered from the declaration artifact
         // pinned to `(decl_canonical, decl_whole_hash)` — `decl_whole_hash`
-        // is the content version `DeclIdentity` carries (observed when
-        // the base placeholder was interned). When the prepared decl
-        // cannot be recovered the result is left non-cacheable
-        // (`cache_suppress`): the value still flows to the caller but the
-        // memo refuses admission rather than rooting an entry on a decl
-        // identity whose artifact is gone.
+        // was re-sourced above from the live indexed view. When the
+        // prepared decl cannot be recovered the result is left
+        // non-cacheable (`cache_suppress`): the value still flows to
+        // the caller but the memo refuses admission rather than rooting
+        // an entry on a decl identity whose artifact is gone.
+        //
+        // R6 non-file fork: when the base names a real file but the
+        // live indexed view yields no `IndexedReady`, the key is stale
+        // (file dropped or never loaded) — refuse admission so the
+        // next caller cold-recomputes against the current state.
+        if !is_non_file_base && live_indexed.is_none() {
+            let mut out = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                QueryResult::Value(self.opaque(QueryError::Miss)),
+                empty_signature(),
+            ));
+            out.cache_suppress = true;
+            return out;
+        }
         let ri = ResolvedRootIdentity::new(decl_canonical.as_ref(), decl_name.as_ref());
         let prepared = match adapter.resolve_prepared_type_decl(base, &ri) {
             Some(p) => p,
@@ -781,8 +819,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         // Self-version rooting: the instantiated shell's body and member
         // structure were lowered from the prepared decl declared in
-        // `decl_canonical` at the observed `decl_whole_hash` (carried by
-        // the `Instantiate` key's `DeclIdentity`) AND from the generic
+        // `decl_canonical` at the observed `decl_whole_hash` (re-sourced
+        // from the live indexed view above) AND from the generic
         // `args` substituted into the decl body. The result therefore
         // transitively depends on the file content each file-derived
         // argument was lowered from — the same file-derived-input rooting
@@ -792,7 +830,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // self-root so a content edit to the declaring file OR to any
         // argument's originating file misses the warm read. Structural
         // args (`Global`-scoped primitives) contribute nothing.
-        let mut observed_self_roots = vec![(Arc::clone(decl_canonical), decl_whole_hash)];
+        //
+        // R6 non-file fork: when the base names no file (the global /
+        // structural sentinel `canonical_id == ""`, the built-in
+        // utility carrier `"__builtin__"`, or the synthetic test
+        // sentinel `"<synthetic>"`), there is no `FileWholeHash` to
+        // root on the file — `decl_whole_hash` is the default sentinel
+        // `0`. Recording `(non_file_canonical, 0)` as a self-root
+        // would either be a no-op (the sentinel canonical is never
+        // tracked by the live view, so strict validation would
+        // optimistically accept) or — worse — would pretend the
+        // builtin/global has a content version. Skip the file-side
+        // self-root in those cases and rely entirely on the args
+        // self-roots (the same rule the builtin-utility path applies).
+        let mut observed_self_roots: Vec<(Arc<str>, crate::semantic_query::HashValue)> =
+            if is_non_file_base {
+                Vec::new()
+            } else {
+                vec![(Arc::clone(decl_canonical), decl_whole_hash)]
+            };
         for arg_root in self.observed_self_roots_from_nodes(args.iter().copied()) {
             if !observed_self_roots
                 .iter()
@@ -818,7 +874,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// recovered, in which case the caller treats the body as non-heritage.
     pub(super) fn prepared_decl_kind(
         &self,
-        identity: &DeclIdentity,
+        identity: &crate::semantic_query::DeclIdentity,
     ) -> Option<verter_semantic::analysis::type_eval::TypeDeclKind> {
         let scope = NodeScopeId::File {
             canonical_id: Arc::clone(&identity.canonical_id),
@@ -1828,7 +1884,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     // Declaration identity is carried directly by
-    // `SemanticQueryKey::Instantiate.base` (`DeclIdentity`), so there is
+    // `SemanticQueryKey::Instantiate.base` (`DeclKey`), so there is
     // no arena node to unwrap.
 
     /// Path-precise projection. Walks each [`PathSegment`]
@@ -2334,7 +2390,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.evaluate_deferred_semantic_node_with_context(mapper.value_expr, context);
             let resolved = match graph.node_data(evaluated).as_deref() {
                 Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                    let base = base.clone();
+                    let base = base.to_decl_key();
                     let args = Arc::clone(args);
                     match self.execute(SemanticQueryKey::Instantiate {
                         base,
@@ -2554,7 +2610,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let evaluated = self.evaluate_deferred_semantic_node_with_context(substituted, context);
         let resolved = match self.graph().node_data(evaluated).as_deref() {
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                let base = base.clone();
+                let base = base.to_decl_key();
                 let args = Arc::clone(args);
                 match self.execute(SemanticQueryKey::Instantiate {
                     base,
@@ -2687,7 +2743,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let evaluated = self.evaluate_deferred_semantic_node_with_context(substituted, context);
         let resolved = match self.graph().node_data(evaluated).as_deref() {
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                let base = base.clone();
+                let base = base.to_decl_key();
                 let args = Arc::clone(args);
                 match self.execute(SemanticQueryKey::Instantiate {
                     base,
@@ -2760,7 +2816,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self.evaluate_deferred_semantic_node_with_context(mapper.value_expr, context);
         let resolved = match self.graph().node_data(evaluated).as_deref() {
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                let base = base.clone();
+                let base = base.to_decl_key();
                 let args = Arc::clone(args);
                 match self.execute(SemanticQueryKey::Instantiate {
                     base,
@@ -3394,7 +3450,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// which propagates here as `QueryResult::Recursive(node)`.
     pub(super) fn build_resolve_macro_payload(
         &self,
-        owner: &crate::semantic_query::DeclIdentity,
+        owner: &crate::semantic_query::DeclKey,
         macro_index: usize,
         macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
         type_args: &Arc<[SemanticNodeId]>,
@@ -3402,16 +3458,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         use verter_semantic::analysis::AnalyzedMacroKind;
 
+        // R6 / R20: the key is content-free. Re-source the owning
+        // SFC's content version from the live indexed view at
+        // value-build time so the cached `MemoEntry` self-roots on
+        // the current generation's whole_hash. When the owner has no
+        // live `IndexedReady` (e.g. a synthetic test-only owner whose
+        // canonical was never upserted), fall back to a sentinel hash
+        // `0` for the simple arms (DefineProps / WithDefaults 0-1
+        // args, DefineExpose, DefineOptions) which read no
+        // owner-side macro data — those arms operate purely on
+        // `type_args`. Snapshot-consuming arms (DefineEmits /
+        // DefineSlots / DefineModel) re-check below and refuse
+        // admission with `cache_suppress = true` when the snapshot
+        // is missing.
+        let owner_indexed = self.ctx.ensure_indexed_ready(owner.canonical_id.as_ref());
+        let owner_whole_hash: crate::semantic_query::HashValue = owner_indexed
+            .as_ref()
+            .map(|indexed| indexed.whole_hash)
+            .unwrap_or_default();
+
         // Seed local fence with the macro's owning canonical and the
-        // content version the `ResolveMacroPayload` key carries
-        // (`owner.whole_hash`, observed when the synthetic SFC owner
-        // identity was constructed). This is also the memo entry's
+        // re-sourced content version. This is also the memo entry's
         // self-root: a content edit to the owning SFC shifts the
-        // whole-hash and misses the warm read.
+        // whole-hash, the strict warm-read validator rejects the
+        // stored signature, and the cold build re-runs.
         let mut local_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
         local_fence.push((
             Arc::clone(&owner.canonical_id),
-            crate::semantic_query::DepVersion::WholeHash(owner.whole_hash),
+            crate::semantic_query::DepVersion::WholeHash(owner_whole_hash),
         ));
         // Also pin the project-generation so the fence catches
         // workspace-wide changes that could invalidate the lowering
@@ -3444,71 +3518,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
             AnalyzedMacroKind::DefineEmits
             | AnalyzedMacroKind::DefineSlots
             | AnalyzedMacroKind::DefineModel => {
-                // Read the macro snapshot from the owner artifact pinned
-                // to `owner.whole_hash` — the content version the
-                // `ResolveMacroPayload` key names. The macro body the
-                // build reads must stay consistent with the key
-                // identity: a key for an older owner version must read
-                // that older version's macros, not whatever is current.
-                //
-                // The fast read is the content-pinned artifact lookup.
-                // It misses in two distinct situations that must NOT be
-                // conflated:
-                //   1. the owner file CHANGED — `owner.whole_hash` is a
-                //      stale content version. The key is stale; resolve
-                //      MUST NOT fall through to the newer content. Miss.
-                //   2. the owner file is UNCHANGED but its `IndexedReady`
-                //      was merely evicted from `FileArtifactStore`. The
-                //      key is still current; macro resolution must not
-                //      depend on cache residency, so the artifact is
-                //      rematerialized and the macro resolved from it.
-                // The owner's authoritative current content hash splits
-                // the two: observing it is a producer-side observation
-                // at value-compute time, not a signature-builder
-                // re-read, so it does not reopen the publish race.
-                let snapshot = match self
-                    .ctx
-                    .project_type_store()
-                    .indexed()
-                    .get_for_current_content(&owner.canonical_id, owner.whole_hash)
+                // Read the macro snapshot directly from the live
+                // indexed view obtained at function entry.
+                // Source-and-consistency: `owner_indexed` came from
+                // `ensure_indexed_ready` (the live view), and its
+                // `whole_hash` already discriminates content versions
+                // through the cached `MemoEntry`'s self-root rail. A
+                // missing `IndexedReady` for a snapshot-consuming arm
+                // is a stale key — refuse admission so the next
+                // caller cold-recomputes. A missing `script_analysis`
+                // on a present `IndexedReady` means the SFC carries no
+                // macros — return Miss.
+                let snapshot = match owner_indexed
+                    .as_ref()
                     .and_then(|indexed| indexed.script_analysis.clone())
                 {
                     Some(s) => s,
                     None => {
-                        // Pinned read missed. Rematerialize ONLY when
-                        // `owner.whole_hash` is still the owner's current
-                        // content (case 2 — evicted-but-current). When
-                        // the hashes differ or the current hash is
-                        // unavailable (case 1 — the file changed, or the
-                        // owner was evicted/deleted) the key is stale:
-                        // `ensure_indexed_ready` would yield the NEWER
-                        // content, so it must NOT run for a stale key.
-                        let owner_current_hash = self
-                            .ctx
-                            .authoritative_current_content_hash(&owner.canonical_id);
-                        let rematerialized = match owner_current_hash {
-                            Some(current) if current == owner.whole_hash => self
-                                .ctx
-                                .ensure_indexed_ready(&owner.canonical_id)
-                                // Defend against a content edit racing
-                                // between the hash observation and the
-                                // rematerialization: the rematerialized
-                                // artifact's `whole_hash` must still
-                                // equal the keyed `owner.whole_hash`.
-                                .filter(|indexed| indexed.whole_hash == owner.whole_hash)
-                                .and_then(|indexed| indexed.script_analysis.clone()),
-                            _ => None,
-                        };
-                        match rematerialized {
-                            Some(s) => s,
-                            None => {
-                                return (
-                                    QueryResult::Error(QueryError::Miss),
-                                    fence_to_dep_signature(local_fence),
-                                )
-                                    .into();
-                            }
+                        let mut out =
+                            crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                                QueryResult::Error(QueryError::Miss),
+                                fence_to_dep_signature(local_fence),
+                            ));
+                        // Only suppress when the owner artifact is
+                        // genuinely missing (stale key). A present
+                        // `IndexedReady` with no macros yields the
+                        // non-suppressing Miss above.
+                        if owner_indexed.is_none() {
+                            out.cache_suppress = true;
                         }
+                        return out;
                     }
                 };
                 if snapshot.macros.get(macro_index).is_none() {
@@ -3548,7 +3587,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
 
         // Self-version rooting: the macro payload was resolved from the
-        // owning SFC's macro analysis at the observed `owner.whole_hash`
+        // owning SFC's macro analysis at the re-sourced `owner_whole_hash`
         // AND from the `type_args` nodes — every arm derives its value
         // from `type_args` (returned directly for `DefineProps` /
         // `WithDefaults` 1-arg and `DefineExpose` / `DefineOptions`;
@@ -3563,7 +3602,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // SFC OR to any type argument's originating file misses the warm
         // read. Structural type args (`Global`-scoped primitives) and an
         // empty `type_args` set contribute nothing.
-        let mut observed_self_roots = vec![(Arc::clone(&owner.canonical_id), owner.whole_hash)];
+        let mut observed_self_roots = vec![(Arc::clone(&owner.canonical_id), owner_whole_hash)];
         for arg_root in self.observed_self_roots_from_nodes(type_args.iter().copied()) {
             if !observed_self_roots
                 .iter()

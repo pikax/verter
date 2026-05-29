@@ -42,7 +42,7 @@ use verter_audit::RequestKind;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::request_context::{RequestContext, RequestContextGuard};
 use crate::semantic_query::{
-    DeclIdentity, PathSegment, ProjectionMode, QueryResult, SemanticNodeData, SemanticQueryKey,
+    PathSegment, ProjectionMode, QueryResult, SemanticNodeData, SemanticQueryKey,
 };
 use crate::types::{AnalysisLevel, HostConfig};
 use crate::{FileKind, UpsertRequest, VerterHost};
@@ -83,10 +83,9 @@ fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
 /// an empty `type_args` slice short-circuits to `Opaque(Miss)` for
 /// `DefineProps`, which is exactly the path we want to exercise to
 /// prove the dispatch arm produced no record.
-fn synthetic_macro_owner(canonical: &str) -> DeclIdentity {
-    DeclIdentity {
+fn synthetic_macro_owner(canonical: &str) -> crate::semantic_query::DeclKey {
+    crate::semantic_query::DeclKey {
         canonical_id: Arc::from(canonical),
-        whole_hash: [0u8; 16],
         decl_name: Arc::from("<sfc-script-setup>"),
     }
 }

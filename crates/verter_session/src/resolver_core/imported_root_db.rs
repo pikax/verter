@@ -210,7 +210,7 @@ impl ImportedRootDb {
                 .roots
                 .get_if_valid_with_facts(&key, view)
                 .map(|(_, facts)| facts)
-                .unwrap_or_else(|| Arc::from(Vec::<FactVersionRef>::new())),
+                .unwrap_or_else(crate::fact_signature_helpers::empty_fact_signature),
         };
         Some((value, facts))
     }

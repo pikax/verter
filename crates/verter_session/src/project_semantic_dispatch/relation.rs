@@ -255,7 +255,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // anchors during binding.
         let transit = crate::semantic_query::ProjectionReductionContext::structural_transit();
         let unwrapped = match self.execute(SemanticQueryKey::Instantiate {
-            base: identity,
+            base: identity.to_decl_key(),
             args,
             context: transit,
         }) {
@@ -342,7 +342,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // without re-reducing nested `keyof` / `Mapped` operators.
         let transit = crate::semantic_query::ProjectionReductionContext::structural_transit();
         let unwrapped = match self.execute(SemanticQueryKey::Instantiate {
-            base: identity,
+            base: identity.to_decl_key(),
             args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             context: transit,
         }) {

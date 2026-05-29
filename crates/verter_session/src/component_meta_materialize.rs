@@ -1,9 +1,11 @@
 #![deny(missing_docs)]
 //! Session-layer structural materialiser. Dispatch-driven, with
-//! graph-native policy predicates, cooperative-admission post-compute
-//! revalidation for atomic publish/invalidate, and a content-hash
-//! bucketed Weak-ref `DepSignature` interner for `Arc::ptr_eq` cleanup
-//! of the reverse-index.
+//! graph-native policy predicates and a query-identity split-publish cold
+//! build (post-compute revalidation atomic with the publish) over the
+//! shared
+//! [`ReverseIndexedCandidateStore`](crate::cache_runtime::ReverseIndexedCandidateStore),
+//! whose per-canonical reverse index (keyed `(key, admission_seq)`) drives
+//! O(K) invalidation cleanup.
 //!
 //! **Foundational types**:
 //! - [`MaterializeOutcome`] — materialiser-local result enum
@@ -16,8 +18,9 @@
 //! **Materialiser entry**:
 //! - [`materialize_component_meta_structure`] — five-stage entry
 //!   pipeline (warm peek → same-key cycle → depth fuse → package /
-//!   function policy gates → cooperative-admission cold build with
-//!   `post_publish` reverse-index registration).
+//!   function policy gates → query-identity split-publish cold build,
+//!   whose `publish_core` registers the reverse index under the slot
+//!   guard).
 //! - [`materialize_object_surface`] — per-shape Object handler
 //!   that walks members + call/construct/index signatures at Nested
 //!   axis. Re-entry through the materialiser entry applies the
@@ -281,11 +284,11 @@ pub fn convert_dispatch_result(
 use std::cell::{Cell, RefCell};
 
 use crate::component_meta_caches::MaterializeStructureEntry;
-// Migration: this consumer routes through
-// `cooperative_admit_with_post_publish` (the ComputeAdmission API)
-// instead of the legacy `cooperative_get_or_insert_with_post_publish`.
-// The legacy entry-point remains the public API for callers whose
-// compute closures never produce non-cacheable values.
+// This consumer hands its `ComputeAdmission`-returning cold-build closure
+// to `MaterializeStructureDb::get_or_compute_admit`, which routes through
+// the query-identity `query::lookup` split-publish path so a
+// valid-but-non-cacheable outcome (`ReturnOnly`) returns to the winning
+// flight alone without admitting a candidate.
 // Test-only — the in-tree `mod tests { … }` block at the bottom of this
 // file constructs `ProjectSemanticDispatch::new(host)` directly to drive
 // dispatch-pipeline assertions. Gated `#[cfg(test)]` to keep the
@@ -354,12 +357,14 @@ thread_local! {
 /// with the input key + depth.
 pub const MAX_DEPTH: usize = 4096;
 
-// `NonCacheableSlot` was a stack-local `RefCell<Option<...>>` side
-// channel used to broadcast non-cacheable materialisation outcomes
-// to the post-cooperative fallback. The carrier consolidation
-// retired it: cooperative joiners now observe non-cacheable outcomes
-// directly through `ComputeAdmission::ReturnOnly`'s typed broadcast
-// channel inside the in-flight slot (`cache_runtime::singleflight`).
+// A non-cacheable materialisation outcome needs no stack-local side
+// channel. It flows through `ComputeAdmission::ReturnOnly`
+// (`cache_runtime/singleflight.rs`): the value is delivered to the
+// winning flight alone. A `ReturnOnly` outcome carries no entry /
+// dep-signature, so it is NOT shared to concurrent joiners — the
+// in-flight slot only flags `non_cacheable_winner`, and joiners that
+// observe that flag fork and cold-recompute for their own view rather
+// than inheriting a value they cannot view-validate.
 
 /// RAII guard for the per-thread `MATERIALIZE_IN_FLIGHT`
 /// stack and the `MATERIALIZE_DEPTH` counter. Push on construction,
@@ -413,12 +418,12 @@ impl Drop for MaterializeInFlightGuard {
 ///    no cache write.
 /// 3. Pre-admission depth-fuse check → `Tainted(key.base)` if
 ///    depth > `MAX_DEPTH`, no cache write.
-/// 4. Cooperative-admission cold build via
-///    `cooperative_get_or_insert_with_post_publish`. The compute
+/// 4. Query-identity split-publish cold build via
+///    `MaterializeStructureDb::get_or_compute_admit`. The compute
 ///    closure dispatches `ProjectPath { base, [], mode }` to the
-///    canonical materialisation pipeline. The post_publish callback
-///    registers the (key, dep_signature) pair in the
-///    `canonical_to_keys` reverse index.
+///    canonical materialisation pipeline; the store's `publish_core`
+///    then registers the candidate in the per-canonical reverse index
+///    (keyed `(key, admission_seq)`) under the slot guard.
 ///
 /// **Tainted is a sentinel propagation:** when the dispatch returns
 /// `QueryResult::Recursive`, `convert_dispatch_result` promotes it
@@ -487,6 +492,9 @@ fn finish_materialize_admission(
         // joiners observe the same valid outcome. The CacheRead's
         // dep_signature is empty: non-cacheable results MUST NOT
         // propagate as cache deps (R20).
+        let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
+            crate::cache_runtime::NonAdmissionReason::IntrinsicNonCacheable,
+        );
         return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
             crate::semantic_query::CacheRead {
                 value: outcome,
@@ -498,24 +506,28 @@ fn finish_materialize_admission(
     }
     let dispatch_dep_signature = dep_signature_from_fence(local_fence.clone());
     match materialize_structure_read_set(&local_fence, base_origin_self_root) {
-        Some((facts, self_root_canonicals)) => {
-            crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(MaterializeStructureEntry {
-                outcome,
-                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(facts),
-                dispatch_dep_signature,
-                self_root_canonicals,
-                admission_seq: crate::bounded_query_retention::next_retention_seq(),
-                validated_at_generation,
-            })
+        Ok((facts, self_root_canonicals)) => {
+            crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                MaterializeStructureEntry {
+                    outcome,
+                    read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(facts),
+                    dispatch_dep_signature,
+                    self_root_canonicals,
+                    validated_at_generation,
+                },
+            )
         }
-        None => {
-            // The observed-root signature cannot be built strictly —
-            // the fence carries an unsound `RouteGeneration` dependency
-            // or a fence `WholeHash` conflicts with the observed base
-            // self-root. The materialised outcome is valid; route it
-            // through `ReturnOnly` so joiners observe it without
-            // admitting an entry the warm-read validator could not
-            // soundly check.
+        Err(reason) => {
+            // The observed-root signature cannot be built strictly.
+            // The carrier builder distinguishes two refusal modes and
+            // returns the typed reason: a fence `WholeHash` that
+            // conflicts with the observed base self-root yields
+            // `SelfRootConflict`; a fence `RouteGeneration` entry
+            // yields `RouteGenerationDependency`. The materialised
+            // outcome is valid; route it through `ReturnOnly` so
+            // joiners observe it without admitting an entry the
+            // warm-read validator could not soundly check.
+            let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(reason);
             crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
                 crate::semantic_query::CacheRead {
                     value: outcome,
@@ -565,7 +577,10 @@ fn finish_materialize_admission(
 fn materialize_structure_read_set(
     local_fence: &[(Arc<str>, DepVersion)],
     base_origin_self_root: Option<&(Arc<str>, crate::resolver_core::ResolverHash16)>,
-) -> Option<crate::fact_signature_helpers::StructuralCarrierReadSet> {
+) -> Result<
+    crate::fact_signature_helpers::StructuralCarrierReadSet,
+    crate::cache_runtime::NonAdmissionReason,
+> {
     use crate::resolver_core::FactVersionRef;
 
     // Collapse observed self-roots into a per-canonical hash map; a
@@ -590,12 +605,19 @@ fn materialize_structure_read_set(
     // Merge the fence facts as cross-file dependency facts. A fence
     // `WholeHash` for a self-root canonical is folded onto the
     // observed self-root: it MUST agree with the observed hash.
+    // The two refusal modes are distinguished:
+    //   - A `WholeHash` mismatch with the observed self-root is a
+    //     `SelfRootConflict` — the fence observation disagrees with
+    //     the keyed scope's observed self-root hash.
+    //   - A `RouteGeneration` fence entry is a
+    //     `RouteGenerationDependency` — no authoritative validating
+    //     source (see `fact_signature_from_fence`).
     for (canonical, version) in local_fence.iter() {
         match version {
             DepVersion::WholeHash(hash) => {
                 if let Some(observed_hash) = self_root_hashes.get(canonical) {
                     if hash != observed_hash {
-                        return None;
+                        return Err(crate::cache_runtime::NonAdmissionReason::SelfRootConflict);
                     }
                     // Already emitted as a self-root — do not duplicate.
                     continue;
@@ -611,15 +633,14 @@ fn materialize_structure_read_set(
                 });
             }
             DepVersion::RouteGeneration(_) => {
-                // Unsound — see `fact_signature_from_fence`.
-                return None;
+                return Err(crate::cache_runtime::NonAdmissionReason::RouteGenerationDependency);
             }
         }
     }
 
     let mut self_root_canonicals: Vec<Arc<str>> = self_root_hashes.into_keys().collect();
     self_root_canonicals.sort();
-    Some((Arc::from(facts), Arc::from(self_root_canonicals)))
+    Ok((Arc::from(facts), Arc::from(self_root_canonicals)))
 }
 
 /// The `base` node's declaration-origin self-root for a materialiser
@@ -726,17 +747,18 @@ fn merge_traced_facts_into_materialize_carrier(
 }
 
 /// Five-phase materialiser entry. Maintains
-/// the `MaterializeStructureDb` warm cache via cooperative-admission
-/// with `post_publish` reverse-index registration.
+/// the `MaterializeStructureDb` warm cache via the query-identity
+/// split-publish lifecycle (the store's `publish_core` registers the
+/// per-canonical reverse index under the slot guard).
 ///
 /// **Phases:**
-/// 1. Warm peek with proactive stale-entry removal.
+/// 1. Warm peek — a stale candidate is skipped (left for other views);
+///    routine reclamation is the FIFO budget + per-canonical drain.
 /// 2. Same-key thread-local re-entry detection.
 /// 3. Pre-admission depth fuse.
 /// 4. Package-ref / function-shape-at-Nested policy gates.
-/// 5. Cooperative-admission cold build with `post_publish`. Inside
-///    the compute closure: registry-route branch,
-///    recursive-helper cycle guard, then the
+/// 5. Split-publish cold build. Inside the compute closure:
+///    registry-route branch, recursive-helper cycle guard, then the
 ///    canonical DeclRef / InstantiationRef / Object handlers.
 ///
 /// **Cache contract**:
@@ -763,7 +785,9 @@ pub(crate) fn materialize_component_meta_structure(
 
     let db = ctx.project_type_store().materialize_structure_db();
 
-    // Warm-hit peek with proactive stale removal.
+    // Warm-hit peek: a stale candidate is skipped on read; reclamation is
+    // the FIFO budget / per-canonical drain / schema eviction / generation
+    // clear.
     if let Some(cached) = db.peek(&key, ctx) {
         return cached;
     }
@@ -841,15 +865,15 @@ pub(crate) fn materialize_component_meta_structure(
         }
     }
 
-    // Cooperative-admission cold build with post_publish. The
-    // compute closure returns `ComputeAdmission<MaterializeOutcome,
+    // Query-identity split-publish cold build. The compute closure
+    // returns `ComputeAdmission<MaterializeOutcome,
     // MaterializeStructureEntry>`: `Cacheable(entry)` for
     // materialisations that admit to the cache, `ReturnOnly(outcome)`
     // for valid-but-non-cacheable materialisations (intrinsically
     // non-cacheable outcomes like Tainted, OR tracer-overflow
     // refusals). The in-flight slot broadcasts the `ReturnOnly`
     // outcome to cooperative joiners through the typed return-only
-    // channel — there is no longer a stack-local side channel.
+    // channel.
     let key_for_compute = key.clone();
     let compute = move || -> crate::cache_runtime::singleflight::ComputeAdmission<
         crate::semantic_query::CacheRead<MaterializeOutcome>,
@@ -963,7 +987,7 @@ pub(crate) fn materialize_component_meta_structure(
                     // original args (preserves generic carriers per
                     // Codex2 P0 #3).
                     let body_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
-                        base: extraction.root_identity.clone(),
+                        base: extraction.root_identity.to_decl_key(),
                         args: Arc::clone(&extraction.root_args),
                         context: crate::semantic_query::ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Navigate),
                     });
@@ -990,16 +1014,8 @@ pub(crate) fn materialize_component_meta_structure(
                     // projection's expansion behavior.
                     let keys_node = crate::meta_resolve::build_keys_union_node(graph, keys);
                     let pick_or_omit_identity = match &extraction.route {
-                        RouteDemand::Pick(_) => crate::semantic_query::DeclIdentity {
-                            canonical_id: Arc::from("__builtin__"),
-                            whole_hash: crate::semantic_query::HashValue::default(),
-                            decl_name: Arc::from("Pick"),
-                        },
-                        RouteDemand::Omit(_) => crate::semantic_query::DeclIdentity {
-                            canonical_id: Arc::from("__builtin__"),
-                            whole_hash: crate::semantic_query::HashValue::default(),
-                            decl_name: Arc::from("Omit"),
-                        },
+                        RouteDemand::Pick(_) => crate::semantic_query::DeclKey::builtin("Pick"),
+                        RouteDemand::Omit(_) => crate::semantic_query::DeclKey::builtin("Omit"),
                         _ => unreachable!("matched only Pick/Omit"),
                     };
                     let projected = dispatch.execute_read(SemanticQueryKey::Instantiate {
@@ -1096,7 +1112,7 @@ pub(crate) fn materialize_component_meta_structure(
                 };
             resolve_target.map(|(identity, args)| {
                 let read = dispatch.execute_read(SemanticQueryKey::Instantiate {
-                    base: identity,
+                    base: identity.to_decl_key(),
                     args,
                     context: crate::semantic_query::ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Navigate),
                 });
@@ -1223,11 +1239,6 @@ pub(crate) fn materialize_component_meta_structure(
         )
     };
 
-    let key_for_register = key.clone();
-    // `&MaterializeStructureDb` is `Copy`; a dedicated binding lets the
-    // removal-side closure capture the db alongside the `post_publish`
-    // closure that captures the original `db`.
-    let db_for_removal = db;
     // Wrap the cooperative-admission compute closure with
     // `install_fact_tracer`. On `FactReadSetFinalise::Ok`, override
     // the entry's `read_set_signature.facts` rail with the traced
@@ -1284,6 +1295,16 @@ pub(crate) fn materialize_component_meta_structure(
                                     )
                                 }
                                 None => {
+                                    // The traced self-root facts torn
+                                    // against the observed self-roots
+                                    // — the value is valid but the
+                                    // signature cannot be rooted
+                                    // strictly. Route through
+                                    // `ReturnOnly` with the
+                                    // `SelfRootConflict` reason.
+                                    let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
+                                        crate::cache_runtime::NonAdmissionReason::SelfRootConflict,
+                                    );
                                     crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
                                         crate::semantic_query::CacheRead {
                                             value: entry.outcome,
@@ -1310,6 +1331,9 @@ pub(crate) fn materialize_component_meta_structure(
                     // non-cacheable) passes through unchanged.
                     match admission {
                         crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry) => {
+                            let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
+                                crate::cache_runtime::NonAdmissionReason::SignatureOverflow,
+                            );
                             crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
                                 crate::semantic_query::CacheRead {
                                     value: entry.outcome,
@@ -1325,93 +1349,14 @@ pub(crate) fn materialize_component_meta_structure(
             }
         }
     };
-    let result = crate::cache_runtime::singleflight::cooperative_admit_with_post_publish(
-        db.entries(),
-        db.inflight(),
-        key.clone(),
-        |entry: &MaterializeStructureEntry| {
-            // Carrier-aware validate-before-bubble. The entry's
-            // self-root canonicals (ONLY the `base` node's
-            // declaration-origin file — NOT the consumer materialise
-            // scope, R7 cross-owner reuse) validate **strictly**;
-            // every other fact keeps the lazy cross-file
-            // permissiveness. The project-generation gate is the
-            // project-shape counterpart: the carrier validates only
-            // file-content whole-hashes, but a `ProjectGeneration` reset
-            // bumps no file content. Stale entries never bubble.
-            if entry.validated_at_generation
-                == ctx.project_type_store().current_project_generation()
-                && entry
-                    .read_set_signature
-                    .validate_with_self_roots(ctx, &entry.self_root_canonicals)
-            {
-                entry.read_set_signature.bubble(ctx);
-                Some(crate::semantic_query::CacheRead {
-                    value: entry.outcome.clone(),
-                    dep_signature: Arc::clone(&entry.dispatch_dep_signature),
-                    walker_diagnostics: Arc::from([]),
-                    cache_suppress: false,
-                })
-            } else {
-                None
-            }
-        },
-        compute,
-        |entry: &MaterializeStructureEntry| {
-            entry.read_set_signature.bubble(ctx);
-            crate::semantic_query::CacheRead {
-                value: entry.outcome.clone(),
-                dep_signature: Arc::clone(&entry.dispatch_dep_signature),
-                walker_diagnostics: Arc::from([]),
-                cache_suppress: false,
-            }
-        },
-        // Race-closer — post-compute revalidation with strict
-        // self-root validation plus the project-generation gate. Runs
-        // under the `publish_fence` read guard (the substrate holds it
-        // across revalidate→insert→post_publish), so the generation
-        // check and the `entries.insert` are atomic against a
-        // concurrent `invalidate_all` clear+bump: an entry materialised
-        // under a superseded project generation is rejected here rather
-        // than published into the freshly-cleared cache.
-        |entry: &MaterializeStructureEntry| {
-            entry.validated_at_generation == ctx.project_type_store().current_project_generation()
-                && entry
-                    .read_set_signature
-                    .validate_with_self_roots(ctx, &entry.self_root_canonicals)
-        },
-        // removal_cleanup — removal-side counterpart of `post_publish`.
-        // When the substrate removes an already-published entry
-        // (warm-hit reject or joiner-fork reject) the live counter must
-        // decrement and the per-canonical reverse-index registration
-        // must drop, symmetric with the `post_publish` bump + register.
-        move |removed_key: &MaterializeStructureCacheKey,
-              removed_entry: &Arc<MaterializeStructureEntry>| {
-            db_for_removal.decrement_live_counter();
-            db_for_removal.unregister_post_publish(
-                removed_key,
-                &removed_entry.read_set_signature,
-                removed_entry.admission_seq,
-            );
-        },
-        // post_publish — register reverse-index AFTER
-        // entries.insert AND AFTER successful revalidation.
-        move |entry_arc: &Arc<MaterializeStructureEntry>, k: &MaterializeStructureCacheKey| {
-            db.bump_live_counter();
-            db.register_post_publish(
-                key_for_register.clone(),
-                &entry_arc.read_set_signature,
-                entry_arc.admission_seq,
-            );
-            let _ = k; // unused — key_for_register is the same key
-        },
-        // publish_fence — the Db's `retention_gate`. The substrate
-        // holds it (shared read) across `entries.insert` + `post_publish`
-        // so the map insert and the reverse-index + budget admission are
-        // one lock-domain mutation, exclusive against `invalidate_all`'s
-        // map+budget clear.
-        Some(db.publish_fence()),
-    );
+    // Route the cold materialisation through the Db's query-identity
+    // split-publish lifecycle over the shared reverse-indexed candidate
+    // store. The Db owns the warm-hit lookup, post-compute revalidation,
+    // publish-core (counter + reverse-index + retention-budget admission
+    // under the slot guard), the guard-free deferred FIFO eviction, and
+    // the publish fence (so a project-generation `clear` cannot interleave
+    // and the re-entrant eviction cannot self-deadlock).
+    let result = db.get_or_compute_admit(&key, ctx, compute);
 
     match result {
         Some(read) => read,
@@ -2224,7 +2169,7 @@ export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
         // Conditional doesn't collapse → recursive GetItemKeys ref is
         // visible to collect_ref_identities_node.
         let skeleton_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
-            base: dotpathkeys_id.clone(),
+            base: dotpathkeys_id.to_decl_key(),
             args: StdArc::from(Vec::new().into_boxed_slice()),
             context: crate::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Skeleton,
@@ -2277,7 +2222,7 @@ export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
 
         // Navigate + args=[] still executes without panic (continue-skip path).
         let navigate_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
-            base: id.clone(),
+            base: id.to_decl_key(),
             args: StdArc::from(Vec::new().into_boxed_slice()),
             context: crate::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Navigate,
@@ -2287,7 +2232,7 @@ export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
 
         // Expanded + args=[] still executes without panic (continue-skip path).
         let expanded_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
-            base: id.clone(),
+            base: id.to_decl_key(),
             args: StdArc::from(Vec::new().into_boxed_slice()),
             context: crate::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Expanded,
@@ -2367,7 +2312,7 @@ export type GetItemKeys<I, T extends NestedItem<I> = NestedItem<I>> =
         // This is the discriminating mechanical proof for rev-10.
         let dotpathkeys_id = a0_make_decl_identity(host, "/u.ts", "DotPathKeys");
         let skeleton_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
-            base: dotpathkeys_id.clone(),
+            base: dotpathkeys_id.to_decl_key(),
             args: StdArc::from(Vec::new().into_boxed_slice()),
             context: crate::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Skeleton,
@@ -2428,11 +2373,10 @@ export type GetItemKeys<I, T extends NestedItem<I> = NestedItem<I>> =
     //   4. Materialize publish-after-invalidation revalidates + skips
     //   5. Materialize orphan entry caught on next peek
     //
-    // Tests 4+5 currently exercise the existing MaterializeStructureEntry
-    // shape (no validated_at_generation field — that's added in WT5's R
-    // commit). They verify the orphan-reaping behavior in
-    // MaterializeStructureDb::peek (R8-5 dep_signature_valid_for_host
-    // path).
+    // Tests 4+5 verify the orphan-skip behavior in
+    // MaterializeStructureDb::peek: a stale candidate fails strict
+    // self-root validation and is skipped on read (it stays resident for
+    // other views; reclamation is the FIFO budget / per-canonical drain).
     // =================================================================
 
     /// #1 — when the materialiser handles a `DeclRef`, the
@@ -2549,13 +2493,10 @@ export type C<T> = A<T>
     }
 
     /// #4 — orphan entry (stale dep_signature) is caught
-    /// on the next `peek` and removed proactively. This exercises the
-    /// `dep_signature_valid_for_host` path in MaterializeStructureDb::peek.
-    ///
-    /// Note: the more elaborate `materialize_publish_after_invalidation_revalidates_and_skips`
-    /// scenario from the plan requires the `validated_at_generation`
-    /// field on MaterializeStructureEntry which is added in WT5/R. The
-    /// test here exercises the orphan-reaping path that exists today.
+    /// on the next `peek` and skipped on read (it stays resident for other
+    /// views; reclamation is the FIFO budget / per-canonical drain). This
+    /// exercises the strict self-root validation path in
+    /// MaterializeStructureDb::peek.
     #[test]
     fn materialize_publish_after_invalidation_revalidates_and_skips() {
         use crate::semantic_query::ProjectionMode;
@@ -2590,32 +2531,22 @@ export type C<T> = A<T>
         project
             .upsert_base("/types.ts", "export type Foo = { x: number; y: string }")
             .unwrap();
-        // Peek again — the stale entry must be reaped, not returned.
-        // We assert the cache invariant: peek never returns a stale
-        // entry. If `peek` still returns `Some`, the surviving entry's
-        // fact carrier MUST validate against the live store view (it
-        // would only survive if its `base`-origin self-root happened to
-        // be content-invariant under the edit).
+        // Peek again — the stale candidate must not be returned. The
+        // cache invariant: `peek` never returns a candidate whose fact
+        // carrier fails strict self-root validation against the live store
+        // view. `peek` itself performs that validation before returning
+        // `Some`, so a `Some` result is by construction a candidate that
+        // validated (it would only survive the edit if its `base`-origin
+        // self-root happened to be content-invariant). A `None` result is
+        // the stale candidate correctly skipped.
         let db = host.project_type_store().materialize_structure_db();
-        if db.peek(&key, host).is_some() {
-            let entry = db
-                .entries()
-                .get(&key)
-                .map(|e| e.clone())
-                .expect("entry present after a Some peek");
-            assert!(
-                entry
-                    .read_set_signature
-                    .validate_with_self_roots(host, &entry.self_root_canonicals),
-                "peek returned an entry whose fact carrier no longer validates — \
-                 invariant violation"
-            );
-        }
+        let _ = db.peek(&key, host);
     }
 
     /// #5 — orphan entry inserted directly into the cache
-    /// is reaped on next peek (matches the test above's invariant from
-    /// the other angle).
+    /// is skipped on next peek (matches the test above's invariant from
+    /// the other angle): a candidate whose strict self-root fails misses
+    /// on read; it is not reclaimed on the read path.
     #[test]
     fn materialize_orphan_entry_caught_on_next_peek() {
         use crate::resolver_core::FactVersionRef;
@@ -2655,30 +2586,26 @@ export type C<T> = A<T>
             }]
             .into_boxed_slice(),
         ));
-        let stale_entry = StdArc::new(MaterializeStructureEntry {
-            outcome: MaterializeOutcome::Value(decl_ref_node),
-            read_set_signature: stale_carrier,
-            // The dispatch-return signature is not a validity rail —
-            // staleness is carried by the fact carrier above.
-            dispatch_dep_signature: StdArc::from(Vec::new()),
+        let db = host.project_type_store().materialize_structure_db();
+        db.insert_for_test(
+            key.clone(),
+            MaterializeOutcome::Value(decl_ref_node),
+            stale_carrier,
             // `/types.ts` listed as a self-root so the strict validator
             // routes its `FileWholeHash` through
             // `validates_self_root_whole_hash` and rejects the all-zero
             // hash.
-            self_root_canonicals: StdArc::from(vec![StdArc::<str>::from("/types.ts")]),
-            admission_seq: crate::bounded_query_retention::next_retention_seq(),
-            // Current project generation — this entry's staleness is
-            // exercised through the carrier rail, not the generation
-            // gate, so it must match the live generation here.
-            validated_at_generation: host.project_type_store().current_project_generation(),
-        });
-        let db = host.project_type_store().materialize_structure_db();
-        db.entries().insert(key.clone(), stale_entry);
-        // Peek must return None (entry is stale).
+            StdArc::from(vec![StdArc::<str>::from("/types.ts")]),
+            // Current project generation — this candidate's staleness is
+            // exercised through the carrier rail, not the generation gate,
+            // so it must match the live generation here.
+            host.project_type_store().current_project_generation(),
+        );
+        // Peek must return None (the candidate's strict self-root fails).
         let peek_result = db.peek(&key, host);
         assert!(
             peek_result.is_none(),
-            "stale entry must be reaped on next peek"
+            "a candidate whose strict self-root fails must miss on peek"
         );
     }
 
@@ -2978,15 +2905,13 @@ export type C<T> = A<T>
         );
     }
 
-    /// Test 7 — `peek`'s slow-path stale removal decrements
-    /// the live_counter so the shared counter does not inflate
-    /// permanently when entries become stale.
-    ///
-    /// Plan R8-5 fix: the original peek did `remove_if` without
-    /// decrementing the counter on success. Repeated stale peeks would
-    /// leak the counter upward.
+    /// Test 7 — `peek` skips a stale candidate on read and leaves the
+    /// shared live_counter untouched: the candidate stays resident for
+    /// other views, so the counter still tracks it. Reclamation (and the
+    /// matching decrement) happens later through the FIFO budget /
+    /// per-canonical drain, never on the read path.
     #[test]
-    fn ref_cycle_result_db_peek_decrements_live_counter_on_stale_removal() {
+    fn ref_cycle_result_db_peek_skips_stale_candidate_without_touching_live_counter() {
         let project = a0_make_project();
         project
             .upsert_base("/types.ts", "export type Foo = { x: number };")
@@ -2998,7 +2923,7 @@ export type C<T> = A<T>
         // carries a self-root `FileWholeHash` for `/nonexistent.ts`, a
         // canonical the host's `FileArtifactStore` does not track. The
         // strict `validate_with_self_roots` rejects an untracked
-        // self-root; peek's slow-path removes the entry.
+        // self-root; peek skips the candidate on read (it stays resident).
         let stale_carrier =
             crate::fact_signature_helpers::ReadSetSignature::new(std::sync::Arc::from(
                 vec![crate::resolver_core::FactVersionRef::FileWholeHash {
@@ -3007,48 +2932,51 @@ export type C<T> = A<T>
                 }]
                 .into_boxed_slice(),
             ));
-        let stale_entry = std::sync::Arc::new(crate::component_meta_caches::RefCycleEntry {
-            result: false,
-            read_set_signature: stale_carrier,
-            // The dispatch-return signature is not a validity rail —
-            // staleness is carried by the fact carrier above.
-            dispatch_dep_signature: std::sync::Arc::from(Vec::new()),
+        let db = host.project_type_store().ref_cycle_db();
+        db.insert_for_test(
+            id.clone(),
+            false,
+            stale_carrier,
             // `/nonexistent.ts` listed as a self-root so the strict
             // validator routes its `FileWholeHash` through
-            // `validates_self_root_whole_hash`, which rejects an
-            // untracked self-root canonical.
-            self_root_canonicals: std::sync::Arc::from(vec![std::sync::Arc::<str>::from(
-                "/nonexistent.ts",
-            )]),
-            admission_seq: crate::bounded_query_retention::next_retention_seq(),
-            // Current project generation — this entry's staleness is
-            // exercised through the carrier rail, not the generation
-            // gate, so it must match the live generation here.
-            validated_at_generation: host.project_type_store().current_project_generation(),
-        });
-        let db = host.project_type_store().ref_cycle_db();
-        db.entries().insert(id.clone(), stale_entry);
-        db.bump_live_counter();
-        let live_before = db.live_counter_for_test();
-        assert_eq!(
-            live_before, 1,
-            "synthetic insert + bump_live_counter should leave live=1"
+            // `validates_self_root_whole_hash`, which rejects an untracked
+            // self-root canonical.
+            std::sync::Arc::from(vec![std::sync::Arc::<str>::from("/nonexistent.ts")]),
+            // Current project generation — this candidate's staleness is
+            // exercised through the carrier rail, not the generation gate,
+            // so it must match the live generation here.
+            host.project_type_store().current_project_generation(),
         );
+        let live_before = db.live_counter_for_test();
+        assert_eq!(live_before, 1, "synthetic insert should leave live=1");
 
-        // Peek must return None (entry is stale). Every peek validates
-        // the carrier strictly — the self-root `FileWholeHash` for the
-        // untracked `/nonexistent.ts` fails `validates_self_root_whole_hash`;
-        // peek removes the entry.
+        // Peek must return None — every peek validates the carrier
+        // strictly, and the self-root `FileWholeHash` for the untracked
+        // `/nonexistent.ts` fails `validates_self_root_whole_hash`. The
+        // store SKIPS the stale candidate on read (it keeps it for other
+        // views; routine reclamation is the FIFO budget + per-canonical
+        // drain), so peek misses WITHOUT reaping.
         let peek_result = db.peek(&id, host);
         assert!(
             peek_result.is_none(),
-            "stale entry (fact carrier references nonexistent canonical) must be reaped"
+            "a candidate whose strict self-root fails must miss on peek (never served stale)"
+        );
+        assert_eq!(
+            db.live_counter_for_test(),
+            1,
+            "the store does not reap a stale candidate on peek — it stays \
+             for other views and for budget / per-canonical reclamation",
         );
 
-        let live_after = db.live_counter_for_test();
+        // The stale candidate is reclaimed by per-canonical invalidation
+        // of the canonical its carrier references — and that decrements
+        // the live counter exactly once.
+        db.invalidate_for_canonical("/nonexistent.ts");
         assert_eq!(
-            live_after, 0,
-            "stale removal must decrement live_counter to prevent leak (R8-5 fix)"
+            db.live_counter_for_test(),
+            0,
+            "per-canonical invalidation reclaims the stale candidate and \
+             decrements the live counter exactly once",
         );
     }
 
@@ -3120,7 +3048,7 @@ export type C<T> = A<T>
             .materialize_structure_overflow_refusals
             .load(std::sync::atomic::Ordering::Relaxed);
         let db = host.project_type_store().materialize_structure_db();
-        let entries_before = db.entries().len();
+        let entries_before = db.live_count();
 
         // Arm the forced-observation hook. 1100 > FACT_SIGNATURE_CAP
         // (1024) — guarantees the cold compute's installed tracer
@@ -3155,20 +3083,20 @@ export type C<T> = A<T>
         }
 
         // Discrimination #2: the materialise-structure cache MUST NOT
-        // contain the key. Refusing admission on Overflow is the whole
+        // admit a candidate. Refusing admission on Overflow is the whole
         // point — admission with an unbounded fact signature would
         // poison the cache.
         assert_eq!(
-            db.entries().len(),
+            db.live_count(),
             entries_before,
-            "Overflow MUST NOT admit the entry to the MaterializeStructureDb \
+            "Overflow MUST NOT admit a candidate to the MaterializeStructureDb \
              cache; cache size must stay at the pre-call value to ensure \
              the next request cold-recomputes"
         );
         assert!(
-            !db.entries().contains_key(&key),
-            "MaterializeStructureDb cache MUST NOT contain the key whose cold \
-             compute overflowed the fact tracer"
+            db.peek(&key, host).is_none(),
+            "MaterializeStructureDb cache MUST NOT hold a candidate for the key \
+             whose cold compute overflowed the fact tracer"
         );
 
         // Discrimination #3: the overflow-refusal counter advanced.
@@ -3187,361 +3115,12 @@ export type C<T> = A<T>
         drop(_force_guard);
     }
 
-    // =====================================================================
-    // Publish-fence ⊇ revalidation — a project-generation `invalidate_all`
-    // racing a cooperative-admission publish must not leave (or admit) a
-    // stale entry.
-    //
-    // `cooperative_admit_with_post_publish` runs `revalidate_after_compute`
-    // and then `map.insert` + `post_publish`. The `publish_fence` read
-    // guard MUST span ALL THREE — if it covered only the insert, a
-    // project-generation `invalidate_all` (which holds the matching write
-    // guard across its clear) could land in the post-revalidate /
-    // pre-insert gap, clear the cache, and then the winner would publish an
-    // entry validated against the SUPERSEDED generation into the
-    // freshly-cleared cache, defeating the reset.
-    //
-    // The two tests below pin a cooperative-admission winner at exactly
-    // that gap via the substrate's `POST_REVALIDATE_PRE_PUBLISH_HOOK`
-    // injection point and assert `retention_gate.try_write()` is `None` —
-    // a concurrent project-generation reset reaching the write fence right
-    // now WOULD block. DISCRIMINATES: with the fence covering only the
-    // insert, the winner holds NO guard at the hook point, `try_write()`
-    // succeeds (`Some`), and the assertion FAILS; with the fence widened
-    // to cover the revalidation it returns `None` and the assertion
-    // PASSES. The end-to-end no-stale-survivor assertion is the second,
-    // independent discriminator.
-    // =====================================================================
-
-    /// `MaterializeStructureDb`: the cooperative-admission `publish_fence`
-    /// spans `revalidate_after_compute` → `map.insert` → `post_publish`,
-    /// so a project-generation `invalidate_all` cannot interleave its
-    /// clear between the revalidation and the insert.
-    #[test]
-    fn materialize_structure_publish_fence_covers_revalidation_against_generation_reset() {
-        use crate::component_meta_caches::MaterializeStructureEntry;
-        use crate::semantic_query::{CacheRead, ProjectionMode, SemanticNodeId};
-        use std::sync::Barrier;
-        use std::thread;
-
-        let project = a0_make_project();
-        let host = project.host();
-        let db = host.project_type_store().materialize_structure_db();
-
-        let key = MaterializeStructureCacheKey {
-            scope_canonical_id: StdArc::from("/fence_owner.ts"),
-            base: SemanticNodeId(0),
-            scope_axis: MaterializationScope::TopLevel,
-            mode: ProjectionMode::Shallow,
-        };
-        // The generation the synthetic entry is "computed" under.
-        let validated_at_generation = host.project_type_store().current_project_generation();
-
-        // party 1 = the parked cooperative winner, party 2 = main.
-        let parked = StdArc::new(Barrier::new(2));
-
-        let project_w = StdArc::clone(&project);
-        let key_w = key.clone();
-        let parked_w = StdArc::clone(&parked);
-        let winner = thread::spawn(move || {
-            let host = project_w.host();
-            let db = host.project_type_store().materialize_structure_db();
-            // Install the post-revalidate / pre-publish rendezvous on the
-            // WINNER thread (the hook is thread-local and fires on the
-            // cold winner's thread). The hook parks the winner inside the
-            // `publish_fence` region, AFTER a successful
-            // `revalidate_after_compute` and BEFORE `map.insert`.
-            let _hook = crate::cache_runtime::singleflight::install_post_revalidate_pre_publish_hook(
-                Box::new(move || {
-                    parked_w.wait();
-                    parked_w.wait();
-                }),
-            );
-            let entry_outcome = MaterializeOutcome::Miss(SemanticNodeId(0));
-            crate::cache_runtime::singleflight::cooperative_admit_with_post_publish(
-                db.entries(),
-                db.inflight(),
-                key_w.clone(),
-                // validate — generation gate + (vacuous) carrier check.
-                |entry: &MaterializeStructureEntry| {
-                    if entry.validated_at_generation
-                        == host.project_type_store().current_project_generation()
-                        && entry
-                            .read_set_signature
-                            .validate_with_self_roots(host, &entry.self_root_canonicals)
-                    {
-                        Some(CacheRead {
-                            value: entry.outcome.clone(),
-                            dep_signature: StdArc::clone(&entry.dispatch_dep_signature),
-                            walker_diagnostics: StdArc::from([]),
-                            cache_suppress: false,
-                        })
-                    } else {
-                        None
-                    }
-                },
-                // compute — a `Cacheable` entry stamped with the
-                // pre-build project generation.
-                || {
-                    crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-                        MaterializeStructureEntry {
-                            outcome: entry_outcome.clone(),
-                            read_set_signature:
-                                crate::fact_signature_helpers::ReadSetSignature::empty(),
-                            dispatch_dep_signature: StdArc::from(Vec::new()),
-                            self_root_canonicals: StdArc::from(Vec::<StdArc<str>>::new()),
-                            admission_seq: crate::bounded_query_retention::next_retention_seq(),
-                            validated_at_generation,
-                        },
-                    )
-                },
-                // project.
-                |entry: &MaterializeStructureEntry| CacheRead {
-                    value: entry.outcome.clone(),
-                    dep_signature: StdArc::clone(&entry.dispatch_dep_signature),
-                    walker_diagnostics: StdArc::from([]),
-                    cache_suppress: false,
-                },
-                // revalidate_after_compute — generation gate + carrier.
-                |entry: &MaterializeStructureEntry| {
-                    entry.validated_at_generation
-                        == host.project_type_store().current_project_generation()
-                        && entry
-                            .read_set_signature
-                            .validate_with_self_roots(host, &entry.self_root_canonicals)
-                },
-                // removal_cleanup.
-                |removed_key: &MaterializeStructureCacheKey,
-                 removed_entry: &StdArc<MaterializeStructureEntry>| {
-                    db.decrement_live_counter();
-                    db.unregister_post_publish(
-                        removed_key,
-                        &removed_entry.read_set_signature,
-                        removed_entry.admission_seq,
-                    );
-                },
-                // post_publish.
-                |entry_arc: &StdArc<MaterializeStructureEntry>,
-                 k: &MaterializeStructureCacheKey| {
-                    db.bump_live_counter();
-                    db.register_post_publish(
-                        k.clone(),
-                        &entry_arc.read_set_signature,
-                        entry_arc.admission_seq,
-                    );
-                },
-                Some(db.publish_fence()),
-            )
-        });
-
-        // The winner has run `revalidate_after_compute` and is parked
-        // inside the `publish_fence` region, before `map.insert`.
-        parked.wait();
-        // DETERMINISTIC DISCRIMINATOR: with the fence widened to cover
-        // the revalidation, the winner holds the `retention_gate` read
-        // guard right now — a project-generation reset reaching the write
-        // fence WOULD block. With the un-widened fence the winner holds
-        // no guard yet and `try_write()` succeeds.
-        assert!(
-            db.test_retention_gate().try_write().is_none(),
-            "REVALIDATE-VS-PUBLISH-FENCE RACE: the cooperative-admission \
-             `publish_fence` read guard does NOT cover \
-             `revalidate_after_compute`. A project-generation \
-             `invalidate_all` can take the write guard in the \
-             post-revalidate / pre-insert gap, clear the cache, and the \
-             winner then publishes an entry validated against the \
-             superseded generation into the freshly-cleared cache. The \
-             fence must span revalidate → insert → post_publish.",
-        );
-
-        // A concurrent project-generation reset. Post-fix it blocks on
-        // the `retention_gate` write guard the parked winner holds; it
-        // proceeds only once the winner has inserted and released.
-        let project_inval = StdArc::clone(&project);
-        let invalidator = thread::spawn(move || {
-            project_inval
-                .host()
-                .project_type_store()
-                .bump_project_generation_and_evict();
-        });
-
-        // Release the winner: it inserts, runs post_publish, and drops
-        // the fence guard.
-        parked.wait();
-        winner.join().expect("winner thread");
-        invalidator.join().expect("invalidator thread");
-
-        // No stale survivor. Post-fix the reset's `invalidate_all` is
-        // ordered AFTER the winner's fenced insert, so it wipes the
-        // just-published entry. Pre-fix the reset cleared the (empty)
-        // cache BEFORE the unfenced winner inserted, stranding a stale
-        // entry.
-        assert_eq!(
-            db.entry_count(),
-            0,
-            "a project-generation reset racing the publish left a stale \
-             entry in the cache — the reset was defeated",
-        );
-        assert_eq!(
-            db.live_counter_for_test(),
-            0,
-            "the live counter must match the (empty) entry map after the \
-             racing project-generation reset",
-        );
-    }
-
-    /// `RefCycleResultDb`: mirror of the `MaterializeStructureDb`
-    /// publish-fence test — the cooperative-admission `publish_fence`
-    /// spans `revalidate_after_compute` → `map.insert` → `post_publish`.
-    #[test]
-    fn ref_cycle_publish_fence_covers_revalidation_against_generation_reset() {
-        use crate::component_meta_caches::RefCycleEntry;
-        use crate::semantic_query::CacheRead;
-        use std::sync::Barrier;
-        use std::thread;
-
-        let project = a0_make_project();
-        let host = project.host();
-        let db = host.project_type_store().ref_cycle_db();
-
-        let id = a0_make_decl_identity(host, "/ref_cycle_fence.ts", "FenceHelper");
-        let validated_at_generation = host.project_type_store().current_project_generation();
-
-        let parked = StdArc::new(Barrier::new(2));
-
-        let project_w = StdArc::clone(&project);
-        let id_w = id.clone();
-        let parked_w = StdArc::clone(&parked);
-        let winner = thread::spawn(move || {
-            let host = project_w.host();
-            let db = host.project_type_store().ref_cycle_db();
-            let _hook = crate::cache_runtime::singleflight::install_post_revalidate_pre_publish_hook(
-                Box::new(move || {
-                    parked_w.wait();
-                    parked_w.wait();
-                }),
-            );
-            crate::cache_runtime::singleflight::cooperative_admit_with_post_publish::<
-                _,
-                RefCycleEntry,
-                CacheRead<bool>,
-                _,
-                _,
-                _,
-                _,
-                _,
-                _,
-            >(
-                db.entries(),
-                db.inflight(),
-                id_w.clone(),
-                |entry: &RefCycleEntry| {
-                    if entry.validated_at_generation
-                        == host.project_type_store().current_project_generation()
-                        && entry
-                            .read_set_signature
-                            .validate_with_self_roots(host, &entry.self_root_canonicals)
-                    {
-                        Some(CacheRead {
-                            value: entry.result,
-                            dep_signature: StdArc::clone(&entry.dispatch_dep_signature),
-                            walker_diagnostics: StdArc::from([]),
-                            cache_suppress: false,
-                        })
-                    } else {
-                        None
-                    }
-                },
-                || {
-                    crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(RefCycleEntry {
-                        result: false,
-                        read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(
-                        ),
-                        dispatch_dep_signature: StdArc::from(Vec::new()),
-                        self_root_canonicals: StdArc::from(Vec::<StdArc<str>>::new()),
-                        admission_seq: crate::bounded_query_retention::next_retention_seq(),
-                        validated_at_generation,
-                    })
-                },
-                |entry: &RefCycleEntry| CacheRead {
-                    value: entry.result,
-                    dep_signature: StdArc::clone(&entry.dispatch_dep_signature),
-                    walker_diagnostics: StdArc::from([]),
-                    cache_suppress: false,
-                },
-                |entry: &RefCycleEntry| {
-                    entry.validated_at_generation
-                        == host.project_type_store().current_project_generation()
-                        && entry
-                            .read_set_signature
-                            .validate_with_self_roots(host, &entry.self_root_canonicals)
-                },
-                |removed_key: &crate::semantic_query::DeclIdentity,
-                 removed_entry: &StdArc<RefCycleEntry>| {
-                    db.decrement_live_counter();
-                    db.unregister_post_publish(
-                        removed_key,
-                        &removed_entry.read_set_signature,
-                        removed_entry.admission_seq,
-                    );
-                },
-                |entry_arc: &StdArc<RefCycleEntry>, k: &crate::semantic_query::DeclIdentity| {
-                    db.bump_live_counter();
-                    db.register_post_publish(
-                        k.clone(),
-                        &entry_arc.read_set_signature,
-                        entry_arc.admission_seq,
-                    );
-                },
-                Some(db.publish_fence()),
-            )
-        });
-
-        parked.wait();
-        assert!(
-            db.test_retention_gate().try_write().is_none(),
-            "REVALIDATE-VS-PUBLISH-FENCE RACE (RefCycleResultDb): the \
-             cooperative-admission `publish_fence` read guard does NOT \
-             cover `revalidate_after_compute` — a project-generation \
-             `invalidate_all` can clear the cache in the post-revalidate \
-             / pre-insert gap and the winner then publishes a \
-             superseded-generation entry into it. The fence must span \
-             revalidate → insert → post_publish.",
-        );
-
-        let project_inval = StdArc::clone(&project);
-        let invalidator = thread::spawn(move || {
-            project_inval
-                .host()
-                .project_type_store()
-                .bump_project_generation_and_evict();
-        });
-
-        parked.wait();
-        winner.join().expect("winner thread");
-        invalidator.join().expect("invalidator thread");
-
-        assert_eq!(
-            db.entries().len(),
-            0,
-            "a project-generation reset racing the BFS publish left a \
-             stale entry in the RefCycleResultDb — the reset was defeated",
-        );
-        assert_eq!(
-            db.live_counter_for_test(),
-            0,
-            "the live counter must match the (empty) entry map after the \
-             racing project-generation reset",
-        );
-    }
-
-    /// `MaterializeStructureDb::peek` rejects (and reaps) an entry whose
+    /// `MaterializeStructureDb::peek` rejects a candidate whose
     /// `validated_at_generation` no longer equals the live project
     /// generation — a `ProjectGeneration` reset bumps no file content, so
     /// the carrier alone cannot detect a project-shape change.
     #[test]
     fn materialize_structure_peek_rejects_entry_from_superseded_generation() {
-        use crate::component_meta_caches::MaterializeStructureEntry;
         use crate::semantic_query::{ProjectionMode, SemanticNodeId};
 
         let project = a0_make_project();
@@ -3554,63 +3133,53 @@ export type C<T> = A<T>
             scope_axis: MaterializationScope::TopLevel,
             mode: ProjectionMode::Shallow,
         };
-        // Plant an entry with a VALID carrier (empty signature validates
-        // vacuously — no self-root, no legacy dep) tagged with the
+        // Plant a candidate with a VALID carrier (empty signature
+        // validates vacuously — no self-root, no fact dep) tagged with the
         // CURRENT project generation.
         let gen0 = host.project_type_store().current_project_generation();
-        let entry = StdArc::new(MaterializeStructureEntry {
-            outcome: MaterializeOutcome::Miss(SemanticNodeId(0)),
-            read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
-            dispatch_dep_signature: StdArc::from(Vec::new()),
-            self_root_canonicals: StdArc::from(Vec::<StdArc<str>>::new()),
-            admission_seq: crate::bounded_query_retention::next_retention_seq(),
-            validated_at_generation: gen0,
-        });
-        db.entries().insert(key.clone(), StdArc::clone(&entry));
-        db.bump_live_counter();
+        db.insert_for_test(
+            key.clone(),
+            MaterializeOutcome::Miss(SemanticNodeId(0)),
+            crate::fact_signature_helpers::ReadSetSignature::empty(),
+            StdArc::from(Vec::<StdArc<str>>::new()),
+            gen0,
+        );
 
         // Same generation — the carrier validates and the generation
         // matches, so `peek` HITs.
         assert!(
             db.peek(&key, host).is_some(),
-            "an entry with a valid carrier and a matching project \
+            "a candidate with a valid carrier and a matching project \
              generation must warm-hit",
         );
 
         // Bump ONLY the project generation (a tsconfig / SDK /
         // workspace-folder change bumps no file content) WITHOUT clearing
-        // the cache. The planted entry's carrier is still valid — only
+        // the cache. The planted candidate's carrier is still valid — only
         // its `validated_at_generation` is now stale.
         host.project_type_store().bump_project_generation();
 
-        // DISCRIMINATOR: `peek` must now MISS — the entry's
-        // `validated_at_generation` no longer equals the live
-        // generation. Without the generation gate `peek`'s carrier check
-        // alone still passes (no file content changed) and the stale
-        // entry is served.
+        // DISCRIMINATOR: `peek` must now MISS — the candidate's
+        // `validated_at_generation` no longer equals the live generation.
+        // Without the generation gate `peek`'s carrier check alone still
+        // passes (no file content changed) and the stale candidate is
+        // served.
         assert!(
             db.peek(&key, host).is_none(),
-            "STALE-GENERATION READ: `MaterializeStructureDb::peek` served \
-             an entry whose `validated_at_generation` is superseded — a \
+            "STALE-GENERATION READ: `MaterializeStructureDb::peek` served a \
+             candidate whose `validated_at_generation` is superseded — a \
              `ProjectGeneration` reset bumps no file content, so the \
-             carrier check alone cannot detect it. `peek` must reject an \
-             entry whose generation stamp no longer matches.",
-        );
-        // The stale entry was reaped, not merely skipped.
-        assert_eq!(
-            db.entry_count(),
-            0,
-            "the rejected stale-generation entry must be reaped from the \
-             cache",
+             carrier check alone cannot detect it. `peek` must reject a \
+             candidate whose generation stamp no longer matches.",
         );
     }
 
-    /// `RefCycleResultDb::peek` rejects (and reaps) an entry whose
+    /// `RefCycleResultDb::peek` rejects a candidate whose
     /// `validated_at_generation` no longer equals the live project
     /// generation. Mirror of the `MaterializeStructureDb` test.
     #[test]
     fn ref_cycle_peek_rejects_entry_from_superseded_generation() {
-        use crate::component_meta_caches::{ref_cycle_db_peek, RefCycleEntry};
+        use crate::component_meta_caches::ref_cycle_db_peek;
 
         let project = a0_make_project();
         let host = project.host();
@@ -3618,20 +3187,17 @@ export type C<T> = A<T>
 
         let id = a0_make_decl_identity(host, "/gen_peek_cycle.ts", "Helper");
         let gen0 = host.project_type_store().current_project_generation();
-        let entry = StdArc::new(RefCycleEntry {
-            result: true,
-            read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
-            dispatch_dep_signature: StdArc::from(Vec::new()),
-            self_root_canonicals: StdArc::from(Vec::<StdArc<str>>::new()),
-            admission_seq: crate::bounded_query_retention::next_retention_seq(),
-            validated_at_generation: gen0,
-        });
-        db.entries().insert(id.clone(), StdArc::clone(&entry));
-        db.bump_live_counter();
+        db.insert_for_test(
+            id.clone(),
+            true,
+            crate::fact_signature_helpers::ReadSetSignature::empty(),
+            StdArc::from(Vec::<StdArc<str>>::new()),
+            gen0,
+        );
 
         assert!(
             ref_cycle_db_peek(db, &id, host).is_some(),
-            "an entry with a valid carrier and a matching project \
+            "a candidate with a valid carrier and a matching project \
              generation must warm-hit",
         );
 
@@ -3639,17 +3205,11 @@ export type C<T> = A<T>
 
         assert!(
             ref_cycle_db_peek(db, &id, host).is_none(),
-            "STALE-GENERATION READ: `RefCycleResultDb::peek` served an \
-             entry whose `validated_at_generation` is superseded — a \
+            "STALE-GENERATION READ: `RefCycleResultDb::peek` served a \
+             candidate whose `validated_at_generation` is superseded — a \
              `ProjectGeneration` reset bumps no file content, so the \
-             carrier check alone cannot detect it. `peek` must reject an \
-             entry whose generation stamp no longer matches.",
-        );
-        assert_eq!(
-            db.entries().len(),
-            0,
-            "the rejected stale-generation entry must be reaped from the \
-             cache",
+             carrier check alone cannot detect it. `peek` must reject a \
+             candidate whose generation stamp no longer matches.",
         );
     }
 }

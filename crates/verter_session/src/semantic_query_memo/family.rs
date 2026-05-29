@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::fact_signature_helpers::ReadSetSignature;
 use crate::semantic_query::{
-    DeclIdentity, DepSignature, HostResolvedNamedTypeKey, IndexKey, MapperKey, PathSegment,
+    DeclKey, DepSignature, HostResolvedNamedTypeKey, IndexKey, MapperKey, PathSegment,
     ProjectionMode, ProjectionReductionContext, QueryResult, ReductionDemand, ResolveDeclKey,
     SemanticNodeId, SemanticQueryKey, ValueRootKey,
 };
@@ -60,6 +60,21 @@ pub(super) struct MemoEntry {
     /// this entry. Replayed on warm hits via `CacheRead.walker_diagnostics`.
     /// Empty for non-walker queries.
     pub(super) walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+    /// LRU eviction-recency metadata for the multi-candidate slot
+    /// vector — NOT a semantic-validity oracle. Validity is decided
+    /// exclusively by `read_set_signature.validate_with_self_roots`
+    /// against the caller's live view.
+    pub(super) validated_at_generation: u64,
+    /// Store-assigned per-candidate identity. Two distinct candidates
+    /// in the same `(family, slot)` carry distinct `admission_seq`s;
+    /// the reverse-index registration includes this seq so a
+    /// `(family, slot)` with multiple candidates registers each
+    /// candidate separately and a cross-canonical cleanup for an
+    /// evicted candidate does NOT strip the surviving sibling's
+    /// registrations. Set by [`SemanticGraphStore::warm_publish_one`] /
+    /// `warm_publish_one_if_absent` / the test publish helpers — the
+    /// only paths that create a `MemoEntry`.
+    pub(super) admission_seq: u64,
 }
 
 impl MemoEntry {
@@ -77,6 +92,16 @@ impl MemoEntry {
     /// self-root canonical the live store view no longer tracks, fails
     /// validation and the warm read recomputes.
     pub(super) fn validate(&self, ctx: &dyn crate::resolver_core::ResolverContext) -> bool {
+        // Test-only process-global probe, serialised across test
+        // threads via [`super::VALIDATE_RUNNING_PROBE_TEST_LOCK`].
+        // Invoked WHILE this `validate` call is running. The warm-read
+        // path calls `validate` AFTER releasing the `entries` lock
+        // (snapshot + outside-lock validate); the probe lets a test
+        // assert `entries.try_lock()` succeeds from a peer thread while
+        // this validate is in progress. Disarmed by default; armed via
+        // [`super::SemanticGraphStore::arm_validate_running_probe_for_tests`].
+        #[cfg(any(test, debug_assertions))]
+        super::validate_running_probe();
         self.read_set_signature
             .validate_with_self_roots(ctx, &self.self_root_canonicals)
     }
@@ -93,8 +118,12 @@ impl MemoEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum FamilyKey {
     ResolveDecl(ResolveDeclKey),
+    /// `base` is a content-free [`DeclKey`] (R6) — version-rooting
+    /// lives on each candidate's `ReadSetSignature.facts` +
+    /// `self_root_canonicals` inside the multi-candidate
+    /// [`FamilySlots`].
     Instantiate {
-        base: DeclIdentity,
+        base: DeclKey,
         args: Arc<[SemanticNodeId]>,
         /// Surface-provenance dimension (codex BINDING design). A
         /// macro-type-argument own-body instantiation and a plain
@@ -168,11 +197,12 @@ pub(super) enum FamilyKey {
     ResolvedNamedType {
         key: Arc<HostResolvedNamedTypeKey>,
     },
-    /// Binding amendment — `ResolveMacroPayload`. Mode-erased
-    /// for the family memo; the per-mode result lives in the matching
-    /// `FamilySlots` slot.
+    /// Mode-erased ResolveMacroPayload identity. `owner` is a
+    /// content-free [`DeclKey`] (R6) — version-rooting lives on each
+    /// candidate's `ReadSetSignature.facts` + `self_root_canonicals`
+    /// inside the multi-candidate [`FamilySlots`].
     ResolveMacroPayload {
-        owner: DeclIdentity,
+        owner: DeclKey,
         macro_index: usize,
         macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
         type_args: Arc<[SemanticNodeId]>,
@@ -212,46 +242,104 @@ pub(super) enum ModeSlot {
     TransitExpanded,
 }
 
-/// Per-family per-slot warm storage. Each slot independently holds an
-/// optional [`MemoEntry`]. Backfill on completion fills empty narrower
-/// slots from a successful broader compute (see [`FamilySlots::publish`]).
+/// Per-slot candidate cap.
+///
+/// Two candidates in one (family, slot) belong to different views (a
+/// base view and an overlay view, or two overlays of the SAME
+/// content-free key under different file-content versions). Same-view
+/// re-publish (matching signature) replaces in place; a different
+/// view appends; an unrelated fifth candidate FIFO-evicts the
+/// oldest. The cap prevents unbounded growth for keys queried under
+/// many distinct overlays without losing R20 overlay isolation.
+pub(super) const FAMILY_SLOT_CANDIDATE_CAP: usize = 4;
+
+/// Per-slot candidate list (cap [`FAMILY_SLOT_CANDIDATE_CAP`]).
+///
+/// Insertion order is FIFO from front to back; the eldest candidate
+/// sits at index 0. Eviction policy when an unmatched signature
+/// appends a new candidate at cap: evict the oldest candidate at
+/// index 0.
+pub(super) type CandidateList = smallvec::SmallVec<[MemoEntry; FAMILY_SLOT_CANDIDATE_CAP]>;
+
+/// Outcome of [`FamilySlots::publish`]: the list of slots this publish
+/// populated PLUS the candidates that were displaced during the
+/// publish (same-discriminant replacements + per-slot FIFO cap-evictions).
+/// The caller drains each displaced candidate's reverse-index
+/// registrations by its `admission_seq` so a surviving sibling
+/// candidate in the same slot keeps its own seq registrations.
+pub(super) struct FamilyPublishOutcome {
+    pub(super) populated: smallvec::SmallVec<[ModeSlot; 6]>,
+    pub(super) displaced: smallvec::SmallVec<[(ModeSlot, MemoEntry); 4]>,
+}
+
+/// Per-family per-slot warm storage.
+///
+/// Each slot independently holds an ORDERED LIST of [`MemoEntry`]
+/// candidates (cap [`FAMILY_SLOT_CANDIDATE_CAP`]) — see
+/// [`CandidateList`]. Each candidate carries its own
+/// `read_set_signature` + `self_root_canonicals`, so two file-content
+/// versions of the SAME content-free `SemanticQueryKey` (e.g.
+/// `Instantiate { base: DeclKey { canonical, name }, .. }` under a
+/// base view and an overlay view) coexist as distinct candidates
+/// inside the same slot — R20 overlay isolation.
+///
+/// Validity is decided EXCLUSIVELY by per-candidate
+/// `read_set_signature.validate_with_self_roots`. The
+/// `validated_at_generation` metadata is recency only.
+///
+/// Backfill on completion fills every empty narrower slot from a
+/// successful broader compute (see [`FamilySlots::publish`]).
 #[derive(Default, Clone)]
 pub(super) struct FamilySlots {
-    single: Option<MemoEntry>,
-    identity: Option<MemoEntry>,
-    navigate: Option<MemoEntry>,
-    shallow: Option<MemoEntry>,
-    expanded: Option<MemoEntry>,
+    single: CandidateList,
+    identity: CandidateList,
+    navigate: CandidateList,
+    shallow: CandidateList,
+    expanded: CandidateList,
     /// Skeleton mode slot. Independent from
     /// Navigate/Expanded; does NOT participate in backfill.
-    skeleton: Option<MemoEntry>,
+    skeleton: CandidateList,
     /// `StructuralTransit` slot mirrors of the four publication slots —
     /// Codex-hybrid spec. Independent from the
     /// publication slots; backfill within the transit family follows
     /// the same `Expanded → Shallow → Navigate → Identity` hierarchy.
-    transit_identity: Option<MemoEntry>,
-    transit_navigate: Option<MemoEntry>,
-    transit_shallow: Option<MemoEntry>,
-    transit_expanded: Option<MemoEntry>,
+    transit_identity: CandidateList,
+    transit_navigate: CandidateList,
+    transit_shallow: CandidateList,
+    transit_expanded: CandidateList,
+}
+
+/// Discriminant identity used for in-place replacement on
+/// [`FamilySlots::publish`].
+///
+/// A re-publish with the SAME fact-set + generation replaces the
+/// existing candidate in place. A different view (different
+/// generation OR different observed facts) appends a NEW candidate.
+/// This is admission identity ONLY — read-side validity is decided by
+/// the candidate's `ReadSetSignature.validate_with_self_roots` rail
+/// against the caller's live view (R20).
+fn candidate_same_discriminant(a: &MemoEntry, b: &MemoEntry) -> bool {
+    a.validated_at_generation == b.validated_at_generation
+        && a.read_set_signature.facts == b.read_set_signature.facts
 }
 
 impl FamilySlots {
-    pub(super) fn slot(&self, slot: ModeSlot) -> Option<&MemoEntry> {
+    fn slot_list(&self, slot: ModeSlot) -> &CandidateList {
         match slot {
-            ModeSlot::Single => self.single.as_ref(),
-            ModeSlot::Identity => self.identity.as_ref(),
-            ModeSlot::Navigate => self.navigate.as_ref(),
-            ModeSlot::Shallow => self.shallow.as_ref(),
-            ModeSlot::Expanded => self.expanded.as_ref(),
-            ModeSlot::Skeleton => self.skeleton.as_ref(),
-            ModeSlot::TransitIdentity => self.transit_identity.as_ref(),
-            ModeSlot::TransitNavigate => self.transit_navigate.as_ref(),
-            ModeSlot::TransitShallow => self.transit_shallow.as_ref(),
-            ModeSlot::TransitExpanded => self.transit_expanded.as_ref(),
+            ModeSlot::Single => &self.single,
+            ModeSlot::Identity => &self.identity,
+            ModeSlot::Navigate => &self.navigate,
+            ModeSlot::Shallow => &self.shallow,
+            ModeSlot::Expanded => &self.expanded,
+            ModeSlot::Skeleton => &self.skeleton,
+            ModeSlot::TransitIdentity => &self.transit_identity,
+            ModeSlot::TransitNavigate => &self.transit_navigate,
+            ModeSlot::TransitShallow => &self.transit_shallow,
+            ModeSlot::TransitExpanded => &self.transit_expanded,
         }
     }
 
-    pub(super) fn slot_mut(&mut self, slot: ModeSlot) -> &mut Option<MemoEntry> {
+    fn slot_list_mut(&mut self, slot: ModeSlot) -> &mut CandidateList {
         match slot {
             ModeSlot::Single => &mut self.single,
             ModeSlot::Identity => &mut self.identity,
@@ -266,40 +354,149 @@ impl FamilySlots {
         }
     }
 
-    /// Publish `entry` to `slot` and backfill every narrower slot whose
-    /// cell is empty. The narrower slots store the same `Arc`-shared
-    /// [`MemoEntry`] (same result + same dep-signature) — this is the
-    /// conservative "broader satisfies narrower" rule from; a
-    /// dep-signature tightening pass against the actual narrower read-set
-    /// is permitted follow-up work tracked in §1.4.
+    /// Snapshot the candidate list for `slot`. Caller validates each
+    /// candidate OUTSIDE the lock (via [`MemoEntry::validate`]) and, on a
+    /// match, briefly reacquires the lock to call
+    /// [`Self::mark_validated_freshest`] for LRU bookkeeping.
     ///
-    /// Returns the list of slots that this publish actually populated
-    /// (the primary slot + any previously-empty narrower slots that were
-    /// backfilled). — the caller registers a
-    /// reverse-index entry per populated slot in the per-canonical
-    /// `canonical_to_entries` index. Capped at 6 (single + identity +
-    /// navigate + shallow + expanded + skeleton), so a stack `SmallVec`
-    /// keeps allocation off the hot path.
-    pub(super) fn publish(
-        &mut self,
-        slot: ModeSlot,
-        entry: MemoEntry,
-    ) -> smallvec::SmallVec<[ModeSlot; 6]> {
+    /// Splitting the warm-hit path into snapshot, outside-lock
+    /// validate, and brief LRU update keeps the single global memo
+    /// `entries` mutex off the validation hot path. `validate` walks
+    /// the path-precise fact rail against the resolver store view,
+    /// which is itself reentrant work; holding `entries` across that
+    /// walk serialises every unrelated warm read and cold publish
+    /// during validation, which the multi-candidate cap-4 substrate
+    /// makes worse.
+    pub(super) fn snapshot_slot(&self, slot: ModeSlot) -> CandidateList {
+        self.slot_list(slot).clone()
+    }
+
+    /// Move the candidate matching `(validated_at_generation, facts)`
+    /// to the back of `slot`'s FIFO order — the LRU bookkeeping the
+    /// snapshot/validate-outside-lock path's caller invokes after a
+    /// successful match.
+    ///
+    /// Identifies the candidate by discriminant identity (the same
+    /// `(validated_at_generation, facts)` pair `publish_one` uses for
+    /// in-place replacement). If no matching candidate is still in the
+    /// slot — a concurrent invalidation drained it between the
+    /// snapshot and this update — this is a no-op; the caller has
+    /// already returned the cloned `MemoEntry` from the snapshot.
+    ///
+    /// Moves the matching candidate to the back of the FIFO insertion
+    /// order so the LRU eviction policy treats it as freshest.
+    /// `validated_at_generation` is left unchanged (admission-time
+    /// stamp, not access-time).
+    pub(super) fn mark_validated_freshest(&mut self, slot: ModeSlot, entry: &MemoEntry) {
+        let list = self.slot_list_mut(slot);
+        if let Some(index) = list
+            .iter()
+            .position(|c| candidate_same_discriminant(c, entry))
+        {
+            if index + 1 < list.len() {
+                let candidate = list.remove(index);
+                list.push(candidate);
+            }
+        }
+    }
+
+    /// Unvalidated peek: return the first candidate for `slot`, if
+    /// any. Used by code paths that report whether a slot is
+    /// physically populated (independent of validity against any
+    /// particular view) — e.g. instrumentation, in-flight admission
+    /// gating, and reverse-index sanity checks. The validity oracle
+    /// is `lookup`'s strict self-root validation rail.
+    pub(super) fn slot_peek_any(&self, slot: ModeSlot) -> Option<&MemoEntry> {
+        self.slot_list(slot).first()
+    }
+
+    /// Publish `entry` into `slot` and backfill every narrower slot
+    /// whose candidate list is currently empty.
+    ///
+    /// Admission policy in the PRIMARY slot:
+    /// - Same exact `(validated_at_generation, facts)` discriminant ⇒
+    ///   replace in place (move to back; same-view re-publish).
+    /// - Different discriminant ⇒ append at the back.
+    /// - At cap ⇒ FIFO-evict the front (oldest by insertion).
+    ///
+    /// Backfill into a narrower slot is the conservative "broader
+    /// satisfies narrower when no narrower compute landed first" rule
+    /// — backfill writes ONLY if the narrower candidate list is
+    /// empty, preserving any prior narrower-specific publish. A
+    /// narrower compute that wrote first survives the broader
+    /// compute's backfill (consistent with the legacy single-entry
+    /// `if cell.is_none()` semantics).
+    ///
+    /// Returns the list of slots this publish populated AND the
+    /// candidates that the publish displaced (same-discriminant
+    /// replacements + per-slot FIFO cap-eviction victims). The caller
+    /// drains each displaced candidate's reverse-index registrations
+    /// under its own admission_seq so a sibling candidate in the same
+    /// slot keeps its registrations.
+    pub(super) fn publish(&mut self, slot: ModeSlot, entry: MemoEntry) -> FamilyPublishOutcome {
         let mut populated = smallvec::SmallVec::<[ModeSlot; 6]>::new();
-        *self.slot_mut(slot) = Some(entry.clone());
+        let mut displaced: smallvec::SmallVec<[(ModeSlot, MemoEntry); 4]> =
+            smallvec::SmallVec::new();
+        for victim in self.publish_one(slot, entry.clone()) {
+            displaced.push((slot, victim));
+        }
         populated.push(slot);
         for narrower in backfill_targets(slot) {
-            let cell = self.slot_mut(*narrower);
-            if cell.is_none() {
-                *cell = Some(entry.clone());
+            if self.slot_list(*narrower).is_empty() {
+                for victim in self.publish_one(*narrower, entry.clone()) {
+                    displaced.push((*narrower, victim));
+                }
                 populated.push(*narrower);
             }
         }
-        populated
+        FamilyPublishOutcome {
+            populated,
+            displaced,
+        }
     }
 
+    /// Internal: admit `entry` into a single slot's candidate list,
+    /// applying the same-discriminant-replace / FIFO-evict rules.
+    /// Returns the candidates that were displaced (replaced or
+    /// evicted) — the caller drains their reverse-index registrations
+    /// by per-candidate `admission_seq` so a surviving sibling
+    /// candidate in the same slot keeps its own seq registrations.
+    fn publish_one(
+        &mut self,
+        slot: ModeSlot,
+        entry: MemoEntry,
+    ) -> smallvec::SmallVec<[MemoEntry; 2]> {
+        let mut displaced: smallvec::SmallVec<[MemoEntry; 2]> = smallvec::SmallVec::new();
+        let list = self.slot_list_mut(slot);
+        if let Some(pos) = list
+            .iter()
+            .position(|c| candidate_same_discriminant(c, &entry))
+        {
+            // Same view re-publish: remove the previous candidate and
+            // append the new one so it becomes the freshest by
+            // insertion order. A FIFO eviction now drops the oldest
+            // unrelated candidate, not the just-replaced one. The
+            // displaced candidate's reverse-index registrations
+            // (keyed under its own admission_seq) are orphan stamps
+            // until the caller drains them.
+            displaced.push(list.remove(pos));
+            list.push(entry);
+        } else {
+            // Different view: append. If we overshoot the cap, drop
+            // the oldest candidate at the front — and surface it so
+            // the caller can drain its reverse-index registrations.
+            list.push(entry);
+            while list.len() > FAMILY_SLOT_CANDIDATE_CAP {
+                displaced.push(list.remove(0));
+            }
+        }
+        displaced
+    }
+
+    /// Total number of distinct slots that hold at least one
+    /// candidate. Used by the per-store memo size accounting.
     pub(super) fn populated_count(&self) -> usize {
-        let slots = [
+        [
             &self.single,
             &self.identity,
             &self.navigate,
@@ -310,46 +507,123 @@ impl FamilySlots {
             &self.transit_navigate,
             &self.transit_shallow,
             &self.transit_expanded,
-        ];
-        slots.iter().filter(|s| s.is_some()).count()
+        ]
+        .iter()
+        .filter(|list| !list.is_empty())
+        .count()
     }
 
     /// Audit-only iterator that yields one `(slot_label, &MemoEntry)`
-    /// pair per populated slot. Used by
+    /// pair per populated slot — taking the FIRST candidate of each
+    /// list as a representative. Used by
     /// [`super::SemanticGraphStore::audit_eager_key_dump`] to flatten
-    /// family state into per-slot rows for the Tier 0 Step 0.2 corpus
-    /// snapshot.
+    /// family state into per-slot rows for the corpus snapshot.
+    ///
+    /// **By design — single-representative shape.** With the cap-4
+    /// multi-candidate substrate a slot may hold up to 4 candidates,
+    /// but this audit row format yields ONE row per populated slot
+    /// to preserve the legacy corpus-snapshot shape so existing audit
+    /// fixtures stay stable. Tooling that needs the full per-candidate
+    /// enumeration uses [`Self::iter_populated_slots_all`] (drain /
+    /// reverse-index sweep paths), not this audit dump. The chosen
+    /// representative is the FIRST candidate in the list — the eldest
+    /// by insertion order under the FIFO discipline (the slot's LRU
+    /// move-to-back operation reorders subsequent reads, so a recently
+    /// validated candidate is at the back of the list, not the front).
     pub(super) fn iter_populated_slots(&self) -> Vec<(&'static str, &MemoEntry)> {
         let mut out: Vec<(&'static str, &MemoEntry)> = Vec::new();
-        if let Some(e) = &self.single {
+        if let Some(e) = self.single.first() {
             out.push(("single", e));
         }
-        if let Some(e) = &self.identity {
+        if let Some(e) = self.identity.first() {
             out.push(("identity", e));
         }
-        if let Some(e) = &self.navigate {
+        if let Some(e) = self.navigate.first() {
             out.push(("navigate", e));
         }
-        if let Some(e) = &self.shallow {
+        if let Some(e) = self.shallow.first() {
             out.push(("shallow", e));
         }
-        if let Some(e) = &self.expanded {
+        if let Some(e) = self.expanded.first() {
             out.push(("expanded", e));
         }
-        if let Some(e) = &self.skeleton {
+        if let Some(e) = self.skeleton.first() {
             out.push(("skeleton", e));
         }
-        if let Some(e) = &self.transit_identity {
+        if let Some(e) = self.transit_identity.first() {
             out.push(("transit_identity", e));
         }
-        if let Some(e) = &self.transit_navigate {
+        if let Some(e) = self.transit_navigate.first() {
             out.push(("transit_navigate", e));
         }
-        if let Some(e) = &self.transit_shallow {
+        if let Some(e) = self.transit_shallow.first() {
             out.push(("transit_shallow", e));
         }
-        if let Some(e) = &self.transit_expanded {
+        if let Some(e) = self.transit_expanded.first() {
             out.push(("transit_expanded", e));
+        }
+        out
+    }
+
+    /// Candidate count in a specific slot. Exposed for test probes
+    /// (`SemanticGraphStore::slot_candidate_count_for_tests`); the
+    /// integration tests use it to verify multi-candidate
+    /// coexistence and cap-4 FIFO eviction. Cheap O(1) read.
+    pub(super) fn slot_candidate_count_for_test(&self, slot: ModeSlot) -> usize {
+        self.slot_list(slot).len()
+    }
+
+    /// Walk `slot`'s candidate list and retain only those entries for
+    /// which `keep` returns `true`. Removed entries do not appear in
+    /// any subsequent lookup; the caller is responsible for fanning
+    /// out per-candidate cleanup (reverse-index drains, memo-budget
+    /// accounting). Used by `invalidate_canonical` to drop only those
+    /// candidates whose fact rail genuinely references the touched
+    /// canonical, leaving unrelated overlay candidates intact.
+    pub(super) fn retain_candidates_in_slot_mut<F>(&mut self, slot: ModeSlot, mut keep: F)
+    where
+        F: FnMut(&MemoEntry) -> bool,
+    {
+        let list = self.slot_list_mut(slot);
+        list.retain(|entry| keep(entry));
+    }
+
+    /// Walk EVERY candidate in EVERY slot, yielding `(ModeSlot,
+    /// &MemoEntry)` per candidate. Used by the reverse-index drain
+    /// path that must register / unregister every candidate the
+    /// memo's per-canonical sweep can encounter — not just one
+    /// representative per slot.
+    pub(super) fn iter_populated_slots_all(&self) -> Vec<(ModeSlot, &MemoEntry)> {
+        let mut out: Vec<(ModeSlot, &MemoEntry)> = Vec::new();
+        for e in &self.single {
+            out.push((ModeSlot::Single, e));
+        }
+        for e in &self.identity {
+            out.push((ModeSlot::Identity, e));
+        }
+        for e in &self.navigate {
+            out.push((ModeSlot::Navigate, e));
+        }
+        for e in &self.shallow {
+            out.push((ModeSlot::Shallow, e));
+        }
+        for e in &self.expanded {
+            out.push((ModeSlot::Expanded, e));
+        }
+        for e in &self.skeleton {
+            out.push((ModeSlot::Skeleton, e));
+        }
+        for e in &self.transit_identity {
+            out.push((ModeSlot::TransitIdentity, e));
+        }
+        for e in &self.transit_navigate {
+            out.push((ModeSlot::TransitNavigate, e));
+        }
+        for e in &self.transit_shallow {
+            out.push((ModeSlot::TransitShallow, e));
+        }
+        for e in &self.transit_expanded {
+            out.push((ModeSlot::TransitExpanded, e));
         }
         out
     }

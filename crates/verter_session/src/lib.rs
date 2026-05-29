@@ -325,6 +325,15 @@ pub mod test_only {
     /// The body lives in `src/test_only_imported_macro_surface.rs`
     /// (attached via `#[path]`) so the crate root stays under its line
     /// ceiling (`tests/no_lib_rs_growth.rs`).
+    ///
+    /// `#[cfg(any(test, debug_assertions))]`-gated to match the gate
+    /// on the upstream `with_bare_host_ctx_for_test` helper this probe
+    /// consumes: a `pub mod` of a body that imports cfg-gated symbols
+    /// is an unresolved-import error in `cargo build --release` where
+    /// `debug_assertions` is off. Same invariant as the
+    /// `CompileForceOverflowGuard` re-export in
+    /// `host_resolve/mod.rs`.
+    #[cfg(any(test, debug_assertions))]
     #[path = "../test_only_imported_macro_surface.rs"]
     pub mod imported_macro_surface;
 }

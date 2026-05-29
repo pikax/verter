@@ -51,6 +51,7 @@ mod family;
 mod hash_cons_memos;
 mod inflight;
 mod interner;
+mod reverse_index;
 mod stats;
 #[cfg(any(test, debug_assertions))]
 mod test_gates;
@@ -67,13 +68,19 @@ use budgeted_caches::{BudgetedNamedTypeIndex, BudgetedRelationMemo};
 use derivation::DerivationStore;
 pub use family::AuditEagerKeyRow;
 use family::{
-    carrier_facts_reference_canonical, family_and_slot, FamilyKey, FamilySlots, MemoEntry, ModeSlot,
+    carrier_facts_reference_canonical, family_and_slot, CandidateList, FamilyKey, FamilySlots,
+    MemoEntry, ModeSlot,
 };
 use inflight::{
     InflightEntry, InflightPanicGuard, RecursionStackGuard, IN_FLIGHT_ON_THIS_THREAD,
     MAX_INFLIGHT_RETRIES,
 };
 use stats::{AtomicSemanticGraphStats, EntriesLockGuard, InFlightStatsGuard};
+
+#[cfg(any(test, debug_assertions))]
+use test_gates::validate_running_probe;
+#[cfg(any(test, debug_assertions))]
+pub use test_gates::{ValidateRunningProbeGuard, VALIDATE_RUNNING_PROBE_TEST_LOCK};
 
 // ──────────────────────────────────────────────────────────────────────────
 // (NodeArena moved to `arena.rs` — see that module for the structural-
@@ -393,6 +400,13 @@ pub struct SemanticGraphStore {
     /// with no registration. The `entries → canonical_to_entries shards`
     /// lock order permits taking a shard mutex while `entries` is held.
     memo_budget: crate::bounded_query_retention::GlobalRetentionBudget<FamilyKey>,
+    /// Monotonic per-candidate admission-sequence allocator. Each
+    /// `MemoEntry` carries a unique seq so the
+    /// `(FamilyKey, ModeSlot, seq)` reverse-index registration is
+    /// per-candidate — a cross-canonical cleanup for one evicted
+    /// candidate strips only that candidate's seq, leaving siblings'
+    /// registrations intact.
+    candidate_admission_seq: std::sync::atomic::AtomicU64,
     // Hash-cons substitution + evaluation result memos — accessors
     // and invalidation contract live in `hash_cons_memos.rs`. Both
     // dedupe identical structural keys reaching
@@ -427,13 +441,16 @@ pub struct SemanticGraphStore {
 /// Γ.B reverse-index type alias. See
 /// [`SemanticGraphStore::canonical_to_entries`] for the contract.
 ///
-/// The per-canonical shard maps each `(family, slot)` entry identity to
-/// the entry's `ReadSetSignature.facts` rail — the path-precise fact
+/// The per-canonical shard maps each
+/// `(family, slot, admission_seq)` PER-CANDIDATE entry identity to the
+/// candidate's `ReadSetSignature.facts` rail — the path-precise fact
 /// signature, kept as a diagnostic stamp of what was registered.
-/// `invalidate_canonical`'s drain identifies registrations by
-/// `(family, slot)` entry identity, not by `Arc::ptr_eq` on this stamp.
+/// `invalidate_canonical`'s drain identifies registrations by the
+/// per-candidate identity (NOT by `(family, slot)` alone), so a
+/// cross-canonical cleanup for one evicted candidate does NOT strip a
+/// surviving sibling candidate's registrations in the same slot.
 type CanonicalToEntries =
-    DashMap<Arc<str>, Mutex<FxHashMap<(FamilyKey, ModeSlot), RegisteredFacts>>>;
+    DashMap<Arc<str>, Mutex<FxHashMap<(FamilyKey, ModeSlot, u64), RegisteredFacts>>>;
 
 /// The `ReadSetSignature.facts` rail an entry registered under a
 /// canonical in [`CanonicalToEntries`] — the diagnostic stamp + the
@@ -524,6 +541,15 @@ impl SemanticGraphStore {
             hold_start: Instant::now(),
             wait_ns,
         }
+    }
+
+    /// Allocate the next per-candidate admission sequence — the
+    /// store-assigned identity each new [`MemoEntry`] carries. Used
+    /// to key `canonical_to_entries` per-candidate so a cross-canonical
+    /// cleanup for one evicted candidate doesn't strip a sibling's
+    /// registrations.
+    fn alloc_candidate_admission_seq(&self) -> u64 {
+        self.candidate_admission_seq.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Construct a store wired to the host's
@@ -754,10 +780,10 @@ impl SemanticGraphStore {
         rows
     }
 
-    /// Number of `(family, slot)` registrations under `canonical_id`
-    /// in the Γ.B `canonical_to_entries` reverse index. Returns 0 when
-    /// the canonical is not present. Test/diagnostic accessor — plan
-    /// §6 / §13.2.
+    /// Number of `(family, slot, admission_seq)` per-candidate
+    /// registrations under `canonical_id` in the
+    /// `canonical_to_entries` reverse index. Returns 0 when the
+    /// canonical is not present. Test/diagnostic accessor.
     #[must_use]
     pub fn canonical_to_entries_count(&self, canonical_id: &str) -> usize {
         self.canonical_to_entries
@@ -831,7 +857,7 @@ impl SemanticGraphStore {
             // Drain the per-canonical `(family, slot) → registered fact
             // rail` map for `canonical_id`, UNDER the held `entries`
             // lock.
-            let drained: Vec<((FamilyKey, ModeSlot), RegisteredFacts)> =
+            let drained: Vec<((FamilyKey, ModeSlot, u64), RegisteredFacts)> =
                 match self.canonical_to_entries.remove(canonical_id) {
                     Some((_, mutex)) => {
                         let lock_start = if timing_on {
@@ -858,7 +884,7 @@ impl SemanticGraphStore {
                         Vec::new()
                     }
                 };
-            for ((family, slot), _) in &drained {
+            for ((family, slot, _seq), _) in &drained {
                 affected_pairs.insert((family.clone(), *slot));
             }
 
@@ -870,52 +896,51 @@ impl SemanticGraphStore {
             // fact rail was replaced by a fresh build whose fact rail
             // also references the canonical).
             //
-            // Track each evicted entry's `(family, slot)` key together
-            // with its full carrier so the cross-canonical drain can
-            // remove that exact entry's registrations from every
-            // canonical its fact rail referenced (the set returned by
-            // `ReadSetSignature::canonical_ids()`).
-            //
-            // Keying the drain by entry identity `(FamilyKey, ModeSlot)`
-            // rather than by `Arc::ptr_eq` on the stored fact rail
-            // prevents the "shared Arc" hazard: when two memo entries
-            // share the same `Arc<[FactVersionRef]>` and only one is
-            // evicted, a `map.retain` over the other canonical shards
-            // with `Arc::ptr_eq(registered, facts)` would remove BOTH
-            // entries' registrations because they point to the same
-            // Arc. The surviving entry would then have no reverse-index
-            // registration for its canonicals and a later
-            // `invalidate_canonical` of those canonicals would miss it,
-            // leaving stale warm data. Keying the drain by entry
-            // identity is what makes that drain precise.
+            // Track each evicted entry's PER-CANDIDATE
+            // `(family, slot, admission_seq)` key + carrier so the
+            // cross-canonical drain removes ONLY that candidate's
+            // registrations. With multi-candidate slots, keying the
+            // drain by per-candidate identity preserves sibling
+            // candidates' registrations under shared canonicals (e.g.
+            // a slot holds A+C and B+C; invalidating A evicts A+C only
+            // and removes A+C's seq from canonical C, while B+C's
+            // separate seq on C survives so a later
+            // `invalidate_canonical(C)` still drains B+C).
             let mut evicted_entries: Vec<(
-                (FamilyKey, ModeSlot),
+                (FamilyKey, ModeSlot, u64),
                 crate::fact_signature_helpers::ReadSetSignature,
                 DepSignature,
             )> = Vec::new();
-            for ((family, slot), registered_facts) in &drained {
+            for ((family, slot, _seq), registered_facts) in &drained {
                 let Some(slots) = entries.get_mut(family) else {
                     continue;
                 };
-                let Some(current_entry) = slots.slot(*slot) else {
-                    continue;
-                };
-                let entry_facts = &current_entry.read_set_signature.facts;
-                let drop = Arc::ptr_eq(entry_facts, registered_facts)
-                    || carrier_facts_reference_canonical(entry_facts, canonical_id)
-                    || current_entry
-                        .dispatch_dep_signature
-                        .iter()
-                        .any(|(c, _)| c.as_ref() == canonical_id);
-                if drop {
-                    let entry_carrier = current_entry.read_set_signature.clone();
-                    let entry_dispatch_sig = Arc::clone(&current_entry.dispatch_dep_signature);
-                    *slots.slot_mut(*slot) = None;
+                // Walk every candidate in the slot — remove only
+                // those whose fact rail / dispatch-dep signature
+                // genuinely reaches the touched canonical, so
+                // unrelated overlay candidates survive.
+                let mut victims: Vec<MemoEntry> = Vec::new();
+                slots.retain_candidates_in_slot_mut(*slot, |entry| {
+                    let entry_facts = &entry.read_set_signature.facts;
+                    let drop = Arc::ptr_eq(entry_facts, registered_facts)
+                        || carrier_facts_reference_canonical(entry_facts, canonical_id)
+                        || entry
+                            .dispatch_dep_signature
+                            .iter()
+                            .any(|(c, _)| c.as_ref() == canonical_id);
+                    if drop {
+                        victims.push(entry.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+                for victim in victims {
                     evicted += 1;
                     evicted_entries.push((
-                        (family.clone(), *slot),
-                        entry_carrier,
-                        entry_dispatch_sig,
+                        (family.clone(), *slot, victim.admission_seq),
+                        victim.read_set_signature.clone(),
+                        Arc::clone(&victim.dispatch_dep_signature),
                     ));
                 }
             }
@@ -965,7 +990,7 @@ impl SemanticGraphStore {
                     if !seen_cleanup.insert(Arc::clone(&other_canonical)) {
                         continue;
                     }
-                    Self::prune_reverse_index_registration(
+                    reverse_index::prune_reverse_index_registration(
                         &self.canonical_to_entries,
                         &other_canonical,
                         evicted_key,
@@ -978,7 +1003,7 @@ impl SemanticGraphStore {
                     if !seen_cleanup.insert(Arc::clone(other_canonical)) {
                         continue;
                     }
-                    Self::prune_reverse_index_registration(
+                    reverse_index::prune_reverse_index_registration(
                         &self.canonical_to_entries,
                         other_canonical,
                         evicted_key,
@@ -1908,8 +1933,13 @@ impl SemanticGraphStore {
     ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
         let (family, slot) = family_and_slot(key);
         let entries = self.entries_lock_diagnosed();
+        // Pick the first candidate as the unvalidated representative —
+        // diagnostic / cache-state callers that do not run the strict
+        // self-root validator. The candidate list is multi-element
+        // under multi-view publication; selecting the first preserves
+        // the prior "is there an entry here at all" semantics.
         let result = entries.get(&family).and_then(|slots| {
-            slots.slot(slot).cloned().map(|entry| {
+            slots.slot_peek_any(slot).cloned().map(|entry| {
                 // R3/R26/R28 - bubble the entry path-precise fact
                 // observation set into any outer cold-compute scope
                 // so transitive memo hits do not lose contributing
@@ -1967,28 +1997,37 @@ impl SemanticGraphStore {
         ctx: &dyn crate::resolver_core::ResolverContext,
     ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
         let (family, slot) = family_and_slot(key);
-        let entries = self.entries_lock_diagnosed();
-        let result = entries.get(&family).and_then(|slots| {
-            slots.slot(slot).cloned().and_then(|entry| {
-                // Strict warm-read validation: validate the carrier
-                // against the live store view, validating every
-                // self-root canonical's `FileWholeHash` strictly. A
-                // stale entry — a same-canonical content edit, or a
-                // self-root the live store view no longer tracks —
-                // fails and is NOT bubbled (a stale entry must not
-                // pollute an outer tracer).
-                if !entry.validate(ctx) {
-                    return None;
-                }
-                entry.read_set_signature.bubble(ctx);
-                let dep_signature = Arc::clone(&entry.dispatch_dep_signature);
-                Some(CacheRead {
-                    value: entry.result,
-                    dep_signature,
-                    walker_diagnostics: entry.walker_diagnostics,
-                    cache_suppress: false,
-                })
-            })
+        // Snapshot the candidate list under the lock, then validate
+        // OUTSIDE the lock. Holding `entries` across `MemoEntry::validate`
+        // — which walks the path-precise fact rail against the resolver
+        // store view — would serialise every unrelated warm read and
+        // cold publish on the single global memo mutex.
+        let snapshot: Option<CandidateList> = {
+            let entries = self.entries_lock_diagnosed();
+            entries.get(&family).map(|slots| slots.snapshot_slot(slot))
+        };
+        let validated =
+            snapshot.and_then(|list| list.into_iter().find(|entry| entry.validate(ctx)));
+        if let Some(entry) = &validated {
+            // Brief LRU bookkeeping — reacquire ONLY to update FIFO
+            // order so subsequent lookups treat this candidate as
+            // freshest. The match is by discriminant identity; if a
+            // concurrent invalidation drained it between snapshot and
+            // here, the update is a no-op.
+            let mut entries = self.entries_lock_diagnosed();
+            if let Some(slots) = entries.get_mut(&family) {
+                slots.mark_validated_freshest(slot, entry);
+            }
+        }
+        let result = validated.map(|entry| {
+            entry.read_set_signature.bubble(ctx);
+            let dep_signature = Arc::clone(&entry.dispatch_dep_signature);
+            CacheRead {
+                value: entry.result,
+                dep_signature,
+                walker_diagnostics: entry.walker_diagnostics,
+                cache_suppress: false,
+            }
         });
         if let Some(rctx) = crate::request_context::current_request_context() {
             if result.is_some() {
@@ -2017,7 +2056,7 @@ impl SemanticGraphStore {
         let entries = self.entries_lock_diagnosed();
         entries
             .get(&family)
-            .is_some_and(|slots| slots.slot(slot).is_some())
+            .is_some_and(|slots| slots.slot_peek_any(slot).is_some())
     }
 
     /// Per-key result for the BFS bridge's batch dispatch (D103). Each
@@ -2184,13 +2223,16 @@ impl SemanticGraphStore {
     ///
     /// **Lock discipline.** Acquires `self.entries` directly (no
     /// `entries_lock_diagnosed` Instant::now/capture-token wrapping).
-    /// Holds the lock ONLY for the slot read + `MemoEntry` clone, then
-    /// releases it. Carrier validation (`entry.validate` — fact-rail
-    /// validation against the resolver store view with strict
-    /// self-root checks), the TLS fact-rail bubble, and instrumentation
-    /// all run AFTER the lock is dropped, so an unrelated warm read or
-    /// cold publish does not serialise on the single global memo mutex
-    /// for the duration of validation. Mirrors the relation memo's
+    /// Holds the lock ONLY for the slot SNAPSHOT — a clone of the
+    /// candidate list out of the slot — then releases it. Carrier
+    /// validation (`entry.validate` — fact-rail validation against the
+    /// resolver store view with strict self-root checks), the TLS
+    /// fact-rail bubble, and instrumentation all run AFTER the lock is
+    /// dropped, so an unrelated warm read or cold publish does not
+    /// serialise on the single global memo mutex for the duration of
+    /// validation. LRU bookkeeping briefly reacquires the lock to move
+    /// the matching candidate to the back of the FIFO — a constant-time
+    /// `Vec` reorder, no fact-rail work. Mirrors the relation memo's
     /// `get_relation`.
     #[inline]
     fn try_warm_hit_fast_path(
@@ -2200,46 +2242,31 @@ impl SemanticGraphStore {
     ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
         let (family, slot) = family_and_slot(key);
 
-        // Clone the `MemoEntry` OUT of the `entries` lock before
-        // validating. `entry.validate(ctx)` validates the path-precise
-        // fact rail against the resolver store view with strict
-        // self-root checks; holding the single global `entries` mutex
-        // across that work would serialise every unrelated warm read
-        // and cold publish on the memo mutex for the duration of
-        // validation. The clone is a handful of `Arc::clone`s
-        // (`ReadSetSignature` facts, `self_root_canonicals`,
-        // `walker_diagnostics`) — far cheaper than holding the lock
-        // through validation. This mirrors the relation memo's
-        // `get_relation`, which clones the `RelationMemoEntry` out of
-        // its `DashMap` shard guard before validating + bubbling.
-        let entry: MemoEntry = {
-            // Single non-diagnosed lock acquisition. The
-            // `entries_lock_diagnosed` wrapper that adds Instant::now
-            // wait+hold timing under capture-token is intentionally
-            // bypassed here because the warm-hit hot path runs
-            // hundreds of thousands of times per request and the
-            // wrapper's per-acquisition cost dominates the warm-hit
-            // wall-clock.
+        // Snapshot the candidate list under the lock; validate OUTSIDE
+        // the lock. With the cap-4 multi-candidate substrate the
+        // validation walk over the path-precise fact rail is bounded
+        // but still non-trivial, and holding the single global memo
+        // mutex across it would serialise every unrelated warm read
+        // and cold publish during validation. Stale candidates are
+        // skipped without bubbling.
+        let snapshot: Option<CandidateList> = {
             let entries = self.entries.lock();
-            entries
-                .get(&family)
-                .and_then(|slots| slots.slot(slot).cloned())?
+            entries.get(&family).map(|slots| slots.snapshot_slot(slot))
         };
-
-        // Validate + bubble OUTSIDE the critical section.
-        //
-        // Strict warm-read validation BEFORE bubbling: the entry's
-        // carrier is validated against the live store view, validating
-        // every self-root canonical's `FileWholeHash` strictly. A
-        // stale entry — a same-canonical content edit, or a self-root
-        // the live store view no longer tracks — fails and the fast
-        // path reports a miss WITHOUT bubbling: a stale entry must not
-        // pollute an outer tracer with observations that no longer
-        // reflect current state, and the cooperative slow path
-        // cold-recomputes.
-        if !entry.validate(ctx) {
-            return None;
+        let entry: MemoEntry = snapshot?.into_iter().find(|e| e.validate(ctx))?;
+        // Brief LRU bookkeeping — reacquire ONLY to move the matching
+        // candidate to the back of the FIFO order so subsequent
+        // lookups treat it as freshest. The match is by discriminant
+        // identity; if a concurrent invalidation drained it between
+        // snapshot and here, the update is a no-op (the caller still
+        // gets the cloned entry from the snapshot).
+        {
+            let mut entries = self.entries.lock();
+            if let Some(slots) = entries.get_mut(&family) {
+                slots.mark_validated_freshest(slot, &entry);
+            }
         }
+
         // R3/R26/R28 - bubble the entry path-precise fact observation
         // set into any outer cold-compute scope so transitive memo
         // hits do not lose the contributing fact identities.
@@ -2737,6 +2764,7 @@ impl SemanticGraphStore {
             };
         if let Some(carrier) = publish_carrier {
             let published = self.warm_publish_one(
+                ctx,
                 &key,
                 &result,
                 &walker_diagnostics,
@@ -2778,6 +2806,7 @@ impl SemanticGraphStore {
             if published {
                 for backfill in pending_prefix_backfills {
                     self.warm_publish_one_if_absent(
+                        ctx,
                         backfill.key,
                         QueryResult::Value(backfill.node),
                         carrier.clone(),
@@ -2947,6 +2976,7 @@ impl SemanticGraphStore {
     /// skipped too — see [`Self::invalidate_all`]'s serialization docs.
     fn warm_publish_one(
         &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
         key: &SemanticQueryKey,
         result: &QueryResult<SemanticNodeId>,
         walker_diagnostics: &Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
@@ -2975,23 +3005,22 @@ impl SemanticGraphStore {
         // the traced cross-file fact set. `warm_publish_one` records it
         // verbatim; it never reconstructs facts from the legacy fence.
         let read_set_signature = read_set_signature.clone();
+        let validated_at_generation = ctx.project_type_store().project_generation();
+        let admission_seq = self.alloc_candidate_admission_seq();
         let entry = MemoEntry {
             result: result.clone(),
             read_set_signature: read_set_signature.clone(),
             dispatch_dep_signature: Arc::clone(dispatch_dep_signature),
             self_root_canonicals: Arc::clone(self_root_canonicals),
             walker_diagnostics: Arc::clone(walker_diagnostics),
+            validated_at_generation,
+            admission_seq,
         };
         let mut entries = self.entries_lock_diagnosed();
         // Test forcing: simulate a concurrent sweep that aborted
-        // this in-flight entry just before the TOCTOU re-check.
-        // Deterministically drives the `cold_aborts_swept` counter
-        // for counter-helper coverage tests without needing a racy
-        // real invalidation. The per-store flag default `false`
-        // makes this branch a single relaxed atomic load on the
-        // cold-build path under normal traffic, and — being
-        // per-store — it cannot bleed into a concurrent unrelated
-        // test's store (test hermeticity).
+        // this in-flight entry just before the TOCTOU re-check —
+        // per-store flag, default `false`, single relaxed load on
+        // the production cold path.
         if self.force_cold_abort_sweep.load(Ordering::Relaxed) {
             inflight.state.lock().aborted = true;
         }
@@ -3012,10 +3041,11 @@ impl SemanticGraphStore {
         // Record whether this family is newly entering the memo so the
         // retention budget tracks one ledger record per family.
         let family_was_new = !entries.contains_key(&family);
-        let populated_slots = entries
+        let outcome = entries
             .entry(family.clone())
             .or_default()
             .publish(slot, entry);
+        let populated_slots = outcome.populated;
         // Per-request memo-insertion attribution. Each populated slot
         // (primary plus any backfilled narrower slots) counts as one
         // insertion under the active request's audit. The host-global
@@ -3029,6 +3059,21 @@ impl SemanticGraphStore {
                 ctx.memo_insertions
                     .fetch_add(populated_slots.len() as u64, Ordering::Relaxed);
             }
+        }
+        // Drain per-candidate reverse-index registrations for every
+        // candidate this publish DISPLACED (same-discriminant
+        // replacements + per-slot FIFO cap-eviction victims). Each
+        // displaced candidate's `admission_seq` keys its own
+        // registrations, so siblings in the same slot keep theirs
+        // (R20 overlay isolation). Runs UNDER the held `entries`
+        // lock.
+        for (displaced_slot, displaced_entry) in &outcome.displaced {
+            reverse_index::drain_candidate_reverse_index_registrations(
+                &self.canonical_to_entries,
+                &family,
+                *displaced_slot,
+                displaced_entry,
+            );
         }
         // Family-memo consistency-cluster fence: the three cluster
         // members — `entries`, `memo_budget`, `canonical_to_entries` —
@@ -3051,12 +3096,13 @@ impl SemanticGraphStore {
         // `entries` lock, keeping the live memo slot and its
         // reverse-index registration atomic against a concurrent
         // `invalidate_all`. See `register_reverse_index`'s docstring.
-        Self::register_reverse_index(
+        reverse_index::register_reverse_index(
             &self.canonical_to_entries,
             &family,
             &populated_slots,
             &read_set_signature,
             dispatch_dep_signature,
+            admission_seq,
         );
         drop(entries);
         // Published cleanly under a non-aborted in-flight entry — the
@@ -3107,6 +3153,7 @@ impl SemanticGraphStore {
     /// path-precise facts.
     fn warm_publish_one_if_absent(
         &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
         key: SemanticQueryKey,
         result: QueryResult<SemanticNodeId>,
         read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
@@ -3137,12 +3184,16 @@ impl SemanticGraphStore {
             return;
         }
         let dispatch_dep_signature_clone = Arc::clone(&dispatch_dep_signature);
+        let validated_at_generation = ctx.project_type_store().project_generation();
+        let admission_seq = self.alloc_candidate_admission_seq();
         let entry = MemoEntry {
             result,
             read_set_signature: read_set_signature.clone(),
             dispatch_dep_signature,
             self_root_canonicals,
             walker_diagnostics: Arc::from([]),
+            validated_at_generation,
+            admission_seq,
         };
         let mut entries = self.entries_lock_diagnosed();
         // Abort fence — re-check the parent winner's in-flight `aborted`
@@ -3161,10 +3212,11 @@ impl SemanticGraphStore {
             return;
         }
         let family_was_new = !entries.contains_key(&family);
-        let populated_slots = entries
+        let outcome = entries
             .entry(family.clone())
             .or_default()
             .publish(slot, entry);
+        let populated_slots = outcome.populated;
         // Per-request memo-insertion attribution — see
         // `warm_publish_one` for the full rationale; the prefix-backfill
         // path bumps the same per-request counter so attribution
@@ -3175,6 +3227,16 @@ impl SemanticGraphStore {
                     .fetch_add(populated_slots.len() as u64, Ordering::Relaxed);
             }
         }
+        // Drain displaced candidates' per-candidate registrations —
+        // see `warm_publish_one` for the rationale.
+        for (displaced_slot, displaced_entry) in &outcome.displaced {
+            reverse_index::drain_candidate_reverse_index_registrations(
+                &self.canonical_to_entries,
+                &family,
+                *displaced_slot,
+                displaced_entry,
+            );
+        }
         // Family-memo consistency-cluster fence — record the
         // `memo_budget` admission under the held `entries` lock; see
         // `warm_publish_one`.
@@ -3184,124 +3246,15 @@ impl SemanticGraphStore {
         // Carrier-aware reverse-index registration — runs UNDER the held
         // `entries` lock; see `warm_publish_one` for the full carrier and
         // lock-order rationale.
-        Self::register_reverse_index(
+        reverse_index::register_reverse_index(
             &self.canonical_to_entries,
             &family,
             &populated_slots,
             &read_set_signature,
             &dispatch_dep_signature_clone,
+            admission_seq,
         );
         drop(entries);
-    }
-
-    /// Γ.B reverse-index registration helper. Shared by
-    /// [`Self::warm_publish_one`] and
-    /// [`Self::warm_publish_one_if_absent`]. The caller invokes this
-    /// WHILE holding the `entries` lock — the `entries →
-    /// canonical_to_entries shards` lock order permits taking a shard
-    /// mutex while `entries` is held (`entries` is outermost), and
-    /// registering under the lock keeps the live memo slot and its
-    /// reverse-index registration atomic against a concurrent
-    /// [`Self::invalidate_all`].
-    ///
-    /// **Carrier-aware registration.** The reverse index keys each
-    /// populated slot under EVERY canonical the entry's
-    /// [`ReadSetSignature`] references — every canonical named by a
-    /// fact in the path-precise `facts` rail (`Parse(...)`,
-    /// `ResolveImports(...)`, `RouteSurface(...)`, `FileWholeHash`,
-    /// `DerivedFactHash`). The stored value in the per-canonical shard
-    /// is the entry's `facts` rail (kept as a diagnostic stamp of what
-    /// was registered) but `invalidate_canonical`'s cross-canonical
-    /// drain identifies registrations by `(family, slot)` entry
-    /// identity rather than by `Arc::ptr_eq` on the stored signature.
-    /// This prevents the "shared Arc" hazard where two entries sharing
-    /// a canonicalised `Arc<[FactVersionRef]>` would have BOTH
-    /// registrations stripped when only one is evicted — see the
-    /// drain implementation in `invalidate_canonical` for the
-    /// rationale. Iterating `read_set_signature.canonical_ids()`
-    /// covers every canonical the fact rail names so
-    /// `invalidate_canonical`'s shard-drain reaches the entry.
-    ///
-    /// **Consistency with `MaterializeStructureDb::register_post_publish`.**
-    /// `MaterializeStructureDb` and `RefCycleResultDb` register their
-    /// reverse indexes over the same `canonical_ids()` iteration so they
-    /// drain on fact-only invalidation; this helper registers the family
-    /// memo's reverse index over the identical iteration, so all three
-    /// reverse indexes drain consistently.
-    fn register_reverse_index(
-        canonical_to_entries: &CanonicalToEntries,
-        family: &FamilyKey,
-        populated_slots: &[ModeSlot],
-        read_set_signature: &crate::fact_signature_helpers::ReadSetSignature,
-        dispatch_dep_signature: &DepSignature,
-    ) {
-        let timing_on = verter_scheduler::request_context::current_timing_enabled();
-        let registered_facts = Arc::clone(&read_set_signature.facts);
-        // Iteration set: UNION of the carrier's `canonical_ids()` and
-        // the dispatch fence canonicals. Production cold builds fold
-        // `dep_signature` into the carrier during
-        // `finalise_traced_build_output`, so the two sets overlap and
-        // the `seen` dedup collapses them; the dispatch-fence pass
-        // still covers synthetic / test publishes whose carrier was
-        // seeded without folding the fence. The FIFO-eviction prune in
-        // `record_family_admission_locked` walks the SAME union so
-        // register and cleanup stay symmetric.
-        let mut seen: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
-        for populated in populated_slots {
-            seen.clear();
-            for canonical in read_set_signature.canonical_ids() {
-                if !seen.insert(Arc::clone(&canonical)) {
-                    continue;
-                }
-                Self::register_single_canonical(
-                    canonical_to_entries,
-                    &canonical,
-                    family,
-                    *populated,
-                    &registered_facts,
-                    timing_on,
-                );
-            }
-            for (canonical, _) in dispatch_dep_signature.iter() {
-                if !seen.insert(Arc::clone(canonical)) {
-                    continue;
-                }
-                Self::register_single_canonical(
-                    canonical_to_entries,
-                    canonical,
-                    family,
-                    *populated,
-                    &registered_facts,
-                    timing_on,
-                );
-            }
-        }
-    }
-
-    /// Single-shard registration step used by [`Self::register_reverse_index`].
-    #[inline]
-    fn register_single_canonical(
-        canonical_to_entries: &CanonicalToEntries,
-        canonical: &Arc<str>,
-        family: &FamilyKey,
-        populated: ModeSlot,
-        registered_facts: &RegisteredFacts,
-        timing_on: bool,
-    ) {
-        let shard = canonical_to_entries
-            .entry(Arc::clone(canonical))
-            .or_insert_with(|| Mutex::new(FxHashMap::default()));
-        let lock_start = if timing_on {
-            Some(Instant::now())
-        } else {
-            None
-        };
-        let mut map = shard.value().lock();
-        let lock_wait = lock_start
-            .map(|t| t.elapsed())
-            .unwrap_or(std::time::Duration::ZERO);
-        crate::host_manage::record_family_map_lock_acquisition(lock_wait);
-        map.insert((family.clone(), populated), Arc::clone(registered_facts));
     }
 
     /// Record a newly-admitted family against the memo retention
@@ -3350,14 +3303,6 @@ impl SemanticGraphStore {
         entries: &mut FxHashMap<FamilyKey, FamilySlots>,
         family: &FamilyKey,
     ) {
-        const ALL_SLOTS: [ModeSlot; 6] = [
-            ModeSlot::Single,
-            ModeSlot::Identity,
-            ModeSlot::Navigate,
-            ModeSlot::Shallow,
-            ModeSlot::Expanded,
-            ModeSlot::Skeleton,
-        ];
         let seq = crate::bounded_query_retention::next_retention_seq();
         let victims = self.memo_budget.record_admission(seq, family.clone());
         // Test-only injection point — parked after the `memo_budget`
@@ -3401,23 +3346,27 @@ impl SemanticGraphStore {
             // `project_generation_signature()`) cannot survive FIFO
             // eviction. `prune_reverse_index_registration` is
             // idempotent, so a canonical in both rails is pruned twice
-            // harmlessly.
+            // harmlessly. Each candidate's registrations are keyed
+            // PER-CANDIDATE on `(family, slot, admission_seq)` so a
+            // multi-view slot's cleanup strips only this candidate's
+            // seq — surviving sibling candidates in the same slot
+            // keep their own seq registrations.
             if let Some(slots) = entries.remove(&victim) {
-                for slot in ALL_SLOTS {
-                    if let Some(entry) = slots.slot(slot) {
-                        let carrier_canonicals = entry.read_set_signature.canonical_ids();
-                        let dispatch_canonicals =
-                            entry.dispatch_dep_signature.iter().map(|(c, _)| c);
-                        for canonical in carrier_canonicals.iter().chain(dispatch_canonicals) {
-                            Self::prune_reverse_index_registration(
-                                &self.canonical_to_entries,
-                                canonical,
-                                &(victim.clone(), slot),
-                            );
-                            #[cfg(any(test, debug_assertions))]
-                            {
-                                pruned_any = true;
-                            }
+                // Walk every candidate in every slot — a multi-view
+                // slot must drain reverse-index registrations for
+                // each candidate, not just the first.
+                for (slot, entry) in slots.iter_populated_slots_all() {
+                    let carrier_canonicals = entry.read_set_signature.canonical_ids();
+                    let dispatch_canonicals = entry.dispatch_dep_signature.iter().map(|(c, _)| c);
+                    for canonical in carrier_canonicals.iter().chain(dispatch_canonicals) {
+                        reverse_index::prune_reverse_index_registration(
+                            &self.canonical_to_entries,
+                            canonical,
+                            &(victim.clone(), slot, entry.admission_seq),
+                        );
+                        #[cfg(any(test, debug_assertions))]
+                        {
+                            pruned_any = true;
                         }
                     }
                 }
@@ -3442,55 +3391,6 @@ impl SemanticGraphStore {
         }
     }
 
-    /// Remove one `(family, slot)` registration from `canonical`'s
-    /// reverse-index shard, then drop the outer shard entirely when that
-    /// removal empties its inner map.
-    ///
-    /// Leaving an emptied shard resident strands an empty `Mutex<map>`
-    /// plus the canonical `Arc<str>` under `canonical_to_entries` for
-    /// the lifetime of the project generation; under churn across many
-    /// distinct canonicals the reverse index would then grow unbounded,
-    /// defeating the bound the `memo_budget` exists to enforce.
-    ///
-    /// **Lock domain.** Both production callers —
-    /// [`Self::record_family_admission_locked`]'s FIFO-victim cleanup
-    /// and [`Self::invalidate_canonical`]'s cross-canonical cleanup —
-    /// invoke this WHILE holding the family memo's `entries` `Mutex`, the
-    /// single lock domain the consistency cluster (`entries`,
-    /// `memo_budget`, `canonical_to_entries`) is mutated under. The
-    /// publish-side [`Self::register_reverse_index`] inserter also runs
-    /// under `entries`, so a prune and a registration are serialised by
-    /// the `entries` lock and can never interleave.
-    ///
-    /// **Shard-detach safety.** Even absent the `entries` lock the
-    /// outer-shard drop is race-free: the inner-map removal releases the
-    /// per-canonical `Mutex` before the outer drop is attempted; the
-    /// outer drop is then a single [`DashMap::remove_if`] whose emptiness
-    /// predicate runs while the `DashMap` shard write lock is held. A
-    /// `register_reverse_index` inserter takes that same shard write lock
-    /// for the whole `entry(canonical).or_insert_with(...)` + inner
-    /// `insert`, so the two serialise: either the inserter runs first and
-    /// `remove_if`'s predicate observes the inner map non-empty (drop
-    /// skipped), or `remove_if` runs first, drops the empty outer entry,
-    /// and the inserter's later `or_insert_with` re-creates a fresh shard
-    /// cleanly. A registration can never be stranded in a just-removed
-    /// outer entry. This mirrors the
-    /// `BoundedCandidateMap::remove_candidate_by_seq` slot-detach
-    /// pattern.
-    fn prune_reverse_index_registration(
-        canonical_to_entries: &CanonicalToEntries,
-        canonical: &Arc<str>,
-        registration: &(FamilyKey, ModeSlot),
-    ) {
-        if let Some(shard) = canonical_to_entries.get(canonical) {
-            shard.value().lock().remove(registration);
-        }
-        // Drop the outer shard iff its inner map is now empty. The
-        // predicate holds the `DashMap` shard write lock, so it cannot
-        // race a concurrent inserter on this shard.
-        canonical_to_entries.remove_if(canonical, |_, mutex| mutex.lock().is_empty());
-    }
-
     /// Test-only accessor: read the entry's [`ReadSetSignature`]
     /// carrier for `key`. Returns `None` when no entry is present.
     /// Surfaces the carrier's path-precise `facts` rail so integration
@@ -3505,13 +3405,13 @@ impl SemanticGraphStore {
         let entries = self.entries_lock_diagnosed();
         entries
             .get(&family)
-            .and_then(|slots| slots.slot(slot).cloned())
+            .and_then(|slots| slots.slot_peek_any(slot).cloned())
             .map(|entry| entry.read_set_signature)
     }
 
-    /// Test-only direct publish. Mirrors `warm_publish_one`'s
-    /// admission shape so a test driving many families exercises the
-    /// same FIFO budget eviction as production.
+    /// Test-only direct publish. Delegates to
+    /// [`Self::publish_with_carrier_dispatch_and_generation_for_tests`]
+    /// with an empty dispatch-dep signature and generation `0`.
     #[doc(hidden)]
     pub fn publish_with_carrier_for_tests(
         &self,
@@ -3520,19 +3420,19 @@ impl SemanticGraphStore {
         read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
     ) -> usize {
-        self.publish_with_carrier_and_dispatch_for_tests(
+        self.publish_with_carrier_dispatch_and_generation_for_tests(
             key,
             result,
             read_set_signature,
             self_root_canonicals,
             empty_signature(),
+            0,
         )
     }
 
     /// Variant of [`Self::publish_with_carrier_for_tests`] taking an
-    /// explicit `dispatch_dep_signature` — seeds an entry whose
-    /// dispatch-fence canonicals diverge from the carrier rail
-    /// (FIFO reverse-index symmetry discriminator).
+    /// explicit `dispatch_dep_signature` (FIFO reverse-index symmetry
+    /// discriminator). Generation `0`.
     #[doc(hidden)]
     pub fn publish_with_carrier_and_dispatch_for_tests(
         &self,
@@ -3542,6 +3442,28 @@ impl SemanticGraphStore {
         self_root_canonicals: Arc<[Arc<str>]>,
         dispatch_dep_signature: DepSignature,
     ) -> usize {
+        self.publish_with_carrier_dispatch_and_generation_for_tests(
+            key,
+            result,
+            read_set_signature,
+            self_root_canonicals,
+            dispatch_dep_signature,
+            0,
+        )
+    }
+
+    /// Variant taking an explicit `validated_at_generation` — used
+    /// by multi-candidate overlay/base tests.
+    #[doc(hidden)]
+    pub fn publish_with_carrier_dispatch_and_generation_for_tests(
+        &self,
+        key: SemanticQueryKey,
+        result: QueryResult<SemanticNodeId>,
+        read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
+        dispatch_dep_signature: DepSignature,
+        validated_at_generation: u64,
+    ) -> usize {
         if !matches!(result, QueryResult::Value(_)) {
             return 0;
         }
@@ -3549,31 +3471,55 @@ impl SemanticGraphStore {
         if matches!(family, FamilyKey::ResolvedNamedType { .. }) {
             return 0;
         }
+        let admission_seq = self.alloc_candidate_admission_seq();
         let entry = MemoEntry {
             result,
             read_set_signature: read_set_signature.clone(),
             dispatch_dep_signature: Arc::clone(&dispatch_dep_signature),
             self_root_canonicals,
             walker_diagnostics: Arc::from([]),
+            validated_at_generation,
+            admission_seq,
         };
         let mut entries = self.entries_lock_diagnosed();
         let family_was_new = !entries.contains_key(&family);
-        let populated_slots = entries
+        let outcome = entries
             .entry(family.clone())
             .or_default()
             .publish(slot, entry);
+        let populated_slots = outcome.populated;
+        for (displaced_slot, displaced_entry) in &outcome.displaced {
+            reverse_index::drain_candidate_reverse_index_registrations(
+                &self.canonical_to_entries,
+                &family,
+                *displaced_slot,
+                displaced_entry,
+            );
+        }
         if family_was_new && !populated_slots.is_empty() {
             self.record_family_admission_locked(&mut entries, &family);
         }
-        Self::register_reverse_index(
+        reverse_index::register_reverse_index(
             &self.canonical_to_entries,
             &family,
             &populated_slots,
             &read_set_signature,
             &dispatch_dep_signature,
+            admission_seq,
         );
         drop(entries);
         populated_slots.len()
+    }
+
+    /// Test-only candidate-count probe for `(family, slot)`.
+    #[doc(hidden)]
+    pub fn slot_candidate_count_for_tests(&self, key: &SemanticQueryKey) -> usize {
+        let (family, slot) = family_and_slot(key);
+        let entries = self.entries_lock_diagnosed();
+        entries
+            .get(&family)
+            .map(|slots| slots.slot_candidate_count_for_test(slot))
+            .unwrap_or(0)
     }
 }
 

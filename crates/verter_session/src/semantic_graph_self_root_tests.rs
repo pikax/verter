@@ -207,7 +207,7 @@ fn instantiate_same_canonical_edit_rejects_warm_entry() {
     // Resolve the declaration so the observed whole hash is reachable.
     let decl_key = SemanticQueryKey::ResolveDecl(resolve_decl_key(c, "Box"));
     let _ = dispatch.execute(decl_key);
-    let whole_hash = host
+    let _ = host
         .ensure_indexed_ready(c)
         .map(|indexed| indexed.whole_hash)
         .expect("declaring file IndexedReady materialises");
@@ -215,9 +215,8 @@ fn instantiate_same_canonical_edit_rejects_warm_entry() {
         crate::semantic_query::PrimitiveKind::String,
     ));
     let key = SemanticQueryKey::Instantiate {
-        base: crate::semantic_query::DeclIdentity {
+        base: crate::semantic_query::DeclKey {
             canonical_id: Arc::from(c),
-            whole_hash,
             decl_name: Arc::from("Box"),
         },
         args: Arc::from(vec![string_arg].into_boxed_slice()),
@@ -274,7 +273,7 @@ fn resolve_macro_payload_same_canonical_edit_rejects_warm_entry() {
     let dispatch = host.semantic_dispatch();
     let graph = host.project_type_store().semantic_graph();
 
-    let whole_hash = host
+    let _ = host
         .ensure_indexed_ready(c)
         .map(|indexed| indexed.whole_hash)
         .expect("owner SFC IndexedReady materialises");
@@ -282,9 +281,8 @@ fn resolve_macro_payload_same_canonical_edit_rejects_warm_entry() {
         crate::semantic_query::PrimitiveKind::String,
     ));
     let key = SemanticQueryKey::ResolveMacroPayload {
-        owner: crate::semantic_query::DeclIdentity {
+        owner: crate::semantic_query::DeclKey {
             canonical_id: Arc::from(c),
-            whole_hash,
             decl_name: Arc::from("<sfc-script-setup>"),
         },
         macro_index: 0,
@@ -837,14 +835,13 @@ fn file_derived_object_node(host: &VerterHost, canonical: &str) -> SemanticNodeI
     let _ = dispatch.execute(SemanticQueryKey::ResolveDecl(resolve_decl_key(
         canonical, "Foo",
     )));
-    let whole_hash = host
+    let _ = host
         .ensure_indexed_ready(canonical)
         .map(|indexed| indexed.whole_hash)
         .expect("file IndexedReady materialises");
     let key = SemanticQueryKey::Instantiate {
-        base: crate::semantic_query::DeclIdentity {
+        base: crate::semantic_query::DeclKey {
             canonical_id: Arc::from(canonical),
-            whole_hash,
             decl_name: Arc::from("Foo"),
         },
         args: Arc::from(Vec::new().into_boxed_slice()),
@@ -1226,16 +1223,15 @@ fn non_builtin_instantiation_roots_on_type_argument_file() {
     let dispatch = host.semantic_dispatch();
     let graph = host.project_type_store().semantic_graph();
 
-    let gen_whole_hash = host
+    let _ = host
         .ensure_indexed_ready(gen)
         .map(|indexed| indexed.whole_hash)
         .expect("declaring file IndexedReady materialises");
     // `Box<Foo>` — the single arg is the file-derived `Foo` Object node
     // scoped to `arg`'s file. The declaring file is `gen`.
     let key = SemanticQueryKey::Instantiate {
-        base: crate::semantic_query::DeclIdentity {
+        base: crate::semantic_query::DeclKey {
             canonical_id: Arc::from(gen),
-            whole_hash: gen_whole_hash,
             decl_name: Arc::from("Box"),
         },
         args: Arc::from(vec![arg_node].into_boxed_slice()),
@@ -1342,7 +1338,7 @@ fn resolve_macro_payload_roots_on_type_argument_file() {
     let dispatch = host.semantic_dispatch();
     let graph = host.project_type_store().semantic_graph();
 
-    let sfc_whole_hash = host
+    let _ = host
         .ensure_indexed_ready(sfc)
         .map(|indexed| indexed.whole_hash)
         .expect("owner SFC IndexedReady materialises");
@@ -1351,9 +1347,8 @@ fn resolve_macro_payload_roots_on_type_argument_file() {
     // file-derived `Foo` Object node scoped to `arg`'s file. The owning
     // canonical is `sfc`.
     let key = SemanticQueryKey::ResolveMacroPayload {
-        owner: crate::semantic_query::DeclIdentity {
+        owner: crate::semantic_query::DeclKey {
             canonical_id: Arc::from(sfc),
-            whole_hash: sfc_whole_hash,
             decl_name: Arc::from("<sfc-script-setup>"),
         },
         macro_index: 0,

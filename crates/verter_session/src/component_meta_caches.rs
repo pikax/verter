@@ -3,51 +3,61 @@
 //!
 //! ## Architecture
 //!
-//! Each cache is a typed `*Db` wrapper around `DashMap<Key, Arc<Entry>>`
-//! plus a per-cache `InflightTable<Key>` (admission control isolation per
-//! D3.2). The wrappers share the same shape:
+//! Each cache is a typed `*Db` wrapper that routes its cold build through
+//! one of the two cache-runtime node entry points, so the cooperative
+//! singleflight protocol (one-winner cold build, cooperative joiner
+//! waits, panic safety, post-compute revalidation) stays
+//! cache-runtime-internal and no `*Db` names a cooperative primitive
+//! directly. The wrappers split into two families by storage shape:
 //!
-//! - `Entry` carries `(value, dep_signature)`.
-//! - The cold-compute entry point delegates to a cooperative-admission
-//!   primitive for one-winner-cold-build, panic-safety, and
-//!   post-compute revalidation. Most wrappers expose
-//!   `get_or_compute<F>(key, host, compute) -> Option<value>` over
-//!   [`cooperative_get_or_insert_with_post_publish`]. Two consume the
+//! - **Single-entry artifact caches** — a `DashMap<Key, Arc<CacheEntry>>`
+//!   plus a per-cache `InflightTable<QueryFlightKey<Key>>`. Their
+//!   `get_or_compute<F>(key, ctx, compute) -> Option<value>` builds a
+//!   [`SingleEntryArtifactNode`] (an [`ArtifactNode`]) over the map /
+//!   flight table / live counter and routes through
+//!   [`crate::cache_runtime::node::lookup`]. The node's winner-only
+//!   `post_publish` / `removal_cleanup` hooks keep the shared
+//!   `component_meta_cache_live` counter in step with the live map.
+//! - **Reverse-indexed multi-candidate query-identity caches** —
+//!   `ImportedRegistryDb`, `MaterializeStructureDb`, `RefCycleResultDb`.
+//!   Each wraps a shared
+//!   [`ReverseIndexedCandidateStore`](crate::cache_runtime::ReverseIndexedCandidateStore)
+//!   plus a per-cache `InflightTable<QueryFlightKey<Key>>`, and its
+//!   `get_or_compute_admit<F>(key, ctx, compute)` builds a
+//!   [`QueryCandidateNode`] (a [`QueryNode`]) and routes through
+//!   [`crate::cache_runtime::node::query::lookup`]. The producer's cold
+//!   `compute` returns a
 //!   [`ComputeAdmission`](crate::cache_runtime::singleflight::ComputeAdmission)
-//!   API of `cooperative_admit_with_post_publish` so a
-//!   valid-but-non-cacheable cold outcome is broadcast to joiners
-//!   without admitting the cache: `ImportedRegistryDb` via its
-//!   `get_or_compute_admit` method (the producer runs its
-//!   fuse-consuming resolution inside the singleflight `compute`
-//!   closure), and `MaterializeStructureDb` via the materialiser's
-//!   direct use of its `entries()` / `inflight()` accessors.
+//!   so a valid-but-non-cacheable outcome (`ReturnOnly`) returns to the
+//!   winning flight alone without admitting a candidate — concurrent
+//!   joiners cannot view-validate it and instead fork and cold-recompute
+//!   for their own view. Storage (the slot install, the live-counter
+//!   net-bump, the reverse-index registration, the retention admission,
+//!   and the deferred FIFO eviction) is the store's, driven through the
+//!   node's `publish_core` / `evict_deferred` / `publish_fence` /
+//!   `lookup_candidate` under the split publish lifecycle.
 //!
 //! ## Live-counter accounting invariant
 //!
 //! The shared `component_meta_cache_live` counter must equal the number
-//! of entries actually live in the cache maps on EVERY admission path.
-//! Every wrapper therefore bumps the counter in the substrate's
-//! winner-only `post_publish` callback — fired exactly once, after
-//! `map.insert` and a successful `revalidate_after_compute` — and
-//! decrements it in the `removal_cleanup` callback (and on every direct
-//! map removal: per-canonical / project-generation invalidation, budget
-//! eviction, schema-mismatch evict — plus, for the two retention-bounded
-//! caches whose `peek` reaps stale entries, that stale-`peek` reap; the
-//! `cooperative_get_or_insert` engine wrappers below have non-reaping
-//! `peek`s). The increment is
-//! never placed in the `compute` closure: a cold compute that fails
-//! `revalidate_after_compute` (a project-generation reset landed during
-//! the cold window) publishes no map entry and the substrate runs no
-//! `removal_cleanup`, so a pre-publication bump would leak permanently.
-//! `post_publish` is structurally unreachable on the revalidation-fail
-//! path, so the bump is correct-by-construction: an entry contributes
-//! `+1` exactly while it is live in the map.
-//! - `validate(&Entry)` and `revalidate_after_compute(&Entry)` reject
-//!   entries whose `read_set_signature.facts` no longer validate
-//!   against the live `StoreView`.
-//! - Per-canonical and project-generation invalidation hooks wired into
-//!   [`ProjectTypeStore::evict_canonical`] and
-//!   [`ProjectTypeStore::bump_project_generation_and_evict`].
+//! of entries / candidates actually live across the cache maps and stores
+//! on EVERY admission path. The single-entry caches bump it in the node's
+//! winner-only `post_publish` (fired exactly once, after the map insert
+//! and a successful post-compute revalidation) and decrement it in
+//! `removal_cleanup`; the increment is never placed in the `compute`
+//! closure, so a revalidation-fail cold build (a project-generation reset
+//! landed during the cold window) publishes no entry and leaks no count.
+//! The query-identity stores net-bump the counter under the slot guard in
+//! `publish_core` and decrement it in every store removal path
+//! (per-canonical drain, deferred FIFO victim, project-generation
+//! `clear`, schema eviction), so a stale candidate skipped on read is not
+//! reaped on the read path and the counter still tracks live candidates.
+//! Read-side validation (`validate` / `lookup_candidate` and the
+//! post-compute revalidation) rejects an entry / candidate whose
+//! `read_set_signature.facts` no longer validate against the live
+//! `StoreView`. Per-canonical and project-generation invalidation hooks
+//! are wired into [`ProjectTypeStore::evict_canonical`] and
+//! [`ProjectTypeStore::bump_project_generation_and_evict`].
 //!
 //! ## D3.5 — `Arc<str>` / `Arc<TypeExpr>` keys
 //!
@@ -71,11 +81,10 @@ use dashmap::DashMap;
 use verter_semantic::analysis::type_solver::query_engine::ProjectedMember;
 use verter_type_expr::TypeExpr;
 
-use crate::cache_runtime::singleflight::{cooperative_get_or_insert_with_post_publish, InflightTable};
-use crate::fact_signature_helpers::{
-    bubble_fact_signature, validate_fact_signature_with_self_roots,
-};
-use crate::instant::Instant;
+use crate::cache_runtime::admission::{CacheAdmission, CacheEntry, NonAdmissionReason};
+use crate::cache_runtime::node::{lookup, ArtifactNode, ComputeCtx, QueryFlightKey};
+use crate::cache_runtime::singleflight::InflightTable;
+use crate::fact_signature_helpers::ReadSetSignature;
 use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
 use crate::resolver_core::cache_keys::{
     PreparedMemberCacheKey, PreparedSurfaceCacheKey, PreparedTargetCacheKey,
@@ -84,6 +93,274 @@ use crate::resolver_core::cache_keys::{
 use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistrySymbol;
 use crate::resolver_core::{FactVersionRef, ResolvedTypeDeclaration, ResolverContext};
 use crate::semantic_query::{DepSignature, ProjectionMode};
+
+// ===========================================================================
+// Shared single-entry artifact node
+// ===========================================================================
+//
+// The single-entry caches below (`DeclarationLookupDb`, `ResolvabilityDb`,
+// `OwnerCollectionDb`, `PreparedTargetDb`, `ShapeCacheDb`,
+// `PreparedSurfaceDb`, `PreparedMemberDb`, `RoutedExprSurfaceDb`) all
+// store one entry per key validated by a path-precise fact signature
+// plus a generation gate, and all bump a shared live counter on publish
+// / decrement it on removal. They are identical modulo the key type, the
+// value type, and the self-root derivation, so they share ONE
+// [`ArtifactNode`] implementation rather than repeating the cooperative-
+// admission closure plumbing per cache.
+//
+// Each cache's `get_or_compute` builds a `SingleEntryArtifactNode` over
+// its own `entries` / `inflight` / `live_counter` plus the per-call
+// `compute` closure, then routes through
+// [`crate::cache_runtime::node::lookup`]. The stored value is the domain
+// value; every validity rail (the fact signature, the self-root
+// canonicals, the compute-time generation) lives in
+// [`crate::cache_runtime::CacheEntry`].
+
+/// Per-call [`ArtifactNode`] adapter for the single-entry caches.
+///
+/// Holds borrows of the owning cache's published map, flight table, and
+/// live counter, plus the per-call cold-build closure. The closure
+/// returns `Some((value, facts, self_roots))` on success — the domain
+/// value, the path-precise fact signature, and the canonicals validated
+/// strictly as self-roots — or `None` on observable failure.
+struct SingleEntryArtifactNode<'a, K, V, F>
+where
+    K: Eq + std::hash::Hash + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+    F: FnOnce() -> Option<(V, Arc<[FactVersionRef]>, Arc<[Arc<str>]>)>,
+{
+    entries: &'a DashMap<K, Arc<CacheEntry<V>>>,
+    inflight: &'a InflightTable<QueryFlightKey<K>>,
+    live_counter: &'a AtomicU64,
+    /// `FnOnce` carried in a `RefCell<Option<_>>` so the `&self`
+    /// `compute` method (the `ArtifactNode` trait takes `&self`) can
+    /// `take()` it exactly once on the cold winner's call.
+    compute: std::cell::RefCell<Option<F>>,
+}
+
+impl<'a, K, V, F> ArtifactNode for SingleEntryArtifactNode<'a, K, V, F>
+where
+    K: Eq + std::hash::Hash + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+    F: FnOnce() -> Option<(V, Arc<[FactVersionRef]>, Arc<[Arc<str>]>)>,
+{
+    type Key = K;
+    type Value = V;
+
+    fn entries(&self) -> &DashMap<Self::Key, Arc<CacheEntry<Self::Value>>> {
+        self.entries
+    }
+
+    fn inflight(&self) -> &InflightTable<QueryFlightKey<Self::Key>> {
+        self.inflight
+    }
+
+    fn compute(&self, _key: &Self::Key, cx: &mut ComputeCtx<'_>) -> CacheAdmission<Self::Value> {
+        let compute = self
+            .compute
+            .borrow_mut()
+            .take()
+            .expect("single-entry compute is taken exactly once by the cold winner");
+        match compute() {
+            Some((value, facts, self_root_canonicals)) => CacheAdmission::Cacheable {
+                value,
+                signature: ReadSetSignature::new(facts),
+                self_root_canonicals,
+                validated_at_generation: cx.generation(),
+            },
+            None => CacheAdmission::Failed {
+                reason: NonAdmissionReason::ComputeFailed,
+            },
+        }
+    }
+
+    fn validate(
+        &self,
+        _key: &Self::Key,
+        entry: &CacheEntry<Self::Value>,
+        cx: &ComputeCtx<'_>,
+    ) -> Option<Self::Value> {
+        // Generation gate (the project-shape counterpart of the
+        // file-content carrier check — a `ProjectGeneration` reset bumps
+        // no file content) plus strict self-root fact validation. A
+        // passing validation also bubbles the entry's facts into the
+        // caller's outer tracer.
+        if entry.validated_at_generation == cx.generation()
+            && entry
+                .signature
+                .validate_with_self_roots(cx.resolver, &entry.self_root_canonicals)
+        {
+            entry.signature.bubble(cx.resolver);
+            Some(entry.value.clone())
+        } else {
+            None
+        }
+    }
+
+    fn post_publish(&self, _key: &Self::Key, _entry: &Arc<CacheEntry<Self::Value>>) {
+        // Winner-only — fires after `entries.insert` AND a successful
+        // post-compute revalidation, so the bump is paired with the
+        // published map entry and is structurally unreachable on the
+        // revalidation-fail path (no leak).
+        self.live_counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn removal_cleanup(&self, _key: &Self::Key, _entry: &Arc<CacheEntry<Self::Value>>) {
+        // Removal-side counterpart of `post_publish` — the substrate
+        // fires this on the warm-hit reject path AND the joiner-fork
+        // reject path, so the counter tracks live entries, not lifetime
+        // inserts.
+        self.live_counter.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Warm-read peek shared by the single-entry caches that expose a
+/// `peek()` method: validate the entry's signature strictly against its
+/// own self-roots plus the generation gate, bubbling on a hit.
+fn single_entry_peek<K, V>(
+    entries: &DashMap<K, Arc<CacheEntry<V>>>,
+    key: &K,
+    ctx: &dyn ResolverContext,
+) -> Option<V>
+where
+    K: Eq + std::hash::Hash + Clone,
+    V: Clone,
+{
+    let entry_arc = entries.get(key).map(|e| e.clone())?;
+    if entry_arc.validated_at_generation == ctx.project_type_store().current_project_generation()
+        && entry_arc
+            .signature
+            .validate_with_self_roots(ctx, &entry_arc.self_root_canonicals)
+    {
+        entry_arc.signature.bubble(ctx);
+        Some(entry_arc.value.clone())
+    } else {
+        None
+    }
+}
+
+/// Per-call [`QueryNode`] adapter for the reverse-indexed multi-candidate
+/// caches (`ImportedRegistryDb`, `MaterializeStructureDb`,
+/// `RefCycleResultDb`).
+///
+/// Mirrors [`SingleEntryArtifactNode`] for the query-identity family:
+/// holds a borrow of the owning cache's
+/// [`ReverseIndexedCandidateStore`](crate::cache_runtime::ReverseIndexedCandidateStore)
+/// plus the per-call cold-build closure, and routes the cold build through
+/// [`crate::cache_runtime::node::query::lookup`] — so the cooperative
+/// primitive stays cache-runtime-internal and no consumer names it
+/// directly. The closure returns a node-level
+/// [`CacheAdmission`](crate::cache_runtime::admission::CacheAdmission) the
+/// producer already built (the producer keeps ownership of its
+/// `install_fact_tracer` / fact-merge logic). `publish_core` /
+/// `evict_deferred` / `publish_fence` / `lookup_candidate` delegate to the
+/// store, so the split publish lifecycle (counter + reverse index + budget
+/// admission under the slot guard, then deferred FIFO eviction under the
+/// fence) is the store's.
+struct QueryCandidateNode<'a, K, V, F>
+where
+    K: Eq + std::hash::Hash + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+    F: FnOnce() -> CacheAdmission<V>,
+{
+    store: &'a crate::cache_runtime::ReverseIndexedCandidateStore<K, V>,
+    inflight: &'a InflightTable<QueryFlightKey<K>>,
+    ctx: &'a dyn ResolverContext,
+    /// `FnOnce` carried in a `RefCell<Option<_>>` so the `&self` `compute`
+    /// method can `take()` it exactly once on the cold winner's call.
+    compute: std::cell::RefCell<Option<F>>,
+}
+
+impl<'a, K, V, F> crate::cache_runtime::QueryNode for QueryCandidateNode<'a, K, V, F>
+where
+    K: Eq + std::hash::Hash + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+    F: FnOnce() -> CacheAdmission<V>,
+{
+    type Key = K;
+    type Discriminant = crate::cache_runtime::FactCandidateDiscriminant;
+    type Value = V;
+
+    fn inflight(&self) -> &InflightTable<QueryFlightKey<Self::Key>> {
+        self.inflight
+    }
+
+    fn lookup_candidate(
+        &self,
+        key: &Self::Key,
+        cx: &crate::cache_runtime::ComputeCtx<'_>,
+    ) -> Option<Self::Value> {
+        let generation = cx.generation();
+        self.store.lookup(key, |candidate| {
+            // Validate against the CANDIDATE's OWN strict self-root set
+            // (the producer stamped it at admission) plus the
+            // project-generation gate. A stale candidate is skipped (the
+            // store keeps it for other views).
+            if candidate.validated_at_generation == generation
+                && candidate
+                    .signature
+                    .validate_with_self_roots(self.ctx, &candidate.self_root_canonicals)
+            {
+                candidate.signature.bubble(self.ctx);
+                Some(candidate.value.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn compute(
+        &self,
+        _key: &Self::Key,
+        _cx: &mut crate::cache_runtime::ComputeCtx<'_>,
+    ) -> CacheAdmission<Self::Value> {
+        let compute = self
+            .compute
+            .borrow_mut()
+            .take()
+            .expect("query-candidate compute is taken exactly once by the cold winner");
+        compute()
+    }
+
+    fn discriminant(
+        &self,
+        _key: &Self::Key,
+        _value: &Self::Value,
+        signature: &ReadSetSignature,
+        validated_at_generation: u64,
+    ) -> Self::Discriminant {
+        // The discriminant's generation is the candidate's OWN stamped
+        // generation (the producer's in-compute snapshot threaded straight
+        // from the `Cacheable` arm), so a same-view re-publish replaces in
+        // place rather than coexisting as a duplicate. Reading
+        // `cx.generation()` here instead would use the runtime's
+        // lookup-entry snapshot and skew under a mid-compute generation
+        // bump.
+        crate::cache_runtime::FactCandidateDiscriminant {
+            validated_at_generation,
+            facts: Arc::clone(&signature.facts),
+        }
+    }
+
+    fn publish_fence(&self) -> Option<&parking_lot::RwLock<()>> {
+        // The budgeted stores expose a retention gate; the unbudgeted
+        // imported-registry store also exposes one (a no-op fence with no
+        // deferred victims, but it keeps the lifecycle uniform).
+        Some(self.store.retention_gate())
+    }
+
+    fn publish_core(
+        &self,
+        key: Self::Key,
+        candidate: crate::cache_runtime::Candidate<Self::Discriminant, Self::Value>,
+    ) -> crate::cache_runtime::PublishCoreOutcome<Self::Key> {
+        self.store.publish_core(key, candidate)
+    }
+
+    fn evict_deferred(&self, victims: crate::cache_runtime::DeferredVictims<Self::Key>) {
+        self.store.evict_deferred(victims);
+    }
+}
 
 // ===========================================================================
 // 1. ImportedRegistryDb — `(canonical, name) → Option<ResolvedImportedRegistrySymbol>`
@@ -118,11 +395,22 @@ pub struct ImportedRegistryEntry {
 
 pub type ImportedRegistryKey = (Arc<str>, Arc<str>);
 
+/// The value the imported-registry store holds per candidate.
+pub type ImportedRegistryValue = Option<Arc<ResolvedImportedRegistrySymbol>>;
+
 pub struct ImportedRegistryDb {
-    entries: DashMap<ImportedRegistryKey, Arc<ImportedRegistryEntry>>,
-    inflight: InflightTable<ImportedRegistryKey>,
-    live_counter: Arc<AtomicU64>,
-    canonical_index: crate::invalidation_domain::CanonicalReverseIndex<ImportedRegistryKey>,
+    /// The shared reverse-indexed multi-candidate store. No retention
+    /// budget — the per-slot candidate cap plus the per-canonical
+    /// reverse-index drain are the reclamation paths (the keyed canonical
+    /// is the entry's self-root, so a content edit invalidates exactly its
+    /// own resolved imports).
+    store: crate::cache_runtime::ReverseIndexedCandidateStore<
+        ImportedRegistryKey,
+        ImportedRegistryValue,
+    >,
+    /// Per-cache flight table keyed by the flight identity (cache key +
+    /// store-view compat token) so two overlays on one key do not coalesce.
+    inflight: InflightTable<QueryFlightKey<ImportedRegistryKey>>,
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`crate::cache_schema`] for the contract.
     schema_version: u32,
@@ -149,253 +437,198 @@ impl ImportedRegistryDb {
 
     fn with_counter_and_schema_version(live_counter: Arc<AtomicU64>, schema_version: u32) -> Self {
         Self {
-            entries: DashMap::new(),
+            store: crate::cache_runtime::ReverseIndexedCandidateStore::with_counter(live_counter),
             inflight: InflightTable::new(),
-            live_counter,
-            canonical_index: crate::invalidation_domain::CanonicalReverseIndex::new(),
             schema_version,
         }
     }
 
-    /// Peek-only lookup: returns the cached value only if its
-    /// `fact_dep_signature` is still valid against `ctx`.
+    /// Peek-only lookup: returns the first cached candidate whose
+    /// `read_set_signature` is still valid against `ctx`.
     ///
-    /// This is the warm-hit half of [`Self::get_or_compute`] exposed
-    /// for the producer's compute-once shape: the producer peeks here
-    /// first, and on a miss computes the imported-registry value
-    /// **once** (the wildcard-route fuse is a side-effecting budget —
-    /// it must be consumed at most once per request) before using
-    /// `get_or_compute` purely as a signature-building write-through.
-    /// The keyed canonical is the entry's self-root, validated
+    /// This is the warm-hit half of [`Self::get_or_compute_admit`]
+    /// exposed for the producer's compute-once shape: the producer peeks
+    /// here first, and on a miss computes the imported-registry value
+    /// **once** (the wildcard-route fuse is a side-effecting budget — it
+    /// must be consumed at most once per request) before using
+    /// `get_or_compute_admit` purely as a signature-building write-through.
+    /// The keyed canonical is the candidate's self-root, validated
     /// strictly — a same-canonical content edit, or a keyed canonical
-    /// untracked by the live store view, rejects the entry, exactly
-    /// matching the `get_or_compute` warm-hit `validate` arm.
+    /// untracked by the live store view, rejects the candidate, exactly
+    /// matching the `get_or_compute_admit` warm-hit `lookup` arm.
     pub(crate) fn peek(
         &self,
         key: &ImportedRegistryKey,
         ctx: &dyn ResolverContext,
-    ) -> Option<Option<Arc<ResolvedImportedRegistrySymbol>>> {
-        let self_roots: [&str; 1] = [key.0.as_ref()];
-        let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-        // The carrier validates only file-content whole-hashes; a
-        // `ProjectGeneration` reset bumps no file content, so the
-        // generation gate is the project-shape counterpart of the
-        // carrier check. A stale-by-project-generation entry is rejected
-        // here even though its `fact_dep_signature` still validates.
-        if entry_arc.validated_at_generation
-            == ctx.project_type_store().current_project_generation()
-            && validate_fact_signature_with_self_roots(
-                ctx,
-                &entry_arc.fact_dep_signature,
-                &self_roots,
-            )
-        {
-            bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
-            Some(entry_arc.value.clone())
-        } else {
-            None
-        }
+    ) -> Option<ImportedRegistryValue> {
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
+        let generation = ctx.project_type_store().current_project_generation();
+        self.store.lookup(key, |candidate| {
+            // The carrier validates only file-content whole-hashes; a
+            // `ProjectGeneration` reset bumps no file content, so the
+            // generation gate is the project-shape counterpart of the
+            // carrier check. A stale-by-project-generation candidate is
+            // rejected even though its signature still validates.
+            if candidate.validated_at_generation == generation
+                && candidate
+                    .signature
+                    .validate_with_self_roots(ctx, &self_roots)
+            {
+                candidate.signature.bubble(ctx);
+                Some(candidate.value.clone())
+            } else {
+                None
+            }
+        })
     }
 
     /// Cooperative-admission cold compute over the imported-registry
-    /// cache, routed through
-    /// [`crate::cache_runtime::singleflight::cooperative_admit_with_post_publish`]
-    /// (the [`ComputeAdmission`](crate::cache_runtime::singleflight::ComputeAdmission)
-    /// API).
+    /// cache, routed through the query-identity split-publish lifecycle
+    /// adapter over the shared
+    /// [`ReverseIndexedCandidateStore`](crate::cache_runtime::ReverseIndexedCandidateStore).
     ///
     /// The producer's `compute` closure runs the expensive,
     /// fuse-consuming `resolve_imported_registry_symbol_with_budget`
-    /// resolution INSIDE the per-key `InflightTable` singleflight slot:
-    /// when several requests miss the same key concurrently, exactly
-    /// ONE winner runs `compute` and every joiner blocks on the slot
-    /// condvar and reuses the winner's value. Running the resolution
-    /// here — rather than before the admission call — is what makes the
-    /// wildcard-route fuse a one-winner cost instead of an N-waiter
-    /// cost.
+    /// resolution INSIDE the per-flight-lane singleflight slot: when
+    /// several requests miss the same key concurrently under one view,
+    /// exactly ONE winner runs `compute` and every joiner re-reads the
+    /// store via the warm-hit lookup. Running the resolution here — rather
+    /// than before the admission call — is what makes the wildcard-route
+    /// fuse a one-winner cost instead of an N-waiter cost.
     ///
-    /// `compute` returns a [`ComputeAdmission`](crate::cache_runtime::singleflight::ComputeAdmission):
+    /// `compute` returns a [`ComputeAdmission`](crate::cache_runtime::singleflight::ComputeAdmission)
+    /// over an [`ImportedRegistryEntry`]:
     ///
     /// - `Cacheable(entry)` — the provenance-pure fact signature built;
-    ///   the entry is admitted, `post_publish` registers the reverse
-    ///   index, joiners re-read the published entry.
-    /// - `ReturnOnly(value)` — the resolution produced a valid value
-    ///   but shared-cache admission is refused (the signature builder
-    ///   could not build, or the test refusal hook fired). The cache
-    ///   stays empty, joiners receive `value` through the slot's
-    ///   return-only channel, and the next cold miss recomputes. The
-    ///   resolution is NOT re-run and the fuse is NOT consumed twice.
-    /// - `Failed` — the resolution itself failed; joiners surface
-    ///   `None` and the next caller retries.
+    ///   the candidate is admitted into the store (counter bump +
+    ///   reverse-index registration under the slot guard), joiners re-read
+    ///   the published candidate.
+    /// - `ReturnOnly(value)` — the resolution produced a valid value but
+    ///   shared-cache admission is refused (the signature builder could
+    ///   not build, or the test refusal hook fired). Nothing is admitted,
+    ///   joiners fork and recompute, and the next cold miss recomputes.
+    ///   The resolution is NOT re-run and the fuse is NOT consumed twice.
+    /// - `Failed` — the resolution itself failed; joiners surface `None`
+    ///   and the next caller retries.
+    ///
+    /// The store carries NO retention budget, so the publish lifecycle has
+    /// no deferred budget victims and no publish fence — the per-slot
+    /// candidate cap (handled inside `publish_core` under the slot guard)
+    /// plus the per-canonical reverse-index drain are the reclamation
+    /// paths. The split lifecycle still closes the
+    /// install-before-registration race: `publish_core` installs the
+    /// candidate, bumps the counter, and registers the reverse index
+    /// together under the slot guard, so no concurrent remover can observe
+    /// a candidate before its counter / index registration exists.
     pub(crate) fn get_or_compute_admit<F>(
         &self,
         key: &ImportedRegistryKey,
         ctx: &dyn ResolverContext,
         compute: F,
-    ) -> Option<Option<Arc<ResolvedImportedRegistrySymbol>>>
+    ) -> Option<ImportedRegistryValue>
     where
         F: FnOnce() -> crate::cache_runtime::singleflight::ComputeAdmission<
-            Option<Arc<ResolvedImportedRegistrySymbol>>,
+            ImportedRegistryValue,
             ImportedRegistryEntry,
         >,
     {
-        let live_counter = Arc::clone(&self.live_counter);
-        let live_counter_for_removal = Arc::clone(&self.live_counter);
-        let key_for_post_publish = key.clone();
-        let canonical_index = &self.canonical_index;
-        let canonical_index_for_removal = &self.canonical_index;
-        // The keyed canonical is the entry's self-root — validated
+        // The keyed canonical is the candidate's self-root — validated
         // strictly on warm read (same-canonical edit / untracked keyed
         // canonical → miss).
-        let self_roots: [&str; 1] = [key.0.as_ref()];
-        crate::cache_runtime::singleflight::cooperative_admit_with_post_publish(
-            &self.entries,
-            &self.inflight,
-            key.clone(),
-            |entry: &ImportedRegistryEntry| {
-                // The carrier validates only file-content whole-hashes;
-                // the generation gate is the project-shape counterpart
-                // (a `ProjectGeneration` reset bumps no file content).
-                if entry.validated_at_generation
-                    == ctx.project_type_store().current_project_generation()
-                    && validate_fact_signature_with_self_roots(
-                        ctx,
-                        &entry.fact_dep_signature,
-                        &self_roots,
-                    )
-                {
-                    bubble_fact_signature(ctx, &entry.fact_dep_signature);
-                    Some(entry.value.clone())
-                } else {
-                    None
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
+        // Unpack the producer's domain `ComputeAdmission<V, Entry>` into a
+        // node-level `CacheAdmission<V>` — the cold-build closure the
+        // `QueryCandidateNode` adapter runs. The producer keeps its
+        // fuse-consuming resolution; this only re-shapes the carrier and
+        // stamps the keyed canonical's self-root set.
+        let node_compute = move || -> CacheAdmission<ImportedRegistryValue> {
+            match compute() {
+                crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry) => {
+                    CacheAdmission::Cacheable {
+                        value: entry.value,
+                        signature: crate::fact_signature_helpers::ReadSetSignature::new(
+                            Arc::clone(&entry.fact_dep_signature),
+                        ),
+                        self_root_canonicals: self_roots,
+                        validated_at_generation: entry.validated_at_generation,
+                    }
                 }
-            },
-            compute,
-            |entry: &ImportedRegistryEntry| {
-                bubble_fact_signature(ctx, &entry.fact_dep_signature);
-                entry.value.clone()
-            },
-            |entry: &ImportedRegistryEntry| {
-                // Post-compute revalidation — generation gate plus the
-                // file-content carrier check, mirroring the warm-hit
-                // `validate` arm. A project-generation reset that landed
-                // during the cold window rejects the entry here.
-                entry.validated_at_generation
-                    == ctx.project_type_store().current_project_generation()
-                    && validate_fact_signature_with_self_roots(
-                        ctx,
-                        &entry.fact_dep_signature,
-                        &self_roots,
-                    )
-            },
-            // Removal-side counterpart of `post_publish`: when the
-            // substrate removes an already-published entry (warm-hit
-            // reject or joiner-fork reject) the live counter must
-            // decrement and the per-canonical reverse-index
-            // registration must drop, symmetric with the
-            // `post_publish` bump + register. Without this a
-            // joiner-fork over-counts the live counter and leaves a
-            // dangling reverse-index entry.
-            //
-            // The `unregister` is identity-checked against the removed
-            // entry's `EntryIdentity`: the substrate's `map.remove_if`
-            // and this cleanup are not atomic, so a cold re-publish
-            // could land a FRESH entry under the same key (and
-            // `register` it) in between. A key-only unregister would
-            // then delete that fresh registration and orphan a live
-            // entry from `invalidate_canonical`'s reverse-index drain.
-            // The identity carried here names the entry this cleanup
-            // actually removed, so a re-published entry's registration
-            // is preserved.
-            move |removed_key: &ImportedRegistryKey, removed_entry: &Arc<ImportedRegistryEntry>| {
-                live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
-                canonical_index_for_removal.unregister(
-                    removed_key.0.as_ref(),
-                    removed_key,
-                    crate::invalidation_domain::EntryIdentity::of(removed_entry),
-                );
-            },
-            move |entry_arc: &Arc<ImportedRegistryEntry>, _key: &ImportedRegistryKey| {
-                // Fires AFTER entries.insert AND AFTER successful
-                // post-compute revalidation — only for the `Cacheable`
-                // arm. A `ReturnOnly` outcome is NOT admitted, so the
-                // live counter is bumped and the reverse index is
-                // registered exactly when the entry actually lands.
-                live_counter.fetch_add(1, Ordering::Relaxed);
-                let canonical = Arc::clone(&key_for_post_publish.0);
-                canonical_index.register(
-                    &canonical,
-                    key_for_post_publish.clone(),
-                    crate::invalidation_domain::EntryIdentity::of(entry_arc),
-                );
-            },
-            // `ImportedRegistryDb` carries no `GlobalRetentionBudget` —
-            // its reverse index is the `CanonicalIndex` and there is no
-            // map/budget desync class to fence. No publish fence.
-            None,
-        )
+                crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(value) => {
+                    // Consume the typed refusal reason the producer
+                    // armed via `SetReasonGuard::arm` right before
+                    // constructing `ComputeAdmission::ReturnOnly(...)`
+                    // (TLS pass-through, single-threaded between set
+                    // and take because the singleflight winner runs
+                    // `compute()` and the lowering match on the same
+                    // thread). Falls back to `SignatureOverflow` on
+                    // an empty slot; debug builds debug-assert so the
+                    // unmigrated callsite surfaces under `cargo test`.
+                    let reason = crate::cache_runtime::consume_return_only_reason_for_lowering()
+                        .unwrap_or(NonAdmissionReason::SignatureOverflow);
+                    CacheAdmission::ReturnOnly { value, reason }
+                }
+                crate::cache_runtime::singleflight::ComputeAdmission::Failed => {
+                    CacheAdmission::Failed {
+                        reason: NonAdmissionReason::ComputeFailed,
+                    }
+                }
+            }
+        };
+        let node = QueryCandidateNode {
+            store: &self.store,
+            inflight: &self.inflight,
+            ctx,
+            compute: std::cell::RefCell::new(Some(node_compute)),
+        };
+        crate::cache_runtime::query::lookup(&node, key.clone(), ctx)
     }
 
     pub fn invalidate_canonical(&self, canonical_id: &str) {
-        // Drain via the per-canonical reverse index in
-        // O(K) (entries owned by this canonical) instead of O(N) (total
-        // entries). The index is populated on every cooperative
-        // post-publish, so a content edit on the file invalidates
-        // exactly its own resolved imports.
-        let drained = self.canonical_index.drain_for(canonical_id);
-        for key in drained {
-            if self.entries.remove(&key).is_some() {
-                self.live_counter.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
+        // Drain via the store's per-canonical reverse index in O(K)
+        // (candidates owned by this canonical) instead of O(N) (total
+        // candidates). The index is populated on every cold publish, so a
+        // content edit on the file invalidates exactly its own resolved
+        // imports.
+        self.store.invalidate_canonical(canonical_id);
     }
 
     pub fn invalidate_all(&self) {
-        let n = self.entries.len() as u64;
-        self.entries.clear();
-        self.canonical_index.clear();
-        self.live_counter.fetch_sub(
-            n.min(self.live_counter.load(Ordering::Relaxed)),
-            Ordering::Relaxed,
-        );
+        self.store.invalidate_all();
     }
 
     pub fn live_count(&self) -> usize {
-        self.entries.len()
+        self.store.live_count()
     }
 
-    /// Test-only accessor for the per-cache in-flight table. Drives
-    /// the deterministic cooperative-joiner rendezvous in
-    /// `query_db_self_root_tests.rs` — a follower is a confirmed
-    /// joiner once it has cloned its own `Arc` to the winner's
-    /// in-flight slot, observable via `InflightTable::slot_strong_count`.
-    #[cfg(test)]
-    pub(crate) fn inflight_table_for_test(&self) -> &InflightTable<ImportedRegistryKey> {
-        &self.inflight
-    }
-
-    /// Test-only: is `key` currently registered in the per-canonical
-    /// reverse index? Drives the P2 removal-cleanup discriminator —
-    /// after a joiner-fork removes the winner's entry, the winner's
-    /// key must NOT dangle in the reverse index.
+    /// Test-only: is ANY candidate for `key` currently registered under
+    /// its keyed canonical in the store's reverse index? Drives the
+    /// reverse-index consistency discriminators — a candidate's
+    /// registration must track its slot membership exactly.
     #[cfg(test)]
     pub(crate) fn reverse_index_contains_for_test(&self, key: &ImportedRegistryKey) -> bool {
-        self.canonical_index.contains(key.0.as_ref(), key)
+        self.store
+            .reverse_index_contains_key_for_test(key.0.as_ref(), key)
     }
 
     /// Test-only direct insertion entry point used by the
     /// invalidation-perf regression test
-    /// (`crates/verter_session/tests/invalidation_perf.rs`). Bypasses
-    /// the cooperative-admission inflight slot and registers the entry
-    /// in the per-canonical reverse index identically to the cold
-    /// post-publish path. NOT for use from production code.
+    /// (`crates/verter_session/tests/invalidation_perf.rs`). Bypasses the
+    /// cooperative-admission inflight slot and admits the candidate into
+    /// the store (registering its reverse index) identically to the cold
+    /// publish path. NOT for use from production code.
     #[cfg(any(test, debug_assertions))]
     pub fn insert_for_test(&self, key: ImportedRegistryKey, entry: Arc<ImportedRegistryEntry>) {
-        let canonical = Arc::clone(&key.0);
-        let identity = crate::invalidation_domain::EntryIdentity::of(&entry);
-        self.canonical_index
-            .register(&canonical, key.clone(), identity);
-        self.entries.insert(key, entry);
-        self.live_counter.fetch_add(1, Ordering::Relaxed);
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
+        let signature = crate::fact_signature_helpers::ReadSetSignature::new(Arc::clone(
+            &entry.fact_dep_signature,
+        ));
+        self.store.insert_for_test(
+            key,
+            entry.value.clone(),
+            signature,
+            self_roots,
+            entry.validated_at_generation,
+        );
     }
 
     /// Test-only synthetic-entry inserter used exclusively by
@@ -441,15 +674,7 @@ impl crate::invalidation_domain::ParticipatesInInvalidation for ImportedRegistry
 
 impl crate::invalidation_domain::InvalidationByCanonical for ImportedRegistryDb {
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
-        let drained = self.canonical_index.drain_for(canonical_id);
-        let mut removed = 0usize;
-        for key in drained {
-            if self.entries.remove(&key).is_some() {
-                self.live_counter.fetch_sub(1, Ordering::Relaxed);
-                removed += 1;
-            }
-        }
-        removed
+        self.store.invalidate_canonical(canonical_id)
     }
 }
 
@@ -468,13 +693,7 @@ impl crate::cache_schema::CacheSchemaVersioned for ImportedRegistryDb {
         if self.schema_version == current {
             return 0;
         }
-        let count = self.entries.len();
-        self.entries.clear();
-        self.canonical_index.clear();
-        if count > 0 {
-            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
-        }
-        count
+        self.store.evict_if_schema_mismatch()
     }
 }
 
@@ -482,23 +701,11 @@ impl crate::cache_schema::CacheSchemaVersioned for ImportedRegistryDb {
 // 2. DeclarationLookupDb — `(canonical, name) → ResolvedTypeDeclaration`
 // ===========================================================================
 
-#[derive(Clone)]
-pub struct DeclarationLookupEntry {
-    pub value: Arc<ResolvedTypeDeclaration>,
-    /// R3/R26/R28 fact-precise dependency signature. See
-    /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
-    pub fact_dep_signature: Arc<[FactVersionRef]>,
-    /// Project generation this entry was computed under. See
-    /// [`ImportedRegistryEntry::validated_at_generation`] for the
-    /// project-generation staleness contract.
-    pub validated_at_generation: u64,
-}
-
 pub type DeclarationLookupKey = (Arc<str>, Arc<str>);
 
 pub struct DeclarationLookupDb {
-    entries: DashMap<DeclarationLookupKey, Arc<DeclarationLookupEntry>>,
-    inflight: InflightTable<DeclarationLookupKey>,
+    entries: DashMap<DeclarationLookupKey, Arc<CacheEntry<Arc<ResolvedTypeDeclaration>>>>,
+    inflight: InflightTable<QueryFlightKey<DeclarationLookupKey>>,
     live_counter: Arc<AtomicU64>,
 }
 
@@ -524,83 +731,21 @@ impl DeclarationLookupDb {
     where
         F: FnOnce() -> Option<(ResolvedTypeDeclaration, Arc<[FactVersionRef]>)>,
     {
-        // Publish-side counterpart: the live counter is bumped in the
-        // winner-only `post_publish` callback (after `map.insert` + a
-        // successful `revalidate_after_compute`), NOT in `compute` — a
-        // pre-publication bump leaks when post-compute revalidation
-        // rejects the entry (no map entry, no `removal_cleanup`).
-        let live_counter_for_publish = Arc::clone(&self.live_counter);
-        // Removal-side counterpart of the `post_publish` increment:
-        // when the substrate removes an already-published entry (warm-hit
-        // reject or joiner-fork reject), the live counter must decrement
-        // symmetrically so it tracks live entries, not lifetime inserts.
-        let live_counter_for_removal = Arc::clone(&self.live_counter);
         // The entry's keyed canonical is its self-root: the warm-read
         // validator validates the self-root `FileWholeHash` strictly so
         // a same-canonical content edit (or a keyed canonical that
         // became untracked) rejects the entry instead of riding the
         // lazy "untracked → accept" rule.
-        let self_roots: [&str; 1] = [key.0.as_ref()];
-        // Snapshot the project generation BEFORE the cold compute
-        // dispatches any work. The carrier validates only file-content
-        // whole-hashes; a `ProjectGeneration` reset bumps no file
-        // content, so the entry carries its compute-time generation
-        // explicitly. The read-side gates reject the entry once the live
-        // generation moves past this snapshot.
-        let generation_snapshot = ctx.project_type_store().current_project_generation();
-        cooperative_get_or_insert_with_post_publish(
-            &self.entries,
-            &self.inflight,
-            key.clone(),
-            |entry: &DeclarationLookupEntry| {
-                if entry.validated_at_generation
-                    == ctx.project_type_store().current_project_generation()
-                    && validate_fact_signature_with_self_roots(
-                        ctx,
-                        &entry.fact_dep_signature,
-                        &self_roots,
-                    )
-                {
-                    bubble_fact_signature(ctx, &entry.fact_dep_signature);
-                    Some(entry.value.clone())
-                } else {
-                    None
-                }
-            },
-            move || {
-                compute().map(|(value, fact_dep_signature)| DeclarationLookupEntry {
-                    value: Arc::new(value),
-                    fact_dep_signature,
-                    validated_at_generation: generation_snapshot,
-                })
-            },
-            |entry: &DeclarationLookupEntry| {
-                bubble_fact_signature(ctx, &entry.fact_dep_signature);
-                entry.value.clone()
-            },
-            |entry: &DeclarationLookupEntry| {
-                entry.validated_at_generation
-                    == ctx.project_type_store().current_project_generation()
-                    && validate_fact_signature_with_self_roots(
-                        ctx,
-                        &entry.fact_dep_signature,
-                        &self_roots,
-                    )
-            },
-            move |_key: &DeclarationLookupKey, _entry: &Arc<DeclarationLookupEntry>| {
-                live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
-            },
-            // post_publish — fires once on the cold winner's thread,
-            // AFTER `entries.insert` AND a successful
-            // `revalidate_after_compute`. The live-counter bump rides
-            // here so it is paired with the published map entry and is
-            // structurally unreachable on the revalidation-fail path.
-            move |_entry_arc: &Arc<DeclarationLookupEntry>, _key: &DeclarationLookupKey| {
-                live_counter_for_publish.fetch_add(1, Ordering::Relaxed);
-            },
-            // No retention budget on this cache shape — no publish fence.
-            None,
-        )
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
+        let node = SingleEntryArtifactNode {
+            entries: &self.entries,
+            inflight: &self.inflight,
+            live_counter: &self.live_counter,
+            compute: std::cell::RefCell::new(Some(move || {
+                compute().map(|(value, facts)| (Arc::new(value), facts, Arc::clone(&self_roots)))
+            })),
+        };
+        lookup(&node, key.clone(), ctx)
     }
 
     pub fn invalidate_canonical(&self, canonical_id: &str) {
@@ -647,23 +792,11 @@ impl Default for DeclarationLookupDb {
 // 3. ResolvabilityDb — `(canonical, name) → bool`
 // ===========================================================================
 
-#[derive(Clone)]
-pub struct ResolvabilityEntry {
-    pub value: bool,
-    /// R3/R26/R28 fact-precise dependency signature. See
-    /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
-    pub fact_dep_signature: Arc<[FactVersionRef]>,
-    /// Project generation this entry was computed under. See
-    /// [`ImportedRegistryEntry::validated_at_generation`] for the
-    /// project-generation staleness contract.
-    pub validated_at_generation: u64,
-}
-
 pub type ResolvabilityKey = (Arc<str>, Arc<str>);
 
 pub struct ResolvabilityDb {
-    entries: DashMap<ResolvabilityKey, Arc<ResolvabilityEntry>>,
-    inflight: InflightTable<ResolvabilityKey>,
+    entries: DashMap<ResolvabilityKey, Arc<CacheEntry<bool>>>,
+    inflight: InflightTable<QueryFlightKey<ResolvabilityKey>>,
     live_counter: Arc<AtomicU64>,
 }
 
@@ -689,75 +822,19 @@ impl ResolvabilityDb {
     where
         F: FnOnce() -> Option<(bool, Arc<[FactVersionRef]>)>,
     {
-        // Publish-side counterpart: the live counter is bumped in the
-        // winner-only `post_publish` callback, NOT in `compute` — see
-        // `DeclarationLookupDb::get_or_compute` for the leak rationale.
-        let live_counter_for_publish = Arc::clone(&self.live_counter);
-        // Removal-side counterpart of the `post_publish` increment —
-        // decrements when the substrate removes an already-published
-        // entry so the live counter tracks live entries, not lifetime
-        // inserts.
-        let live_counter_for_removal = Arc::clone(&self.live_counter);
         // The keyed source canonical is the entry's self-root — strict
         // warm-read validation rejects a same-canonical edit or an
         // untracked keyed canonical.
-        let self_roots: [&str; 1] = [key.0.as_ref()];
-        // Snapshot the project generation BEFORE the cold compute
-        // dispatches any work — see `DeclarationLookupDb::get_or_compute`
-        // for the project-generation staleness rationale.
-        let generation_snapshot = ctx.project_type_store().current_project_generation();
-        cooperative_get_or_insert_with_post_publish(
-            &self.entries,
-            &self.inflight,
-            key.clone(),
-            |entry: &ResolvabilityEntry| {
-                if entry.validated_at_generation
-                    == ctx.project_type_store().current_project_generation()
-                    && validate_fact_signature_with_self_roots(
-                        ctx,
-                        &entry.fact_dep_signature,
-                        &self_roots,
-                    )
-                {
-                    bubble_fact_signature(ctx, &entry.fact_dep_signature);
-                    Some(entry.value)
-                } else {
-                    None
-                }
-            },
-            move || {
-                compute().map(|(value, fact_dep_signature)| ResolvabilityEntry {
-                    value,
-                    fact_dep_signature,
-                    validated_at_generation: generation_snapshot,
-                })
-            },
-            |entry: &ResolvabilityEntry| {
-                bubble_fact_signature(ctx, &entry.fact_dep_signature);
-                entry.value
-            },
-            |entry: &ResolvabilityEntry| {
-                entry.validated_at_generation
-                    == ctx.project_type_store().current_project_generation()
-                    && validate_fact_signature_with_self_roots(
-                        ctx,
-                        &entry.fact_dep_signature,
-                        &self_roots,
-                    )
-            },
-            move |_key: &ResolvabilityKey, _entry: &Arc<ResolvabilityEntry>| {
-                live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
-            },
-            // post_publish — fires once on the cold winner's thread,
-            // AFTER `entries.insert` AND a successful
-            // `revalidate_after_compute`. The live-counter bump rides
-            // here so it is paired with the published map entry.
-            move |_entry_arc: &Arc<ResolvabilityEntry>, _key: &ResolvabilityKey| {
-                live_counter_for_publish.fetch_add(1, Ordering::Relaxed);
-            },
-            // No retention budget on this cache shape — no publish fence.
-            None,
-        )
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
+        let node = SingleEntryArtifactNode {
+            entries: &self.entries,
+            inflight: &self.inflight,
+            live_counter: &self.live_counter,
+            compute: std::cell::RefCell::new(Some(move || {
+                compute().map(|(value, facts)| (value, facts, Arc::clone(&self_roots)))
+            })),
+        };
+        lookup(&node, key.clone(), ctx)
     }
 
     pub fn invalidate_canonical(&self, canonical_id: &str) {
@@ -808,25 +885,11 @@ impl Default for ResolvabilityDb {
 // the owner_canonical at insertion time and validates per-canonical only.
 // ===========================================================================
 
-#[derive(Clone)]
-pub struct OwnerCollectionEntry {
-    #[allow(dead_code)]
-    pub owner_canonical: Arc<str>,
-    pub value: Option<Arc<TypeExpr>>,
-    /// R3/R26/R28 fact-precise dependency signature. See
-    /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
-    pub fact_dep_signature: Arc<[FactVersionRef]>,
-    /// Project generation this entry was computed under. See
-    /// [`ImportedRegistryEntry::validated_at_generation`] for the
-    /// project-generation staleness contract.
-    pub validated_at_generation: u64,
-}
-
 pub type OwnerCollectionKey = (Arc<str>, Arc<str>); // (owner, name)
 
 pub struct OwnerCollectionDb {
-    entries: DashMap<OwnerCollectionKey, Arc<OwnerCollectionEntry>>,
-    inflight: InflightTable<OwnerCollectionKey>,
+    entries: DashMap<OwnerCollectionKey, Arc<CacheEntry<Option<Arc<TypeExpr>>>>>,
+    inflight: InflightTable<QueryFlightKey<OwnerCollectionKey>>,
     live_counter: Arc<AtomicU64>,
 }
 
@@ -852,77 +915,21 @@ impl OwnerCollectionDb {
     where
         F: FnOnce() -> Option<(Option<TypeExpr>, Arc<[FactVersionRef]>)>,
     {
-        let owner_canonical = key.0.clone();
-        // Publish-side counterpart: the live counter is bumped in the
-        // winner-only `post_publish` callback, NOT in `compute` — see
-        // `DeclarationLookupDb::get_or_compute` for the leak rationale.
-        let live_counter_for_publish = Arc::clone(&self.live_counter);
-        // Removal-side counterpart of the `post_publish` increment —
-        // decrements when the substrate removes an already-published
-        // entry so the live counter tracks live entries.
-        let live_counter_for_removal = Arc::clone(&self.live_counter);
         // The owner canonical is the entry's self-root. This cache is
         // body-bearing (stores a `TypeExpr`), so strict self-root
         // validation is the correctness floor — a content edit to the
         // owner file invalidates the cached collection expression.
-        let self_roots: [&str; 1] = [key.0.as_ref()];
-        // Snapshot the project generation BEFORE the cold compute
-        // dispatches any work — see `DeclarationLookupDb::get_or_compute`
-        // for the project-generation staleness rationale.
-        let generation_snapshot = ctx.project_type_store().current_project_generation();
-        cooperative_get_or_insert_with_post_publish(
-            &self.entries,
-            &self.inflight,
-            key.clone(),
-            |entry: &OwnerCollectionEntry| {
-                if entry.validated_at_generation
-                    == ctx.project_type_store().current_project_generation()
-                    && validate_fact_signature_with_self_roots(
-                        ctx,
-                        &entry.fact_dep_signature,
-                        &self_roots,
-                    )
-                {
-                    bubble_fact_signature(ctx, &entry.fact_dep_signature);
-                    Some(entry.value.clone())
-                } else {
-                    None
-                }
-            },
-            move || {
-                compute().map(|(value, fact_dep_signature)| OwnerCollectionEntry {
-                    owner_canonical,
-                    value: value.map(Arc::new),
-                    fact_dep_signature,
-                    validated_at_generation: generation_snapshot,
-                })
-            },
-            |entry: &OwnerCollectionEntry| {
-                bubble_fact_signature(ctx, &entry.fact_dep_signature);
-                entry.value.clone()
-            },
-            |entry: &OwnerCollectionEntry| {
-                entry.validated_at_generation
-                    == ctx.project_type_store().current_project_generation()
-                    && validate_fact_signature_with_self_roots(
-                        ctx,
-                        &entry.fact_dep_signature,
-                        &self_roots,
-                    )
-            },
-            move |_key: &OwnerCollectionKey, _entry: &Arc<OwnerCollectionEntry>| {
-                live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
-            },
-            // post_publish — fires once on the cold winner's thread,
-            // AFTER `entries.insert` AND a successful
-            // `revalidate_after_compute`. The live-counter bump rides
-            // here so it is paired with the published map entry.
-            move |_entry_arc: &Arc<OwnerCollectionEntry>, _key: &OwnerCollectionKey| {
-                live_counter_for_publish.fetch_add(1, Ordering::Relaxed);
-            },
-            // No retention budget on this cache shape — no publish fence.
-            None,
-        )
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
+        let node = SingleEntryArtifactNode {
+            entries: &self.entries,
+            inflight: &self.inflight,
+            live_counter: &self.live_counter,
+            compute: std::cell::RefCell::new(Some(move || {
+                compute()
+                    .map(|(value, facts)| (value.map(Arc::new), facts, Arc::clone(&self_roots)))
+            })),
+        };
+        lookup(&node, key.clone(), ctx)
     }
 
     pub fn invalidate_canonical(&self, canonical_id: &str) {
@@ -969,30 +976,13 @@ impl Default for OwnerCollectionDb {
 // 5. PreparedTargetDb — `PreparedTargetCacheKey → Option<(Arc<str>, Arc<str>)>`
 // ===========================================================================
 
-#[derive(Clone)]
-pub struct PreparedTargetEntry {
-    pub value: Option<(Arc<str>, Arc<str>)>,
-    /// R3/R26/R28 fact-precise dependency signature. See
-    /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
-    pub fact_dep_signature: Arc<[FactVersionRef]>,
-    /// Canonicals validated **strictly** as self-roots on every warm
-    /// read and post-compute revalidation: the active scope, the
-    /// original declaring canonical, AND the FINAL routed declaring
-    /// canonical (when the requested name re-exports through an
-    /// intermediate module to a third file). The cache key only
-    /// encodes the active scope + original declaring canonical, so the
-    /// entry carries the routed canonical explicitly — a content edit
-    /// to the third declaring file rejects the entry.
-    pub self_root_canonicals: Arc<[Arc<str>]>,
-    /// Project generation this entry was computed under. See
-    /// [`ImportedRegistryEntry::validated_at_generation`] for the
-    /// project-generation staleness contract.
-    pub validated_at_generation: u64,
-}
+/// The prepared-target value: the resolved `(canonical, symbol)` target
+/// pair, or `None` when the requested name has no prepared target.
+pub type PreparedTargetValue = Option<(Arc<str>, Arc<str>)>;
 
 pub struct PreparedTargetDb {
-    entries: DashMap<PreparedTargetCacheKey, Arc<PreparedTargetEntry>>,
-    inflight: InflightTable<PreparedTargetCacheKey>,
+    entries: DashMap<PreparedTargetCacheKey, Arc<CacheEntry<PreparedTargetValue>>>,
+    inflight: InflightTable<QueryFlightKey<PreparedTargetCacheKey>>,
     live_counter: Arc<AtomicU64>,
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`crate::cache_schema`] for the contract.
@@ -1045,28 +1035,15 @@ impl PreparedTargetDb {
         if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
-        let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-        let self_roots: Vec<&str> = entry_arc
-            .self_root_canonicals
-            .iter()
-            .map(Arc::as_ref)
-            .collect();
-        // The carrier validates only file-content whole-hashes; the
-        // generation gate is the project-shape counterpart (a
-        // `ProjectGeneration` reset bumps no file content).
-        if entry_arc.validated_at_generation
-            == ctx.project_type_store().current_project_generation()
-            && validate_fact_signature_with_self_roots(
-                ctx,
-                &entry_arc.fact_dep_signature,
-                &self_roots,
-            )
-        {
-            bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
-            Some(entry_arc.value.clone())
-        } else {
-            None
-        }
+        // Validation uses the entry's OWN `self_root_canonicals` — the
+        // active scope, the original declaring canonical, AND the final
+        // routed declaring canonical (when the requested name re-exports
+        // through an intermediate module). The cache key only encodes the
+        // first two, so the entry carries the routed canonical
+        // explicitly; validating from `key`-derived self-roots alone
+        // would leave a content edit to the third declaring file
+        // undetected.
+        single_entry_peek(&self.entries, key, ctx)
     }
 
     pub(crate) fn get_or_compute<F>(
@@ -1082,88 +1059,19 @@ impl PreparedTargetDb {
             Arc<[Arc<str>]>,
         )>,
     {
-        // Publish-side counterpart: the live counter is bumped in the
-        // winner-only `post_publish` callback, NOT in `compute` — see
-        // `DeclarationLookupDb::get_or_compute` for the leak rationale.
-        let live_counter_for_publish = Arc::clone(&self.live_counter);
-        // Removal-side counterpart of the `post_publish` increment —
-        // decrements when the substrate removes an already-published
-        // entry so the live counter tracks live entries. The cooperative
-        // substrate runs this on its own warm-hit stale-eviction path,
-        // so a lazily-evicted entry decrements `live_counter`
-        // symmetrically with the `post_publish` increment.
-        let live_counter_for_removal = Arc::clone(&self.live_counter);
         // The entry's `self_root_canonicals` (active scope + original
-        // declaring canonical + final routed declaring canonical)
-        // validate strictly. Reading them from the entry — not the
-        // key — covers the routed third declaring file the key never
-        // encodes.
-        let validate = |entry: &PreparedTargetEntry| -> Option<Option<(Arc<str>, Arc<str>)>> {
-            let self_roots: Vec<&str> =
-                entry.self_root_canonicals.iter().map(Arc::as_ref).collect();
-            // The carrier validates only file-content whole-hashes; the
-            // generation gate is the project-shape counterpart.
-            if entry.validated_at_generation
-                == ctx.project_type_store().current_project_generation()
-                && validate_fact_signature_with_self_roots(
-                    ctx,
-                    &entry.fact_dep_signature,
-                    &self_roots,
-                )
-            {
-                bubble_fact_signature(ctx, &entry.fact_dep_signature);
-                Some(entry.value.clone())
-            } else {
-                None
-            }
+        // declaring canonical + final routed declaring canonical) are
+        // supplied by `compute` itself — reading them from the cold build
+        // (not the key) covers the routed third declaring file the key
+        // never encodes. The adapter validates them strictly on every
+        // warm read and post-compute revalidation.
+        let node = SingleEntryArtifactNode {
+            entries: &self.entries,
+            inflight: &self.inflight,
+            live_counter: &self.live_counter,
+            compute: std::cell::RefCell::new(Some(compute)),
         };
-        // Snapshot the project generation BEFORE the cold compute
-        // dispatches any work — see `DeclarationLookupDb::get_or_compute`
-        // for the project-generation staleness rationale.
-        let generation_snapshot = ctx.project_type_store().current_project_generation();
-        cooperative_get_or_insert_with_post_publish(
-            &self.entries,
-            &self.inflight,
-            key.clone(),
-            validate,
-            move || {
-                compute().map(|(value, fact_dep_signature, self_root_canonicals)| {
-                    PreparedTargetEntry {
-                        value,
-                        fact_dep_signature,
-                        self_root_canonicals,
-                        validated_at_generation: generation_snapshot,
-                    }
-                })
-            },
-            |entry: &PreparedTargetEntry| {
-                bubble_fact_signature(ctx, &entry.fact_dep_signature);
-                entry.value.clone()
-            },
-            |entry: &PreparedTargetEntry| {
-                let self_roots: Vec<&str> =
-                    entry.self_root_canonicals.iter().map(Arc::as_ref).collect();
-                entry.validated_at_generation
-                    == ctx.project_type_store().current_project_generation()
-                    && validate_fact_signature_with_self_roots(
-                        ctx,
-                        &entry.fact_dep_signature,
-                        &self_roots,
-                    )
-            },
-            move |_key: &PreparedTargetCacheKey, _entry: &Arc<PreparedTargetEntry>| {
-                live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
-            },
-            // post_publish — fires once on the cold winner's thread,
-            // AFTER `entries.insert` AND a successful
-            // `revalidate_after_compute`. The live-counter bump rides
-            // here so it is paired with the published map entry.
-            move |_entry_arc: &Arc<PreparedTargetEntry>, _key: &PreparedTargetCacheKey| {
-                live_counter_for_publish.fetch_add(1, Ordering::Relaxed);
-            },
-            // No retention budget on this cache shape — no publish fence.
-            None,
-        )
+        lookup(&node, key.clone(), ctx)
     }
 
     pub fn invalidate_canonical(&self, canonical_id: &str) {
@@ -1228,9 +1136,9 @@ impl PreparedTargetDb {
             decl_symbol_name: Arc::from("Synthetic"),
             requested_name: Arc::from("Synthetic"),
         };
-        let entry = Arc::new(PreparedTargetEntry {
+        let entry = Arc::new(CacheEntry {
             value: None,
-            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+            signature: ReadSetSignature::empty(),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
             validated_at_generation: 0,
         });
@@ -1301,29 +1209,18 @@ impl crate::cache_schema::CacheSchemaVersioned for PreparedTargetDb {
 // `descend_published_member` and re-consult the cache at each hop.
 // ===========================================================================
 
-#[derive(Clone)]
-pub struct ShapeCacheEntry {
-    pub value: MaterializedTypeExpr,
-    /// R3/R26/R28 fact-precise dependency signature. See
-    /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
-    pub fact_dep_signature: Arc<[FactVersionRef]>,
-    /// Project generation this entry was computed under. See
-    /// [`ImportedRegistryEntry::validated_at_generation`] for the
-    /// project-generation staleness contract.
-    ///
-    /// Overlay/base isolation for `SemanticNode`-subject entries does
-    /// NOT rely on `SemanticNodeId` being generation-tagged (the arena
-    /// is append-only across generations and IDs are raw `u64`).
-    /// Isolation comes from three mechanisms working together:
-    ///   1. `observe_materialize_scope` is overlay-aware and pins the
-    ///      overlay `IndexedReady` when an overlay covers the scope.
-    ///   2. The fact signature self-roots on that observation's
-    ///      `whole_hash`. A base-mode peek against an overlay-rooted
-    ///      entry fails `validate_fact_signature_with_self_roots`.
-    ///   3. This field plus `bump_project_generation_and_evict`
-    ///      detect cross-generation drift on overlay open/close.
-    pub validated_at_generation: u64,
-}
+// Overlay/base isolation for `SemanticNode`-subject entries does NOT
+// rely on `SemanticNodeId` being generation-tagged (the arena is
+// append-only across generations and IDs are raw `u64`). Isolation comes
+// from three mechanisms working together:
+//   1. `observe_materialize_scope` is overlay-aware and pins the overlay
+//      `IndexedReady` when an overlay covers the scope.
+//   2. The entry's fact signature self-roots on that observation's
+//      `whole_hash`. A base-mode peek against an overlay-rooted entry
+//      fails `ReadSetSignature::validate_with_self_roots`.
+//   3. The `CacheEntry::validated_at_generation` field plus
+//      `bump_project_generation_and_evict` detect cross-generation drift
+//      on overlay open/close.
 
 /// Subject of a [`ShapeCacheKey`] — the *what* whose shape is cached.
 ///
@@ -1492,8 +1389,8 @@ impl ShapeCacheKey {
 }
 
 pub struct ShapeCacheDb {
-    entries: DashMap<ShapeCacheKey, Arc<ShapeCacheEntry>>,
-    inflight: InflightTable<ShapeCacheKey>,
+    entries: DashMap<ShapeCacheKey, Arc<CacheEntry<MaterializedTypeExpr>>>,
+    inflight: InflightTable<QueryFlightKey<ShapeCacheKey>>,
     live_counter: Arc<AtomicU64>,
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`crate::cache_schema`] for the contract.
@@ -1539,28 +1436,9 @@ impl ShapeCacheDb {
             return None;
         }
         // The subject's scope canonical is the entry's self-root —
-        // strict warm-read validation rejects a same-scope content
-        // edit.
-        let scope = key.subject.scope_canonical().clone();
-        let self_roots: [&str; 1] = [scope.as_ref()];
-        let result = (|| -> Option<MaterializedTypeExpr> {
-            let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-            // The carrier validates only file-content whole-hashes; the
-            // generation gate is the project-shape counterpart.
-            if entry_arc.validated_at_generation
-                == ctx.project_type_store().current_project_generation()
-                && validate_fact_signature_with_self_roots(
-                    ctx,
-                    &entry_arc.fact_dep_signature,
-                    &self_roots,
-                )
-            {
-                bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
-                Some(entry_arc.value.clone())
-            } else {
-                None
-            }
-        })();
+        // strict warm-read validation rejects a same-scope content edit.
+        // The entry carries its own self-roots, validated strictly.
+        let result = single_entry_peek(&self.entries, key, ctx);
         if let Some(rctx) = crate::request_context::current_request_context() {
             let counter = match &key.subject {
                 ShapeSubject::TypeExpr { .. } => &rctx.cache_counters.materialize_memo,
@@ -1584,77 +1462,19 @@ impl ShapeCacheDb {
     where
         F: FnOnce() -> Option<(MaterializedTypeExpr, Arc<[FactVersionRef]>)>,
     {
-        // Publish-side counterpart: the live counter is bumped in the
-        // winner-only `post_publish` callback, NOT in `compute` — see
-        // `DeclarationLookupDb::get_or_compute` for the leak rationale.
-        let live_counter_for_publish = Arc::clone(&self.live_counter);
-        // Removal-side counterpart of the `post_publish` increment —
-        // decrements when the substrate removes an already-published
-        // entry so the live counter tracks live entries.
-        let live_counter_for_removal = Arc::clone(&self.live_counter);
         // The subject's scope canonical is the entry's self-root —
-        // strict warm-read validation.
-        let scope = key.subject.scope_canonical().clone();
-        // Snapshot the project generation BEFORE the cold compute
-        // dispatches any work — see `DeclarationLookupDb::get_or_compute`
-        // for the project-generation staleness rationale.
-        let generation_snapshot = ctx.project_type_store().current_project_generation();
-        let scope_for_validate = Arc::clone(&scope);
-        let scope_for_revalidate = Arc::clone(&scope);
-        cooperative_get_or_insert_with_post_publish(
-            &self.entries,
-            &self.inflight,
-            key.clone(),
-            move |entry: &ShapeCacheEntry| {
-                let self_roots: [&str; 1] = [scope_for_validate.as_ref()];
-                if entry.validated_at_generation
-                    == ctx.project_type_store().current_project_generation()
-                    && validate_fact_signature_with_self_roots(
-                        ctx,
-                        &entry.fact_dep_signature,
-                        &self_roots,
-                    )
-                {
-                    bubble_fact_signature(ctx, &entry.fact_dep_signature);
-                    Some(entry.value.clone())
-                } else {
-                    None
-                }
-            },
-            move || {
-                compute().map(|(value, fact_dep_signature)| ShapeCacheEntry {
-                    value,
-                    fact_dep_signature,
-                    validated_at_generation: generation_snapshot,
-                })
-            },
-            |entry: &ShapeCacheEntry| {
-                bubble_fact_signature(ctx, &entry.fact_dep_signature);
-                entry.value.clone()
-            },
-            move |entry: &ShapeCacheEntry| {
-                let self_roots: [&str; 1] = [scope_for_revalidate.as_ref()];
-                entry.validated_at_generation
-                    == ctx.project_type_store().current_project_generation()
-                    && validate_fact_signature_with_self_roots(
-                        ctx,
-                        &entry.fact_dep_signature,
-                        &self_roots,
-                    )
-            },
-            move |_key: &ShapeCacheKey, _entry: &Arc<ShapeCacheEntry>| {
-                live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
-            },
-            // post_publish — fires once on the cold winner's thread,
-            // AFTER `entries.insert` AND a successful
-            // `revalidate_after_compute`. The live-counter bump rides
-            // here so it is paired with the published map entry.
-            move |_entry_arc: &Arc<ShapeCacheEntry>, _key: &ShapeCacheKey| {
-                live_counter_for_publish.fetch_add(1, Ordering::Relaxed);
-            },
-            // No retention budget on this cache shape — no publish fence.
-            None,
-        )
+        // strict warm-read validation rejects a same-scope content edit.
+        let self_roots: Arc<[Arc<str>]> =
+            Arc::from(vec![Arc::clone(key.subject.scope_canonical())]);
+        let node = SingleEntryArtifactNode {
+            entries: &self.entries,
+            inflight: &self.inflight,
+            live_counter: &self.live_counter,
+            compute: std::cell::RefCell::new(Some(move || {
+                compute().map(|(value, facts)| (value, facts, Arc::clone(&self_roots)))
+            })),
+        };
+        lookup(&node, key.clone(), ctx)
     }
 
     /// Universal-caching admission helper. Admits an already-computed
@@ -1725,14 +1545,15 @@ impl ShapeCacheDb {
             Arc::new(TypeExpr::Unknown { raw: String::new() }),
             ProjectionMode::Shallow,
         );
-        let entry = Arc::new(ShapeCacheEntry {
+        let entry = Arc::new(CacheEntry {
             value: MaterializedTypeExpr {
                 node_id: None,
                 type_expr: TypeExpr::Unknown { raw: String::new() },
                 dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
                 cache_suppress: false,
             },
-            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+            signature: ReadSetSignature::empty(),
+            self_root_canonicals: Arc::from(vec![Arc::clone(key.subject.scope_canonical())]),
             validated_at_generation: 0,
         });
         self.entries.insert(key, entry);
@@ -1792,14 +1613,15 @@ impl ShapeCacheDb {
             ShapeSubject::SemanticNode { node, .. } => Some(*node),
             ShapeSubject::TypeExpr { .. } => None,
         };
-        let entry = Arc::new(ShapeCacheEntry {
+        let entry = Arc::new(CacheEntry {
             value: MaterializedTypeExpr {
                 node_id: node_for_provenance,
                 type_expr: deep_type,
                 dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
                 cache_suppress: false,
             },
-            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+            signature: ReadSetSignature::empty(),
+            self_root_canonicals: Arc::from(vec![Arc::clone(key.subject.scope_canonical())]),
             validated_at_generation: 0,
         });
         self.entries.insert(key, entry);
@@ -1871,21 +1693,9 @@ pub enum PreparedSurfacePayload {
     Unsupported,
 }
 
-#[derive(Clone)]
-pub struct PreparedSurfaceEntry {
-    pub value: PreparedSurfacePayload,
-    /// R3/R26/R28 fact-precise dependency signature. See
-    /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
-    pub fact_dep_signature: Arc<[FactVersionRef]>,
-    /// Project generation this entry was computed under. See
-    /// [`ImportedRegistryEntry::validated_at_generation`] for the
-    /// project-generation staleness contract.
-    pub validated_at_generation: u64,
-}
-
 pub struct PreparedSurfaceDb {
-    entries: DashMap<PreparedSurfaceCacheKey, Arc<PreparedSurfaceEntry>>,
-    inflight: InflightTable<PreparedSurfaceCacheKey>,
+    entries: DashMap<PreparedSurfaceCacheKey, Arc<CacheEntry<PreparedSurfacePayload>>>,
+    inflight: InflightTable<QueryFlightKey<PreparedSurfaceCacheKey>>,
     live_counter: Arc<AtomicU64>,
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`crate::cache_schema`] for the contract.
@@ -1934,25 +1744,7 @@ impl PreparedSurfaceDb {
         // surface encodes body-sensitive structure, so strict self-root
         // validation is the correctness floor — any content edit to the
         // keyed file rejects the cached projection.
-        let self_roots: [&str; 1] = [key.canonical_id.as_ref()];
-        let result = (|| -> Option<PreparedSurfacePayload> {
-            let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-            // The carrier validates only file-content whole-hashes; the
-            // generation gate is the project-shape counterpart.
-            if entry_arc.validated_at_generation
-                == ctx.project_type_store().current_project_generation()
-                && validate_fact_signature_with_self_roots(
-                    ctx,
-                    &entry_arc.fact_dep_signature,
-                    &self_roots,
-                )
-            {
-                bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
-                Some(entry_arc.value.clone())
-            } else {
-                None
-            }
-        })();
+        let result = single_entry_peek(&self.entries, key, ctx);
         if let Some(rctx) = crate::request_context::current_request_context() {
             if result.is_some() {
                 rctx.cache_counters
@@ -1978,73 +1770,18 @@ impl PreparedSurfaceDb {
     where
         F: FnOnce() -> Option<(PreparedSurfacePayload, Arc<[FactVersionRef]>)>,
     {
-        // Publish-side counterpart: the live counter is bumped in the
-        // winner-only `post_publish` callback, NOT in `compute` — see
-        // `DeclarationLookupDb::get_or_compute` for the leak rationale.
-        let live_counter_for_publish = Arc::clone(&self.live_counter);
-        // Removal-side counterpart of the `post_publish` increment —
-        // decrements when the substrate removes an already-published
-        // entry so the live counter tracks live entries.
-        let live_counter_for_removal = Arc::clone(&self.live_counter);
         // The keyed canonical is the entry's self-root — strict
         // warm-read validation (body-sensitive surface).
-        let self_roots: [&str; 1] = [key.canonical_id.as_ref()];
-        // Snapshot the project generation BEFORE the cold compute
-        // dispatches any work — see `DeclarationLookupDb::get_or_compute`
-        // for the project-generation staleness rationale.
-        let generation_snapshot = ctx.project_type_store().current_project_generation();
-        cooperative_get_or_insert_with_post_publish(
-            &self.entries,
-            &self.inflight,
-            key.clone(),
-            |entry: &PreparedSurfaceEntry| {
-                if entry.validated_at_generation
-                    == ctx.project_type_store().current_project_generation()
-                    && validate_fact_signature_with_self_roots(
-                        ctx,
-                        &entry.fact_dep_signature,
-                        &self_roots,
-                    )
-                {
-                    bubble_fact_signature(ctx, &entry.fact_dep_signature);
-                    Some(entry.value.clone())
-                } else {
-                    None
-                }
-            },
-            move || {
-                compute().map(|(value, fact_dep_signature)| PreparedSurfaceEntry {
-                    value,
-                    fact_dep_signature,
-                    validated_at_generation: generation_snapshot,
-                })
-            },
-            |entry: &PreparedSurfaceEntry| {
-                bubble_fact_signature(ctx, &entry.fact_dep_signature);
-                entry.value.clone()
-            },
-            |entry: &PreparedSurfaceEntry| {
-                entry.validated_at_generation
-                    == ctx.project_type_store().current_project_generation()
-                    && validate_fact_signature_with_self_roots(
-                        ctx,
-                        &entry.fact_dep_signature,
-                        &self_roots,
-                    )
-            },
-            move |_key: &PreparedSurfaceCacheKey, _entry: &Arc<PreparedSurfaceEntry>| {
-                live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
-            },
-            // post_publish — fires once on the cold winner's thread,
-            // AFTER `entries.insert` AND a successful
-            // `revalidate_after_compute`. The live-counter bump rides
-            // here so it is paired with the published map entry.
-            move |_entry_arc: &Arc<PreparedSurfaceEntry>, _key: &PreparedSurfaceCacheKey| {
-                live_counter_for_publish.fetch_add(1, Ordering::Relaxed);
-            },
-            // No retention budget on this cache shape — no publish fence.
-            None,
-        )
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.canonical_id)]);
+        let node = SingleEntryArtifactNode {
+            entries: &self.entries,
+            inflight: &self.inflight,
+            live_counter: &self.live_counter,
+            compute: std::cell::RefCell::new(Some(move || {
+                compute().map(|(value, facts)| (value, facts, Arc::clone(&self_roots)))
+            })),
+        };
+        lookup(&node, key.clone(), ctx)
     }
 
     pub fn invalidate_canonical(&self, canonical_id: &str) {
@@ -2092,9 +1829,10 @@ impl PreparedSurfaceDb {
             substitutions: PreparedSubstitutionKey::Empty,
             from_root_body: true,
         };
-        let entry = Arc::new(PreparedSurfaceEntry {
+        let entry = Arc::new(CacheEntry {
             value: PreparedSurfacePayload::Empty,
-            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+            signature: ReadSetSignature::empty(),
+            self_root_canonicals: Arc::from(vec![Arc::clone(&key.canonical_id)]),
             validated_at_generation: 0,
         });
         self.entries.insert(key, entry);
@@ -2130,21 +1868,9 @@ impl crate::cache_schema::CacheSchemaVersioned for PreparedSurfaceDb {
 // 9. PreparedMemberDb — `PreparedMemberCacheKey → Option<ProjectedMember>`
 // ===========================================================================
 
-#[derive(Clone)]
-pub struct PreparedMemberEntry {
-    pub value: Option<Arc<ProjectedMember>>,
-    /// R3/R26/R28 fact-precise dependency signature. See
-    /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
-    pub fact_dep_signature: Arc<[FactVersionRef]>,
-    /// Project generation this entry was computed under. See
-    /// [`ImportedRegistryEntry::validated_at_generation`] for the
-    /// project-generation staleness contract.
-    pub validated_at_generation: u64,
-}
-
 pub struct PreparedMemberDb {
-    entries: DashMap<PreparedMemberCacheKey, Arc<PreparedMemberEntry>>,
-    inflight: InflightTable<PreparedMemberCacheKey>,
+    entries: DashMap<PreparedMemberCacheKey, Arc<CacheEntry<Option<Arc<ProjectedMember>>>>>,
+    inflight: InflightTable<QueryFlightKey<PreparedMemberCacheKey>>,
     live_counter: Arc<AtomicU64>,
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`crate::cache_schema`] for the contract.
@@ -2191,25 +1917,7 @@ impl PreparedMemberDb {
         }
         // The keyed canonical is the entry's self-root — strict
         // warm-read validation rejects a same-canonical content edit.
-        let self_roots: [&str; 1] = [key.canonical_id.as_ref()];
-        let result = (|| -> Option<Option<Arc<ProjectedMember>>> {
-            let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-            // The carrier validates only file-content whole-hashes; the
-            // generation gate is the project-shape counterpart.
-            if entry_arc.validated_at_generation
-                == ctx.project_type_store().current_project_generation()
-                && validate_fact_signature_with_self_roots(
-                    ctx,
-                    &entry_arc.fact_dep_signature,
-                    &self_roots,
-                )
-            {
-                bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
-                Some(entry_arc.value.clone())
-            } else {
-                None
-            }
-        })();
+        let result = single_entry_peek(&self.entries, key, ctx);
         if let Some(rctx) = crate::request_context::current_request_context() {
             if result.is_some() {
                 rctx.cache_counters
@@ -2235,73 +1943,19 @@ impl PreparedMemberDb {
     where
         F: FnOnce() -> Option<(Option<ProjectedMember>, Arc<[FactVersionRef]>)>,
     {
-        // Publish-side counterpart: the live counter is bumped in the
-        // winner-only `post_publish` callback, NOT in `compute` — see
-        // `DeclarationLookupDb::get_or_compute` for the leak rationale.
-        let live_counter_for_publish = Arc::clone(&self.live_counter);
-        // Removal-side counterpart of the `post_publish` increment —
-        // decrements when the substrate removes an already-published
-        // entry so the live counter tracks live entries.
-        let live_counter_for_removal = Arc::clone(&self.live_counter);
         // The keyed canonical is the entry's self-root — strict
         // warm-read validation.
-        let self_roots: [&str; 1] = [key.canonical_id.as_ref()];
-        // Snapshot the project generation BEFORE the cold compute
-        // dispatches any work — see `DeclarationLookupDb::get_or_compute`
-        // for the project-generation staleness rationale.
-        let generation_snapshot = ctx.project_type_store().current_project_generation();
-        cooperative_get_or_insert_with_post_publish(
-            &self.entries,
-            &self.inflight,
-            key.clone(),
-            |entry: &PreparedMemberEntry| {
-                if entry.validated_at_generation
-                    == ctx.project_type_store().current_project_generation()
-                    && validate_fact_signature_with_self_roots(
-                        ctx,
-                        &entry.fact_dep_signature,
-                        &self_roots,
-                    )
-                {
-                    bubble_fact_signature(ctx, &entry.fact_dep_signature);
-                    Some(entry.value.clone())
-                } else {
-                    None
-                }
-            },
-            move || {
-                compute().map(|(value, fact_dep_signature)| PreparedMemberEntry {
-                    value: value.map(Arc::new),
-                    fact_dep_signature,
-                    validated_at_generation: generation_snapshot,
-                })
-            },
-            |entry: &PreparedMemberEntry| {
-                bubble_fact_signature(ctx, &entry.fact_dep_signature);
-                entry.value.clone()
-            },
-            |entry: &PreparedMemberEntry| {
-                entry.validated_at_generation
-                    == ctx.project_type_store().current_project_generation()
-                    && validate_fact_signature_with_self_roots(
-                        ctx,
-                        &entry.fact_dep_signature,
-                        &self_roots,
-                    )
-            },
-            move |_key: &PreparedMemberCacheKey, _entry: &Arc<PreparedMemberEntry>| {
-                live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
-            },
-            // post_publish — fires once on the cold winner's thread,
-            // AFTER `entries.insert` AND a successful
-            // `revalidate_after_compute`. The live-counter bump rides
-            // here so it is paired with the published map entry.
-            move |_entry_arc: &Arc<PreparedMemberEntry>, _key: &PreparedMemberCacheKey| {
-                live_counter_for_publish.fetch_add(1, Ordering::Relaxed);
-            },
-            // No retention budget on this cache shape — no publish fence.
-            None,
-        )
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.canonical_id)]);
+        let node = SingleEntryArtifactNode {
+            entries: &self.entries,
+            inflight: &self.inflight,
+            live_counter: &self.live_counter,
+            compute: std::cell::RefCell::new(Some(move || {
+                compute()
+                    .map(|(value, facts)| (value.map(Arc::new), facts, Arc::clone(&self_roots)))
+            })),
+        };
+        lookup(&node, key.clone(), ctx)
     }
 
     pub fn invalidate_canonical(&self, canonical_id: &str) {
@@ -2351,9 +2005,10 @@ impl PreparedMemberDb {
             substitutions: PreparedSubstitutionKey::Empty,
             from_root_body: true,
         };
-        let entry = Arc::new(PreparedMemberEntry {
+        let entry = Arc::new(CacheEntry {
             value: None,
-            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+            signature: ReadSetSignature::empty(),
+            self_root_canonicals: Arc::from(vec![Arc::clone(&key.canonical_id)]),
             validated_at_generation: 0,
         });
         self.entries.insert(key, entry);
@@ -2389,21 +2044,9 @@ impl crate::cache_schema::CacheSchemaVersioned for PreparedMemberDb {
 // 10. RoutedExprSurfaceDb — `RoutedExprSurfaceCacheKey → TypeExpr`
 // ===========================================================================
 
-#[derive(Clone)]
-pub struct RoutedExprSurfaceEntry {
-    pub value: Arc<TypeExpr>,
-    /// R3/R26/R28 fact-precise dependency signature. See
-    /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
-    pub fact_dep_signature: Arc<[FactVersionRef]>,
-    /// Project generation this entry was computed under. See
-    /// [`ImportedRegistryEntry::validated_at_generation`] for the
-    /// project-generation staleness contract.
-    pub validated_at_generation: u64,
-}
-
 pub struct RoutedExprSurfaceDb {
-    entries: DashMap<RoutedExprSurfaceCacheKey, Arc<RoutedExprSurfaceEntry>>,
-    inflight: InflightTable<RoutedExprSurfaceCacheKey>,
+    entries: DashMap<RoutedExprSurfaceCacheKey, Arc<CacheEntry<Arc<TypeExpr>>>>,
+    inflight: InflightTable<QueryFlightKey<RoutedExprSurfaceCacheKey>>,
     live_counter: Arc<AtomicU64>,
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`crate::cache_schema`] for the contract.
@@ -2450,24 +2093,7 @@ impl RoutedExprSurfaceDb {
         }
         // The keyed scope canonical is the entry's self-root — strict
         // warm-read validation rejects a same-scope content edit.
-        let self_roots: [&str; 1] = [key.scope_canonical_id.as_ref()];
-        let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-        // The carrier validates only file-content whole-hashes; the
-        // generation gate is the project-shape counterpart (a
-        // `ProjectGeneration` reset bumps no file content).
-        if entry_arc.validated_at_generation
-            == ctx.project_type_store().current_project_generation()
-            && validate_fact_signature_with_self_roots(
-                ctx,
-                &entry_arc.fact_dep_signature,
-                &self_roots,
-            )
-        {
-            bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
-            Some(entry_arc.value.clone())
-        } else {
-            None
-        }
+        single_entry_peek(&self.entries, key, ctx)
     }
 
     pub(crate) fn get_or_compute<F>(
@@ -2479,73 +2105,18 @@ impl RoutedExprSurfaceDb {
     where
         F: FnOnce() -> Option<(TypeExpr, Arc<[FactVersionRef]>)>,
     {
-        // Publish-side counterpart: the live counter is bumped in the
-        // winner-only `post_publish` callback, NOT in `compute` — see
-        // `DeclarationLookupDb::get_or_compute` for the leak rationale.
-        let live_counter_for_publish = Arc::clone(&self.live_counter);
-        // Removal-side counterpart of the `post_publish` increment —
-        // decrements when the substrate removes an already-published
-        // entry so the live counter tracks live entries.
-        let live_counter_for_removal = Arc::clone(&self.live_counter);
         // The keyed scope canonical is the entry's self-root — strict
         // warm-read validation.
-        let self_roots: [&str; 1] = [key.scope_canonical_id.as_ref()];
-        // Snapshot the project generation BEFORE the cold compute
-        // dispatches any work — see `DeclarationLookupDb::get_or_compute`
-        // for the project-generation staleness rationale.
-        let generation_snapshot = ctx.project_type_store().current_project_generation();
-        cooperative_get_or_insert_with_post_publish(
-            &self.entries,
-            &self.inflight,
-            key.clone(),
-            |entry: &RoutedExprSurfaceEntry| {
-                if entry.validated_at_generation
-                    == ctx.project_type_store().current_project_generation()
-                    && validate_fact_signature_with_self_roots(
-                        ctx,
-                        &entry.fact_dep_signature,
-                        &self_roots,
-                    )
-                {
-                    bubble_fact_signature(ctx, &entry.fact_dep_signature);
-                    Some(entry.value.clone())
-                } else {
-                    None
-                }
-            },
-            move || {
-                compute().map(|(value, fact_dep_signature)| RoutedExprSurfaceEntry {
-                    value: Arc::new(value),
-                    fact_dep_signature,
-                    validated_at_generation: generation_snapshot,
-                })
-            },
-            |entry: &RoutedExprSurfaceEntry| {
-                bubble_fact_signature(ctx, &entry.fact_dep_signature);
-                entry.value.clone()
-            },
-            |entry: &RoutedExprSurfaceEntry| {
-                entry.validated_at_generation
-                    == ctx.project_type_store().current_project_generation()
-                    && validate_fact_signature_with_self_roots(
-                        ctx,
-                        &entry.fact_dep_signature,
-                        &self_roots,
-                    )
-            },
-            move |_key: &RoutedExprSurfaceCacheKey, _entry: &Arc<RoutedExprSurfaceEntry>| {
-                live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
-            },
-            // post_publish — fires once on the cold winner's thread,
-            // AFTER `entries.insert` AND a successful
-            // `revalidate_after_compute`. The live-counter bump rides
-            // here so it is paired with the published map entry.
-            move |_entry_arc: &Arc<RoutedExprSurfaceEntry>, _key: &RoutedExprSurfaceCacheKey| {
-                live_counter_for_publish.fetch_add(1, Ordering::Relaxed);
-            },
-            // No retention budget on this cache shape — no publish fence.
-            None,
-        )
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.scope_canonical_id)]);
+        let node = SingleEntryArtifactNode {
+            entries: &self.entries,
+            inflight: &self.inflight,
+            live_counter: &self.live_counter,
+            compute: std::cell::RefCell::new(Some(move || {
+                compute().map(|(value, facts)| (Arc::new(value), facts, Arc::clone(&self_roots)))
+            })),
+        };
+        lookup(&node, key.clone(), ctx)
     }
 
     pub fn invalidate_canonical(&self, canonical_id: &str) {
@@ -2592,9 +2163,10 @@ impl RoutedExprSurfaceDb {
             root_symbol: Arc::from("Synthetic"),
             route: RouteDemand::Whole,
         };
-        let entry = Arc::new(RoutedExprSurfaceEntry {
+        let entry = Arc::new(CacheEntry {
             value: Arc::new(TypeExpr::Unknown { raw: String::new() }),
-            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+            signature: ReadSetSignature::empty(),
+            self_root_canonicals: Arc::from(vec![Arc::clone(&key.scope_canonical_id)]),
             validated_at_generation: 0,
         });
         self.entries.insert(key, entry);
@@ -2677,16 +2249,6 @@ pub struct MaterializeStructureEntry {
     /// reuse). An untracked or hash-mismatched self-root rejects the
     /// entry.
     pub self_root_canonicals: Arc<[Arc<str>]>,
-    /// Retention-ledger admission identity — the unique sequence number
-    /// this entry is recorded under in the `GlobalRetentionBudget`
-    /// ledger. Allocated once at entry construction; `register_post_publish`
-    /// records the entry under it, and every removal path forgets exactly
-    /// this ledger record via `forget_seq`. Scoping the ledger removal to
-    /// this seq (rather than the cache key) means a concurrently-admitted
-    /// fresh entry that republished the same key keeps its own ledger
-    /// record — symmetric with the `Arc::ptr_eq` guard on the
-    /// reverse-index removal.
-    pub admission_seq: u64,
     /// Project generation this entry was computed under, captured by the
     /// cold `compute` closure before it dispatched any work. The carrier
     /// (`read_set_signature`) validates only file-content whole-hashes;
@@ -2704,133 +2266,39 @@ pub struct MaterializeStructureEntry {
     pub validated_at_generation: u64,
 }
 
-/// Per-canonical reverse index shared by [`MaterializeStructureDb`]
-/// and [`RefCycleResultDb`]: maps each canonical id to the set of
-/// cache keys whose carrier fact rail references it, paired with the
-/// registered `ReadSetSignature.facts` `Arc` (the `Arc::ptr_eq`
-/// discriminant for the per-canonical invalidation drain).
-type CanonicalToKeysIndex<K> =
-    DashMap<Arc<str>, parking_lot::Mutex<rustc_hash::FxHashMap<K, Arc<[FactVersionRef]>>>>;
-
-/// Remove the `Arc::ptr_eq`-matching `key` registration from
-/// `canonical`'s `canonical_to_keys` shard, then drop the outer shard
-/// when that removal empties its inner map.
+/// Final-result cache for the structural materialiser.
 ///
-/// Shared by every `canonical_to_keys` removal path in
-/// [`MaterializeStructureDb`] and [`RefCycleResultDb`] — budget
-/// eviction, per-canonical-invalidation cross-canonical cleanup, and
-/// cooperative-removal `unregister_post_publish`. Leaving an emptied
-/// shard resident strands an empty `Mutex<map>` plus the canonical
-/// `Arc<str>` for the lifetime of the project generation; under churn
-/// across many distinct canonicals the reverse index would then grow
-/// unbounded, defeating the bound the `GlobalRetentionBudget` exists to
-/// enforce.
-///
-/// **Concurrency.** The outer `canonical_to_keys` is a `DashMap`. The
-/// inner-map removal releases the per-canonical `Mutex` before the
-/// outer drop is attempted; the outer drop is a single
-/// [`DashMap::remove_if`] whose emptiness predicate runs while the
-/// `DashMap` shard write lock is held. `register_post_publish`'s
-/// inserter holds that same shard write lock for the whole
-/// `entry(canonical).or_insert_with(...)` + inner `insert`, so the two
-/// serialise: either the inserter runs first and the predicate observes
-/// the inner map non-empty (drop skipped), or `remove_if` runs first,
-/// drops the empty outer entry, and the inserter's later
-/// `or_insert_with` re-creates a fresh shard cleanly. A registration is
-/// never stranded in a just-removed outer entry. Mirrors the
-/// `BoundedCandidateMap::remove_candidate_by_seq` slot-detach pattern.
-fn prune_canonical_to_keys_registration<K>(
-    canonical_to_keys: &CanonicalToKeysIndex<K>,
-    canonical: &Arc<str>,
-    key: &K,
-    expected_facts: &Arc<[FactVersionRef]>,
-) where
-    K: Eq + std::hash::Hash,
-{
-    if let Some(shard) = canonical_to_keys.get(canonical) {
-        let mut map = shard.lock();
-        if let Some(existing_sig) = map.get(key) {
-            // `Arc::ptr_eq` guard — drop only OUR registration, never a
-            // concurrent fresh winner's that republished the same key.
-            if Arc::ptr_eq(existing_sig, expected_facts) {
-                map.remove(key);
-            }
-        }
-    }
-    // Drop the outer shard iff its inner map is now empty. The predicate
-    // holds the `DashMap` shard write lock, so it cannot race a
-    // concurrent `register_post_publish` inserter on this shard.
-    canonical_to_keys.remove_if(canonical, |_, mutex| mutex.lock().is_empty());
-}
-
-/// Final-result cache for the structural
-/// materialiser. Reverse-index `canonical_to_keys` enables
-/// `Arc::ptr_eq`-based invalidation cleanup; cooperative-admission's
-/// `post_publish` callback wires the registration.
-///
-/// The cache key carries a content-derived `SemanticNodeId`, so each
-/// distinct content version of an owner produces a fresh entry. The
-/// embedded [`crate::bounded_query_retention::GlobalRetentionBudget`] is
-/// the routine memory-reclamation path: the `post_publish` hook records
-/// each admission and FIFO-evicts the oldest entries past
-/// [`Self::MAX_ENTRIES`], so a long-lived session does not accumulate
-/// stale per-version structural materialisations unbounded.
+/// Routes through the shared
+/// [`ReverseIndexedCandidateStore`](crate::cache_runtime::ReverseIndexedCandidateStore):
+/// the per-canonical reverse index enables O(K) invalidation cleanup, and
+/// the embedded FIFO retention budget is the routine memory-reclamation
+/// path (the cache key carries a content-derived `SemanticNodeId`, so each
+/// distinct content version of an owner produces a fresh candidate; the
+/// budget FIFO-evicts the oldest past [`Self::MAX_ENTRIES`] so a
+/// long-lived session does not accumulate stale per-version structural
+/// materialisations unbounded). Concurrent base/overlay variants of one
+/// content-free key coexist as candidates in one slot (R20).
 pub struct MaterializeStructureDb {
-    entries: DashMap<MaterializeStructureCacheKey, Arc<MaterializeStructureEntry>>,
-    inflight: InflightTable<MaterializeStructureCacheKey>,
-    /// Per-canonical reverse index — see [`CanonicalToKeysIndex`].
-    /// `invalidate_for_canonical` drains this map and uses
-    /// `Arc::ptr_eq` to discriminate stale entries from fresh
-    /// post-publish writes.
-    canonical_to_keys: CanonicalToKeysIndex<MaterializeStructureCacheKey>,
-    /// Global insertion-ordered total-size budget. Bounds the total
-    /// entry count across all keys — the reverse-index drain reclaims
-    /// only on per-canonical invalidation, which an owner-content edit
-    /// no longer triggers, so this budget is the routine reclamation.
-    retention_budget:
-        crate::bounded_query_retention::GlobalRetentionBudget<MaterializeStructureCacheKey>,
-    live_counter: Arc<AtomicU64>,
-    /// Lifecycle gate keeping `entries`, `canonical_to_keys`,
-    /// `retention_budget`, and `live_counter` in one lock domain. Every
-    /// mutation that touches the map and the budget — the cooperative
-    /// publish (`map.insert` + `post_publish`), the cooperative removal
-    /// cleanup, a budget-FIFO eviction, a stale-`peek` removal, and a
-    /// per-canonical drain — runs under a shared read guard; the
-    /// project-generation `clear` (`invalidate_all` /
-    /// `evict_if_schema_mismatch`) takes the exclusive write guard
-    /// across the whole map+index+budget+counter clear. A `clear`
-    /// therefore cannot interleave its clears with a concurrent
-    /// publish, so the budget never strands a live `entries` item with
-    /// no admission record. `DashMap` stays for hot-path concurrency;
-    /// the gate is a coarse reset fence.
-    retention_gate: parking_lot::RwLock<()>,
-    /// Test-only injection point inside [`Self::invalidate_all`],
-    /// parked between the `entries` clear and the budget clear with the
-    /// `retention_gate` write guard still held. A race test arms it
-    /// with a barrier and calls `wait()` twice to assert the in-flight
-    /// clear engages the gate against a concurrent publish. Per-instance;
-    /// absent from release builds.
-    #[cfg(any(test, debug_assertions))]
-    invalidate_all_midpoint_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
-    /// Test-only injection point inside [`Self::register_post_publish`],
-    /// parked AFTER `retention_budget.record_admission` has returned its
-    /// FIFO victims but BEFORE `evict_budget_victim` removes them. A race
-    /// test arms it with a barrier and calls `wait()` twice to drive a
-    /// concurrent same-key re-publish into that gap, then asserts the
-    /// identity-scoped `evict_budget_victim` removes the OLD victim and
-    /// leaves the fresh re-publish intact. Per-instance; absent from
-    /// release builds.
-    #[cfg(any(test, debug_assertions))]
-    register_post_publish_pre_evict_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+    /// The shared reverse-indexed multi-candidate store (budgeted form).
+    /// Owns the slots, the per-canonical reverse index, the FIFO retention
+    /// budget, the shared live counter, and the retention gate (the
+    /// publish fence).
+    store: crate::cache_runtime::ReverseIndexedCandidateStore<
+        MaterializeStructureCacheKey,
+        crate::semantic_query::CacheRead<MaterializeOutcome>,
+    >,
+    /// Per-cache flight table keyed by the flight identity (cache key +
+    /// store-view compat token) so two overlays on one key do not coalesce.
+    inflight: InflightTable<QueryFlightKey<MaterializeStructureCacheKey>>,
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`crate::cache_schema`] for the contract.
     schema_version: u32,
 }
 
 impl MaterializeStructureDb {
-    /// Total entry-count cap. A long-lived editor session that
+    /// Total candidate-count cap. A long-lived editor session that
     /// re-materialises many owner versions caps here; the oldest
-    /// entries are FIFO-evicted on the write-side `post_publish` hook.
+    /// candidates are FIFO-evicted via the store's deferred-eviction path.
     pub const MAX_ENTRIES: usize = 2048;
 
     /// Construct a fresh cache.
@@ -2840,9 +2308,10 @@ impl MaterializeStructureDb {
     }
 
     pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
-        Self::with_counter_and_schema_version(
+        Self::with_counter_schema_and_budget(
             live_counter,
             crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+            Self::MAX_ENTRIES,
         )
     }
 
@@ -2850,98 +2319,43 @@ impl MaterializeStructureDb {
     /// Used by `cache_invariant_migration` fixtures.
     #[cfg(any(test, debug_assertions))]
     pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
-        Self::with_counter_and_schema_version(Arc::new(AtomicU64::new(0)), schema_version)
-    }
-
-    /// Test-only constructor pinning a small `retention_budget` cap so a
-    /// reverse-index test drives FIFO eviction without admitting
-    /// [`Self::MAX_ENTRIES`] (2048) entries.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn new_with_budget_for_test(budget_cap: usize) -> Self {
-        let mut db = Self::with_counter_and_schema_version(
+        Self::with_counter_schema_and_budget(
             Arc::new(AtomicU64::new(0)),
-            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
-        );
-        db.retention_budget =
-            crate::bounded_query_retention::GlobalRetentionBudget::new(budget_cap);
-        db
+            schema_version,
+            Self::MAX_ENTRIES,
+        )
     }
 
-    /// Test-only — number of distinct outer shards currently resident
-    /// in the `canonical_to_keys` reverse index. A budget eviction that
-    /// empties a shard's inner map must drop the outer shard, so this
-    /// count tracks the surviving canonicals — not the lifetime
-    /// canonical count.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn canonical_to_keys_shard_count_for_test(&self) -> usize {
-        self.canonical_to_keys.len()
-    }
-
-    fn with_counter_and_schema_version(live_counter: Arc<AtomicU64>, schema_version: u32) -> Self {
+    fn with_counter_schema_and_budget(
+        live_counter: Arc<AtomicU64>,
+        schema_version: u32,
+        budget_cap: usize,
+    ) -> Self {
         Self {
-            entries: DashMap::new(),
-            inflight: InflightTable::new(),
-            canonical_to_keys: DashMap::new(),
-            retention_budget: crate::bounded_query_retention::GlobalRetentionBudget::new(
-                Self::MAX_ENTRIES,
+            store: crate::cache_runtime::ReverseIndexedCandidateStore::with_counter_and_budget(
+                live_counter,
+                budget_cap,
             ),
-            live_counter,
-            retention_gate: parking_lot::RwLock::new(()),
-            #[cfg(any(test, debug_assertions))]
-            invalidate_all_midpoint_gate: parking_lot::Mutex::new(None),
-            #[cfg(any(test, debug_assertions))]
-            register_post_publish_pre_evict_gate: parking_lot::Mutex::new(None),
+            inflight: InflightTable::new(),
             schema_version,
         }
     }
 
-    /// Configured total entry-count cap.
+    /// Configured total candidate-count cap.
     #[must_use]
     pub fn retention_cap(&self) -> usize {
-        self.retention_budget.cap()
+        self.store.retention_cap()
     }
 
-    /// Test-only — number of admission records currently in the
-    /// retention ledger. The budget evicts the oldest once this exceeds
-    /// [`Self::MAX_ENTRIES`], so it is the count that bounds the cache.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn retention_tracked_len(&self) -> usize {
-        self.retention_budget.tracked_len()
-    }
-
-    /// Test-only accessor for the lifecycle `retention_gate`. A race
-    /// test parks `invalidate_all` mid-flight (via the `invalidate_all`
-    /// injection point) and uses `try_read()` on this gate to assert,
-    /// deterministically, that the in-flight clear has engaged the
-    /// write guard against concurrent publishes.
-    #[cfg(test)]
-    #[doc(hidden)]
-    #[must_use]
-    pub(crate) fn test_retention_gate(&self) -> &parking_lot::RwLock<()> {
-        &self.retention_gate
-    }
-
-    /// Read-only test accessor for the shared
-    /// live_counter. Used by the publish-fence / generation-revalidation
-    /// race tests to verify that revalidation failures do NOT increment
-    /// the counter (entries are removed without inflating the live
-    /// count).
-    #[cfg(test)]
-    pub(crate) fn live_counter_for_test(&self) -> u64 {
-        self.live_counter.load(Ordering::Relaxed)
-    }
-
-    /// Read-only peek with proactive stale-entry removal.
-    /// When the entry's `dep_signature` is stale, remove it (orphan
-    /// reaping) and return `None`.
+    /// Read-only strict-validation peek — never mutates the store.
     ///
-    /// R8-5 — successful stale removal must decrement the shared
-    /// `live_counter` so it tracks live entries (not lifetime inserts).
-    /// Without this, every stale peek inflates the shared counter
-    /// permanently.
+    /// A candidate is returned only when its carrier validates strictly
+    /// against the live store view AND its `validated_at_generation` still
+    /// equals the live project generation. A stale candidate is SKIPPED,
+    /// not reaped — the store keeps it for other views, and routine
+    /// reclamation is the FIFO retention budget + the per-canonical drain.
+    /// The shared `live_counter` therefore tracks live candidates without
+    /// any read-path decrement.
     pub(crate) fn peek(
         &self,
         key: &MaterializeStructureCacheKey,
@@ -2950,67 +2364,30 @@ impl MaterializeStructureDb {
         if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
-        let result = (|| -> Option<crate::semantic_query::CacheRead<MaterializeOutcome>> {
-            let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-            // Carrier-aware validate-before-bubble. The entry's
-            // self-root canonicals (ONLY the `base` node's
-            // declaration-origin file — NOT the consumer materialise
-            // scope, R7 cross-owner reuse) validate **strictly** — an
-            // untracked or hash-mismatched self-root rejects the
-            // entry; every other fact keeps the lazy cross-file
-            // permissiveness. A stale entry never bubbles into the
-            // active outer tracer.
-            //
-            // The generation gate is the project-shape counterpart of
-            // the carrier check: the carrier validates only file-content
-            // whole-hashes, but a `ProjectGeneration` reset (tsconfig /
-            // path-alias / SDK / workspace-folder change) bumps no file
-            // content. An entry whose `validated_at_generation` no longer
-            // equals the live project generation is stale even though its
-            // carrier still validates — reap it.
-            if entry_arc.validated_at_generation
-                != ctx.project_type_store().current_project_generation()
-                || !entry_arc
-                    .read_set_signature
-                    .validate_with_self_roots(ctx, &entry_arc.self_root_canonicals)
+        // Warm-hit read-side validation through the store. The candidate's
+        // self-root canonicals (ONLY the `base` node's declaration-origin
+        // file — NOT the consumer materialise scope, R7 cross-owner reuse)
+        // validate **strictly**; every other fact keeps the lazy
+        // cross-file permissiveness. The generation gate is the
+        // project-shape counterpart of the carrier check (a
+        // `ProjectGeneration` reset bumps no file content). A stale
+        // candidate never bubbles. The store skips a stale candidate on
+        // read (the slot keeps it for other views); routine reclamation is
+        // the FIFO budget + per-canonical drain.
+        let generation = ctx.project_type_store().current_project_generation();
+        let result = self.store.lookup(key, |candidate| {
+            if candidate.validated_at_generation == generation
+                && candidate
+                    .signature
+                    .validate_with_self_roots(ctx, &candidate.self_root_canonicals)
             {
-                // Stale-entry reap touches `entries`, the
-                // `canonical_to_keys` reverse index, and the retention
-                // budget — hold the retention gate (shared read) across
-                // the whole removal so it does not desync against a
-                // concurrent project-generation `clear`.
-                let _retention = self.retention_gate.read();
-                let removed = self
-                    .entries
-                    .remove_if(key, |_, e| Arc::ptr_eq(e, &entry_arc));
-                if removed.is_some() {
-                    self.live_counter.fetch_sub(1, Ordering::Relaxed);
-                    // Route the reap through the SAME cleanup the
-                    // cooperative-removal path uses: `unregister_post_publish`
-                    // unregisters every `canonical_to_keys` registration
-                    // the reaped entry held (one per canonical its carrier
-                    // referenced) and prunes the now-empty shards, then
-                    // forgets exactly this entry's retention-ledger record
-                    // via `forget_seq`. A bare `forget_seq` here would
-                    // drop the ledger record but leave dead reverse-index
-                    // shards resident for a multi-canonical entry.
-                    self.unregister_post_publish(
-                        key,
-                        &entry_arc.read_set_signature,
-                        entry_arc.admission_seq,
-                    );
-                }
-                return None;
+                candidate.signature.bubble(ctx);
+                crate::host_manage::record_materialize_structure_cache_hit();
+                Some(candidate.value.clone())
+            } else {
+                None
             }
-            entry_arc.read_set_signature.bubble(ctx);
-            crate::host_manage::record_materialize_structure_cache_hit();
-            Some(crate::semantic_query::CacheRead {
-                value: entry_arc.outcome.clone(),
-                dep_signature: Arc::clone(&entry_arc.dispatch_dep_signature),
-                walker_diagnostics: std::sync::Arc::from([]),
-                cache_suppress: false,
-            })
-        })();
+        });
         if let Some(rctx) = crate::request_context::current_request_context() {
             if result.is_some() {
                 rctx.cache_counters
@@ -3027,169 +2404,118 @@ impl MaterializeStructureDb {
         result
     }
 
-    /// Drop every cache entry whose carrier references `canonical_id`.
-    /// Uses the `canonical_to_keys` reverse index to find affected
-    /// keys; uses `Arc::ptr_eq` to discriminate "our entry" from
-    /// concurrent fresh writes.
+    /// Cooperative-admission cold compute over the materialise-structure
+    /// cache, routed through the query-identity split-publish lifecycle
+    /// adapter over the shared store. The producer supplies the cold
+    /// `compute` closure (its `install_fact_tracer`-wrapped
+    /// materialisation), returning a [`ComputeAdmission`] over a
+    /// [`MaterializeStructureEntry`].
     ///
-    /// Holds the `retention_gate` read guard across the whole
-    /// reverse-index drain + `entries` removal + budget `forget_seq` +
-    /// counter decrement, so this per-canonical invalidation does not
-    /// desync the map and the budget against a concurrent
-    /// project-generation `clear` (which takes the write guard).
-    ///
-    /// Each removed entry's reverse-index registrations and
-    /// retention-ledger record are dropped by [`Self::unregister_post_publish`],
-    /// the single removal-side cleanup helper. It iterates the entry's
-    /// `read_set_signature.canonical_ids()` — the union of fact-rail
-    /// canonicals (from `read_set_signature.facts`) and dispatch-fence
-    /// canonicals (from `dispatch_dep_signature`) — the same set
-    /// [`Self::register_post_publish`] registered under. The
-    /// `canonical_id` shard itself is already drained by the
-    /// `canonical_to_keys.remove` above; the helper's
-    /// `prune_canonical_to_keys_registration` for that canonical is then
-    /// a no-op (the shard is gone). The `live_counter` decrement stays
-    /// here — `unregister_post_publish` does not touch the counter — so
-    /// each removed entry nets exactly one decrement.
-    pub fn invalidate_for_canonical(&self, canonical_id: &str) {
-        let _retention = self.retention_gate.read();
-        let drained: Vec<(MaterializeStructureCacheKey, Arc<[FactVersionRef]>)> =
-            match self.canonical_to_keys.remove(canonical_id) {
-                Some((_, mutex)) => mutex.lock().drain().collect(),
-                None => return,
+    /// The store is budgeted, so the publish lifecycle threads the store's
+    /// `retention_gate` as the publish fence and the FIFO retention
+    /// victims through `evict_deferred`: the fence read guard spans
+    /// revalidation → publish_core (counter bump + reverse-index
+    /// registration + retention-admission record under the slot guard) →
+    /// evict_deferred (the guard-free FIFO victim eviction), so a
+    /// project-generation `clear` cannot interleave and the re-entrant
+    /// eviction cannot self-deadlock.
+    pub(crate) fn get_or_compute_admit<F>(
+        &self,
+        key: &MaterializeStructureCacheKey,
+        ctx: &dyn ResolverContext,
+        compute: F,
+    ) -> Option<crate::semantic_query::CacheRead<MaterializeOutcome>>
+    where
+        F: FnOnce() -> crate::cache_runtime::singleflight::ComputeAdmission<
+            crate::semantic_query::CacheRead<MaterializeOutcome>,
+            MaterializeStructureEntry,
+        >,
+    {
+        // Unpack the producer's domain `ComputeAdmission<V, Entry>` into a
+        // node-level `CacheAdmission<V>`. `outcome -> value.value`,
+        // `dispatch_dep_signature -> value.dep_signature`,
+        // `read_set_signature -> signature`.
+        let node_compute =
+            move || -> CacheAdmission<crate::semantic_query::CacheRead<MaterializeOutcome>> {
+                match compute() {
+                    crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry) => {
+                        CacheAdmission::Cacheable {
+                            value: crate::semantic_query::CacheRead {
+                                value: entry.outcome,
+                                dep_signature: Arc::clone(&entry.dispatch_dep_signature),
+                                walker_diagnostics: Arc::from([]),
+                                cache_suppress: false,
+                            },
+                            signature: entry.read_set_signature,
+                            self_root_canonicals: entry.self_root_canonicals,
+                            validated_at_generation: entry.validated_at_generation,
+                        }
+                    }
+                    crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(value) => {
+                        // TLS pass-through: consume the typed refusal
+                        // reason the materialise producer armed via
+                        // `SetReasonGuard::arm`. Debug builds
+                        // debug-assert on an empty slot so unmigrated
+                        // callsites surface; release builds fall back
+                        // to `SignatureOverflow`.
+                        let reason =
+                            crate::cache_runtime::consume_return_only_reason_for_lowering()
+                                .unwrap_or(NonAdmissionReason::SignatureOverflow);
+                        CacheAdmission::ReturnOnly { value, reason }
+                    }
+                    crate::cache_runtime::singleflight::ComputeAdmission::Failed => {
+                        CacheAdmission::Failed {
+                            reason: NonAdmissionReason::ComputeFailed,
+                        }
+                    }
+                }
             };
-        for (key, registered_sig) in &drained {
-            let registered = Arc::clone(registered_sig);
-            let removed = self.entries.remove_if(key, move |_, entry_arc| {
-                Arc::ptr_eq(&entry_arc.read_set_signature.facts, &registered)
-            });
-            if let Some((_, removed_entry)) = removed {
-                self.live_counter.fetch_sub(1, Ordering::Relaxed);
-                // Route reverse-index + retention-ledger cleanup through
-                // the shared removal helper. It prunes the registration
-                // under every canonical the carrier referenced
-                // (`canonical_ids()` — legacy ∪ facts) and forgets
-                // exactly this entry's ledger record (`forget_seq`),
-                // identical to the cooperative-removal and stale-`peek`
-                // reap paths — no second canonical-set derivation.
-                self.unregister_post_publish(
-                    key,
-                    &removed_entry.read_set_signature,
-                    removed_entry.admission_seq,
-                );
-            }
-        }
+        let node = QueryCandidateNode {
+            store: &self.store,
+            inflight: &self.inflight,
+            ctx,
+            compute: std::cell::RefCell::new(Some(node_compute)),
+        };
+        crate::cache_runtime::query::lookup(&node, key.clone(), ctx)
     }
 
-    /// Drop every cache entry. Used on project-generation bumps.
-    ///
-    /// Holds the `retention_gate` WRITE guard across the whole
-    /// `entries` + `canonical_to_keys` + `retention_budget` +
-    /// `live_counter` clear. A concurrent cooperative publish, removal
-    /// cleanup, stale-`peek` reap, or per-canonical drain holds the
-    /// gate's read guard, so it blocks until this clear completes — no
-    /// publish can land a live `entries` item whose budget admission
-    /// this reset then erases.
-    ///
-    /// Saturating-subtract pattern (NOT `store(0)`) because
-    /// `live_counter` is shared via `Arc<AtomicU64>` across every typed DB
-    /// in `ProjectTypeStore` (`component_meta_cache_live`). A per-DB
-    /// `store(0)` would corrupt other DBs' contributions to the shared
-    /// sum. Mirrors the existing `ImportedRegistryDb::invalidate_all`
-    /// pattern — subtract only this DB's entry count, capped at the
-    /// counter's current value to prevent underflow under
-    /// concurrent invalidation.
+    /// Drop every candidate whose carrier references `canonical_id`,
+    /// draining via the store's per-canonical reverse index in O(K).
+    pub fn invalidate_for_canonical(&self, canonical_id: &str) {
+        self.store.invalidate_canonical(canonical_id);
+    }
+
+    /// Drop every cache candidate. Used on project-generation bumps.
+    /// Takes the store's `retention_gate` write guard across the whole
+    /// slot+index+budget+counter clear.
     pub fn invalidate_all(&self) {
-        let _retention = self.retention_gate.write();
-        let n = self.entries.len() as u64;
-        self.entries.clear();
-        self.canonical_to_keys.clear();
-        // Test-only injection point — parked between the `entries`
-        // clear and the budget clear with the `retention_gate` write
-        // guard still held. A race test arms it to assert a concurrent
-        // publish is blocked. `None` (production default) is a no-op.
-        #[cfg(any(test, debug_assertions))]
-        {
-            let gate = self.invalidate_all_midpoint_gate.lock().clone();
-            if let Some(barrier) = gate {
-                barrier.wait();
-                barrier.wait();
-            }
-        }
-        self.retention_budget.clear();
-        self.live_counter.fetch_sub(
-            n.min(self.live_counter.load(Ordering::Relaxed)),
-            Ordering::Relaxed,
-        );
+        self.store.invalidate_all();
     }
 
-    /// Test-only driver: arm the [`Self::invalidate_all`] injection
-    /// point with `barrier`. The next `invalidate_all` on this Db calls
-    /// `barrier.wait()` twice between the `entries` clear and the
-    /// budget clear (with the `retention_gate` write guard held). The
-    /// returned guard disarms the injection point on drop.
-    #[cfg(test)]
-    #[doc(hidden)]
-    #[must_use]
-    pub(crate) fn test_arm_invalidate_all_midpoint_gate(
-        &self,
-        barrier: Arc<std::sync::Barrier>,
-    ) -> MaterializeInvalidateGateGuard<'_> {
-        *self.invalidate_all_midpoint_gate.lock() = Some(barrier);
-        MaterializeInvalidateGateGuard {
-            gate: &self.invalidate_all_midpoint_gate,
-        }
-    }
-
-    /// Test-only driver: arm the [`Self::register_post_publish`]
-    /// pre-eviction injection point with `barrier`. The next
-    /// `register_post_publish` on this Db calls `barrier.wait()` twice
-    /// AFTER `retention_budget.record_admission` returned its FIFO
-    /// victims but BEFORE `evict_budget_victim` removes them. A race
-    /// test uses this to interleave a concurrent same-key re-publish and
-    /// prove the identity-scoped `evict_budget_victim` removes the OLD
-    /// victim, not the fresh re-publish. The returned guard disarms the
-    /// injection point on drop.
-    #[cfg(test)]
-    #[doc(hidden)]
-    #[must_use]
-    pub(crate) fn test_arm_register_post_publish_pre_evict_gate(
-        &self,
-        barrier: Arc<std::sync::Barrier>,
-    ) -> MaterializeRegisterPreEvictGateGuard<'_> {
-        *self.register_post_publish_pre_evict_gate.lock() = Some(barrier);
-        MaterializeRegisterPreEvictGateGuard {
-            gate: &self.register_post_publish_pre_evict_gate,
-        }
-    }
-
-    /// Number of warm entries.
+    /// Number of warm candidates.
     #[must_use]
     pub fn live_count(&self) -> usize {
-        self.entries.len()
+        self.store.live_count()
     }
 
-    /// Number of distinct cache slots currently materialised in the
-    /// `MaterializeStructureDb`'s entry map.
+    /// Number of distinct cache candidates currently materialised.
     ///
-    /// **R7 cross-owner reuse contract.** N consumer scopes that
-    /// reach the same `(base, scope_axis, mode)` collapse to ONE
-    /// entry because the cache key's `Hash`/`PartialEq` impls exclude
+    /// **R7 cross-owner reuse contract.** N consumer scopes that reach
+    /// the same `(base, scope_axis, mode)` collapse to ONE slot because
+    /// the cache key's `Hash`/`PartialEq` impls exclude
     /// `scope_canonical_id`. Used by
-    /// `tests/cross_owner_materialise_reuse_production.rs` to verify
-    /// the production-flow contract: driving
-    /// `materialize_component_meta_structure` from N owners with a
-    /// shared inner type produces `entry_count == 1` for that slot.
+    /// `tests/cross_owner_materialise_reuse_production.rs` to verify the
+    /// production-flow contract: driving
+    /// `materialize_component_meta_structure` from N owners with a shared
+    /// inner type produces one candidate for that slot under one view.
     ///
-    /// Synonym for [`live_count`](Self::live_count) kept as a stable
-    /// accessor for the landing-gap audit tests; the two will not
-    /// diverge.
+    /// Synonym for [`live_count`](Self::live_count).
     #[must_use]
     pub fn entry_count(&self) -> usize {
-        self.entries.len()
+        self.store.live_count()
     }
 
-    /// Test-only synthetic-entry inserter used exclusively by
+    /// Test-only synthetic-candidate inserter used exclusively by
     /// `cache_invariant_migration` fixtures to verify the cache-cluster
     /// schema-version eviction invariant.
     #[cfg(any(test, debug_assertions))]
@@ -3202,241 +2528,52 @@ impl MaterializeStructureDb {
             scope_axis: MaterializationScope::TopLevel,
             mode: ProjectionMode::Shallow,
         };
-        let entry = Arc::new(MaterializeStructureEntry {
-            outcome: MaterializeOutcome::Miss(SemanticNodeId(0)),
-            read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
-            dispatch_dep_signature: Arc::from(Vec::new()),
-            self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
-            admission_seq: crate::bounded_query_retention::next_retention_seq(),
-            validated_at_generation: 0,
-        });
-        self.entries.insert(key, entry);
-        self.live_counter.fetch_add(1, Ordering::Relaxed);
+        let value = crate::semantic_query::CacheRead {
+            value: MaterializeOutcome::Miss(SemanticNodeId(0)),
+            dep_signature: Arc::from(Vec::new()),
+            walker_diagnostics: Arc::from([]),
+            cache_suppress: false,
+        };
+        self.store.insert_for_test(
+            key,
+            value,
+            crate::fact_signature_helpers::ReadSetSignature::empty(),
+            Arc::from(Vec::<Arc<str>>::new()),
+            0,
+        );
     }
 
-    /// Internal — register a `(key, fact_rail)` pair under every
-    /// canonical the entry's carrier fact rail references. Called from
-    /// the materialiser's `post_publish` callback. The reverse index
-    /// drains under any canonical a fact names, so every fact-rail dep
-    /// (`Parse(...)` / `ResolveImports(...)` / `RouteSurface(...)` /
-    /// `FileWholeHash` / `DerivedFactHash`) invalidates the entry when
-    /// its canonical changes.
-    ///
-    /// Also records the admission against the global retention budget
-    /// and FIFO-evicts the oldest entries once the total exceeds
-    /// [`Self::MAX_ENTRIES`]. Evicting a still-valid entry only causes
-    /// a later recompute; it never produces an incorrect result.
-    ///
-    /// `admission_seq` is the published entry's
-    /// [`MaterializeStructureEntry::admission_seq`] — the ledger records
-    /// this entry under that exact identity, so a later removal path can
-    /// forget precisely this ledger record (`forget_seq`) without
-    /// dropping a concurrently-admitted fresh entry that republished the
-    /// same key.
-    pub(crate) fn register_post_publish(
+    /// Test-only: admit a candidate at a specific generation directly into
+    /// the store, bypassing the cooperative flight. Drives the
+    /// generation-gate `peek` discriminator.
+    #[cfg(test)]
+    pub(crate) fn insert_for_test(
         &self,
         key: MaterializeStructureCacheKey,
-        read_set_signature: &crate::fact_signature_helpers::ReadSetSignature,
-        admission_seq: u64,
+        outcome: MaterializeOutcome,
+        read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
+        validated_at_generation: u64,
     ) {
-        let timing_on = verter_scheduler::request_context::current_timing_enabled();
-        let registered_facts = Arc::clone(&read_set_signature.facts);
-        for canonical in read_set_signature.canonical_ids() {
-            let shard = self
-                .canonical_to_keys
-                .entry(canonical)
-                .or_insert_with(|| parking_lot::Mutex::new(rustc_hash::FxHashMap::default()));
-            let lock_start = if timing_on {
-                Some(Instant::now())
-            } else {
-                None
-            };
-            let mut map = shard.value().lock();
-            let lock_wait = lock_start
-                .map(|t| t.elapsed())
-                .unwrap_or(std::time::Duration::ZERO);
-            crate::host_manage::record_family_map_lock_acquisition(lock_wait);
-            map.insert(key.clone(), Arc::clone(&registered_facts));
-        }
-        // Global retention budget: record this admission under the
-        // entry's own seq, FIFO-evict the oldest entries past the total
-        // cap. Each victim carries its admission `seq`, so
-        // `evict_budget_victim` removes precisely that admission's entry
-        // even if a concurrent same-key re-publish has overwritten the
-        // map slot under `victim_key` with a fresh, distinctly-seq'd
-        // entry.
-        let victims = self.retention_budget.record_admission(admission_seq, key);
-        // Test-only injection point — parked AFTER `record_admission`
-        // returned its FIFO victims but BEFORE `evict_budget_victim`
-        // removes them. A race test arms it to drive a concurrent
-        // same-key re-publish into this gap. `None` (production default)
-        // is a no-op.
-        #[cfg(any(test, debug_assertions))]
-        {
-            let gate = self.register_post_publish_pre_evict_gate.lock().clone();
-            if let Some(barrier) = gate {
-                barrier.wait();
-                barrier.wait();
-            }
-        }
-        for (victim_seq, victim_key) in victims {
-            self.evict_budget_victim(victim_seq, &victim_key);
-        }
-    }
-
-    /// Remove one entry chosen by the retention budget for FIFO
-    /// eviction. Drains the entry's reverse-index registrations under
-    /// every canonical its carrier referenced and decrements the live
-    /// counter, matching the removal-side cleanup the cooperative
-    /// substrate runs for a warm-hit reject.
-    ///
-    /// **Identity-scoped removal.** The map entry under `victim_key` is
-    /// removed ONLY when its stored `admission_seq` still equals
-    /// `victim_seq`. A same-key re-publish racing this eviction
-    /// overwrites the `victim_key` slot with a fresh entry carrying a
-    /// distinct seq; a bare-key removal would evict that fresh entry and
-    /// strand its live ledger record (cache grows past the cap). The
-    /// `remove_if` predicate runs under the `DashMap` shard write lock,
-    /// so the seq check and the removal are atomic against a concurrent
-    /// re-publish.
-    fn evict_budget_victim(&self, victim_seq: u64, victim_key: &MaterializeStructureCacheKey) {
-        let Some((_, entry)) = self
-            .entries
-            .remove_if(victim_key, |_, e| e.admission_seq == victim_seq)
-        else {
-            return;
+        let value = crate::semantic_query::CacheRead {
+            value: outcome,
+            dep_signature: Arc::from(Vec::new()),
+            walker_diagnostics: Arc::from([]),
+            cache_suppress: false,
         };
-        self.live_counter.fetch_sub(1, Ordering::Relaxed);
-        // Drop each reverse-index registration; the helper also drops
-        // the outer shard when the removal empties its inner map, so a
-        // budget-driven eviction wave does not leave empty shards
-        // resident.
-        for canonical in entry.read_set_signature.canonical_ids() {
-            prune_canonical_to_keys_registration(
-                &self.canonical_to_keys,
-                &canonical,
-                victim_key,
-                &entry.read_set_signature.facts,
-            );
-        }
-    }
-
-    /// Internal — get the inflight table. Used by the materialiser
-    /// for the cooperative-admission write path.
-    pub(crate) fn inflight(&self) -> &InflightTable<MaterializeStructureCacheKey> {
-        &self.inflight
-    }
-
-    /// Internal — get the entries map. Used by the materialiser for
-    /// the cooperative-admission write path.
-    pub(crate) fn entries(
-        &self,
-    ) -> &DashMap<MaterializeStructureCacheKey, Arc<MaterializeStructureEntry>> {
-        &self.entries
-    }
-
-    /// Internal — the lifecycle `retention_gate`, passed as the
-    /// `publish_fence` to `cooperative_admit_with_post_publish` so the
-    /// substrate holds it across `entries.insert` + `post_publish`.
-    /// Keeps the cooperative publish in the same lock domain as
-    /// `invalidate_all`'s map+budget clear.
-    pub(crate) fn publish_fence(&self) -> &parking_lot::RwLock<()> {
-        &self.retention_gate
-    }
-
-    /// Internal — bump the live counter. Called from the
-    /// materialiser's compute closure on successful publish.
-    pub(crate) fn bump_live_counter(&self) {
-        self.live_counter.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Internal — decrement the live counter. The removal-side
-    /// counterpart of [`Self::bump_live_counter`], called from the
-    /// materialiser's cooperative-admission `removal_cleanup` closure
-    /// when the substrate removes an already-published entry so the
-    /// shared `component_meta_cache_live` counter tracks live entries,
-    /// not lifetime inserts.
-    pub(crate) fn decrement_live_counter(&self) {
-        self.live_counter.fetch_sub(1, Ordering::Relaxed);
-    }
-
-    /// Complete removal-side cleanup, the counterpart of
-    /// [`Self::register_post_publish`]. Two callers reach it: the
-    /// cooperative-admission substrate when it removes one
-    /// already-published entry (a warm-hit reject or a joiner-fork
-    /// reject), and [`Self::peek`]'s stale/generation-mismatch reap. The
-    /// entry's reverse-index registration must be dropped under EVERY
-    /// canonical it referenced, symmetric with the per-canonical
-    /// `register_post_publish` insert. `Arc::ptr_eq` against the entry's
-    /// `legacy` rail discriminates "our registration" from a concurrent
-    /// fresh winner's.
-    ///
-    /// `admission_seq` is the removed entry's
-    /// [`MaterializeStructureEntry::admission_seq`]. The retention-ledger
-    /// removal is scoped to that exact seq via `forget_seq` — a key-only
-    /// `forget` would also drop a concurrently-admitted fresh entry's
-    /// ledger record (a fresh winner can republish the same key in the
-    /// `remove_if` → cleanup window), letting the fresh entry escape the
-    /// budget count and the cache grow past `MAX_ENTRIES`. Identity
-    /// scoping here mirrors the `Arc::ptr_eq` guard on the reverse-index
-    /// removal above.
-    pub(crate) fn unregister_post_publish(
-        &self,
-        key: &MaterializeStructureCacheKey,
-        read_set_signature: &crate::fact_signature_helpers::ReadSetSignature,
-        admission_seq: u64,
-    ) {
-        for canonical in read_set_signature.canonical_ids() {
-            prune_canonical_to_keys_registration(
-                &self.canonical_to_keys,
-                &canonical,
-                key,
-                &read_set_signature.facts,
-            );
-        }
-        // Keep the retention ledger consistent: drop exactly this
-        // entry's ledger record, leaving a fresh re-admission of the
-        // same key intact.
-        self.retention_budget.forget_seq(admission_seq);
+        self.store.insert_for_test(
+            key,
+            value,
+            read_set_signature,
+            self_root_canonicals,
+            validated_at_generation,
+        );
     }
 }
 
 impl Default for MaterializeStructureDb {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// RAII guard returned by
-/// [`MaterializeStructureDb::test_arm_invalidate_all_midpoint_gate`].
-/// Disarms the per-instance `invalidate_all` injection point on drop.
-#[cfg(test)]
-#[doc(hidden)]
-pub(crate) struct MaterializeInvalidateGateGuard<'a> {
-    gate: &'a parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
-}
-
-#[cfg(test)]
-impl Drop for MaterializeInvalidateGateGuard<'_> {
-    fn drop(&mut self) {
-        *self.gate.lock() = None;
-    }
-}
-
-/// RAII guard returned by
-/// [`MaterializeStructureDb::test_arm_register_post_publish_pre_evict_gate`].
-/// Disarms the per-instance pre-eviction injection point on drop so a
-/// later `register_post_publish` does not park on a stale barrier.
-#[cfg(test)]
-#[doc(hidden)]
-pub(crate) struct MaterializeRegisterPreEvictGateGuard<'a> {
-    gate: &'a parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
-}
-
-#[cfg(test)]
-impl Drop for MaterializeRegisterPreEvictGateGuard<'_> {
-    fn drop(&mut self) {
-        *self.gate.lock() = None;
     }
 }
 
@@ -3449,18 +2586,7 @@ impl crate::cache_schema::CacheSchemaVersioned for MaterializeStructureDb {
         if self.schema_version == current {
             return 0;
         }
-        // Same map + index + budget + counter clear as `invalidate_all`
-        // — take the `retention_gate` write guard across the whole
-        // clear so a concurrent publish cannot interleave.
-        let _retention = self.retention_gate.write();
-        let count = self.entries.len();
-        self.entries.clear();
-        self.canonical_to_keys.clear();
-        self.retention_budget.clear();
-        if count > 0 {
-            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
-        }
-        count
+        self.store.evict_if_schema_mismatch()
     }
 }
 
@@ -3468,7 +2594,7 @@ impl crate::cache_schema::CacheSchemaVersioned for MaterializeStructureDb {
 // C — RefCycleResultDb
 // ===========================================================================
 
-use crate::cache_runtime::singleflight::{cooperative_admit_with_post_publish, ComputeAdmission};
+use crate::cache_runtime::singleflight::ComputeAdmission;
 use crate::semantic_query::DeclIdentity;
 
 /// C — entry stored in `RefCycleResultDb`. Carries the
@@ -3507,16 +2633,6 @@ pub struct RefCycleEntry {
     /// read: the BFS root file plus every visited declaration's file.
     /// An untracked or hash-mismatched self-root rejects the entry.
     pub self_root_canonicals: Arc<[Arc<str>]>,
-    /// Retention-ledger admission identity — the unique sequence number
-    /// this entry is recorded under in the `GlobalRetentionBudget`
-    /// ledger. Allocated once at entry construction; `register_post_publish`
-    /// records the entry under it, and every removal path forgets exactly
-    /// this ledger record via `forget_seq`. Scoping the ledger removal to
-    /// this seq (rather than the cache key) means a concurrently-admitted
-    /// fresh entry that republished the same key keeps its own ledger
-    /// record — symmetric with the `Arc::ptr_eq` guard on the
-    /// reverse-index removal.
-    pub admission_seq: u64,
     /// Project generation this entry was computed under, captured by the
     /// cold BFS `compute` closure before it dispatched any work. The
     /// carrier (`read_set_signature`) validates only file-content
@@ -3534,65 +2650,47 @@ pub struct RefCycleEntry {
     pub validated_at_generation: u64,
 }
 
-/// R — host-owned cache for transitive
-/// cycle BFS results.
+/// Host-owned cache for transitive cycle BFS results.
 ///
-/// Mirrors [`MaterializeStructureDb`]'s reverse-index pattern:
-///   - Entries keyed by `DeclIdentity`.
-/// - `canonical_to_keys` reverse-index drains under `invalidate_for_canonical`.
-/// - `Arc::ptr_eq` discriminates "our entry" from concurrent fresh writes.
-///   - `live_counter` shared via `Arc<AtomicU64>` with all sibling DBs;
-///     uses the saturating-subtract pattern on `invalidate_all` to
-///     preserve other DBs' contributions.
+/// Mirrors [`MaterializeStructureDb`]: a shared budgeted
+/// [`ReverseIndexedCandidateStore`](crate::cache_runtime::ReverseIndexedCandidateStore)
+/// keyed by `DeclIdentity`, whose per-canonical reverse index drains
+/// under `invalidate_for_canonical`, whose `FactCandidateDiscriminant`
+/// (generation + facts) selects which candidate a re-publish replaces,
+/// and whose shared `live_counter` (an `Arc<AtomicU64>` across all
+/// sibling DBs) uses the saturating-subtract pattern on `invalidate_all`
+/// to preserve other DBs' contributions.
 ///
-/// Cooperative-admission integration: cold-path BFS runs inside
-/// [`cooperative_admit_with_post_publish`], whose `compute`
-/// closure runs synchronously on the caller's thread (see
-/// `cache_runtime::singleflight` synchronous-compute contract).
-/// Borrow-capture of `&dyn ResolverContext` in the BFS compute closure
-/// is safe because no thread-hop occurs. An overflowed / unrootable
-/// signature returns the computed bool through
+/// Cooperative-admission integration: `get_or_compute_admit` builds a
+/// [`QueryCandidateNode`] over the store and routes the cold-path BFS
+/// through [`crate::cache_runtime::node::query::lookup`] and the
+/// split publish lifecycle. The BFS `compute` closure runs synchronously
+/// on the caller's thread (see `cache_runtime/singleflight.rs`
+/// synchronous-compute contract), so borrow-capture of
+/// `&dyn ResolverContext` is safe — no thread-hop occurs. An overflowed /
+/// unrootable signature returns the computed bool through
 /// [`ComputeAdmission::ReturnOnly`] — the value reaches every joiner
-/// without admitting the entry, and no second uncached BFS runs.
+/// without admitting a candidate, and no second uncached BFS runs.
 pub struct RefCycleResultDb {
-    entries: DashMap<DeclIdentity, Arc<RefCycleEntry>>,
-    inflight: InflightTable<DeclIdentity>,
-    /// Per-canonical reverse index — maps each canonical id to the set
-    /// of cache keys whose dep_signature references it.
-    canonical_to_keys: CanonicalToKeysIndex<DeclIdentity>,
-    /// Global insertion-ordered total-size budget. The `DeclIdentity`
-    /// key embeds the file whole-hash, so each distinct content version
-    /// produces a fresh entry; the reverse-index drain reclaims only on
-    /// per-canonical invalidation, which an owner-content edit no longer
-    /// triggers. This budget is the routine reclamation path —
-    /// `post_publish` records each admission and FIFO-evicts the oldest
-    /// entries past [`Self::MAX_ENTRIES`].
-    retention_budget: crate::bounded_query_retention::GlobalRetentionBudget<DeclIdentity>,
-    live_counter: Arc<AtomicU64>,
-    /// Lifecycle gate keeping `entries`, `canonical_to_keys`,
-    /// `retention_budget`, and `live_counter` in one lock domain. Every
-    /// mutation that touches the map and the budget — the cooperative
-    /// publish (`map.insert` + `post_publish`), the cooperative removal
-    /// cleanup, a budget-FIFO eviction, a stale-`peek` removal, and a
-    /// per-canonical drain — runs under a shared read guard;
-    /// `invalidate_all` takes the exclusive write guard across the
-    /// whole map+index+budget+counter clear. A `clear` therefore cannot
-    /// interleave its clears with a concurrent publish, so the budget
-    /// never strands a live `entries` item with no admission record.
-    retention_gate: parking_lot::RwLock<()>,
-    /// Test-only injection point inside [`Self::invalidate_all`],
-    /// parked between the `entries` clear and the budget clear with the
-    /// `retention_gate` write guard still held. Per-instance; absent
-    /// from release builds.
-    #[cfg(any(test, debug_assertions))]
-    invalidate_all_midpoint_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+    /// The shared reverse-indexed multi-candidate store (budgeted form).
+    /// The `DeclIdentity` key embeds the file whole-hash, so each distinct
+    /// content version produces a fresh candidate; the FIFO retention
+    /// budget is the routine reclamation path and the per-canonical
+    /// reverse index drains on per-canonical invalidation. Concurrent
+    /// base/overlay variants of one key coexist as candidates (R20).
+    store: crate::cache_runtime::ReverseIndexedCandidateStore<
+        DeclIdentity,
+        crate::semantic_query::CacheRead<bool>,
+    >,
+    /// Per-cache flight table keyed by the flight identity (cache key +
+    /// store-view compat token) so two overlays on one key do not coalesce.
+    inflight: InflightTable<QueryFlightKey<DeclIdentity>>,
 }
 
 impl RefCycleResultDb {
-    /// Total entry-count cap. A long-lived session that re-runs the
-    /// transitive-cycle BFS for many owner versions caps here; the
-    /// oldest entries are FIFO-evicted on the write-side `post_publish`
-    /// hook.
+    /// Total candidate-count cap. A long-lived session that re-runs the
+    /// transitive-cycle BFS for many owner versions caps here; the oldest
+    /// candidates are FIFO-evicted via the store's deferred-eviction path.
     pub const MAX_ENTRIES: usize = 2048;
 
     /// Construct with a fresh, unshared `live_counter`. Tests-only.
@@ -3609,330 +2707,127 @@ impl RefCycleResultDb {
 
     fn with_counter_and_budget(live_counter: Arc<AtomicU64>, budget_cap: usize) -> Self {
         Self {
-            entries: DashMap::new(),
-            inflight: InflightTable::new(),
-            canonical_to_keys: DashMap::new(),
-            retention_budget: crate::bounded_query_retention::GlobalRetentionBudget::new(
+            store: crate::cache_runtime::ReverseIndexedCandidateStore::with_counter_and_budget(
+                live_counter,
                 budget_cap,
             ),
-            live_counter,
-            retention_gate: parking_lot::RwLock::new(()),
-            #[cfg(any(test, debug_assertions))]
-            invalidate_all_midpoint_gate: parking_lot::Mutex::new(None),
+            inflight: InflightTable::new(),
         }
     }
 
-    /// Test-only constructor pinning a small `retention_budget` cap so a
-    /// reverse-index test drives FIFO eviction without admitting
-    /// [`Self::MAX_ENTRIES`] (2048) entries.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn new_with_budget_for_test(budget_cap: usize) -> Self {
-        Self::with_counter_and_budget(Arc::new(AtomicU64::new(0)), budget_cap)
-    }
-
-    /// Test-only — number of distinct outer shards currently resident
-    /// in the `canonical_to_keys` reverse index. A budget eviction that
-    /// empties a shard's inner map must drop the outer shard, so this
-    /// count tracks the surviving canonicals — not the lifetime
-    /// canonical count.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn canonical_to_keys_shard_count_for_test(&self) -> usize {
-        self.canonical_to_keys.len()
-    }
-
-    /// Configured total entry-count cap.
+    /// Configured total candidate-count cap.
     #[must_use]
     pub fn retention_cap(&self) -> usize {
-        self.retention_budget.cap()
+        self.store.retention_cap()
     }
 
-    /// Test-only accessor for the lifecycle `retention_gate`. A race
-    /// test parks `invalidate_all` mid-flight and uses `try_read()` on
-    /// this gate to assert the in-flight clear engages the write guard
-    /// against concurrent publishes.
-    #[cfg(test)]
-    #[doc(hidden)]
-    #[must_use]
-    pub(crate) fn test_retention_gate(&self) -> &parking_lot::RwLock<()> {
-        &self.retention_gate
-    }
-
-    /// Test-only driver: arm the [`Self::invalidate_all`] injection
-    /// point with `barrier`. The next `invalidate_all` on this Db calls
-    /// `barrier.wait()` twice between the `entries` clear and the
-    /// budget clear (with the `retention_gate` write guard held).
-    #[cfg(test)]
-    #[doc(hidden)]
-    #[must_use]
-    pub(crate) fn test_arm_invalidate_all_midpoint_gate(
-        &self,
-        barrier: Arc<std::sync::Barrier>,
-    ) -> RefCycleInvalidateGateGuard<'_> {
-        *self.invalidate_all_midpoint_gate.lock() = Some(barrier);
-        RefCycleInvalidateGateGuard {
-            gate: &self.invalidate_all_midpoint_gate,
-        }
-    }
-
-    /// Test-only — number of admission records currently in the
-    /// retention ledger. The budget evicts the oldest once this exceeds
-    /// [`Self::MAX_ENTRIES`], so it is the count that bounds the cache.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn retention_tracked_len(&self) -> usize {
-        self.retention_budget.tracked_len()
-    }
-
-    /// Internal — get the entries map. Used by the BFS-cache compute
-    /// closure for `cooperative_get_or_insert_with_post_publish`.
-    pub(crate) fn entries(&self) -> &DashMap<DeclIdentity, Arc<RefCycleEntry>> {
-        &self.entries
-    }
-
-    /// Internal — get the inflight table. Used by the BFS-cache compute
-    /// closure for `cooperative_get_or_insert_with_post_publish`.
-    pub(crate) fn inflight(&self) -> &InflightTable<DeclIdentity> {
-        &self.inflight
-    }
-
-    /// Internal — the lifecycle `retention_gate`, passed as the
-    /// `publish_fence` to `cooperative_admit_with_post_publish` so the
-    /// substrate holds it across `entries.insert` + `post_publish`,
-    /// keeping the cooperative publish in the same lock domain as
-    /// `invalidate_all`'s map+budget clear.
-    pub(crate) fn publish_fence(&self) -> &parking_lot::RwLock<()> {
-        &self.retention_gate
-    }
-
-    /// Internal — bump the live counter. Called from the BFS-cache
-    /// compute closure's `post_publish` callback on successful publish.
-    pub(crate) fn bump_live_counter(&self) {
-        self.live_counter.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Removal-side counterpart of [`Self::bump_live_counter`]. Called
-    /// from the cooperative-admission `removal_cleanup` closure when
-    /// the substrate removes an already-published entry so the shared
-    /// `component_meta_cache_live` counter tracks live entries, not
-    /// lifetime inserts.
-    pub(crate) fn decrement_live_counter(&self) {
-        self.live_counter.fetch_sub(1, Ordering::Relaxed);
-    }
-
-    /// Read-only test accessor for the shared
-    /// `live_counter`. Used by R's invalidation tests to verify that
-    /// `invalidate_for_canonical` and `invalidate_all` correctly
-    /// decrement the counter without corrupting sibling DBs'
-    /// contributions to the shared sum.
+    /// Read-only test accessor for the shared `live_counter`. Used by the
+    /// invalidation tests to verify that `invalidate_for_canonical` and
+    /// `invalidate_all` correctly decrement the counter without
+    /// corrupting sibling DBs' contributions to the shared sum.
     #[cfg(test)]
     pub(crate) fn live_counter_for_test(&self) -> u64 {
-        self.live_counter.load(Ordering::Relaxed)
+        self.store.live_counter_for_test()
     }
 
-    /// Register the reverse-index after a successful publish under
-    /// every canonical the entry's carrier fact rail references.
-    /// Per-canonical mutex acquisition pattern matches
-    /// `MaterializeStructureDb`. Bounded by
-    /// `read_set_signature.canonical_ids().len() ≤ ~80` (BFS hop cap
-    /// + transitive fact set).
+    /// Cooperative-admission cold BFS over the ref-cycle cache, routed
+    /// through the query-identity split-publish lifecycle adapter over the
+    /// shared store. The producer supplies the `install_fact_tracer`-wrapped
+    /// BFS `compute` closure, returning a [`ComputeAdmission`] over a
+    /// [`RefCycleEntry`].
     ///
-    /// Also records the admission against the global retention budget
-    /// and FIFO-evicts the oldest entries once the total exceeds
-    /// [`Self::MAX_ENTRIES`]. Evicting a still-valid entry only causes
-    /// a later recompute; it never produces an incorrect result.
-    ///
-    /// `admission_seq` is the published entry's
-    /// [`RefCycleEntry::admission_seq`] — the ledger records this entry
-    /// under that exact identity, so a later removal path can forget
-    /// precisely this ledger record (`forget_seq`) without dropping a
-    /// concurrently-admitted fresh entry that republished the same key.
-    pub(crate) fn register_post_publish(
+    /// The store is budgeted, so the publish lifecycle threads the store's
+    /// `retention_gate` as the publish fence and the FIFO retention
+    /// victims through `evict_deferred`. The fence read guard spans
+    /// revalidation → publish_core → evict_deferred, so a
+    /// project-generation `clear` cannot interleave and the re-entrant
+    /// eviction cannot self-deadlock. A `ReturnOnly` outcome (overflow /
+    /// unrootable / `RouteGeneration`) returns the computed bool to the
+    /// winner without admitting; joiners fork and recompute.
+    pub(crate) fn get_or_compute_admit<F>(
         &self,
-        key: DeclIdentity,
-        read_set_signature: &crate::fact_signature_helpers::ReadSetSignature,
-        admission_seq: u64,
-    ) {
-        let timing_on = verter_scheduler::request_context::current_timing_enabled();
-        let registered_facts = Arc::clone(&read_set_signature.facts);
-        for canonical in read_set_signature.canonical_ids() {
-            let shard = self
-                .canonical_to_keys
-                .entry(canonical)
-                .or_insert_with(|| parking_lot::Mutex::new(rustc_hash::FxHashMap::default()));
-            let lock_start = if timing_on {
-                Some(Instant::now())
-            } else {
-                None
-            };
-            let mut map = shard.value().lock();
-            let lock_wait = lock_start
-                .map(|t| t.elapsed())
-                .unwrap_or(std::time::Duration::ZERO);
-            crate::host_manage::record_family_map_lock_acquisition(lock_wait);
-            map.insert(key.clone(), Arc::clone(&registered_facts));
-        }
-        // Global retention budget: record this admission under the
-        // entry's own seq, FIFO-evict the oldest entries past the total
-        // cap. Each victim carries its admission `seq`, so
-        // `evict_budget_victim` removes precisely that admission's entry
-        // even if a concurrent same-key re-publish has overwritten the
-        // map slot under `victim_key` with a fresh, distinctly-seq'd
-        // entry.
-        let victims = self.retention_budget.record_admission(admission_seq, key);
-        for (victim_seq, victim_key) in victims {
-            self.evict_budget_victim(victim_seq, &victim_key);
-        }
-    }
-
-    /// Remove one entry chosen by the retention budget for FIFO
-    /// eviction. Drains the entry's reverse-index registrations under
-    /// every canonical its carrier referenced and decrements the live
-    /// counter, matching the removal-side cleanup the cooperative
-    /// substrate runs for a warm-hit reject.
-    ///
-    /// **Identity-scoped removal.** The map entry under `victim_key` is
-    /// removed ONLY when its stored `admission_seq` still equals
-    /// `victim_seq`. A same-key re-publish racing this eviction
-    /// overwrites the `victim_key` slot with a fresh entry carrying a
-    /// distinct seq; a bare-key removal would evict that fresh entry and
-    /// strand its live ledger record (cache grows past the cap). The
-    /// `remove_if` predicate runs under the `DashMap` shard write lock,
-    /// so the seq check and the removal are atomic against a concurrent
-    /// re-publish.
-    fn evict_budget_victim(&self, victim_seq: u64, victim_key: &DeclIdentity) {
-        let Some((_, entry)) = self
-            .entries
-            .remove_if(victim_key, |_, e| e.admission_seq == victim_seq)
-        else {
-            return;
+        id: &DeclIdentity,
+        ctx: &dyn ResolverContext,
+        compute: F,
+    ) -> Option<crate::semantic_query::CacheRead<bool>>
+    where
+        F: FnOnce() -> ComputeAdmission<crate::semantic_query::CacheRead<bool>, RefCycleEntry>,
+    {
+        // Unpack the producer's domain `ComputeAdmission<V, Entry>` into a
+        // node-level `CacheAdmission<V>`. `result -> value.value`,
+        // `dispatch_dep_signature -> value.dep_signature`,
+        // `read_set_signature -> signature`.
+        let node_compute = move || -> CacheAdmission<crate::semantic_query::CacheRead<bool>> {
+            match compute() {
+                ComputeAdmission::Cacheable(entry) => CacheAdmission::Cacheable {
+                    value: crate::semantic_query::CacheRead {
+                        value: entry.result,
+                        dep_signature: Arc::clone(&entry.dispatch_dep_signature),
+                        walker_diagnostics: Arc::from([]),
+                        cache_suppress: false,
+                    },
+                    signature: entry.read_set_signature,
+                    self_root_canonicals: entry.self_root_canonicals,
+                    validated_at_generation: entry.validated_at_generation,
+                },
+                ComputeAdmission::ReturnOnly(value) => {
+                    // TLS pass-through: consume the typed refusal
+                    // reason the ref-cycle producer armed via
+                    // `SetReasonGuard::arm` (e.g.
+                    // `RouteGenerationDependency`,
+                    // `SelfRootConflict`, `SignatureOverflow`,
+                    // `ForcedTestRefusal`). Debug builds debug-assert
+                    // on an empty slot so unmigrated callsites surface;
+                    // release builds fall back to `SignatureOverflow`.
+                    let reason = crate::cache_runtime::consume_return_only_reason_for_lowering()
+                        .unwrap_or(NonAdmissionReason::SignatureOverflow);
+                    CacheAdmission::ReturnOnly { value, reason }
+                }
+                ComputeAdmission::Failed => CacheAdmission::Failed {
+                    reason: NonAdmissionReason::ComputeFailed,
+                },
+            }
         };
-        self.live_counter.fetch_sub(1, Ordering::Relaxed);
-        // Drop each reverse-index registration; the helper also drops
-        // the outer shard when the removal empties its inner map, so a
-        // budget-driven eviction wave does not leave empty shards
-        // resident.
-        for canonical in entry.read_set_signature.canonical_ids() {
-            prune_canonical_to_keys_registration(
-                &self.canonical_to_keys,
-                &canonical,
-                victim_key,
-                &entry.read_set_signature.facts,
-            );
-        }
-    }
-
-    /// Complete removal-side cleanup, the counterpart of
-    /// [`Self::register_post_publish`]. Two callers reach it: the
-    /// cooperative-admission substrate when it removes one
-    /// already-published entry (a warm-hit reject or a joiner-fork
-    /// reject), and [`Self::peek`]'s stale/generation-mismatch reap. The
-    /// entry's reverse-index registration must be dropped under EVERY
-    /// canonical it referenced, symmetric with the per-canonical
-    /// `register_post_publish` insert. `Arc::ptr_eq` against the entry's
-    /// `legacy` rail discriminates "our registration" from a concurrent
-    /// fresh winner's so a re-published entry's registration is not
-    /// stolen.
-    ///
-    /// `admission_seq` is the removed entry's
-    /// [`RefCycleEntry::admission_seq`]. The retention-ledger removal is
-    /// scoped to that exact seq via `forget_seq` — a key-only `forget`
-    /// would also drop a concurrently-admitted fresh entry's ledger
-    /// record (a fresh winner can republish the same key in the
-    /// `remove_if` → cleanup window), letting the fresh entry escape the
-    /// budget count and the cache grow past `MAX_ENTRIES`. Identity
-    /// scoping here mirrors the `Arc::ptr_eq` guard on the reverse-index
-    /// removal above.
-    pub(crate) fn unregister_post_publish(
-        &self,
-        key: &DeclIdentity,
-        read_set_signature: &crate::fact_signature_helpers::ReadSetSignature,
-        admission_seq: u64,
-    ) {
-        for canonical in read_set_signature.canonical_ids() {
-            prune_canonical_to_keys_registration(
-                &self.canonical_to_keys,
-                &canonical,
-                key,
-                &read_set_signature.facts,
-            );
-        }
-        // Keep the retention ledger consistent: drop exactly this
-        // entry's ledger record, leaving a fresh re-admission of the
-        // same key intact.
-        self.retention_budget.forget_seq(admission_seq);
+        let node = QueryCandidateNode {
+            store: &self.store,
+            inflight: &self.inflight,
+            ctx,
+            compute: std::cell::RefCell::new(Some(node_compute)),
+        };
+        crate::cache_runtime::query::lookup(&node, id.clone(), ctx)
     }
 
     /// Strict-validation peek.
     ///
-    /// Every read validates the entry's carrier against the live store
-    /// view BEFORE returning — there is no carrier-bypassing fast
-    /// return. The entry's `self_root_canonicals` (the BFS root file
+    /// Every read validates the candidate's carrier against the live
+    /// store view BEFORE returning — there is no carrier-bypassing fast
+    /// return. The candidate's `self_root_canonicals` (the BFS root file
     /// plus every visited declaration's file) validate **strictly**: a
     /// same-canonical content edit, or a self-root canonical the live
-    /// store view no longer tracks, rejects the entry; every other fact
-    /// keeps the lazy cross-file permissiveness. The entry's
+    /// store view no longer tracks, rejects the candidate; every other
+    /// fact keeps the lazy cross-file permissiveness. The candidate's
     /// `validated_at_generation` must additionally still equal the live
-    /// project generation — a `ProjectGeneration` reset bumps no file
-    /// content, so the carrier alone cannot detect it. A stale entry
-    /// never returns and never bubbles; it is removed (with
-    /// `live_counter` decrement per R8-5).
+    /// project generation. A stale candidate never returns and never
+    /// bubbles (the store keeps it for other views; routine reclamation is
+    /// the FIFO budget + per-canonical drain).
     pub(crate) fn peek(
         &self,
         id: &DeclIdentity,
         ctx: &dyn ResolverContext,
     ) -> Option<crate::semantic_query::CacheRead<bool>> {
-        let result = (|| -> Option<crate::semantic_query::CacheRead<bool>> {
-            let entry_arc = self.entries.get(id).map(|e| Arc::clone(&*e))?;
-            // Carrier-aware validate-before-bubble with strict
-            // self-root validation, plus the project-generation gate
-            // (the carrier validates only file-content whole-hashes; a
-            // `ProjectGeneration` reset bumps no file content). A stale
-            // entry never returns and never bubbles.
-            if entry_arc.validated_at_generation
-                != ctx.project_type_store().current_project_generation()
-                || !entry_arc
-                    .read_set_signature
-                    .validate_with_self_roots(ctx, &entry_arc.self_root_canonicals)
+        let generation = ctx.project_type_store().current_project_generation();
+        let result = self.store.lookup(id, |candidate| {
+            if candidate.validated_at_generation == generation
+                && candidate
+                    .signature
+                    .validate_with_self_roots(ctx, &candidate.self_root_canonicals)
             {
-                // Stale-entry reap touches `entries`, the
-                // `canonical_to_keys` reverse index, and the retention
-                // budget — hold the retention gate (shared read) across
-                // the whole removal so it does not desync against a
-                // concurrent project-generation `clear`.
-                let _retention = self.retention_gate.read();
-                // R8-5 — decrement live_counter on stale removal so
-                // the shared counter tracks live entries, not stale ones.
-                let removed = self
-                    .entries
-                    .remove_if(id, |_, e| Arc::ptr_eq(e, &entry_arc));
-                if removed.is_some() {
-                    self.live_counter.fetch_sub(1, Ordering::Relaxed);
-                    // Route the reap through the SAME cleanup the
-                    // cooperative-removal path uses: `unregister_post_publish`
-                    // unregisters every `canonical_to_keys` registration
-                    // the reaped entry held and prunes the now-empty
-                    // shards, then forgets exactly this entry's
-                    // retention-ledger record via `forget_seq`. A bare
-                    // `forget_seq` here would leave dead reverse-index
-                    // shards resident for a multi-canonical entry.
-                    self.unregister_post_publish(
-                        id,
-                        &entry_arc.read_set_signature,
-                        entry_arc.admission_seq,
-                    );
-                }
-                return None;
+                candidate.signature.bubble(ctx);
+                Some(candidate.value.clone())
+            } else {
+                None
             }
-            entry_arc.read_set_signature.bubble(ctx);
-            Some(crate::semantic_query::CacheRead {
-                value: entry_arc.result,
-                dep_signature: Arc::clone(&entry_arc.dispatch_dep_signature),
-                walker_diagnostics: Arc::from([]),
-                cache_suppress: false,
-            })
-        })();
+        });
         if let Some(rctx) = crate::request_context::current_request_context() {
             if result.is_some() {
                 rctx.cache_counters
@@ -3949,108 +2844,50 @@ impl RefCycleResultDb {
         result
     }
 
-    /// Drop every cache entry whose carrier references `canonical_id`.
-    /// Uses the `canonical_to_keys` reverse index to find affected
-    /// keys; `Arc::ptr_eq` discriminates "our entry" from concurrent
-    /// fresh writes.
-    ///
-    /// Holds the `retention_gate` read guard across the whole
-    /// reverse-index drain + `entries` removal + budget `forget_seq` +
-    /// counter decrement, so this per-canonical invalidation does not
-    /// desync the map and the budget against a concurrent `clear`.
-    ///
-    /// Each removed entry's reverse-index registrations and
-    /// retention-ledger record are dropped by [`Self::unregister_post_publish`],
-    /// the single removal-side cleanup helper. It iterates the entry's
-    /// `read_set_signature.canonical_ids()` — the exact fact-rail
-    /// canonical set [`Self::register_post_publish`] registered under.
-    /// The `canonical_id` shard itself is already drained by the
-    /// `canonical_to_keys.remove` above; the helper's
-    /// `prune_canonical_to_keys_registration` for that canonical is then
-    /// a no-op. The `live_counter` decrement stays here —
-    /// `unregister_post_publish` does not touch the counter — so each
-    /// removed entry nets exactly one decrement.
+    /// Drop every candidate whose carrier references `canonical_id`,
+    /// draining via the store's per-canonical reverse index in O(K).
     pub fn invalidate_for_canonical(&self, canonical_id: &str) {
-        let _retention = self.retention_gate.read();
-        let drained: Vec<(DeclIdentity, Arc<[FactVersionRef]>)> =
-            match self.canonical_to_keys.remove(canonical_id) {
-                Some((_, mutex)) => mutex.lock().drain().collect(),
-                None => return,
-            };
-        for (key, registered_sig) in &drained {
-            let registered = Arc::clone(registered_sig);
-            let removed = self.entries.remove_if(key, move |_, entry_arc| {
-                Arc::ptr_eq(&entry_arc.read_set_signature.facts, &registered)
-            });
-            if let Some((_, removed_entry)) = removed {
-                self.live_counter.fetch_sub(1, Ordering::Relaxed);
-                // Route reverse-index + retention-ledger cleanup through
-                // the shared removal helper. It prunes the registration
-                // under every canonical the carrier referenced
-                // (`canonical_ids()` — legacy ∪ facts) and forgets
-                // exactly this entry's ledger record (`forget_seq`),
-                // identical to the cooperative-removal and stale-`peek`
-                // reap paths — no second canonical-set derivation.
-                self.unregister_post_publish(
-                    key,
-                    &removed_entry.read_set_signature,
-                    removed_entry.admission_seq,
-                );
-            }
-        }
+        self.store.invalidate_canonical(canonical_id);
     }
 
-    /// Drop every cache entry. Used on project-generation bumps.
-    ///
-    /// Holds the `retention_gate` WRITE guard across the whole
-    /// `entries` + `canonical_to_keys` + `retention_budget` +
-    /// `live_counter` clear, so a concurrent cooperative publish,
-    /// removal cleanup, stale-`peek` reap, or per-canonical drain
-    /// (each holding the read guard) blocks until this clear completes
-    /// — no publish can land a live `entries` item whose budget
-    /// admission this reset then erases.
-    ///
-    /// Saturating-subtract pattern (NOT `store(0)`)
-    /// because `live_counter` is shared via `Arc<AtomicU64>` across all
-    /// typed DBs in `ProjectTypeStore`. A per-DB `store(0)` would
-    /// corrupt sibling DBs' contributions to the shared sum.
+    /// Drop every cache candidate. Used on project-generation bumps.
+    /// Takes the store's `retention_gate` write guard across the whole
+    /// slot+index+budget+counter clear.
     pub fn invalidate_all(&self) {
-        let _retention = self.retention_gate.write();
-        let n = self.entries.len() as u64;
-        self.entries.clear();
-        self.canonical_to_keys.clear();
-        // Test-only injection point — parked between the `entries`
-        // clear and the budget clear with the `retention_gate` write
-        // guard still held. `None` (production default) is a no-op.
-        #[cfg(any(test, debug_assertions))]
-        {
-            let gate = self.invalidate_all_midpoint_gate.lock().clone();
-            if let Some(barrier) = gate {
-                barrier.wait();
-                barrier.wait();
-            }
-        }
-        self.retention_budget.clear();
-        self.live_counter.fetch_sub(
-            n.min(self.live_counter.load(Ordering::Relaxed)),
-            Ordering::Relaxed,
-        );
+        self.store.invalidate_all();
     }
-}
 
-/// RAII guard returned by
-/// [`RefCycleResultDb::test_arm_invalidate_all_midpoint_gate`]. Disarms
-/// the per-instance `invalidate_all` injection point on drop.
-#[cfg(test)]
-#[doc(hidden)]
-pub(crate) struct RefCycleInvalidateGateGuard<'a> {
-    gate: &'a parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
-}
+    /// Number of warm candidates.
+    #[must_use]
+    pub fn live_count(&self) -> usize {
+        self.store.live_count()
+    }
 
-#[cfg(test)]
-impl Drop for RefCycleInvalidateGateGuard<'_> {
-    fn drop(&mut self) {
-        *self.gate.lock() = None;
+    /// Test-only: admit a candidate at a specific generation directly into
+    /// the store, bypassing the cooperative flight. Drives the
+    /// generation-gate `peek` discriminator.
+    #[cfg(test)]
+    pub(crate) fn insert_for_test(
+        &self,
+        id: DeclIdentity,
+        result: bool,
+        read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
+        validated_at_generation: u64,
+    ) {
+        let value = crate::semantic_query::CacheRead {
+            value: result,
+            dep_signature: Arc::from(Vec::new()),
+            walker_diagnostics: Arc::from([]),
+            cache_suppress: false,
+        };
+        self.store.insert_for_test(
+            id,
+            value,
+            read_set_signature,
+            self_root_canonicals,
+            validated_at_generation,
+        );
     }
 }
 
@@ -4068,8 +2905,10 @@ impl Default for RefCycleResultDb {
 /// before returning — there is no generation-equal fast return that
 /// bypasses validation. Returns `Some(read)` only when a cached entry
 /// exists AND its strict self-root validation passes; returns `None` on
-/// a true cache miss or a stale entry (a stale entry is removed and the
-/// caller falls through to BFS compute).
+/// a true cache miss or a stale entry (a stale candidate is skipped on
+/// read — it stays resident for other views — and the caller falls
+/// through to BFS compute; reclamation is the FIFO budget / per-canonical
+/// drain / schema eviction / generation clear).
 pub(crate) fn ref_cycle_db_peek(
     db: &RefCycleResultDb,
     id: &DeclIdentity,
@@ -4323,10 +3162,7 @@ impl crate::invalidation_domain::ParticipatesInInvalidation for RefCycleResultDb
 
 impl crate::invalidation_domain::InvalidationByCanonical for RefCycleResultDb {
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
-        let before = self.entries().len();
-        self.invalidate_for_canonical(canonical_id);
-        let after = self.entries().len();
-        before.saturating_sub(after)
+        self.store.invalidate_canonical(canonical_id)
     }
 }
 
@@ -4372,7 +3208,7 @@ pub(crate) fn force_ref_cycle_return_only_for_tests() -> ForceRefCycleReturnOnly
 /// The cooperative-admission wrapper invoked by
 /// `meta_resolve::ref_root_reaches_transitive_cycle_node` on the cold
 /// path. The `compute` closure runs synchronously on the caller's
-/// thread (per the `cache_runtime::singleflight` synchronous-compute contract),
+/// thread (per singleflight's synchronous-compute contract),
 /// so capturing `&dyn ResolverContext` and `&DeclIdentity` directly is safe.
 ///
 /// On cooperative-admission success: bumps `live_counter`, registers
@@ -4400,222 +3236,145 @@ where
         &mut Vec<(Arc<str>, crate::types::Hash16)>,
     ) -> bool,
 {
-    let key_for_register = id.clone();
-    // `&RefCycleResultDb` is `Copy`; a dedicated binding lets the
-    // removal-side closure capture the db alongside the `post_publish`
-    // closure that captures the original `db`.
-    let db_for_removal = db;
     // Wrap the BFS cold-compute with `install_fact_tracer`. On `Ok`,
     // merge the traced observation set on top of the visited-identity
     // self-roots. On `Overflow`, return the computed bool via
-    // `ReturnOnly` (no second uncached BFS).
+    // `ReturnOnly` (no second uncached BFS). The Db drives the
+    // query-identity split-publish lifecycle over the shared store
+    // (warm-hit lookup, revalidation, publish-core under the slot guard,
+    // guard-free deferred FIFO eviction, publish fence).
     let host = ctx.host_for_fact_tracer_install();
     let provenance = Arc::clone(&host.provenance);
-    cooperative_admit_with_post_publish(
-        db.entries(),
-        db.inflight(),
-        id.clone(),
-        // Validate(&Entry) -> Option<V> — strict self-root validation
-        // plus the project-generation gate. The carrier validates only
-        // file-content whole-hashes; a `ProjectGeneration` reset
-        // (tsconfig / SDK / workspace-folder change) bumps no file
-        // content, so an entry whose `validated_at_generation` no longer
-        // matches the live generation is stale even though its carrier
-        // still validates.
-        |entry: &RefCycleEntry| {
-            if entry.validated_at_generation
-                == ctx.project_type_store().current_project_generation()
-                && entry
-                    .read_set_signature
-                    .validate_with_self_roots(ctx, &entry.self_root_canonicals)
-            {
-                entry.read_set_signature.bubble(ctx);
-                Some(crate::semantic_query::CacheRead {
-                    value: entry.result,
-                    dep_signature: Arc::clone(&entry.dispatch_dep_signature),
-                    walker_diagnostics: Arc::from([]),
-                    cache_suppress: false,
-                })
-            } else {
-                None
-            }
-        },
-        // Compute() -> ComputeAdmission<V, Entry>
-        || -> ComputeAdmission<crate::semantic_query::CacheRead<bool>, RefCycleEntry> {
-            // Snapshot the project generation BEFORE the BFS dispatches
-            // any work. A `ProjectGeneration` reset that lands during
-            // the cold BFS window bumps this; the post-compute
-            // revalidation (run under the `publish_fence` read guard)
-            // then rejects the entry, and a stale entry can neither
-            // survive a reset nor publish into a freshly-cleared cache.
-            let validated_at_generation = ctx.project_type_store().current_project_generation();
-            let mut compute_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
-            let mut observed_self_roots: Vec<(Arc<str>, crate::types::Hash16)> = Vec::new();
-            let (result, finalise) =
-                crate::fact_signature_helpers::install_fact_tracer(host, || {
-                    compute_bfs(&mut compute_fence, &mut observed_self_roots)
-                });
+    let compute = || -> ComputeAdmission<crate::semantic_query::CacheRead<bool>, RefCycleEntry> {
+        // Snapshot the project generation BEFORE the BFS dispatches
+        // any work. A `ProjectGeneration` reset that lands during
+        // the cold BFS window bumps this; the post-compute
+        // revalidation (run under the `publish_fence` read guard)
+        // then rejects the entry, and a stale entry can neither
+        // survive a reset nor publish into a freshly-cleared cache.
+        let validated_at_generation = ctx.project_type_store().current_project_generation();
+        let mut compute_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
+        let mut observed_self_roots: Vec<(Arc<str>, crate::types::Hash16)> = Vec::new();
+        let (result, finalise) = crate::fact_signature_helpers::install_fact_tracer(host, || {
+            compute_bfs(&mut compute_fence, &mut observed_self_roots)
+        });
+        provenance
+            .ref_cycle_fact_tracer_installs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // The dispatch-return fence is the set of files the BFS
+        // actually read. It is built up front — before the
+        // `RouteGeneration` refusal scan — so every `ReturnOnly`
+        // exit can carry it. A `ReturnOnly` `CacheRead` MUST report
+        // this fence: the caller (`ref_root_reaches_transitive_cycle_node`)
+        // merges `read.dep_signature` into its own `local_fence`, so
+        // a `ReturnOnly` that dropped the fence would let an outer
+        // computation be cached without the files the BFS read.
+        // Carrying it makes the `ReturnOnly` path observably
+        // equivalent to the `None`-arm uncached-fallback (which
+        // extends the caller's fence via `local_fence.extend(fence)`)
+        // without running a second uncached BFS. It is the entry's
+        // dispatch-return signature, NOT a cache-validity rail — the
+        // fact carrier built by `ref_cycle_read_set` is the validity
+        // oracle.
+        let dispatch_dep_signature: DepSignature = Arc::from(compute_fence.into_boxed_slice());
+        // `cache_suppress` stays `false`: the caller does not
+        // consume it. A `ReturnOnly` outcome is non-shareable across
+        // cooperative joiners — the winner alone receives this
+        // `CacheRead`, and a joiner that coalesced onto a
+        // `ReturnOnly` winner forks and cold-recomputes its own BFS
+        // (so it builds its own view-accurate fence). The fence
+        // therefore reaches the winner's caller through
+        // `dep_signature`, never through `cache_suppress`.
+        let return_only_value = |dep_signature: DepSignature| crate::semantic_query::CacheRead {
+            value: result,
+            dep_signature,
+            walker_diagnostics: Arc::from([]),
+            cache_suppress: false,
+        };
+        // Refuse shared admission when the BFS fence carries a
+        // `RouteGeneration` dependency — route generation has no
+        // authoritative validating source, so an entry rooted on
+        // it could not detect a content edit to the route-observed
+        // file. The computed bool is still returned via `ReturnOnly`,
+        // carrying the BFS fence.
+        if dispatch_dep_signature
+            .iter()
+            .any(|(_, v)| matches!(v, crate::semantic_query::DepVersion::RouteGeneration(_)))
+        {
             provenance
-                .ref_cycle_fact_tracer_installs
+                .ref_cycle_overflow_refusals
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // The dispatch-return fence is the set of files the BFS
-            // actually read. It is built up front — before the
-            // `RouteGeneration` refusal scan — so every `ReturnOnly`
-            // exit can carry it. A `ReturnOnly` `CacheRead` MUST report
-            // this fence: the caller (`ref_root_reaches_transitive_cycle_node`)
-            // merges `read.dep_signature` into its own `local_fence`, so
-            // a `ReturnOnly` that dropped the fence would let an outer
-            // computation be cached without the files the BFS read.
-            // Carrying it makes the `ReturnOnly` path observably
-            // equivalent to the `None`-arm uncached-fallback (which
-            // extends the caller's fence via `local_fence.extend(fence)`)
-            // without running a second uncached BFS. It is the entry's
-            // dispatch-return signature, NOT a cache-validity rail — the
-            // fact carrier built by `ref_cycle_read_set` is the validity
-            // oracle.
-            let dispatch_dep_signature: DepSignature = Arc::from(compute_fence.into_boxed_slice());
-            // `cache_suppress` stays `false`: the caller does not
-            // consume it. A `ReturnOnly` outcome is non-shareable across
-            // cooperative joiners — the winner alone receives this
-            // `CacheRead`, and a joiner that coalesced onto a
-            // `ReturnOnly` winner forks and cold-recomputes its own BFS
-            // (so it builds its own view-accurate fence). The fence
-            // therefore reaches the winner's caller through
-            // `dep_signature`, never through `cache_suppress`.
-            let return_only_value =
-                |dep_signature: DepSignature| crate::semantic_query::CacheRead {
-                    value: result,
-                    dep_signature,
-                    walker_diagnostics: Arc::from([]),
-                    cache_suppress: false,
-                };
-            // Refuse shared admission when the BFS fence carries a
-            // `RouteGeneration` dependency — route generation has no
-            // authoritative validating source, so an entry rooted on
-            // it could not detect a content edit to the route-observed
-            // file. The computed bool is still returned via `ReturnOnly`,
-            // carrying the BFS fence.
-            if dispatch_dep_signature
-                .iter()
-                .any(|(_, v)| matches!(v, crate::semantic_query::DepVersion::RouteGeneration(_)))
-            {
-                provenance
-                    .ref_cycle_overflow_refusals
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return ComputeAdmission::ReturnOnly(return_only_value(Arc::clone(
-                    &dispatch_dep_signature,
-                )));
-            }
-            // Test-only injection: deterministically reproduce the
-            // production refusal contract (tracer overflow / unrootable
-            // self-root / `RouteGeneration` fence dependency) AFTER the
-            // real BFS has populated `compute_fence`. The `ReturnOnly`
-            // `CacheRead` carries the real BFS fence — exactly as every
-            // production refusal site does.
-            #[cfg(test)]
-            if FORCE_REF_CYCLE_RETURN_ONLY.with(|f| f.get()) {
-                provenance
-                    .ref_cycle_overflow_refusals
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return ComputeAdmission::ReturnOnly(return_only_value(Arc::clone(
-                    &dispatch_dep_signature,
-                )));
-            }
-            match finalise {
-                crate::resolver_core::FactReadSetFinalise::Ok(traced) => {
-                    // Build the observed-root carrier: visited-identity
-                    // self-roots prepended, traced facts merged on top.
-                    match ref_cycle_read_set(&observed_self_roots, &traced) {
-                        Some((facts, self_root_canonicals)) => {
-                            ComputeAdmission::Cacheable(RefCycleEntry {
-                                result,
-                                read_set_signature:
-                                    crate::fact_signature_helpers::ReadSetSignature::new(facts),
-                                dispatch_dep_signature,
-                                self_root_canonicals,
-                                admission_seq: crate::bounded_query_retention::next_retention_seq(),
-                                validated_at_generation,
-                            })
-                        }
-                        None => {
-                            // A torn observation among the visited
-                            // self-roots — the value is valid but the
-                            // signature cannot be built strictly. The
-                            // computed bool is returned via `ReturnOnly`,
-                            // carrying the BFS fence.
-                            provenance
-                                .ref_cycle_overflow_refusals
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            ComputeAdmission::ReturnOnly(return_only_value(dispatch_dep_signature))
-                        }
+            let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
+                crate::cache_runtime::NonAdmissionReason::RouteGenerationDependency,
+            );
+            return ComputeAdmission::ReturnOnly(return_only_value(Arc::clone(
+                &dispatch_dep_signature,
+            )));
+        }
+        // Test-only injection: deterministically reproduce the
+        // production refusal contract (tracer overflow / unrootable
+        // self-root / `RouteGeneration` fence dependency) AFTER the
+        // real BFS has populated `compute_fence`. The `ReturnOnly`
+        // `CacheRead` carries the real BFS fence — exactly as every
+        // production refusal site does.
+        #[cfg(test)]
+        if FORCE_REF_CYCLE_RETURN_ONLY.with(|f| f.get()) {
+            provenance
+                .ref_cycle_overflow_refusals
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
+                crate::cache_runtime::NonAdmissionReason::ForcedTestRefusal,
+            );
+            return ComputeAdmission::ReturnOnly(return_only_value(Arc::clone(
+                &dispatch_dep_signature,
+            )));
+        }
+        match finalise {
+            crate::resolver_core::FactReadSetFinalise::Ok(traced) => {
+                // Build the observed-root carrier: visited-identity
+                // self-roots prepended, traced facts merged on top.
+                match ref_cycle_read_set(&observed_self_roots, &traced) {
+                    Some((facts, self_root_canonicals)) => {
+                        ComputeAdmission::Cacheable(RefCycleEntry {
+                            result,
+                            read_set_signature:
+                                crate::fact_signature_helpers::ReadSetSignature::new(facts),
+                            dispatch_dep_signature,
+                            self_root_canonicals,
+                            validated_at_generation,
+                        })
+                    }
+                    None => {
+                        // A torn observation among the visited
+                        // self-roots — the value is valid but the
+                        // signature cannot be built strictly. The
+                        // computed bool is returned via `ReturnOnly`,
+                        // carrying the BFS fence.
+                        provenance
+                            .ref_cycle_overflow_refusals
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
+                            crate::cache_runtime::NonAdmissionReason::SelfRootConflict,
+                        );
+                        ComputeAdmission::ReturnOnly(return_only_value(dispatch_dep_signature))
                     }
                 }
-                crate::resolver_core::FactReadSetFinalise::Overflow => {
-                    provenance
-                        .ref_cycle_overflow_refusals
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    // Tracer overflowed — return the computed bool via
-                    // `ReturnOnly`, carrying the BFS fence; no second
-                    // uncached BFS.
-                    ComputeAdmission::ReturnOnly(return_only_value(dispatch_dep_signature))
-                }
             }
-        },
-        // Project(&Entry) -> V — bubble path-precise observation set
-        // so outer cold-computes see the BFS's transitive facts.
-        |entry: &RefCycleEntry| {
-            entry.read_set_signature.bubble(ctx);
-            crate::semantic_query::CacheRead {
-                value: entry.result,
-                dep_signature: Arc::clone(&entry.dispatch_dep_signature),
-                walker_diagnostics: Arc::from([]),
-                cache_suppress: false,
+            crate::resolver_core::FactReadSetFinalise::Overflow => {
+                provenance
+                    .ref_cycle_overflow_refusals
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Tracer overflowed — return the computed bool via
+                // `ReturnOnly`, carrying the BFS fence; no second
+                // uncached BFS.
+                let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
+                    crate::cache_runtime::NonAdmissionReason::SignatureOverflow,
+                );
+                ComputeAdmission::ReturnOnly(return_only_value(dispatch_dep_signature))
             }
-        },
-        // revalidate_after_compute(&Entry) -> bool — strict self-root
-        // validation plus the project-generation gate. Runs under the
-        // `publish_fence` read guard (the substrate holds it across
-        // revalidate→insert→post_publish), so the generation check and
-        // the `entries.insert` are atomic against a concurrent
-        // `invalidate_all` clear+bump: a BFS entry computed under a
-        // superseded project generation is rejected here rather than
-        // published into the freshly-cleared cache.
-        |entry: &RefCycleEntry| {
-            entry.validated_at_generation == ctx.project_type_store().current_project_generation()
-                && entry
-                    .read_set_signature
-                    .validate_with_self_roots(ctx, &entry.self_root_canonicals)
-        },
-        // removal_cleanup(&K, &Arc<Entry>) — removal-side counterpart
-        // of `post_publish`. When the substrate removes an
-        // already-published entry (warm-hit reject or joiner-fork
-        // reject) the live counter must decrement and the
-        // per-canonical reverse-index registration must drop,
-        // symmetric with the `post_publish` bump + register.
-        move |removed_key: &DeclIdentity, removed_entry: &Arc<RefCycleEntry>| {
-            db_for_removal.decrement_live_counter();
-            db_for_removal.unregister_post_publish(
-                removed_key,
-                &removed_entry.read_set_signature,
-                removed_entry.admission_seq,
-            );
-        },
-        // post_publish(&Arc<Entry>, &K)
-        move |entry_arc: &Arc<RefCycleEntry>, _k: &DeclIdentity| {
-            db.bump_live_counter();
-            db.register_post_publish(
-                key_for_register.clone(),
-                &entry_arc.read_set_signature,
-                entry_arc.admission_seq,
-            );
-        },
-        // publish_fence — the Db's `retention_gate`. The substrate
-        // holds it (shared read) across `entries.insert` + `post_publish`
-        // so the map insert and the reverse-index + budget admission are
-        // one lock-domain mutation, exclusive against `invalidate_all`'s
-        // map+budget clear.
-        Some(db.publish_fence()),
-    )
+        }
+    };
+    db.get_or_compute_admit(id, ctx, compute)
 }
 
 /// Build the observed-root fact signature + self-root canonical set

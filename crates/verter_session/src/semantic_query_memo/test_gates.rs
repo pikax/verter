@@ -208,3 +208,101 @@ impl Drop for TestInvalidateAllGateGuard<'_> {
         *self.gate.lock() = None;
     }
 }
+
+// ────────────────────────────────────────────────────────────────────
+// Process-global validate-running probe — `cfg(any(test,
+// debug_assertions))`-gated. Invoked from inside
+// [`super::family::MemoEntry::validate`] every time the validate runs.
+// Used by the hot-path concurrency-fitness discriminator to assert
+// `entries.try_lock()` succeeds from a peer thread while a worker
+// thread is inside `validate` — proving the warm-read path released
+// the mutex before invoking `validate`. Disarmed by default.
+// ────────────────────────────────────────────────────────────────────
+#[cfg(any(test, debug_assertions))]
+static VALIDATE_RUNNING_PROBE: parking_lot::Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>> =
+    parking_lot::Mutex::new(None);
+
+/// Invoked from inside [`super::family::MemoEntry::validate`] on every
+/// validate call. Fires the armed probe if any. No-op on the
+/// production path (no probe armed).
+#[cfg(any(test, debug_assertions))]
+#[inline]
+pub(super) fn validate_running_probe() {
+    let probe = VALIDATE_RUNNING_PROBE.lock().clone();
+    if let Some(probe) = probe {
+        probe();
+    }
+}
+
+/// RAII guard returned by
+/// [`SemanticGraphStore::arm_validate_running_probe_for_tests`]. On
+/// drop the global probe is cleared.
+#[cfg(any(test, debug_assertions))]
+#[doc(hidden)]
+pub struct ValidateRunningProbeGuard {
+    pub(crate) _private: (),
+}
+
+#[cfg(any(test, debug_assertions))]
+impl Drop for ValidateRunningProbeGuard {
+    fn drop(&mut self) {
+        *VALIDATE_RUNNING_PROBE.lock() = None;
+    }
+}
+
+/// Process-global lock used by tests that arm the global validate
+/// probe to serialise across the test binary, preventing
+/// interleaving with other tests that exercise warm reads.
+#[cfg(any(test, debug_assertions))]
+#[doc(hidden)]
+pub static VALIDATE_RUNNING_PROBE_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+#[cfg(any(test, debug_assertions))]
+impl SemanticGraphStore {
+    /// Arm a process-global validate-running probe — a closure
+    /// invoked from inside [`super::family::MemoEntry::validate`]
+    /// every time the validate runs. The probe gives a race test a
+    /// deterministic hook to pause the warm-read thread inside
+    /// `validate` so a peer thread can verify the `entries` mutex is
+    /// NOT held during validation. Returns an RAII guard that disarms
+    /// the probe when dropped.
+    ///
+    /// The probe is process-global because the test thread arms it
+    /// while a worker thread runs the validate. Tests using this
+    /// probe must serialise on the
+    /// [`VALIDATE_RUNNING_PROBE_TEST_LOCK`] mutex.
+    #[doc(hidden)]
+    pub fn arm_validate_running_probe_for_tests<F>(probe: F) -> ValidateRunningProbeGuard
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        *VALIDATE_RUNNING_PROBE.lock() = Some(Arc::new(probe));
+        ValidateRunningProbeGuard { _private: () }
+    }
+
+    /// Test-only — attempt `entries.try_lock()` and immediately
+    /// release the guard. Returns `true` iff the lock was acquired
+    /// (no other thread holds the `entries` mutex at the call
+    /// instant). Used by the hot-path concurrency-fitness
+    /// discriminator to verify the warm-read path releases the mutex
+    /// before invoking `MemoEntry::validate`.
+    #[doc(hidden)]
+    pub fn try_lock_entries_for_tests(&self) -> bool {
+        self.entries.try_lock().is_some()
+    }
+
+    /// Test-only wrapper around the `pub(crate)` warm-read
+    /// `get_validated`. Lets integration tests drive the warm-read
+    /// path (snapshot under lock + validate outside lock + brief LRU
+    /// reacquire) end-to-end with a concrete `&VerterHost` as the
+    /// `ResolverContext`. Returns `true` on a warm hit, `false` on a
+    /// miss / stale candidate.
+    #[doc(hidden)]
+    pub fn get_validated_with_host_for_tests(
+        &self,
+        key: &crate::semantic_query::SemanticQueryKey,
+        host: &crate::VerterHost,
+    ) -> bool {
+        self.get_validated(key, host).is_some()
+    }
+}

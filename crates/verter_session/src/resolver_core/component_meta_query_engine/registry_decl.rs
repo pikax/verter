@@ -73,20 +73,22 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // DashMap-backed DB is the authoritative cross-request cache.
         //
         // Singleflight shape: peek the shared DB first, and on a miss
-        // run the resolution INSIDE the cooperative-admission
-        // `compute` closure. `resolve_imported_registry_symbol_with_budget`
-        // consumes the wildcard-route fuse (`allow_wildcard_route()` /
+        // run the resolution INSIDE the cold-build `compute` closure that
+        // `ImportedRegistryDb::get_or_compute_admit` drives through the
+        // query-identity `query::lookup` split-publish path.
+        // `resolve_imported_registry_symbol_with_budget` consumes the
+        // wildcard-route fuse (`allow_wildcard_route()` /
         // `wildcard_route_fanout`) on the slow lane — a side-effecting,
-        // per-request budget. Running it inside the
-        // `cooperative_admit_with_post_publish` slot is what bounds
-        // that cost to ONE winner: when several requests miss the same
-        // key concurrently, exactly one runs the closure and joiners
-        // block on the slot condvar and reuse its value. The closure
-        // returns `ComputeAdmission::Cacheable` when the
-        // provenance-pure signature builds and `ComputeAdmission::ReturnOnly`
-        // when it cannot — `ReturnOnly` still returns (and broadcasts)
-        // the freshly-resolved value without admitting the cache and
-        // without re-running the resolution.
+        // per-request budget. Running it inside the cooperative flight
+        // slot is what bounds that cost to ONE winner: when several
+        // requests miss the same key concurrently, exactly one runs the
+        // closure and joiners block on the slot condvar and reuse its
+        // value. The closure returns `ComputeAdmission::Cacheable` when
+        // the provenance-pure signature builds and
+        // `ComputeAdmission::ReturnOnly` when it cannot — `ReturnOnly`
+        // still returns (and broadcasts) the freshly-resolved value
+        // without admitting the cache and without re-running the
+        // resolution.
         let arc_key = (
             std::sync::Arc::<str>::from(canonical_id),
             std::sync::Arc::<str>::from(exported_name),
@@ -149,19 +151,21 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         #[cfg(test)]
         super::INJECT_IMPORTED_REGISTRY_CONCURRENT_PUBLISH.with(|slot| {
             if let Some(symbol) = slot.borrow().clone() {
-                if let Some(fact_sig) = engine_fact_signature_for_exported_type(
-                    ctx,
-                    canonical_id,
-                    exported_name,
-                    observed_keyed_hash.expect(
-                        "concurrent-publish injection fixture requires an observed keyed hash",
-                    ),
-                ) {
+                if let crate::cache_runtime::SignatureAdmission::Cacheable(sig) =
+                    engine_fact_signature_for_exported_type(
+                        ctx,
+                        canonical_id,
+                        exported_name,
+                        observed_keyed_hash.expect(
+                            "concurrent-publish injection fixture requires an observed keyed hash",
+                        ),
+                    )
+                {
                     host_db.insert_for_test(
                         arc_key.clone(),
                         std::sync::Arc::new(crate::component_meta_caches::ImportedRegistryEntry {
                             value: Some(std::sync::Arc::new(symbol)),
-                            fact_dep_signature: fact_sig,
+                            fact_dep_signature: sig.facts,
                             // A simulated concurrent publish stamps the
                             // live project generation, exactly as the
                             // real cold-compute path does.
@@ -246,13 +250,26 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 // stale observed hash. The freshly-resolved value is
                 // still returned — and broadcast to joiners — via
                 // `ReturnOnly`.
-                return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(resolved_value);
+                let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
+                    crate::cache_runtime::NonAdmissionReason::ForcedTestRefusal,
+                );
+                return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
+                    resolved_value,
+                );
             }
             let Some(observed) = observed_keyed_hash else {
                 // No authoritative current content for the keyed
                 // canonical — shared-cache admission is refused, but
-                // the value is still returned via `ReturnOnly`.
-                return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(resolved_value);
+                // the value is still returned via `ReturnOnly`. The
+                // missing current-content read means the provenance
+                // could not be rooted to a self-root canonical, so
+                // a cross-view joiner could never view-validate it.
+                let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
+                    crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
+                );
+                return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
+                    resolved_value,
+                );
             };
             match engine_fact_signature_for_exported_type(
                 ctx,
@@ -260,16 +277,24 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 exported_name,
                 observed,
             ) {
-                Some(fact_dep_signature) => {
+                crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
                     crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                         crate::component_meta_caches::ImportedRegistryEntry {
                             value: resolved_value,
-                            fact_dep_signature,
+                            fact_dep_signature: sig.facts,
                             validated_at_generation,
                         },
                     )
                 }
-                None => crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(resolved_value),
+                crate::cache_runtime::SignatureAdmission::NonCacheable(reason) => {
+                    // Pass the typed refusal reason through the TLS
+                    // bridge so the downstream `CacheAdmission`
+                    // lowering attributes the correct structured
+                    // refusal reason instead of hard-coding
+                    // `SignatureOverflow`.
+                    let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(reason);
+                    crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(resolved_value)
+                }
             }
         });
         let result = match host_value {
@@ -421,13 +446,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     self.ctx
                         .resolve_type_declaration_for_dep(canonical_source, requested_name)
                 });
-            let fact_sig = engine_fact_signature_for_exported_type(
+            let observed = observed_keyed_hash?;
+            match engine_fact_signature_for_exported_type(
                 self.ctx,
                 canonical_source,
                 requested_name,
-                observed_keyed_hash?,
-            )?;
-            Some((computed, fact_sig))
+                observed,
+            ) {
+                crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
+                    Some((computed, sig.facts))
+                }
+                crate::cache_runtime::SignatureAdmission::NonCacheable(_) => None,
+            }
         });
         let declaration = match host_value {
             Some(arc_decl) => arc_decl.as_ref().clone(),
@@ -508,13 +538,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 self.resolve_imported_registry_symbol(source_key, exported_name)
                     .is_some()
             };
-            let fact_sig = engine_fact_signature_for_exported_type(
+            let observed = observed_keyed_hash?;
+            match engine_fact_signature_for_exported_type(
                 self.ctx,
                 source_key,
                 exported_name,
-                observed_keyed_hash?,
-            )?;
-            Some((computed, fact_sig))
+                observed,
+            ) {
+                crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
+                    Some((computed, sig.facts))
+                }
+                crate::cache_runtime::SignatureAdmission::NonCacheable(_) => None,
+            }
         });
         // A `None` host-value means the signature builder refused
         // admission (or post-compute revalidation failed). Shared-cache
@@ -574,13 +609,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             // Root the signature on the canonical AND content version
             // the observation recorded — the value and the self-root
             // then provably agree on one content identity.
-            let fact_sig = engine_fact_signature_for_exported_type(
+            match engine_fact_signature_for_exported_type(
                 self.ctx,
                 observed.canonical_id.as_str(),
                 name,
                 observed.whole_hash,
-            )?;
-            Some((computed, fact_sig))
+            ) {
+                crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
+                    Some((computed, sig.facts))
+                }
+                crate::cache_runtime::SignatureAdmission::NonCacheable(_) => None,
+            }
         });
         let body: Option<verter_type_expr::TypeExpr> = match host_value {
             Some(opt_arc) => opt_arc.map(|arc_expr| arc_expr.as_ref().clone()),
@@ -874,20 +913,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             QueryResult::Value(id) => id,
             _ => return None,
         };
-        // C16: Instantiate.base is DeclIdentity. Build from resolved root +
-        // shallow state whole_hash.
-        let whole_hash = self
-            .ctx
-            .shallow_file_state(resolved_root.0.as_str())
-            .map(|s| s.whole_hash)
-            .unwrap_or_default();
-        let identity = crate::semantic_query::DeclIdentity {
+        // R6: Instantiate.base is content-free `DeclKey`; the
+        // cold build re-sources the live whole_hash from
+        // `ensure_indexed_ready`.
+        let base = crate::semantic_query::DeclKey {
             canonical_id: std::sync::Arc::from(resolved_root.0.as_str()),
-            whole_hash,
             decl_name: std::sync::Arc::from(resolved_root.1.as_str()),
         };
         match dispatch.execute(SemanticQueryKey::Instantiate {
-            base: identity,
+            base,
             args: empty_semantic_args(),
             // `dispatch_root_instantiated` feeds
             // `projected_surface_from_semantic_node` which reads the

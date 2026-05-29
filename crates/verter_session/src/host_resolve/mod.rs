@@ -72,6 +72,20 @@ pub(crate) use test_guards::{
 };
 pub(crate) use vue_script_extract::{extract_vue_script_content, template_converter_inputs};
 
+// Test-only knob: arm the compile-tier producer's fact-injection slot.
+// Re-exported through the parent module so `crate::for_tests` can
+// publish it without forming a name dependency on the
+// `virtual_file_pipeline` private module path.
+//
+// The cfg gate MUST match the target's gate in `virtual_file_pipeline.rs`
+// (`CompileForceOverflowGuard` is `#[cfg(any(test, debug_assertions))]`).
+// A `pub use` of a cfg-stripped item is an unresolved-import error in
+// release builds (`cargo build --release`, where `debug_assertions` is
+// off), so the gate is required, not optional.
+#[cfg(any(test, debug_assertions))]
+#[doc(hidden)]
+pub use virtual_file_pipeline::CompileForceOverflowGuard;
+
 // Test-only re-exports: `host_resolve_tests.rs` and the inline frontier
 // tests reference internal helpers via `super::*`. After the split,
 // `super` from those tests resolves to this `mod.rs`, so we re-expose

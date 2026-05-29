@@ -917,7 +917,7 @@ impl RouteDb {
                     entries: Arc::from(Vec::<EffectiveExportEntry>::new().into_boxed_slice()),
                     augmenter_count: 0,
                     augmenter_set_fingerprint: [0u8; 16],
-                    fact_dep_signature: Arc::from(Vec::<FactVersionRef>::new().into_boxed_slice()),
+                    fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
                 })
             }
         }

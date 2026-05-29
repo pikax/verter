@@ -737,7 +737,7 @@ fn invalidate_nodes_removes_last_good() {
             last_access_tick: 1,
             tsx: None,
             template_analysis: None,
-            fact_dep_signature: std::sync::Arc::from(Vec::new()),
+            fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
         },
     );
 
@@ -3160,7 +3160,7 @@ mod upsert_compile_cache_tests {
                     last_access_tick: 0,
                     tsx: None,
                     template_analysis: None,
-                    fact_dep_signature: std::sync::Arc::from(Vec::new()),
+                    fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
                 },
             );
         }

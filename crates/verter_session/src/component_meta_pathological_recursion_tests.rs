@@ -29,9 +29,7 @@ use std::sync::Arc;
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{
-    DeclIdentity, HashValue, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
-};
+use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey};
 use crate::types::HostConfig;
 use crate::VerterHost;
 
@@ -144,13 +142,11 @@ fn pathological_self_shadowing_userland_pick() {
             // `Instantiate(Pick, [T_arg, K_arg])` for the type
             // params, which collides with the active stack entry.
             let dispatch = ProjectSemanticDispatch::new(&*host_for_thread);
-            let shallow = host_for_thread
+            let _ = host_for_thread
                 .shallow_file_state("/A.vue")
                 .expect("/A.vue must have shallow file state");
-            let whole_hash: HashValue = shallow.whole_hash;
-            let pick_identity = DeclIdentity {
+            let pick_identity = crate::semantic_query::DeclKey {
                 canonical_id: Arc::from("/A.vue"),
-                whole_hash,
                 decl_name: Arc::from("Pick"),
             };
             // Use synthetic placeholder args (interned `Primitive`
@@ -272,13 +268,11 @@ fn pathological_exclude_self_recursive() {
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
             let dispatch = ProjectSemanticDispatch::new(&*host_for_thread);
-            let shallow = host_for_thread
+            let _ = host_for_thread
                 .shallow_file_state("/A.vue")
                 .expect("/A.vue must have shallow file state");
-            let whole_hash: HashValue = shallow.whole_hash;
-            let r_identity = DeclIdentity {
+            let r_identity = crate::semantic_query::DeclKey {
                 canonical_id: Arc::from("/A.vue"),
-                whole_hash,
                 decl_name: Arc::from("R"),
             };
             let key = SemanticQueryKey::Instantiate {
@@ -471,13 +465,11 @@ fn pathological_template_literal_key_recursion() {
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
             let dispatch = ProjectSemanticDispatch::new(&*host_for_thread);
-            let shallow = host_for_thread
+            let _ = host_for_thread
                 .shallow_file_state("/A.vue")
                 .expect("/A.vue must have shallow file state");
-            let whole_hash: HashValue = shallow.whole_hash;
-            let r_identity = DeclIdentity {
+            let r_identity = crate::semantic_query::DeclKey {
                 canonical_id: Arc::from("/A.vue"),
-                whole_hash,
                 decl_name: Arc::from("R"),
             };
             let key = SemanticQueryKey::Instantiate {

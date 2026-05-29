@@ -177,7 +177,7 @@ impl VerterHost {
             None => (
                 (normalized_canonical.clone(), imported_name.to_string()),
                 "miss",
-                Arc::from(Vec::<crate::resolver_core::FactVersionRef>::new()),
+                crate::fact_signature_helpers::empty_fact_signature(),
             ),
         };
 

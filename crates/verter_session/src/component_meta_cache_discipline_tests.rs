@@ -19,8 +19,7 @@ use verter_semantic::analysis::AnalyzedMacroKind;
 use crate::host_test_audit::DispatchCounter;
 use crate::project_semantic_dispatch::{omit_builtin_decl_identity, pick_builtin_decl_identity};
 use crate::semantic_query::{
-    DeclIdentity, ProjectionMode, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
-    SemanticQueryKey,
+    ProjectionMode, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
 };
 use crate::types::HostConfig;
 use crate::VerterHost;
@@ -62,7 +61,7 @@ fn intern_empty_object(host: &VerterHost) -> SemanticNodeId {
 /// whose self-root canonical is untracked or hash-mismatched. The
 /// owner must therefore be a tracked file with the real content
 /// version threaded into the key identity.
-fn tracked_macro_owner(host: &VerterHost, canonical: &str) -> DeclIdentity {
+fn tracked_macro_owner(host: &VerterHost, canonical: &str) -> crate::semantic_query::DeclKey {
     use crate::{FileKind, UpsertRequest};
     let _ = host
         .upsert(UpsertRequest {
@@ -73,13 +72,13 @@ fn tracked_macro_owner(host: &VerterHost, canonical: &str) -> DeclIdentity {
             aliases: Vec::new(),
         })
         .expect("owner SFC upsert succeeds");
-    let whole_hash = host
+    // Force the IndexedReady to materialise so the cold build can
+    // re-source the live whole_hash.
+    let _ = host
         .ensure_indexed_ready(canonical)
-        .map(|indexed| indexed.whole_hash)
         .expect("owner SFC IndexedReady materialises");
-    DeclIdentity {
+    crate::semantic_query::DeclKey {
         canonical_id: Arc::from(canonical),
-        whole_hash,
         decl_name: Arc::from("<sfc-script-setup>"),
     }
 }
@@ -139,7 +138,10 @@ fn cache_discipline_resolve_macro_payload_repeated_keys_warm() {
                 crate::semantic_query::PrimitiveKind::String,
             ));
     let unrelated_key = SemanticQueryKey::ResolveMacroPayload {
-        owner: DeclIdentity::synthetic("OtherOwner"),
+        owner: crate::semantic_query::DeclKey {
+            canonical_id: Arc::from("<synthetic>"),
+            decl_name: Arc::from("OtherOwner"),
+        },
         macro_index: 1,
         macro_kind: AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![unrelated_arg].into_boxed_slice()),

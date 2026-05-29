@@ -1268,16 +1268,15 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                     canonical_id,
                     name,
-                    whole_hash,
+                    whole_hash: _,
                 }) => {
-                    let identity = DeclIdentity {
+                    let base = crate::semantic_query::DeclKey {
                         canonical_id: Arc::clone(canonical_id),
-                        whole_hash: *whole_hash,
                         decl_name: Arc::clone(name),
                     };
                     drop(data);
                     let expanded = match self.dispatch.execute(SemanticQueryKey::Instantiate {
-                        base: identity,
+                        base,
                         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                         context:
                             crate::semantic_query::ProjectionReductionContext::structural_transit(),
@@ -1364,7 +1363,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         results.push(current);
                         return;
                     }
-                    let identity = base.clone();
+                    let identity = base.to_decl_key();
                     let args_clone = Arc::clone(args);
                     drop(data);
                     // Intermediate-hop demand
@@ -1577,11 +1576,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                 canonical_id,
                 name,
-                whole_hash,
+                whole_hash: _,
             }) => {
-                let identity = DeclIdentity {
+                let identity = crate::semantic_query::DeclKey {
                     canonical_id: Arc::clone(canonical_id),
-                    whole_hash: *whole_hash,
                     decl_name: Arc::clone(name),
                 };
                 if let Some(alias_id) = self.alias_identity(node) {
@@ -2187,7 +2185,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // structurally at the `Ref` arm, so only `Foo`'s own
                 // members carry the bit.
                 match self.dispatch.execute(SemanticQueryKey::Instantiate {
-                    base: identity.clone(),
+                    base: identity.to_decl_key(),
                     args: args_clone,
                     context: crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
@@ -2266,7 +2264,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // here drops the provenance and the macro-T-root own-body
                 // members all report `false`.
                 match self.dispatch.execute(SemanticQueryKey::Instantiate {
-                    base: identity.clone(),
+                    base: identity.to_decl_key(),
                     args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                     context: crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,

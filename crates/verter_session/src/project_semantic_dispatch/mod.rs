@@ -1200,37 +1200,24 @@ fn find_member(surface: &SurfaceView, needle: &str) -> Option<SemanticNodeId> {
 // classes A/B/C, 5/6/7/8/9 classes D + R) land in 5d-5f.
 // ──────────────────────────────────────────────────────────────────────────
 
-/// `__builtin__` decl identity for the `Pick` utility.
+/// `__builtin__` decl key for the `Pick` utility.
 ///
-/// Used by [`ProjectSemanticDispatch::execute_pick`] to dispatch through
-/// the existing `Instantiate` variant's built-in utility branch
-/// (`build_builtin_utility` Pick arm at `build.rs:870`). The
-/// `canonical_id = "__builtin__"` sentinel matches the convention at
-/// `meta_resolve.rs:9959/9977/9998` and the route through `UtilitySource::Builtin`
-/// per the existing `adapter.utility_source(base, "Pick")` code path.
-#[must_use]
-pub fn pick_builtin_decl_identity() -> DeclIdentity {
-    DeclIdentity {
-        canonical_id: Arc::from("__builtin__"),
-        whole_hash: [0u8; 16],
-        decl_name: Arc::from("Pick"),
-    }
-}
-
-/// `__builtin__` decl identity for the `Omit` utility.
-///
-/// Used by [`ProjectSemanticDispatch::execute_omit`]. Mirrors the Pick
-/// helper above, dispatching through the existing
-/// `build_builtin_utility` Omit arm at `build.rs:911` (which preserves
-/// call/construct/index signatures per `:937-939`).
+/// Returns the content-free [`DeclKey`](crate::semantic_query::DeclKey)
+/// used as `SemanticQueryKey::Instantiate.base` for the Pick builtin
+/// (`build_builtin_utility` Pick arm).
 #[must_use]
 #[allow(dead_code)]
-pub fn omit_builtin_decl_identity() -> DeclIdentity {
-    DeclIdentity {
-        canonical_id: Arc::from("__builtin__"),
-        whole_hash: [0u8; 16],
-        decl_name: Arc::from("Omit"),
-    }
+pub fn pick_builtin_decl_identity() -> crate::semantic_query::DeclKey {
+    crate::semantic_query::DeclKey::builtin("Pick")
+}
+
+/// `__builtin__` decl key for the `Omit` utility.
+///
+/// Mirrors [`pick_builtin_decl_identity`] for the Omit builtin.
+#[must_use]
+#[allow(dead_code)]
+pub fn omit_builtin_decl_identity() -> crate::semantic_query::DeclKey {
+    crate::semantic_query::DeclKey::builtin("Omit")
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
@@ -1282,7 +1269,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> QueryResult<SemanticNodeId> {
         let key_set = self.intern_string_literal_union(members);
         self.execute(SemanticQueryKey::Instantiate {
-            base: pick_builtin_decl_identity(),
+            base: crate::semantic_query::DeclKey::builtin("Pick"),
             args: Arc::from(vec![base, key_set].into_boxed_slice()),
             context: crate::semantic_query::ProjectionReductionContext::published(mode),
         })
@@ -1304,7 +1291,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> QueryResult<SemanticNodeId> {
         let key_set = self.intern_string_literal_union(members);
         self.execute(SemanticQueryKey::Instantiate {
-            base: omit_builtin_decl_identity(),
+            base: crate::semantic_query::DeclKey::builtin("Omit"),
             args: Arc::from(vec![base, key_set].into_boxed_slice()),
             context: crate::semantic_query::ProjectionReductionContext::published(mode),
         })

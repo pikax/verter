@@ -108,6 +108,6 @@ pub use record::{
 };
 pub use scheduler::{SchedulerAudit, SchedulerDepths, WorkerPool};
 pub use store::RequestStoreAudit;
-pub use structured_event::StructuredAuditEvent;
+pub use structured_event::{NonAdmissionReason, StructuredAuditEvent};
 pub use timing::RequestTimingAudit;
 pub use waits::WaitAudit;

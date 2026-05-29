@@ -55,6 +55,80 @@ use crate::payloads::tags::{
 };
 use crate::record::{u64_as_decimal_string, Hash16};
 
+/// Why a cold-compute result was admitted as non-cacheable instead of
+/// entering the warm cache.
+///
+/// The cache-runtime admission types carry this on their non-cacheable
+/// arms: a `Cacheable` outcome enters the warm cache, while every other
+/// outcome routes the value back to the winning flight alone (joiners
+/// fork and recompute) and stamps the reason here so structured refusal
+/// telemetry can attribute the miss without a format string.
+///
+/// This lives in the audit leaf crate so structured refusal events can
+/// depend on it without a back-edge to `verter_session`. The session
+/// crate re-exports it from `cache_runtime::admission`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NonAdmissionReason {
+    /// The value is an intrinsic / builtin whose result is the same in
+    /// every world and is deliberately never cached as a fact-validated
+    /// entry.
+    IntrinsicNonCacheable,
+    /// The path-precise fact signature exceeded the size cap. The value
+    /// is correct; the signature is too large to admit safely.
+    SignatureOverflow,
+    /// The producer observed zero facts on a source-dependent cache, so
+    /// there is no signature to validate a warm hit against.
+    EmptySignature,
+    /// The entry's keyed self-root was edited (or became untracked)
+    /// during the cold compute window, so the freshly-built value is
+    /// already stale for the keyed file.
+    SelfRootConflict,
+    /// The computed route depends on the project generation and the
+    /// generation moved during the cold window.
+    RouteGenerationDependency,
+    /// A test forced the admission path to refuse, exercising the
+    /// non-cacheable broadcast contract deterministically.
+    ForcedTestRefusal,
+    /// The world generation under which the value was computed has been
+    /// superseded by a newer generation.
+    GenerationSuperseded,
+    /// Post-compute revalidation rejected the entry just before publish
+    /// (a mutation invalidated its dep-signature mid-compute).
+    PostComputeRevalidationFailed,
+    /// A retention / compute budget was exhausted before the value could
+    /// be admitted.
+    BudgetExceeded,
+    /// The compute was cancelled or its enclosing request was
+    /// interrupted before it could publish.
+    Cancelled,
+    /// The value could not be rooted to a self-root canonical, so a
+    /// cross-view joiner could never view-validate it.
+    UnresolvedProvenance,
+    /// The cold compute itself failed (panic substitute, missing dep,
+    /// parse error).
+    ComputeFailed,
+}
+
+impl std::fmt::Display for NonAdmissionReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::IntrinsicNonCacheable => "IntrinsicNonCacheable",
+            Self::SignatureOverflow => "SignatureOverflow",
+            Self::EmptySignature => "EmptySignature",
+            Self::SelfRootConflict => "SelfRootConflict",
+            Self::RouteGenerationDependency => "RouteGenerationDependency",
+            Self::ForcedTestRefusal => "ForcedTestRefusal",
+            Self::GenerationSuperseded => "GenerationSuperseded",
+            Self::PostComputeRevalidationFailed => "PostComputeRevalidationFailed",
+            Self::BudgetExceeded => "BudgetExceeded",
+            Self::Cancelled => "Cancelled",
+            Self::UnresolvedProvenance => "UnresolvedProvenance",
+            Self::ComputeFailed => "ComputeFailed",
+        };
+        f.write_str(name)
+    }
+}
+
 /// Typed structured event emitted by an audited request path.
 ///
 /// All variants are `Serialize + Deserialize` so they can be written
@@ -730,5 +804,84 @@ fn format_augmentation_target(
             None => "wild=?".to_owned(),
         },
         AugmentationTargetKindTag::GlobalAugmentation => "global".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod non_admission_reason_tests {
+    //! Discriminating coverage for [`NonAdmissionReason`] — the
+    //! cache-runtime non-cacheable refusal classification that lives in
+    //! the audit leaf crate so structured refusal events can depend on
+    //! it without a back-edge to `verter_session`.
+    //!
+    //! These tests fail to compile / fail their assertions against a
+    //! tree where the enum or one of its variants is absent, and pass
+    //! once the full variant set is present.
+    use super::NonAdmissionReason;
+
+    /// The complete refusal-classification surface, every variant named
+    /// once. A regression dropping a variant fails to compile here.
+    const ALL: &[NonAdmissionReason] = &[
+        NonAdmissionReason::IntrinsicNonCacheable,
+        NonAdmissionReason::SignatureOverflow,
+        NonAdmissionReason::EmptySignature,
+        NonAdmissionReason::SelfRootConflict,
+        NonAdmissionReason::RouteGenerationDependency,
+        NonAdmissionReason::ForcedTestRefusal,
+        NonAdmissionReason::GenerationSuperseded,
+        NonAdmissionReason::PostComputeRevalidationFailed,
+        NonAdmissionReason::BudgetExceeded,
+        NonAdmissionReason::Cancelled,
+        NonAdmissionReason::UnresolvedProvenance,
+        NonAdmissionReason::ComputeFailed,
+    ];
+
+    #[test]
+    fn every_reason_is_distinct_and_copy() {
+        // `Copy` — moving by value leaves the original usable.
+        for (i, &a) in ALL.iter().enumerate() {
+            let copied = a;
+            assert_eq!(a, copied, "a NonAdmissionReason must be Copy + Eq");
+            // Every OTHER variant compares unequal: no two discriminants
+            // collapse onto each other (a `#[default]`-style merge would
+            // fail this).
+            for (j, &b) in ALL.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "distinct refusal reasons must not compare equal");
+                }
+            }
+        }
+        // The surface has exactly the twelve documented reasons.
+        assert_eq!(ALL.len(), 12, "NonAdmissionReason must expose 12 variants");
+    }
+
+    #[test]
+    fn display_is_distinct_per_variant() {
+        // Each variant Displays to a distinct, non-empty name so refusal
+        // telemetry can attribute the miss without a format string. A
+        // `Display` that collapsed two variants onto the same text would
+        // fail this discriminator.
+        let mut seen = std::collections::BTreeSet::new();
+        for &reason in ALL {
+            let rendered = reason.to_string();
+            assert!(
+                !rendered.is_empty(),
+                "{reason:?} must render a non-empty name"
+            );
+            assert!(
+                seen.insert(rendered.clone()),
+                "Display collision on {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn serde_round_trips_through_json() {
+        for &reason in ALL {
+            let json = serde_json::to_string(&reason).expect("serialize NonAdmissionReason");
+            let back: NonAdmissionReason =
+                serde_json::from_str(&json).expect("deserialize NonAdmissionReason");
+            assert_eq!(reason, back, "serde round-trip must preserve the variant");
+        }
     }
 }

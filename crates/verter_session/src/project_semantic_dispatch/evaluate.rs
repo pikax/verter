@@ -14,8 +14,8 @@ use std::sync::Arc;
 
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    DeclIdentity, IndexKey, LiteralValue, PathSegment, ProjectionMode, ProjectionReductionContext,
-    QueryError, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
+    IndexKey, LiteralValue, PathSegment, ProjectionMode, ProjectionReductionContext, QueryError,
+    QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
 };
 
 /// Hard ceiling on recursive `evaluate_deferred_semantic_node_with_context`
@@ -350,11 +350,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                     canonical_id,
                     name,
-                    whole_hash,
+                    whole_hash: _,
                 }) => {
-                    let identity = DeclIdentity {
+                    let base = crate::semantic_query::DeclKey {
                         canonical_id: Arc::clone(canonical_id),
-                        whole_hash: *whole_hash,
                         decl_name: Arc::clone(name),
                     };
                     drop(data);
@@ -366,7 +365,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // during relation-engine binding; the caller's
                     // `StructuralTransit` context now carries through.
                     match self.execute(SemanticQueryKey::Instantiate {
-                        base: identity,
+                        base,
                         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                         context: reduction_context,
                     }) {

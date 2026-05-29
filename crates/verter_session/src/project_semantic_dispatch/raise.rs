@@ -1109,13 +1109,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if self.ctx.workspace_is_package_backed(canonical_id.as_ref()) {
                     return node;
                 }
-                let identity = crate::semantic_query::DeclIdentity {
+                // The placeholder's `whole_hash` is diagnostic payload only;
+                // the `Instantiate` key is content-free (R6) and the cold
+                // build re-sources the live whole_hash from
+                // `ensure_indexed_ready`.
+                let _ = whole_hash;
+                let base = crate::semantic_query::DeclKey {
                     canonical_id: Arc::clone(canonical_id),
-                    whole_hash: *whole_hash,
                     decl_name: Arc::clone(name),
                 };
                 let key = SemanticQueryKey::Instantiate {
-                    base: identity,
+                    base,
                     args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                     context,
                 };
@@ -1312,7 +1316,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // reduce regardless of body shape.
                     return node;
                 }
-                let identity = base.clone();
+                let base_key = base.to_decl_key();
                 let args: Arc<[SemanticNodeId]> = Arc::from(
                     args.iter()
                         .map(|id| state.mapping.get(&(*id, context)).copied().unwrap_or(*id))
@@ -1320,7 +1324,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .into_boxed_slice(),
                 );
                 let key = SemanticQueryKey::Instantiate {
-                    base: identity,
+                    base: base_key,
                     args,
                     context,
                 };

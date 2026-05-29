@@ -1135,14 +1135,28 @@ fn resolve_decl_anchor(
 /// Build a `DeclIdentity` for a test type declared in the given file.
 /// Uses `whole_hash = [0u8; 16]` (tests don't have real content hashes).
 fn decl_identity(
+    _host: &VerterHost,
+    canonical_id: &str,
+    name: &str,
+) -> crate::semantic_query::DeclKey {
+    // Content-free key (R6); the cold build re-sources the live
+    // whole_hash from `ensure_indexed_ready` at value-compute time.
+    crate::semantic_query::DeclKey {
+        canonical_id: Arc::from(canonical_id),
+        decl_name: Arc::from(name),
+    }
+}
+
+/// Value-side `DeclIdentity` carrying the file's real whole_hash —
+/// used for interning `SemanticNodeData::InstantiationRef` and
+/// `SemanticNodeData::DeclRef` payloads which still embed
+/// `DeclIdentity` for node-arena identity (value-side payload, not a
+/// query-identity key — R6 only forbids query-key embedding).
+fn decl_identity_value(
     host: &VerterHost,
     canonical_id: &str,
     name: &str,
 ) -> crate::semantic_query::DeclIdentity {
-    // The identity carries the file.s REAL whole hash — the content
-    // version recorded on `NodeScopeId::File` at intern time in
-    // production. A bogus hash would make the published memo entry.s
-    // self-root `FileWholeHash` fail strict warm-read validation.
     let whole_hash = host
         .ensure_indexed_ready(canonical_id)
         .map(|indexed| indexed.whole_hash)
@@ -3451,17 +3465,15 @@ fn mapped_type_uses_source_member_names_when_object_source() {
 // dispatch call (typically `SemanticQueryKey::MappedType`) and emits
 // the same origin edges the userland-equivalent alias would emit.
 
-/// Helper: build a `DeclIdentity` carrying a utility name so
-/// `build_instantiate` sees it as "utility" through `utility_source`.
-/// Returns `DeclIdentity` directly — the prior `DeclAnchor` node
-/// variant has been retired.
+/// Helper: build a content-free `DeclKey` carrying a utility name so
+/// `build_instantiate` sees it as a "utility" through `utility_source`.
+/// Returns `DeclKey` for use as `SemanticQueryKey::Instantiate.base`.
 fn utility_identity(
     _graph: &Arc<SemanticGraphStore>,
     name: &str,
-) -> crate::semantic_query::DeclIdentity {
-    crate::semantic_query::DeclIdentity {
+) -> crate::semantic_query::DeclKey {
+    crate::semantic_query::DeclKey {
         canonical_id: Arc::from("/w/lib.ts"),
-        whole_hash: [0u8; 16],
         decl_name: Arc::from(name),
     }
 }
@@ -5378,20 +5390,12 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
 
 use verter_semantic::analysis::AnalyzedMacroKind;
 
-fn synthetic_macro_owner(
-    host: &VerterHost,
-    canonical: &str,
-) -> crate::semantic_query::DeclIdentity {
-    // The owner identity carries the SFC.s REAL whole hash so the
-    // published `ResolveMacroPayload` memo entry.s self-root
-    // `FileWholeHash` passes strict warm-read validation.
-    let whole_hash = host
-        .ensure_indexed_ready(canonical)
-        .map(|indexed| indexed.whole_hash)
-        .unwrap_or([0u8; 16]);
-    crate::semantic_query::DeclIdentity {
+fn synthetic_macro_owner(_host: &VerterHost, canonical: &str) -> crate::semantic_query::DeclKey {
+    // Content-free key (R6); `build_resolve_macro_payload`
+    // re-sources the owner's live `whole_hash` from
+    // `ensure_indexed_ready` at value-compute time.
+    crate::semantic_query::DeclKey {
         canonical_id: Arc::from(canonical),
-        whole_hash,
         decl_name: Arc::from("<sfc-script-setup>"),
     }
 }
@@ -5925,20 +5929,25 @@ fn resolve_macro_payload_rematerializes_evicted_but_current_owner_artifact() {
     }
 }
 
-/// **A stale `ResolveMacroPayload` key must NOT resolve against newer
-/// owner content.** When the owner SFC has CHANGED, a `ResolveMacroPayload`
-/// key still carrying the OLD `owner.whole_hash` is stale: macro
-/// resolution must return `Miss` rather than reading the newer
-/// content's macros.
+/// **`ResolveMacroPayload` re-resolves under content edit via the
+/// content-free R6 key.** The key carries no `whole_hash`; the cold
+/// build re-sources the live owner content version from
+/// `ensure_indexed_ready` at value-compute time. A content edit
+/// invalidates the warm entry via strict self-root validation, the
+/// next call cold-rebuilds against the new content, and the macro
+/// resolves against the *current* SFC.
 ///
-/// Discrimination property: the rematerialize-on-eviction branch is
-/// gated on `authoritative_current_content_hash(owner) == owner.whole_hash`.
-/// For a stale key the hashes differ, so the branch does NOT
-/// rematerialize (rematerializing would yield the NEWER content). A
-/// branch that rematerialized unconditionally would resolve the stale
-/// key against the post-edit macros and this test FAILS.
+/// Discrimination property: under R6 the key is content-free, so the
+/// same `ResolveMacroPayload` key resolves against whichever owner
+/// content the live indexed view currently exposes. The warm entry's
+/// self-root `FileWholeHash` is rejected on the edited content and a
+/// fresh cold build runs against the new version. A regression that
+/// re-introduced `whole_hash` in the key would either (a) cache-miss
+/// against the new key under the new content and return the old
+/// resolution, or (b) cache-miss against the old key and refuse to
+/// resolve.
 #[test]
-fn resolve_macro_payload_stale_owner_key_does_not_resolve_against_newer_content() {
+fn resolve_macro_payload_resolves_against_current_owner_content_via_content_free_key() {
     let host = host();
     let c = "/macro_evict/stale.vue";
     let _ = host
@@ -5951,11 +5960,32 @@ fn resolve_macro_payload_stale_owner_key_does_not_resolve_against_newer_content(
         })
         .unwrap();
 
-    // Capture the v1 owner identity (the now-soon-to-be-stale hash).
-    let stale_owner = synthetic_macro_owner(&host, c);
-    let stale_macro_index = define_emits_macro_index(&host, c);
+    // Capture the v1 owner identity. Under R6 the `DeclKey` is
+    // content-free, so this key remains valid against v2 too.
+    let owner_key_v1 = synthetic_macro_owner(&host, c);
+    let macro_index = define_emits_macro_index(&host, c);
 
-    // Change the SFC content: `owner.whole_hash` from v1 is now stale.
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    // Prime the warm entry under v1 — succeeds.
+    let key = SemanticQueryKey::ResolveMacroPayload {
+        owner: owner_key_v1.clone(),
+        macro_index,
+        macro_kind: AnalyzedMacroKind::DefineEmits,
+        type_args: Arc::from(vec![arg].into_boxed_slice()),
+        mode: ProjectionMode::Expanded,
+    };
+    let v1_result = dispatch.execute(key.clone());
+    assert!(
+        matches!(v1_result, QueryResult::Value(_)),
+        "v1 macro resolution must succeed; got {v1_result:?}"
+    );
+
+    // Change the SFC content. Under R6 the SAME content-free `DeclKey`
+    // re-applies: the warm entry's self-root `FileWholeHash` is
+    // rejected by strict validation, and the cold rebuild reads v2.
     let _ = host
         .upsert(UpsertRequest {
             canonical_id: None,
@@ -5967,45 +5997,20 @@ fn resolve_macro_payload_stale_owner_key_does_not_resolve_against_newer_content(
             aliases: Vec::new(),
         })
         .unwrap();
-    let current_owner = synthetic_macro_owner(&host, c);
-    assert_ne!(
-        stale_owner.whole_hash, current_owner.whole_hash,
-        "fixture invariant: the SFC edit must shift the owner whole hash"
-    );
-
-    let graph = Arc::clone(host.project_type_store().semantic_graph());
-    let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let dispatch = ProjectSemanticDispatch::new(&host);
-    // A `ResolveMacroPayload` key carrying the STALE v1 `whole_hash`.
-    let stale_key = SemanticQueryKey::ResolveMacroPayload {
-        owner: stale_owner,
-        macro_index: stale_macro_index,
+    let macro_index_v2 = define_emits_macro_index(&host, c);
+    let key_v2 = SemanticQueryKey::ResolveMacroPayload {
+        owner: owner_key_v1,
+        macro_index: macro_index_v2,
         macro_kind: AnalyzedMacroKind::DefineEmits,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
         mode: ProjectionMode::Expanded,
     };
-
-    // The stale key's pinned lookup misses (only v2's artifact is
-    // cached). The rematerialize branch observes the current hash !=
-    // the stale `owner.whole_hash` and refuses to rematerialize — the
-    // result is `Miss`, NOT a resolution against the v2 macros.
-    let result = dispatch.execute(stale_key);
-    match result {
-        QueryResult::Error(QueryError::Miss) => { /* expected */ }
-        QueryResult::Value(n) => {
-            let d = host
-                .project_type_store()
-                .semantic_graph()
-                .node_data(n)
-                .unwrap();
-            assert!(
-                matches!(&*d, SemanticNodeData::Opaque(QueryError::Miss)),
-                "a stale ResolveMacroPayload key MUST NOT resolve against newer owner \
-                 content — expected a Miss, got {d:?}"
-            );
-        }
-        other => panic!("expected Miss for a stale owner key, got {other:?}"),
-    }
+    let v2_result = dispatch.execute(key_v2);
+    assert!(
+        matches!(v2_result, QueryResult::Value(_)),
+        "v2 macro resolution must succeed against the new content via the \
+         content-free DeclKey; got {v2_result:?}"
+    );
 }
 
 /// **Class A dispatch parity (invisibility proof).** Verifies that
@@ -6318,7 +6323,7 @@ fn pick_builtin_decl_identity_uses_canonical_sentinel() {
          drift breaks utility_source routing"
     );
     assert_eq!(id.decl_name.as_ref(), "Pick");
-    assert_eq!(id.whole_hash, [0u8; 16]);
+    // R6: the key is content-free — no `whole_hash` field exists.
 }
 
 /// `omit_builtin_decl_identity()` returns the `__builtin__` sentinel
@@ -6744,7 +6749,7 @@ fn shallow_intersection_object_and_instantiation_ref_merges_members() {
     // Ensure Foo is indexed before constructing the InstantiationRef.
     let _ = resolve_decl_anchor(&dispatch, "/w/inst.ts", "Foo");
     let inst_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
-        base: decl_identity(&host, "/w/inst.ts", "Foo"),
+        base: decl_identity_value(&host, "/w/inst.ts", "Foo"),
         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
     });
     let base = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
@@ -6849,7 +6854,7 @@ fn shallow_instantiation_ref_substitutes_via_navigate() {
     let _ = resolve_decl_anchor(&dispatch, "/w/wrap.ts", "Foo");
     let str_arg = primitive(&graph, PrimitiveKind::String);
     let inst_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
-        base: decl_identity(&host, "/w/wrap.ts", "Foo"),
+        base: decl_identity_value(&host, "/w/wrap.ts", "Foo"),
         args: Arc::from(vec![str_arg].into_boxed_slice()),
     });
 
@@ -6894,7 +6899,7 @@ fn shallow_instantiation_ref_warm_pass_o1() {
     let _ = resolve_decl_anchor(&dispatch, "/w/wrap_warm.ts", "Foo");
     let str_arg = primitive(&graph, PrimitiveKind::String);
     let inst_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
-        base: decl_identity(&host, "/w/wrap_warm.ts", "Foo"),
+        base: decl_identity_value(&host, "/w/wrap_warm.ts", "Foo"),
         args: Arc::from(vec![str_arg].into_boxed_slice()),
     });
 
@@ -7094,7 +7099,7 @@ fn shallow_cycle_propagates_via_diagnostic_not_panic() {
     let _ = resolve_decl_anchor(&dispatch, "/w/cycle.ts", "Foo");
     let str_arg = primitive(&graph, PrimitiveKind::String);
     let inst_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
-        base: decl_identity(&host, "/w/cycle.ts", "Foo"),
+        base: decl_identity_value(&host, "/w/cycle.ts", "Foo"),
         args: Arc::from(vec![str_arg].into_boxed_slice()),
     });
 
@@ -7267,7 +7272,7 @@ fn shallow_conditional_closed_recurses_on_branch() {
     // via `require_object_surface`.
     let _ = resolve_decl_anchor(&dispatch, "/w/cond_branch.ts", "Wrap");
     let true_branch = graph.intern_node(SemanticNodeData::InstantiationRef {
-        base: decl_identity(&host, "/w/cond_branch.ts", "Wrap"),
+        base: decl_identity_value(&host, "/w/cond_branch.ts", "Wrap"),
         args: Arc::from(vec![str_id].into_boxed_slice()),
     });
 

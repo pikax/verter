@@ -1358,13 +1358,16 @@ pub(crate) struct CompileSlot {
     /// cross-file edit invalidates the affected per-Member fact and
     /// the consumer's warm hit misses without any eager invalidation.
     ///
-    /// Empty signature (default) is a valid state for cold-compute
-    /// paths that have not yet been wired to the tracer; the warm-hit
-    /// path treats an empty signature as "no facts observed" and
+    /// Carrier invariant: `present in compile_slots` implies admitted
+    /// cache entry. A tracer that finalised with `Overflow` MUST NOT
+    /// publish here — the cold-build producer refuses the
+    /// `compile_slots.insert` on overflow and returns the freshly
+    /// computed value to its single caller without admitting. An
+    /// empty fact rail (`facts.is_empty() && !overflowed`) is a valid
+    /// admitted state: the warm-hit oracle validates vacuously and
     /// falls back to the existing `semantic_hash`/override-hash
-    /// pre-filter. The arch-guard test asserts non-empty signature
-    /// production for the compile cold path on macro-dep files.
-    pub(crate) fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>,
+    /// pre-filter.
+    pub(crate) fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature,
 }
 
 /// Lightweight extract of FileEntry fields needed for compilation,

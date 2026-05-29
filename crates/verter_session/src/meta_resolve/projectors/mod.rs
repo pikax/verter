@@ -552,7 +552,7 @@ pub(crate) fn resolve_macro_payload(
     };
 
     let payload_read = dispatch.execute_read(SemanticQueryKey::ResolveMacroPayload {
-        owner: owner.clone(),
+        owner: owner.to_decl_key(),
         macro_index,
         macro_kind,
         type_args,
@@ -992,13 +992,16 @@ fn member_shape_peek_or_compute(
     let admitted = cache.get_or_compute(&key, ctx, move || {
         let scope_obs = observed_scope?;
         let parse_fact = scope_obs.syntactic_export_set.clone()?;
-        let fact_sig =
-            crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
-                &scope_obs,
-                parse_fact,
-                &materialized_for_closure.dep_signature,
-            )?;
-        Some((materialized_for_closure, fact_sig))
+        match crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
+            &scope_obs,
+            parse_fact,
+            &materialized_for_closure.dep_signature,
+        ) {
+            crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
+                Some((materialized_for_closure, sig.facts))
+            }
+            crate::cache_runtime::SignatureAdmission::NonCacheable(_) => None,
+        }
     });
     admitted.unwrap_or(materialized_with_gate_fence)
 }
@@ -1129,14 +1132,13 @@ fn admit_member_shape_if_possible(
     let Some(parse_fact) = observed_scope.syntactic_export_set.clone() else {
         return value;
     };
-    let Some(fact_sig) =
-        crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
-            &observed_scope,
-            parse_fact,
-            &value.dep_signature,
-        )
-    else {
-        return value;
+    let fact_sig = match crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
+        &observed_scope,
+        parse_fact,
+        &value.dep_signature,
+    ) {
+        crate::cache_runtime::SignatureAdmission::Cacheable(sig) => sig.facts,
+        crate::cache_runtime::SignatureAdmission::NonCacheable(_) => return value,
     };
     ctx.project_type_store()
         .shape_cache_db()

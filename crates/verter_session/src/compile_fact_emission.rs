@@ -4,9 +4,12 @@
 //! pass depends on, routing each through the active fact tracer
 //! installed by `VerterHost::with_fact_tracer`. Producers wire one
 //! call to [`observe_compile_tier_dependencies`] around the
-//! `compile_entry` invocation; the resulting `Arc<[FactVersionRef]>`
-//! becomes the `fact_dep_signature` stored on the new
-//! [`crate::types::CompileSlot`].
+//! `compile_entry` invocation; the producer finalises the tracer
+//! through [`crate::cache_runtime::SignatureAdmission::from_finalise`]
+//! and stores the `Cacheable` arm's [`crate::fact_signature_helpers::ReadSetSignature`]
+//! as the `fact_dep_signature` of the new [`crate::types::CompileSlot`].
+//! An overflowed tracer routes the freshly computed virtual file
+//! back to the caller without admitting a slot.
 //!
 //! ## Why path-precision (R28)
 //!
@@ -71,7 +74,7 @@ use verter_semantic::facts::registry::{
 };
 use verter_semantic::facts::FactLane;
 
-use crate::resolver_core::{FactReadSet, FactVersionRef, ParseFactRef, RouteSurfaceFactRef};
+use crate::resolver_core::{FactVersionRef, ParseFactRef, RouteSurfaceFactRef};
 use crate::types::{ExternalSourceRequest, Hash16};
 use crate::VerterHost;
 
@@ -459,16 +462,5 @@ fn observe_augmentation_fingerprints(host: &VerterHost, script_imports: &[Analyz
                 },
             ));
         }
-    }
-}
-
-/// Drain the active tracer into an immutable signature, returning
-/// the empty signature when the tracer overflowed (per R20 1024-cap
-/// — the caller refuses cache admission of overflowed signatures).
-#[allow(dead_code)]
-pub(crate) fn finalise_signature_or_empty(set: FactReadSet) -> Arc<[FactVersionRef]> {
-    match set.finalise() {
-        crate::resolver_core::FactReadSetFinalise::Ok(sig) => sig,
-        crate::resolver_core::FactReadSetFinalise::Overflow => Arc::from(Vec::<_>::new()),
     }
 }

@@ -174,7 +174,7 @@ fn realize_callable_member_inner(
         // Conditional reduction (which is what turns
         // `ExtendSlotWithPlan<TPlan, K>` into a Function) fires.
         SemanticNodeData::InstantiationRef { base, args } => {
-            let base = base.clone();
+            let base = base.to_decl_key();
             let args = Arc::clone(args);
             drop(data);
             let body_context =
