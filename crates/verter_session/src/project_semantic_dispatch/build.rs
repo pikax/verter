@@ -429,6 +429,145 @@ impl<'a> ProjectSemanticDispatch<'a> {
         .with_observed_self_roots([(Arc::clone(&value_root.scope.canonical_id), observed_hash)])
     }
 
+    /// Build a `.vue` SFC's synthesized `default` PUBLIC INSTANCE surface for
+    /// `Instantiate{ .vue, "default", [] }`.
+    ///
+    /// The `.vue`'s `IndexedReady` carries a synthesized `default` VALUE symbol
+    /// (`resolver_core::vue_default_synth`) whose construct-signature return type
+    /// IS the instance object `{ $props, $emit, $slots }`. This lowers that
+    /// instance object through the SHARED lowering pipeline (no second resolver)
+    /// in the `.vue`'s scope, returning a normal
+    /// [`SemanticNodeData::Object`]`(SurfaceView)` so `ProjectPath` / walkers
+    /// navigate `$props` / `$emit` / `$slots`.
+    ///
+    /// Returns `None` when the canonical carries no synthesized `default` with an
+    /// instance shape (a `.vue` with no type-based macros), letting
+    /// `build_instantiate` fall through to its ordinary `resolve_prepared_type_decl`
+    /// miss handling.
+    ///
+    /// Termination is by QUERY IDENTITY, not a depth bound: this pushes
+    /// `(decl_canonical, "default")` onto the dispatcher's `instantiate_active`
+    /// stack before lowering the instance shape and pops after, so a `.vue` whose
+    /// instance shape transitively re-references the SAME `.vue default` identity
+    /// (a circular `A.vue ↔ B.vue` import) short-circuits to
+    /// `Opaque(RecursiveRef)` instead of recursing. The memo's same-key
+    /// `Instantiate` sentinel (`mod.rs`) provides the outer cooperative-admission
+    /// back-edge for the distinct-key re-entry case.
+    fn build_vue_default_instance(
+        &self,
+        decl_canonical: &Arc<str>,
+        decl_whole_hash: crate::semantic_query::HashValue,
+        scope: &NodeScopeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<crate::project_semantic_dispatch::walk::QueryBuildOutput> {
+        // The synthesized `default` value symbol's construct-signature return
+        // type is the instance object. Read it ONCE from the observed
+        // `IndexedReady` (the same artifact that roots the memo entry below).
+        let indexed = self.ctx.ensure_indexed_ready(decl_canonical.as_ref())?;
+        let default_symbol = indexed.shallow_state.value_symbol("default")?;
+        let instance_shape: TypeExpr = default_symbol
+            .function_signature
+            .as_ref()?
+            .return_type
+            .as_ref()?
+            .clone();
+        let observed_hash = indexed.whole_hash;
+
+        // Body-lowering context for the `.vue` scope — mirrors the prepared-decl
+        // path's scope-payload + shadowing capture so a synthesized instance
+        // member that REFERENCES an imported `.vue` (`InstanceType<typeof Foo>`)
+        // resolves through the SAME bare-name / import resolution every decl body
+        // uses.
+        let scope_payload = self
+            .ctx
+            .prepared_decl_bundle(decl_canonical.as_ref())
+            .map(|bundle| {
+                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                    &bundle,
+                )
+            });
+        let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+            scope_payload.as_ref(),
+        );
+        let env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
+        let name_resolution: FxHashMap<String, ResolvedRootIdentity> = FxHashMap::default();
+        let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+
+        // Query-identity recursion control: push `(decl_canonical, "default")`
+        // before lowering. A circular `.vue` import whose instance shape
+        // transitively re-references this same identity sees the active entry in
+        // `shallow_lower_type_expr` and emits `Opaque(RecursiveRef)` at the
+        // back-edge — bounded, no hang.
+        let active_identity: super::InstantiateIdentity =
+            (Arc::clone(decl_canonical), Arc::from("default"));
+        let pushed = self.push_instantiate_active(active_identity);
+        if !pushed {
+            return Some(
+                (
+                    QueryResult::Value(self.opaque(QueryError::RecursiveRef {
+                        name: Arc::from("default"),
+                    })),
+                    empty_signature(),
+                )
+                    .into(),
+            );
+        }
+
+        // Lower the instance object through the shared pipeline. An inline
+        // `ObjectExpr` lowers directly to `SemanticNodeData::Object(SurfaceView)`,
+        // so the result is a normal object the walkers navigate.
+        let result = self.shallow_lower_type_expr_with_context(
+            &instance_shape,
+            &env,
+            scope,
+            &name_resolution,
+            scope_payload.as_ref(),
+            &shadowing,
+            &mut substitutions,
+            context,
+        );
+        self.pop_instantiate_active();
+
+        // Origin edge + dep signature, mirroring `build_instantiate`'s shell. The
+        // instance object is synthesized from the `.vue`'s macro type arguments,
+        // so the result depends on the `.vue`'s content version — root the memo
+        // entry on `(decl_canonical, observed_hash)`.
+        self.graph().record_instantiate();
+        let fence = self.dep_signature_for(decl_canonical, observed_hash);
+        let base = self
+            .graph()
+            .intern_node_with_scope(SemanticNodeData::Opaque(QueryError::Miss), scope.clone());
+        self.graph().record_origin_edge(
+            result,
+            OriginEdgeKind::Instantiate,
+            Arc::from(vec![base].into_boxed_slice()),
+            OriginMeta::None,
+            Arc::clone(&fence),
+        );
+        for (param_name, arg_id) in substitutions {
+            self.graph().record_origin_edge(
+                result,
+                OriginEdgeKind::SubstituteTypeParam,
+                Arc::from(vec![arg_id].into_boxed_slice()),
+                OriginMeta::SubstitutedParam(param_name),
+                Arc::clone(&fence),
+            );
+        }
+
+        // `decl_whole_hash` (carried by the `Instantiate` key's `DeclIdentity`)
+        // and `observed_hash` (the artifact just read) agree under a stable
+        // content generation; root on the observed hash, which is the basis the
+        // instance shape was actually read from.
+        let _ = decl_whole_hash;
+        Some(
+            crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                QueryResult::Value(result),
+                fence,
+            ))
+            .with_observed_self_roots([(Arc::clone(decl_canonical), observed_hash)]),
+        )
+    }
+
     /// Generic instantiation.
     ///
     /// Receives `DeclIdentity` directly from the `Instantiate` key —
@@ -516,6 +655,44 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .intern_node_with_scope(SemanticNodeData::Opaque(QueryError::Miss), scope.clone());
 
         let adapter = SessionDispatchHost::new(self.ctx);
+
+        // 1b. `.vue` synthesized `default` public-instance dispatch.
+        //
+        // A `.vue` SFC has no userland `default` TYPE declaration — its public
+        // component type is the SYNTHESIZED instance object
+        // `{ $props, $emit, $slots }` carried as the construct-signature return
+        // type of a synthesized `default` VALUE symbol
+        // (`resolver_core::vue_default_synth`). `Instantiate{ .vue, "default", [] }`
+        // is the SOLE semantic identity for that public instance — the public
+        // API (`resolve_vue_public_type`) and a `.vue`-importing-`.vue` reference
+        // (`Ref("Foo")` → `DeclRef{Foo.vue, "default"}` → `Instantiate`) BOTH
+        // route here, so there is exactly one query identity and one resolver.
+        //
+        // Without this branch the query would fall through to
+        // `resolve_prepared_type_decl` below (a `.vue` has no prepared `default`
+        // TYPE decl) and miss. The branch is gated on the SAME
+        // `is_synthesis_candidate` predicate the injection used, so a userland
+        // `export default class` in a `.ts` file is never hijacked, and it
+        // requires `args.is_empty()` (the synthesized default takes no type
+        // arguments).
+        //
+        // Termination is by query identity (NO depth bound): the memo's
+        // same-key `Instantiate` recursion sentinel (`mod.rs`) returns
+        // `Opaque(RecursiveRef)` for a circular `A.vue ↔ B.vue` import, and the
+        // `push_instantiate_active`/`pop` discipline below catches same-identity
+        // re-entry while the instance shape is lowering.
+        if decl_name.as_ref() == "default"
+            && args.is_empty()
+            && crate::resolver_core::vue_default_synth::is_synthesis_candidate(
+                decl_canonical.as_ref(),
+            )
+        {
+            if let Some(output) =
+                self.build_vue_default_instance(decl_canonical, decl_whole_hash, &scope, context)
+            {
+                return output;
+            }
+        }
 
         // 2. Built-in utility dispatch.
         // A utility name (Partial, Pick, ReturnType, etc.) that the user

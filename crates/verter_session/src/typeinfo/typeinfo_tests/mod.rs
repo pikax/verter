@@ -68,4 +68,5 @@ mod value_inference;
 mod variadic_tuples;
 mod vue_adapter;
 mod vue_adapter_cache;
+mod vue_import_recursion;
 mod wide_deep;

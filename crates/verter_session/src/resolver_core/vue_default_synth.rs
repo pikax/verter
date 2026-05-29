@@ -150,7 +150,13 @@ const TYPEINFO_SCRATCH_URI_PREFIX: &str = "verter://typeinfo/";
 /// that happen to call something locally named `defineProps` do
 /// NOT qualify; only the two known producers of SFC-style macros
 /// flow through this seam.
-fn is_synthesis_candidate(canonical_id: &str) -> bool {
+///
+/// The `Instantiate(.vue default)` public-instance branch in
+/// [`build_instantiate`](crate::project_semantic_dispatch) gates on this
+/// SAME predicate so the synthesized-default path and the injection path
+/// agree on exactly which canonicals own a synthesized `default` — a
+/// userland `export default class` in a `.ts` file is never hijacked.
+pub(crate) fn is_synthesis_candidate(canonical_id: &str) -> bool {
     canonical_id.ends_with(".vue") || canonical_id.starts_with(TYPEINFO_SCRATCH_URI_PREFIX)
 }
 
