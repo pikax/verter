@@ -12,14 +12,27 @@
 //!    hands it to `EligibilityInputs.owner_has_module_augmentation`).
 //!
 //! 2. **Table-driven classifier test** — exercises every variant of
-//!    [`CompileCacheMode`] against every priority-ordered downgrade
+//!    [`CompileCacheMode`] against every priority-ordered reason
 //!    interaction. The ordering oracle is tested explicitly: an
 //!    all-reasons row pins the exact priority list.
 //!
-//! Stub Prevention guarantee: every test asserts a discriminating
-//! predicate. Against the pre-classifier tree (no `compile_cache_mode`
-//! module at all) these tests compile-fail; against the head they
-//! pass.
+//! Mode-fold contract under test:
+//!
+//! * `Session` stays `Session` for ANY reason (the session fact rail /
+//!   per-session slot state handles every reason); the reasons are
+//!   still recorded in `downgrade_reasons` for telemetry.
+//! * `Content` downgrades to `Stateless` on ANY reason (the pure
+//!   content key cannot represent a cross-file / session-scoped /
+//!   IDE-shape input); there is no `Content → Session` promotion.
+//! * `Stateless` is the floor and ignores every reason (empty
+//!   `downgrade_reasons`).
+//!
+//! Stub Prevention guarantee: every classifier test asserts a
+//! discriminating predicate. Each `Session + reason → Session` case
+//! asserts BOTH `actual_mode == Session` AND the exact ordered
+//! `downgrade_reasons` slice, so it FAILS against any fold that
+//! collapses `Session` to `Stateless` and never degenerates into a
+//! tautology.
 
 use std::sync::Arc;
 
@@ -132,23 +145,27 @@ fn default_profile() -> CompileProfile {
 }
 
 fn ide_only_profile() -> CompileProfile {
-    let mut p = CompileProfile::default();
-    p.target = CompileTarget::TSX; // TSX without TEMPLATE → IDE-only.
-    p
+    // TSX without TEMPLATE → IDE-only.
+    CompileProfile {
+        target: CompileTarget::TSX,
+        ..CompileProfile::default()
+    }
 }
 
 fn non_dev_last_good_config() -> HostConfig {
-    let mut c = HostConfig::default();
-    c.dev_mode = false;
-    c.compile_error_policy = CompileErrorPolicy::StrictError;
-    c
+    HostConfig {
+        dev_mode: false,
+        compile_error_policy: CompileErrorPolicy::StrictError,
+        ..HostConfig::default()
+    }
 }
 
 fn dev_last_good_config() -> HostConfig {
-    let mut c = HostConfig::default();
-    c.dev_mode = true;
-    c.compile_error_policy = CompileErrorPolicy::DevServeLastKnownGood;
-    c
+    HostConfig {
+        dev_mode: true,
+        compile_error_policy: CompileErrorPolicy::DevServeLastKnownGood,
+        ..HostConfig::default()
+    }
 }
 
 fn alias(find: &str, replacement: &str) -> WorkspaceAlias {
@@ -286,8 +303,10 @@ fn has_ide_only_analysis_positive_and_negative() {
     let bundler = default_profile();
     assert!(!has_ide_only_analysis(&bundler));
     // TSX | TEMPLATE → not IDE-only (combined target).
-    let mut combined = CompileProfile::default();
-    combined.target = CompileTarget::TSX | CompileTarget::TEMPLATE;
+    let combined = CompileProfile {
+        target: CompileTarget::TSX | CompileTarget::TEMPLATE,
+        ..CompileProfile::default()
+    };
     assert!(!has_ide_only_analysis(&combined));
 }
 
@@ -301,15 +320,19 @@ fn has_dev_last_good_positive_and_negative() {
     assert!(!has_dev_last_good(&prod));
 
     // Dev only, strict policy.
-    let mut dev_strict = HostConfig::default();
-    dev_strict.dev_mode = true;
-    dev_strict.compile_error_policy = CompileErrorPolicy::StrictError;
+    let dev_strict = HostConfig {
+        dev_mode: true,
+        compile_error_policy: CompileErrorPolicy::StrictError,
+        ..HostConfig::default()
+    };
     assert!(!has_dev_last_good(&dev_strict));
 
     // Last-good policy without dev.
-    let mut prod_last_good = HostConfig::default();
-    prod_last_good.dev_mode = false;
-    prod_last_good.compile_error_policy = CompileErrorPolicy::DevServeLastKnownGood;
+    let prod_last_good = HostConfig {
+        dev_mode: false,
+        compile_error_policy: CompileErrorPolicy::DevServeLastKnownGood,
+        ..HostConfig::default()
+    };
     assert!(!has_dev_last_good(&prod_last_good));
 }
 
@@ -318,7 +341,7 @@ fn has_dev_last_good_positive_and_negative() {
 #[test]
 fn first_downgrade_reason_returns_first_when_present() {
     let cls = CompileModeClassification {
-        requested_mode: CompileCacheMode::Session,
+        requested_mode: CompileCacheMode::Content,
         actual_mode: CompileCacheMode::Stateless,
         downgrade_reasons: smallvec![
             DowngradeReason::HasMacroTypeDeps,
@@ -368,13 +391,111 @@ fn classifier_stateless_no_reasons_stays_stateless() {
     assert!(cls.downgrade_reasons.is_empty());
 }
 
-// ── Classifier: single-reason downgrades ─────────────────────────────
+// ── Classifier: single reason — Session stays Session ────────────────
+//
+// Each test asserts BOTH `actual_mode == Session` (FAILS against a fold
+// that collapses Session to Stateless) AND the exact ordered reason
+// slice (so the assertion never degenerates into a tautology).
 
 #[test]
-fn classifier_session_with_module_augmentation_downgrades_to_stateless() {
+fn classifier_session_with_module_augmentation_stays_session() {
     let mut bundle = InputsBundle::empty();
     bundle.owner_aug = true;
     let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
+    assert_eq!(cls.actual_mode, CompileCacheMode::Session);
+    assert_eq!(
+        cls.downgrade_reasons.as_slice(),
+        &[DowngradeReason::HasModuleAugmentation]
+    );
+}
+
+#[test]
+fn classifier_session_with_workspace_alias_stays_session() {
+    let mut bundle = InputsBundle::empty();
+    bundle.input.script_imports.push(make_alias_import("@/foo"));
+    bundle.aliases.push(alias("@/", "/src/"));
+    let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
+    assert_eq!(cls.actual_mode, CompileCacheMode::Session);
+    assert_eq!(
+        cls.downgrade_reasons.as_slice(),
+        &[DowngradeReason::HasWorkspaceAlias]
+    );
+}
+
+#[test]
+fn classifier_session_with_external_src_stays_session() {
+    let mut bundle = InputsBundle::empty();
+    bundle
+        .input
+        .external_requests
+        .push(make_external_src_request());
+    let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
+    assert_eq!(cls.actual_mode, CompileCacheMode::Session);
+    assert_eq!(
+        cls.downgrade_reasons.as_slice(),
+        &[DowngradeReason::HasExternalSrc]
+    );
+}
+
+#[test]
+fn classifier_session_with_block_override_stays_session() {
+    let mut bundle = InputsBundle::empty();
+    bundle.input.content_override_layer = Some(make_content_override_layer());
+    let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
+    assert_eq!(cls.actual_mode, CompileCacheMode::Session);
+    assert_eq!(
+        cls.downgrade_reasons.as_slice(),
+        &[DowngradeReason::HasBlockOverride]
+    );
+}
+
+#[test]
+fn classifier_session_with_style_override_stays_session() {
+    let mut bundle = InputsBundle::empty();
+    bundle.input.style_override_layer = Some(make_style_override_layer());
+    let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
+    assert_eq!(cls.actual_mode, CompileCacheMode::Session);
+    assert_eq!(
+        cls.downgrade_reasons.as_slice(),
+        &[DowngradeReason::HasStyleOverride]
+    );
+}
+
+#[test]
+fn classifier_session_with_ide_only_analysis_stays_session() {
+    let mut bundle = InputsBundle::empty();
+    bundle.profile = ide_only_profile();
+    let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
+    assert_eq!(cls.actual_mode, CompileCacheMode::Session);
+    assert_eq!(
+        cls.downgrade_reasons.as_slice(),
+        &[DowngradeReason::HasIdeOnlyAnalysis]
+    );
+}
+
+#[test]
+fn classifier_session_with_dev_last_good_stays_session() {
+    let mut bundle = InputsBundle::empty();
+    bundle.config = dev_last_good_config();
+    let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
+    assert_eq!(cls.actual_mode, CompileCacheMode::Session);
+    assert_eq!(
+        cls.downgrade_reasons.as_slice(),
+        &[DowngradeReason::HasDevLastGood]
+    );
+}
+
+// ── Classifier: single reason — Content downgrades to Stateless ──────
+//
+// Every reason makes the pure content key unsafe, so an explicit
+// Content request floors to Stateless. Each test asserts the floor AND
+// preserves the recorded reason slice.
+
+#[test]
+fn classifier_content_with_module_augmentation_downgrades_to_stateless() {
+    let mut bundle = InputsBundle::empty();
+    bundle.owner_aug = true;
+    let cls = classify_compile_mode(CompileCacheMode::Content, &bundle.view());
     assert_eq!(cls.actual_mode, CompileCacheMode::Stateless);
     assert_eq!(
         cls.downgrade_reasons.as_slice(),
@@ -395,11 +516,11 @@ fn classifier_content_with_macro_type_deps_downgrades_to_stateless() {
 }
 
 #[test]
-fn classifier_session_with_workspace_alias_downgrades() {
+fn classifier_content_with_workspace_alias_downgrades_to_stateless() {
     let mut bundle = InputsBundle::empty();
     bundle.input.script_imports.push(make_alias_import("@/foo"));
     bundle.aliases.push(alias("@/", "/src/"));
-    let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
+    let cls = classify_compile_mode(CompileCacheMode::Content, &bundle.view());
     assert_eq!(cls.actual_mode, CompileCacheMode::Stateless);
     assert_eq!(
         cls.downgrade_reasons.as_slice(),
@@ -408,13 +529,13 @@ fn classifier_session_with_workspace_alias_downgrades() {
 }
 
 #[test]
-fn classifier_session_with_external_src_downgrades() {
+fn classifier_content_with_external_src_downgrades_to_stateless() {
     let mut bundle = InputsBundle::empty();
     bundle
         .input
         .external_requests
         .push(make_external_src_request());
-    let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
+    let cls = classify_compile_mode(CompileCacheMode::Content, &bundle.view());
     assert_eq!(cls.actual_mode, CompileCacheMode::Stateless);
     assert_eq!(
         cls.downgrade_reasons.as_slice(),
@@ -423,10 +544,10 @@ fn classifier_session_with_external_src_downgrades() {
 }
 
 #[test]
-fn classifier_session_with_block_override_downgrades() {
+fn classifier_content_with_block_override_downgrades_to_stateless() {
     let mut bundle = InputsBundle::empty();
     bundle.input.content_override_layer = Some(make_content_override_layer());
-    let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
+    let cls = classify_compile_mode(CompileCacheMode::Content, &bundle.view());
     assert_eq!(cls.actual_mode, CompileCacheMode::Stateless);
     assert_eq!(
         cls.downgrade_reasons.as_slice(),
@@ -435,10 +556,10 @@ fn classifier_session_with_block_override_downgrades() {
 }
 
 #[test]
-fn classifier_session_with_style_override_downgrades() {
+fn classifier_content_with_style_override_downgrades_to_stateless() {
     let mut bundle = InputsBundle::empty();
     bundle.input.style_override_layer = Some(make_style_override_layer());
-    let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
+    let cls = classify_compile_mode(CompileCacheMode::Content, &bundle.view());
     assert_eq!(cls.actual_mode, CompileCacheMode::Stateless);
     assert_eq!(
         cls.downgrade_reasons.as_slice(),
@@ -447,10 +568,10 @@ fn classifier_session_with_style_override_downgrades() {
 }
 
 #[test]
-fn classifier_session_with_ide_only_analysis_downgrades() {
+fn classifier_content_with_ide_only_analysis_downgrades_to_stateless() {
     let mut bundle = InputsBundle::empty();
     bundle.profile = ide_only_profile();
-    let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
+    let cls = classify_compile_mode(CompileCacheMode::Content, &bundle.view());
     assert_eq!(cls.actual_mode, CompileCacheMode::Stateless);
     assert_eq!(
         cls.downgrade_reasons.as_slice(),
@@ -459,10 +580,10 @@ fn classifier_session_with_ide_only_analysis_downgrades() {
 }
 
 #[test]
-fn classifier_session_with_dev_last_good_downgrades() {
+fn classifier_content_with_dev_last_good_downgrades_to_stateless() {
     let mut bundle = InputsBundle::empty();
     bundle.config = dev_last_good_config();
-    let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
+    let cls = classify_compile_mode(CompileCacheMode::Content, &bundle.view());
     assert_eq!(cls.actual_mode, CompileCacheMode::Stateless);
     assert_eq!(
         cls.downgrade_reasons.as_slice(),
@@ -470,7 +591,10 @@ fn classifier_session_with_dev_last_good_downgrades() {
     );
 }
 
-// ── Classifier: priority ordering ────────────────────────────────────
+// ── Classifier: priority ordering (Session stays Session) ────────────
+//
+// The reason ordering is identical regardless of requested mode; these
+// drive a Session request and assert Session + the ordered slice.
 
 #[test]
 fn classifier_two_reasons_emit_in_priority_order() {
@@ -480,7 +604,7 @@ fn classifier_two_reasons_emit_in_priority_order() {
     bundle.profile = ide_only_profile();
     bundle.config = dev_last_good_config();
     let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
-    assert_eq!(cls.actual_mode, CompileCacheMode::Stateless);
+    assert_eq!(cls.actual_mode, CompileCacheMode::Session);
     assert_eq!(
         cls.downgrade_reasons.as_slice(),
         &[
@@ -505,7 +629,7 @@ fn classifier_mid_priority_mix_macro_then_alias_then_external() {
         .external_requests
         .push(make_external_src_request());
     let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
-    assert_eq!(cls.actual_mode, CompileCacheMode::Stateless);
+    assert_eq!(cls.actual_mode, CompileCacheMode::Session);
     assert_eq!(
         cls.downgrade_reasons.as_slice(),
         &[
@@ -523,7 +647,7 @@ fn classifier_block_then_style_override_then_ide() {
     bundle.input.style_override_layer = Some(make_style_override_layer());
     bundle.profile = ide_only_profile();
     let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
-    assert_eq!(cls.actual_mode, CompileCacheMode::Stateless);
+    assert_eq!(cls.actual_mode, CompileCacheMode::Session);
     assert_eq!(
         cls.downgrade_reasons.as_slice(),
         &[
@@ -540,6 +664,7 @@ fn classifier_module_augmentation_beats_macro_type_deps() {
     bundle.owner_aug = true;
     bundle.input.macro_type_deps.push(make_macro_type_dep("X"));
     let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
+    assert_eq!(cls.actual_mode, CompileCacheMode::Session);
     assert_eq!(
         cls.first_downgrade_reason(),
         Some(DowngradeReason::HasModuleAugmentation)
@@ -572,7 +697,8 @@ fn classifier_all_reasons_triggered_emit_full_priority_list() {
     bundle.config = dev_last_good_config();
 
     let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
-    assert_eq!(cls.actual_mode, CompileCacheMode::Stateless);
+    // Session stays Session even with every reason firing.
+    assert_eq!(cls.actual_mode, CompileCacheMode::Session);
     assert_eq!(
         cls.downgrade_reasons.as_slice(),
         &[
@@ -589,6 +715,42 @@ fn classifier_all_reasons_triggered_emit_full_priority_list() {
     assert_eq!(
         cls.first_downgrade_reason(),
         Some(DowngradeReason::HasModuleAugmentation)
+    );
+}
+
+#[test]
+fn classifier_content_with_all_reasons_floors_to_stateless_with_full_list() {
+    // Same all-reasons input as above, but an explicit Content request:
+    // floors to Stateless while preserving the full ordered reason list.
+    let mut bundle = InputsBundle::empty();
+    bundle.owner_aug = true;
+    bundle.input.macro_type_deps.push(make_macro_type_dep("X"));
+    bundle.input.script_imports.push(make_alias_import("@/foo"));
+    bundle.aliases.push(alias("@/", "/src/"));
+    bundle
+        .input
+        .external_requests
+        .push(make_external_src_request());
+    bundle.input.content_override_layer = Some(make_content_override_layer());
+    bundle.input.style_override_layer = Some(make_style_override_layer());
+    bundle.profile = ide_only_profile();
+    bundle.config = dev_last_good_config();
+
+    let cls = classify_compile_mode(CompileCacheMode::Content, &bundle.view());
+    assert_eq!(cls.actual_mode, CompileCacheMode::Stateless);
+    assert_eq!(cls.requested_mode, CompileCacheMode::Content);
+    assert_eq!(
+        cls.downgrade_reasons.as_slice(),
+        &[
+            DowngradeReason::HasModuleAugmentation,
+            DowngradeReason::HasMacroTypeDeps,
+            DowngradeReason::HasWorkspaceAlias,
+            DowngradeReason::HasExternalSrc,
+            DowngradeReason::HasBlockOverride,
+            DowngradeReason::HasStyleOverride,
+            DowngradeReason::HasIdeOnlyAnalysis,
+            DowngradeReason::HasDevLastGood,
+        ]
     );
 }
 
@@ -620,13 +782,18 @@ fn classifier_stateless_with_all_reasons_keeps_reasons_empty() {
     assert!(cls.first_downgrade_reason().is_none());
 }
 
-// ── Smoke: classifier preserves requested_mode field ─────────────────
+// ── Smoke: classifier preserves requested_mode on a Content floor ────
 
 #[test]
-fn classifier_preserves_requested_mode_on_downgrade() {
+fn classifier_preserves_requested_mode_on_content_downgrade() {
+    // A Content request with a reason floors actual_mode to Stateless
+    // while preserving requested_mode == Content. (Session + reason is
+    // no longer a downgrade under the corrected fold, so the
+    // requested-mode-preservation smoke uses a Content request.)
     let mut bundle = InputsBundle::empty();
     bundle.owner_aug = true;
-    let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
-    assert_eq!(cls.requested_mode, CompileCacheMode::Session);
+    let cls = classify_compile_mode(CompileCacheMode::Content, &bundle.view());
+    assert_eq!(cls.requested_mode, CompileCacheMode::Content);
+    assert_eq!(cls.actual_mode, CompileCacheMode::Stateless);
     assert_ne!(cls.actual_mode, cls.requested_mode);
 }

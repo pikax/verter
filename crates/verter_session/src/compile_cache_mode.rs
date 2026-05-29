@@ -16,8 +16,7 @@
 //! [`classify_compile_mode`] walks them in deterministic priority
 //! order, collects every triggering reason into the
 //! [`CompileModeClassification::downgrade_reasons`] vector, and folds
-//! the requested mode down to the most-cache-rich mode the inputs
-//! support.
+//! the requested mode to the mode the inputs actually support.
 //!
 //! ## Priority order (CRITICAL)
 //!
@@ -29,14 +28,28 @@
 //! then `HasStyleOverride` then `HasIdeOnlyAnalysis` then
 //! `HasDevLastGood`.
 //!
-//! ## Mode-downgrade ladder
+//! ## Mode fold
 //!
-//! [`CompileCacheMode::Session`] can downgrade to
-//! [`CompileCacheMode::Content`] or [`CompileCacheMode::Stateless`].
-//! [`CompileCacheMode::Content`] can downgrade to
-//! [`CompileCacheMode::Stateless`]. [`CompileCacheMode::Stateless`]
-//! never downgrades — it is the floor and ignores every reason
-//! (stateless already bypasses host caches).
+//! Every reason is either a cross-file dependency
+//! (`HasMacroTypeDeps` / `HasModuleAugmentation` / `HasWorkspaceAlias`
+//! / `HasExternalSrc`) or a session-scoped / IDE-shape input
+//! (`HasBlockOverride` / `HasStyleOverride` / `HasIdeOnlyAnalysis` /
+//! `HasDevLastGood`). The session cache's path-precise
+//! [`ReadSetSignature`](crate::fact_signature_helpers::ReadSetSignature)
+//! fact rail and per-session slot state handle all of them, so:
+//!
+//! * [`CompileCacheMode::Session`] stays `Session` for EVERY reason —
+//!   the reasons are recorded in `downgrade_reasons` for telemetry but
+//!   the mode does not change. `Session` is the host default and the
+//!   richest mode.
+//! * [`CompileCacheMode::Content`] is a pure content-addressed request
+//!   with NO fact rail; ANY reason means its pure key cannot represent
+//!   the input safely, so `Content` downgrades to
+//!   [`CompileCacheMode::Stateless`]. There is NO `Content → Session`
+//!   promotion: `Content` is an explicit opt-in whose
+//!   safety-precondition failure floors to `Stateless`.
+//! * [`CompileCacheMode::Stateless`] never changes — it is the floor
+//!   and ignores every reason (stateless already bypasses host caches).
 //!
 //! `#![allow(dead_code)]` at module scope: the helpers and classifier
 //! land ahead of the compile-entry-path wiring that consumes them.
@@ -233,23 +246,26 @@ pub(crate) struct EligibilityInputs<'a> {
 /// Classify a requested compile-cache mode against the request's
 /// eligibility surface.
 ///
-/// Walks the eight downgrade predicates in priority order, collects
-/// every triggering reason into
+/// Walks the eight predicates in priority order, collects every
+/// triggering reason into
 /// [`CompileModeClassification::downgrade_reasons`], and selects the
-/// `actual_mode` per the downgrade ladder:
+/// `actual_mode` per the mode fold:
 ///
-/// * [`CompileCacheMode::Session`] downgrades on ANY reason →
-///   `Content` first, then `Stateless` if `Content` is also not
-///   eligible.
-/// * [`CompileCacheMode::Content`] downgrades on ANY reason →
-///   `Stateless`.
-/// * [`CompileCacheMode::Stateless`] never downgrades — it already
+/// * [`CompileCacheMode::Session`] stays `Session` for ANY reason —
+///   the session fact rail / per-session slot state handles every
+///   reason, so the mode is unchanged and the reasons are recorded
+///   only for telemetry.
+/// * [`CompileCacheMode::Content`] downgrades to `Stateless` on ANY
+///   reason — the pure content key cannot represent a cross-file /
+///   session-scoped / IDE-shape input. There is no `Content → Session`
+///   promotion.
+/// * [`CompileCacheMode::Stateless`] never changes — it already
 ///   bypasses host caches.
 ///
 /// Stateless mode IGNORES every reason: the `downgrade_reasons`
 /// vector is empty even when conditions like `HasMacroTypeDeps` are
 /// triggered, because stateless ALREADY bypasses every cache the
-/// downgrade reasons would protect.
+/// reasons would protect.
 pub(crate) fn classify_compile_mode(
     requested: CompileCacheMode,
     inputs: &EligibilityInputs<'_>,
@@ -301,17 +317,21 @@ pub(crate) fn classify_compile_mode(
         };
     }
 
-    // Mode downgrade fold. Every reason in the current predicate set
-    // invalidates BOTH the `Content` and `Session` cache shapes —
-    // they share the same content-key surface, so any observed reason
-    // collapses the request to `Stateless`. If an eligibility
-    // refinement later isolates reasons applicable only to `Session`
-    // (leaving `Content` still admissible), this arm splits per-mode;
-    // under the present predicates the collapse is the correct floor.
+    // Mode fold. Every reason is a cross-file / session-scoped /
+    // IDE-shape input that the session fact rail (or per-session slot
+    // state) handles safely, so `Session` stays `Session` for every
+    // reason — the reasons remain in `downgrade_reasons` for telemetry
+    // even though the mode does not change. `Content` is a pure
+    // content-addressed request with NO fact rail: any reason means the
+    // pure key cannot represent the input safely, so `Content`
+    // downgrades to `Stateless`. There is NO `Content → Session`
+    // promotion — `Content` is an explicit opt-in and its
+    // safety-precondition failure floors to `Stateless`. `Stateless`
+    // already returned above (it is the floor and ignores reasons).
     let actual_mode = match requested {
-        CompileCacheMode::Session => CompileCacheMode::Stateless,
-        CompileCacheMode::Content => CompileCacheMode::Stateless,
         CompileCacheMode::Stateless => CompileCacheMode::Stateless,
+        CompileCacheMode::Session => CompileCacheMode::Session,
+        CompileCacheMode::Content => CompileCacheMode::Stateless,
     };
 
     CompileModeClassification {

@@ -65,8 +65,10 @@ pub enum CompileErrorPolicy {
 /// candidate slots keyed by `(canonical, profile_hash)`, each
 /// candidate validated by its path-precise `ReadSetSignature` on
 /// every warm hit). `Session` is the most cache-rich mode and the
-/// host's default — it downgrades to `Content` or `Stateless` when
-/// the request's eligibility forbids fact-validated caching (see
+/// host's default; its fact rail and per-session slot state handle
+/// cross-file, session-scoped, and IDE-shape inputs, so `Session`
+/// never downgrades. An explicit `Content` request downgrades to
+/// `Stateless` when any of those inputs is present (see
 /// [`DowngradeReason`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CompileCacheMode {
@@ -92,9 +94,17 @@ pub enum CompileCacheMode {
     Session,
 }
 
-/// Why the runtime downgraded a requested
-/// [`CompileCacheMode::Session`] (or [`CompileCacheMode::Content`])
-/// to a less-rich mode.
+/// Why a requested cache mode was constrained.
+///
+/// A reason is recorded whenever the compile input carries a
+/// cross-file dependency, a session-scoped input, or an IDE-shape
+/// target. Under the mode fold a recorded reason keeps a requested
+/// [`CompileCacheMode::Session`] at `Session` (the session fact rail /
+/// per-session slot state handles it) and downgrades a requested
+/// [`CompileCacheMode::Content`] to [`CompileCacheMode::Stateless`]
+/// (the pure content key cannot represent the input). So a reason is a
+/// hard *ineligibility* signal for `Content` and a *telemetry* signal
+/// for `Session`.
 ///
 /// Carriers preserve EVERY triggering reason internally in priority
 /// order; the public single-field `Option<DowngradeReason>` on the
@@ -103,16 +113,17 @@ pub enum CompileCacheMode {
 /// carries the full ordered list for telemetry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DowngradeReason {
-    /// The compile input references external `src="..."` blocks.
-    /// External blocks resolve outside the env-hash dimensions; a
-    /// pure-content key cannot key on them, so `Content` /
-    /// `Session` modes are not eligible.
+    /// The compile input references external `src="..."` blocks. The
+    /// session fact rail observes each external file's `FileWholeHash`
+    /// and invalidates the warm hit when that file's content changes,
+    /// so `Session` remains eligible. A pure-content key cannot key on
+    /// the external file's identity, so only `Content` is ineligible.
     HasExternalSrc,
     /// The compile input has macro type dependencies. Macro-resolved
     /// types depend on cross-file type traversal that lives outside
-    /// the pure-content key; `Session` mode's fact rail captures
-    /// these dependencies, so a request that asked for `Content`
-    /// upgrades the eligibility constraint here.
+    /// the pure-content key. `Session` mode's path-precise fact rail
+    /// captures those dependencies and stays eligible; `Content` has
+    /// no fact rail, so it is ineligible.
     HasMacroTypeDeps,
     /// One of the compile input's script imports resolves through a
     /// workspace alias. Alias resolution depends on the workspace
