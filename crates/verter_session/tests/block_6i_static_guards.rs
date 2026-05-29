@@ -709,7 +709,7 @@ fn ax_hybrid_three_keys_carry_reduction_context() {
     }
 
     for variant_anchor in [
-        "Instantiate {\n        base: DeclIdentity,",
+        "Instantiate {\n        base: DeclKey,",
         "KeyOf {\n        base: SemanticNodeId,",
         "MappedType {\n        source: SemanticNodeId,",
         "ProjectPath {\n        base: SemanticNodeId,",
