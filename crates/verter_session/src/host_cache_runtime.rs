@@ -304,12 +304,17 @@ impl VerterHost {
                 // above).
                 let _ = self.ensure_indexed_ready(&resolved_canonical);
                 // Read the augmenter's own augmentation facts and emit
-                // a structurally-matching target kind per fact. The
-                // augmenter file may not even live in the store at
-                // legacy-key shape if materialisation produced only the
-                // content-addressed key — `get_artifacts_any` performs
-                // the permissive canonical-only lookup that ignores
-                // `content_hash` for this exact callsite.
+                // a structurally-matching target kind per fact.
+                // `ensure_indexed_ready` always inserts the materialised
+                // artifact at the `(canonical, whole_hash)` legacy-shape
+                // key (see `host_manage::prepared_decl::ensure_indexed_ready`
+                // → `FileArtifactStore::insert`), so a legacy-key row is
+                // guaranteed present after the call above succeeds.
+                // `get_artifacts_any` is the right read because the
+                // caller knows the canonical and does not want to
+                // re-derive the live `content_hash` — the permissive
+                // canonical-only lookup ignores `content_hash` and
+                // returns the latest legacy row directly.
                 if let Some(augmenter_artifacts) = store.get_artifacts_any(&resolved_canonical) {
                     // Invalidate any `augmentation_index` entry whose
                     // cold scan ran BEFORE this augmenter entered the

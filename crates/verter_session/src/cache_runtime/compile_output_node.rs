@@ -266,16 +266,35 @@ impl CompileOutputNodePureContent {
         //
         // The asymmetric tail: the two maps are not lock-coupled, so a
         // `remove_canonical` interleaved BETWEEN `entries.insert` and
-        // `by_canonical.insert` may evict the (then-empty) reverse-index
-        // set first and let this publish reinstall a backref to an
-        // already-removed entry. That backref is bounded reverse-index
-        // dust — the key points at no live `entries` row, the next
-        // `remove_canonical` (or `clear_all`) prunes it, and an
-        // `entries.remove` on an absent key is a benign no-op. Dust is
-        // bounded by `≤ N_concurrent_publishers + 1` because each
-        // publisher can install at most one such backref before the
-        // racing remove drains the set, and any subsequent
-        // `remove_canonical` prunes whatever it observes.
+        // `by_canonical.insert` splits into two subcases by whether a
+        // prior `by_canonical` row already existed for this canonical:
+        //
+        // - Prior backref existed (an earlier publish for `canonical`
+        //   landed and was not yet evicted): `remove_canonical` removes
+        //   the prior `by_canonical` row and walks its key set,
+        //   `entries.remove`-ing each PRIOR key. Those prior keys are
+        //   distinct from this publish's `key` (the racer's `entries`
+        //   row at THIS key was just installed and is not in the prior
+        //   set), so `entries.remove(this_key)` is never reached. This
+        //   publish's `entries` row remains live; its
+        //   `by_canonical.insert` then installs a NEW backref pointing
+        //   at the now-live `entries` row. RESULT: live backref → live
+        //   entry. No orphan, no dust.
+        //
+        // - No prior backref (first publish for `canonical`, or a prior
+        //   remove already drained it): `remove_canonical`'s
+        //   `by_canonical.remove(canonical)` returns `None`, the loop
+        //   that calls `entries.remove` does not run, and this publish's
+        //   `entries` row at `this_key` is untouched. The publish then
+        //   installs the first `by_canonical` backref. RESULT: live
+        //   backref → live entry. No orphan.
+        //
+        // The remaining race is a `remove_canonical` that runs AFTER
+        // this publish completes both inserts: that case is the
+        // standard eviction path — the backref is drained, the entries
+        // row is removed, no asymmetric state remains. The
+        // `concurrent_publish_and_remove_canonical_never_orphans_content_entry`
+        // 20k-cycle race characterises the union of these subcases.
         self.entries.insert(key.clone(), Arc::new(entry));
         self.by_canonical
             .entry(Arc::clone(&key.canonical_id))
