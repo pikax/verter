@@ -1209,12 +1209,13 @@ fn try_project_jsdoc_descriptions(
     let mut sources: rustc_hash::FxHashMap<Arc<str>, Option<Arc<str>>> =
         rustc_hash::FxHashMap::default();
 
+    use crate::typeinfo::adapters::vue::surface::normalize_jsdoc_body;
     for member in surface.members.iter() {
         let description = member
             .jsdoc_description_span
             .as_ref()
             .and_then(|cs| slice_canonical_span_cached(host, &mut sources, cs))
-            .map(|text| text.trim().to_string())
+            .map(|text| normalize_jsdoc_body(&text))
             .filter(|text| !text.is_empty());
         let tags: Vec<JsdocTag> = member
             .jsdoc_tag_spans
@@ -1230,7 +1231,7 @@ fn try_project_jsdoc_descriptions(
                     .text_span
                     .as_ref()
                     .and_then(|cs| slice_canonical_span_cached(host, &mut sources, cs))
-                    .map(|t| t.trim().to_string())
+                    .map(|t| normalize_jsdoc_body(&t))
                     .filter(|t| !t.is_empty());
                 Some(JsdocTag { name, text })
             })

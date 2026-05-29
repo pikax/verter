@@ -460,6 +460,36 @@ fn slice_canonical_span(host: &VerterHost, cspan: &CanonicalSpan) -> Option<Stri
     source.get(start..end).map(|s| s.to_string())
 }
 
+/// Normalize a multi-line JSDoc description/tag body sliced from a span.
+///
+/// A description/tag span is a contiguous `[start, end)` region whose FIRST line
+/// already had its leading `/**`-decoration stripped (the span starts at the
+/// content), but whose CONTINUATION lines still carry the `   * ` JSDoc
+/// decoration verbatim (the span is contiguous source text). The published
+/// `description` is DISPLAY text, not comment syntax, so strip each
+/// continuation line's leading whitespace + optional single `*` decoration —
+/// matching `verter_semantic::analysis::jsdoc`'s per-line stripping — and rejoin
+/// with `\n`. A single-line body is returned trimmed.
+pub(crate) fn normalize_jsdoc_body(raw: &str) -> String {
+    let mut lines = raw.lines();
+    let mut out = String::new();
+    if let Some(first) = lines.next() {
+        out.push_str(first.trim_end());
+    }
+    for line in lines {
+        out.push('\n');
+        // Strip leading whitespace, then a single `*` decoration, then the
+        // whitespace after it.
+        let trimmed = line.trim_start();
+        let stripped = trimmed
+            .strip_prefix('*')
+            .map(|rest| rest.trim_start())
+            .unwrap_or(trimmed);
+        out.push_str(stripped.trim_end());
+    }
+    out.trim().to_string()
+}
+
 fn member_jsdoc_from_spans(
     host: &VerterHost,
     member: &TypeInfoSurfaceMember,
@@ -470,7 +500,7 @@ fn member_jsdoc_from_spans(
         .jsdoc_description_span
         .as_ref()
         .and_then(&slice)
-        .map(|text| text.trim().to_string())
+        .map(|text| normalize_jsdoc_body(&text))
         .filter(|text| !text.is_empty());
 
     let tags: Vec<JsdocTag> = member
@@ -485,7 +515,7 @@ fn member_jsdoc_from_spans(
                 .text_span
                 .as_ref()
                 .and_then(&slice)
-                .map(|t| t.trim().to_string())
+                .map(|t| normalize_jsdoc_body(&t))
                 .filter(|t| !t.is_empty());
             Some(JsdocTag { name, text })
         })
