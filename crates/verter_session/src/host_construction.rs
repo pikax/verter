@@ -398,6 +398,42 @@ impl VerterHost {
         root.snapshot.owners_for_file(canonical).first().copied()
     }
 
+    /// Configured workspace path-aliases for the project that owns
+    /// `canonical`, or an empty vec when no configured project claims it
+    /// (ambient libs, fallback projects, or a workspace without a
+    /// published snapshot).
+    ///
+    /// Used by the compile-cache mode classifier's
+    /// [`crate::compile_cache_mode::has_workspace_alias`] predicate so a
+    /// `Content`-requested compile of a file that resolves an import
+    /// through an alias is correctly recognised as alias-dependent. The
+    /// resolved alias dependency is part of the session resolution state,
+    /// so `Session` mode stays eligible regardless.
+    #[must_use]
+    pub(crate) fn workspace_aliases_for_canonical(
+        &self,
+        canonical: &str,
+    ) -> Vec<verter_workspace::WorkspaceAlias> {
+        use verter_workspace::workspace_snapshot::ProjectPayload;
+        let Some(root) = self.workspace().published_root() else {
+            return Vec::new();
+        };
+        let snapshot = &root.snapshot;
+        let Some(project_id) = snapshot.owners_for_file(canonical).first().copied() else {
+            return Vec::new();
+        };
+        match snapshot
+            .projects
+            .get(project_id.0 as usize)
+            .map(|p| &p.payload)
+        {
+            Some(ProjectPayload::Configured {
+                workspace_aliases, ..
+            }) => workspace_aliases.clone(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Host-owned scratch cache for the typeinfo
     /// `evaluate_type_expression` entry-point. Used internally by
     /// [`Self::evaluate_type_expression_with_audit`] to memoise the
@@ -440,6 +476,17 @@ impl VerterHost {
     #[must_use]
     pub(crate) fn compile_cache(&self) -> &dashmap::DashMap<String, crate::types::ProfileState> {
         self.project_type_store.compile_cache().entries()
+    }
+
+    /// Content-addressed compile-output cache node, shared project-wide.
+    /// Used by the `CompileCacheMode::Content` compile route; the
+    /// fact-validated `Session` route uses the per-profile compile cache
+    /// instead.
+    #[must_use]
+    pub(crate) fn compile_output_pure_content(
+        &self,
+    ) -> &crate::cache_runtime::CompileOutputNodePureContent {
+        self.project_type_store.compile_output_pure_content()
     }
 
     /// Reference to the source-content-domain DB's underlying storage

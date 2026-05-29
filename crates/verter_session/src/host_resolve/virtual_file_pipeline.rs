@@ -70,6 +70,36 @@ impl Drop for CompileForceOverflowGuard {
     }
 }
 
+/// Compile-mode discriminator for the content-addressed cache key:
+/// the `Content` cache-mode stable hash folded with the full profile
+/// identity. The profile (`DefaultHasher`-based; in-memory only, never
+/// persisted) captures every codegen-affecting flag so two `Content`
+/// requests with different profiles do not collide on one content entry.
+fn content_mode_profile_hash(profile: &CompileProfile) -> Hash16 {
+    let mut buf = Vec::with_capacity(40);
+    buf.extend_from_slice(b"verter.content_mode_profile.v1:");
+    buf.extend_from_slice(&CompileCacheMode::Content.stable_hash());
+    buf.extend_from_slice(&compile_profile_hash(profile).to_le_bytes());
+    crate::hash::hash_16(&buf)
+}
+
+/// Deployment version hash for the compiler crate. Two builds of a
+/// different compiler version must not share a content-addressed cache
+/// entry (the codegen may differ byte-for-byte). Derived from the
+/// crate semantic version; the compiler and session crates version in
+/// lockstep across the workspace.
+fn compiler_version_hash() -> Hash16 {
+    crate::hash::hash_16(concat!("verter.compiler.v1:", env!("CARGO_PKG_VERSION")).as_bytes())
+}
+
+/// Deployment version hash for the codegen plugin set. The compile
+/// pipeline is monolithic (no separately-versioned plugin registry),
+/// so the plugin-set identity tracks the crate semantic version in
+/// lockstep with [`compiler_version_hash`].
+fn plugin_versions_hash() -> Hash16 {
+    crate::hash::hash_16(concat!("verter.plugins.v1:", env!("CARGO_PKG_VERSION")).as_bytes())
+}
+
 impl VerterHost {
     /// Resolve a raw import identifier (bundler query string or LSP `._VERTER_.` format)
     /// to its canonical ID, virtual node kind, and rendered bundler/LSP IDs.
@@ -573,6 +603,53 @@ impl VerterHost {
             .and_then(|cc| session_node.peek_signature(&cc, profile_hash))
     }
 
+    /// Build the content-addressed cache key for a
+    /// [`CompileCacheMode::Content`] compile request.
+    ///
+    /// Every byte-determined input the compiled artifact depends on
+    /// enters the key: the source canonical and its `content_hash`, the
+    /// four split env-dimension hashes plus the project identity (from
+    /// the per-canonical env-hash bundle), the public-API mode hash, the
+    /// source-map policy hash, and the compiler / plugin version hashes.
+    /// Two requests that agree on every dimension MUST produce
+    /// byte-identical output, so a single content entry serves both.
+    fn compile_pure_content_key(
+        &self,
+        canonical_id: &str,
+        content_hash: Hash16,
+        profile: &CompileProfile,
+    ) -> crate::cache_runtime::CompileOutputPureContentKey {
+        let env = self.host_view_env_hashes_for(canonical_id);
+        let project_identity = self.host_view_project_identity_for(canonical_id).0;
+        // Source-map emission policy projected from the profile. The
+        // profile carries a single `source_map` toggle; map it onto the
+        // public policy enum so two requests with different emission
+        // policies never share a content entry.
+        let source_map_policy = if profile.source_map {
+            SourceMapPolicy::Inline
+        } else {
+            SourceMapPolicy::None
+        };
+        crate::cache_runtime::CompileOutputPureContentKey {
+            canonical_id: Arc::from(canonical_id),
+            content_hash,
+            parse_env_hash: env.parse_env_hash,
+            resolve_env_hash: env.resolve_env_hash,
+            type_env_hash: env.type_env_hash,
+            lib_env_hash: env.lib_env_hash,
+            project_identity,
+            // Compile-mode discriminator: the public cache mode PLUS the
+            // full profile identity (target, ssr, force_js,
+            // is_production, delimiters, …). Two Content requests for the
+            // same content + env but different profiles produce different
+            // output, so they must not share a content entry.
+            compile_cache_mode_hash: content_mode_profile_hash(profile),
+            source_map_policy_hash: source_map_policy.stable_hash(),
+            compiler_version: compiler_version_hash(),
+            plugin_versions: plugin_versions_hash(),
+        }
+    }
+
     /// Retrieve a compiled virtual file (script, template, style, or main bundle).
     ///
     /// On cache hit, returns immediately. On cache miss, compiles the file using
@@ -605,6 +682,7 @@ impl VerterHost {
         };
 
         let profile_hash = compile_profile_hash(&query.compile_profile);
+        let requested_mode = query.compile_profile.requested_mode;
 
         // Cache hit check and compile input extraction under a single read lock.
         // This avoids cloning the full FileEntry (with all compile_slots, style_overrides, etc.)
@@ -616,6 +694,10 @@ impl VerterHost {
             /// Captured under read lock so the compile slot is stored with the
             /// semantic_hash that was current when we decided to compile.
             semantic_hash: Hash16,
+            /// Content `whole_hash` captured under the same read lock, so a
+            /// `Content`-mode publish keys the content-addressed entry on the
+            /// exact source version that was compiled.
+            whole_hash: Hash16,
         }
 
         // Capture scheduler source state at compile START for artifact commit.
@@ -654,24 +736,54 @@ impl VerterHost {
                     })
                     .unwrap_or(0);
 
-                if let Some(ref cc) = cc_ref {
-                    let session_node =
-                        crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
-                    if let Some(hit) = session_node.lookup(
-                        cc,
-                        profile_hash,
-                        &parse.semantic_hash,
-                        soh,
-                        coh,
-                        |sig| self.compile_slot_facts_validate(sig),
-                    ) {
-                        #[cfg(feature = "session_metrics")]
-                        self.metrics
-                            .compile_cache_hits
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Warm-hit consult, routed by the requested cache mode.
+                // `Session` validates the fact-validated session slot;
+                // `Content` peeks the pure content-addressed entry;
+                // `Stateless` bypasses both nodes. The warm hit returns
+                // the requested node's output + diagnostics, which are
+                // identical in shape across modes.
+                struct WarmHit {
+                    outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
+                    diagnostics: DiagnosticsSnapshot,
+                }
+                let warm_hit: Option<WarmHit> = match requested_mode {
+                    CompileCacheMode::Stateless => None,
+                    CompileCacheMode::Session => cc_ref.as_ref().and_then(|cc| {
+                        let session_node =
+                            crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                        session_node
+                            .lookup(cc, profile_hash, &parse.semantic_hash, soh, coh, |sig| {
+                                self.compile_slot_facts_validate(sig)
+                            })
+                            .map(|hit| WarmHit {
+                                outputs: hit.outputs,
+                                diagnostics: hit.diagnostics,
+                            })
+                    }),
+                    CompileCacheMode::Content => {
+                        let key = self.compile_pure_content_key(
+                            &canonical_id,
+                            parse.whole_hash,
+                            &query.compile_profile,
+                        );
+                        self.compile_output_pure_content()
+                            .peek(&key)
+                            .map(|value| WarmHit {
+                                outputs: value.outputs.clone(),
+                                diagnostics: value.diagnostics.clone(),
+                            })
+                    }
+                };
 
-                        // Build effective meta for cache-hit render_ids
-                        let mut hit_meta = parse.meta.clone();
+                if let Some(hit) = warm_hit {
+                    #[cfg(feature = "session_metrics")]
+                    self.metrics
+                        .compile_cache_hits
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                    // Build effective meta for cache-hit render_ids.
+                    let mut hit_meta = parse.meta.clone();
+                    if let Some(ref cc) = cc_ref {
                         if let Some(so) = cc.style_overrides.get(&profile_hash) {
                             for (idx, lang) in so.lang_overrides.iter().enumerate() {
                                 if let Some(ref l) = lang {
@@ -681,23 +793,18 @@ impl VerterHost {
                                 }
                             }
                         }
+                    }
 
-                        if let Some(found) = hit.outputs.get(&node_kind) {
-                            return Ok(VirtualFileResponse {
-                                id: render_single_id(
-                                    &canonical_id,
-                                    &node_kind,
-                                    &hit_meta,
-                                    raw_was_lsp,
-                                ),
-                                code: found.code.clone(),
-                                source_map: found.source_map.clone(),
-                                lang: found.lang.clone(),
-                                stale: false,
-                                diagnostics: hit.diagnostics.clone(),
-                                meta: found.meta.clone(),
-                            });
-                        }
+                    if let Some(found) = hit.outputs.get(&node_kind) {
+                        return Ok(VirtualFileResponse {
+                            id: render_single_id(&canonical_id, &node_kind, &hit_meta, raw_was_lsp),
+                            code: found.code.clone(),
+                            source_map: found.source_map.clone(),
+                            lang: found.lang.clone(),
+                            stale: false,
+                            diagnostics: hit.diagnostics.clone(),
+                            meta: found.meta.clone(),
+                        });
                     }
                 }
 
@@ -769,6 +876,7 @@ impl VerterHost {
                     fallback_last_good,
                     meta: effective_meta,
                     semantic_hash: parse.semantic_hash,
+                    whole_hash: parse.whole_hash,
                 }
             }
         };
@@ -778,6 +886,7 @@ impl VerterHost {
             fallback_last_good,
             meta,
             semantic_hash: captured_semantic_hash,
+            whole_hash: captured_whole_hash,
         } = cache_miss;
 
         #[cfg(feature = "session_metrics")]
@@ -799,13 +908,33 @@ impl VerterHost {
             .map(|o| o.hash)
             .unwrap_or(0);
 
-        // R3/R26/R28 cold-compute prefetch (pre-tracer): make sure
-        // the cross-file dependency surface the tracer will observe is
-        // resolved + indexed-ready before the tracer is installed.
-        // Performed outside `with_fact_tracer` so that load / index
-        // mutations are not folded into the consumer's observed read
-        // set. See `prefetch_compile_tier_observation_targets` for
-        // the contract.
+        // Classify the requested cache mode against this request's
+        // eligibility surface, EXACTLY ONCE per compile. The classifier
+        // is the sole authority for the mode decision; this pipeline
+        // only consumes the result. `Session` (the host default) stays
+        // `Session` for every reason; `Content` downgrades to
+        // `Stateless` on any reason; `Stateless` is the floor.
+        let classification = crate::compile_cache_mode::classify_compile_mode(
+            requested_mode,
+            &crate::compile_cache_mode::EligibilityInputs {
+                input: &compile_input,
+                profile: &query.compile_profile,
+                config: &self.config,
+                workspace_aliases: &self.workspace_aliases_for_canonical(&canonical_id),
+                owner_has_module_augmentation: crate::compile_cache_mode::has_module_augmentation(
+                    &canonical_id,
+                    self.project_type_store.indexed(),
+                ),
+            },
+        );
+        let actual_mode = classification.actual_mode;
+
+        // Cold-compute prefetch: resolve + index the cross-file
+        // dependency surface before compiling so the compile pass sees
+        // resolved deps. Performed outside any fact-tracer scope so that
+        // load / index mutations are not folded into a consumer's
+        // observed read set. Runs for every mode (it governs compile
+        // correctness, not just fact observation).
         self.prefetch_compile_tier_observation_targets(
             &canonical_id,
             &compile_input.script_imports,
@@ -813,53 +942,59 @@ impl VerterHost {
             &compile_input.external_requests,
         );
 
-        // R3/R26/R28 cold-compute fact-observation scope. The tracer
+        // Compile, routed by the actual cache mode.
+        //
+        // `Session` installs the R3/R26/R28 fact-observation tracer: it
         // accumulates every cross-file fact (per-`Member` /
         // `MemberPresence` for macro type deps, `ImportRef` per script
-        // import, `ModuleAugmentationIndexShape` per augmented
-        // specifier) that the compile pass reads. The finalised
-        // signature lands on the new `CompileSlot.fact_dep_signature`
-        // and validates the slot on every warm-hit read.
-        let (compile_result, fact_read_set) = self.with_fact_tracer(|| {
-            crate::compile_fact_emission::observe_compile_tier_dependencies(
-                self,
-                &canonical_id,
-                &compile_input.script_imports,
-                &compile_input.macro_type_deps,
-                &compile_input.external_requests,
-            );
-            // Test-only fact injection: when armed, emit `N` synthetic
-            // `FileWholeHash` observations into the active tracer.
-            // `N > FACT_SIGNATURE_CAP` (1024) drives the tracer to
-            // `Overflow` deterministically, exercising the
-            // refuse-publish-on-overflow path without requiring a
-            // pathological workspace fixture.
-            let force_n =
-                COMPILE_TEST_FORCE_OVERFLOW_OBSERVATIONS.load(std::sync::atomic::Ordering::Relaxed);
-            if force_n > 0 {
-                for n in 0..force_n {
-                    crate::resolver_core::resolver_context::observe_fan_out(
-                        crate::resolver_core::FactVersionRef::FileWholeHash {
-                            canonical_id: format!("__compile_force_overflow_{n}.ts"),
-                            hash: [(n & 0xff) as u8; 16],
-                        },
-                    );
+        // import, `ModuleAugmentationIndexShape` per augmented specifier)
+        // the compile reads, finalises a `ReadSetSignature`, and routes
+        // it through `SignatureAdmission`. `Content` and `Stateless`
+        // have NO fact rail, so they compile directly without the tracer
+        // and never finalise a signature.
+        let (compile_result, compile_admission) = if actual_mode == CompileCacheMode::Session {
+            let (result, fact_read_set) = self.with_fact_tracer(|| {
+                crate::compile_fact_emission::observe_compile_tier_dependencies(
+                    self,
+                    &canonical_id,
+                    &compile_input.script_imports,
+                    &compile_input.macro_type_deps,
+                    &compile_input.external_requests,
+                );
+                // Test-only fact injection: when armed, emit `N`
+                // synthetic `FileWholeHash` observations into the active
+                // tracer. `N > FACT_SIGNATURE_CAP` (1024) drives the
+                // tracer to `Overflow` deterministically, exercising the
+                // refuse-publish-on-overflow path without a pathological
+                // workspace fixture.
+                let force_n = COMPILE_TEST_FORCE_OVERFLOW_OBSERVATIONS
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if force_n > 0 {
+                    for n in 0..force_n {
+                        crate::resolver_core::resolver_context::observe_fan_out(
+                            crate::resolver_core::FactVersionRef::FileWholeHash {
+                                canonical_id: format!("__compile_force_overflow_{n}.ts"),
+                                hash: [(n & 0xff) as u8; 16],
+                            },
+                        );
+                    }
                 }
-            }
-            self.compile_entry(&compile_input, &query.compile_profile)
-        });
-        // Typed admission: route the finalised tracer through
-        // `SignatureAdmission`. `Cacheable(sig)` → publish the
-        // compile-output slot through the typed session node under the
-        // path-precise signature. `NonCacheable` (overflow) → the
-        // session node removes any prior slot and the freshly computed
-        // value is returned to the caller without admitting, preserving
-        // the carrier invariant `present in the session slot map ⇒
-        // admitted cache entry`. The caller-visible compile result is
-        // computed independently of admission; both arms hand back the
-        // same value.
-        let compile_admission =
-            crate::cache_runtime::SignatureAdmission::from_finalise(fact_read_set.finalise());
+                self.compile_entry(&compile_input, &query.compile_profile)
+            });
+            // `Cacheable(sig)` → publish the compile-output slot through
+            // the typed session node under the path-precise signature.
+            // `NonCacheable` (overflow) → the session node removes any
+            // prior slot and the freshly computed value is returned
+            // without admitting. The caller-visible result is computed
+            // independently of admission.
+            let admission =
+                crate::cache_runtime::SignatureAdmission::from_finalise(fact_read_set.finalise());
+            (result, Some(admission))
+        } else {
+            // `Content` / `Stateless`: no tracer, no fact signature.
+            let result = self.compile_entry(&compile_input, &query.compile_profile);
+            (result, None)
+        };
         let (compiled_outputs, diagnostics, stale, compiled_tsx, compiled_template_analysis) =
             match compile_result {
                 Ok((outputs, diagnostics, tsx, tpl)) => (outputs, diagnostics, false, tsx, tpl),
@@ -896,30 +1031,9 @@ impl VerterHost {
 
         let last_tick = self.tick.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Store compile results. The compile cache is the authority for
-        // profile state.
-        //
-        // Route the finalised admission through the typed session node.
-        // `Cacheable(sig)` publishes the compile-output slot under the
-        // path-precise signature AND commits the scheduler artifact
-        // snapshot — both observable warm-hit substrates land together.
-        // `NonCacheable(_)` (overflow) skips BOTH writes and removes any
-        // prior slot for this `(canonical, profile)` so the carrier
-        // invariant `present in the session slot map ⇒ admitted cache
-        // entry for the current version` survives a recompute that
-        // overflows after a prior successful publish. The sibling writes
-        // below (latest-diagnostics + generation bump, DerivedRawState
-        // template analysis, scheduler artifact commit / eviction) are
-        // NOT compile-output slots, so they stay with this caller and
-        // are gated on the admission outcome captured in `is_cacheable`;
-        // the latest-diagnostics + generation bump runs on either arm so
-        // errors surface, and the caller still receives the freshly
-        // computed virtual file below.
-        let is_cacheable = matches!(
-            compile_admission,
-            crate::cache_runtime::SignatureAdmission::Cacheable(_)
-        );
-        let session_publish_value = crate::cache_runtime::CompileOutputValue::from_compile_record(
+        // The freshly compiled value, shared by the Session and Content
+        // publish paths. Stateless drops it after returning the response.
+        let compile_output_value = crate::cache_runtime::CompileOutputValue::from_compile_record(
             captured_semantic_hash,
             style_override_hash,
             content_override_hash,
@@ -933,81 +1047,127 @@ impl VerterHost {
             compiled_tsx.clone(),
             compiled_template_analysis.clone(),
         );
+
+        // The `latest_diagnostics` + generation bump runs for EVERY mode
+        // so compile errors / warnings surface regardless of caching.
+        // This is observable diagnostic state, not a compile-output
+        // cache entry.
         if let Some(mut cc) = self.compile_cache().get_mut(&canonical_id) {
-            let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
-            session_node.publish(
-                &mut cc,
-                profile_hash,
-                compile_admission,
-                session_publish_value,
-                last_tick,
-            );
-            // The `latest_diagnostics` + generation bump runs on either
-            // arm so errors surface regardless of cacheability.
             cc.latest_diagnostics
                 .insert(profile_hash, diagnostics.clone());
             cc.diagnostics_generation += 1;
         }
 
-        if is_cacheable {
-            // Persist raw template analysis on DerivedRawState (the
-            // profileless source-derived cache). Only for
-            // non-override compiles.
-            if compiled_template_analysis.is_some()
-                && compile_input.content_override_layer.is_none()
-            {
-                let mut derived_ref = self
-                    .derived_raw_cache()
-                    .entry(canonical_id.clone())
-                    .or_default();
-                derived_ref.value_mut().raw_template_analysis =
-                    compiled_template_analysis.clone().map(Arc::new);
+        // Publish, routed by the actual cache mode.
+        match actual_mode {
+            CompileCacheMode::Stateless => {
+                // Bypass both typed cache nodes: publish nothing. The
+                // caller still receives the freshly computed virtual
+                // file below.
             }
-
-            // Commit to scheduler artifact snapshot (scheduler path
-            // only). Gated on `Cacheable` admission so the carrier
-            // invariant holds at the artifact substrate layer too —
-            // a refused compile must not be observable via
-            // `try_get_artifact` or pending Artifact requests.
-            if let Some(ref snap) = sched_snapshot_at_start {
-                self.scheduler.commit_artifact(
+            CompileCacheMode::Content => {
+                // Publish into the content-addressed node ONLY. No fact
+                // rail, no session slot, no scheduler artifact: the
+                // content key's env-hash dimensions already invalidate
+                // on every observable env change.
+                let key = self.compile_pure_content_key(
                     &canonical_id,
-                    profile_hash,
-                    verter_scheduler::node::ArtifactSnapshot {
-                        generation: snap.generation,
+                    captured_whole_hash,
+                    &query.compile_profile,
+                );
+                let generation = self.project_type_store.current_project_generation();
+                self.compile_output_pure_content().publish_content(
+                    key,
+                    compile_output_value,
+                    generation,
+                );
+            }
+            CompileCacheMode::Session => {
+                // Route the finalised admission through the typed session
+                // node. `Cacheable(sig)` publishes the slot under the
+                // path-precise signature AND commits the scheduler
+                // artifact snapshot — both observable warm-hit substrates
+                // land together. `NonCacheable(_)` (overflow) skips both
+                // and removes any prior slot so the carrier invariant
+                // `present in the session slot map ⇒ admitted cache entry
+                // for the current version` survives an overflowing
+                // recompute after a prior successful publish.
+                let admission =
+                    compile_admission.expect("Session mode always finalises a SignatureAdmission");
+                let is_cacheable = matches!(
+                    admission,
+                    crate::cache_runtime::SignatureAdmission::Cacheable(_)
+                );
+                if let Some(mut cc) = self.compile_cache().get_mut(&canonical_id) {
+                    let session_node =
+                        crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                    session_node.publish(
+                        &mut cc,
                         profile_hash,
-                        data: Arc::new(crate::host_executor::HostArtifactData {
-                            outputs: compiled_outputs.clone(),
-                            diagnostics: diagnostics.clone(),
-                        }),
-                    },
-                );
-            }
-        } else {
-            // Refused admission. Symmetrically evict any prior scheduler
-            // artifact snapshot so `try_get_artifact` and pending
-            // Artifact requests cannot return a stale result on the
-            // companion warm-hit substrate; no fresh artifact is
-            // committed. The caller still receives the freshly computed
-            // virtual file from `compile_result` below.
-            //
-            // The scheduler eviction is gated on the compile's
-            // start-of-compile generation captured in
-            // `sched_snapshot_at_start`: a slow refused compile that
-            // started at generation N can race with a fast successful
-            // compile at N+k that already committed a newer artifact,
-            // and an unconditional evict would clobber the newer
-            // artifact. Passing the captured start generation as
-            // `max_generation` makes the eviction symmetric with
-            // `commit_artifact`'s own node-generation rejection: the
-            // newer artifact at N+k survives, and the stale artifact at
-            // N is dropped.
-            if let Some(ref snap) = sched_snapshot_at_start {
-                self.scheduler.remove_artifact_if_not_newer_than(
-                    &canonical_id,
-                    profile_hash,
-                    snap.generation,
-                );
+                        admission,
+                        compile_output_value,
+                        last_tick,
+                    );
+                }
+
+                if is_cacheable {
+                    // Persist raw template analysis on DerivedRawState
+                    // (the profileless source-derived cache). Only for
+                    // non-override compiles.
+                    if compiled_template_analysis.is_some()
+                        && compile_input.content_override_layer.is_none()
+                    {
+                        let mut derived_ref = self
+                            .derived_raw_cache()
+                            .entry(canonical_id.clone())
+                            .or_default();
+                        derived_ref.value_mut().raw_template_analysis =
+                            compiled_template_analysis.clone().map(Arc::new);
+                    }
+
+                    // Commit to scheduler artifact snapshot (scheduler
+                    // path only). Gated on `Cacheable` admission so the
+                    // carrier invariant holds at the artifact substrate
+                    // layer too — a refused compile must not be observable
+                    // via `try_get_artifact` or pending Artifact requests.
+                    if let Some(ref snap) = sched_snapshot_at_start {
+                        self.scheduler.commit_artifact(
+                            &canonical_id,
+                            profile_hash,
+                            verter_scheduler::node::ArtifactSnapshot {
+                                generation: snap.generation,
+                                profile_hash,
+                                data: Arc::new(crate::host_executor::HostArtifactData {
+                                    outputs: compiled_outputs.clone(),
+                                    diagnostics: diagnostics.clone(),
+                                }),
+                            },
+                        );
+                    }
+                } else {
+                    // Refused admission. Symmetrically evict any prior
+                    // scheduler artifact snapshot so `try_get_artifact`
+                    // and pending Artifact requests cannot return a stale
+                    // result on the companion warm-hit substrate; no fresh
+                    // artifact is committed.
+                    //
+                    // The eviction is gated on the compile's
+                    // start-of-compile generation captured in
+                    // `sched_snapshot_at_start`: a slow refused compile
+                    // that started at generation N can race with a fast
+                    // successful compile at N+k that already committed a
+                    // newer artifact, and an unconditional evict would
+                    // clobber it. Passing the captured start generation as
+                    // `max_generation` makes the eviction symmetric with
+                    // `commit_artifact`'s own node-generation rejection.
+                    if let Some(ref snap) = sched_snapshot_at_start {
+                        self.scheduler.remove_artifact_if_not_newer_than(
+                            &canonical_id,
+                            profile_hash,
+                            snap.generation,
+                        );
+                    }
+                }
             }
         }
 

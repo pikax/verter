@@ -1742,6 +1742,14 @@ pub struct ProjectTypeStore {
     /// [`crate::types::ProfileState`] entries; the §3.4.2 invalidation
     /// matrix governs eviction triggers.
     compile_cache_db: CompileCacheDb,
+    /// Content-addressed compile-output cache for
+    /// [`crate::types::CompileCacheMode::Content`] requests. Keyed by the
+    /// full env-dimension tuple + content hash; one immutable entry per
+    /// key, no fact-validation rail (cross-file edits invalidate through
+    /// the env-hash dimensions). The fact-validated `Session` mode uses
+    /// the per-profile [`compile_cache_db`](Self::compile_cache_db)
+    /// instead, so the two cache families are disjoint by construction.
+    compile_output_pure_content: crate::cache_runtime::CompileOutputNodePureContent,
     /// Source-content-domain DB for the per-canonical compile cache (D48).
     /// Holds [`crate::types::DerivedRawState`] entries (sub-mirror of
     /// `IndexedReady.import_routes` plus source-derived analyses); the
@@ -1909,6 +1917,7 @@ impl ProjectTypeStore {
             type_resolution_context_db: TypeResolutionContextDb::new(),
             eval_env_cache_db: EvalEnvCacheDb::new(),
             compile_cache_db: CompileCacheDb::new(),
+            compile_output_pure_content: crate::cache_runtime::CompileOutputNodePureContent::new(),
             derived_raw_cache_db: DerivedRawCacheDb::new(),
             dependency_cache_db: DependencyCacheDb::new(),
             resolved_type_cache_db: ResolvedTypeCacheDb::new(),
@@ -2022,6 +2031,14 @@ impl ProjectTypeStore {
     /// changes invalidate, source-content changes preserve.
     pub fn compile_cache(&self) -> &CompileCacheDb {
         &self.compile_cache_db
+    }
+
+    /// Content-addressed compile-output cache node for
+    /// [`crate::types::CompileCacheMode::Content`] requests.
+    pub(crate) fn compile_output_pure_content(
+        &self,
+    ) -> &crate::cache_runtime::CompileOutputNodePureContent {
+        &self.compile_output_pure_content
     }
 
     /// Source-content-domain DB for the per-canonical compile cache

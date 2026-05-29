@@ -952,6 +952,15 @@ pub struct CompileProfile {
     pub conditional_root_narrowing: bool,
     /// Experimental: strict slot children type checking.
     pub strict_slots: bool,
+    /// Caller-requested compile cache mode for this request.
+    ///
+    /// The host classifies this against the request's eligibility
+    /// surface (see [`DowngradeReason`]) and routes the compile through
+    /// the resulting actual mode: [`CompileCacheMode::Session`] (the
+    /// default) consults the fact-validated session cache,
+    /// [`CompileCacheMode::Content`] the pure content-addressed cache,
+    /// [`CompileCacheMode::Stateless`] no cache. Defaults to `Session`.
+    pub requested_mode: CompileCacheMode,
 }
 
 impl Default for CompileProfile {
@@ -974,6 +983,7 @@ impl Default for CompileProfile {
             embed_ambient_types: false,
             conditional_root_narrowing: false,
             strict_slots: false,
+            requested_mode: CompileCacheMode::Session,
         }
     }
 }
