@@ -1,7 +1,7 @@
 //! Cooperative-admission substrate tests — extracted sibling of
-//! `cooperative_admission.rs` (kept under the file-size guard cap).
+//! `singleflight.rs` (kept under the file-size guard cap).
 //!
-//! Included as a child `mod` of `cooperative_admission` via
+//! Included as a child `mod` of `singleflight` via
 //! `#[path]`, so `use super::*` reaches the substrate's private
 //! `InflightSlot` / `InflightTable` internals the thread-coordinated
 //! discriminators poll.
@@ -548,7 +548,7 @@ fn cacheable_joiner_runs_validate_on_its_own_thread() {
          joiner is not running the caller's `validate` closure on the \
          joiner path — it is skipping read-side view validation and \
          the fact-bubble side effect. See \
-         `crates/verter_session/src/cooperative_admission.rs` joiner branch."
+         `crates/verter_session/src/cache_runtime/singleflight.rs` joiner branch."
     );
 }
 
@@ -950,5 +950,673 @@ fn compute_admission_failed_variant_is_constructible() {
     assert!(
         matches!(admission, ComputeAdmission::Failed),
         "ComputeAdmission::Failed must be constructible"
+    );
+}
+
+// ===========================================================================
+// New-adapter discriminators: by_flight_key (MapK != FlightK) +
+// with_lookup_publish (slot-delegated storage).
+// ===========================================================================
+
+/// `cooperative_admit_with_post_publish_by_flight_key` publishes into
+/// the map under `MapK` while coalescing the flight on `FlightK`.
+///
+/// Two threads race on the SAME map key but carry DIFFERENT flight keys
+/// (the model of two overlays on one cache key, both cold). They must
+/// NOT coalesce: each runs its own cold compute. A `Barrier` holds both
+/// inside `compute` until both have passed the warm-miss check and
+/// claimed their (distinct) flight slots, so neither observes the
+/// other's publish on the warm path.
+///
+/// Discriminating: against the unified-key primitive (where flight key =
+/// map key) the two threads WOULD claim the SAME flight slot and only
+/// ONE compute would run; the other would be a cooperative joiner.
+/// Distinct flight keys force two concurrent cold computes. The
+/// published map stays keyed by the shared `MapK` (the compat-token
+/// never enters the map), so exactly one map entry survives.
+#[test]
+fn by_flight_key_keys_map_on_mapk_and_coalesces_on_flightk() {
+    use std::sync::Barrier;
+
+    let map: Arc<DashMap<u32, Arc<String>>> = Arc::new(DashMap::new());
+    let inflight: Arc<InflightTable<(u32, u8)>> = Arc::new(InflightTable::default());
+    let compute_count = Arc::new(AtomicUsize::new(0));
+    // Both cold computes rendezvous here so each passes its warm-miss
+    // check and claims its own flight slot before either publishes.
+    let both_in_compute = Arc::new(Barrier::new(2));
+
+    let handles: Vec<_> = [0u8, 1u8]
+        .into_iter()
+        .map(|flight_token| {
+            let map = Arc::clone(&map);
+            let inflight = Arc::clone(&inflight);
+            let count = Arc::clone(&compute_count);
+            let barrier = Arc::clone(&both_in_compute);
+            thread::spawn(move || {
+                cooperative_admit_with_post_publish_by_flight_key(
+                    &map,
+                    &inflight,
+                    42u32,
+                    (42u32, flight_token),
+                    |entry: &String| Some(entry.clone()),
+                    move || {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        // Hold until BOTH threads are inside compute so
+                        // neither sees the other's publish on the warm
+                        // path — proving distinct flight lanes do not
+                        // coalesce.
+                        barrier.wait();
+                        ComputeAdmission::Cacheable(format!("flight-{flight_token}"))
+                    },
+                    |entry: &String| entry.clone(),
+                    |_entry: &String| true,
+                    |_k: &u32, _e: &Arc<String>| {},
+                    |_e: &Arc<String>, _k: &u32| {},
+                    None,
+                )
+            })
+        })
+        .collect();
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+    // Distinct flight lanes ⇒ both cold computes ran (no coalescing).
+    assert_eq!(
+        compute_count.load(Ordering::SeqCst),
+        2,
+        "distinct flight keys must NOT coalesce — each runs its own cold compute"
+    );
+    for r in &results {
+        assert!(r.is_some(), "each flight returns its own computed value");
+    }
+    // The published map is keyed by the shared MapK (42), so there is
+    // exactly ONE map entry (the second publish overwrote the first
+    // under the same map key). The compat-token never enters the map.
+    assert_eq!(
+        map.len(),
+        1,
+        "the published map must be keyed by MapK only — the flight token is NOT a map key"
+    );
+
+    // A subsequent caller under a THIRD flight token now hits the warm
+    // map under MapK 42 and does NOT recompute — confirming the map key
+    // is the shared MapK, independent of flight token.
+    let warm = cooperative_admit_with_post_publish_by_flight_key(
+        &map,
+        &inflight,
+        42u32,
+        (42u32, 9u8),
+        |entry: &String| Some(entry.clone()),
+        || {
+            compute_count.fetch_add(1, Ordering::SeqCst);
+            ComputeAdmission::Cacheable("should-not-run".to_string())
+        },
+        |entry: &String| entry.clone(),
+        |_entry: &String| true,
+        |_k: &u32, _e: &Arc<String>| {},
+        |_e: &Arc<String>, _k: &u32| {},
+        None,
+    );
+    assert!(
+        warm.is_some(),
+        "warm map hit under MapK must return a value"
+    );
+    assert_eq!(
+        compute_count.load(Ordering::SeqCst),
+        2,
+        "a warm map hit under MapK must NOT recompute regardless of flight token"
+    );
+}
+
+/// When two cold winners on DIFFERENT flight lanes publish under the SAME
+/// map key, the second `map.insert` replaces the first entry — and the
+/// replaced entry must receive `removal_cleanup` so a cache that bumps a
+/// live counter in `post_publish` and decrements it in `removal_cleanup`
+/// stays balanced.
+///
+/// The `by_flight_key` adapter separates the in-flight coalescing identity
+/// (`FlightK`) from the published map key (`MapK`). Two requests on
+/// distinct flight lanes (e.g. two overlays) for the same cache key both
+/// cold-compute and both publish under the shared `MapK`; the second
+/// publish overwrites the first. Without cleaning up the overwritten
+/// entry, every overwrite leaks one live-counter increment — the artifact
+/// node's `post_publish` ran twice while `removal_cleanup` never ran for
+/// the displaced entry.
+///
+/// A `Barrier` holds both winners inside `compute` until each has passed
+/// its warm-miss check and claimed its own flight slot, so neither
+/// coalesces onto the other and both reach the publish path.
+///
+/// Discriminating: with the overwrite path leaking, `post_publish` fires
+/// twice and `removal_cleanup` zero times, so the net live count is 2.
+/// With the displaced entry cleaned up under the publish fence, the net
+/// live count is 1 (two publishes, one removal of the overwritten entry).
+#[test]
+fn by_flight_key_overwrite_cleans_up_displaced_entry() {
+    use std::sync::Barrier;
+
+    let map: Arc<DashMap<u32, Arc<String>>> = Arc::new(DashMap::new());
+    let inflight: Arc<InflightTable<(u32, u8)>> = Arc::new(InflightTable::default());
+    // Models a cache's live-entry counter: bumped in post_publish, drained
+    // in removal_cleanup. A leaked overwrite leaves this above the number
+    // of entries actually held in the map.
+    let post_publish_count = Arc::new(AtomicUsize::new(0));
+    let removal_cleanup_count = Arc::new(AtomicUsize::new(0));
+    // Both cold computes rendezvous so each claims its own flight slot
+    // before either publishes — forcing two concurrent winners that both
+    // publish under the same MapK.
+    let both_in_compute = Arc::new(Barrier::new(2));
+
+    let handles: Vec<_> = [0u8, 1u8]
+        .into_iter()
+        .map(|flight_token| {
+            let map = Arc::clone(&map);
+            let inflight = Arc::clone(&inflight);
+            let pub_count = Arc::clone(&post_publish_count);
+            let rm_count = Arc::clone(&removal_cleanup_count);
+            let barrier = Arc::clone(&both_in_compute);
+            thread::spawn(move || {
+                cooperative_admit_with_post_publish_by_flight_key(
+                    &map,
+                    &inflight,
+                    42u32,
+                    (42u32, flight_token),
+                    |entry: &String| Some(entry.clone()),
+                    move || {
+                        barrier.wait();
+                        ComputeAdmission::Cacheable(format!("flight-{flight_token}"))
+                    },
+                    |entry: &String| entry.clone(),
+                    |_entry: &String| true,
+                    move |_k: &u32, _e: &Arc<String>| {
+                        rm_count.fetch_add(1, Ordering::SeqCst);
+                    },
+                    move |_e: &Arc<String>, _k: &u32| {
+                        pub_count.fetch_add(1, Ordering::SeqCst);
+                    },
+                    None,
+                )
+            })
+        })
+        .collect();
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+    for r in &results {
+        assert!(r.is_some(), "each cold winner returns its own value");
+    }
+    // Both winners published under the shared MapK.
+    assert_eq!(
+        post_publish_count.load(Ordering::SeqCst),
+        2,
+        "two cold winners on distinct flight lanes each publish under the shared MapK"
+    );
+    // The second publish overwrote the first; the displaced entry must
+    // have received removal_cleanup exactly once.
+    assert_eq!(
+        removal_cleanup_count.load(Ordering::SeqCst),
+        1,
+        "the entry displaced by the second publish must receive removal_cleanup"
+    );
+    // Net live accounting (post_publish bumps − removal_cleanup drains) ==
+    // 1, matching the single surviving map entry.
+    let net_live =
+        post_publish_count.load(Ordering::SeqCst) - removal_cleanup_count.load(Ordering::SeqCst);
+    assert_eq!(
+        net_live, 1,
+        "net live-entry accounting must equal the one surviving map entry, \
+         not leak the overwritten entry's increment"
+    );
+    assert_eq!(
+        map.len(),
+        1,
+        "exactly one map entry survives under the shared MapK"
+    );
+}
+
+/// The displacing publisher's `removal_cleanup` of an overwritten entry
+/// must run STRICTLY AFTER that overwritten entry's own `post_publish`
+/// completes. This is the linearization the aggregate-count test above
+/// CANNOT see: two publishes netting to one cleanup proves the count is
+/// balanced eventually, not that the cleanup observed the displaced
+/// entry's `post_publish` as already done.
+///
+/// Two cold winners on distinct flight lanes (A on token 0, B on token 1)
+/// publish under the same `MapK`. A inserts first; B's compute blocks
+/// until A has entered its `post_publish`, so B is always the displacer
+/// and A is always the displaced entry.
+///
+/// The live counter is modelled as a SIGNED `AtomicI64`: `post_publish`
+/// bumps it, `removal_cleanup` drains it. A correct linearization keeps it
+/// `>= 0` at every observed point — the displaced entry's bump always
+/// precedes its drain. Without per-`MapK` linearization the displacing
+/// publisher (B) can run `removal_cleanup` (`fetch_sub`) for A while A's
+/// `post_publish` (`fetch_add`) has not yet run, driving the counter to
+/// `-1` (a `usize` counter would wrap to a catastrophic huge value). A
+/// `fetch_min`-tracked low-water mark and a per-decrement pre-condition
+/// check both witness the underflow.
+///
+/// An ORDER LOG (a `Mutex<Vec<Op>>`) records `post_publish` / `cleanup`
+/// events. Post-fix, A's whole publish — insert + `post_publish` — runs
+/// inside A's shard write guard, and B's insert blocks on that same shard
+/// guard until A releases it, so the log always reads
+/// `[APostPublish, .., BCleanupOfA, ..]`. Pre-fix, A's `map.insert` holds
+/// no guard across `post_publish`, so B's insert + `removal_cleanup` can
+/// land in the gap and the log shows `BCleanupOfA` before `APostPublish`.
+///
+/// Discriminating: post-fix the low-water mark is `0`, the per-decrement
+/// pre-condition holds, and the order log shows A's `post_publish` before
+/// B's cleanup-of-A — all THREE deterministically. Pre-fix at least one
+/// fails (low-water `-1`, the pre-condition panic, or the inverted order),
+/// reliably exposed by the documented window-widener below.
+#[test]
+fn by_flight_key_displaced_cleanup_runs_after_its_own_post_publish() {
+    use std::sync::atomic::AtomicI64;
+    use std::sync::mpsc;
+    use std::sync::Barrier;
+    use std::sync::Mutex;
+
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+    enum Op {
+        APostPublish,
+        BCleanupOfA,
+        BPostPublish,
+    }
+
+    let map: Arc<DashMap<u32, Arc<String>>> = Arc::new(DashMap::new());
+    let inflight: Arc<InflightTable<(u32, u8)>> = Arc::new(InflightTable::default());
+    // Signed so an underflow is observable as a negative value rather than
+    // a usize wrap. Models a cache's live-entry counter.
+    let live = Arc::new(AtomicI64::new(0));
+    // Low-water mark: a correct linearization never lets `live` dip below
+    // zero, so this stays `0`. A pre-fix underflow records `-1`.
+    let low_water = Arc::new(AtomicI64::new(0));
+    let order_log = Arc::new(Mutex::new(Vec::<Op>::new()));
+    // Both cold computes rendezvous so each claims its own flight slot and
+    // both reach the publish path under the shared MapK.
+    let both_winners = Arc::new(Barrier::new(2));
+    // A signals from inside its `post_publish` that it has begun
+    // publishing; B's compute blocks on this so B inserts AFTER A and is
+    // always the displacer. The receiver is consumed only by B (token 1).
+    let (tx_a_publishing, rx_a_publishing) = mpsc::channel::<()>();
+    let tx_a_publishing = Arc::new(Mutex::new(Some(tx_a_publishing)));
+    let rx_a_publishing = Arc::new(Mutex::new(Some(rx_a_publishing)));
+
+    let handles: Vec<_> = [0u8, 1u8]
+        .into_iter()
+        .map(|flight_token| {
+            let map = Arc::clone(&map);
+            let inflight = Arc::clone(&inflight);
+            let live = Arc::clone(&live);
+            let low_water = Arc::clone(&low_water);
+            let order_log = Arc::clone(&order_log);
+            let both_winners = Arc::clone(&both_winners);
+            let tx_a_publishing = Arc::clone(&tx_a_publishing);
+            // Only B (token 1) pulls the receiver; A (token 0) leaves it.
+            let rx_a_publishing = if flight_token == 1 {
+                rx_a_publishing.lock().unwrap().take()
+            } else {
+                None
+            };
+            thread::spawn(move || {
+                cooperative_admit_with_post_publish_by_flight_key(
+                    &map,
+                    &inflight,
+                    42u32,
+                    (42u32, flight_token),
+                    |entry: &String| Some(entry.clone()),
+                    move || {
+                        // Both threads become winners on distinct flight
+                        // lanes, then B (token 1) waits until A (token 0)
+                        // has entered its publish, so A inserts first.
+                        both_winners.wait();
+                        if let Some(rx) = &rx_a_publishing {
+                            rx.recv()
+                                .expect("A must signal it is publishing before B publishes");
+                        }
+                        ComputeAdmission::Cacheable(format!("flight-{flight_token}"))
+                    },
+                    |entry: &String| entry.clone(),
+                    |_entry: &String| true,
+                    {
+                        let live = Arc::clone(&live);
+                        let low_water = Arc::clone(&low_water);
+                        let order_log = Arc::clone(&order_log);
+                        move |_k: &u32, _e: &Arc<String>| {
+                            // Displacing publisher draining the overwritten
+                            // entry. Pre-condition: the overwritten entry's
+                            // `post_publish` bump MUST already be visible —
+                            // i.e. `live >= 1` before this decrement. Under
+                            // a correct per-MapK linearization this always
+                            // holds; pre-fix it can be `0`.
+                            let before = live.load(Ordering::SeqCst);
+                            assert!(
+                                before >= 1,
+                                "removal_cleanup of a displaced entry ran before that \
+                                 entry's own post_publish bump was visible (live={before}) \
+                                 — the per-MapK publish lifecycle is not linearized"
+                            );
+                            order_log.lock().unwrap().push(Op::BCleanupOfA);
+                            let after = live.fetch_sub(1, Ordering::SeqCst) - 1;
+                            low_water.fetch_min(after, Ordering::SeqCst);
+                        }
+                    },
+                    {
+                        let live = Arc::clone(&live);
+                        let order_log = Arc::clone(&order_log);
+                        let tx_a_publishing = Arc::clone(&tx_a_publishing);
+                        move |_e: &Arc<String>, _k: &u32| {
+                            if flight_token == 0 {
+                                // A: announce that publishing has begun so
+                                // B may now insert and displace A. Pre-fix
+                                // this runs with NO shard guard held, so B
+                                // can race in and clean A up before the
+                                // bump below. The sleep widens that pre-fix
+                                // window to make the race deterministic; it
+                                // is NOT a correctness synchroniser — post
+                                // fix A holds the shard write guard across
+                                // this whole closure, so B's insert blocks
+                                // until A releases regardless of the sleep.
+                                if let Some(tx) = tx_a_publishing.lock().unwrap().take() {
+                                    tx.send(()).expect("A signals publishing");
+                                }
+                                thread::sleep(Duration::from_millis(50));
+                                order_log.lock().unwrap().push(Op::APostPublish);
+                            } else {
+                                order_log.lock().unwrap().push(Op::BPostPublish);
+                            }
+                            live.fetch_add(1, Ordering::SeqCst);
+                        }
+                    },
+                    None,
+                )
+            })
+        })
+        .collect();
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+    for r in &results {
+        assert!(r.is_some(), "each cold winner returns its own value");
+    }
+    // The live counter never dipped below zero — the displaced entry's
+    // bump always preceded its drain.
+    assert_eq!(
+        low_water.load(Ordering::SeqCst),
+        0,
+        "live counter underflowed: a displaced entry was cleaned up before its \
+         own post_publish ran"
+    );
+    // Net live accounting settles at exactly the one surviving map entry.
+    assert_eq!(
+        live.load(Ordering::SeqCst),
+        1,
+        "net live-entry accounting must equal the one surviving map entry"
+    );
+    assert_eq!(map.len(), 1, "exactly one map entry survives");
+    // The order log proves A's post_publish completed before B cleaned A
+    // up — not merely that the counts balanced.
+    let log = order_log.lock().unwrap().clone();
+    let a_pp = log
+        .iter()
+        .position(|op| *op == Op::APostPublish)
+        .expect("A must run post_publish");
+    let b_cleanup = log
+        .iter()
+        .position(|op| *op == Op::BCleanupOfA)
+        .expect("B must clean up the displaced entry A");
+    assert!(
+        a_pp < b_cleanup,
+        "A's post_publish must be ordered before B's cleanup of A, got {log:?}"
+    );
+}
+
+/// A cold cacheable node computes exactly ONCE for two concurrent
+/// joiners on the same flight key (H14 singleflight). Exercised through
+/// the by_flight_key adapter — the artifact `lookup` path lowers here.
+#[test]
+fn cold_cacheable_node_computes_once_for_two_joiners() {
+    use std::sync::Barrier;
+
+    let map: DashMap<u32, Arc<String>> = DashMap::new();
+    let inflight: InflightTable<(u32, u8)> = InflightTable::default();
+    let map = Arc::new(map);
+    let inflight = Arc::new(inflight);
+    let compute_count = Arc::new(AtomicUsize::new(0));
+    // Hold the winner in compute until the joiner is a proven slot
+    // waiter, so the joiner cannot race ahead and start its own compute.
+    let release = Arc::new(Barrier::new(1));
+
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let map = Arc::clone(&map);
+            let inflight = Arc::clone(&inflight);
+            let compute_count = Arc::clone(&compute_count);
+            let release = Arc::clone(&release);
+            thread::spawn(move || {
+                cooperative_admit_with_post_publish_by_flight_key(
+                    &map,
+                    &inflight,
+                    7u32,
+                    (7u32, 0u8),
+                    |entry: &String| Some(entry.clone()),
+                    move || {
+                        compute_count.fetch_add(1, Ordering::SeqCst);
+                        thread::sleep(Duration::from_millis(20));
+                        let _ = release;
+                        ComputeAdmission::Cacheable("one-winner".to_string())
+                    },
+                    |entry: &String| entry.clone(),
+                    |_entry: &String| true,
+                    |_k: &u32, _e: &Arc<String>| {},
+                    |_e: &Arc<String>, _k: &u32| {},
+                    None,
+                )
+            })
+        })
+        .collect();
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+    assert_eq!(
+        compute_count.load(Ordering::SeqCst),
+        1,
+        "exactly one cold cacheable compute must run for two joiners on the same flight key"
+    );
+    for r in &results {
+        assert_eq!(r.as_deref(), Some("one-winner"));
+    }
+}
+
+/// A `ReturnOnly` winner over the by_flight_key adapter publishes
+/// NOTHING: the map stays empty and `post_publish` (the reverse-index /
+/// persistence hook) is never invoked. The winner receives its value
+/// directly; the next caller cold-recomputes.
+///
+/// Discriminating: a `Cacheable` outcome inserts into the map and fires
+/// `post_publish`. The `ReturnOnly` arm must do neither — it carries no
+/// validatable carrier, so it is winner-only and non-persisting.
+#[test]
+fn return_only_does_not_publish_reverse_index_or_persist() {
+    let map: DashMap<u32, Arc<String>> = DashMap::new();
+    let inflight: InflightTable<(u32, u8)> = InflightTable::default();
+    let post_publish_count = Arc::new(AtomicUsize::new(0));
+    let post_publish_count_cl = Arc::clone(&post_publish_count);
+
+    let v = cooperative_admit_with_post_publish_by_flight_key(
+        &map,
+        &inflight,
+        5u32,
+        (5u32, 0u8),
+        |entry: &String| Some(entry.clone()),
+        || ComputeAdmission::<String, String>::ReturnOnly("winner-only".to_string()),
+        |entry: &String| entry.clone(),
+        |_entry: &String| true,
+        |_k: &u32, _e: &Arc<String>| {},
+        move |_e: &Arc<String>, _k: &u32| {
+            post_publish_count_cl.fetch_add(1, Ordering::SeqCst);
+        },
+        None,
+    );
+
+    assert_eq!(
+        v.as_deref(),
+        Some("winner-only"),
+        "the ReturnOnly winner receives its value directly"
+    );
+    assert_eq!(
+        map.len(),
+        0,
+        "a ReturnOnly outcome must NOT insert into the published map"
+    );
+    assert_eq!(
+        post_publish_count.load(Ordering::SeqCst),
+        0,
+        "a ReturnOnly outcome must NOT fire post_publish (no reverse-index / persist)"
+    );
+}
+
+/// A budgeted cache driven through the CACHE-KEY-IS-FLIGHT-KEY entry point
+/// (`cooperative_admit_with_post_publish`) must not self-deadlock when its
+/// `post_publish` hook re-enters the published map to FIFO-evict a victim
+/// during publication.
+///
+/// This is the exact shape of the two budgeted unified consumers
+/// (`MaterializeStructureDb` / `RefCycleResultDb`): their `post_publish`
+/// runs `register_post_publish` → `evict_budget_victim` →
+/// `entries.remove_if(victim)` on the SAME `DashMap` the entry was just
+/// published into. If the publish holds the map's shard WRITE guard across
+/// `post_publish` (as a per-map-key linearization does), and the FIFO
+/// victim hashes to the same shard as the just-published key, the
+/// re-entrant `remove_if` blocks forever on a write guard this very thread
+/// already holds — a non-reentrant same-shard self-deadlock.
+///
+/// The repro is deterministic, not a race: every key has a CONSTANT
+/// `Hash` (distinct under `Eq`, so K1 and K2 are separate map entries, but
+/// they hash identically), so they always land on the same `DashMap`
+/// shard, and the publish runs entirely on one worker thread. With cap = 1,
+/// publishing K2 while K1 is resident evicts K1 from inside K2's
+/// `post_publish`; under the buggy linearized publish K2's shard guard is
+/// held across that eviction, so `remove_if(K1)` (same shard)
+/// self-deadlocks the worker.
+///
+/// Deadlock-freedom is asserted with a WATCHDOG: the publish sequence runs
+/// on a worker thread that signals completion over an `mpsc` channel; the
+/// test waits with `recv_timeout(5s)`. Pre-fix the worker hangs and the
+/// timeout fires → the test FAILS. Post-fix the cache-key-is-flight-key
+/// publish uses `map.insert` (transient guard released before
+/// `post_publish`), so the re-entrant eviction acquires the now-free shard
+/// lock and the worker completes in well under the timeout. The test also
+/// asserts the eviction actually fired (one victim removed, K2 sole
+/// survivor) so it discriminates on eviction-DURING-publication, not merely
+/// on "did not hang". (Pre-fix the deadlocked worker thread is abandoned;
+/// the test process exits after the failure, so the leak is bounded.)
+#[test]
+fn unified_budgeted_post_publish_eviction_does_not_self_deadlock() {
+    use std::collections::VecDeque;
+    use std::hash::{Hash, Hasher};
+    use std::sync::mpsc;
+    use std::sync::Mutex;
+
+    // A key that is DISTINCT under `Eq` (so K1 and K2 occupy separate map
+    // slots) but hashes to a CONSTANT (so every key lands on the same
+    // `DashMap` shard under the map's `RandomState`). This forces K2's
+    // publish and the eviction of victim K1 onto the SAME shard lock — the
+    // precise condition the buggy linearized publish self-deadlocks on —
+    // without needing a custom map hasher (the substrate hardcodes the
+    // default `RandomState`).
+    #[derive(PartialEq, Eq, Clone, Copy, Debug)]
+    struct CollidingKey(u32);
+    impl Hash for CollidingKey {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            // Constant — every value hashes identically, so all keys share
+            // one shard. `Eq` still distinguishes them.
+            state.write_u8(0);
+        }
+    }
+
+    let map: Arc<DashMap<CollidingKey, Arc<String>>> = Arc::new(DashMap::new());
+    let inflight: Arc<InflightTable<CollidingKey>> = Arc::new(InflightTable::default());
+    // FIFO retention budget, cap = 1 — models the unified consumers'
+    // `retention_budget.record_admission` returning the oldest key as a
+    // victim once the cap is exceeded.
+    let fifo: Arc<Mutex<VecDeque<CollidingKey>>> = Arc::new(Mutex::new(VecDeque::new()));
+    const CAP: usize = 1;
+    let evictions = Arc::new(AtomicUsize::new(0));
+
+    let map_w = Arc::clone(&map);
+    let inflight_w = Arc::clone(&inflight);
+    let fifo_w = Arc::clone(&fifo);
+    let evictions_w = Arc::clone(&evictions);
+
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+    let worker = thread::spawn(move || {
+        // Publish two distinct keys in sequence on ONE thread. K1 fills the
+        // cap; K2 overflows it and must evict K1 from inside K2's
+        // `post_publish` while (pre-fix) holding K2's shard guard.
+        for n in [1u32, 2u32] {
+            let key = CollidingKey(n);
+            let map_inner = Arc::clone(&map_w);
+            let fifo_inner = Arc::clone(&fifo_w);
+            let evictions_inner = Arc::clone(&evictions_w);
+            let v = cooperative_admit_with_post_publish(
+                &map_w,
+                &inflight_w,
+                key,
+                |entry: &String| Some(entry.clone()),
+                move || ComputeAdmission::Cacheable(format!("v{n}")),
+                |entry: &String| entry.clone(),
+                |_entry: &String| true,
+                |_k: &CollidingKey, _e: &Arc<String>| {},
+                // post_publish: record the admission in the FIFO, then
+                // FIFO-evict any overflow by removing the victim from the
+                // SAME map — exactly `evict_budget_victim`'s `remove_if`.
+                move |_e: &Arc<String>, published_key: &CollidingKey| {
+                    let victims: Vec<CollidingKey> = {
+                        let mut q = fifo_inner.lock().unwrap();
+                        q.push_back(*published_key);
+                        let mut v = Vec::new();
+                        while q.len() > CAP {
+                            if let Some(victim) = q.pop_front() {
+                                v.push(victim);
+                            }
+                        }
+                        v
+                    };
+                    for victim in victims {
+                        // Re-entrant removal on the just-published map. With
+                        // a held shard guard (pre-fix) and a same-shard
+                        // victim this is the self-deadlock.
+                        if map_inner.remove_if(&victim, |_, _| true).is_some() {
+                            evictions_inner.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                },
+                None,
+            );
+            assert_eq!(v.as_deref(), Some(format!("v{n}").as_str()));
+        }
+        done_tx.send(()).expect("worker signals completion");
+    });
+
+    // Watchdog: a hung publish never sends, so the timeout fires and the
+    // test fails. A healthy publish completes near-instantly.
+    match done_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(()) => {
+            worker.join().expect("worker thread joins cleanly");
+        }
+        Err(_) => panic!(
+            "unified budgeted publish DEADLOCKED: post_publish re-entered the published map to \
+             evict a same-shard victim while the publish held that shard's write guard"
+        ),
+    }
+
+    // Eviction actually ran during publication — the test discriminates on
+    // re-entrant-eviction-during-publish, not merely on deadlock-freedom.
+    assert_eq!(
+        evictions.load(Ordering::SeqCst),
+        1,
+        "publishing K2 over a cap-1 budget must evict K1 from inside K2's post_publish"
+    );
+    assert_eq!(map.len(), 1, "exactly the surviving entry (K2) remains");
+    assert!(
+        map.get(&CollidingKey(2)).is_some() && map.get(&CollidingKey(1)).is_none(),
+        "K1 was evicted; K2 survives"
     );
 }

@@ -112,7 +112,6 @@ pub mod component_meta_result_db;
 mod component_meta_slot_binding_skip_tests;
 #[cfg(test)]
 mod component_meta_terminal_mode_tests;
-pub mod cooperative_admission;
 pub mod cross_file;
 pub mod fact_emission;
 pub(crate) mod fact_signature_helpers;

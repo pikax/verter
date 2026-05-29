@@ -522,7 +522,7 @@ pub struct RequestContext {
     /// surfaces on
     /// [`verter_audit::ComponentMetaPayload::memo_insertions`].
     pub memo_insertions: AtomicU64,
-    /// `cooperative_admission` builds that landed with
+    /// `cache_runtime::singleflight` builds that landed with
     /// `cache_suppress=true` and had their warm-publish skipped;
     /// surfaces on
     /// [`verter_audit::ComponentMetaPayload::memo_publish_suppressed`].

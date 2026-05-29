@@ -120,6 +120,11 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use parking_lot::{Condvar, Mutex};
 
+use super::singleflight_publish::{
+    publish_entry_insert_then_post_publish, publish_entry_linearized_per_map_key,
+    remove_published_entry_with_cleanup,
+};
+
 /// First-class outcome of a cooperative-admission cold compute.
 ///
 /// `compute` closures return one of three variants:
@@ -164,34 +169,38 @@ pub enum ComputeAdmission<V, Entry> {
 
 /// Per-key in-flight slot. The winner publishes via `state.completed`;
 /// joiners wait on `ready` until publish or fail.
-struct InflightSlot {
-    state: Mutex<InflightSlotState>,
-    ready: Condvar,
+///
+/// `pub(super)` so the sibling `lookup_publish` adapter (the
+/// query-identity multi-candidate state machine) drives the same
+/// winner/joiner protocol over this slot without re-implementing it.
+pub(super) struct InflightSlot {
+    pub(super) state: Mutex<InflightSlotState>,
+    pub(super) ready: Condvar,
 }
 
 #[derive(Default)]
-struct InflightSlotState {
+pub(super) struct InflightSlotState {
     /// `true` once a thread has claimed ownership of the cold build.
     /// Subsequent threads see `claimed == true` and wait on `ready`.
-    claimed: bool,
+    pub(super) claimed: bool,
     /// `true` once the winner has finished — successfully or otherwise.
-    completed: bool,
+    pub(super) completed: bool,
     /// `true` if the winner's `compute()` returned `None`, panicked, OR
     /// `revalidate_after_compute` rejected the freshly-built entry.
     /// Joiners observing `failed = true` return `None`; subsequent calls
     /// retry the cold path.
-    failed: bool,
+    pub(super) failed: bool,
     /// `true` when the winner's compute returned a valid-but-non-cacheable
     /// outcome (`ComputeAdmission::ReturnOnly`). The map stays empty for
     /// such a winner. A joiner that wakes observing `non_cacheable_winner
     /// == true` (with `failed == false`) has no published entry to
     /// validate against its own view, so it forks and cold-recomputes.
     /// `false` for cacheable outcomes and for failures.
-    non_cacheable_winner: bool,
+    pub(super) non_cacheable_winner: bool,
 }
 
 impl InflightSlot {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             state: Mutex::new(InflightSlotState::default()),
             ready: Condvar::new(),
@@ -205,7 +214,7 @@ pub struct InflightTable<K>
 where
     K: Hash + Eq + Clone,
 {
-    table: Mutex<HashMap<K, Arc<InflightSlot>>>,
+    pub(super) table: Mutex<HashMap<K, Arc<InflightSlot>>>,
 }
 
 impl<K> Default for InflightTable<K>
@@ -252,7 +261,7 @@ where
 /// returns early. Without this, a panic inside `compute()` would leave
 /// `claimed = true, completed = false` forever — joiners would block on
 /// the condvar with no possible publish to wake them.
-struct InflightPanicGuard<'a, K>
+pub(super) struct InflightPanicGuard<'a, K>
 where
     K: Hash + Eq + Clone,
 {
@@ -266,7 +275,7 @@ impl<'a, K> InflightPanicGuard<'a, K>
 where
     K: Hash + Eq + Clone,
 {
-    fn new(
+    pub(super) fn new(
         slot: Arc<InflightSlot>,
         table: &'a Mutex<HashMap<K, Arc<InflightSlot>>>,
         key: K,
@@ -279,7 +288,7 @@ where
         }
     }
 
-    fn mark_finished(&mut self) {
+    pub(super) fn mark_finished(&mut self) {
         self.finished = true;
     }
 }
@@ -322,7 +331,7 @@ where
 /// still holds the SAME `Arc` this caller owned. A cross-view joiner
 /// that forked may already have installed a fresh slot for the same
 /// key; an unconditional remove would evict that fresh slot.
-fn retire_slot_if_current<K>(
+pub(super) fn retire_slot_if_current<K>(
     table: &Mutex<HashMap<K, Arc<InflightSlot>>>,
     key: &K,
     slot: &Arc<InflightSlot>,
@@ -335,46 +344,6 @@ fn retire_slot_if_current<K>(
         .is_some_and(|existing| Arc::ptr_eq(existing, slot))
     {
         table.remove(key);
-    }
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Test-only rendezvous: a hook fired by
-    /// [`remove_published_entry_with_cleanup`] AFTER `map.remove_if`
-    /// succeeds but BEFORE the caller's `removal_cleanup` runs.
-    ///
-    /// This is the precise interleaving point a removal-cleanup race
-    /// needs: a test installs a hook that cold-publishes a fresh entry
-    /// under the same key (the work a concurrent caller would do while
-    /// the removing caller is preempted), then lets the real
-    /// `removal_cleanup` run. It is a deterministic rendezvous — the
-    /// hook IS the synchronisation point — not a timing sleep. The
-    /// hook is thread-local so it only affects the installing test's
-    /// thread, and it fires the production removal path otherwise
-    /// unchanged.
-    static REMOVAL_CLEANUP_PRE_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Test-only: install a hook fired between `map.remove_if` and
-/// `removal_cleanup` inside [`remove_published_entry_with_cleanup`].
-/// Returns a guard that clears the hook on drop so it cannot leak into
-/// a later test on the same worker thread.
-#[cfg(test)]
-pub(crate) fn install_removal_cleanup_pre_hook(hook: Box<dyn Fn()>) -> RemovalCleanupPreHookGuard {
-    REMOVAL_CLEANUP_PRE_HOOK.with(|h| *h.borrow_mut() = Some(hook));
-    RemovalCleanupPreHookGuard
-}
-
-/// RAII guard that clears the thread-local removal-cleanup pre-hook.
-#[cfg(test)]
-pub(crate) struct RemovalCleanupPreHookGuard;
-
-#[cfg(test)]
-impl Drop for RemovalCleanupPreHookGuard {
-    fn drop(&mut self) {
-        REMOVAL_CLEANUP_PRE_HOOK.with(|h| *h.borrow_mut() = None);
     }
 }
 
@@ -403,7 +372,15 @@ thread_local! {
 /// `publish_fence` read-guard region. Returns a guard that clears the
 /// hook on drop so it cannot leak into a later test on the same worker
 /// thread.
+/// `allow(dead_code)`: this hook instruments the artifact
+/// cache-key-is-flight-key publish fence (still a live production path for
+/// the single-entry artifact caches). The query-identity caches drive
+/// their own fence through the lookup-publish adapter's
+/// `POST_PUBLISH_CORE_PRE_EVICT_HOOK`; no current test installs THIS hook,
+/// but it remains the artifact path's deterministic publish-fence
+/// rendezvous.
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn install_post_revalidate_pre_publish_hook(
     hook: Box<dyn Fn()>,
 ) -> PostRevalidatePrePublishHookGuard {
@@ -414,6 +391,7 @@ pub(crate) fn install_post_revalidate_pre_publish_hook(
 /// RAII guard that clears the thread-local post-revalidate pre-publish
 /// hook.
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) struct PostRevalidatePrePublishHookGuard;
 
 #[cfg(test)]
@@ -435,57 +413,6 @@ fn fire_post_revalidate_pre_publish_hook() {
             hook();
         }
     });
-}
-
-/// Remove the exact published `Arc<Entry>` the caller validated — a
-/// `ptr_eq` guard so a concurrent fresh winner's entry is not evicted —
-/// and, on a real removal, run the caller's `removal_cleanup` so the
-/// cache's removal-side bookkeeping (live counter, reverse index) stays
-/// symmetric with its publish-side bookkeeping.
-///
-/// Used by both substrate removal sites: the warm-hit path when
-/// `validate` rejects a stale entry, and the joiner-fork path when a
-/// cross-view follower rejects the winner's entry. A raw `map.remove_if`
-/// in either site would skip the cleanup and leave caches with
-/// publish-side counters / reverse indexes out of sync after a removal.
-///
-/// `publish_fence`, when `Some`, is the cache's lifecycle
-/// `retention_gate`. The map removal and `removal_cleanup` (which drains
-/// the cache's reverse index and retention budget) run under a shared
-/// read guard so a concurrent project-generation `clear` — which holds
-/// the write guard across its own map+budget clear — cannot interleave
-/// its clears with this removal's map/budget mutation. A cache with no
-/// retention budget passes `None`.
-fn remove_published_entry_with_cleanup<K, Entry, RemovalCleanup>(
-    map: &DashMap<K, Arc<Entry>>,
-    key: &K,
-    entry_arc: &Arc<Entry>,
-    removal_cleanup: &mut RemovalCleanup,
-    publish_fence: Option<&parking_lot::RwLock<()>>,
-) where
-    K: Eq + Hash + Clone,
-    Entry: Send + Sync + 'static,
-    RemovalCleanup: FnMut(&K, &Arc<Entry>),
-{
-    // Hold the cache's retention gate (shared read) across the whole
-    // `remove_if` + `removal_cleanup` so the map removal and the
-    // reverse-index / budget / counter cleanup are one lock-domain
-    // mutation against a concurrent `clear`.
-    let _retention = publish_fence.map(parking_lot::RwLock::read);
-    if let Some((removed_key, removed_entry)) =
-        map.remove_if(key, |_, existing| Arc::ptr_eq(existing, entry_arc))
-    {
-        // Test-only rendezvous: a fresh re-publish under the same key
-        // can land here, between the `remove_if` and the cleanup. This
-        // is the exact window the removal-cleanup identity-check guards.
-        #[cfg(test)]
-        REMOVAL_CLEANUP_PRE_HOOK.with(|h| {
-            if let Some(hook) = h.borrow().as_ref() {
-                hook();
-            }
-        });
-        removal_cleanup(&removed_key, &removed_entry);
-    }
 }
 
 /// Cooperative get-or-compute over a [`DashMap`]-backed cache. See module
@@ -538,7 +465,15 @@ fn remove_published_entry_with_cleanup<K, Entry, RemovalCleanup>(
 ///   entry).
 /// - `None` if `compute()` returns `None`, panics, post-compute
 ///   revalidation fails, or the joiner observes a failed winner.
+///
+/// This is the no-`post_publish`, no-publish-fence entry point of the
+/// primitive's API. Every current `verter_session` cache routes
+/// through [`cooperative_get_or_insert_with_post_publish`] (which this
+/// delegates to with a no-op `post_publish` and no fence); the bare
+/// form is retained as the minimal admission shape for a cache that
+/// needs neither.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub fn cooperative_get_or_insert<
     K,
     Entry,
@@ -649,7 +584,7 @@ where
 /// false-trigger):
 /// ```text
 /// awk '/^#\[cfg\(test\)\]\s*$/{intest=1} !intest{print} /^}\s*$/&&intest{intest=0}' \
-///     crates/verter_session/src/cooperative_admission.rs \
+///     crates/verter_session/src/cache_runtime/singleflight.rs \
 ///   | grep -n "thread::spawn\|rayon\|tokio::spawn" \
 ///   || echo "OK: no production thread-spawn"
 /// ```
@@ -892,6 +827,27 @@ where
 ///
 /// `post_publish` is winner-only and fires exactly once. Joiners run
 /// `validate`, never `post_publish`.
+///
+/// This is the cache-key-is-flight-key shape: the published map key and
+/// the in-flight coalescing identity are the same `K`. When the cache
+/// must coalesce concurrent flights on a DIFFERENT identity than the
+/// published map key — e.g. when the flight lane is keyed by
+/// `(key, store-view compat token)` so two overlays on the same map key
+/// do not coalesce — route through
+/// [`cooperative_admit_with_post_publish_by_flight_key`] instead. This
+/// entry point delegates there with `flight_key = key`.
+///
+/// `allow(dead_code)`: this cache-key-is-flight-key shape has no
+/// production caller — every host-backed cache keys its flight lane on
+/// the store-view compat token (so two overlays on one key do not
+/// coalesce) and routes through
+/// [`cooperative_admit_with_post_publish_by_flight_key`] (single-entry
+/// artifact caches) or the query-identity lookup-publish adapter
+/// (multi-candidate caches). The shape is retained as the documented
+/// minimal cache-key-is-flight-key entry point and is exercised by the
+/// `cache_runtime` tests (the same-shard budget-eviction
+/// deadlock-freedom discriminator).
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub fn cooperative_admit_with_post_publish<
     K,
@@ -907,11 +863,11 @@ pub fn cooperative_admit_with_post_publish<
     map: &DashMap<K, Arc<Entry>>,
     inflight: &InflightTable<K>,
     key: K,
-    mut validate: Validate,
+    validate: Validate,
     compute: Compute,
     project: Project,
-    mut revalidate_after_compute: Revalidate,
-    mut removal_cleanup: RemovalCleanup,
+    revalidate_after_compute: Revalidate,
+    removal_cleanup: RemovalCleanup,
     post_publish: PostPublish,
     publish_fence: Option<&parking_lot::RwLock<()>>,
 ) -> Option<V>
@@ -926,6 +882,177 @@ where
     RemovalCleanup: FnMut(&K, &Arc<Entry>),
     PostPublish: FnOnce(&Arc<Entry>, &K),
 {
+    // The cache-key-is-flight-key shape is the by-flight-key shape with
+    // the two identities unified. Drive the shared state machine, but
+    // with `linearize_publish = false`: when `MapK == FlightK` the
+    // in-flight table coalesces every caller of one key onto ONE cold
+    // winner, so there is exactly one publisher per key and the map slot
+    // is always vacant at publish — there is no displacing publisher to
+    // serialise against. The publish therefore uses `map.insert`, whose
+    // transient shard guard is RELEASED before `post_publish`, so a
+    // `post_publish` hook may re-enter the same map (a budgeted cache's
+    // FIFO eviction does exactly that) without self-deadlocking on a
+    // same-shard victim. `flight_key = key.clone()` reproduces the prior
+    // single-key coalescing exactly.
+    let flight_key = key.clone();
+    cooperative_admit_impl(
+        map,
+        inflight,
+        key,
+        flight_key,
+        validate,
+        compute,
+        project,
+        revalidate_after_compute,
+        removal_cleanup,
+        post_publish,
+        publish_fence,
+        false,
+    )
+}
+
+/// Cooperative cold-compute admission that separates the published map
+/// key (`MapK`) from the in-flight coalescing identity (`FlightK`).
+///
+/// [`cooperative_admit_with_post_publish`] assumes the two are the same
+/// `K`. That is wrong when the flight lane must coalesce on more than
+/// the cache key — most importantly when the flight identity carries
+/// the store-view compat token so two requests under different overlays
+/// on the SAME cache key do NOT coalesce onto one cold build (their
+/// results are not interchangeable; each must compute and validate for
+/// its own view). The map stays keyed by the cache key (the compat
+/// token is a flight-lane dimension, not a cache-key dimension), while
+/// the in-flight table coalesces on `FlightK`.
+///
+/// All other semantics are identical to
+/// [`cooperative_admit_with_post_publish`] — the three-way
+/// [`ComputeAdmission`] outcome, the joiner view-validation contract,
+/// the panic guard, the removal-side cleanup, and the publish fence —
+/// because both forms drive the shared [`cooperative_admit_impl`] state
+/// machine. `removal_cleanup` and `post_publish` receive the `MapK` the
+/// entry is published under.
+///
+/// This is the only entry point that can have CONCURRENT publishers for
+/// one map key (two winners on distinct flight lanes), so it publishes
+/// with `linearize_publish = true`: the displaced entry's cleanup and the
+/// new entry's `post_publish` run as one per-map-key-atomic operation
+/// under the map's shard write guard (see
+/// [`publish_entry_linearized_per_map_key`]). Its consumers' hooks must
+/// therefore not re-enter the map (the by-flight-key caches' hooks are
+/// lock-free or touch a separate map). The cache-key-is-flight-key form
+/// coalesces all callers onto one publisher and so uses the non-linearized
+/// publish instead.
+#[allow(clippy::too_many_arguments)]
+pub fn cooperative_admit_with_post_publish_by_flight_key<
+    MapK,
+    FlightK,
+    Entry,
+    V,
+    Validate,
+    Compute,
+    Project,
+    Revalidate,
+    RemovalCleanup,
+    PostPublish,
+>(
+    map: &DashMap<MapK, Arc<Entry>>,
+    inflight: &InflightTable<FlightK>,
+    map_key: MapK,
+    flight_key: FlightK,
+    validate: Validate,
+    compute: Compute,
+    project: Project,
+    revalidate_after_compute: Revalidate,
+    removal_cleanup: RemovalCleanup,
+    post_publish: PostPublish,
+    publish_fence: Option<&parking_lot::RwLock<()>>,
+) -> Option<V>
+where
+    MapK: Eq + Hash + Clone,
+    FlightK: Eq + Hash + Clone,
+    Entry: Send + Sync + 'static,
+    V: Clone,
+    Validate: FnMut(&Entry) -> Option<V>,
+    Compute: FnOnce() -> ComputeAdmission<V, Entry>,
+    Project: FnOnce(&Entry) -> V,
+    Revalidate: FnMut(&Entry) -> bool,
+    RemovalCleanup: FnMut(&MapK, &Arc<Entry>),
+    PostPublish: FnOnce(&Arc<Entry>, &MapK),
+{
+    cooperative_admit_impl(
+        map,
+        inflight,
+        map_key,
+        flight_key,
+        validate,
+        compute,
+        project,
+        revalidate_after_compute,
+        removal_cleanup,
+        post_publish,
+        publish_fence,
+        true,
+    )
+}
+
+/// Shared cold-compute admission state machine behind both
+/// [`cooperative_admit_with_post_publish`] (the cache-key-is-flight-key
+/// form) and [`cooperative_admit_with_post_publish_by_flight_key`] (the
+/// split-identity form). One winner/joiner protocol, one panic guard, one
+/// post-compute revalidation gate, one removal-side cleanup.
+///
+/// `linearize_publish` selects the publish tail:
+///
+/// - `false` (cache-key-is-flight-key) — the in-flight table coalesces
+///   every caller of one map key onto ONE cold winner, so there is exactly
+///   one publisher per key and the map slot is vacant at publish. The
+///   publish uses [`publish_entry_insert_then_post_publish`]: `map.insert`
+///   releases its transient shard guard BEFORE `post_publish`, so a
+///   `post_publish` hook may re-enter the same map (a budgeted cache's FIFO
+///   `evict_budget_victim` → `entries.remove_if`) without self-deadlocking.
+/// - `true` (split-identity) — two winners on distinct flight lanes can
+///   publish under one map key, the second displacing the first. The
+///   publish uses [`publish_entry_linearized_per_map_key`], which holds the
+///   shard write guard across the displaced cleanup + new `post_publish`,
+///   so those hooks must NOT re-enter the map.
+#[allow(clippy::too_many_arguments)]
+fn cooperative_admit_impl<
+    MapK,
+    FlightK,
+    Entry,
+    V,
+    Validate,
+    Compute,
+    Project,
+    Revalidate,
+    RemovalCleanup,
+    PostPublish,
+>(
+    map: &DashMap<MapK, Arc<Entry>>,
+    inflight: &InflightTable<FlightK>,
+    map_key: MapK,
+    flight_key: FlightK,
+    mut validate: Validate,
+    compute: Compute,
+    project: Project,
+    mut revalidate_after_compute: Revalidate,
+    mut removal_cleanup: RemovalCleanup,
+    post_publish: PostPublish,
+    publish_fence: Option<&parking_lot::RwLock<()>>,
+    linearize_publish: bool,
+) -> Option<V>
+where
+    MapK: Eq + Hash + Clone,
+    FlightK: Eq + Hash + Clone,
+    Entry: Send + Sync + 'static,
+    V: Clone,
+    Validate: FnMut(&Entry) -> Option<V>,
+    Compute: FnOnce() -> ComputeAdmission<V, Entry>,
+    Project: FnOnce(&Entry) -> V,
+    Revalidate: FnMut(&Entry) -> bool,
+    RemovalCleanup: FnMut(&MapK, &Arc<Entry>),
+    PostPublish: FnOnce(&Arc<Entry>, &MapK),
+{
     // `compute` and `project` are logically one-shot; the joiner
     // re-validation loop carries them in `Option`s (see
     // `cooperative_get_or_insert_with_post_publish` for the rationale).
@@ -936,24 +1063,25 @@ where
         // `cooperative_get_or_insert_with_post_publish` warm path —
         // including the removal-side cleanup so the cache's live
         // counter / reverse index stay symmetric with publish.
-        if let Some(entry_arc) = map.get(&key).map(|e| e.clone()) {
+        if let Some(entry_arc) = map.get(&map_key).map(|e| e.clone()) {
             if let Some(value) = validate(&entry_arc) {
                 return Some(value);
             }
             remove_published_entry_with_cleanup(
                 map,
-                &key,
+                &map_key,
                 &entry_arc,
                 &mut removal_cleanup,
                 publish_fence,
             );
         }
 
-        // Claim the inflight slot or join an in-progress build.
+        // Claim the inflight slot or join an in-progress build. The
+        // flight slot is keyed by `FlightK`, NOT the map key.
         let slot = {
             let mut table = inflight.table.lock();
             table
-                .entry(key.clone())
+                .entry(flight_key.clone())
                 .or_insert_with(|| Arc::new(InflightSlot::new()))
                 .clone()
         };
@@ -973,7 +1101,7 @@ where
             let non_cacheable_winner = state.non_cacheable_winner;
             drop(state);
             if non_cacheable_winner {
-                retire_slot_if_current(&inflight.table, &key, &slot);
+                retire_slot_if_current(&inflight.table, &flight_key, &slot);
                 drop(slot);
                 continue;
             }
@@ -983,7 +1111,7 @@ where
             // not guaranteed to be running under the same view/overlay
             // as the winner. `validate` returning `Some` also performs
             // the caller's fact-bubble side effect.
-            if let Some(entry_arc) = map.get(&key).map(|e| e.clone()) {
+            if let Some(entry_arc) = map.get(&map_key).map(|e| e.clone()) {
                 if let Some(value) = validate(&entry_arc) {
                     return Some(value);
                 }
@@ -994,22 +1122,23 @@ where
                 // admission so the follower cold-computes for its view.
                 remove_published_entry_with_cleanup(
                     map,
-                    &key,
+                    &map_key,
                     &entry_arc,
                     &mut removal_cleanup,
                     publish_fence,
                 );
             }
-            retire_slot_if_current(&inflight.table, &key, &slot);
+            retire_slot_if_current(&inflight.table, &flight_key, &slot);
             drop(slot);
             continue;
         }
         state.claimed = true;
         drop(state);
 
-        // Cold winner runs compute under a panic guard.
+        // Cold winner runs compute under a panic guard keyed by the
+        // flight identity (the slot lives in the `FlightK` table).
         let mut panic_guard =
-            InflightPanicGuard::new(Arc::clone(&slot), &inflight.table, key.clone());
+            InflightPanicGuard::new(Arc::clone(&slot), &inflight.table, flight_key.clone());
 
         let admission = compute
             .take()
@@ -1048,7 +1177,7 @@ where
                     slot.ready.notify_all();
                     panic_guard.mark_finished();
                     drop(panic_guard);
-                    retire_slot_if_current(&inflight.table, &key, &slot);
+                    retire_slot_if_current(&inflight.table, &flight_key, &slot);
                     return None;
                 }
                 let entry_arc = Arc::new(entry);
@@ -1060,21 +1189,44 @@ where
                 {
                     // Test-only rendezvous fired inside the `publish_fence`
                     // read-guard region, AFTER a successful revalidation
-                    // and BEFORE `map.insert` — the exact point a
+                    // and BEFORE the publish — the exact point a
                     // project-generation `clear` must not be able to
                     // interleave. Production fires nothing.
                     fire_post_revalidate_pre_publish_hook();
-                    map.insert(key.clone(), Arc::clone(&entry_arc));
-                    post_publish(&entry_arc, &key);
+                    // Path-split publish (see `linearize_publish` on this
+                    // fn). The split-identity caller can have concurrent
+                    // publishers per map key, so it serialises the displaced
+                    // cleanup + new `post_publish` under the shard write
+                    // guard. The cache-key-is-flight-key caller has exactly
+                    // one publisher per key, so it inserts with a transient
+                    // guard and runs `post_publish` AFTER releasing it — the
+                    // only shape under which a hook may re-enter this map.
+                    if linearize_publish {
+                        publish_entry_linearized_per_map_key(
+                            map,
+                            &map_key,
+                            &entry_arc,
+                            &mut removal_cleanup,
+                            post_publish,
+                        );
+                    } else {
+                        publish_entry_insert_then_post_publish(
+                            map,
+                            &map_key,
+                            &entry_arc,
+                            &mut removal_cleanup,
+                            post_publish,
+                        );
+                    }
                 }
                 {
                     let mut state = slot.state.lock();
                     state.completed = true;
                     // Cacheable winner: joiners fall through to the
-                    // `map.get(&key) + validate(&entry_arc)` path so each
-                    // joiner thread runs `validate` against its own view.
-                    // `validate` both view-checks the entry and runs the
-                    // caller's fact-bubble side effect (e.g.
+                    // `map.get(&map_key) + validate(&entry_arc)` path so
+                    // each joiner thread runs `validate` against its own
+                    // view. `validate` both view-checks the entry and runs
+                    // the caller's fact-bubble side effect (e.g.
                     // `entry.read_set_signature.bubble(ctx)` for the
                     // materialiser) on the joiner's own thread, delivering
                     // the cached entry's facts into the joiner's outer
@@ -1120,20 +1272,21 @@ where
         // Retire the inflight slot. Future callers either hit the warm map
         // (Cacheable path) or start a fresh inflight (ReturnOnly /
         // Failed paths leave the map empty).
-        retire_slot_if_current(&inflight.table, &key, &slot);
+        retire_slot_if_current(&inflight.table, &flight_key, &slot);
 
         return value;
     }
 }
+
 // ============================================================================
 // D3.2 admission-control gating tests + joiner view-validation discriminators.
 //
-// Extracted to the sibling `cooperative_admission_tests.rs` (kept as a
+// Extracted to the sibling `singleflight_tests.rs` (kept as a
 // child `mod` via `#[path]` so the thread-coordinated discriminators
 // reach the substrate's private `InflightSlot` / `InflightTable`
 // internals). Splitting keeps this file under the file-size guard cap.
 // ============================================================================
 
 #[cfg(test)]
-#[path = "cooperative_admission_tests.rs"]
+#[path = "singleflight_tests.rs"]
 mod tests;

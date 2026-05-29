@@ -246,13 +246,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 // stale observed hash. The freshly-resolved value is
                 // still returned — and broadcast to joiners — via
                 // `ReturnOnly`.
-                return crate::cooperative_admission::ComputeAdmission::ReturnOnly(resolved_value);
+                return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(resolved_value);
             }
             let Some(observed) = observed_keyed_hash else {
                 // No authoritative current content for the keyed
                 // canonical — shared-cache admission is refused, but
                 // the value is still returned via `ReturnOnly`.
-                return crate::cooperative_admission::ComputeAdmission::ReturnOnly(resolved_value);
+                return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(resolved_value);
             };
             match engine_fact_signature_for_exported_type(
                 ctx,
@@ -261,7 +261,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 observed,
             ) {
                 Some(fact_dep_signature) => {
-                    crate::cooperative_admission::ComputeAdmission::Cacheable(
+                    crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                         crate::component_meta_caches::ImportedRegistryEntry {
                             value: resolved_value,
                             fact_dep_signature,
@@ -269,7 +269,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         },
                     )
                 }
-                None => crate::cooperative_admission::ComputeAdmission::ReturnOnly(resolved_value),
+                None => crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(resolved_value),
             }
         });
         let result = match host_value {

@@ -1678,7 +1678,7 @@ pub struct ProjectTypeStore {
     intrinsic_registry: IntrinsicRegistry,
     // 10 host-owned typed DB wrappers for the component-meta engine's
     // previously engine-local caches. Each DB consumes the
-    // [`crate::cooperative_admission::cooperative_get_or_insert`]
+    // [`crate::cache_runtime::singleflight::cooperative_get_or_insert`]
     // primitive (admission-control, panic safety, post-compute
     // revalidation). The engine keeps a per-request
     // `RefCell<FxHashMap>` mirror as non-authoritative scratch.

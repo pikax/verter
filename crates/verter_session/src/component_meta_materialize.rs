@@ -359,7 +359,7 @@ pub const MAX_DEPTH: usize = 4096;
 // to the post-cooperative fallback. The carrier consolidation
 // retired it: cooperative joiners now observe non-cacheable outcomes
 // directly through `ComputeAdmission::ReturnOnly`'s typed broadcast
-// channel inside the in-flight slot (`cooperative_admission.rs`).
+// channel inside the in-flight slot (`cache_runtime::singleflight`).
 
 /// RAII guard for the per-thread `MATERIALIZE_IN_FLIGHT`
 /// stack and the `MATERIALIZE_DEPTH` counter. Push on construction,
@@ -476,7 +476,7 @@ fn finish_materialize_admission(
     local_fence: Vec<(Arc<str>, DepVersion)>,
     base_origin_self_root: Option<&(Arc<str>, crate::resolver_core::ResolverHash16)>,
     validated_at_generation: u64,
-) -> crate::cooperative_admission::ComputeAdmission<
+) -> crate::cache_runtime::singleflight::ComputeAdmission<
     crate::semantic_query::CacheRead<MaterializeOutcome>,
     MaterializeStructureEntry,
 > {
@@ -487,7 +487,7 @@ fn finish_materialize_admission(
         // joiners observe the same valid outcome. The CacheRead's
         // dep_signature is empty: non-cacheable results MUST NOT
         // propagate as cache deps (R20).
-        return crate::cooperative_admission::ComputeAdmission::ReturnOnly(
+        return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
             crate::semantic_query::CacheRead {
                 value: outcome,
                 dep_signature: empty_signature(),
@@ -499,7 +499,7 @@ fn finish_materialize_admission(
     let dispatch_dep_signature = dep_signature_from_fence(local_fence.clone());
     match materialize_structure_read_set(&local_fence, base_origin_self_root) {
         Some((facts, self_root_canonicals)) => {
-            crate::cooperative_admission::ComputeAdmission::Cacheable(MaterializeStructureEntry {
+            crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(MaterializeStructureEntry {
                 outcome,
                 read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(facts),
                 dispatch_dep_signature,
@@ -516,7 +516,7 @@ fn finish_materialize_admission(
             // through `ReturnOnly` so joiners observe it without
             // admitting an entry the warm-read validator could not
             // soundly check.
-            crate::cooperative_admission::ComputeAdmission::ReturnOnly(
+            crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
                 crate::semantic_query::CacheRead {
                     value: outcome,
                     dep_signature: empty_signature(),
@@ -851,7 +851,7 @@ pub(crate) fn materialize_component_meta_structure(
     // outcome to cooperative joiners through the typed return-only
     // channel — there is no longer a stack-local side channel.
     let key_for_compute = key.clone();
-    let compute = move || -> crate::cooperative_admission::ComputeAdmission<
+    let compute = move || -> crate::cache_runtime::singleflight::ComputeAdmission<
         crate::semantic_query::CacheRead<MaterializeOutcome>,
         MaterializeStructureEntry,
     > {
@@ -1241,7 +1241,7 @@ pub(crate) fn materialize_component_meta_structure(
     let host = ctx.host_for_fact_tracer_install();
     let compute = {
         let provenance = Arc::clone(&host.provenance);
-        move || -> crate::cooperative_admission::ComputeAdmission<
+        move || -> crate::cache_runtime::singleflight::ComputeAdmission<
             crate::semantic_query::CacheRead<MaterializeOutcome>,
             MaterializeStructureEntry,
         > {
@@ -1253,7 +1253,7 @@ pub(crate) fn materialize_component_meta_structure(
             match finalise {
                 crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
                     match admission {
-                        crate::cooperative_admission::ComputeAdmission::Cacheable(mut entry) => {
+                        crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(mut entry) => {
                             // Merge the tracer's authoritative
                             // observation set ON TOP of the producer
                             // carrier's observed self-roots — the
@@ -1279,12 +1279,12 @@ pub(crate) fn materialize_component_meta_structure(
                                         crate::fact_signature_helpers::ReadSetSignature::new(
                                             merged,
                                         );
-                                    crate::cooperative_admission::ComputeAdmission::Cacheable(
+                                    crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                                         entry,
                                     )
                                 }
                                 None => {
-                                    crate::cooperative_admission::ComputeAdmission::ReturnOnly(
+                                    crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
                                         crate::semantic_query::CacheRead {
                                             value: entry.outcome,
                                             dep_signature: empty_signature(),
@@ -1309,8 +1309,8 @@ pub(crate) fn materialize_component_meta_structure(
                     // entry. Pre-existing ReturnOnly (intrinsically
                     // non-cacheable) passes through unchanged.
                     match admission {
-                        crate::cooperative_admission::ComputeAdmission::Cacheable(entry) => {
-                            crate::cooperative_admission::ComputeAdmission::ReturnOnly(
+                        crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry) => {
+                            crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
                                 crate::semantic_query::CacheRead {
                                     value: entry.outcome,
                                     dep_signature: empty_signature(),
@@ -1325,7 +1325,7 @@ pub(crate) fn materialize_component_meta_structure(
             }
         }
     };
-    let result = crate::cooperative_admission::cooperative_admit_with_post_publish(
+    let result = crate::cache_runtime::singleflight::cooperative_admit_with_post_publish(
         db.entries(),
         db.inflight(),
         key.clone(),
@@ -3251,14 +3251,14 @@ export type C<T> = A<T>
             // cold winner's thread). The hook parks the winner inside the
             // `publish_fence` region, AFTER a successful
             // `revalidate_after_compute` and BEFORE `map.insert`.
-            let _hook = crate::cooperative_admission::install_post_revalidate_pre_publish_hook(
+            let _hook = crate::cache_runtime::singleflight::install_post_revalidate_pre_publish_hook(
                 Box::new(move || {
                     parked_w.wait();
                     parked_w.wait();
                 }),
             );
             let entry_outcome = MaterializeOutcome::Miss(SemanticNodeId(0));
-            crate::cooperative_admission::cooperative_admit_with_post_publish(
+            crate::cache_runtime::singleflight::cooperative_admit_with_post_publish(
                 db.entries(),
                 db.inflight(),
                 key_w.clone(),
@@ -3283,7 +3283,7 @@ export type C<T> = A<T>
                 // compute — a `Cacheable` entry stamped with the
                 // pre-build project generation.
                 || {
-                    crate::cooperative_admission::ComputeAdmission::Cacheable(
+                    crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                         MaterializeStructureEntry {
                             outcome: entry_outcome.clone(),
                             read_set_signature:
@@ -3415,13 +3415,13 @@ export type C<T> = A<T>
         let winner = thread::spawn(move || {
             let host = project_w.host();
             let db = host.project_type_store().ref_cycle_db();
-            let _hook = crate::cooperative_admission::install_post_revalidate_pre_publish_hook(
+            let _hook = crate::cache_runtime::singleflight::install_post_revalidate_pre_publish_hook(
                 Box::new(move || {
                     parked_w.wait();
                     parked_w.wait();
                 }),
             );
-            crate::cooperative_admission::cooperative_admit_with_post_publish::<
+            crate::cache_runtime::singleflight::cooperative_admit_with_post_publish::<
                 _,
                 RefCycleEntry,
                 CacheRead<bool>,
@@ -3453,7 +3453,7 @@ export type C<T> = A<T>
                     }
                 },
                 || {
-                    crate::cooperative_admission::ComputeAdmission::Cacheable(RefCycleEntry {
+                    crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(RefCycleEntry {
                         result: false,
                         read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(
                         ),

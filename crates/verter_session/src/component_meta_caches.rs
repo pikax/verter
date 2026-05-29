@@ -13,7 +13,7 @@
 //!   post-compute revalidation. Most wrappers expose
 //!   `get_or_compute<F>(key, host, compute) -> Option<value>` over
 //!   [`cooperative_get_or_insert_with_post_publish`]. Two consume the
-//!   [`ComputeAdmission`](crate::cooperative_admission::ComputeAdmission)
+//!   [`ComputeAdmission`](crate::cache_runtime::singleflight::ComputeAdmission)
 //!   API of `cooperative_admit_with_post_publish` so a
 //!   valid-but-non-cacheable cold outcome is broadcast to joiners
 //!   without admitting the cache: `ImportedRegistryDb` via its
@@ -71,7 +71,7 @@ use dashmap::DashMap;
 use verter_semantic::analysis::type_solver::query_engine::ProjectedMember;
 use verter_type_expr::TypeExpr;
 
-use crate::cooperative_admission::{cooperative_get_or_insert_with_post_publish, InflightTable};
+use crate::cache_runtime::singleflight::{cooperative_get_or_insert_with_post_publish, InflightTable};
 use crate::fact_signature_helpers::{
     bubble_fact_signature, validate_fact_signature_with_self_roots,
 };
@@ -199,8 +199,8 @@ impl ImportedRegistryDb {
 
     /// Cooperative-admission cold compute over the imported-registry
     /// cache, routed through
-    /// [`crate::cooperative_admission::cooperative_admit_with_post_publish`]
-    /// (the [`ComputeAdmission`](crate::cooperative_admission::ComputeAdmission)
+    /// [`crate::cache_runtime::singleflight::cooperative_admit_with_post_publish`]
+    /// (the [`ComputeAdmission`](crate::cache_runtime::singleflight::ComputeAdmission)
     /// API).
     ///
     /// The producer's `compute` closure runs the expensive,
@@ -213,7 +213,7 @@ impl ImportedRegistryDb {
     /// wildcard-route fuse a one-winner cost instead of an N-waiter
     /// cost.
     ///
-    /// `compute` returns a [`ComputeAdmission`](crate::cooperative_admission::ComputeAdmission):
+    /// `compute` returns a [`ComputeAdmission`](crate::cache_runtime::singleflight::ComputeAdmission):
     ///
     /// - `Cacheable(entry)` — the provenance-pure fact signature built;
     ///   the entry is admitted, `post_publish` registers the reverse
@@ -233,7 +233,7 @@ impl ImportedRegistryDb {
         compute: F,
     ) -> Option<Option<Arc<ResolvedImportedRegistrySymbol>>>
     where
-        F: FnOnce() -> crate::cooperative_admission::ComputeAdmission<
+        F: FnOnce() -> crate::cache_runtime::singleflight::ComputeAdmission<
             Option<Arc<ResolvedImportedRegistrySymbol>>,
             ImportedRegistryEntry,
         >,
@@ -247,7 +247,7 @@ impl ImportedRegistryDb {
         // strictly on warm read (same-canonical edit / untracked keyed
         // canonical → miss).
         let self_roots: [&str; 1] = [key.0.as_ref()];
-        crate::cooperative_admission::cooperative_admit_with_post_publish(
+        crate::cache_runtime::singleflight::cooperative_admit_with_post_publish(
             &self.entries,
             &self.inflight,
             key.clone(),
@@ -3468,7 +3468,7 @@ impl crate::cache_schema::CacheSchemaVersioned for MaterializeStructureDb {
 // C — RefCycleResultDb
 // ===========================================================================
 
-use crate::cooperative_admission::{cooperative_admit_with_post_publish, ComputeAdmission};
+use crate::cache_runtime::singleflight::{cooperative_admit_with_post_publish, ComputeAdmission};
 use crate::semantic_query::DeclIdentity;
 
 /// C — entry stored in `RefCycleResultDb`. Carries the
@@ -3548,7 +3548,7 @@ pub struct RefCycleEntry {
 /// Cooperative-admission integration: cold-path BFS runs inside
 /// [`cooperative_admit_with_post_publish`], whose `compute`
 /// closure runs synchronously on the caller's thread (see
-/// `cooperative_admission.rs` synchronous-compute contract).
+/// `cache_runtime::singleflight` synchronous-compute contract).
 /// Borrow-capture of `&dyn ResolverContext` in the BFS compute closure
 /// is safe because no thread-hop occurs. An overflowed / unrootable
 /// signature returns the computed bool through
@@ -4372,7 +4372,7 @@ pub(crate) fn force_ref_cycle_return_only_for_tests() -> ForceRefCycleReturnOnly
 /// The cooperative-admission wrapper invoked by
 /// `meta_resolve::ref_root_reaches_transitive_cycle_node` on the cold
 /// path. The `compute` closure runs synchronously on the caller's
-/// thread (per cooperative_admission's synchronous-compute contract),
+/// thread (per the `cache_runtime::singleflight` synchronous-compute contract),
 /// so capturing `&dyn ResolverContext` and `&DeclIdentity` directly is safe.
 ///
 /// On cooperative-admission success: bumps `live_counter`, registers

@@ -47,6 +47,14 @@ pub use crate::semantic_query_memo::{
 /// `OwnerImportSurface` / `RefCycleEntry` / `MemoEntry`.
 pub use crate::fact_signature_helpers::ReadSetSignature;
 
+/// Re-export the cooperative-admission outcome enum so integration
+/// tests in `crates/verter_session/tests/*.rs` can name the type
+/// (`cache_runtime` is `pub(crate)`, so the canonical path is not
+/// reachable from outside the crate). Internal production callers
+/// reach `crate::cache_runtime::singleflight::ComputeAdmission`
+/// directly.
+pub use crate::cache_runtime::singleflight::ComputeAdmission;
+
 /// Constructs `ComputeAdmission::Failed` for the
 /// `compute_admission_failed_variant_is_constructible` discriminator
 /// in `tests/block_1_i_discriminators.rs`. The Failed variant is
@@ -54,8 +62,8 @@ pub use crate::fact_signature_helpers::ReadSetSignature;
 /// `cooperative_admit_with_post_publish`; this helper proves it is
 /// constructible so the variant cannot be silently dropped.
 pub fn cooperative_admission_failed_variant_for_tests(
-) -> crate::cooperative_admission::ComputeAdmission<(), ()> {
-    crate::cooperative_admission::ComputeAdmission::Failed
+) -> crate::cache_runtime::singleflight::ComputeAdmission<(), ()> {
+    crate::cache_runtime::singleflight::ComputeAdmission::Failed
 }
 
 /// Fan `sig` into every active tracer on the current thread's TLS

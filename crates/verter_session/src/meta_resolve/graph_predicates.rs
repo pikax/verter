@@ -411,8 +411,8 @@ pub(crate) fn declaration_body_prefers_inline_materialization_node(
 ///   2. **Slow path** — cooperative-admission via
 ///      `ref_cycle_db_get_or_compute`; the BFS body
 ///      ([`bfs_compute_inner`]) runs synchronously in the
-///      `compute` closure (per cooperative_admission's synchronous-
-///      compute contract), capturing `&dyn ResolverContext` directly. On
+///      `compute` closure (per the `cache_runtime::singleflight`
+///      synchronous-compute contract), capturing `&dyn ResolverContext` directly. On
 ///      cooperative-admission failure (revalidation rejected the entry),
 ///      falls back to an uncached recompute so the caller never sees
 ///      a publishing miss.
@@ -468,8 +468,8 @@ pub(crate) fn ref_root_reaches_transitive_cycle_node(
     // closure captures `&dyn ResolverContext` by reference — Rust borrow safe
     // because `cooperative_get_or_insert_with_post_publish` runs the
     // compute closure on the calling thread (per its
-    // synchronous-compute contract documented at
-    // `cooperative_admission.rs:278`).
+    // synchronous-compute contract documented in
+    // `cache_runtime::singleflight`).
     let read_opt = crate::component_meta_caches::ref_cycle_db_get_or_compute(
         db,
         root_identity,
