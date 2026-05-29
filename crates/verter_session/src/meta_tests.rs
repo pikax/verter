@@ -8732,51 +8732,54 @@ defineSlots<ButtonSlots>()
         "requested member-path materialization should not publish transitive nested helper refs",
     );
 
+    // Shallow-by-default registry contract: imported helper aliases are
+    // published as a bare `Ref { name }` in the resolved type registry, NOT
+    // an eagerly-materialized object. The deep slot-binding correctness is
+    // asserted on the PUBLISHED surface below.
     let button_slots = resolved
         .resolved_type_registry
         .iter()
         .find(|entry| entry.name == "ButtonSlots")
         .expect("ButtonSlots should be published in the resolved type registry");
-    let TypeExpr::Object(button_slots_shape) = &button_slots.type_expr else {
-        panic!(
-            "ButtonSlots should materialize as an object, got {:?}",
-            button_slots.type_expr
-        );
-    };
-    let default_method = button_slots_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Method(method) if method.name == "default" => Some(&method.function),
-            ObjectMember::Property(property) if property.name == "default" => match &property.ty {
-                TypeExpr::Function(function) => Some(function.as_ref()),
-                _ => None,
-            },
-            _ => None,
-        })
-        .expect("ButtonSlots should keep the default slot callable signature");
-    let props_param = default_method
-        .parameters
-        .first()
-        .expect("default slot method should keep its props parameter");
-    let TypeExpr::Object(props_shape) = &props_param.ty else {
-        panic!(
-            "slot props should materialize as an object, got {:?}",
-            props_param.ty
-        );
-    };
-    let ui_prop = props_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
-            _ => None,
-        })
-        .expect("default slot props should keep a ui member");
     assert!(
-        matches!(ui_prop, TypeExpr::IndexedAccess { .. }),
-        "requested member-path materialization should keep nested slot helpers on the requested route, got {:?}",
-        ui_prop
+        matches!(&button_slots.type_expr, TypeExpr::Ref { name, .. } if name.as_ref() == "ButtonSlots"),
+        "imported registry helper should stay a shallow Ref (shallow-by-default), got {:?}",
+        button_slots.type_expr
+    );
+    assert!(
+        !matches!(&button_slots.type_expr, TypeExpr::Object(_)),
+        "registry entry must NOT eagerly materialize to an object, got {:?}",
+        button_slots.type_expr
+    );
+
+    // Published-surface contract (path-precise materialization): the default
+    // slot's `ui` binding stays symbolic on the requested member path
+    // `Button['ui']` — the nested `DeepProps` callable-parameter helper is
+    // never widened into the binding.
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let default_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "default")
+        .expect("default slot should be extracted");
+    let ui_binding = default_slot
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "ui")
+        .expect("default slot should expose the ui binding");
+    assert_eq!(
+        ui_binding.raw_type.as_deref(),
+        Some("Button['ui']"),
+        "nested slot helpers must stay on the requested member path, got {:?}",
+        ui_binding.raw_type
+    );
+    assert!(
+        matches!(&ui_binding.type_expr, TypeExpr::IndexedAccess { .. }),
+        "default slot ui binding must stay a symbolic IndexedAccess, got {:?}",
+        ui_binding.type_expr
     );
 }
 
@@ -8833,51 +8836,54 @@ defineSlots<ButtonSlots>()
         "function-valued registry members should not publish transitive callable parameter helpers",
     );
 
+    // Shallow-by-default registry contract: the imported `ButtonSlots` helper
+    // stays a bare `Ref { name }` in the registry. Its function-valued member
+    // (`default(props: { ui: Button['ui'] })`) carries a callable-parameter
+    // helper that must NOT be eagerly inlined — the deep binding correctness is
+    // asserted on the published surface below.
     let button_slots = resolved
         .resolved_type_registry
         .iter()
         .find(|entry| entry.name == "ButtonSlots")
         .expect("ButtonSlots should be published in the resolved type registry");
-    let TypeExpr::Object(button_slots_shape) = &button_slots.type_expr else {
-        panic!(
-            "ButtonSlots should materialize as an object, got {:?}",
-            button_slots.type_expr
-        );
-    };
-    let default_method = button_slots_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Method(method) if method.name == "default" => Some(&method.function),
-            ObjectMember::Property(property) if property.name == "default" => match &property.ty {
-                TypeExpr::Function(function) => Some(function.as_ref()),
-                _ => None,
-            },
-            _ => None,
-        })
-        .expect("ButtonSlots should keep the default slot callable signature");
-    let props_param = default_method
-        .parameters
-        .first()
-        .expect("default slot method should keep its props parameter");
-    let TypeExpr::Object(props_shape) = &props_param.ty else {
-        panic!(
-            "slot props should materialize as an object, got {:?}",
-            props_param.ty
-        );
-    };
-    let ui_prop = props_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
-            _ => None,
-        })
-        .expect("default slot props should keep a ui member");
     assert!(
-        matches!(ui_prop, TypeExpr::IndexedAccess { .. }),
-        "function-valued projected members should keep imported member-path helpers symbolic, got {:?}",
-        ui_prop
+        matches!(&button_slots.type_expr, TypeExpr::Ref { name, .. } if name.as_ref() == "ButtonSlots"),
+        "imported registry helper should stay a shallow Ref (shallow-by-default), got {:?}",
+        button_slots.type_expr
+    );
+    assert!(
+        !matches!(&button_slots.type_expr, TypeExpr::Object(_)),
+        "registry entry must NOT eagerly materialize the function-valued member, got {:?}",
+        button_slots.type_expr
+    );
+
+    // Published-surface contract: the default slot's `ui` binding stays
+    // symbolic on the requested member path `Button['ui']`; the function-valued
+    // projected member never widens the imported member-path helper.
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let default_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "default")
+        .expect("default slot should be extracted");
+    let ui_binding = default_slot
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "ui")
+        .expect("default slot should expose the ui binding");
+    assert_eq!(
+        ui_binding.raw_type.as_deref(),
+        Some("Button['ui']"),
+        "function-valued projected members must keep the helper on the requested member path, got {:?}",
+        ui_binding.raw_type
+    );
+    assert!(
+        matches!(&ui_binding.type_expr, TypeExpr::IndexedAccess { .. }),
+        "default slot ui binding must stay a symbolic IndexedAccess, got {:?}",
+        ui_binding.type_expr
     );
 }
 
@@ -12307,53 +12313,54 @@ defineSlots<ButtonSlots>()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("should resolve component meta state");
 
+    // Shallow-by-default registry contract: the imported `ButtonSlots` helper
+    // stays a bare `Ref { name }` in the registry. The indexed-access slot
+    // binding (`ui: Button['ui']`) resolves PATH-PRECISELY on the published
+    // surface below — only the requested `ui` member path, never the whole
+    // `Button` shape, enters the published binding.
     let button_slots = resolved
         .resolved_type_registry
         .iter()
         .find(|entry| entry.name == "ButtonSlots")
         .expect("ButtonSlots should be published in the resolved type registry");
-    let TypeExpr::Object(button_slots_shape) = &button_slots.type_expr else {
-        panic!(
-            "ButtonSlots should materialize as an object, got {:?}",
-            button_slots.type_expr
-        );
-    };
-    // `default` is stored as a Method, not a Property
-    let default_method = button_slots_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Method(method) if method.name == "default" => Some(&method.function),
-            ObjectMember::Property(property) if property.name == "default" => match &property.ty {
-                TypeExpr::Function(function) => Some(function.as_ref()),
-                _ => None,
-            },
-            _ => None,
-        })
-        .expect("ButtonSlots should keep the default slot callable signature");
-    let Some(props_param) = default_method.parameters.first() else {
-        panic!("default slot method should keep its props parameter");
-    };
-    let TypeExpr::Object(props_shape) = &props_param.ty else {
-        panic!(
-            "slot props should materialize as an object, got {:?}",
-            props_param.ty
-        );
-    };
-    // Imported slot param helpers now stay symbolic in the registry; the
-    // public slot binding contract still points at the requested member path.
-    let ui_prop = props_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
-            _ => None,
-        })
-        .expect("default slot props should keep a ui member");
     assert!(
-        matches!(ui_prop, TypeExpr::IndexedAccess { .. }),
-        "slot props ui should stay on the requested member path instead of widening eagerly, got {:?}",
-        ui_prop
+        matches!(&button_slots.type_expr, TypeExpr::Ref { name, .. } if name.as_ref() == "ButtonSlots"),
+        "imported registry helper should stay a shallow Ref (shallow-by-default), got {:?}",
+        button_slots.type_expr
+    );
+    assert!(
+        !matches!(&button_slots.type_expr, TypeExpr::Object(_)),
+        "registry entry must NOT eagerly materialize to an object, got {:?}",
+        button_slots.type_expr
+    );
+
+    // Published-surface contract: the default slot's `ui` binding resolves to
+    // the requested member path `Button['ui']` — symbolic IndexedAccess, NOT
+    // an eagerly-widened object of the whole `Button` shape.
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let default_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "default")
+        .expect("default slot should be extracted");
+    let ui_binding = default_slot
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "ui")
+        .expect("default slot should expose the ui binding");
+    assert_eq!(
+        ui_binding.raw_type.as_deref(),
+        Some("Button['ui']"),
+        "indexed-access slot binding must stay on the requested member path, got {:?}",
+        ui_binding.raw_type
+    );
+    assert!(
+        matches!(&ui_binding.type_expr, TypeExpr::IndexedAccess { .. }),
+        "default slot ui binding must stay a symbolic IndexedAccess, got {:?}",
+        ui_binding.type_expr
     );
 }
 
@@ -12423,50 +12430,23 @@ defineSlots<ButtonSlots>()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("should resolve component meta state");
 
+    // Shallow-by-default registry contract: the imported `ButtonSlots` helper
+    // stays a bare `Ref { name }` in the registry; the deep slot-binding
+    // correctness is asserted on the published surface below.
     let button_slots = resolved
         .resolved_type_registry
         .iter()
         .find(|entry| entry.name == "ButtonSlots")
         .expect("ButtonSlots should be published in the resolved type registry");
-    let TypeExpr::Object(button_slots_shape) = &button_slots.type_expr else {
-        panic!(
-            "ButtonSlots should materialize as an object, got {:?}",
-            button_slots.type_expr
-        );
-    };
-    let default_method = button_slots_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Method(method) if method.name == "default" => Some(&method.function),
-            ObjectMember::Property(property) if property.name == "default" => match &property.ty {
-                TypeExpr::Function(function) => Some(function.as_ref()),
-                _ => None,
-            },
-            _ => None,
-        })
-        .expect("ButtonSlots should keep the default slot callable signature");
-    let Some(props_param) = default_method.parameters.first() else {
-        panic!("default slot method should keep its props parameter");
-    };
-    let TypeExpr::Object(props_shape) = &props_param.ty else {
-        panic!(
-            "slot props should materialize as an object, got {:?}",
-            props_param.ty
-        );
-    };
-    let ui_prop = props_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
-            _ => None,
-        })
-        .expect("default slot props should keep a ui member");
     assert!(
-        matches!(ui_prop, TypeExpr::IndexedAccess { .. }),
-        "imported slot callable params should keep indexed member-path helpers symbolic, got {:?}",
-        ui_prop
+        matches!(&button_slots.type_expr, TypeExpr::Ref { name, .. } if name.as_ref() == "ButtonSlots"),
+        "imported registry helper should stay a shallow Ref (shallow-by-default), got {:?}",
+        button_slots.type_expr
+    );
+    assert!(
+        !matches!(&button_slots.type_expr, TypeExpr::Object(_)),
+        "registry entry must NOT eagerly materialize to an object, got {:?}",
+        button_slots.type_expr
     );
 
     let meta = project
@@ -12557,34 +12537,30 @@ defineSlots<MenuSlots>()
         !registry_names.contains("DynamicSlots") && !registry_names.contains("MergeTypes"),
         "imported utility helpers should stay off the published registry, got {registry_names:?}"
     );
+    // Shallow-by-default registry contract: the imported `MenuSlots` helper —
+    // whose body is an intersection mixing explicit slot members with imported
+    // utility helpers (`DynamicSlots<MergeTypes<T>>`) — stays a bare
+    // `Ref { name }` in the registry. The explicit slot members are asserted on
+    // the published surface below.
     let menu_slots = resolved
         .resolved_type_registry
         .iter()
         .find(|entry| entry.name == "MenuSlots")
         .expect("MenuSlots should be published in the resolved type registry");
-    let TypeExpr::Object(menu_slots_shape) = &menu_slots.type_expr else {
-        panic!(
-            "imported slot helpers should still expose their explicit slot members, got {:?}",
-            menu_slots.type_expr
-        );
-    };
     assert!(
-        menu_slots_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "default")
-                || matches!(member, ObjectMember::Method(method) if method.name == "default"),
-        ),
-        "MenuSlots should keep the explicit default slot member, got {:?}",
+        matches!(&menu_slots.type_expr, TypeExpr::Ref { name, .. } if name.as_ref() == "MenuSlots"),
+        "imported intersection slot helper should stay a shallow Ref (shallow-by-default), got {:?}",
         menu_slots.type_expr
     );
     assert!(
-        menu_slots_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "item")
-                || matches!(member, ObjectMember::Method(method) if method.name == "item"),
-        ),
-        "MenuSlots should keep the explicit item slot member, got {:?}",
+        !matches!(&menu_slots.type_expr, TypeExpr::Object(_)),
+        "registry entry must NOT eagerly materialize the intersection surface, got {:?}",
         menu_slots.type_expr
     );
 
+    // Published-surface contract: the explicit `default` and `item` slot
+    // members survive on the published surface; the imported utility helpers
+    // (`DynamicSlots` / `MergeTypes`) stay off the registry (asserted above).
     let meta = project
         .host()
         .get_component_meta("/src/App.vue")
