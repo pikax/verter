@@ -426,7 +426,12 @@ mod tests {
     /// Build an inline object type `{ <name>: number }` whose single property
     /// carries known declaration-site spans, so a shift/clear over the object's
     /// member spans is observable.
-    fn object_with_member_spans(name: &str, decl: Span, name_span: Span, ty_span: Span) -> TypeExpr {
+    fn object_with_member_spans(
+        name: &str,
+        decl: Span,
+        name_span: Span,
+        ty_span: Span,
+    ) -> TypeExpr {
         TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty::with_spans(
                 name.to_string(),
@@ -460,10 +465,7 @@ mod tests {
     /// spans. The walker must reach into the frame for either transform to be
     /// correct — a `RecursiveRef` arm that only recurses `type_arguments`
     /// leaves these spans untouched.
-    fn recursive_ref_with_frame(
-        check: TypeExpr,
-        extends: TypeExpr,
-    ) -> TypeExpr {
+    fn recursive_ref_with_frame(check: TypeExpr, extends: TypeExpr) -> TypeExpr {
         TypeExpr::RecursiveRef {
             name: Arc::from("Self"),
             type_arguments: Arc::from(Vec::<TypeExpr>::new()),
@@ -502,18 +504,10 @@ mod tests {
         let delta: i64 = 100;
         // `check` and `extends` start at DIFFERENT offsets so a single accidental
         // shift of one cannot masquerade as both being correct.
-        let check = object_with_member_spans(
-            "a",
-            Span::new(10, 19),
-            Span::new(10, 11),
-            Span::new(13, 19),
-        );
-        let extends = object_with_member_spans(
-            "b",
-            Span::new(40, 49),
-            Span::new(40, 41),
-            Span::new(43, 49),
-        );
+        let check =
+            object_with_member_spans("a", Span::new(10, 19), Span::new(10, 11), Span::new(13, 19));
+        let extends =
+            object_with_member_spans("b", Span::new(40, 49), Span::new(40, 41), Span::new(43, 49));
         let mut ty = recursive_ref_with_frame(check, extends);
 
         ty.shift_spans(delta);
@@ -559,18 +553,10 @@ mod tests {
     // PASSES once both `check` and `extends` are recursed.
     #[test]
     fn clear_spans_drops_recursive_ref_conditional_frame_member_spans() {
-        let check = object_with_member_spans(
-            "a",
-            Span::new(10, 19),
-            Span::new(10, 11),
-            Span::new(13, 19),
-        );
-        let extends = object_with_member_spans(
-            "b",
-            Span::new(40, 49),
-            Span::new(40, 41),
-            Span::new(43, 49),
-        );
+        let check =
+            object_with_member_spans("a", Span::new(10, 19), Span::new(10, 11), Span::new(13, 19));
+        let extends =
+            object_with_member_spans("b", Span::new(40, 49), Span::new(40, 41), Span::new(43, 49));
         let mut ty = recursive_ref_with_frame(check, extends);
 
         ty.clear_spans();

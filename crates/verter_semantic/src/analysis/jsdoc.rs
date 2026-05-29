@@ -1191,15 +1191,23 @@ mod tests {
 
         // Leading text + the JSDoc block push the `{a: number}` payload well past
         // byte 0; the function name `fn1` is the anchor the caller resolves on.
-        let source = "const PADDING = 0;\n/** @param {{a: number}} p the param */\nfunction fn1(p) {}\n";
+        let source =
+            "const PADDING = 0;\n/** @param {{a: number}} p the param */\nfunction fn1(p) {}\n";
         let name_offset = source.find("fn1").expect("the `fn1` binding is present") as u32;
 
         let params = extract_jsdoc_param_types_at_offset(source, name_offset);
-        assert_eq!(params.len(), 1, "exactly one `@param` type must be recovered");
+        assert_eq!(
+            params.len(),
+            1,
+            "exactly one `@param` type must be recovered"
+        );
         assert_eq!(params[0].0, "p", "the param name token must be `p`");
 
         let TypeExpr::Object(object) = &params[0].1 else {
-            panic!("`@param {{a: number}}` must lower to an object, got {:?}", params[0].1);
+            panic!(
+                "`@param {{a: number}}` must lower to an object, got {:?}",
+                params[0].1
+            );
         };
         let ObjectMember::Property(prop) = &object.properties[0] else {
             panic!("expected `a` property, got {:?}", object.properties[0]);
