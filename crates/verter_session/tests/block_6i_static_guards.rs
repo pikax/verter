@@ -117,17 +117,33 @@ fn shape_cache_db_replaces_split_caches() {
 
     for symbol in [
         "pub struct ShapeCacheDb",
-        "pub struct ShapeCacheEntry",
         "pub enum ShapeSubject",
         "pub struct ShapeDemand",
         "pub struct ShapeCacheKey",
     ] {
         assert!(
             src.contains(symbol),
-            "guard B.1: `component_meta_caches.rs` MUST declare `{symbol}` — Block 6.i \
-             Commit B universal-cache architectural contract.",
+            "guard B.1: `component_meta_caches.rs` MUST declare `{symbol}` — the \
+             universal-cache architectural contract.",
         );
     }
+
+    // The shape cache stores the runtime carrier
+    // `cache_runtime::CacheEntry<MaterializedTypeExpr>`, NOT a bespoke
+    // `ShapeCacheEntry`: every validity rail (the fact signature, the
+    // self-root canonicals, the compute-time generation) lives on the
+    // shared cache-runtime entry. A regression reintroducing a bespoke
+    // per-cache carrier fails here.
+    assert!(
+        src.contains("DashMap<ShapeCacheKey, Arc<CacheEntry<MaterializedTypeExpr>>>"),
+        "guard B.1: `ShapeCacheDb.entries` MUST store \
+         `Arc<CacheEntry<MaterializedTypeExpr>>` (the shared cache-runtime carrier).",
+    );
+    assert!(
+        !src.contains("pub struct ShapeCacheEntry"),
+        "guard B.1: the bespoke `ShapeCacheEntry` carrier MUST be retired — the shape \
+         cache stores `cache_runtime::CacheEntry<MaterializedTypeExpr>`.",
+    );
 
     // The legacy split caches MUST be retired (no public surface).
     for retired in [

@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use verter_session::semantic_query::{DeclIdentity, ProjectionMode, SemanticQueryKey};
+use verter_session::semantic_query::{ProjectionMode, SemanticQueryKey};
 use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
 
 const PATHOLOGICAL_PICK_TS: &str = r#"
@@ -60,9 +60,8 @@ fn type_resolution_audit_pathological_recursion_observes_depth_cap_exactly() {
     // userland `Pick` declaration regardless of whole_hash because
     // `build_resolve_decl` keys on `(canonical, name)` for top-level
     // decl name lookups.
-    let pick_identity = DeclIdentity {
+    let pick_identity = verter_session::semantic_query::DeclKey {
         canonical_id: Arc::from("/pathological.ts"),
-        whole_hash: [0u8; 16],
         decl_name: Arc::from("Pick"),
     };
     let key = SemanticQueryKey::Instantiate {

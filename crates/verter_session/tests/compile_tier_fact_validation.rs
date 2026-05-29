@@ -59,8 +59,13 @@ fn prime_compile(host: &VerterHost, canonical: &str) {
 }
 
 /// R3 arch-guard pinned in source: `CompileSlot` carries
-/// `fact_dep_signature: Arc<[FactVersionRef]>`. The source-grep test
+/// `fact_dep_signature: ReadSetSignature`. The source-grep test
 /// must keep this in lockstep with the field on `types.rs`.
+///
+/// `ReadSetSignature` is the typed admission carrier: overflow is
+/// representable structurally (`overflowed: bool`), so the cold-build
+/// producer can refuse `compile_slots.insert` on overflow rather than
+/// publishing an indistinguishable empty signature.
 #[test]
 fn compile_slot_carries_fact_dep_signature_field_grep() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -68,9 +73,10 @@ fn compile_slot_carries_fact_dep_signature_field_grep() {
         .join("types.rs");
     let src = std::fs::read_to_string(&path).expect("read types.rs");
     assert!(
-        src.contains("fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>"),
+        src.contains("fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature"),
         "R3/R26/R28: `CompileSlot.fact_dep_signature` MUST be declared as \
-         `Arc<[FactVersionRef]>` in types.rs"
+         `ReadSetSignature` in types.rs so overflow and empty are structurally \
+         distinguishable at the carrier type"
     );
     assert!(
         src.contains("pub(crate) struct CompileSlot"),

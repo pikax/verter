@@ -83,29 +83,164 @@ fn normalize_whitespace(body: &str) -> String {
     body.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Strip Rust comments (`// line` and `/* block */`) from `body`. A
+/// comment that incidentally mentions a refusal-shape keyword
+/// (e.g. `// see RouteGenerationDependency for the rail shape`)
+/// must not satisfy a substring predicate on the actual code — the
+/// guard is structural, not lexical-substring.
+fn strip_comments(body: &str) -> String {
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let mut i = 0;
+    let mut in_str = false;
+    let mut in_char = false;
+    let mut esc = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_str {
+            out.push(b as char);
+            if esc {
+                esc = false;
+            } else if b == b'\\' {
+                esc = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_char {
+            out.push(b as char);
+            if esc {
+                esc = false;
+            } else if b == b'\\' {
+                esc = true;
+            } else if b == b'\'' {
+                in_char = false;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'"' {
+            in_str = true;
+            out.push('"');
+            i += 1;
+            continue;
+        }
+        if b == b'\'' {
+            // Heuristic: a lifetime (`'a`) is rare in body
+            // expressions; treat any `'` as char-literal start. The
+            // worst case is over-stripping, which keeps the guard
+            // strictly stricter (not weaker).
+            in_char = true;
+            out.push('\'');
+            i += 1;
+            continue;
+        }
+        // Line comment.
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            // Skip to end of line.
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        // Block comment (no nesting tracking — Rust's nested
+        // `/* /* */ */` is rare in scanned bodies; the inner `*/`
+        // closes the outer here, leaving the trailing `*/` as raw
+        // tokens that cannot satisfy any refusal-shape predicate).
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < bytes.len() {
+                if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                    i += 2;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        out.push(b as char);
+        i += 1;
+    }
+    out
+}
+
 /// Whether `body` carries a WHOLE-CARRIER `RouteGeneration` refusal: it
 /// mentions the `RouteGeneration` variant AND, in the same body, aborts
-/// the entire carrier via a statement-position `return` refusal — either
-/// `return None` or `return ... ReturnOnly`.
+/// the entire carrier via a statement-position `return` refusal whose
+/// PAYLOAD names the `RouteGenerationDependency` reason (or, for the
+/// `Option`-returning shape, returns bare `None`).
 ///
 /// The discriminating point is the `return` keyword. A per-item
 /// `filter_map`/closure drop is written `=> None` (a bare arm
 /// expression, NO `return`), so a body whose only `RouteGeneration`
 /// handling is a `filter_map => None` does NOT satisfy this — exactly
 /// the silent-drop shape the guard must catch on an entry producer.
+///
+/// Four accepted refusal shapes (each anchored to the SAME return
+/// expression — no cross-statement substring AND):
+///
+///   * `return None` — `Option`-returning producer aborts the entry.
+///   * `return ComputeAdmission::ReturnOnly(...)` —
+///     `ComputeAdmission`-returning producer routes the value through
+///     the non-cacheable arm.
+///   * `return Err(...RouteGenerationDependency...)` —
+///     `Result`-returning producer aborts the entry with the typed
+///     reason. The regex anchors `RouteGenerationDependency` to
+///     appear INSIDE the `Err(...)` parenthesis group (`[^)]*` between
+///     the open `(` and the discriminator), so a body containing
+///     `return Err(OtherError)` in one expression and a comment / use
+///     of `RouteGenerationDependency` elsewhere does NOT satisfy this
+///     predicate.
+///   * `return SignatureAdmission::NonCacheable(...RouteGenerationDependency...)`
+///     — `SignatureAdmission`-returning producer. Same anchoring.
+///
+/// Comments are stripped before the regex applies so a comment
+/// incidentally containing a refusal-shape keyword cannot satisfy
+/// a predicate on the code.
 fn body_has_whole_carrier_route_refusal(body: &str) -> bool {
-    let norm = normalize_whitespace(body);
+    let stripped = strip_comments(body);
+    let norm = normalize_whitespace(&stripped);
     if !norm.contains("RouteGeneration") {
         return false;
     }
     // A whole-carrier refusal is a `return`-prefixed statement that
-    // aborts the entry: `return None` or `return ... ReturnOnly(..)`.
-    // `::` spacing is collapsed first so a reformat cannot break the
-    // `ComputeAdmission::ReturnOnly` match. A per-item `filter_map`
-    // drop is a bare `=> None` arm — no `return` — so it does NOT
-    // satisfy either branch.
+    // aborts the entry. `::` spacing is collapsed first so a reformat
+    // cannot break the `ComputeAdmission::ReturnOnly` or
+    // `NonAdmissionReason::RouteGenerationDependency` match. A per-item
+    // `filter_map` drop is a bare `=> None` arm — no `return` — so it
+    // does NOT satisfy any branch.
     let norm_tight = norm.replace(" :: ", "::");
-    norm_tight.contains("return None") || norm_tight.contains("return ComputeAdmission::ReturnOnly")
+    if norm_tight.contains("return None") {
+        return true;
+    }
+    if norm_tight.contains("return ComputeAdmission::ReturnOnly") {
+        return true;
+    }
+    // `return Err(<NonAdmissionReason expression>)` is the
+    // `Result`-returning typed-reason refusal shape. The reason MUST
+    // be `RouteGenerationDependency` AND must live INSIDE the same
+    // `Err(...)` parenthesis group (anchored via the `[^)]*`
+    // character class). A body with `return Err(OtherError)` in one
+    // expression and an unrelated `RouteGenerationDependency` mention
+    // elsewhere does NOT match.
+    let return_err_typed = regex::Regex::new(r"return\s+Err\s*\(\s*[^)]*RouteGenerationDependency")
+        .expect("anchored regex literal compiles");
+    if return_err_typed.is_match(&norm_tight) {
+        return true;
+    }
+    // `return SignatureAdmission::NonCacheable(<NonAdmissionReason>)`
+    // is the `SignatureAdmission`-returning typed-reason refusal shape.
+    // Same SAME-EXPRESSION anchoring as the `Err` case above.
+    let return_sig_admission_typed = regex::Regex::new(
+        r"return\s+SignatureAdmission::NonCacheable\s*\(\s*[^)]*RouteGenerationDependency",
+    )
+    .expect("anchored regex literal compiles");
+    if return_sig_admission_typed.is_match(&norm_tight) {
+        return true;
+    }
+    false
 }
 
 /// Whether `body` (a converter) demonstrably HANDLES the
@@ -241,6 +376,58 @@ fn route_generation_scanner_discriminates() {
         "self-test: a body that aborts via `return ComputeAdmission::ReturnOnly(..)` on \
          RouteGeneration MUST be recognised as a whole-carrier refusal",
     );
+    // A `return Err(NonAdmissionReason::RouteGenerationDependency)`
+    // whole-carrier refusal — the `Result`-returning producer shape
+    // used by `materialize_structure_read_set` to thread the typed
+    // reason back to the caller.
+    let return_err_typed =
+        "fn p() { for v in fence { match v { DepVersion::RouteGeneration(_) => { return Err(NonAdmissionReason::RouteGenerationDependency); } _ => {} } } Ok(out) }";
+    assert!(
+        body_has_whole_carrier_route_refusal(return_err_typed),
+        "self-test: a `Result`-returning entry producer that aborts via \
+         `return Err(NonAdmissionReason::RouteGenerationDependency)` on \
+         RouteGeneration MUST be recognised as a whole-carrier refusal — \
+         the typed reason flows back to the caller, who routes through \
+         the cooperative refusal arm.",
+    );
+    // A bare `return Err(_)` without the `RouteGenerationDependency`
+    // discriminator is NOT accepted — a producer that returns a
+    // generic error without classifying the cause has not honoured
+    // the typed-reason contract.
+    let return_err_untyped =
+        "fn p() { for v in fence { match v { DepVersion::RouteGeneration(_) => { return Err(()); } _ => {} } } Ok(out) }";
+    assert!(
+        !body_has_whole_carrier_route_refusal(return_err_untyped),
+        "self-test: a `Result`-returning producer that returns a bare \
+         `Err(_)` WITHOUT the `RouteGenerationDependency` discriminator \
+         has NOT honoured the typed-reason contract — the typed reason \
+         must reach the caller, not a generic error.",
+    );
+    // A `return SignatureAdmission::NonCacheable(NonAdmissionReason::RouteGenerationDependency)`
+    // whole-carrier refusal — the `SignatureAdmission`-returning
+    // producer shape used by `engine_fact_signature_for_materialize_memo`.
+    let return_sig_admission_typed =
+        "fn p() { for v in fence { match v { DepVersion::RouteGeneration(_) => { return SignatureAdmission::NonCacheable(NonAdmissionReason::RouteGenerationDependency); } _ => {} } } SignatureAdmission::Cacheable(out) }";
+    assert!(
+        body_has_whole_carrier_route_refusal(return_sig_admission_typed),
+        "self-test: a `SignatureAdmission`-returning entry producer that \
+         aborts via \
+         `return SignatureAdmission::NonCacheable(NonAdmissionReason::RouteGenerationDependency)` \
+         MUST be recognised as a whole-carrier refusal — the typed \
+         reason flows to the caller, who routes through the cooperative \
+         refusal arm.",
+    );
+    // A bare `return SignatureAdmission::NonCacheable(_)` without the
+    // `RouteGenerationDependency` discriminator is NOT accepted.
+    let return_sig_admission_untyped =
+        "fn p() { for v in fence { match v { DepVersion::RouteGeneration(_) => { return SignatureAdmission::NonCacheable(other_reason); } _ => {} } } SignatureAdmission::Cacheable(out) }";
+    assert!(
+        !body_has_whole_carrier_route_refusal(return_sig_admission_untyped),
+        "self-test: a `SignatureAdmission`-returning producer that \
+         refuses with a non-RouteGenerationDependency reason has NOT \
+         honoured the typed-reason contract for the `RouteGeneration` \
+         variant — the typed reason must be `RouteGenerationDependency`.",
+    );
 
     // --- THE DECISIVE CASE — a per-item `filter_map => None` drop. ---
     // This is exactly `dep_signature_to_fact_signature`'s legitimate
@@ -293,6 +480,131 @@ fn route_generation_scanner_discriminates() {
         body_has_whole_carrier_route_refusal(reformatted),
         "self-test: whitespace normalisation MUST make the whole-carrier check robust to \
          a reformat (line breaks / spacing around `::` and `;`)",
+    );
+
+    // --- ANCHORING: `return Err(...)` and `RouteGenerationDependency`
+    //     in different expressions MUST NOT satisfy the predicate.
+    // The substring `return Err` appears in one expression (a
+    // generic Err) and `RouteGenerationDependency` appears as a
+    // string-literal or unrelated identifier elsewhere. A
+    // substring-AND check would falsely accept this body; the
+    // anchored regex
+    // `return Err\s*\(\s*[^)]*RouteGenerationDependency` rejects it
+    // by requiring the discriminator to live INSIDE the same
+    // `Err(...)` parenthesis group.
+    let return_err_unrelated_mention = "fn p() { \
+        for v in fence { \
+            match v { \
+                DepVersion::RouteGeneration(_) => { return Err(GenericError); } \
+                _ => {} \
+            } \
+        } \
+        let label = \"RouteGenerationDependency\"; \
+        let _ = label; \
+        Ok(out) \
+    }";
+    assert!(
+        !body_has_whole_carrier_route_refusal(return_err_unrelated_mention),
+        "self-test: `return Err(GenericError)` paired with an \
+         unrelated `RouteGenerationDependency` mention elsewhere in \
+         the body MUST NOT satisfy the predicate — the anchored regex \
+         requires `RouteGenerationDependency` to live INSIDE the same \
+         `Err(...)` parenthesis as the `return`. A substring-AND check \
+         would falsely accept this shape; the anchored predicate rejects \
+         it.",
+    );
+    // Same anchoring for the SignatureAdmission shape.
+    let return_sig_admission_unrelated_mention = "fn p() { \
+        for v in fence { \
+            match v { \
+                DepVersion::RouteGeneration(_) => { return SignatureAdmission::NonCacheable(OtherReason); } \
+                _ => {} \
+            } \
+        } \
+        let label = \"RouteGenerationDependency\"; \
+        let _ = label; \
+        SignatureAdmission::Cacheable(out) \
+    }";
+    assert!(
+        !body_has_whole_carrier_route_refusal(return_sig_admission_unrelated_mention),
+        "self-test: `return SignatureAdmission::NonCacheable(OtherReason)` \
+         paired with an unrelated `RouteGenerationDependency` mention \
+         elsewhere MUST NOT satisfy the predicate — anchored regex.",
+    );
+
+    // --- COMMENT STRIPPING: a comment that mentions
+    //     `RouteGenerationDependency` cannot satisfy a code predicate. ---
+    let comment_only_mention = "fn p() { \
+        for v in fence { \
+            match v { \
+                DepVersion::RouteGeneration(_) => { return Err(GenericError); } \
+                _ => {} \
+            } \
+        } \
+        // see RouteGenerationDependency for the rail shape \
+        Ok(out) \
+    }";
+    assert!(
+        !body_has_whole_carrier_route_refusal(comment_only_mention),
+        "self-test: a `// comment` that incidentally mentions \
+         `RouteGenerationDependency` MUST be stripped before the \
+         predicate runs — a code-level `Err(GenericError)` paired with \
+         a comment-only mention does NOT satisfy the typed-reason \
+         contract.",
+    );
+    let block_comment_only_mention = "fn p() { \
+        for v in fence { \
+            match v { \
+                DepVersion::RouteGeneration(_) => { return Err(GenericError); } \
+                _ => {} \
+            } \
+        } \
+        /* RouteGenerationDependency description here */ \
+        Ok(out) \
+    }";
+    assert!(
+        !body_has_whole_carrier_route_refusal(block_comment_only_mention),
+        "self-test: a `/* block comment */` that incidentally \
+         mentions `RouteGenerationDependency` MUST also be stripped — \
+         block comments and line comments are both lexically removed \
+         before the structural predicate applies.",
+    );
+
+    // --- Positive case: anchored regex must still accept the
+    //     well-formed typed refusal. ---
+    let return_err_anchored = "fn p() { \
+        for v in fence { \
+            match v { \
+                DepVersion::RouteGeneration(_) => { \
+                    return Err(NonAdmissionReason::RouteGenerationDependency); \
+                } \
+                _ => {} \
+            } \
+        } \
+        Ok(out) \
+    }";
+    assert!(
+        body_has_whole_carrier_route_refusal(return_err_anchored),
+        "self-test: a well-formed `return Err(NonAdmissionReason::\
+         RouteGenerationDependency)` — typed reason INSIDE the Err(...) \
+         parenthesis — MUST satisfy the anchored regex.",
+    );
+    let return_sig_admission_anchored = "fn p() { \
+        for v in fence { \
+            match v { \
+                DepVersion::RouteGeneration(_) => { \
+                    return SignatureAdmission::NonCacheable(NonAdmissionReason::RouteGenerationDependency); \
+                } \
+                _ => {} \
+            } \
+        } \
+        SignatureAdmission::Cacheable(out) \
+    }";
+    assert!(
+        body_has_whole_carrier_route_refusal(return_sig_admission_anchored),
+        "self-test: a well-formed `return SignatureAdmission::\
+         NonCacheable(NonAdmissionReason::RouteGenerationDependency)` \
+         MUST satisfy the anchored regex.",
     );
 
     // Sanity: the scanned producers exist.

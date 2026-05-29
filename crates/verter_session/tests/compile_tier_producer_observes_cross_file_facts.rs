@@ -22,10 +22,9 @@
 //! `/src/types.ts`. This holds against the post-change tree and
 //! WOULD FAIL against a tree where the prefetch is removed.
 
-use std::sync::Arc;
-
 use verter_semantic::facts::registry::FactKey;
 use verter_session::resolver_core::{FactVersionRef, ParseFactRef};
+use verter_session::ReadSetSignature;
 use verter_session::{
     CompileProfile, FileKind, HostConfig, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
@@ -65,9 +64,9 @@ fn prime_compile(host: &VerterHost, canonical: &str) {
 
 /// Read the `CompileSlot.fact_dep_signature` for the canonical at
 /// the default profile, or an empty signature if no slot was admitted.
-fn read_signature(host: &VerterHost, canonical: &str) -> Arc<[FactVersionRef]> {
+fn read_signature(host: &VerterHost, canonical: &str) -> ReadSetSignature {
     host.compile_slot_fact_dep_signature(canonical, &CompileProfile::default())
-        .unwrap_or_else(|| Arc::from(Vec::<FactVersionRef>::new()))
+        .unwrap_or_else(ReadSetSignature::empty)
 }
 
 /// R3/R26/R28 producer-timing discriminator.
@@ -106,13 +105,13 @@ fn cold_compile_observes_member_fact_for_cross_file_type_import() {
 
     let signature = read_signature(&host, "/src/Comp.vue");
     assert!(
-        !signature.is_empty(),
+        !signature.facts.is_empty(),
         "R3/R26/R28: compile_slot.fact_dep_signature MUST be non-empty \
          after cold compute of an SFC importing types from a workspace .ts \
-         (signature.len() = {}). The pre-tracer prefetch is the producer-timing \
+         (signature.facts.len() = {}). The pre-tracer prefetch is the producer-timing \
          contract — without it, observations silently skip and the signature \
          is empty, breaking cross-file fact-validation.",
-        signature.len()
+        signature.facts.len()
     );
 
     // Path-precision: at least one observation must reference the
@@ -121,7 +120,7 @@ fn cold_compile_observes_member_fact_for_cross_file_type_import() {
     // `MemberPresence` for the imported type — the producer admits
     // one Export + one MemberShape + per-member MemberPresence
     // observations for each `macro_type_dep`.
-    let observes_cross_file_type_fact = signature.iter().any(|fact| {
+    let observes_cross_file_type_fact = signature.facts.iter().any(|fact| {
         matches!(
             fact,
             FactVersionRef::Parse(ParseFactRef { canonical_id, key, .. })
@@ -140,6 +139,7 @@ fn cold_compile_observes_member_fact_for_cross_file_type_import() {
          with an Export / MemberShape / MemberPresence key. \
          Signature observed: {:?}",
         signature
+            .facts
             .iter()
             .map(|f| format!("{:?}", f))
             .collect::<Vec<_>>()
@@ -187,14 +187,14 @@ fn cross_file_type_edit_invalidates_consumer_via_fact_validation() {
         // ensures the discriminator is meaningful.
         eprintln!(
             "INFO: warm_before=false (prime likely failed to admit a slot); \
-             signature_before.len()={}",
-            signature_before.len()
+             signature_before.facts.len()={}",
+            signature_before.facts.len()
         );
         return;
     }
 
     assert!(
-        !signature_before.is_empty(),
+        !signature_before.facts.is_empty(),
         "warm slot MUST carry a non-empty fact_dep_signature for a SFC with \
          cross-file type imports — fact-validation gates the warm hit."
     );
@@ -276,7 +276,7 @@ fn compile_slot_invalidates_on_runtime_import_body_edit() {
     );
 
     let signature = read_signature(&host, "/src/Comp.vue");
-    let observes_utils_whole_hash = signature.iter().any(|fact| {
+    let observes_utils_whole_hash = signature.facts.iter().any(|fact| {
         matches!(
             fact,
             FactVersionRef::FileWholeHash { canonical_id, .. }
@@ -289,6 +289,7 @@ fn compile_slot_invalidates_on_runtime_import_body_edit() {
          FileWholeHash for a runtime-imported dependency. \
          Signature observed: {:?}",
         signature
+            .facts
             .iter()
             .map(|f| format!("{f:?}"))
             .collect::<Vec<_>>()
@@ -452,7 +453,7 @@ fn compile_slot_invalidates_on_external_src_template_edit() {
     );
 
     let signature = read_signature(&host, "/src/Comp.vue");
-    let observes_tpl_whole_hash = signature.iter().any(|fact| {
+    let observes_tpl_whole_hash = signature.facts.iter().any(|fact| {
         matches!(
             fact,
             FactVersionRef::FileWholeHash { canonical_id, .. }
@@ -466,6 +467,7 @@ fn compile_slot_invalidates_on_external_src_template_edit() {
          pre-1.J.3 producer never received `external_requests` and \
          produced an empty signature. Signature observed: {:?}",
         signature
+            .facts
             .iter()
             .map(|f| format!("{f:?}"))
             .collect::<Vec<_>>()
@@ -540,7 +542,7 @@ fn compile_slot_invalidates_on_side_effect_import_body_edit() {
     // Fact-presence half of the discriminator: the compile slot's
     // signature MUST carry a `FileWholeHash` for the side-effect dep.
     let signature = read_signature(&host, "/src/Comp.vue");
-    let observes_setup_whole_hash = signature.iter().any(|fact| {
+    let observes_setup_whole_hash = signature.facts.iter().any(|fact| {
         matches!(
             fact,
             FactVersionRef::FileWholeHash { canonical_id, .. }
@@ -555,6 +557,7 @@ fn compile_slot_invalidates_on_side_effect_import_body_edit() {
          per-binding loop, which never executes for a side-effect \
          import. Signature observed: {:?}",
         signature
+            .facts
             .iter()
             .map(|f| format!("{f:?}"))
             .collect::<Vec<_>>()

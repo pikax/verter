@@ -1,0 +1,274 @@
+//! R6 structural guard for query-identity cache keys.
+//!
+//! Asserts that `SemanticQueryKey::Instantiate`,
+//! `SemanticQueryKey::ResolveMacroPayload`, and the mirrored
+//! `FamilyKey` shapes inside the family memo carry NO content / version
+//! hashes — neither as a direct field (`whole_hash`, `content_hash`,
+//! `fact_dep_signature`) nor through an embedded type that transitively
+//! contains one (specifically `DeclIdentity`, which remains versioned
+//! as a value-side payload).
+//!
+//! Two-layer enforcement:
+//!
+//! 1. **Compile-time destructuring proof** — the `base` / `owner`
+//!    field on each variant is a `DeclKey`, which is a public
+//!    two-field content-free struct (`canonical_id`, `decl_name`).
+//!    The destructuring patterns below would fail to compile if a
+//!    future commit re-introduced `whole_hash` to either the variant
+//!    or to `DeclKey` itself.
+//!
+//! 2. **Source-AST scan** — walk
+//!    `crates/verter_session/src/semantic_query.rs` and
+//!    `crates/verter_session/src/semantic_query_memo/family.rs`
+//!    and assert that the `Instantiate` and `ResolveMacroPayload`
+//!    variant bodies (in both `SemanticQueryKey` and `FamilyKey`)
+//!    contain NO of the forbidden field names and NO embedded
+//!    `DeclIdentity` reference inside the variant.
+//!
+//! The structural arm (1) catches direct shape regressions at compile
+//! time. The source-AST arm (2) is the durable architecture pin
+//! registered in
+//! `tests/critical_rules_have_guards.rs::CRITICAL_RULE_GUARDS` so the
+//! "Cache Architecture (CRITICAL)" rule's R6 clause has a named
+//! discriminating guard.
+
+use std::fs;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use verter_session::semantic_query::{
+    DeclKey, ProjectionMode, ProjectionReductionContext, SemanticNodeId, SemanticQueryKey,
+};
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/")
+        .parent()
+        .expect("repo root")
+        .to_path_buf()
+}
+
+fn read_file(rel: &str) -> String {
+    let path = workspace_root().join(rel);
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("read `{rel}`: {e}"))
+}
+
+/// Compile-time proof that `SemanticQueryKey::Instantiate.base` is a
+/// `DeclKey` (content-free) — NOT a `DeclIdentity` (versioned).
+#[test]
+fn r6_semantic_query_key_instantiate_base_is_content_free_decl_key() {
+    let base = DeclKey {
+        canonical_id: Arc::from("/r6_check.ts"),
+        decl_name: Arc::from("Foo"),
+    };
+    let key = SemanticQueryKey::Instantiate {
+        base: base.clone(),
+        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    };
+    match key {
+        SemanticQueryKey::Instantiate {
+            base: DeclKey {
+                canonical_id,
+                decl_name,
+            },
+            args: _,
+            context: _,
+        } => {
+            // The `base` field exposes ONLY `canonical_id` and
+            // `decl_name`. Any future addition of `whole_hash` /
+            // `content_hash` / `fact_dep_signature` to `DeclKey`
+            // breaks this destructuring at compile time.
+            assert_eq!(canonical_id.as_ref(), "/r6_check.ts");
+            assert_eq!(decl_name.as_ref(), "Foo");
+        }
+        _ => panic!("expected Instantiate variant"),
+    }
+}
+
+/// Compile-time proof that `SemanticQueryKey::ResolveMacroPayload.owner`
+/// is a `DeclKey` (content-free) — NOT a `DeclIdentity`.
+#[test]
+fn r6_semantic_query_key_resolve_macro_payload_owner_is_content_free_decl_key() {
+    let owner = DeclKey {
+        canonical_id: Arc::from("/r6_check.vue"),
+        decl_name: Arc::from("<sfc-script-setup>"),
+    };
+    let key = SemanticQueryKey::ResolveMacroPayload {
+        owner: owner.clone(),
+        macro_index: 0,
+        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+        type_args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        mode: ProjectionMode::Expanded,
+    };
+    match key {
+        SemanticQueryKey::ResolveMacroPayload {
+            owner: DeclKey {
+                canonical_id,
+                decl_name,
+            },
+            macro_index: _,
+            macro_kind: _,
+            type_args: _,
+            mode: _,
+        } => {
+            assert_eq!(canonical_id.as_ref(), "/r6_check.vue");
+            assert_eq!(decl_name.as_ref(), "<sfc-script-setup>");
+        }
+        _ => panic!("expected ResolveMacroPayload variant"),
+    }
+}
+
+/// Source-AST scan over `semantic_query.rs` — the `Instantiate` and
+/// `ResolveMacroPayload` variant bodies of `SemanticQueryKey` must
+/// contain NO `whole_hash`, `content_hash`, or `fact_dep_signature`
+/// field, AND no embedded `DeclIdentity` type.
+#[test]
+fn r6_semantic_query_key_variants_carry_no_version_hash_in_source() {
+    let source = read_file("crates/verter_session/src/semantic_query.rs");
+
+    // Forbidden field names that, if added to the variant body,
+    // would re-introduce a content/version hash into a query-identity
+    // key. The scan looks for each name with the field-shape suffix
+    // ': ' inside the variant body block.
+    const FORBIDDEN_FIELDS: &[&str] = &["whole_hash:", "content_hash:", "fact_dep_signature:"];
+    // Forbidden embedded types that transitively contain a version
+    // hash. `DeclIdentity` is the canonical offender — keeping it as
+    // a value-side payload is fine, embedding it in a query-identity
+    // key is the R6 violation.
+    const FORBIDDEN_EMBEDS: &[&str] = &["base: DeclIdentity", "owner: DeclIdentity"];
+
+    for variant in ["Instantiate {", "ResolveMacroPayload {"] {
+        let body = extract_brace_block(&source, variant).unwrap_or_else(|| {
+            panic!("R6 GUARD: could not locate `{variant}` variant body in semantic_query.rs")
+        });
+        for needle in FORBIDDEN_FIELDS {
+            assert!(
+                !body.contains(needle),
+                "R6 GUARD VIOLATION — `SemanticQueryKey::{}` body in \
+                 `semantic_query.rs` contains forbidden field `{}`. A \
+                 query-identity cache key MUST NOT carry a content / \
+                 version hash; per-value version-rooting lives on the \
+                 cached `MemoEntry`'s `ReadSetSignature.facts` and \
+                 `self_root_canonicals`. Body:\n{}",
+                variant.trim_end_matches(" {"),
+                needle,
+                body
+            );
+        }
+        for needle in FORBIDDEN_EMBEDS {
+            assert!(
+                !body.contains(needle),
+                "R6 GUARD VIOLATION — `SemanticQueryKey::{}` body in \
+                 `semantic_query.rs` embeds `{}`. `DeclIdentity` is a \
+                 versioned (`whole_hash`-bearing) type and must NOT be \
+                 embedded in a query-identity key — use the content-free \
+                 `DeclKey` instead. Body:\n{}",
+                variant.trim_end_matches(" {"),
+                needle,
+                body
+            );
+        }
+    }
+}
+
+/// Source-AST scan over `semantic_query_memo/family.rs` — the
+/// `FamilyKey::Instantiate` and `FamilyKey::ResolveMacroPayload`
+/// variants are the mode-erased identities that `family_and_slot`
+/// projects to and that the memo's `entries: Mutex<FxHashMap<FamilyKey,
+/// FamilySlots>>` actually keys on. They must satisfy the same R6
+/// no-content-hash invariant as their `SemanticQueryKey` siblings.
+#[test]
+fn r6_family_key_variants_carry_no_version_hash_in_source() {
+    let source = read_file("crates/verter_session/src/semantic_query_memo/family.rs");
+
+    const FORBIDDEN_FIELDS: &[&str] = &["whole_hash:", "content_hash:", "fact_dep_signature:"];
+    const FORBIDDEN_EMBEDS: &[&str] = &["base: DeclIdentity", "owner: DeclIdentity"];
+
+    for variant in ["Instantiate {", "ResolveMacroPayload {"] {
+        let body = extract_brace_block(&source, variant).unwrap_or_else(|| {
+            panic!("R6 GUARD: could not locate `{variant}` variant body in family.rs")
+        });
+        for needle in FORBIDDEN_FIELDS {
+            assert!(
+                !body.contains(needle),
+                "R6 GUARD VIOLATION — `FamilyKey::{}` body in \
+                 `family.rs` contains forbidden field `{}`. The \
+                 `FamilyKey` is the mode-erased memo identity \
+                 (`Mutex<FxHashMap<FamilyKey, FamilySlots>>`) and \
+                 MUST NOT carry a content / version hash. Body:\n{}",
+                variant.trim_end_matches(" {"),
+                needle,
+                body
+            );
+        }
+        for needle in FORBIDDEN_EMBEDS {
+            assert!(
+                !body.contains(needle),
+                "R6 GUARD VIOLATION — `FamilyKey::{}` body in \
+                 `family.rs` embeds `{}`. `DeclIdentity` is a \
+                 versioned type — use the content-free `DeclKey` \
+                 instead. Body:\n{}",
+                variant.trim_end_matches(" {"),
+                needle,
+                body
+            );
+        }
+    }
+}
+
+/// Source-AST scan over `semantic_query.rs` — the `DeclKey` struct
+/// itself must be content-free. Adding a `whole_hash` / `content_hash`
+/// / `fact_dep_signature` field to `DeclKey` would silently re-violate
+/// R6 across every variant that embeds it, so this guard
+/// independently pins the struct shape.
+#[test]
+fn r6_decl_key_struct_is_content_free_in_source() {
+    let source = read_file("crates/verter_session/src/semantic_query.rs");
+    let body = extract_brace_block(&source, "pub struct DeclKey {")
+        .expect("R6 GUARD: could not locate `pub struct DeclKey` body in semantic_query.rs");
+
+    for needle in ["whole_hash:", "content_hash:", "fact_dep_signature:"] {
+        assert!(
+            !body.contains(needle),
+            "R6 GUARD VIOLATION — `pub struct DeclKey` carries forbidden \
+             field `{}`. The query-identity decl key MUST stay \
+             content-free; per-file version rooting belongs on the \
+             cached value, not on the key. Body:\n{}",
+            needle,
+            body
+        );
+    }
+}
+
+/// Locate the first `{ ... }` brace block following a textual
+/// `needle` in `source`. Returns the inner text between the matching
+/// `{` and the corresponding `}` (excluding the braces themselves) or
+/// `None` if the needle is missing or unbalanced.
+fn extract_brace_block(source: &str, needle: &str) -> Option<String> {
+    let start = source.find(needle)?;
+    let bytes = source.as_bytes();
+    let mut depth = 0usize;
+    let mut iter = start..bytes.len();
+    let mut open: Option<usize> = None;
+    for i in &mut iter {
+        match bytes[i] {
+            b'{' => {
+                if depth == 0 {
+                    open = Some(i);
+                }
+                depth += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let begin = open? + 1;
+                    return Some(source[begin..i].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}

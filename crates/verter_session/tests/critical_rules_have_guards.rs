@@ -126,6 +126,14 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // Per-file admission + route guards in sibling test files.
             "admission_guard",
             "route_generation_admission_guard",
+            // R6 query-identity-keys content-free guards
+            // (`Instantiate.base` / `ResolveMacroPayload.owner` mirror
+            // on the `FamilyKey` memo identity).
+            "r6_semantic_query_key_instantiate_base_is_content_free_decl_key",
+            "r6_semantic_query_key_resolve_macro_payload_owner_is_content_free_decl_key",
+            "r6_semantic_query_key_variants_carry_no_version_hash_in_source",
+            "r6_family_key_variants_carry_no_version_hash_in_source",
+            "r6_decl_key_struct_is_content_free_in_source",
         ],
     ),
     (
@@ -328,6 +336,30 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // the same predicate and fails the build on any
             // production-source violation.
             "guard7_predicate_rejects_block_vocabulary",
+        ],
+    ),
+    (
+        "Typed SignatureAdmission gate",
+        &[
+            // `ReadSetSignature` is the typed admission carrier:
+            // `is_cacheable()` returns `!overflowed`, so empty and
+            // overflow are structurally distinguishable at the
+            // type. Pre-fix the equivalent `Arc<[FactVersionRef]>`
+            // rail had no overflow bit and the warm-hit oracle
+            // could not discriminate the two states.
+            "empty_and_overflow_are_distinguishable_at_carrier_type",
+            // Source-grep arch-guard: no production callsite
+            // constructs `Arc::from(Vec::<FactVersionRef>::new())`
+            // outside `fact_signature_helpers::empty_fact_signature`
+            // and the legacy `finalise_signature_or_empty` helper
+            // is gone.
+            "no_call_site_constructs_empty_signature_from_overflow",
+            // Behavioural discriminator: the compile-tier cold-build
+            // producer refuses `compile_slots.insert` when the
+            // finalised tracer reports `Overflow`. Pre-fix the
+            // collapsed empty-signature slot landed and stayed
+            // warm trivially.
+            "compile_fact_signature_overflow_does_not_publish_compile_slot",
         ],
     ),
 ];

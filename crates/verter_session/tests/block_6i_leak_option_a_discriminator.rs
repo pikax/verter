@@ -212,7 +212,7 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
     // `InstantiationRef` carrier (the body lowering carrier-stops via
     // `may_reduce_operator(StructuralTransit) == false`).
     let instantiate_query = SemanticQueryKey::Instantiate {
-        base: decl_identity,
+        base: decl_identity.to_decl_key(),
         args,
         context: ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
     };

@@ -87,13 +87,13 @@ fn lower_mapped(host: &Arc<VerterHost>) -> SemanticNodeId {
                 whole_hash,
             },
         )) => {
-            let identity = verter_session::semantic_query::DeclIdentity {
+            let _ = whole_hash;
+            let base = verter_session::semantic_query::DeclKey {
                 canonical_id: Arc::clone(canonical_id),
-                whole_hash: *whole_hash,
                 decl_name: Arc::clone(name),
             };
             let key = SemanticQueryKey::Instantiate {
-                base: identity,
+                base,
                 args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                 context: ProjectionReductionContext::structural_transit_with_mode(
                     ProjectionMode::Navigate,
@@ -133,7 +133,7 @@ fn extract_mapper_inputs(
             }
             SemanticNodeData::DeclRef { identity } => {
                 let key = SemanticQueryKey::Instantiate {
-                    base: identity.clone(),
+                    base: identity.to_decl_key(),
                     args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                     context: ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
@@ -148,7 +148,7 @@ fn extract_mapper_inputs(
             }
             SemanticNodeData::InstantiationRef { base, args } => {
                 let key = SemanticQueryKey::Instantiate {
-                    base: base.clone(),
+                    base: base.to_decl_key(),
                     args: Arc::clone(args),
                     context: ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,

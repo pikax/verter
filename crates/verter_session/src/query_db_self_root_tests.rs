@@ -248,7 +248,7 @@ fn imported_registry_db_untracked_self_root_rejects_warm_entry() {
     let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
 
     let _ = db.get_or_compute_admit(&key, ctx, || {
-        crate::cooperative_admission::ComputeAdmission::Cacheable(
+        crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
             crate::component_meta_caches::ImportedRegistryEntry {
                 value: Some(Arc::new(imported_symbol(c, "stale"))),
                 fact_dep_signature: planted_self_root(c),
@@ -261,7 +261,7 @@ fn imported_registry_db_untracked_self_root_rejects_warm_entry() {
     let warm = db
         .get_or_compute_admit(&key, ctx, || {
             cold_ran = true;
-            crate::cooperative_admission::ComputeAdmission::Cacheable(
+            crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                 crate::component_meta_caches::ImportedRegistryEntry {
                     value: Some(Arc::new(imported_symbol(c, "recomputed"))),
                     fact_dep_signature: empty_fact_signature(),
@@ -519,7 +519,9 @@ fn prepared_target_db_declaring_canonical_edit_rejects_warm_entry() {
                 observed_decl_hash,
                 None,
             )
-            .expect("provenance-pure signature builds — both observed artifacts present");
+            .into_cacheable()
+            .expect("provenance-pure signature builds — both observed artifacts present")
+            .facts;
             Some((
                 Some((Arc::<str>::from(decl_canonical), Arc::<str>::from("stale"))),
                 sig,
@@ -1052,7 +1054,9 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
                 &observed_scope,
                 export_set,
                 &primed_dep_sig,
-            )?;
+            )
+            .into_cacheable()?
+            .facts;
             Some((materialized("stale", Arc::clone(&primed_dep_sig)), sig))
         })
         .expect("cold publish succeeds");
@@ -1233,7 +1237,9 @@ fn declaration_lookup_db_self_root_sibling_edit_rejects_warm_entry() {
                 "Probe",
                 observed_keyed_hash,
             )
-            .expect("provenance-pure signature builds — observed artifact present");
+            .into_cacheable()
+            .expect("provenance-pure signature builds — observed artifact present")
+            .facts;
             Some((decl("stale", c), sig))
         })
         .expect("cold publish succeeds — keyed canonical tracked");
@@ -1298,8 +1304,10 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
                 "Probe",
                 observed_keyed_hash,
             )
-            .expect("provenance-pure signature builds — observed artifact present");
-            crate::cooperative_admission::ComputeAdmission::Cacheable(
+            .into_cacheable()
+            .expect("provenance-pure signature builds — observed artifact present")
+            .facts;
+            crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                 crate::component_meta_caches::ImportedRegistryEntry {
                     value: Some(Arc::new(imported_symbol(c, "stale"))),
                     fact_dep_signature: sig,
@@ -1316,7 +1324,7 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
     let warm = db
         .get_or_compute_admit(&key, ctx2, || {
             cold_ran = true;
-            crate::cooperative_admission::ComputeAdmission::Cacheable(
+            crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                 crate::component_meta_caches::ImportedRegistryEntry {
                     value: Some(Arc::new(imported_symbol(c, "recomputed"))),
                     fact_dep_signature: empty_fact_signature(),
@@ -1368,7 +1376,9 @@ fn resolvability_db_self_root_sibling_edit_rejects_warm_entry() {
                 "Probe",
                 observed_keyed_hash,
             )
-            .expect("provenance-pure signature builds — observed artifact present");
+            .into_cacheable()
+            .expect("provenance-pure signature builds — observed artifact present")
+            .facts;
             Some((false, sig))
         })
         .expect("cold publish succeeds");
@@ -1427,7 +1437,9 @@ fn owner_collection_db_self_root_sibling_edit_rejects_warm_entry() {
                 "Probe",
                 observed_keyed_hash,
             )
-            .expect("provenance-pure signature builds — observed artifact present");
+            .into_cacheable()
+            .expect("provenance-pure signature builds — observed artifact present")
+            .facts;
             Some((
                 Some(TypeExpr::Unknown {
                     raw: "stale".to_string(),
@@ -1496,7 +1508,9 @@ fn prepared_surface_db_self_root_sibling_edit_rejects_warm_entry() {
                 "Probe",
                 observed_keyed_hash,
             )
-            .expect("provenance-pure signature builds — observed artifact present");
+            .into_cacheable()
+            .expect("provenance-pure signature builds — observed artifact present")
+            .facts;
             Some((PreparedSurfacePayload::Empty, sig))
         })
         .expect("cold publish succeeds");
@@ -1552,7 +1566,9 @@ fn routed_expr_surface_db_self_root_sibling_edit_rejects_warm_entry() {
                 "Probe",
                 observed_keyed_hash,
             )
-            .expect("provenance-pure signature builds — observed artifact present");
+            .into_cacheable()
+            .expect("provenance-pure signature builds — observed artifact present")
+            .facts;
             Some((
                 TypeExpr::Unknown {
                     raw: "stale".to_string(),
@@ -1778,7 +1794,9 @@ fn prepared_target_db_self_root_sibling_edit_rejects_warm_entry() {
                 observed_keyed_hash,
                 None,
             )
-            .expect("provenance-pure signature builds — observed artifact present");
+            .into_cacheable()
+            .expect("provenance-pure signature builds — observed artifact present")
+            .facts;
             Some((
                 Some((Arc::<str>::from(c), Arc::<str>::from("stale"))),
                 sig,
@@ -1979,7 +1997,9 @@ fn prepared_target_db_live_counter_does_not_drift_on_stale_eviction() {
                 observed_keyed_hash,
                 None,
             )
-            .expect("provenance-pure signature builds — observed artifact present");
+            .into_cacheable()
+            .expect("provenance-pure signature builds — observed artifact present")
+            .facts;
             Some((
                 Some((Arc::<str>::from(keyed), Arc::<str>::from("Probe"))),
                 sig,
@@ -2092,7 +2112,9 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
                 &observed_scope,
                 export_set,
                 &empty_dep_signature(),
-            )?;
+            )
+            .into_cacheable()?
+            .facts;
             Some((materialized("stale", empty_dep_signature()), sig))
         })
         .expect("cold publish succeeds");
@@ -2183,7 +2205,9 @@ fn prepared_member_db_self_root_sibling_edit_rejects_warm_entry() {
                 "field",
                 observed_keyed_hash,
             )
-            .expect("provenance-pure signature builds — observed artifact present");
+            .into_cacheable()
+            .expect("provenance-pure signature builds — observed artifact present")
+            .facts;
             Some((Some(projected_member("stale")), sig))
         })
         .expect("cold publish succeeds");
@@ -2319,12 +2343,12 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
         &dep_sig,
     );
     assert!(
-        sig.is_none(),
-        "engine_fact_signature_for_materialize_memo MUST return None when an observed \
+        sig.cacheable().is_none(),
+        "engine_fact_signature_for_materialize_memo MUST refuse admission (NonCacheable) when an observed \
          dependency carries DepVersion::RouteGeneration — route generation has no \
          validating source, so the entry must not be admitted to the shared memo. A \
          producer that roots the RouteGeneration dependency by any fact returns \
-         Some and admits the entry; that admission is the unsoundness this refusal \
+         Cacheable and admits the entry; that admission is the unsoundness this refusal \
          closes.",
     );
 
@@ -2339,7 +2363,9 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
             &observed_scope,
             export_set,
             &primed_dep_sig,
-        )?;
+        )
+        .into_cacheable()?
+        .facts;
         Some((materialized("fresh", Arc::clone(&primed_dep_sig)), fact_sig))
     });
     // The publish path declined the entry — `get_or_compute` returns
@@ -2464,7 +2490,9 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
             .expect("scope SyntacticExportSet parse fact recoverable"),
         &dep_sig,
     )
-    .expect("a ProjectGeneration dep signature is admissible (Some)");
+    .into_cacheable()
+    .expect("a ProjectGeneration dep signature is admissible (Some)")
+    .facts;
     assert!(
         sig.iter().any(|f| matches!(
             f,
@@ -2494,7 +2522,9 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
                 &observed_scope,
                 export_set,
                 &primed_dep_sig,
-            )?;
+            )
+            .into_cacheable()?
+            .facts;
             Some((materialized("stale", Arc::clone(&primed_dep_sig)), fact_sig))
         })
         .expect("cold publish succeeds");
@@ -2652,7 +2682,9 @@ fn materialize_memo_db_observed_whole_hash_dependency_preserves_observed_hash() 
             .expect("scope SyntacticExportSet parse fact recoverable"),
         &dep_sig,
     )
-    .expect("a WholeHash-only dep signature must produce an admissible fact signature");
+    .into_cacheable()
+    .expect("a WholeHash-only dep signature must produce an admissible fact signature")
+    .facts;
 
     let dep_fact_hash = sig.iter().find_map(|f| match f {
         FactVersionRef::FileWholeHash { canonical_id, hash } if canonical_id == dep => Some(*hash),
@@ -2767,7 +2799,9 @@ fn materialize_memo_db_scope_self_root_carries_observed_hash_not_current() {
         observed_export_set,
         &empty_dep_signature(),
     )
-    .expect("a dep-free materialize-memo signature is admissible");
+    .into_cacheable()
+    .expect("a dep-free materialize-memo signature is admissible")
+    .facts;
 
     let scope_fact_hash = sig
         .iter()
@@ -2881,7 +2915,9 @@ fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end(
             &observed_scope_h1,
             export_set,
             &empty_dep_signature(),
-        )?;
+        )
+        .into_cacheable()?
+        .facts;
         Some((materialized("stale", empty_dep_signature()), fact_sig))
     });
     assert!(
@@ -2982,8 +3018,8 @@ fn materialize_memo_db_mixed_scope_observation_refuses_admission() {
         &dep_sig,
     );
     assert!(
-        sig.is_none(),
-        "engine_fact_signature_for_materialize_memo MUST return None when an observed \
+        sig.cacheable().is_none(),
+        "engine_fact_signature_for_materialize_memo MUST refuse admission (NonCacheable) when an observed \
          dependency names the keyed scope with a WholeHash disagreeing with the \
          observation's whole hash — a torn read of the scope's content \
          version. A builder that unconditionally skips a scope-named dependency admits \
@@ -3036,8 +3072,8 @@ fn materialize_memo_db_scope_export_set_canonical_mismatch_refuses_admission() {
         &empty_dep_signature(),
     );
     assert!(
-        sig.is_none(),
-        "engine_fact_signature_for_materialize_memo MUST return None when the supplied \
+        sig.cacheable().is_none(),
+        "engine_fact_signature_for_materialize_memo MUST refuse admission (NonCacheable) when the supplied \
          SyntacticExportSet parse fact describes a canonical other than the keyed scope — \
          a Parse fact for the wrong file mis-roots the entry. A builder that pushes the \
          supplied parse fact without a canonical-equality guard emits a self-root \
@@ -3298,7 +3334,9 @@ fn imported_registry_db_signature_builder_is_provenance_pure() {
     // Step 2 — anchor non-vacuity: observed == current builds `Some`
     // rooted on `H1`.
     let anchored = engine_fact_signature_for_exported_type(ctx, c, "Probe", observed_h1)
-        .expect("observed-current signature builds");
+        .into_cacheable()
+        .expect("observed-current signature builds")
+        .facts;
     assert!(
         signature_roots_whole_hash(&anchored, c, observed_h1),
         "anchor: the signature for the observed-current case must root on H1",
@@ -3315,7 +3353,9 @@ fn imported_registry_db_signature_builder_is_provenance_pure() {
     // Step 4 — the STALE observed hash refuses admission.
     let ctx2: &dyn ResolverContext = &host;
     assert!(
-        engine_fact_signature_for_exported_type(ctx2, c, "Probe", observed_h1).is_none(),
+        engine_fact_signature_for_exported_type(ctx2, c, "Probe", observed_h1)
+            .into_cacheable()
+            .is_none(),
         "ImportedRegistryDb's signature builder MUST return None for the STALE observed \
          hash H1 after the keyed canonical was edited to H2 — the H1 parse-fact registry \
          is drained, so shared-cache admission is refused. A pre-fix builder re-reads \
@@ -3326,7 +3366,9 @@ fn imported_registry_db_signature_builder_is_provenance_pure() {
     // Step 5 — the CURRENT observed hash still builds, proving step 4
     // is the stale-observation refusal, not a broken builder.
     let current_sig = engine_fact_signature_for_exported_type(ctx2, c, "Probe", current_h2)
-        .expect("current-observed signature still builds");
+        .into_cacheable()
+        .expect("current-observed signature still builds")
+        .facts;
     assert!(
         signature_roots_whole_hash(&current_sig, c, current_h2),
         "the current-observed signature must root on H2 — confirming step 4's None is \
@@ -3348,7 +3390,9 @@ fn declaration_lookup_db_signature_builder_is_provenance_pure() {
     let ctx: &dyn ResolverContext = &host;
 
     let anchored = engine_fact_signature_for_exported_type(ctx, c, "Probe", observed_h1)
-        .expect("observed-current signature builds");
+        .into_cacheable()
+        .expect("observed-current signature builds")
+        .facts;
     assert!(
         signature_roots_whole_hash(&anchored, c, observed_h1),
         "anchor: the signature for the observed-current case must root on H1",
@@ -3363,14 +3407,18 @@ fn declaration_lookup_db_signature_builder_is_provenance_pure() {
 
     let ctx2: &dyn ResolverContext = &host;
     assert!(
-        engine_fact_signature_for_exported_type(ctx2, c, "Probe", observed_h1).is_none(),
+        engine_fact_signature_for_exported_type(ctx2, c, "Probe", observed_h1)
+            .into_cacheable()
+            .is_none(),
         "DeclarationLookupDb's signature builder MUST return None for the STALE observed \
          hash H1 after the keyed canonical was edited to H2. A pre-fix builder re-reads \
          current content and returns Some rooted on H2.",
     );
 
     let current_sig = engine_fact_signature_for_exported_type(ctx2, c, "Probe", current_h2)
-        .expect("current-observed signature still builds");
+        .into_cacheable()
+        .expect("current-observed signature still builds")
+        .facts;
     assert!(
         signature_roots_whole_hash(&current_sig, c, current_h2),
         "the current-observed signature must root on H2",
@@ -3391,7 +3439,9 @@ fn resolvability_db_signature_builder_is_provenance_pure() {
     let ctx: &dyn ResolverContext = &host;
 
     let anchored = engine_fact_signature_for_exported_type(ctx, c, "Probe", observed_h1)
-        .expect("observed-current signature builds");
+        .into_cacheable()
+        .expect("observed-current signature builds")
+        .facts;
     assert!(
         signature_roots_whole_hash(&anchored, c, observed_h1),
         "anchor: the signature for the observed-current case must root on H1",
@@ -3406,14 +3456,18 @@ fn resolvability_db_signature_builder_is_provenance_pure() {
 
     let ctx2: &dyn ResolverContext = &host;
     assert!(
-        engine_fact_signature_for_exported_type(ctx2, c, "Probe", observed_h1).is_none(),
+        engine_fact_signature_for_exported_type(ctx2, c, "Probe", observed_h1)
+            .into_cacheable()
+            .is_none(),
         "ResolvabilityDb's signature builder MUST return None for the STALE observed \
          hash H1 after the keyed canonical was edited to H2. A pre-fix builder re-reads \
          current content and returns Some rooted on H2.",
     );
 
     let current_sig = engine_fact_signature_for_exported_type(ctx2, c, "Probe", current_h2)
-        .expect("current-observed signature still builds");
+        .into_cacheable()
+        .expect("current-observed signature still builds")
+        .facts;
     assert!(
         signature_roots_whole_hash(&current_sig, c, current_h2),
         "the current-observed signature must root on H2",
@@ -3435,7 +3489,9 @@ fn owner_collection_db_signature_builder_is_provenance_pure() {
     let ctx: &dyn ResolverContext = &host;
 
     let anchored = engine_fact_signature_for_exported_type(ctx, c, "Probe", observed_h1)
-        .expect("observed-current signature builds");
+        .into_cacheable()
+        .expect("observed-current signature builds")
+        .facts;
     assert!(
         signature_roots_whole_hash(&anchored, c, observed_h1),
         "anchor: the signature for the observed-current case must root on H1",
@@ -3450,14 +3506,18 @@ fn owner_collection_db_signature_builder_is_provenance_pure() {
 
     let ctx2: &dyn ResolverContext = &host;
     assert!(
-        engine_fact_signature_for_exported_type(ctx2, c, "Probe", observed_h1).is_none(),
+        engine_fact_signature_for_exported_type(ctx2, c, "Probe", observed_h1)
+            .into_cacheable()
+            .is_none(),
         "OwnerCollectionDb's signature builder MUST return None for the STALE observed \
          hash H1 after the keyed canonical was edited to H2. A pre-fix builder re-reads \
          current content and returns Some rooted on H2.",
     );
 
     let current_sig = engine_fact_signature_for_exported_type(ctx2, c, "Probe", current_h2)
-        .expect("current-observed signature still builds");
+        .into_cacheable()
+        .expect("current-observed signature still builds")
+        .facts;
     assert!(
         signature_roots_whole_hash(&current_sig, c, current_h2),
         "the current-observed signature must root on H2",
@@ -3483,7 +3543,9 @@ fn prepared_member_db_signature_builder_is_provenance_pure() {
     // The keyed member is `Probe.a` — `keyed_source_with_sibling`
     // declares `interface Probe { a: number; b: string; }`.
     let anchored = engine_fact_signature_for_canonical_member(ctx, c, "Probe", "a", observed_h1)
-        .expect("observed-current signature builds");
+        .into_cacheable()
+        .expect("observed-current signature builds")
+        .facts;
     assert!(
         signature_roots_whole_hash(&anchored, c, observed_h1),
         "anchor: the signature for the observed-current case must root on H1",
@@ -3498,7 +3560,9 @@ fn prepared_member_db_signature_builder_is_provenance_pure() {
 
     let ctx2: &dyn ResolverContext = &host;
     assert!(
-        engine_fact_signature_for_canonical_member(ctx2, c, "Probe", "a", observed_h1).is_none(),
+        engine_fact_signature_for_canonical_member(ctx2, c, "Probe", "a", observed_h1)
+            .into_cacheable()
+            .is_none(),
         "PreparedMemberDb's signature builder MUST return None for the STALE observed \
          hash H1 after the keyed canonical was edited to H2 — the H1 MemberPresence / \
          Member parse-fact registry is drained. A pre-fix builder re-reads current \
@@ -3506,7 +3570,9 @@ fn prepared_member_db_signature_builder_is_provenance_pure() {
     );
 
     let current_sig = engine_fact_signature_for_canonical_member(ctx2, c, "Probe", "a", current_h2)
-        .expect("current-observed signature still builds");
+        .into_cacheable()
+        .expect("current-observed signature still builds")
+        .facts;
     assert!(
         signature_roots_whole_hash(&current_sig, c, current_h2),
         "the current-observed signature must root on H2",
@@ -3539,7 +3605,9 @@ fn prepared_target_db_signature_builder_is_provenance_pure() {
         observed_h1,
         None,
     )
-    .expect("observed-current signature builds");
+    .into_cacheable()
+    .expect("observed-current signature builds")
+    .facts;
     assert!(
         signature_roots_whole_hash(&anchored, c, observed_h1),
         "anchor: the signature for the observed-current case must root on H1",
@@ -3564,6 +3632,7 @@ fn prepared_target_db_signature_builder_is_provenance_pure() {
             observed_h1,
             None,
         )
+        .into_cacheable()
         .is_none(),
         "PreparedTargetDb's signature builder MUST return None for the STALE observed \
          hash H1 after the keyed canonical was edited to H2. A pre-fix builder re-reads \
@@ -3573,7 +3642,9 @@ fn prepared_target_db_signature_builder_is_provenance_pure() {
     let current_sig = engine_fact_signature_for_prepared_target(
         ctx2, c, "Probe", current_h2, c, "Probe", current_h2, None,
     )
-    .expect("current-observed signature still builds");
+    .into_cacheable()
+    .expect("current-observed signature still builds")
+    .facts;
     assert!(
         signature_roots_whole_hash(&current_sig, c, current_h2),
         "the current-observed signature must root on H2",
@@ -4107,7 +4178,9 @@ fn materialize_memo_scope_lowering_and_signature_root_share_one_observation() {
             .expect("scope SyntacticExportSet parse fact recoverable"),
         &empty_dep_signature(),
     )
-    .expect("a dep-free materialize-memo signature is admissible");
+    .into_cacheable()
+    .expect("a dep-free materialize-memo signature is admissible")
+    .facts;
     let signature_self_root_hash = signature
         .iter()
         .find_map(|f| match f {
@@ -4301,7 +4374,9 @@ fn observe_materialize_scope_refuses_evicted_stale_artifact() {
             &observed_scope,
             export_set,
             &empty_dep_signature(),
-        )?;
+        )
+        .into_cacheable()?
+        .facts;
         Some((materialized("stale", empty_dep_signature()), fact_sig))
     });
     assert!(
@@ -4604,59 +4679,28 @@ fn materialize_memo_publish_site_degrades_on_none_scope_observation() {
 }
 
 // ---------------------------------------------------------------------------
-// Cooperative-admission joiner view-validation — cache-level discriminator.
+// Cross-view candidate isolation through `ImportedRegistryDb` (R20).
 // ---------------------------------------------------------------------------
+//
+// `ImportedRegistryDb::get_or_compute_admit` routes through the
+// query-identity split-publish lifecycle over the shared
+// `ReverseIndexedCandidateStore`. The flight lane is keyed by
+// `(key, store-view compat token)`, so a base request and an overlay
+// request on the SAME key run on DISTINCT flight lanes — they do NOT
+// coalesce onto one cold build. Each computes and admits its OWN
+// candidate, and the two coexist in one content-free slot (R20 overlay
+// isolation). A reader under either view selects the candidate that
+// validates against its own content identity; the other view's candidate
+// is never served cross-view.
 
-/// Cache-level cross-view discriminator through `ImportedRegistryDb`.
-///
-/// `ImportedRegistryDb::get_or_compute_admit` routes through the
-/// `cooperative_admit_with_post_publish` substrate. The substrate's
-/// single-flight coalesces concurrent cold misses for the same key —
-/// but two requests carrying the same key can run under different
-/// views (a base context and a session/overlay context). Their
-/// resolved-import results are NOT interchangeable: each must validate
-/// the entry's `fact_dep_signature` against its OWN content identity,
-/// exactly as a warm hit does.
-///
-/// Setup: a real file is upserted, giving it a base content hash. The
-/// winner runs `get_or_compute_admit` under the base host context and
-/// publishes a `Cacheable` entry whose `fact_dep_signature` self-roots
-/// the keyed canonical at its BASE hash — so the winner's own
-/// `revalidate_after_compute` (base view) accepts it and the entry
-/// lands in the map. The follower runs the SAME key under a
-/// `SessionResolverContext` whose overlay re-roots the keyed canonical
-/// to a DIFFERENT content hash. The follower coalesces onto the
-/// winner's flight, wakes onto the published entry, and runs
-/// `ImportedRegistryDb`'s `validate` closure against its OWN overlay
-/// view.
-///
-/// Deterministic rendezvous: the winner is held inside its `compute()`
-/// closure; the test driver releases it ONLY after polling the
-/// winner's `InflightSlot` strong count to PROVE the follower has
-/// coalesced onto that slot (count `>= 4` — see the loop below). A
-/// fixed sleep would not discriminate the joiner path: on a slow
-/// worker the winner could publish first and the follower would then
-/// pass via the warm-map-reject path instead of the joiner-fork path.
-///
-/// Discrimination:
-/// - Pre-fix: the cooperative joiner ran `project` (NOT `validate`) on
-///   the winner's published entry — no view check — so the follower
-///   inherited the winner's base-rooted symbol and its own cold
-///   closure never ran (`follower_cold_ran == false`).
-/// - Post-fix: the joiner runs `ImportedRegistryDb`'s `validate`
-///   closure; the base-rooted self-root mismatches the follower's
-///   overlay hash, `validate` returns `None`, the follower forks and
-///   cold-recomputes for its own view (`follower_cold_ran == true`),
-///   returning its OWN symbol.
+/// A base request and an overlay request on the same imported-registry
+/// key each resolve their OWN view-accurate symbol, and the two
+/// candidates COEXIST in the slot — neither overwrites the other (R20).
 #[test]
-fn imported_registry_cooperative_joiner_validates_against_follower_view() {
+fn imported_registry_base_and_overlay_candidates_coexist() {
     use crate::resolver_core::SessionResolverContext;
     use crate::session_view::{OverlaidView, SessionView};
     use rustc_hash::FxHashMap;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::mpsc;
-    use std::thread;
-    use std::time::{Duration, Instant};
 
     let canonical = "/coop_xview/imported.ts";
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -4670,490 +4714,23 @@ fn imported_registry_cooperative_joiner_validates_against_follower_view() {
         .expect("base IndexedReady materialises")
         .whole_hash;
     let host = Arc::new(host);
+    let key: (Arc<str>, Arc<str>) = (Arc::<str>::from(canonical), Arc::<str>::from("Probe"));
 
-    // The winner's published entry self-roots the keyed canonical at
-    // its BASE content hash — so the winner's own
-    // `revalidate_after_compute` (run under the base view) accepts the
-    // entry and it is admitted into the map.
+    // Base-view publish — self-roots the keyed canonical at its BASE hash.
     let base_self_root: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
         canonical_id: canonical.to_string(),
         hash: base_hash,
     }]);
-
-    let db_handle = Arc::clone(&host);
-    let key: (Arc<str>, Arc<str>) = (Arc::<str>::from(canonical), Arc::<str>::from("Probe"));
-
-    let (tx_winner_in_compute, rx_winner_in_compute) = mpsc::channel::<()>();
-    let (tx_release_winner, rx_release_winner) = mpsc::channel::<()>();
-
-    // Winner thread — runs under the base host context.
-    let winner_host = Arc::clone(&db_handle);
-    let winner_key = key.clone();
-    let winner_self_root = Arc::clone(&base_self_root);
-    let winner = thread::spawn(move || {
-        let ctx: &dyn ResolverContext = winner_host.as_ref();
-        let db = winner_host.project_type_store().imported_registry_db();
-        db.get_or_compute_admit(&winner_key, ctx, || {
-            tx_winner_in_compute.send(()).expect("winner: signal claim");
-            rx_release_winner
-                .recv()
-                .expect("winner: released by driver");
-            crate::cooperative_admission::ComputeAdmission::Cacheable(
-                crate::component_meta_caches::ImportedRegistryEntry {
-                    value: Some(Arc::new(imported_symbol(canonical, "winner-base"))),
-                    fact_dep_signature: Arc::clone(&winner_self_root),
-                    validated_at_generation: ctx.project_type_store().current_project_generation(),
-                },
-            )
-        })
-    });
-
-    rx_winner_in_compute
-        .recv()
-        .expect("winner entered compute (claimed the inflight slot)");
-
-    // Follower thread — runs under a session whose overlay re-roots the
-    // keyed canonical to a DIFFERENT content hash, so the winner's
-    // base-rooted entry must not validate under the follower's view.
-    let follower_cold_ran = Arc::new(AtomicBool::new(false));
-    let follower_host = Arc::clone(&db_handle);
-    let follower_key = key.clone();
-    let follower_cold_flag = Arc::clone(&follower_cold_ran);
-    let follower = thread::spawn(move || {
-        // Overlay re-roots the keyed canonical: a different source body
-        // yields a different overlay content hash.
-        let overlay_source: Arc<str> = Arc::from("export interface Probe { overlaid: string; }\n");
-        let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
-        overlays.insert(canonical.to_string(), Arc::clone(&overlay_source));
-        let view = OverlaidView::new(Arc::clone(&follower_host), overlays);
-        let overlay_hash = view
-            .overlay_content_hash_for(canonical)
-            .expect("overlay content hash present");
-        assert_ne!(
-            overlay_hash, base_hash,
-            "fixture invariant: the overlay hash must differ from the base hash",
-        );
-        follower_host
-            .materialize_overlay_indexed_ready_with_view(canonical, &view)
-            .expect("overlay IndexedReady materialises");
-        let session_store_view = follower_host
-            .resolver_store_view()
-            .with_session_overlay(&follower_host, &view);
-        let session_ctx = SessionResolverContext::new(
-            &follower_host,
-            &view,
-            &session_store_view,
-            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
-        );
-        let db = follower_host.project_type_store().imported_registry_db();
-        db.get_or_compute_admit(&follower_key, &session_ctx, || {
-            follower_cold_flag.store(true, Ordering::SeqCst);
-            crate::cooperative_admission::ComputeAdmission::Cacheable(
-                crate::component_meta_caches::ImportedRegistryEntry {
-                    value: Some(Arc::new(imported_symbol(canonical, "follower-overlay"))),
-                    fact_dep_signature: Arc::from(vec![FactVersionRef::FileWholeHash {
-                        canonical_id: canonical.to_string(),
-                        hash: overlay_hash,
-                    }]),
-                    validated_at_generation: session_ctx
-                        .project_type_store()
-                        .current_project_generation(),
-                },
-            )
-        })
-    });
-
-    // Deterministic rendezvous — prove the follower has coalesced onto
-    // the winner's in-flight slot BEFORE releasing the winner. A fixed
-    // sleep proves nothing: on a slow worker the winner would publish
-    // first, the follower would then reject the warm map entry and
-    // recompute, and the test would pass via the warm-map-reject path
-    // instead of the joiner-fork path it advertises.
-    //
-    // Poll the winner's `InflightSlot` strong count. While the winner
-    // is parked inside its `compute()` closure (blocked on
-    // `rx_release_winner`), the substrate holds exactly three `Arc`s on
-    // the slot: the in-flight table entry, the winner's `slot` local,
-    // and the winner's `panic_guard.slot`. The follower bumps the count
-    // to 4 the instant it clones its own `Arc` via the slot-acquisition
-    // `table.entry(key).or_insert_with(...).clone()` — past which it
-    // deterministically reaches the cooperative joiner wait branch. We
-    // release the winner only once the count is `>= 4`, so the follower
-    // is a PROVEN joiner on every run regardless of worker speed.
-    let db = host.project_type_store().imported_registry_db();
-    let rendezvous_deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if db
-            .inflight_table_for_test()
-            .slot_strong_count(&key)
-            .is_some_and(|count| count >= 4)
-        {
-            break;
-        }
-        assert!(
-            Instant::now() < rendezvous_deadline,
-            "follower failed to coalesce onto the winner's in-flight \
-             slot within 10s — the deterministic joiner rendezvous is \
-             broken",
-        );
-        std::hint::spin_loop();
-    }
-    tx_release_winner.send(()).expect("release winner");
-
-    let winner_result = winner.join().expect("winner joined");
-    let follower_result = follower.join().expect("follower joined");
-
-    // The winner ran under the base view and resolves its own symbol.
-    assert_eq!(
-        winner_result.flatten().map(|s| s.exported_name.clone()),
-        Some("winner-base".to_string()),
-        "the winner resolves its own base-view symbol",
-    );
-
-    // Discriminator: pre-fix the cooperative joiner ran `project` on the
-    // winner's published entry with no view check, so the follower
-    // never ran its own cold closure. Post-fix the joiner runs
-    // `ImportedRegistryDb`'s `validate` closure; the winner's
-    // base-rooted self-root mismatches the follower's overlay hash, so
-    // `validate` returns `None` and the follower forks.
-    assert!(
-        follower_cold_ran.load(Ordering::SeqCst),
-        "ImportedRegistryDb's cooperative joiner MUST run the cache's \
-         `validate` closure against the follower's OWN overlay view — \
-         the winner's entry self-roots the keyed canonical at the BASE \
-         hash and must not validate under the follower's overlay view, \
-         so the follower MUST fork and cold-recompute. Pre-fix the \
-         joiner ran `project` (no view check) and inherited the winner's \
-         base-rooted symbol without recomputing.",
-    );
-    assert_eq!(
-        follower_result.flatten().map(|s| s.exported_name.clone()),
-        Some("follower-overlay".to_string()),
-        "the follower's resolved symbol MUST be its OWN overlay-view \
-         recompute — the winner's base-view symbol is not interchangeable \
-         across views",
-    );
-}
-
-/// P2 removal-cleanup discriminator through `ImportedRegistryDb`.
-///
-/// `ImportedRegistryDb` does publish-side bookkeeping: its
-/// cooperative-admission `post_publish` bumps the shared
-/// `component_meta_cache_live` counter and registers the key in the
-/// per-canonical reverse index. A cross-view joiner-fork removes the
-/// winner's published entry — and that removal MUST run the cache's
-/// removal-side cleanup (decrement the counter, drop the reverse-index
-/// registration) symmetrically with `post_publish`. A raw `DashMap`
-/// removal skips the cleanup.
-///
-/// This test drives a full joiner-fork (winner publishes a base-rooted
-/// entry; follower under an overlay rejects it, forks, and publishes
-/// its own overlay-rooted entry) and then checks that
-/// `ImportedRegistryDb`'s contribution to the shared live counter
-/// equals its actual live entry count.
-///
-/// Discrimination — counter consistency:
-/// - Pre-fix: when the joiner-fork's entry removal is a raw
-///   `map.remove_if` that skips the removal cleanup, the winner's
-///   `post_publish` increments the counter (+1); the joiner-fork
-///   removes the winner entry with NO decrement; the follower's
-///   re-publish increments again (+1). The counter delta is +2 while
-///   the map holds exactly ONE entry — over-counted by one.
-/// - Post-fix: the joiner-fork removal routes through
-///   `removal_cleanup`, decrementing the counter (−1). The counter
-///   delta is +1, matching the one live entry.
-///
-/// The counter is the discriminating signal: pre-fix `counter_delta`
-/// (+2) ≠ `entries_delta` (+1); post-fix they are equal. The
-/// reverse-index assertion below is an additional consistency check —
-/// for this same-key fork the follower re-publishes the same key so
-/// the reverse index ends consistent on both trees; it guards against
-/// a regression that would leave the key unregistered.
-#[test]
-fn imported_registry_joiner_fork_removal_keeps_live_counter_consistent() {
-    use crate::resolver_core::SessionResolverContext;
-    use crate::session_view::{OverlaidView, SessionView};
-    use rustc_hash::FxHashMap;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::mpsc;
-    use std::thread;
-    use std::time::{Duration, Instant};
-
-    let canonical = "/coop_xview_p2/imported.ts";
-    let host = VerterHost::new_standalone(HostConfig::default());
-    upsert(
-        &host,
-        canonical,
-        "export interface Probe { base: number; }\n",
-    );
-    let base_hash = host
-        .ensure_indexed_ready(canonical)
-        .expect("base IndexedReady materialises")
-        .whole_hash;
-    let host = Arc::new(host);
-
-    let base_self_root: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: canonical.to_string(),
-        hash: base_hash,
-    }]);
-
-    let key: (Arc<str>, Arc<str>) = (Arc::<str>::from(canonical), Arc::<str>::from("Probe"));
-
-    // Snapshot the shared live counter AND `ImportedRegistryDb`'s entry
-    // count BEFORE the cooperative race. The shared counter is bumped
-    // by every component-meta cache, so the discriminator is the
-    // DELTA, not the absolute value.
-    let live_counter = Arc::clone(&host.project_type_store().counters.component_meta_cache_live);
-    let counter_before = live_counter.load(Ordering::Relaxed);
-    let entries_before = host
-        .project_type_store()
-        .imported_registry_db()
-        .live_count();
-
-    let (tx_winner_in_compute, rx_winner_in_compute) = mpsc::channel::<()>();
-    let (tx_release_winner, rx_release_winner) = mpsc::channel::<()>();
-
-    // Winner — publishes a base-rooted `Cacheable` entry.
-    let winner_host = Arc::clone(&host);
-    let winner_key = key.clone();
-    let winner_self_root = Arc::clone(&base_self_root);
-    let winner = thread::spawn(move || {
-        let ctx: &dyn ResolverContext = winner_host.as_ref();
-        let db = winner_host.project_type_store().imported_registry_db();
-        db.get_or_compute_admit(&winner_key, ctx, || {
-            tx_winner_in_compute.send(()).expect("winner: signal claim");
-            rx_release_winner
-                .recv()
-                .expect("winner: released by driver");
-            crate::cooperative_admission::ComputeAdmission::Cacheable(
-                crate::component_meta_caches::ImportedRegistryEntry {
-                    value: Some(Arc::new(imported_symbol(canonical, "winner-base"))),
-                    fact_dep_signature: Arc::clone(&winner_self_root),
-                    validated_at_generation: ctx.project_type_store().current_project_generation(),
-                },
-            )
-        })
-    });
-
-    rx_winner_in_compute
-        .recv()
-        .expect("winner entered compute (claimed the inflight slot)");
-
-    // Follower — under an overlay that re-roots the keyed canonical, so
-    // the winner's base-rooted entry fails the follower's view check;
-    // the follower forks and cold-recomputes its own entry.
-    let follower_cold_ran = Arc::new(AtomicBool::new(false));
-    let follower_host = Arc::clone(&host);
-    let follower_key = key.clone();
-    let follower_cold_flag = Arc::clone(&follower_cold_ran);
-    let follower = thread::spawn(move || {
-        let overlay_source: Arc<str> = Arc::from("export interface Probe { overlaid: string; }\n");
-        let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
-        overlays.insert(canonical.to_string(), Arc::clone(&overlay_source));
-        let view = OverlaidView::new(Arc::clone(&follower_host), overlays);
-        let overlay_hash = view
-            .overlay_content_hash_for(canonical)
-            .expect("overlay content hash present");
-        assert_ne!(
-            overlay_hash, base_hash,
-            "fixture invariant: the overlay hash must differ from the base hash",
-        );
-        follower_host
-            .materialize_overlay_indexed_ready_with_view(canonical, &view)
-            .expect("overlay IndexedReady materialises");
-        let session_store_view = follower_host
-            .resolver_store_view()
-            .with_session_overlay(&follower_host, &view);
-        let session_ctx = SessionResolverContext::new(
-            &follower_host,
-            &view,
-            &session_store_view,
-            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
-        );
-        let db = follower_host.project_type_store().imported_registry_db();
-        db.get_or_compute_admit(&follower_key, &session_ctx, || {
-            follower_cold_flag.store(true, Ordering::SeqCst);
-            crate::cooperative_admission::ComputeAdmission::Cacheable(
-                crate::component_meta_caches::ImportedRegistryEntry {
-                    value: Some(Arc::new(imported_symbol(canonical, "follower-overlay"))),
-                    fact_dep_signature: Arc::from(vec![FactVersionRef::FileWholeHash {
-                        canonical_id: canonical.to_string(),
-                        hash: overlay_hash,
-                    }]),
-                    validated_at_generation: session_ctx
-                        .project_type_store()
-                        .current_project_generation(),
-                },
-            )
-        })
-    });
-
-    // Deterministic rendezvous — release the winner only once the
-    // follower has PROVABLY coalesced onto the winner's in-flight slot
-    // (strong count `>= 4`: table + winner.slot + winner.panic_guard +
-    // follower.slot). See
-    // `imported_registry_cooperative_joiner_validates_against_follower_view`.
-    let rendezvous_db = host.project_type_store().imported_registry_db();
-    let rendezvous_deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if rendezvous_db
-            .inflight_table_for_test()
-            .slot_strong_count(&key)
-            .is_some_and(|count| count >= 4)
-        {
-            break;
-        }
-        assert!(
-            Instant::now() < rendezvous_deadline,
-            "follower failed to coalesce onto the winner's in-flight \
-             slot within 10s — the deterministic joiner rendezvous is \
-             broken",
-        );
-        std::hint::spin_loop();
-    }
-    tx_release_winner.send(()).expect("release winner");
-
-    let _winner_result = winner.join().expect("winner joined");
-    let _follower_result = follower.join().expect("follower joined");
-
-    // The follower MUST have forked — this test only discriminates the
-    // removal cleanup if the joiner-fork path actually ran.
-    assert!(
-        follower_cold_ran.load(Ordering::SeqCst),
-        "fixture invariant: the follower MUST fork and cold-recompute \
-         (the winner's base-rooted entry must fail the follower's \
-         overlay-view check) — otherwise the joiner-fork removal under \
-         test never executed",
-    );
-
-    let counter_after = live_counter.load(Ordering::Relaxed);
-    let db = host.project_type_store().imported_registry_db();
-    let entries_after = db.live_count();
-    let counter_delta: u64 = counter_after - counter_before;
-    let entries_delta: u64 = (entries_after - entries_before) as u64;
-
-    // After a joiner-fork the map holds exactly ONE entry for the key
-    // (the follower's overlay-rooted re-publish; the winner's
-    // base-rooted entry was removed by the fork).
-    assert_eq!(
-        entries_delta, 1,
-        "after the joiner-fork the cache must hold exactly one live \
-         entry for the key — the winner's entry removed, the follower's \
-         re-published",
-    );
-
-    // Discriminator: pre-fix the joiner-fork's raw removal skipped the
-    // counter decrement, so the shared counter over-counts (delta +2)
-    // while the map holds one entry. Post-fix the removal routes
-    // through `removal_cleanup` and the counter delta matches the live
-    // entry count.
-    assert_eq!(
-        counter_delta, entries_delta,
-        "the shared `component_meta_cache_live` counter delta ({counter_delta}) \
-         MUST equal `ImportedRegistryDb`'s live-entry delta ({entries_delta}) \
-         after a joiner-fork. A larger counter delta means the \
-         joiner-fork's entry removal skipped the cache-owned removal \
-         cleanup — the winner's entry was removed without decrementing \
-         the counter that its `post_publish` incremented.",
-    );
-
-    // Reverse-index consistency: the one live key must be registered
-    // exactly once; no removal must have left it unregistered.
-    assert!(
-        db.reverse_index_contains_for_test(&key),
-        "the live key must be registered in the per-canonical reverse \
-         index — the joiner-fork's removal cleanup must not unregister \
-         a key that a subsequent re-publish re-registered",
-    );
-}
-
-/// P2 — the removal-cleanup reverse-index `unregister` must be
-/// identity-checked: a stale cleanup must NOT delete a FRESH
-/// registration a concurrent cold-publish put under the same key.
-///
-/// `ImportedRegistryDb`'s cooperative-admission `removal_cleanup`
-/// closure drops the removed entry's per-canonical reverse-index
-/// registration. The substrate's `map.remove_if` (which removes the
-/// caller's stale entry) and that `removal_cleanup` are NOT atomic:
-/// a caller preempted between them gives a concurrent caller a window
-/// to cold-publish a FRESH entry under the same key and `register` it
-/// in the reverse index. If the `removal_cleanup`'s `unregister` were
-/// key-only, the resumed stale cleanup would delete that fresh
-/// registration — leaving a live entry in `entries` that
-/// `invalidate_canonical` (which drains via the reverse index) can no
-/// longer find. A later content edit then leaves that entry stale and
-/// served.
-///
-/// This test drives that exact interleaving deterministically and
-/// single-threaded. The winning caller publishes entry A under `key`,
-/// self-rooting the canonical at its BASE content hash. A second read
-/// then runs under a `SessionResolverContext` whose overlay re-roots
-/// the canonical to a DIFFERENT content hash — so the warm hit on A
-/// fails the overlay-view `validate` and the substrate removes A.
-/// (An overlay is session-local: it does NOT run the host's
-/// `invalidate_canonical` cascade, so entry A genuinely survives in
-/// the base `entries` map between the two reads.)
-///
-/// The substrate's test-only `REMOVAL_CLEANUP_PRE_HOOK` — fired AFTER
-/// `map.remove_if` removed A but BEFORE `removal_cleanup` runs — is
-/// installed to cold-publish a FRESH, DISTINCT entry B under the SAME
-/// `key` (the work a concurrent cold-publisher does while the removing
-/// caller is preempted). The second read's `compute` returns `Failed`
-/// so nothing publishes AFTER the removal — B is left as the sole live
-/// entry under `key`.
-///
-/// Discrimination — the hook IS the synchronisation point, no timing
-/// sleep:
-/// - Pre-fix (`12e29bcbf`): `CanonicalReverseIndex::unregister` is
-///   key-only. A's stale cleanup deletes the `key` registration even
-///   though it now belongs to B. B's entry stays in `entries` but is
-///   orphaned from the reverse index → `reverse_index_contains` is
-///   `false` and a subsequent `invalidate_canonical` MISSES B,
-///   leaving it stale-cached.
-/// - Post-fix: `unregister` is `EntryIdentity`-checked. The stored
-///   registration now names B (`EntryIdentity::of(entry_B)`), which
-///   does not match A's identity, so A's cleanup is a no-op. B's
-///   registration survives → `reverse_index_contains` is `true` and
-///   `invalidate_canonical` evicts B.
-#[test]
-fn imported_registry_removal_cleanup_preserves_fresh_reverse_index_registration() {
-    use crate::resolver_core::SessionResolverContext;
-    use crate::session_view::{OverlaidView, SessionView};
-    use rustc_hash::FxHashMap;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    let canonical = "/coop_xview_p2_identity/imported.ts";
-    let host = VerterHost::new_standalone(HostConfig::default());
-    // Base content — entry A is published self-rooting this hash.
-    upsert(
-        &host,
-        canonical,
-        "export interface Probe { base: number; }\n",
-    );
-    let base_hash = host
-        .ensure_indexed_ready(canonical)
-        .expect("base IndexedReady materialises")
-        .whole_hash;
-    let host = Arc::new(host);
-
-    let key: (Arc<str>, Arc<str>) = (Arc::<str>::from(canonical), Arc::<str>::from("Probe"));
-
-    // Publish entry A under `key`, self-rooting the canonical at its
-    // BASE hash so A's own post-compute revalidation (base view)
-    // accepts it and it lands in the map + reverse index.
     {
         let ctx: &dyn ResolverContext = host.as_ref();
         let db = host.project_type_store().imported_registry_db();
-        let base_self_root: Arc<[FactVersionRef]> =
-            Arc::from(vec![FactVersionRef::FileWholeHash {
-                canonical_id: canonical.to_string(),
-                hash: base_hash,
-            }]);
-        let published = db
+        let base_cold_ran = std::cell::Cell::new(false);
+        let resolved = db
             .get_or_compute_admit(&key, ctx, || {
-                crate::cooperative_admission::ComputeAdmission::Cacheable(
+                base_cold_ran.set(true);
+                crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                     crate::component_meta_caches::ImportedRegistryEntry {
-                        value: Some(Arc::new(imported_symbol(canonical, "entry-A"))),
+                        value: Some(Arc::new(imported_symbol(canonical, "winner-base"))),
                         fact_dep_signature: Arc::clone(&base_self_root),
                         validated_at_generation: ctx
                             .project_type_store()
@@ -5161,25 +4738,18 @@ fn imported_registry_removal_cleanup_preserves_fresh_reverse_index_registration(
                     },
                 )
             })
-            .expect("entry A publishes under the base view");
+            .flatten();
+        assert!(base_cold_ran.get(), "the base view cold-computes");
         assert_eq!(
-            published.map(|s| s.exported_name.clone()),
-            Some("entry-A".to_string()),
-            "fixture invariant: entry A is the freshly published value",
+            resolved.map(|s| s.exported_name.clone()),
+            Some("winner-base".to_string()),
+            "the base view resolves its own base symbol",
         );
     }
-    assert!(
-        host.project_type_store()
-            .imported_registry_db()
-            .reverse_index_contains_for_test(&key),
-        "fixture invariant: entry A's publish registered `key` in the \
-         per-canonical reverse index",
-    );
 
-    // An overlay that re-roots the keyed canonical to a DIFFERENT
-    // content hash: a different source body yields a different overlay
-    // content hash, so entry A's base-rooted self-root fails the
-    // overlay-view `validate` and the warm read removes A.
+    // Overlay-view publish — re-roots the keyed canonical to a DIFFERENT
+    // content hash. A different flight lane (distinct compat token), so it
+    // does NOT coalesce onto the base candidate; it cold-computes its own.
     let overlay_source: Arc<str> = Arc::from("export interface Probe { overlaid: string; }\n");
     let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
     overlays.insert(canonical.to_string(), Arc::clone(&overlay_source));
@@ -5193,47 +4763,6 @@ fn imported_registry_removal_cleanup_preserves_fresh_reverse_index_registration(
     );
     host.materialize_overlay_indexed_ready_with_view(canonical, &view)
         .expect("overlay IndexedReady materialises");
-
-    // The hook fires INSIDE `remove_published_entry_with_cleanup`,
-    // AFTER `map.remove_if` removed entry A but BEFORE `removal_cleanup`
-    // runs — the exact window a concurrent cold-publisher would use. It
-    // cold-publishes a FRESH, DISTINCT entry B under the SAME `key`,
-    // self-rooting the canonical at the OVERLAY hash (so B is valid for
-    // the overlay view). A latch makes the publish fire exactly once
-    // even though the substrate's hook is `Fn`.
-    let hook_host = Arc::clone(&host);
-    let hook_key = key.clone();
-    let fired = Arc::new(AtomicBool::new(false));
-    let hook_fired = Arc::clone(&fired);
-    let _hook_guard =
-        crate::cooperative_admission::install_removal_cleanup_pre_hook(Box::new(move || {
-            if hook_fired.swap(true, Ordering::SeqCst) {
-                return;
-            }
-            let db = hook_host.project_type_store().imported_registry_db();
-            let fresh_entry = Arc::new(crate::component_meta_caches::ImportedRegistryEntry {
-                value: Some(Arc::new(imported_symbol(canonical, "entry-B-fresh"))),
-                fact_dep_signature: Arc::from(vec![FactVersionRef::FileWholeHash {
-                    canonical_id: canonical.to_string(),
-                    hash: overlay_hash,
-                }]),
-                validated_at_generation: hook_host
-                    .project_type_store()
-                    .current_project_generation(),
-            });
-            // Cold-publish B: inserts into `entries` AND registers in
-            // the reverse index with B's own `EntryIdentity` — exactly
-            // what a concurrent cold winner's `post_publish` does.
-            db.insert_for_test(hook_key.clone(), fresh_entry);
-        }));
-
-    // Warm-hit `get_or_compute_admit` under the overlay session view:
-    //   warm hit on A → `validate` rejects A (base self-root fails the
-    //     overlay view) → `remove_published_entry_with_cleanup` removes A
-    //   → REMOVAL_CLEANUP_PRE_HOOK fires → B is cold-published
-    //   → the production `removal_cleanup` runs `unregister(identity_A)`.
-    // `compute` returns `Failed` so nothing publishes after the
-    // removal — B is the sole live entry under `key`.
     {
         let session_store_view = host
             .resolver_store_view()
@@ -5245,59 +4774,183 @@ fn imported_registry_removal_cleanup_preserves_fresh_reverse_index_registration(
             std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
         );
         let db = host.project_type_store().imported_registry_db();
-        let outcome = db.get_or_compute_admit(&key, &session_ctx, || {
-            crate::cooperative_admission::ComputeAdmission::Failed
-        });
+        let overlay_cold_ran = std::cell::Cell::new(false);
+        let resolved = db
+            .get_or_compute_admit(&key, &session_ctx, || {
+                overlay_cold_ran.set(true);
+                crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                    crate::component_meta_caches::ImportedRegistryEntry {
+                        value: Some(Arc::new(imported_symbol(canonical, "follower-overlay"))),
+                        fact_dep_signature: Arc::from(vec![FactVersionRef::FileWholeHash {
+                            canonical_id: canonical.to_string(),
+                            hash: overlay_hash,
+                        }]),
+                        validated_at_generation: session_ctx
+                            .project_type_store()
+                            .current_project_generation(),
+                    },
+                )
+            })
+            .flatten();
+        // DISCRIMINATOR: the overlay request must NOT inherit the base
+        // candidate — its base-rooted self-root mismatches the overlay
+        // hash, so the overlay cold-computes its OWN symbol.
         assert!(
-            outcome.is_none(),
-            "fixture invariant: the warm read rejected stale entry A and \
-             `compute` returned `Failed`, so the call yields `None`",
+            overlay_cold_ran.get(),
+            "the overlay view MUST cold-compute its own candidate — the base \
+             candidate self-roots the keyed canonical at the BASE hash and is \
+             not interchangeable across views",
+        );
+        assert_eq!(
+            resolved.map(|s| s.exported_name.clone()),
+            Some("follower-overlay".to_string()),
+            "the overlay view resolves its OWN overlay symbol",
         );
     }
 
-    assert!(
-        fired.load(Ordering::SeqCst),
-        "fixture invariant: the removal-cleanup pre-hook MUST have fired — \
-         otherwise the racey cold-publish under test never executed",
-    );
-
+    // R20 COEXISTENCE: both the base candidate and the overlay candidate
+    // are live in the one content-free slot — neither overwrote the other.
     let db = host.project_type_store().imported_registry_db();
-
-    // entry B must still be the live entry under `key`.
     assert_eq!(
         db.live_count(),
-        1,
-        "fixture invariant: entry B is the sole live entry under the key \
-         (A removed by the warm-hit reject, B cold-published by the hook)",
+        2,
+        "the base and overlay candidates MUST COEXIST as two distinct \
+         candidates in one content-free slot (R20 overlay isolation) — a \
+         cap-1 / always-replace store would have let the overlay publish \
+         clobber the base candidate, leaving one",
     );
+    // The base reader still sees its own symbol (the overlay candidate did
+    // not displace it).
+    let ctx: &dyn ResolverContext = host.as_ref();
+    let base_again = db.peek(&key, ctx).flatten();
+    assert_eq!(
+        base_again.map(|s| s.exported_name.clone()),
+        Some("winner-base".to_string()),
+        "after the overlay published, a base-view peek still resolves the \
+         base candidate — the two coexist",
+    );
+}
 
-    // DISCRIMINATOR: B's reverse-index registration must survive A's
-    // stale removal cleanup. Pre-fix the key-only `unregister` deletes
-    // it; post-fix the identity-checked `unregister` is a no-op for a
-    // registration that now names B.
+/// The shared `component_meta_cache_live` counter delta equals
+/// `ImportedRegistryDb`'s live-candidate delta after a base + overlay
+/// publish: every admitted candidate contributes exactly one counter
+/// increment, and nothing double-counts or under-counts.
+#[test]
+fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
+    use crate::resolver_core::SessionResolverContext;
+    use crate::session_view::{OverlaidView, SessionView};
+    use rustc_hash::FxHashMap;
+    use std::sync::atomic::Ordering;
+
+    let canonical = "/coop_xview_p2/imported.ts";
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert(
+        &host,
+        canonical,
+        "export interface Probe { base: number; }\n",
+    );
+    let base_hash = host
+        .ensure_indexed_ready(canonical)
+        .expect("base IndexedReady materialises")
+        .whole_hash;
+    let host = Arc::new(host);
+    let key: (Arc<str>, Arc<str>) = (Arc::<str>::from(canonical), Arc::<str>::from("Probe"));
+
+    let live_counter = Arc::clone(&host.project_type_store().counters.component_meta_cache_live);
+    let counter_before = live_counter.load(Ordering::Relaxed);
+    let entries_before = host
+        .project_type_store()
+        .imported_registry_db()
+        .live_count();
+
+    // Base publish.
+    let base_self_root: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
+        canonical_id: canonical.to_string(),
+        hash: base_hash,
+    }]);
+    {
+        let ctx: &dyn ResolverContext = host.as_ref();
+        let db = host.project_type_store().imported_registry_db();
+        let _ = db.get_or_compute_admit(&key, ctx, || {
+            crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                crate::component_meta_caches::ImportedRegistryEntry {
+                    value: Some(Arc::new(imported_symbol(canonical, "winner-base"))),
+                    fact_dep_signature: Arc::clone(&base_self_root),
+                    validated_at_generation: ctx.project_type_store().current_project_generation(),
+                },
+            )
+        });
+    }
+
+    // Overlay publish (distinct flight lane → distinct candidate).
+    let overlay_source: Arc<str> = Arc::from("export interface Probe { overlaid: string; }\n");
+    let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+    overlays.insert(canonical.to_string(), Arc::clone(&overlay_source));
+    let view = OverlaidView::new(Arc::clone(&host), overlays);
+    let overlay_hash = view
+        .overlay_content_hash_for(canonical)
+        .expect("overlay content hash present");
+    host.materialize_overlay_indexed_ready_with_view(canonical, &view)
+        .expect("overlay IndexedReady materialises");
+    {
+        let session_store_view = host
+            .resolver_store_view()
+            .with_session_overlay(&host, &view);
+        let session_ctx = SessionResolverContext::new(
+            &host,
+            &view,
+            &session_store_view,
+            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
+        let db = host.project_type_store().imported_registry_db();
+        let _ = db.get_or_compute_admit(&key, &session_ctx, || {
+            crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                crate::component_meta_caches::ImportedRegistryEntry {
+                    value: Some(Arc::new(imported_symbol(canonical, "follower-overlay"))),
+                    fact_dep_signature: Arc::from(vec![FactVersionRef::FileWholeHash {
+                        canonical_id: canonical.to_string(),
+                        hash: overlay_hash,
+                    }]),
+                    validated_at_generation: session_ctx
+                        .project_type_store()
+                        .current_project_generation(),
+                },
+            )
+        });
+    }
+
+    let db = host.project_type_store().imported_registry_db();
+    let counter_after = live_counter.load(Ordering::Relaxed);
+    let entries_after = db.live_count();
+    let counter_delta: u64 = counter_after - counter_before;
+    let entries_delta: u64 = (entries_after - entries_before) as u64;
+
+    // Two coexisting candidates — the counter delta and the live-candidate
+    // delta must both be 2 and equal.
+    assert_eq!(
+        entries_delta, 2,
+        "the base and overlay candidates coexist — two live candidates",
+    );
+    assert_eq!(
+        counter_delta, entries_delta,
+        "the shared `component_meta_cache_live` counter delta ({counter_delta}) \
+         MUST equal `ImportedRegistryDb`'s live-candidate delta ({entries_delta}) \
+         — every admitted candidate contributes exactly one counter \
+         increment under `publish_core`, with no double-count or under-count",
+    );
+    // The keyed canonical is registered in the reverse index (both
+    // candidates self-root it).
     assert!(
         db.reverse_index_contains_for_test(&key),
-        "the removal-cleanup `unregister` MUST be identity-checked: a \
-         stale cleanup for the REMOVED entry A must not delete the FRESH \
-         reverse-index registration a concurrent cold-publish created \
-         for entry B. Pre-fix the key-only `unregister` deleted B's \
-         registration, orphaning a live entry from `invalidate_canonical`.",
+        "the live key must be registered in the store's per-canonical \
+         reverse index",
     );
-
-    // CONSEQUENCE DISCRIMINATOR: the orphaned-registration bug's real
-    // damage — `invalidate_canonical` drains via the reverse index, so
-    // a lost registration means a later content edit leaves entry B
-    // stale-cached. With the registration preserved, `invalidate_canonical`
-    // finds and evicts B.
+    // A per-canonical invalidation drains BOTH candidates.
     db.invalidate_canonical(canonical);
     assert_eq!(
         db.live_count(),
         0,
-        "after the identity-checked removal cleanup preserved entry B's \
-         reverse-index registration, `invalidate_canonical` MUST find and \
-         evict B. Pre-fix B's registration was deleted, so \
-         `invalidate_canonical` drained an empty bucket and left B \
-         stale-cached.",
+        "`invalidate_canonical` must drain both coexisting candidates",
     );
 }
 
@@ -5358,7 +5011,6 @@ fn intern_global_object(host: &VerterHost) -> crate::semantic_query::SemanticNod
 /// `validate(ctx)` flips this test.
 #[test]
 fn materialize_structure_db_planted_untracked_self_root_rejects_warm_entry() {
-    use crate::component_meta_caches::MaterializeStructureEntry;
     use crate::component_meta_materialize::{
         MaterializationScope, MaterializeOutcome, MaterializeStructureCacheKey,
     };
@@ -5378,7 +5030,7 @@ fn materialize_structure_db_planted_untracked_self_root_rejects_warm_entry() {
         mode: ProjectionMode::Expanded,
     };
 
-    // Plant a synthetic entry: the carrier's facts rail holds a
+    // Plant a synthetic candidate: the carrier's facts rail holds a
     // self-root `FileWholeHash` for the untracked scope, and
     // `self_root_canonicals` lists it. A lax validator admits this; the
     // strict one does not.
@@ -5386,24 +5038,22 @@ fn materialize_structure_db_planted_untracked_self_root_rejects_warm_entry() {
         canonical_id: scope.to_string(),
         hash: PLANTED_HASH,
     }]);
-    let planted = Arc::new(MaterializeStructureEntry {
-        outcome: MaterializeOutcome::Value(base),
-        read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(facts),
-        dispatch_dep_signature: std::sync::Arc::from(Vec::new()),
-        self_root_canonicals: planted_self_root_canonicals(scope),
-        admission_seq: crate::bounded_query_retention::next_retention_seq(),
+    db.insert_for_test(
+        key.clone(),
+        MaterializeOutcome::Value(base),
+        crate::fact_signature_helpers::ReadSetSignature::new(facts),
+        planted_self_root_canonicals(scope),
         // Live project generation — this test exercises the carrier's
         // strict self-root rejection, not the generation gate, so the
         // stamp must match the live generation.
-        validated_at_generation: ctx.project_type_store().current_project_generation(),
-    });
-    db.entries().insert(key.clone(), planted);
+        ctx.project_type_store().current_project_generation(),
+    );
 
     assert!(
         db.peek(&key, ctx).is_none(),
-        "MaterializeStructureDb::peek MUST reject a warm entry whose self-root \
+        "MaterializeStructureDb::peek MUST reject a warm candidate whose self-root \
          FileWholeHash names an UNTRACKED scope canonical — the lax `validate` accepts \
-         the untracked self-root and serves the entry stale; only the strict \
+         the untracked self-root and serves the candidate stale; only the strict \
          `validate_with_self_roots` rejects it.",
     );
 }
@@ -5780,8 +5430,6 @@ fn ref_cycle_db_visited_canonical_edit_rejects_warm_entry() {
 /// `StoreView::validates`.)
 #[test]
 fn ref_cycle_db_untracked_self_root_rejects_warm_entry() {
-    use crate::component_meta_caches::RefCycleEntry;
-
     let host = host_with_unrelated_file();
     let root = "/struct_carrier_qdb/rc_never_loaded.ts";
     assert_untracked(&host, root);
@@ -5793,32 +5441,30 @@ fn ref_cycle_db_untracked_self_root_rejects_warm_entry() {
         decl_name: Arc::from("Probe"),
     };
 
-    // Plant a synthetic entry: the carrier's facts rail holds a
-    // self-root `FileWholeHash` for the untracked root, the legacy rail
-    // is empty, and `self_root_canonicals` lists the root. A lax
-    // validator admits this; the strict one does not.
+    // Plant a synthetic candidate: the carrier's facts rail holds a
+    // self-root `FileWholeHash` for the untracked root and
+    // `self_root_canonicals` lists the root. A lax validator admits this;
+    // the strict one does not.
     let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
         canonical_id: root.to_string(),
         hash: PLANTED_HASH,
     }]);
-    let planted = Arc::new(RefCycleEntry {
-        result: true,
-        read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(facts),
-        dispatch_dep_signature: std::sync::Arc::from(Vec::new()),
-        self_root_canonicals: planted_self_root_canonicals(root),
-        admission_seq: crate::bounded_query_retention::next_retention_seq(),
+    db.insert_for_test(
+        id.clone(),
+        true,
+        crate::fact_signature_helpers::ReadSetSignature::new(facts),
+        planted_self_root_canonicals(root),
         // Live project generation — this test exercises the carrier's
         // strict self-root rejection, not the generation gate, so the
         // stamp must match the live generation.
-        validated_at_generation: ctx.project_type_store().current_project_generation(),
-    });
-    db.entries().insert(id.clone(), planted);
+        ctx.project_type_store().current_project_generation(),
+    );
 
     assert!(
         crate::component_meta_caches::ref_cycle_db_peek(db, &id, ctx).is_none(),
-        "RefCycleResultDb::peek MUST reject a warm entry whose self-root FileWholeHash \
+        "RefCycleResultDb::peek MUST reject a warm candidate whose self-root FileWholeHash \
          names an UNTRACKED root canonical — the lax `validate` accepts the untracked \
-         self-root and serves the entry stale; only the strict `validate_with_self_roots` \
+         self-root and serves the candidate stale; only the strict `validate_with_self_roots` \
          rejects it.",
     );
 }
@@ -6344,203 +5990,6 @@ fn in_scope_query_identity_caches_all_have_self_root_coverage() {
 // stale.
 // ===========================================================================
 
-/// `MaterializeStructureDb`'s stale-`peek` reap (generation mismatch)
-/// routes through the cache's COMPLETE removal cleanup — every
-/// `canonical_to_keys` reverse-index registration the reaped entry held
-/// is unregistered and every now-empty shard is pruned.
-///
-/// Discriminating property — a planted entry references TWO canonicals,
-/// so `register_post_publish` creates TWO `canonical_to_keys` shards. A
-/// `bump_project_generation()` makes the entry generation-stale; the next
-/// `peek` reaps it. After the reap:
-///
-/// - A reap that drops only the map entry + the retention ledger (the
-///   pre-fix `MaterializeStructureDb::peek` body) leaves BOTH dead
-///   reverse-index shards resident — `canonical_to_keys_shard_count_for_test()`
-///   reads 2 and the assertion FAILS.
-/// - A reap routed through `unregister_post_publish` (loops the entry's
-///   `canonical_ids()`, prunes each shard) empties both shards' inner
-///   maps and drops the outer shards — the count reads 0 and the
-///   assertion PASSES.
-#[test]
-fn materialize_structure_peek_stale_reap_cleans_every_reverse_index_shard() {
-    use crate::component_meta_caches::MaterializeStructureEntry;
-    use crate::component_meta_materialize::{
-        MaterializationScope, MaterializeOutcome, MaterializeStructureCacheKey,
-    };
-    use crate::fact_signature_helpers::ReadSetSignature;
-    use crate::semantic_query::{ProjectionMode, SemanticNodeId};
-
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let ctx: &dyn ResolverContext = &host;
-    let db = host.project_type_store().materialize_structure_db();
-
-    let key = MaterializeStructureCacheKey {
-        scope_canonical_id: Arc::from("/owner.ts"),
-        base: SemanticNodeId(0),
-        scope_axis: MaterializationScope::TopLevel,
-        mode: ProjectionMode::Shallow,
-    };
-    // A fact rail naming TWO distinct cross-file-dependency canonicals.
-    // `register_post_publish` loops `canonical_ids()` (which folds in
-    // both the legacy and the fact rail) and creates one reverse-index
-    // shard per canonical, so the entry holds two registrations. The
-    // canonicals are untracked dependencies (NOT self-roots), so the
-    // carrier routes them through the lazy "untracked → accept" path
-    // and the entry is a valid warm hit until the generation gate
-    // rejects it.
-    let facts: Arc<[FactVersionRef]> = Arc::from(vec![
-        FactVersionRef::FileWholeHash {
-            canonical_id: "/dep-a.ts".to_string(),
-            hash: [1; 16],
-        },
-        FactVersionRef::FileWholeHash {
-            canonical_id: "/dep-b.ts".to_string(),
-            hash: [2; 16],
-        },
-    ]);
-    let generation_at_compute = host.project_type_store().current_project_generation();
-    let entry = Arc::new(MaterializeStructureEntry {
-        outcome: MaterializeOutcome::Miss(SemanticNodeId(0)),
-        read_set_signature: ReadSetSignature::new(facts),
-        dispatch_dep_signature: Arc::from(Vec::new()),
-        self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
-        admission_seq: crate::bounded_query_retention::next_retention_seq(),
-        validated_at_generation: generation_at_compute,
-    });
-    db.entries().insert(key.clone(), Arc::clone(&entry));
-    db.bump_live_counter();
-    db.register_post_publish(key.clone(), &entry.read_set_signature, entry.admission_seq);
-    assert_eq!(
-        db.canonical_to_keys_shard_count_for_test(),
-        2,
-        "fixture invariant: a two-canonical entry registers two reverse-index shards",
-    );
-    // The entry's carrier validates against current store state (the
-    // planted canonicals are untracked → lazy-accepted), so `peek` would
-    // HIT were it not for the generation gate.
-    assert!(
-        db.peek(&key, ctx).is_some(),
-        "fixture invariant: the planted entry is a warm hit before the generation bump",
-    );
-
-    // Advance the project generation WITHOUT evicting — the entry stays
-    // resident; the next `peek` must reap it on the generation tag alone.
-    let g_after = host.project_type_store().bump_project_generation();
-    assert!(
-        g_after > generation_at_compute,
-        "fixture invariant: the project generation advanced past the stamped value",
-    );
-
-    // Generation-mismatch `peek` — reaps the entry.
-    assert!(
-        db.peek(&key, ctx).is_none(),
-        "fixture invariant: the generation-stale entry must miss on peek",
-    );
-    assert!(
-        db.entries().get(&key).is_none(),
-        "fixture invariant: the stale entry is reaped from the entry map",
-    );
-
-    assert_eq!(
-        db.canonical_to_keys_shard_count_for_test(),
-        0,
-        "INCOMPLETE STALE REAP: `MaterializeStructureDb::peek`'s \
-         generation-mismatch reap dropped the map entry and the retention \
-         ledger record but left the reaped entry's `canonical_to_keys` \
-         reverse-index registrations resident. The entry referenced two \
-         canonicals, so two dead shards accumulate and keep doing \
-         unnecessary invalidation work — a later invalidation of one shard \
-         cannot reach the others because the entry is already gone. The \
-         stale-peek reap must route through the same \
-         `unregister_post_publish` cleanup the cooperative-removal path \
-         uses, which loops the entry's `canonical_ids()` and prunes every \
-         emptied shard.",
-    );
-}
-
-/// `RefCycleResultDb`'s stale-`peek` reap (generation mismatch) routes
-/// through the cache's COMPLETE removal cleanup — the `RefCycleResultDb`
-/// mirror of `materialize_structure_peek_stale_reap_cleans_every_reverse_index_shard`.
-#[test]
-fn ref_cycle_peek_stale_reap_cleans_every_reverse_index_shard() {
-    use crate::component_meta_caches::RefCycleEntry;
-    use crate::fact_signature_helpers::ReadSetSignature;
-    use crate::semantic_query::{DeclIdentity, HashValue};
-
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let ctx: &dyn ResolverContext = &host;
-    let db = host.project_type_store().ref_cycle_db();
-
-    let key = DeclIdentity {
-        canonical_id: Arc::from("/owner.ts"),
-        whole_hash: HashValue::default(),
-        decl_name: Arc::from("RootHelper"),
-    };
-    // A fact rail naming TWO distinct cross-file-dependency canonicals —
-    // two reverse-index shards registered. Untracked dependencies (NOT
-    // self-roots) route through the lazy "untracked → accept" path, so
-    // the entry is a valid warm hit until the generation gate rejects it.
-    let facts: Arc<[FactVersionRef]> = Arc::from(vec![
-        FactVersionRef::FileWholeHash {
-            canonical_id: "/dep-a.ts".to_string(),
-            hash: [1; 16],
-        },
-        FactVersionRef::FileWholeHash {
-            canonical_id: "/dep-b.ts".to_string(),
-            hash: [2; 16],
-        },
-    ]);
-    let generation_at_compute = host.project_type_store().current_project_generation();
-    let entry = Arc::new(RefCycleEntry {
-        result: false,
-        read_set_signature: ReadSetSignature::new(facts),
-        dispatch_dep_signature: Arc::from(Vec::new()),
-        self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
-        admission_seq: crate::bounded_query_retention::next_retention_seq(),
-        validated_at_generation: generation_at_compute,
-    });
-    db.entries().insert(key.clone(), Arc::clone(&entry));
-    db.bump_live_counter();
-    db.register_post_publish(key.clone(), &entry.read_set_signature, entry.admission_seq);
-    assert_eq!(
-        db.canonical_to_keys_shard_count_for_test(),
-        2,
-        "fixture invariant: a two-canonical entry registers two reverse-index shards",
-    );
-    assert!(
-        db.peek(&key, ctx).is_some(),
-        "fixture invariant: the planted entry is a warm hit before the generation bump",
-    );
-
-    let g_after = host.project_type_store().bump_project_generation();
-    assert!(
-        g_after > generation_at_compute,
-        "fixture invariant: the project generation advanced past the stamped value",
-    );
-
-    assert!(
-        db.peek(&key, ctx).is_none(),
-        "fixture invariant: the generation-stale entry must miss on peek",
-    );
-    assert!(
-        db.entries().get(&key).is_none(),
-        "fixture invariant: the stale entry is reaped from the entry map",
-    );
-
-    assert_eq!(
-        db.canonical_to_keys_shard_count_for_test(),
-        0,
-        "INCOMPLETE STALE REAP: `RefCycleResultDb::peek`'s \
-         generation-mismatch reap dropped the map entry and the budget \
-         record but left the reaped entry's `canonical_to_keys` \
-         reverse-index registrations resident — dead shards accumulate. \
-         The stale-peek reap must route through `unregister_post_publish`, \
-         which loops the entry's `canonical_ids()` and prunes every \
-         emptied shard.",
-    );
-}
-
 /// `ImportedRegistryDb::peek` rejects an entry computed under a
 /// superseded project generation.
 ///
@@ -6584,7 +6033,7 @@ fn imported_registry_peek_rejects_entry_from_superseded_generation() {
     let g_before = host.project_type_store().current_project_generation();
     let primed = db.get_or_compute_admit(&key, ctx, || {
         let validated_at_generation = host.project_type_store().current_project_generation();
-        crate::cooperative_admission::ComputeAdmission::Cacheable(
+        crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
             crate::component_meta_caches::ImportedRegistryEntry {
                 value: None,
                 fact_dep_signature: empty_fact_signature(),
@@ -6706,39 +6155,33 @@ fn prepared_member_peek_rejects_entry_from_superseded_generation() {
 }
 
 /// `ImportedRegistryDb`'s cooperative warm-hit reject driven by a
-/// project-generation mismatch routes through the cache's COMPLETE
-/// removal cleanup — the substrate's `removal_cleanup` closure
-/// unregisters the reaped entry's `CanonicalIndex` reverse-index
-/// registration.
+/// project-generation mismatch skips the stale candidate on read (it
+/// stays resident); when that candidate is later removed through the
+/// per-canonical drain the cache's COMPLETE removal cleanup runs — the
+/// substrate's `removal_cleanup` closure unregisters the drained
+/// candidate's `CanonicalIndex` reverse-index registration.
 ///
 /// `ImportedRegistryDb` is the only fence-less cache that carries a
 /// reverse index, so it is the one Part-C coupling concern: adding the
 /// generation gate to the cooperative `validate` closure creates a new
 /// reject path, and that reject must clean the reverse index, not just
-/// drop the map entry. The cooperative substrate already routes a
-/// `validate`-rejected entry through `remove_published_entry_with_cleanup`,
-/// which runs the cache's `removal_cleanup` (here:
-/// `canonical_index.unregister`) — so the generation gate riding inside
-/// `validate` reuses that complete cleanup.
+/// skip it on read. The store keeps a stale candidate (it may still be
+/// valid for another view); routine reclamation is the per-canonical
+/// drain + FIFO budget, NOT a reap-on-read.
 ///
-/// Discriminating property — an entry is primed through the production
+/// Discriminating property — a candidate is primed through the production
 /// cold path (stamps `validated_at_generation`, registers the reverse
 /// index). A bare `bump_project_generation()` advances the counter. The
-/// next `get_or_compute_admit` reaches its warm-hit `validate` arm; its
-/// `compute` closure returns `ReturnOnly` (no republish, so the only
-/// reverse-index mutation observable afterwards is the reap's
-/// `unregister`):
+/// next `get_or_compute_admit` reaches its warm-hit `lookup_candidate`:
 ///
-/// - With no generation gate in `validate` (the pre-fix closure) the
-///   warm-hit `validate` accepts the stale entry by its file-content-only
-///   `fact_dep_signature`; the entry is served, never reaped, and its
-///   reverse-index registration survives — `reverse_index_contains_for_test`
-///   reads `true` and the assertion FAILS.
-/// - With the generation gate in `validate`, the stale entry is rejected,
-///   the substrate's `remove_published_entry_with_cleanup` removes it AND
-///   runs `removal_cleanup` → `canonical_index.unregister`; the
-///   registration is gone — `reverse_index_contains_for_test` reads
-///   `false` and the assertion PASSES.
+/// - With the generation gate in `lookup_candidate`, the stale candidate
+///   is SKIPPED, the cooperative cold path runs (`cold_ran == true`), and
+///   the candidate stays resident (no reap-on-read). Per-canonical
+///   invalidation then reclaims it AND drops its reverse-index
+///   registration.
+/// - Without the generation gate, the warm read would accept the stale
+///   candidate by its file-content-only signature and short-circuit before
+///   `compute` (`cold_ran == false`), failing the discriminator below.
 #[test]
 fn imported_registry_cooperative_generation_reject_cleans_reverse_index() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -6763,7 +6206,7 @@ fn imported_registry_cooperative_generation_reject_cleans_reverse_index() {
     // reverse index.
     let primed = db.get_or_compute_admit(&key, ctx, || {
         let validated_at_generation = host.project_type_store().current_project_generation();
-        crate::cooperative_admission::ComputeAdmission::Cacheable(
+        crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
             crate::component_meta_caches::ImportedRegistryEntry {
                 value: None,
                 fact_dep_signature: empty_fact_signature(),
@@ -6773,11 +6216,11 @@ fn imported_registry_cooperative_generation_reject_cleans_reverse_index() {
     });
     assert!(
         primed.is_some(),
-        "fixture invariant: the cold cooperative admission publishes the entry",
+        "fixture invariant: the cold cooperative admission publishes the candidate",
     );
     assert!(
         db.reverse_index_contains_for_test(&key),
-        "fixture invariant: the primed entry registered `key` in the \
+        "fixture invariant: the primed candidate registered `key` in the \
          per-canonical reverse index",
     );
 
@@ -6788,39 +6231,52 @@ fn imported_registry_cooperative_generation_reject_cleans_reverse_index() {
         "fixture invariant: the project generation advanced",
     );
 
-    // A second cooperative admission: its warm-hit `validate` arm
-    // re-reads the stale entry. The `compute` closure returns
-    // `ReturnOnly` so nothing republishes — the only reverse-index
-    // mutation observable afterwards is the reap's `unregister`.
+    // A second cooperative admission: its warm-hit `lookup_candidate`
+    // re-reads the stale candidate. The generation gate rejects it, so the
+    // candidate is SKIPPED and the cooperative cold path runs. The
+    // `compute` closure returns `ReturnOnly` so nothing republishes; the
+    // refusal reason is `GenerationSuperseded` because the cold compute
+    // declined to admit on generation grounds (the project generation
+    // advanced between the prime and the second admission).
     let mut cold_ran = false;
     let _ = db.get_or_compute_admit(&key, ctx, || {
         cold_ran = true;
-        crate::cooperative_admission::ComputeAdmission::ReturnOnly(None)
+        let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
+            crate::cache_runtime::NonAdmissionReason::GenerationSuperseded,
+        );
+        crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(None)
     });
     assert!(
         cold_ran,
-        "the warm-hit `validate` arm MUST reject the generation-stale entry so the \
-         cooperative cold path runs — a `validate` that accepted the stale entry on \
-         its file-content-only `fact_dep_signature` would short-circuit before \
-         `compute`.",
+        "DISCRIMINATOR: the warm-hit `lookup_candidate` MUST reject the \
+         generation-stale candidate so the cooperative cold path runs — a \
+         lookup that accepted the stale candidate on its file-content-only \
+         signature would short-circuit before `compute`. The generation \
+         gate rides inside `lookup_candidate`.",
     );
 
+    // The store does NOT reap a stale candidate on read — it stays for
+    // other views and for budget / per-canonical reclamation.
+    assert!(
+        db.reverse_index_contains_for_test(&key),
+        "the store keeps the generation-stale candidate (and its \
+         reverse-index registration) resident on read — reclamation is the \
+         per-canonical drain + FIFO budget, not a reap-on-read",
+    );
+
+    // Per-canonical invalidation reclaims the stale candidate AND drops
+    // its reverse-index registration in one O(K) drain.
+    db.invalidate_canonical(canonical);
     assert!(
         !db.reverse_index_contains_for_test(&key),
-        "INCOMPLETE COOPERATIVE REAP: `ImportedRegistryDb`'s cooperative \
-         warm-hit reject of a generation-stale entry dropped the map entry \
-         but left its `CanonicalIndex` reverse-index registration resident. \
-         The generation gate rides inside the cooperative `validate` \
-         closure, and a `validate` rejection routes through the substrate's \
-         `remove_published_entry_with_cleanup`, which runs `removal_cleanup` \
-         → `canonical_index.unregister`. The reverse-index registration \
-         must be gone after the reap.",
+        "`invalidate_canonical` must drop the drained candidate's \
+         reverse-index registration",
     );
     assert_eq!(
         db.live_count(),
         0,
-        "the generation-stale entry must be reaped from the entry map and \
-         the `ReturnOnly` cold outcome must not republish",
+        "`invalidate_canonical` must drain the generation-stale candidate \
+         (the `ReturnOnly` cold outcome never republished)",
     );
 }
 
@@ -7238,7 +6694,7 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
             + store.prepared_member_db().live_count()
             + store.routed_expr_surface_db().live_count()
             + store.materialize_structure_db().live_count()
-            + store.ref_cycle_db().entries().len()
+            + store.ref_cycle_db().live_count()
     };
 
     // Drive a failed-revalidation cold compute through each of the 8

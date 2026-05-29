@@ -304,6 +304,11 @@ fn semantic_memo_warm_hit_validates_before_bubble() {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/semantic_query_memo/mod.rs"),
     )
     .expect("read mod.rs");
+    let family_src = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/semantic_query_memo/family.rs"),
+    )
+    .expect("read family.rs");
     let build_src = std::fs::read_to_string(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("src/project_semantic_dispatch/build.rs"),
@@ -316,14 +321,19 @@ fn semantic_memo_warm_hit_validates_before_bubble() {
          the entry's carrier BEFORE bubbling so a stale warm hit never pollutes \
          the outer tracer."
     );
+    // Under the multi-candidate `FamilySlots` substrate, the
+    // validate-before-bubble gate lives inside `FamilySlots::lookup`:
+    // the candidate-list scan calls `entry.validate(ctx)` for each
+    // candidate and returns the first that validates. The strict
+    // self-root rail is `ReadSetSignature::validate_with_self_roots`
+    // — `MemoEntry::validate` is the single-line forwarder. Stale
+    // candidates are SKIPPED without bubbling.
     assert!(
-        memo_mod_src.contains("if !entry.validate(ctx) {"),
-        "get_validated must call `entry.validate(ctx)` BEFORE bubbling — that is \
-         the validate-before-bubble gate. `MemoEntry::validate` routes through the \
-         strict self-root validator `ReadSetSignature::validate_with_self_roots`, \
-         passing the entry's recorded `self_root_canonicals`, so a same-canonical \
-         content edit (or a self-root the live store view no longer tracks) rejects \
-         the entry strictly before any bubble."
+        family_src.contains(".validate(ctx)") && family_src.contains("validate_with_self_roots"),
+        "FamilySlots::lookup must call `entry.validate(ctx)` for each \
+         candidate BEFORE returning it (validate-before-bubble gate). \
+         `MemoEntry::validate` routes through the strict self-root validator \
+         `ReadSetSignature::validate_with_self_roots`."
     );
     assert!(
         build_src.contains("graph.get_validated(&prefix_key, ctx)"),
@@ -439,9 +449,10 @@ fn cooperative_return_only_not_shared_to_joiners() {
         .unwrap_or_else(|e| e.into_inner());
 
     let ca_src = std::fs::read_to_string(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/cooperative_admission.rs"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/cache_runtime/singleflight.rs"),
     )
-    .expect("read cooperative_admission.rs");
+    .expect("read cache_runtime/singleflight.rs");
     let mat_src = std::fs::read_to_string(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("src/component_meta_materialize.rs"),
@@ -504,7 +515,7 @@ fn cooperative_return_only_not_shared_to_joiners() {
     // its own thread — view-checking the entry against its own view
     // and running the caller's fact-bubble side effect. See
     // `cacheable_joiner_runs_validate_on_its_own_thread` in
-    // `cooperative_admission.rs` for the behavioural discriminator.
+    // `cache_runtime/singleflight.rs` for the behavioural discriminator.
     let cacheable_arm_end = cacheable_arm_idx
         + ca_src[cacheable_arm_idx..]
             .find("ComputeAdmission::ReturnOnly(value) => {")
@@ -566,7 +577,7 @@ fn compute_admission_failed_variant_is_constructible() {
     assert!(
         matches!(
             admission,
-            verter_session::cooperative_admission::ComputeAdmission::Failed
+            verter_session::for_tests::ComputeAdmission::Failed
         ),
         "ComputeAdmission::Failed must be constructible — the codex three-variant \
          contract requires Cacheable / ReturnOnly / Failed."

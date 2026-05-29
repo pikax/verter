@@ -1,36 +1,21 @@
-//! R3/R26/R28 arch guard for the 9 Family A inner caches that
-//! migrated from `dep_signature: DepSignature` to
-//! `fact_dep_signature: Arc<[FactVersionRef]>` in Stage 7C.A1b.
+//! R3/R26/R28 arch guard for the Family A inner caches.
 //!
-//! Family A caches:
-//!   - `ImportedRegistryEntry`
-//!   - `DeclarationLookupEntry`
-//!   - `ResolvabilityEntry`
-//!   - `OwnerCollectionEntry`
-//!   - `PreparedTargetEntry`
-//!   - `MaterializeMemoEntry`
-//!   - `PreparedSurfaceEntry`
-//!   - `PreparedMemberEntry`
-//!   - `RoutedExprSurfaceEntry`
+//! The eight single-entry caches (`DeclarationLookupDb`,
+//! `ResolvabilityDb`, `OwnerCollectionDb`, `PreparedTargetDb`,
+//! `ShapeCacheDb`, `PreparedSurfaceDb`, `PreparedMemberDb`,
+//! `RoutedExprSurfaceDb`) store the shared cache-runtime carrier
+//! `cache_runtime::CacheEntry<Value>` and route their cold builds
+//! through `cache_runtime::lookup` — the validity rails (the fact
+//! signature, the self-root canonicals, the compute-time generation)
+//! live on the shared entry, NOT on a bespoke per-cache `*Entry`. The
+//! one remaining bespoke carrier is `ImportedRegistryEntry`, the
+//! `QueryNode`-bound imported-registry cache, which still carries
+//! `fact_dep_signature: Arc<[FactVersionRef]>` until its own migration.
 //!
-//! Each entry MUST carry `fact_dep_signature: Arc<[FactVersionRef]>`
-//! and MUST NOT carry the legacy `dep_signature: DepSignature`. The
-//! warm-read validator routes through
-//! [`crate::fact_signature_helpers::validate_fact_signature_with_self_roots`]
-//! — the strict self-root validator, passing the entry's keyed
-//! canonical(s) as the self-root set — and the producer through
-//! [`engine_fact_signature_for_canonical_member`] /
-//! [`engine_fact_signature_for_exported_type`] /
-//! [`engine_fact_signature_for_prepared_target`] /
-//! [`engine_fact_signature_for_materialize_memo`] on cold compute.
-//!
-//! ## Source-grep arch guards
-//!
-//! The first test scans `component_meta_caches.rs` for the migrated
-//! field name shape; the second confirms the legacy field name is
-//! gone. The third pair confirms the producer call-sites use the
-//! new `engine_fact_signature_*` helpers (not the legacy
-//! `engine_dep_signature_for_canonical`).
+//! The producer-side helpers (`engine_fact_signature_for_*` and the
+//! central `fact_signature_for_*` helpers) are unchanged and still
+//! drive the cold-compute signature build; the producer guards below
+//! pin them.
 
 use std::fs;
 use std::path::PathBuf;
@@ -44,45 +29,92 @@ fn read_session_source(relative: &str) -> String {
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
 }
 
-/// Every Family A entry struct carries `fact_dep_signature:
-/// Arc<[FactVersionRef]>`. Source-grep arch guard.
+/// `ImportedRegistryEntry` — the one remaining bespoke Family A carrier
+/// (the `QueryNode`-bound imported-registry cache, migrated separately) —
+/// carries `fact_dep_signature: Arc<[FactVersionRef]>` and never the
+/// legacy `dep_signature: DepSignature`. Source-grep arch guard.
 #[test]
-fn family_a_entries_carry_fact_dep_signature() {
+fn imported_registry_entry_carries_fact_dep_signature() {
     let src = read_session_source("component_meta_caches.rs");
-    const ENTRIES: &[&str] = &[
-        "ImportedRegistryEntry",
-        "DeclarationLookupEntry",
-        "ResolvabilityEntry",
-        "OwnerCollectionEntry",
-        "PreparedTargetEntry",
-        // Block 6.i — `MaterializeMemoEntry` + `MemberShapeCacheEntry`
-        // unified into `ShapeCacheEntry` under the new `ShapeCacheDb`.
-        "ShapeCacheEntry",
-        "PreparedSurfaceEntry",
-        "PreparedMemberEntry",
-        "RoutedExprSurfaceEntry",
+    let struct_decl = "pub struct ImportedRegistryEntry {";
+    let idx = src
+        .find(struct_decl)
+        .unwrap_or_else(|| panic!("expected `{struct_decl}` in component_meta_caches.rs"));
+    let after = &src[idx..];
+    let end = after
+        .find("\n}")
+        .expect("expected struct close for ImportedRegistryEntry");
+    let window = &after[..end];
+    assert!(
+        window.contains("fact_dep_signature: Arc<[FactVersionRef]>"),
+        "ImportedRegistryEntry must carry `fact_dep_signature: Arc<[FactVersionRef]>` \
+         (R28), but the struct body did not contain that field. Window:\n{window}"
+    );
+    assert!(
+        !window.contains("dep_signature: DepSignature"),
+        "ImportedRegistryEntry must NOT carry the legacy `dep_signature: DepSignature` \
+         field. Window:\n{window}"
+    );
+}
+
+/// The eight single-entry Family A caches store the shared cache-runtime
+/// carrier `Arc<CacheEntry<Value>>` and define NO bespoke per-cache
+/// `*Entry` struct. The validity rails (fact signature, self-root
+/// canonicals, compute-time generation) live on the shared entry. A
+/// regression reintroducing a bespoke carrier — or storing a non-runtime
+/// entry type — fails here.
+#[test]
+fn single_entry_caches_store_cache_runtime_entry() {
+    let src = read_session_source("component_meta_caches.rs");
+    // (Db name, the exact `entries: DashMap<...>` value type the
+    // migrated cache must store.)
+    const MIGRATED: &[(&str, &str)] = &[
+        (
+            "DeclarationLookupDb",
+            "Arc<CacheEntry<Arc<ResolvedTypeDeclaration>>>",
+        ),
+        ("ResolvabilityDb", "Arc<CacheEntry<bool>>"),
+        (
+            "OwnerCollectionDb",
+            "Arc<CacheEntry<Option<Arc<TypeExpr>>>>",
+        ),
+        // PreparedTargetDb's value is the `PreparedTargetValue` alias
+        // (`Option<(Arc<str>, Arc<str>)>`) — a `type` alias keeps the
+        // map signature within clippy's type-complexity bound.
+        ("PreparedTargetDb", "Arc<CacheEntry<PreparedTargetValue>>"),
+        ("ShapeCacheDb", "Arc<CacheEntry<MaterializedTypeExpr>>"),
+        (
+            "PreparedSurfaceDb",
+            "Arc<CacheEntry<PreparedSurfacePayload>>",
+        ),
+        (
+            "PreparedMemberDb",
+            "Arc<CacheEntry<Option<Arc<ProjectedMember>>>>",
+        ),
+        ("RoutedExprSurfaceDb", "Arc<CacheEntry<Arc<TypeExpr>>>"),
     ];
-    for entry in ENTRIES {
-        let struct_decl = format!("pub struct {entry} {{");
-        let idx = src
-            .find(&struct_decl)
-            .unwrap_or_else(|| panic!("expected `{struct_decl}` in component_meta_caches.rs"));
-        // Window from struct start to the next `}` at column 0
-        // (struct close).
-        let after = &src[idx..];
-        let end = after
-            .find("\n}")
-            .unwrap_or_else(|| panic!("expected struct close for {entry}"));
-        let window = &after[..end];
+    for (db, value_type) in MIGRATED {
         assert!(
-            window.contains("fact_dep_signature: Arc<[FactVersionRef]>"),
-            "{entry} must carry `fact_dep_signature: Arc<[FactVersionRef]>` (R28 migration), \
-             but the struct body did not contain that field. Window:\n{window}"
+            src.contains(value_type),
+            "{db} must store `{value_type}` (the shared cache-runtime carrier) in its \
+             `entries` map. A bespoke per-cache `*Entry` carrier violates the cutover."
         );
+    }
+    // None of the eight migrated caches define a bespoke carrier struct.
+    for retired in [
+        "pub struct DeclarationLookupEntry",
+        "pub struct ResolvabilityEntry",
+        "pub struct OwnerCollectionEntry",
+        "pub struct PreparedTargetEntry",
+        "pub struct ShapeCacheEntry",
+        "pub struct PreparedSurfaceEntry",
+        "pub struct PreparedMemberEntry",
+        "pub struct RoutedExprSurfaceEntry",
+    ] {
         assert!(
-            !window.contains("dep_signature: DepSignature"),
-            "{entry} must NOT carry the legacy `dep_signature: DepSignature` field after the \
-             R28 migration. Both fields coexisting would violate the clean cutover. Window:\n{window}"
+            !src.contains(retired),
+            "the bespoke carrier `{retired}` MUST be retired — the migrated single-entry \
+             caches store `cache_runtime::CacheEntry<Value>`."
         );
     }
 }
@@ -173,56 +205,65 @@ fn family_a_producers_call_new_fact_helpers() {
     );
 }
 
-/// The legacy `ctx.validate_dep_signature` warm-hit validator is no
-/// longer called for Family A entries. Every Family A warm-read and
-/// post-compute revalidation site validates the `fact_dep_signature`
-/// through `validate_fact_signature_with_self_roots` — the strict
-/// self-root validator: the entry's keyed canonical(s) are passed as
-/// the self-root set, so the leading self-root `FileWholeHash` is
-/// validated strictly (a same-canonical edit, or a keyed canonical
-/// untracked by the live store view, rejects the entry) while
-/// cross-file dependency facts keep lazy permissiveness.
+/// Family A warm reads validate strictly against the entry's own
+/// self-roots and never through the lazy validator.
+///
+/// After the single-entry cutover, the eight migrated caches validate
+/// through the shared cache-runtime entry's
+/// `ReadSetSignature::validate_with_self_roots(ctx,
+/// &entry.self_root_canonicals)` (in the `SingleEntryArtifactNode`
+/// adapter's `validate` and in `single_entry_peek`), and bubble through
+/// `ReadSetSignature::bubble`. `ImportedRegistryEntry` (still bespoke)
+/// validates through the free `validate_fact_signature_with_self_roots`.
+/// The contract this guard pins is boundary-and-behavioural, not a
+/// call-site count: strict self-root validation everywhere, the lazy
+/// `validate_fact_signature(ctx, ...)` nowhere.
 #[test]
 fn family_a_warm_hit_uses_fact_validation() {
     let src = read_session_source("component_meta_caches.rs");
-    // Family A warm-read closures must validate the fact_dep_signature
-    // strictly via `validate_fact_signature_with_self_roots`, NOT the
-    // lazy `validate_fact_signature` (which would route a self-root
-    // `FileWholeHash` through the untracked-accept rule). The 9
-    // get_or_compute methods each carry a warm-hit predicate AND a
-    // post-compute revalidator; the 5 caches exposing `peek()`
-    // (PreparedTarget, MaterializeMemo, PreparedSurface,
-    // PreparedMember, RoutedExprSurface) carry one more. Use a lower
-    // bound to keep the gate stable against minor refactors.
-    let strict_count = src
-        .matches("validate_fact_signature_with_self_roots(")
-        .count();
+
+    // The migrated single-entry caches validate through the shared
+    // cache-runtime entry's strict self-root validator. The adapter's
+    // `validate` passes `cx.resolver`; the shared `single_entry_peek`
+    // passes `ctx`. Both route into `ReadSetSignature::validate_with_self_roots`
+    // against the entry's OWN `self_root_canonicals` (whitespace-robust
+    // substring — the receiver is `entry.signature` / `entry_arc.signature`).
     assert!(
-        strict_count >= 18,
-        "expected at least 18 `validate_fact_signature_with_self_roots(...)` call \
-         sites in component_meta_caches.rs (strict self-root validator + post-publish \
-         revalidator per Family A cache), got {strict_count}"
+        src.contains(".validate_with_self_roots(cx.resolver, &entry.self_root_canonicals)"),
+        "the migrated single-entry adapter MUST validate through \
+         `entry.signature.validate_with_self_roots(cx.resolver, &entry.self_root_canonicals)`."
     );
-    // The lazy `validate_fact_signature` must NOT be used for a Family
-    // A warm/revalidation site: it would accept a self-root
-    // `FileWholeHash` for an untracked keyed canonical and serve a
-    // stale entry. Only the strict self-root variant is permitted.
+    assert!(
+        src.contains(".validate_with_self_roots(ctx, &entry_arc.self_root_canonicals)"),
+        "`single_entry_peek` MUST validate through \
+         `entry_arc.signature.validate_with_self_roots(ctx, &entry_arc.self_root_canonicals)`."
+    );
+    // And bubble through the same carrier so outer tracers observe the
+    // entry's facts (warm hits AND the cold winner's projection).
+    assert!(
+        src.contains("entry.signature.bubble(cx.resolver)")
+            && src.contains("entry_arc.signature.bubble(ctx)"),
+        "the migrated single-entry caches MUST bubble through \
+         `entry.signature.bubble(...)` so outer tracers observe the entry's facts."
+    );
+
+    // `ImportedRegistryEntry` (still bespoke until its own migration)
+    // keeps the free strict self-root validator.
+    assert!(
+        src.contains("validate_fact_signature_with_self_roots("),
+        "ImportedRegistryEntry's warm-read / revalidation closures MUST validate via \
+         `validate_fact_signature_with_self_roots(...)` (strict self-root)."
+    );
+
+    // The lazy `validate_fact_signature(ctx, ...)` must NOT appear for
+    // ANY Family A cache — it routes a self-root `FileWholeHash` through
+    // the untracked-accept rule and would serve a stale entry. This ban
+    // is the load-bearing invariant; it must hold regardless of how the
+    // validation is centralised.
     assert!(
         !src.contains("validate_fact_signature(ctx,"),
         "component_meta_caches.rs must NOT call the lazy `validate_fact_signature(ctx, \
-         ...)` for any Family A cache — the lazy validator routes a self-root \
-         FileWholeHash through the untracked-accept rule and serves stale entries. \
-         Use `validate_fact_signature_with_self_roots` with the entry's keyed \
-         canonical(s) as the self-root set."
-    );
-    // The bubble-up helper ALSO appears on every warm-hit path so
-    // outer tracers see the inner observation set.
-    let bubble_count = src.matches("bubble_fact_signature(ctx,").count();
-    assert!(
-        bubble_count >= 18,
-        "expected at least 18 `bubble_fact_signature(ctx, ...)` call sites in \
-         component_meta_caches.rs (warm-hit + cold-compute bubble per Family A cache), \
-         got {bubble_count}"
+         ...)` for any Family A cache — only strict self-root validation is permitted."
     );
 }
 

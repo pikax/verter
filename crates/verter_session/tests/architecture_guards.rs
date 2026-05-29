@@ -3777,7 +3777,6 @@ mod foundations_guards {
         // `#[cfg(test)] mod tests` inline in
         // `cache_runtime/world_snapshot.rs`.
         "pub(crate) mod cache_runtime",
-        "pub mod cooperative_admission",
         // R3/R26/R28 — fact-validation helpers shared by the inner
         // component-meta caches (Family A/B). Carries
         // `validate_fact_signature`, `bubble_fact_signature`, and the
@@ -3852,6 +3851,14 @@ mod foundations_guards {
         "pub use verter_compiler::compile::CompileTarget",
         // tests/relative_path_session_parity.rs
         "pub use id::resolve_external",
+        // `ReadSetSignature` is the typed return type of the public
+        // `compile_slot_fact_dep_signature` inspector. The owning
+        // module `fact_signature_helpers` stays `pub(crate)` because
+        // its internals (validators, signature constructors) are
+        // implementation detail; only the inspector's return type
+        // needs to enter the public surface so external callers can
+        // name it.
+        "pub use crate::fact_signature_helpers::ReadSetSignature",
         // Block 6.e per-call-site instrumentation: bench example
         // (crates/verter_bench/examples/audit_real_component_meta.rs)
         // dumps the `HostStoreView::from_host` attribution table at the
@@ -4014,6 +4021,19 @@ mod foundations_guards {
             "crates/verter_session/src/host_manage/component_meta_extract.rs",
             "crates/verter_session/src/host_manage/component_meta_methods.rs",
             "crates/verter_session/src/host_resolve.rs",
+            // Compile-tier virtual-file producer. Owns the cold-build
+            // `NonCacheable` admission lifecycle: the SetReasonGuard
+            // arming over the cold-compute pass, the scheduler-eviction
+            // guard (`remove_artifact_if_not_newer_than`) that drops
+            // stale artifacts past the compile-start generation, and
+            // the compile-start-generation snapshot threaded from
+            // `sched_snapshot_at_start` into the eviction call. The
+            // cache-runtime substrate hookups (test-only force-overflow
+            // injection block) are co-located so the
+            // admission/eviction contract stays byte-coherent with the
+            // compile pipeline. Splitting the admission lifecycle out
+            // into a sibling helper module is the eventual cleanup.
+            "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs",
             // `ValidatedFactCache<K, V>` substrate + multi-candidate
             // RCU storage + admission guards + per-counter
             // instrumentation. The cache is the load-bearing

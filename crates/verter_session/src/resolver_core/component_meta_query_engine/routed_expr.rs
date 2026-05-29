@@ -353,15 +353,21 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             // root symbol `root_symbol` declared at `scope_canonical_id`
             // under the route. Observe top-level type identity so the
             // consumer invalidates on shape changes but not on
-            // unrelated member-body edits. `?` on a `None` observation
-            // or builder result refuses shared-cache admission.
-            let fact_sig = engine_fact_signature_for_exported_type(
+            // unrelated member-body edits. `NonCacheable` on a missing
+            // observation or non-recoverable provenance refuses
+            // shared-cache admission.
+            let observed = observed_keyed_hash?;
+            match engine_fact_signature_for_exported_type(
                 ctx,
                 captured_canonical.as_str(),
                 captured_root.as_str(),
-                observed_keyed_hash?,
-            )?;
-            Some((captured_value, fact_sig))
+                observed,
+            ) {
+                crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
+                    Some((captured_value, sig.facts))
+                }
+                crate::cache_runtime::SignatureAdmission::NonCacheable(_) => None,
+            }
         });
         self.routed_expr_surface_cache
             .borrow_mut()

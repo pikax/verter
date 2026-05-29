@@ -360,13 +360,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let captured_canonical = scope_canonical_id.to_string();
         let captured_symbol = symbol_name.to_string();
         let _ = host_db.get_or_compute(&arc_key, ctx, move || {
-            let fact_sig = engine_fact_signature_for_exported_type(
+            let observed = observed_keyed_hash?;
+            match engine_fact_signature_for_exported_type(
                 ctx,
                 captured_canonical.as_str(),
                 captured_symbol.as_str(),
-                observed_keyed_hash?,
-            )?;
-            Some((payload, fact_sig))
+                observed,
+            ) {
+                crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
+                    Some((payload, sig.facts))
+                }
+                crate::cache_runtime::SignatureAdmission::NonCacheable(_) => None,
+            }
         });
     }
 
@@ -946,16 +951,22 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             // consumer warm, and a body edit on the specific member
             // invalidates it. The signature roots on the
             // caller-observed keyed-canonical content version — never
-            // a current-content re-read. `?` on a `None` observation
-            // or builder result refuses shared-cache admission.
-            let fact_sig = engine_fact_signature_for_canonical_member(
+            // a current-content re-read. `NonCacheable` on a missing
+            // observation or non-recoverable provenance refuses
+            // shared-cache admission.
+            let observed = observed_keyed_hash?;
+            match engine_fact_signature_for_canonical_member(
                 ctx,
                 captured_canonical.as_str(),
                 captured_symbol.as_str(),
                 captured_member.as_str(),
-                observed_keyed_hash?,
-            )?;
-            Some((captured_value, fact_sig))
+                observed,
+            ) {
+                crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
+                    Some((captured_value, sig.facts))
+                }
+                crate::cache_runtime::SignatureAdmission::NonCacheable(_) => None,
+            }
         });
     }
 
@@ -1372,7 +1383,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     captured_routed
                         .as_ref()
                         .map(|(c, n, h)| (c.as_str(), n.as_str(), *h));
-                let fact_sig = super::engine_fact_signature_for_prepared_target(
+                let fact_sig = match super::engine_fact_signature_for_prepared_target(
                     ctx,
                     captured_canonical.as_str(),
                     captured_target.as_str(),
@@ -1381,7 +1392,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     captured_decl_symbol.as_str(),
                     observed_decl_hash,
                     routed_decl_ref,
-                )?;
+                ) {
+                    crate::cache_runtime::SignatureAdmission::Cacheable(sig) => sig.facts,
+                    crate::cache_runtime::SignatureAdmission::NonCacheable(_) => return None,
+                };
                 // Self-root canonical set: active scope + original
                 // declaring canonical + final routed declaring
                 // canonical (deduped).
