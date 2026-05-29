@@ -715,6 +715,13 @@ pub(super) fn projected_surface_from_parts_union(
                     if existing.ty != member.ty {
                         existing.ty = TypeExpr::union(vec![existing.ty.clone(), member.ty]);
                     }
+                    // The member now appears in ≥2 union variants — it is a
+                    // SYNTHESIZED common-member with no single OXC declaration
+                    // site (each arm has its own). Clearing both honours the
+                    // `ProjectedMember` provenance invariant: spans/origin are
+                    // `None` for a multi-origin member, never the first arm's.
+                    existing.spans = verter_type_expr::MemberSpans::default();
+                    existing.declaration_origin = None;
                 }
             }
         }

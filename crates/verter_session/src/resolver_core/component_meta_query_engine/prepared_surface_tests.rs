@@ -333,3 +333,95 @@ fn projected_surface_to_type_expr_reemits_real_index_signature_shape_and_spans()
         "a concrete index signature must NOT additionally emit the open placeholder"
     );
 }
+
+/// FIX 2 (U3b fix-cycle, codex#2 P1): a SYNTHESIZED union common-member has NO
+/// single OXC declaration site, so its spans + declaration file must be cleared
+/// (`None`) — NOT carried verbatim from the FIRST arm.
+///
+/// `{ a: string } | { a: number }` with each arm's `a` carrying DISTINCT real
+/// spans + a distinct declaration file. The merged `a: string | number` member
+/// is multi-origin: its spans must all be `None` and its `declaration_origin`
+/// `None`.
+///
+/// Discriminating: pre-fix the union merge merged the second arm into the FIRST
+/// arm's `ProjectedMember` (rewriting only `ty` / `optional`), leaving the first
+/// arm's spans + declaration file in place. Against that tree the merged member
+/// reports the `string` arm's span/file and these `None` asserts fail.
+#[test]
+fn projected_surface_from_parts_union_clears_synthesized_member_span_and_origin() {
+    use verter_span::Span;
+    use verter_type_expr::{MemberSpans, PrimitiveName};
+
+    fn arm(
+        value: PrimitiveName,
+        spans: MemberSpans,
+        origin: &str,
+    ) -> std::sync::Arc<ProjectedSurface> {
+        std::sync::Arc::new(ProjectedSurface {
+            members: vec![ProjectedMember {
+                name: "a".to_string(),
+                ty: TypeExpr::Primitive(value),
+                optional: false,
+                readonly: false,
+                is_method: false,
+                declared_in_macro_type_arg: false,
+                spans,
+                declaration_origin: Some(std::sync::Arc::from(origin)),
+            }],
+            call_signatures: Vec::new(),
+            construct_signatures: Vec::new(),
+            index_signatures: Vec::new(),
+            has_index_signature: false,
+        })
+    }
+
+    // First arm `{ a: string }` and second arm `{ a: number }` — DISTINCT span
+    // ranges + DISTINCT declaration files. Pre-fix, the first arm's
+    // span/file leaks onto the synthesized union member.
+    let first = arm(
+        PrimitiveName::String,
+        MemberSpans {
+            declaration: Some(Span::new(2, 11)),
+            name: Some(Span::new(2, 3)),
+            type_annotation: Some(Span::new(5, 11)),
+        },
+        "/src/a.ts",
+    );
+    let second = arm(
+        PrimitiveName::Number,
+        MemberSpans {
+            declaration: Some(Span::new(40, 49)),
+            name: Some(Span::new(40, 41)),
+            type_annotation: Some(Span::new(43, 49)),
+        },
+        "/src/b.ts",
+    );
+
+    let merged = match projected_surface_from_parts_union(vec![first, second]) {
+        PreparedSurfaceProjection::Surface(surface) => surface,
+        other => panic!("union of two non-empty arms must produce a Surface, got {other:?}"),
+    };
+    let member = merged
+        .members
+        .iter()
+        .find(|m| m.name == "a")
+        .expect("the common `a` member must survive the union merge");
+
+    // The member's type IS the union (sanity: the merge did compose it).
+    assert!(
+        matches!(&member.ty, TypeExpr::Union(_)),
+        "the merged `a` must be `string | number`, got {:?}",
+        member.ty
+    );
+
+    // INVARIANT: a synthesized multi-origin member carries NO span/origin.
+    assert_eq!(
+        member.spans,
+        MemberSpans::default(),
+        "synthesized union common-member must clear ALL spans to None (not the first arm's)"
+    );
+    assert_eq!(
+        member.declaration_origin, None,
+        "synthesized union common-member must clear declaration_origin to None"
+    );
+}
