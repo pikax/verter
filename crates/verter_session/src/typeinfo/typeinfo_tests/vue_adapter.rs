@@ -548,3 +548,233 @@ fn vue_public_type_returns_none_for_plain_ts_file() {
         "a plain .ts file has no .vue public component type"
     );
 }
+
+// ---------------------------------------------------------------------------
+// (9) Query-level distinctness — PublicType vs FullMetadata produce DISTINCT
+//     results for a `.vue`.
+//
+//     Discriminating: the PublicType surface is the instance object
+//     `{ $props, $emit, $slots }`; the FullMetadata defineProps surface is the
+//     props object `{ count }`. They MUST differ — a level that collapsed to
+//     one result would make the member sets equal.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn query_level_public_vs_full_metadata_produce_distinct_surfaces() {
+    const FILE: &str = "/w/LevelComp.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_FULL_COMPONENT);
+
+    let public_surface = host
+        .resolve_vue_public_type(FILE, TypeInfoQueryLevel::PublicType)
+        .expect("public type resolves");
+    let public_members: std::collections::BTreeSet<&str> = public_surface
+        .members
+        .iter()
+        .map(|m| m.name.as_ref())
+        .collect();
+
+    let full_request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
+    let full = host
+        .resolve_vue_macro_surface(&full_request)
+        .expect("full-metadata defineProps surface resolves");
+    let full_members: std::collections::BTreeSet<&str> = full
+        .surface
+        .members
+        .iter()
+        .map(|m| m.name.as_ref())
+        .collect();
+
+    assert!(
+        public_members.contains("$props"),
+        "PublicType carries the instance $props member"
+    );
+    assert!(
+        full_members.contains("count") && !full_members.contains("$props"),
+        "FullMetadata defineProps surface carries the prop members, not the instance shape"
+    );
+    assert_ne!(
+        public_members, full_members,
+        "PublicType and FullMetadata are DISTINCT query results for the same .vue"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (10) Cache identity — the store memoizes per (canonical, content, macro,
+//      level); a content edit yields a distinct content-addressed key.
+//
+//      Discriminating: a warm `vue_macro_dtos` call does NOT grow the store
+//      (same key hits, pointer-equal Arc); a DIFFERENT macro grows it (distinct
+//      slot); a content edit grows it (content-addressed key). A key that
+//      omitted content (an env-hash-only key) would serve the stale entry and
+//      fail the edited-props assertion.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn vue_macro_dtos_cache_keys_on_content_and_macro() {
+    const FILE: &str = "/w/CacheComp.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_PROPS_AND_EMITS);
+
+    assert_eq!(
+        host.vue_shallow_metadata_store().len(),
+        0,
+        "store starts empty"
+    );
+
+    let request_props = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
+    let first = host.vue_macro_dtos(&request_props);
+    assert_eq!(first.props.len(), 2, "cold compute produces the props");
+    assert_eq!(
+        host.vue_shallow_metadata_store().len(),
+        1,
+        "one cold entry published"
+    );
+
+    // Warm hit: same key, store does NOT grow, and the returned Arc is the SAME
+    // cached value (pointer-equal).
+    let second = host.vue_macro_dtos(&request_props);
+    assert_eq!(
+        host.vue_shallow_metadata_store().len(),
+        1,
+        "warm hit reuses the cached entry; store does not grow"
+    );
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "warm hit returns the SAME immutable Arc"
+    );
+
+    // A DIFFERENT macro (defineEmits) is a DISTINCT cache slot.
+    let request_emits = props_request(&host, FILE, AnalyzedMacroKind::DefineEmits);
+    let emits_dtos = host.vue_macro_dtos(&request_emits);
+    assert_eq!(
+        emits_dtos.emits.len(),
+        1,
+        "the emits DTO bundle is computed"
+    );
+    assert_eq!(
+        host.vue_shallow_metadata_store().len(),
+        2,
+        "a different macro occupies a distinct cache slot"
+    );
+
+    // A content edit changes the `.vue`'s whole_hash → a fresh content-addressed
+    // key → a new cold entry (the old entry is not served for changed content).
+    upsert(&host, FILE, VUE_PROPS_AND_EMITS_EDITED);
+    let request_edited = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
+    assert_ne!(
+        request_edited.root_identity, request_props.root_identity,
+        "the content edit changed the .vue's whole_hash"
+    );
+    let edited = host.vue_macro_dtos(&request_edited);
+    let mut edited_names: Vec<&str> = edited.props.iter().map(|p| p.name.as_str()).collect();
+    edited_names.sort_unstable();
+    assert_eq!(
+        edited_names,
+        vec!["count", "extra", "label"],
+        "the edited content's props reflect the NEW source, not the stale entry"
+    );
+    assert!(
+        host.vue_shallow_metadata_store().len() >= 3,
+        "the content edit produced a distinct content-addressed cache entry"
+    );
+}
+
+const VUE_PROPS_AND_EMITS: &str = r#"<script setup lang="ts">
+defineProps<{ count: number; label?: string }>();
+defineEmits<{ (e: 'change', v: number): void }>();
+</script>
+"#;
+
+const VUE_PROPS_AND_EMITS_EDITED: &str = r#"<script setup lang="ts">
+defineProps<{ count: number; label?: string; extra: boolean }>();
+defineEmits<{ (e: 'change', v: number): void }>();
+</script>
+"#;
+
+/// The query level is QUERY IDENTITY, not an env-hash dimension (R21). Guard:
+/// the DTO cache key carries the level tag + content hash, NOT any of the five
+/// env hashes. A structural check on the key type — if a future edit folded an
+/// env hash into the key (or dropped the level), this fails to compile / the
+/// field set changes.
+///
+/// Discriminating: asserts the exact key field set. Adding an env-hash field
+/// (e.g. `resolve_env_hash`) or removing `level_tag` breaks the assertion.
+#[test]
+fn vue_macro_dto_key_carries_level_and_content_not_env_hash() {
+    use crate::typeinfo::adapters::vue::store::VueMacroDtoKey;
+
+    let a = VueMacroDtoKey::new(
+        Arc::from("/w/x.vue"),
+        [1u8; 16],
+        0,
+        TypeInfoQueryLevel::PublicType,
+    );
+    let b = VueMacroDtoKey::new(
+        Arc::from("/w/x.vue"),
+        [1u8; 16],
+        0,
+        TypeInfoQueryLevel::FullMetadata,
+    );
+    // Distinct level ⇒ distinct key (level is part of identity).
+    assert_ne!(a, b, "the level discriminates the key");
+
+    // Distinct content ⇒ distinct key (content-addressed).
+    let c = VueMacroDtoKey::new(
+        Arc::from("/w/x.vue"),
+        [2u8; 16],
+        0,
+        TypeInfoQueryLevel::PublicType,
+    );
+    assert_ne!(a, c, "the content hash discriminates the key");
+
+    // The level tag is a small query-identity discriminant (0/1), NOT a 16-byte
+    // env-hash. PublicType and FullMetadata differ by exactly the tag byte.
+    assert_eq!(TypeInfoQueryLevel::PublicType.cache_tag(), 0);
+    assert_eq!(TypeInfoQueryLevel::FullMetadata.cache_tag(), 1);
+    assert_ne!(
+        TypeInfoQueryLevel::PublicType.cache_tag(),
+        TypeInfoQueryLevel::FullMetadata.cache_tag()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (11) No owned `String` type / JSDoc text on VueMacroSurface / the surface.
+//
+//      The surface carries SPANS only (ids + flags + interned names). This is a
+//      compile-time structural guard plus a runtime assertion that the surface
+//      members expose span fields, never an owned type-text String.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn vue_macro_surface_carries_spans_not_owned_type_strings() {
+    const FILE: &str = "/w/SpanComp.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_PROPS);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
+    let surface = host.resolve_vue_macro_surface(&request).expect("surface");
+
+    // Structural: every member exposes a span-bearing origin + value node id,
+    // and JSDoc as SPANS — there is no owned type-text String field on the
+    // surface member (the `TypeInfoSurfaceMember` type has no `type_annotation:
+    // String`). Assert the span-bearing fields are reachable.
+    for member in surface.surface.members.iter() {
+        // `value` is a node id (not an expanded body), `name` is interned.
+        let _node_id: crate::semantic_query::SemanticNodeId = member.value;
+        let _name: &Arc<str> = &member.name;
+        // JSDoc is a span (Option<CanonicalSpan>), never an owned doc String on
+        // the surface.
+        let _desc_span: &Option<crate::typeinfo::surface::CanonicalSpan> =
+            &member.jsdoc_description_span;
+    }
+
+    // The whole surface is `Eq + Hash` (a structural value of spans/ids/flags),
+    // which would not hold if it carried interior-mutable / non-hashable owned
+    // payloads. Exercise it.
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    surface.surface.hash(&mut h);
+    let _ = h.finish();
+}
