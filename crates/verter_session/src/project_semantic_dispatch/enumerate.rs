@@ -293,6 +293,52 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             SemanticNodeData::Primitive(PrimitiveKind::Never) => Some(Vec::new()),
             SemanticNodeData::KeyOf { base } => self.key_names_from_base_node(*base),
+            // Unresolved alias carrier on the key-domain enumeration path. The
+            // deferred-shell evaluator deliberately leaves `DeclRef` /
+            // `InstantiationRef` carriers symbolic (so intermediate
+            // indexed-access hops keep `Foo['k']` symbolic), but key-domain
+            // enumeration IS the macro-shape enumeration path where the alias
+            // MUST resolve to its declared key set — e.g. an `Omit<T, Keys>`
+            // whose `Keys` is a cross-file `type Keys = 'a' | 'b'` alias (a
+            // barrel-reexported keys alias). Resolve the carrier to its body
+            // through the shared dispatch (`Instantiate`) and recurse. This is
+            // path-precise (the demanded key set), not a breadth walk.
+            SemanticNodeData::DeclRef { identity } => {
+                let instantiated = match self.execute(
+                    crate::semantic_query::SemanticQueryKey::Instantiate {
+                        base: identity.clone(),
+                        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                        context: crate::semantic_query::ProjectionReductionContext::published(
+                            crate::semantic_query::ProjectionMode::Expanded,
+                        ),
+                    },
+                ) {
+                    crate::semantic_query::QueryResult::Value(id) => id,
+                    _ => return self.key_names_from_base_node(resolved),
+                };
+                if instantiated == resolved {
+                    return self.key_names_from_base_node(resolved);
+                }
+                self.key_names_from_keyspace_node(instantiated)
+            }
+            SemanticNodeData::InstantiationRef { base, args } => {
+                let instantiated = match self.execute(
+                    crate::semantic_query::SemanticQueryKey::Instantiate {
+                        base: base.clone(),
+                        args: Arc::clone(args),
+                        context: crate::semantic_query::ProjectionReductionContext::published(
+                            crate::semantic_query::ProjectionMode::Expanded,
+                        ),
+                    },
+                ) {
+                    crate::semantic_query::QueryResult::Value(id) => id,
+                    _ => return self.key_names_from_base_node(resolved),
+                };
+                if instantiated == resolved {
+                    return self.key_names_from_base_node(resolved);
+                }
+                self.key_names_from_keyspace_node(instantiated)
+            }
             _ => self.key_names_from_base_node(resolved),
         }
     }
