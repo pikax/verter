@@ -190,18 +190,31 @@ fn p2_3_duplicate_name_same_value_jsdoc_disambiguates_by_declaration_span() {
 }
 
 // ---------------------------------------------------------------------------
-// P2-4 — class `/** doc */ foo!: string` definite-assignment field.
+// P2-4 — class `/** doc */ foo!: string` definite-assignment field, STRUCTURAL
+// lazy-path coverage (NOT the discriminating `!:`-matcher gate).
 //
-// The pre-fix textual matcher accepted `name` → optional `?` → `:` / `(` but
-// NOT `!` (definite assignment), so a `foo!: string` field's leading JSDoc was
-// missed (`description == None`). The structural attach anchors on the member's
-// name-token offset (the `!` is AFTER the name, so the backward leading-comment
-// walk is unaffected); any remaining textual matcher must also understand `!:`
-// (but is not the authority).
+// HONEST framing: this test confirms a `foo!: string` definite-assignment field
+// reaches the lazy imported-macro-surface `prop_members` rail WITH its JSDoc.
+// But it is NOT discriminating for the `3387740cf` `!:`-matcher fix: after P2-3,
+// `member_display_jsdoc` returns early via the STRUCTURAL `member.spans.name`
+// attach (`extract_jsdoc_near_offset` walks backward from the name token, and
+// the `!` follows the name, so it is unaffected). Reverting the `!:` change to
+// the NON-authority textual matchers would NOT fail this test — the structural
+// path short-circuits before any matcher runs.
+//
+// The DISCRIMINATING guards for the `!:` matcher change live elsewhere, each
+// directly exercising a matcher the structural path bypasses:
+//   - `verter_semantic::analysis::jsdoc::tests::
+//      extract_jsdoc_for_property_name_accepts_definite_assignment_field`
+//     (the `jsdoc.rs` expanded-prop / synthetic-member fallback), and
+//   - `imported_surface::tests::member_decl_site_in_range_accepts_definite_assignment_field`
+//     (the `imported_surface.rs` declaring-declaration presence probe used by
+//     `declaring_decl_span` when a member has NO name span).
+// Both FAIL if `3387740cf`'s `!:` acceptance is reverted.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn p2_4_class_definite_assignment_field_carries_jsdoc() {
+fn p2_4_class_definite_assignment_field_reaches_lazy_surface_with_jsdoc_via_structural_attach() {
     const FILE: &str = "/w/definite.ts";
     // `foo!: string` is a documented definite-assignment field; `plain: number`
     // is a documented normal field (control); `bare!: boolean` is a
@@ -215,14 +228,14 @@ fn p2_4_class_definite_assignment_field_carries_jsdoc() {
 
     let host = build_host(&[(FILE, src)]);
 
-    // POSITIVE: the documented definite-assignment field `foo!: string` carries
-    // its JSDoc (the `!` must not block the leading-comment attach). Pre-fix the
-    // `?`-only matcher missed it → `None`.
+    // POSITIVE: the documented definite-assignment field `foo!: string` reaches
+    // the lazy prop surface WITH its JSDoc via the structural name-span attach
+    // (the `!` must not drop the member or block the leading-comment walk).
     let foo_doc = member_prop_description(&host, FILE, "WithDefinite", "foo");
     assert_eq!(
         foo_doc.as_deref(),
         Some("the definite field"),
-        "`foo!: string`'s JSDoc must resolve; a `None` proves the `!:` matcher gap"
+        "`foo!: string` must reach the lazy surface with its JSDoc via the structural attach"
     );
 
     // CONTROL: the plain documented field still resolves (no regression).

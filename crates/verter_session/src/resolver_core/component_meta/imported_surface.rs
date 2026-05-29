@@ -1298,4 +1298,68 @@ mod tests {
         let _ = ResolvedMacroSurface::Empty;
         let _ = ResolvedMacroSurface::LazyImported(ImportedMacroSurface::new(fixture_identity()));
     }
+
+    // P2-4 DISCRIMINATING guard for the FALLBACK matcher path. `member_display_jsdoc`'s
+    // authority is the structural `member.spans.name` attach (which handles `foo!:`
+    // because the `!` follows the name); the integration test
+    // `tests/jsdoc_provenance_p2.rs::p2_4_class_definite_assignment_field_carries_jsdoc`
+    // only exercises THAT structural path, so it does not discriminate the `!:`
+    // change to this textual presence probe. `member_decl_site_in_range` is the
+    // NON-authority fallback `declaring_decl_span` uses when a member has NO name
+    // span; `3387740cf` taught it to accept the definite-assignment (`name!:`)
+    // marker. This unit drives the probe DIRECTLY on a `foo!: string` field, so it
+    // FAILS if that `!:` acceptance is reverted (the probe would miss the declaration
+    // site and return `false`).
+    #[test]
+    fn member_decl_site_in_range_accepts_definite_assignment_field() {
+        let src = "class WithDefinite {\n  /** doc */\n  foo!: string;\n}\n";
+        assert!(
+            member_decl_site_in_range(src, "foo", 0, src.len()),
+            "the presence probe must find the definite-assignment field `foo!: string`; a `false` \
+             proves the `!:` marker acceptance was reverted (the probe walks `name` → `?`/`!` → \
+             `:`/`(`)",
+        );
+    }
+
+    #[test]
+    fn member_decl_site_in_range_matches_property_optional_and_method_forms() {
+        // Controls: the probe accepts the property (`name:`), optional (`name?:`),
+        // and method-style (`name(`) forms (all pre- and post-fix). Proves the
+        // definite-assignment guard above is not merely a tautology.
+        assert!(member_decl_site_in_range(
+            "interface I { foo: string }",
+            "foo",
+            0,
+            28
+        ));
+        assert!(member_decl_site_in_range(
+            "interface I { foo?: string }",
+            "foo",
+            0,
+            29
+        ));
+        assert!(member_decl_site_in_range(
+            "interface I { foo(): void }",
+            "foo",
+            0,
+            27
+        ));
+    }
+
+    #[test]
+    fn member_decl_site_in_range_rejects_absent_or_non_declaration_name() {
+        // NEGATIVE: a name that never appears as a declaration site → false (the
+        // probe must not fabricate a site, so the `!:` acceptance does not become a
+        // false-positive vector).
+        assert!(
+            !member_decl_site_in_range("interface I { other: string }", "foo", 0, 29),
+            "an absent member name must not match"
+        );
+        // A bare identifier reference (`foo` used as a value, no `:`/`(`/`?`/`!`)
+        // must not be mistaken for a declaration site.
+        assert!(
+            !member_decl_site_in_range("const x = foo + 1;", "foo", 0, 18),
+            "a non-declaration identifier occurrence must not match"
+        );
+    }
 }
