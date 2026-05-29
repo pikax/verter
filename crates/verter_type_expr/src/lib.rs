@@ -770,6 +770,31 @@ impl ObjectExpr {
             }
         }
     }
+
+    /// Recursively drop every member span and nested-type span (see
+    /// [`TypeExpr::clear_spans`]).
+    fn clear_spans(&mut self) {
+        for member in &mut self.properties {
+            match member {
+                ObjectMember::Property(prop) => {
+                    prop.spans.clear();
+                    prop.ty.clear_spans();
+                }
+                ObjectMember::IndexSignature(idx) => {
+                    idx.spans.clear();
+                    idx.key_type.clear_spans();
+                    idx.value_type.clear_spans();
+                }
+                ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+                    func.clear_spans();
+                }
+                ObjectMember::Method(method) => {
+                    method.spans.clear();
+                    method.function.clear_spans();
+                }
+            }
+        }
+    }
 }
 
 /// A member of an object type.
@@ -829,6 +854,11 @@ impl MemberSpans {
         self.name = self.name.map(|span| span.shifted(delta));
         self.type_annotation = self.type_annotation.map(|span| span.shifted(delta));
     }
+
+    /// Drop every span (honest absence — no single source site).
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
 }
 
 /// OXC-derived spans for a call / construct / method function signature.
@@ -846,6 +876,11 @@ impl FunctionSpans {
     fn shift(&mut self, delta: i64) {
         self.signature = self.signature.map(|span| span.shifted(delta));
         self.return_type = self.return_type.map(|span| span.shifted(delta));
+    }
+
+    /// Drop every span (honest absence — no single source site).
+    fn clear(&mut self) {
+        *self = Self::default();
     }
 }
 
@@ -867,6 +902,11 @@ impl IndexSignatureSpans {
         self.declaration = self.declaration.map(|span| span.shifted(delta));
         self.key = self.key.map(|span| span.shifted(delta));
         self.value = self.value.map(|span| span.shifted(delta));
+    }
+
+    /// Drop every span (honest absence — no single source site).
+    fn clear(&mut self) {
+        *self = Self::default();
     }
 }
 
@@ -1086,6 +1126,28 @@ impl FunctionExpr {
             }
         }
     }
+
+    /// Recursively drop the signature/return spans, each parameter's span and
+    /// nested type, the return type, and every type-parameter constraint /
+    /// default (see [`TypeExpr::clear_spans`]).
+    fn clear_spans(&mut self) {
+        self.spans.clear();
+        for param in &mut self.parameters {
+            param.span = None;
+            param.ty.clear_spans();
+        }
+        if let Some(return_type) = self.return_type.as_mut() {
+            Arc::make_mut(return_type).clear_spans();
+        }
+        for type_param in &mut self.type_parameters {
+            if let Some(constraint) = type_param.constraint.as_mut() {
+                Arc::make_mut(constraint).clear_spans();
+            }
+            if let Some(default) = type_param.default.as_mut() {
+                Arc::make_mut(default).clear_spans();
+            }
+        }
+    }
 }
 
 /// A function parameter.
@@ -1236,6 +1298,16 @@ fn shift_arc_slice(slice: &mut Arc<[TypeExpr]>, delta: i64) {
     *slice = Arc::from(items);
 }
 
+/// Recursively [`TypeExpr::clear_spans`] every element of a shared
+/// `Arc<[TypeExpr]>` in place.
+fn clear_arc_slice(slice: &mut Arc<[TypeExpr]>) {
+    let mut items: Vec<TypeExpr> = slice.iter().cloned().collect();
+    for item in &mut items {
+        item.clear_spans();
+    }
+    *slice = Arc::from(items);
+}
+
 // ---------------------------------------------------------------------------
 // Factory helpers
 // ---------------------------------------------------------------------------
@@ -1375,12 +1447,7 @@ impl TypeExpr {
             Self::Function(function) => {
                 Arc::make_mut(function).shift_spans(delta);
             }
-            Self::Ref {
-                type_arguments, ..
-            }
-            | Self::RecursiveRef {
-                type_arguments, ..
-            } => {
+            Self::Ref { type_arguments, .. } | Self::RecursiveRef { type_arguments, .. } => {
                 shift_arc_slice(type_arguments, delta);
             }
             Self::TypeParameter(param) => {
@@ -1423,6 +1490,88 @@ impl TypeExpr {
             }
             Self::TemplateLiteral { expressions, .. } => {
                 shift_arc_slice(expressions, delta);
+            }
+        }
+    }
+
+    /// Recursively clear every embedded declaration-site [`Span`] to `None`, in
+    /// place.
+    ///
+    /// Used when a type was lowered from text that has NO single contiguous
+    /// source region (e.g. a multi-line / `*`-decorated JSDoc `{Type}` payload
+    /// reconstructed across comment lines): there is no honest file span for its
+    /// members, so the structure is preserved while every span is dropped —
+    /// honest absence rather than a wrong offset (the same policy a synthesized
+    /// multi-origin union member follows).
+    pub fn clear_spans(&mut self) {
+        match self {
+            Self::Primitive(_)
+            | Self::Literal(_)
+            | Self::TypeOf(_)
+            | Self::Infer { .. }
+            | Self::SyntheticSlotBinding(_)
+            | Self::Unknown { .. } => {}
+
+            Self::Union(members) | Self::Intersection(members) => {
+                clear_arc_slice(members);
+            }
+            Self::Array { element, .. } => {
+                Arc::make_mut(element).clear_spans();
+            }
+            Self::Tuple { elements, .. } => {
+                for element in Arc::make_mut(elements).iter_mut() {
+                    element.ty.clear_spans();
+                }
+            }
+            Self::Object(object) => {
+                Arc::make_mut(object).clear_spans();
+            }
+            Self::Function(function) => {
+                Arc::make_mut(function).clear_spans();
+            }
+            Self::Ref { type_arguments, .. } | Self::RecursiveRef { type_arguments, .. } => {
+                clear_arc_slice(type_arguments);
+            }
+            Self::TypeParameter(param) => {
+                if let Some(constraint) = param.constraint.as_mut() {
+                    Arc::make_mut(constraint).clear_spans();
+                }
+                if let Some(default) = param.default.as_mut() {
+                    Arc::make_mut(default).clear_spans();
+                }
+            }
+            Self::KeyOf(inner) | Self::Rest(inner) | Self::Parenthesized(inner) => {
+                Arc::make_mut(inner).clear_spans();
+            }
+            Self::IndexedAccess { object, index } => {
+                Arc::make_mut(object).clear_spans();
+                Arc::make_mut(index).clear_spans();
+            }
+            Self::Conditional {
+                check,
+                extends,
+                true_type,
+                false_type,
+            } => {
+                Arc::make_mut(check).clear_spans();
+                Arc::make_mut(extends).clear_spans();
+                Arc::make_mut(true_type).clear_spans();
+                Arc::make_mut(false_type).clear_spans();
+            }
+            Self::Mapped {
+                source,
+                value,
+                name_type,
+                ..
+            } => {
+                Arc::make_mut(source).clear_spans();
+                Arc::make_mut(value).clear_spans();
+                if let Some(name_type) = name_type.as_mut() {
+                    Arc::make_mut(name_type).clear_spans();
+                }
+            }
+            Self::TemplateLiteral { expressions, .. } => {
+                clear_arc_slice(expressions);
             }
         }
     }

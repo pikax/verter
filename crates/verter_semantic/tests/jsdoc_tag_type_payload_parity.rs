@@ -13,7 +13,7 @@
 //! `TSTypeAliasDeclaration` named `__T`, read its `.type_annotation`,
 //! and call `lower_ts_type(&type_annotation, &wrapped_source)`.
 //!
-//! Path B: call `parse_jsdoc_tag_type_payload(INPUT)` — the
+//! Path B: call `parse_jsdoc_tag_type_payload(INPUT, None)` — the
 //! JSDoc-private wrap-and-lower helper exposed by `verter_semantic`.
 //!
 //! Both go through the canonical OXC parser; neither bypasses the
@@ -158,7 +158,7 @@ fn lower_via_ast(input: &str) -> TypeExpr {
 
 /// Path B — call the JSDoc-private wrap-and-lower helper.
 fn lower_via_jsdoc_helper(input: &str) -> TypeExpr {
-    parse_jsdoc_tag_type_payload(input)
+    parse_jsdoc_tag_type_payload(input, None)
 }
 
 #[test]
@@ -176,8 +176,18 @@ fn lower_ts_type_and_parse_jsdoc_tag_type_payload_agree_on_corpus() {
     let mut divergences: Vec<(String, String, String)> = Vec::new();
 
     for fixture in PARITY_CORPUS {
-        let a = lower_via_ast(fixture);
-        let b = lower_via_jsdoc_helper(fixture);
+        // This test characterizes STRUCTURAL parity between the two lowering
+        // entry points (the W0.7 intent: `lower_ts_type` and
+        // `parse_jsdoc_tag_type_payload` agree on the lowered TYPE). The two
+        // paths legitimately differ on span COORDINATES — path A keeps its
+        // private `type __T = …` wrapper's offsets, while the JSDoc helper, when
+        // called without a source position (`None`), CLEARS spans as honest
+        // absence. Normalise spans on both sides so the comparison is over the
+        // type tree, not buffer-relative provenance.
+        let mut a = lower_via_ast(fixture);
+        let mut b = lower_via_jsdoc_helper(fixture);
+        a.clear_spans();
+        b.clear_spans();
         if a != b {
             divergences.push(((*fixture).to_string(), format!("{a:#?}"), format!("{b:#?}")));
         }

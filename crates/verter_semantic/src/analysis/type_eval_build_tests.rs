@@ -1189,7 +1189,8 @@ fn expand_macro_types_reads_prop_field_type_expr_directly_without_reparse() {
     // Negative discrimination: prove the typed shape differs from what
     // the text parser would have produced. If they happened to coincide,
     // the test would not be characterising the typed-read change.
-    let from_text = crate::analysis::jsdoc::parse_jsdoc_tag_type_payload("garbage<<<unparseable");
+    let from_text =
+        crate::analysis::jsdoc::parse_jsdoc_tag_type_payload("garbage<<<unparseable", None);
     assert_ne!(
         from_text, typed_indexed_access,
         "annotation text MUST NOT round-trip back to the typed shape; otherwise the test does not discriminate"
@@ -1238,7 +1239,8 @@ fn expand_macro_types_reads_emit_payload_expr_directly_without_reparse() {
         "expand_macro_types_impl_with_expander must consume field.payload_expr directly"
     );
 
-    let from_text = crate::analysis::jsdoc::parse_jsdoc_tag_type_payload("garbage<<<unparseable");
+    let from_text =
+        crate::analysis::jsdoc::parse_jsdoc_tag_type_payload("garbage<<<unparseable", None);
     assert_ne!(from_text, typed_tuple);
 }
 
@@ -1283,7 +1285,8 @@ fn expand_macro_types_reads_slot_binding_expr_directly_without_reparse() {
         "expand_macro_types_impl_with_expander must consume binding.binding_expr directly"
     );
 
-    let from_text = crate::analysis::jsdoc::parse_jsdoc_tag_type_payload("garbage<<<unparseable");
+    let from_text =
+        crate::analysis::jsdoc::parse_jsdoc_tag_type_payload("garbage<<<unparseable", None);
     assert_ne!(from_text, typed_indexed_access);
 }
 

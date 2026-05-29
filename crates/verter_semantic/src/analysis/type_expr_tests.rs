@@ -9,7 +9,7 @@ use crate::analysis::jsdoc::parse_jsdoc_tag_type_payload;
 
 #[test]
 fn primitive_string() {
-    let expr = parse_jsdoc_tag_type_payload("string");
+    let expr = parse_jsdoc_tag_type_payload("string", None);
     assert_eq!(expr, TypeExpr::Primitive(PrimitiveName::String));
     assert!(expr.is_primitive());
     assert!(!expr.is_unknown());
@@ -18,7 +18,7 @@ fn primitive_string() {
 #[test]
 fn primitive_number() {
     assert_eq!(
-        parse_jsdoc_tag_type_payload("number"),
+        parse_jsdoc_tag_type_payload("number", None),
         TypeExpr::Primitive(PrimitiveName::Number)
     );
 }
@@ -26,7 +26,7 @@ fn primitive_number() {
 #[test]
 fn primitive_boolean() {
     assert_eq!(
-        parse_jsdoc_tag_type_payload("boolean"),
+        parse_jsdoc_tag_type_payload("boolean", None),
         TypeExpr::Primitive(PrimitiveName::Boolean)
     );
 }
@@ -34,7 +34,7 @@ fn primitive_boolean() {
 #[test]
 fn primitive_void() {
     assert_eq!(
-        parse_jsdoc_tag_type_payload("void"),
+        parse_jsdoc_tag_type_payload("void", None),
         TypeExpr::Primitive(PrimitiveName::Void)
     );
 }
@@ -42,7 +42,7 @@ fn primitive_void() {
 #[test]
 fn primitive_never() {
     assert_eq!(
-        parse_jsdoc_tag_type_payload("never"),
+        parse_jsdoc_tag_type_payload("never", None),
         TypeExpr::Primitive(PrimitiveName::Never)
     );
 }
@@ -50,7 +50,7 @@ fn primitive_never() {
 #[test]
 fn primitive_any() {
     assert_eq!(
-        parse_jsdoc_tag_type_payload("any"),
+        parse_jsdoc_tag_type_payload("any", None),
         TypeExpr::Primitive(PrimitiveName::Any)
     );
 }
@@ -58,7 +58,7 @@ fn primitive_any() {
 #[test]
 fn primitive_unknown() {
     assert_eq!(
-        parse_jsdoc_tag_type_payload("unknown"),
+        parse_jsdoc_tag_type_payload("unknown", None),
         TypeExpr::Primitive(PrimitiveName::Unknown)
     );
 }
@@ -66,7 +66,7 @@ fn primitive_unknown() {
 #[test]
 fn primitive_null() {
     assert_eq!(
-        parse_jsdoc_tag_type_payload("null"),
+        parse_jsdoc_tag_type_payload("null", None),
         TypeExpr::Primitive(PrimitiveName::Null)
     );
 }
@@ -74,7 +74,7 @@ fn primitive_null() {
 #[test]
 fn primitive_undefined() {
     assert_eq!(
-        parse_jsdoc_tag_type_payload("undefined"),
+        parse_jsdoc_tag_type_payload("undefined", None),
         TypeExpr::Primitive(PrimitiveName::Undefined)
     );
 }
@@ -82,7 +82,7 @@ fn primitive_undefined() {
 #[test]
 fn primitive_symbol() {
     assert_eq!(
-        parse_jsdoc_tag_type_payload("symbol"),
+        parse_jsdoc_tag_type_payload("symbol", None),
         TypeExpr::Primitive(PrimitiveName::Symbol)
     );
 }
@@ -90,7 +90,7 @@ fn primitive_symbol() {
 #[test]
 fn primitive_bigint() {
     assert_eq!(
-        parse_jsdoc_tag_type_payload("bigint"),
+        parse_jsdoc_tag_type_payload("bigint", None),
         TypeExpr::Primitive(PrimitiveName::BigInt)
     );
 }
@@ -98,7 +98,7 @@ fn primitive_bigint() {
 #[test]
 fn primitive_object() {
     assert_eq!(
-        parse_jsdoc_tag_type_payload("object"),
+        parse_jsdoc_tag_type_payload("object", None),
         TypeExpr::Primitive(PrimitiveName::Object)
     );
 }
@@ -110,7 +110,7 @@ fn primitive_object() {
 #[test]
 fn literal_string() {
     assert_eq!(
-        parse_jsdoc_tag_type_payload("\"hello\""),
+        parse_jsdoc_tag_type_payload("\"hello\"", None),
         TypeExpr::string_literal("hello")
     );
 }
@@ -118,7 +118,7 @@ fn literal_string() {
 #[test]
 fn literal_number() {
     assert_eq!(
-        parse_jsdoc_tag_type_payload("42"),
+        parse_jsdoc_tag_type_payload("42", None),
         TypeExpr::number_literal(42.0)
     );
 }
@@ -126,7 +126,7 @@ fn literal_number() {
 #[test]
 fn literal_negative_number() {
     assert_eq!(
-        parse_jsdoc_tag_type_payload("-1"),
+        parse_jsdoc_tag_type_payload("-1", None),
         TypeExpr::number_literal(-1.0)
     );
 }
@@ -134,7 +134,7 @@ fn literal_negative_number() {
 #[test]
 fn literal_float() {
     assert_eq!(
-        parse_jsdoc_tag_type_payload("2.5"),
+        parse_jsdoc_tag_type_payload("2.5", None),
         TypeExpr::number_literal(2.5)
     );
 }
@@ -142,7 +142,7 @@ fn literal_float() {
 #[test]
 fn literal_true() {
     assert_eq!(
-        parse_jsdoc_tag_type_payload("true"),
+        parse_jsdoc_tag_type_payload("true", None),
         TypeExpr::boolean_literal(true)
     );
 }
@@ -150,7 +150,7 @@ fn literal_true() {
 #[test]
 fn literal_false() {
     assert_eq!(
-        parse_jsdoc_tag_type_payload("false"),
+        parse_jsdoc_tag_type_payload("false", None),
         TypeExpr::boolean_literal(false)
     );
 }
@@ -161,7 +161,7 @@ fn literal_false() {
 
 #[test]
 fn union_two_primitives() {
-    let expr = parse_jsdoc_tag_type_payload("string | number");
+    let expr = parse_jsdoc_tag_type_payload("string | number", None);
     assert_eq!(
         expr,
         TypeExpr::union(vec![
@@ -174,7 +174,7 @@ fn union_two_primitives() {
 
 #[test]
 fn union_three_types() {
-    let expr = parse_jsdoc_tag_type_payload("string | number | boolean");
+    let expr = parse_jsdoc_tag_type_payload("string | number | boolean", None);
     assert_eq!(
         expr,
         TypeExpr::union(vec![
@@ -187,7 +187,7 @@ fn union_three_types() {
 
 #[test]
 fn union_with_null() {
-    let expr = parse_jsdoc_tag_type_payload("string | null");
+    let expr = parse_jsdoc_tag_type_payload("string | null", None);
     assert_eq!(
         expr,
         TypeExpr::union(vec![
@@ -199,7 +199,7 @@ fn union_with_null() {
 
 #[test]
 fn union_with_literals() {
-    let expr = parse_jsdoc_tag_type_payload("\"red\" | \"blue\" | \"green\"");
+    let expr = parse_jsdoc_tag_type_payload("\"red\" | \"blue\" | \"green\"", None);
     assert_eq!(
         expr,
         TypeExpr::union(vec![
@@ -223,7 +223,7 @@ fn union_single_element_collapses() {
 
 #[test]
 fn intersection_two_refs() {
-    let expr = parse_jsdoc_tag_type_payload("A & B");
+    let expr = parse_jsdoc_tag_type_payload("A & B", None);
     assert_eq!(
         expr,
         TypeExpr::intersection(vec![TypeExpr::named("A"), TypeExpr::named("B"),])
@@ -232,7 +232,7 @@ fn intersection_two_refs() {
 
 #[test]
 fn intersection_ref_and_object() {
-    let expr = parse_jsdoc_tag_type_payload("Base & { extra: boolean }");
+    let expr = parse_jsdoc_tag_type_payload("Base & { extra: boolean }", None);
     match &expr {
         TypeExpr::Intersection(types) => {
             assert_eq!(types.len(), 2);
@@ -249,7 +249,7 @@ fn intersection_ref_and_object() {
 
 #[test]
 fn array_bracket_syntax() {
-    let expr = parse_jsdoc_tag_type_payload("string[]");
+    let expr = parse_jsdoc_tag_type_payload("string[]", None);
     assert_eq!(
         expr,
         TypeExpr::Array {
@@ -261,7 +261,7 @@ fn array_bracket_syntax() {
 
 #[test]
 fn array_generic_syntax() {
-    let expr = parse_jsdoc_tag_type_payload("Array<number>");
+    let expr = parse_jsdoc_tag_type_payload("Array<number>", None);
     assert_eq!(
         expr,
         TypeExpr::Array {
@@ -273,7 +273,7 @@ fn array_generic_syntax() {
 
 #[test]
 fn readonly_array() {
-    let expr = parse_jsdoc_tag_type_payload("ReadonlyArray<string>");
+    let expr = parse_jsdoc_tag_type_payload("ReadonlyArray<string>", None);
     assert_eq!(
         expr,
         TypeExpr::Array {
@@ -285,7 +285,7 @@ fn readonly_array() {
 
 #[test]
 fn readonly_operator_array() {
-    let expr = parse_jsdoc_tag_type_payload("readonly string[]");
+    let expr = parse_jsdoc_tag_type_payload("readonly string[]", None);
     assert_eq!(
         expr,
         TypeExpr::Array {
@@ -297,7 +297,7 @@ fn readonly_operator_array() {
 
 #[test]
 fn nested_array() {
-    let expr = parse_jsdoc_tag_type_payload("string[][]");
+    let expr = parse_jsdoc_tag_type_payload("string[][]", None);
     assert_eq!(
         expr,
         TypeExpr::Array {
@@ -316,7 +316,7 @@ fn nested_array() {
 
 #[test]
 fn tuple_basic() {
-    let expr = parse_jsdoc_tag_type_payload("[string, number]");
+    let expr = parse_jsdoc_tag_type_payload("[string, number]", None);
     match &expr {
         TypeExpr::Tuple { elements, readonly } => {
             assert_eq!(elements.len(), 2);
@@ -332,7 +332,7 @@ fn tuple_basic() {
 
 #[test]
 fn tuple_with_optional() {
-    let expr = parse_jsdoc_tag_type_payload("[string, number?]");
+    let expr = parse_jsdoc_tag_type_payload("[string, number?]", None);
     match &expr {
         TypeExpr::Tuple { elements, .. } => {
             assert_eq!(elements.len(), 2);
@@ -345,7 +345,7 @@ fn tuple_with_optional() {
 
 #[test]
 fn tuple_with_rest() {
-    let expr = parse_jsdoc_tag_type_payload("[string, ...number[]]");
+    let expr = parse_jsdoc_tag_type_payload("[string, ...number[]]", None);
     match &expr {
         TypeExpr::Tuple { elements, .. } => {
             assert_eq!(elements.len(), 2);
@@ -358,7 +358,7 @@ fn tuple_with_rest() {
 
 #[test]
 fn tuple_with_labels() {
-    let expr = parse_jsdoc_tag_type_payload("[name: string, age: number]");
+    let expr = parse_jsdoc_tag_type_payload("[name: string, age: number]", None);
     match &expr {
         TypeExpr::Tuple { elements, .. } => {
             assert_eq!(elements.len(), 2);
@@ -371,7 +371,7 @@ fn tuple_with_labels() {
 
 #[test]
 fn readonly_tuple() {
-    let expr = parse_jsdoc_tag_type_payload("readonly [string, number]");
+    let expr = parse_jsdoc_tag_type_payload("readonly [string, number]", None);
     match &expr {
         TypeExpr::Tuple { readonly, .. } => {
             assert!(readonly);
@@ -386,7 +386,7 @@ fn readonly_tuple() {
 
 #[test]
 fn object_basic() {
-    let expr = parse_jsdoc_tag_type_payload("{ name: string; age: number }");
+    let expr = parse_jsdoc_tag_type_payload("{ name: string; age: number }", None);
     match &expr {
         TypeExpr::Object(obj) => {
             assert_eq!(obj.properties.len(), 2);
@@ -413,7 +413,7 @@ fn object_basic() {
 
 #[test]
 fn object_optional_property() {
-    let expr = parse_jsdoc_tag_type_payload("{ name?: string }");
+    let expr = parse_jsdoc_tag_type_payload("{ name?: string }", None);
     match &expr {
         TypeExpr::Object(obj) => {
             assert_eq!(obj.properties.len(), 1);
@@ -431,7 +431,7 @@ fn object_optional_property() {
 
 #[test]
 fn object_readonly_property() {
-    let expr = parse_jsdoc_tag_type_payload("{ readonly id: number }");
+    let expr = parse_jsdoc_tag_type_payload("{ readonly id: number }", None);
     match &expr {
         TypeExpr::Object(obj) => {
             assert_eq!(obj.properties.len(), 1);
@@ -449,7 +449,7 @@ fn object_readonly_property() {
 
 #[test]
 fn object_index_signature() {
-    let expr = parse_jsdoc_tag_type_payload("{ [key: string]: number }");
+    let expr = parse_jsdoc_tag_type_payload("{ [key: string]: number }", None);
     match &expr {
         TypeExpr::Object(obj) => {
             assert_eq!(obj.properties.len(), 1);
@@ -468,7 +468,7 @@ fn object_index_signature() {
 
 #[test]
 fn object_method_signature() {
-    let expr = parse_jsdoc_tag_type_payload("{ greet(name: string): void }");
+    let expr = parse_jsdoc_tag_type_payload("{ greet(name: string): void }", None);
     match &expr {
         TypeExpr::Object(obj) => {
             assert_eq!(obj.properties.len(), 1);
@@ -494,7 +494,7 @@ fn object_method_signature() {
 
 #[test]
 fn object_call_signature() {
-    let expr = parse_jsdoc_tag_type_payload("{ (x: number): string }");
+    let expr = parse_jsdoc_tag_type_payload("{ (x: number): string }", None);
     match &expr {
         TypeExpr::Object(obj) => {
             assert_eq!(obj.properties.len(), 1);
@@ -519,7 +519,7 @@ fn object_call_signature() {
 
 #[test]
 fn function_basic() {
-    let expr = parse_jsdoc_tag_type_payload("(x: string) => number");
+    let expr = parse_jsdoc_tag_type_payload("(x: string) => number", None);
     match &expr {
         TypeExpr::Function(func) => {
             assert_eq!(func.parameters.len(), 1);
@@ -539,7 +539,7 @@ fn function_basic() {
 
 #[test]
 fn function_no_params() {
-    let expr = parse_jsdoc_tag_type_payload("() => void");
+    let expr = parse_jsdoc_tag_type_payload("() => void", None);
     match &expr {
         TypeExpr::Function(func) => {
             assert!(func.parameters.is_empty());
@@ -554,7 +554,7 @@ fn function_no_params() {
 
 #[test]
 fn function_optional_param() {
-    let expr = parse_jsdoc_tag_type_payload("(x?: string) => void");
+    let expr = parse_jsdoc_tag_type_payload("(x?: string) => void", None);
     match &expr {
         TypeExpr::Function(func) => {
             assert_eq!(func.parameters.len(), 1);
@@ -566,7 +566,7 @@ fn function_optional_param() {
 
 #[test]
 fn function_rest_param() {
-    let expr = parse_jsdoc_tag_type_payload("(...args: string[]) => void");
+    let expr = parse_jsdoc_tag_type_payload("(...args: string[]) => void", None);
     match &expr {
         TypeExpr::Function(func) => {
             assert_eq!(func.parameters.len(), 1);
@@ -579,7 +579,7 @@ fn function_rest_param() {
 
 #[test]
 fn function_with_type_params() {
-    let expr = parse_jsdoc_tag_type_payload("<T>(x: T) => T");
+    let expr = parse_jsdoc_tag_type_payload("<T>(x: T) => T", None);
     match &expr {
         TypeExpr::Function(func) => {
             assert_eq!(func.type_parameters.len(), 1);
@@ -591,7 +591,7 @@ fn function_with_type_params() {
 
 #[test]
 fn function_type_json_roundtrip_preserves_generic_parameter_metadata() {
-    let expr = parse_jsdoc_tag_type_payload("<T extends Base = string>(value: T) => T");
+    let expr = parse_jsdoc_tag_type_payload("<T extends Base = string>(value: T) => T", None);
 
     let TypeExpr::Function(func) = &expr else {
         panic!("expected function, got {expr:?}");
@@ -636,7 +636,7 @@ fn function_type_json_roundtrip_preserves_generic_parameter_metadata() {
 
 #[test]
 fn function_nested_type_parameter_usages_are_normalized() {
-    let expr = parse_jsdoc_tag_type_payload("<T>(values: Array<T>) => Promise<T>");
+    let expr = parse_jsdoc_tag_type_payload("<T>(values: Array<T>) => Promise<T>", None);
 
     let TypeExpr::Function(func) = &expr else {
         panic!("expected function, got {expr:?}");
@@ -679,14 +679,14 @@ fn function_nested_type_parameter_usages_are_normalized() {
 #[test]
 fn ref_simple() {
     assert_eq!(
-        parse_jsdoc_tag_type_payload("MyType"),
+        parse_jsdoc_tag_type_payload("MyType", None),
         TypeExpr::named("MyType")
     );
 }
 
 #[test]
 fn ref_with_single_arg() {
-    let expr = parse_jsdoc_tag_type_payload("Promise<string>");
+    let expr = parse_jsdoc_tag_type_payload("Promise<string>", None);
     assert_eq!(
         expr,
         TypeExpr::named_with_args("Promise", vec![TypeExpr::Primitive(PrimitiveName::String)])
@@ -695,7 +695,7 @@ fn ref_with_single_arg() {
 
 #[test]
 fn ref_with_multiple_args() {
-    let expr = parse_jsdoc_tag_type_payload("Map<string, number>");
+    let expr = parse_jsdoc_tag_type_payload("Map<string, number>", None);
     assert_eq!(
         expr,
         TypeExpr::named_with_args(
@@ -710,14 +710,14 @@ fn ref_with_multiple_args() {
 
 #[test]
 fn ref_qualified_name() {
-    let expr = parse_jsdoc_tag_type_payload("Foo.Bar.Baz");
+    let expr = parse_jsdoc_tag_type_payload("Foo.Bar.Baz", None);
     assert_eq!(expr, TypeExpr::named("Foo.Bar.Baz"));
 }
 
 #[test]
 fn ref_array_normalized() {
     // Array<string> normalizes to Array { element, readonly: false }
-    let expr = parse_jsdoc_tag_type_payload("Array<string>");
+    let expr = parse_jsdoc_tag_type_payload("Array<string>", None);
     assert_eq!(
         expr,
         TypeExpr::Array {
@@ -731,7 +731,7 @@ fn ref_array_normalized() {
 
 #[test]
 fn ref_partial() {
-    let expr = parse_jsdoc_tag_type_payload("Partial<MyType>");
+    let expr = parse_jsdoc_tag_type_payload("Partial<MyType>", None);
     assert_eq!(
         expr,
         TypeExpr::named_with_args("Partial", vec![TypeExpr::named("MyType")])
@@ -740,7 +740,7 @@ fn ref_partial() {
 
 #[test]
 fn ref_record() {
-    let expr = parse_jsdoc_tag_type_payload("Record<string, number>");
+    let expr = parse_jsdoc_tag_type_payload("Record<string, number>", None);
     assert_eq!(
         expr,
         TypeExpr::named_with_args(
@@ -755,7 +755,7 @@ fn ref_record() {
 
 #[test]
 fn ref_pick() {
-    let expr = parse_jsdoc_tag_type_payload("Pick<User, \"id\" | \"name\">");
+    let expr = parse_jsdoc_tag_type_payload("Pick<User, \"id\" | \"name\">", None);
     match &expr {
         TypeExpr::Ref {
             name,
@@ -782,13 +782,13 @@ fn ref_pick() {
 
 #[test]
 fn keyof_ref() {
-    let expr = parse_jsdoc_tag_type_payload("keyof T");
+    let expr = parse_jsdoc_tag_type_payload("keyof T", None);
     assert_eq!(expr, TypeExpr::KeyOf(Arc::new(TypeExpr::named("T"))));
 }
 
 #[test]
 fn keyof_object() {
-    let expr = parse_jsdoc_tag_type_payload("keyof { a: string; b: number }");
+    let expr = parse_jsdoc_tag_type_payload("keyof { a: string; b: number }", None);
     match &expr {
         TypeExpr::KeyOf(inner) => {
             assert!(matches!(inner.as_ref(), TypeExpr::Object(_)));
@@ -803,7 +803,7 @@ fn keyof_object() {
 
 #[test]
 fn typeof_simple() {
-    let expr = parse_jsdoc_tag_type_payload("typeof myVar");
+    let expr = parse_jsdoc_tag_type_payload("typeof myVar", None);
     match &expr {
         TypeExpr::TypeOf(value_ref) => {
             assert_eq!(value_ref.path, vec!["myVar"]);
@@ -814,7 +814,7 @@ fn typeof_simple() {
 
 #[test]
 fn typeof_qualified() {
-    let expr = parse_jsdoc_tag_type_payload("typeof module.exports");
+    let expr = parse_jsdoc_tag_type_payload("typeof module.exports", None);
     match &expr {
         TypeExpr::TypeOf(value_ref) => {
             assert_eq!(value_ref.path, vec!["module", "exports"]);
@@ -829,7 +829,7 @@ fn typeof_qualified() {
 
 #[test]
 fn indexed_access_basic() {
-    let expr = parse_jsdoc_tag_type_payload("T[\"key\"]");
+    let expr = parse_jsdoc_tag_type_payload("T[\"key\"]", None);
     assert_eq!(
         expr,
         TypeExpr::IndexedAccess {
@@ -841,7 +841,7 @@ fn indexed_access_basic() {
 
 #[test]
 fn indexed_access_number() {
-    let expr = parse_jsdoc_tag_type_payload("T[number]");
+    let expr = parse_jsdoc_tag_type_payload("T[number]", None);
     assert_eq!(
         expr,
         TypeExpr::IndexedAccess {
@@ -857,7 +857,7 @@ fn indexed_access_number() {
 
 #[test]
 fn conditional_basic() {
-    let expr = parse_jsdoc_tag_type_payload("T extends string ? true : false");
+    let expr = parse_jsdoc_tag_type_payload("T extends string ? true : false", None);
     match &expr {
         TypeExpr::Conditional {
             check,
@@ -879,7 +879,7 @@ fn conditional_basic() {
 
 #[test]
 fn conditional_with_infer() {
-    let expr = parse_jsdoc_tag_type_payload("T extends Array<infer U> ? U : never");
+    let expr = parse_jsdoc_tag_type_payload("T extends Array<infer U> ? U : never", None);
     match &expr {
         TypeExpr::Conditional {
             check,
@@ -911,7 +911,7 @@ fn conditional_with_infer() {
 
 #[test]
 fn mapped_basic() {
-    let expr = parse_jsdoc_tag_type_payload("{ [K in keyof T]: T[K] }");
+    let expr = parse_jsdoc_tag_type_payload("{ [K in keyof T]: T[K] }", None);
     match &expr {
         TypeExpr::Mapped {
             parameter,
@@ -934,7 +934,7 @@ fn mapped_basic() {
 
 #[test]
 fn mapped_optional_add() {
-    let expr = parse_jsdoc_tag_type_payload("{ [K in keyof T]?: T[K] }");
+    let expr = parse_jsdoc_tag_type_payload("{ [K in keyof T]?: T[K] }", None);
     match &expr {
         TypeExpr::Mapped { optional, .. } => {
             assert_eq!(*optional, MappedModifier::Add);
@@ -945,7 +945,7 @@ fn mapped_optional_add() {
 
 #[test]
 fn mapped_readonly_remove() {
-    let expr = parse_jsdoc_tag_type_payload("{ -readonly [K in keyof T]: T[K] }");
+    let expr = parse_jsdoc_tag_type_payload("{ -readonly [K in keyof T]: T[K] }", None);
     match &expr {
         TypeExpr::Mapped { readonly, .. } => {
             assert_eq!(*readonly, MappedModifier::Remove);
@@ -960,7 +960,7 @@ fn mapped_readonly_remove() {
 
 #[test]
 fn template_literal_basic() {
-    let expr = parse_jsdoc_tag_type_payload("`btn-${string}`");
+    let expr = parse_jsdoc_tag_type_payload("`btn-${string}`", None);
     match &expr {
         TypeExpr::TemplateLiteral {
             quasis,
@@ -978,7 +978,7 @@ fn template_literal_basic() {
 
 #[test]
 fn template_literal_multiple_parts() {
-    let expr = parse_jsdoc_tag_type_payload("`${number}px`");
+    let expr = parse_jsdoc_tag_type_payload("`${number}px`", None);
     match &expr {
         TypeExpr::TemplateLiteral {
             quasis,
@@ -1000,7 +1000,7 @@ fn template_literal_multiple_parts() {
 
 #[test]
 fn parenthesized_union() {
-    let expr = parse_jsdoc_tag_type_payload("(string | number)");
+    let expr = parse_jsdoc_tag_type_payload("(string | number)", None);
     match &expr {
         TypeExpr::Parenthesized(inner) => {
             assert!(matches!(inner.as_ref(), TypeExpr::Union(_)));
@@ -1015,7 +1015,7 @@ fn parenthesized_union() {
 
 #[test]
 fn complex_return_type() {
-    let expr = parse_jsdoc_tag_type_payload("ReturnType<typeof createConfig>");
+    let expr = parse_jsdoc_tag_type_payload("ReturnType<typeof createConfig>", None);
     match &expr {
         TypeExpr::Ref {
             name,
@@ -1034,16 +1034,16 @@ fn complex_return_type() {
 
 #[test]
 fn complex_pick_omit() {
-    let expr = parse_jsdoc_tag_type_payload("Pick<User, \"id\" | \"name\">");
+    let expr = parse_jsdoc_tag_type_payload("Pick<User, \"id\" | \"name\">", None);
     assert!(matches!(&expr, TypeExpr::Ref { name, .. } if &**name == "Pick"));
 
-    let expr2 = parse_jsdoc_tag_type_payload("Omit<User, \"password\">");
+    let expr2 = parse_jsdoc_tag_type_payload("Omit<User, \"password\">", None);
     assert!(matches!(&expr2, TypeExpr::Ref { name, .. } if &**name == "Omit"));
 }
 
 #[test]
 fn complex_record_string_literal_keys() {
-    let expr = parse_jsdoc_tag_type_payload("Record<\"a\" | \"b\", number>");
+    let expr = parse_jsdoc_tag_type_payload("Record<\"a\" | \"b\", number>", None);
     match &expr {
         TypeExpr::Ref {
             name,
@@ -1063,7 +1063,7 @@ fn complex_record_string_literal_keys() {
 
 #[test]
 fn complex_nested_utility() {
-    let expr = parse_jsdoc_tag_type_payload("Partial<Pick<User, \"name\" | \"age\">>");
+    let expr = parse_jsdoc_tag_type_payload("Partial<Pick<User, \"name\" | \"age\">>", None);
     match &expr {
         TypeExpr::Ref {
             name,
@@ -1084,6 +1084,7 @@ fn complex_nested_utility() {
 fn complex_union_of_objects() {
     let expr = parse_jsdoc_tag_type_payload(
         "{ type: \"a\"; value: string } | { type: \"b\"; count: number }",
+        None,
     );
     match &expr {
         TypeExpr::Union(types) => {
@@ -1097,7 +1098,7 @@ fn complex_union_of_objects() {
 
 #[test]
 fn complex_awaited() {
-    let expr = parse_jsdoc_tag_type_payload("Awaited<Promise<string>>");
+    let expr = parse_jsdoc_tag_type_payload("Awaited<Promise<string>>", None);
     match &expr {
         TypeExpr::Ref {
             name,
@@ -1134,7 +1135,7 @@ fn no_unknown_for_primitives() {
         "undefined",
         "object",
     ] {
-        let expr = parse_jsdoc_tag_type_payload(name);
+        let expr = parse_jsdoc_tag_type_payload(name, None);
         assert!(
             !expr.is_unknown(),
             "{name} should not produce Unknown, got {expr:?}"
@@ -1164,7 +1165,7 @@ fn no_unknown_for_basic_types() {
     ];
 
     for input in test_cases {
-        let expr = parse_jsdoc_tag_type_payload(input);
+        let expr = parse_jsdoc_tag_type_payload(input, None);
         assert!(
             !expr.is_unknown(),
             "{input} should not produce Unknown, got {expr:?}"
@@ -1174,19 +1175,19 @@ fn no_unknown_for_basic_types() {
 
 #[test]
 fn empty_input_is_unknown() {
-    let expr = parse_jsdoc_tag_type_payload("");
+    let expr = parse_jsdoc_tag_type_payload("", None);
     assert!(expr.is_unknown());
 }
 
 #[test]
 fn whitespace_only_is_unknown() {
-    let expr = parse_jsdoc_tag_type_payload("   ");
+    let expr = parse_jsdoc_tag_type_payload("   ", None);
     assert!(expr.is_unknown());
 }
 
 #[test]
 fn invalid_union_syntax_is_unknown() {
-    let expr = parse_jsdoc_tag_type_payload("string |");
+    let expr = parse_jsdoc_tag_type_payload("string |", None);
     assert!(
         expr.is_unknown(),
         "invalid union should produce Unknown, got {expr:?}"
@@ -1199,7 +1200,7 @@ fn invalid_union_syntax_is_unknown() {
 
 #[test]
 fn invalid_object_member_syntax_is_unknown() {
-    let expr = parse_jsdoc_tag_type_payload("{ name: }");
+    let expr = parse_jsdoc_tag_type_payload("{ name: }", None);
     assert!(
         expr.is_unknown(),
         "invalid object member should produce Unknown, got {expr:?}"

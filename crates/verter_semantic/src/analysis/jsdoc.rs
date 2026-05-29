@@ -19,7 +19,25 @@ use crate::analysis::types::JsdocTag;
 /// resulting `TSType` node via `lower_ts_type`. Returns
 /// [`TypeExpr::Unknown`] if the input is empty or the wrapper parse does
 /// not produce a `TSTypeAliasDeclaration`.
-pub fn parse_jsdoc_tag_type_payload(input: &str) -> TypeExpr {
+///
+/// `payload_file_offset` carries the payload's source position:
+/// - `Some(off)` — `input` is a contiguous slice of the source file whose first
+///   character sits at absolute byte offset `off`. OXC lowers the wrapped
+///   buffer, so every span in the returned `TypeExpr` is initially in WRAPPER
+///   coordinates (offset by the [`WRAPPER_PREFIX_LEN`]-byte `type __T = `
+///   prefix); each embedded declaration-site span is rebased into FILE
+///   coordinates via [`TypeExpr::shift_spans`] so a consumer can slice the
+///   source file with them — identical to the spans a directly-lowered TS
+///   annotation carries.
+/// - `None` — `input` was reconstructed from a multi-line / `*`-decorated JSDoc
+///   payload and has NO single contiguous source region. There is no honest
+///   file span for its members, so every embedded span is cleared via
+///   [`TypeExpr::clear_spans`] (honest absence, never a wrong offset — the same
+///   policy a synthesized multi-origin union member follows).
+///
+/// typeinfo carries spans, not owned strings (owner directive
+/// `feedback_typeinfo_spans_not_strings`).
+pub fn parse_jsdoc_tag_type_payload(input: &str, payload_file_offset: Option<u32>) -> TypeExpr {
     use oxc_allocator::Allocator;
     use oxc_parser::Parser;
     use oxc_span::SourceType;
@@ -37,7 +55,26 @@ pub fn parse_jsdoc_tag_type_payload(input: &str) -> TypeExpr {
 
     for stmt in &ret.program.body {
         if let oxc_ast::ast::Statement::TSTypeAliasDeclaration(alias) = stmt {
-            return verter_type_expr_oxc::lower_ts_type(&alias.type_annotation, &wrapper);
+            let mut lowered = verter_type_expr_oxc::lower_ts_type(&alias.type_annotation, &wrapper);
+            match payload_file_offset {
+                // Rebase wrapper-local spans into the source file's coordinates.
+                // A wrapper span `s` points at `wrapper[s]`; the payload begins
+                // at `wrapper[WRAPPER_PREFIX_LEN]` and at `off` in the file, so
+                // the file position is `s - WRAPPER_PREFIX_LEN + off`. The
+                // intermediate delta is signed (the prefix may sit past the
+                // payload's file offset); `shift_spans` saturates each endpoint
+                // at the file start.
+                Some(off) => {
+                    let delta = i64::from(off) - i64::from(WRAPPER_PREFIX_LEN);
+                    if delta != 0 {
+                        lowered.shift_spans(delta);
+                    }
+                }
+                // No contiguous source region — the wrapper-local spans cannot
+                // be rebased honestly, so drop them.
+                None => lowered.clear_spans(),
+            }
+            return lowered;
         }
     }
 
@@ -46,10 +83,18 @@ pub fn parse_jsdoc_tag_type_payload(input: &str) -> TypeExpr {
     }
 }
 
+/// Byte length of the `type __T = ` prefix [`parse_jsdoc_tag_type_payload`]
+/// prepends before lowering a JSDoc `{Type}` payload through OXC. The payload's
+/// first character sits at this offset inside the synthetic wrapper buffer.
+const WRAPPER_PREFIX_LEN: u32 = "type __T = ".len() as u32;
+
 /// Extract the leading `{Type}` brace payload from a JSDoc tag's text, if the
 /// text begins with one (`{Foo} rest` → `"Foo"`). Depth-aware so nested braces
 /// (`{Record<string, {nested: true}>}`) match the right closing brace. Returns
 /// the payload substring and the remainder after the closing brace.
+///
+/// When `text` is a slice of the original source, the returned payload is a
+/// sub-slice of it, so `payload.as_ptr()` recovers the payload's file position.
 fn split_jsdoc_brace_payload(text: &str) -> Option<(&str, &str)> {
     let trimmed = text.trim_start();
     let rest = trimmed.strip_prefix('{')?;
@@ -69,20 +114,102 @@ fn split_jsdoc_brace_payload(text: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// Lower the leading `{Type}` brace payload of a JSDoc tag's text into a
-/// [`TypeExpr`] via [`parse_jsdoc_tag_type_payload`]. `None` when the tag has no
-/// text or its text does not begin with a `{...}` payload.
+/// The byte offset (in the file) of a sub-slice within its parent source string,
+/// or `None` if `sub` is not actually a sub-slice of `source` (defensive — every
+/// caller passes a real sub-slice).
+fn file_offset_of_subslice(source: &str, sub: &str) -> Option<u32> {
+    let source_start = source.as_ptr() as usize;
+    let sub_start = sub.as_ptr() as usize;
+    (sub_start >= source_start && sub_start + sub.len() <= source_start + source.len())
+        .then(|| (sub_start - source_start) as u32)
+}
+
+/// Lower a JSDoc tag's leading `{Type}` brace payload — taken as a **slice of
+/// the original `source`** — into a [`TypeExpr`], with its member spans in FILE
+/// coordinates. Returns the lowered type plus the remainder after the closing
+/// brace (the part a `@param`/`@typedef` name token follows). `None` when the
+/// tag text does not begin with a `{...}` payload or the payload is empty.
+///
+/// `source_tag_text` MUST be a sub-slice of `source`. The payload's file offset
+/// is recovered by pointer arithmetic. A SINGLE-LINE payload (no interior
+/// newline) maps linearly onto the file, so it lowers with real file-coordinate
+/// spans. A payload that spans comment lines (`*`-decorated) has no single
+/// contiguous source region — it is reconstructed (decorations stripped) and
+/// lowered with its spans CLEARED (honest absence, never a wrong offset).
 ///
 /// This is the producer-side bridge that makes a JSDoc `{Type}` an ORDINARY
 /// type: the returned `TypeExpr` is stored on the same shallow-analysis carrier
 /// a TS annotation populates, so it resolves through the shared dispatch with no
 /// JSDoc-specific resolution path.
-fn lower_jsdoc_tag_type(text: Option<&str>) -> Option<TypeExpr> {
-    let (payload, _rest) = split_jsdoc_brace_payload(text?)?;
+fn lower_jsdoc_tag_type<'a>(source: &str, source_tag_text: &'a str) -> Option<(TypeExpr, &'a str)> {
+    let (payload, rest) = split_jsdoc_brace_payload(source_tag_text)?;
     if payload.is_empty() {
         return None;
     }
-    Some(parse_jsdoc_tag_type_payload(payload))
+    let lowered = if payload.contains('\n') {
+        // Multi-line / decorated payload: no contiguous file region. Strip the
+        // JSDoc line decorations to recover a lowerable single-line type and
+        // drop the (un-rebasable) spans.
+        let reconstructed = reconstruct_multiline_jsdoc_payload(payload);
+        parse_jsdoc_tag_type_payload(&reconstructed, None)
+    } else {
+        // Single-line payload: its position in the file is exact.
+        let offset = file_offset_of_subslice(source, payload);
+        parse_jsdoc_tag_type_payload(payload, offset)
+    };
+    Some((lowered, rest))
+}
+
+/// Reconstruct a single-line type string from a multi-line JSDoc `{Type}`
+/// payload by stripping each continuation line's leading whitespace + optional
+/// `*` decoration and joining the lines with a single space — matching how
+/// [`parse_jsdoc`] normalises tag text. Used only for the rare wrapped payload,
+/// where the spans are cleared anyway.
+fn reconstruct_multiline_jsdoc_payload(payload: &str) -> String {
+    payload
+        .lines()
+        .map(|line| {
+            let line = line.trim_start();
+            line.strip_prefix('*').unwrap_or(line).trim()
+        })
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The source-anchored text slice of a JSDoc tag, given its file-coordinate
+/// text span. The returned slice is a sub-slice of `source`, so its payload's
+/// file offset is recoverable by pointer arithmetic.
+fn tag_text_slice<'a>(source: &'a str, tag: &JsdocTagSpanOffsets) -> Option<&'a str> {
+    let text = tag.text?;
+    source.get(text.start as usize..text.end as usize)
+}
+
+/// Lower the `{T}` payload of the first leading-JSDoc tag (governing the
+/// declaration whose name starts at `target_start`) whose name is in
+/// `tag_names`, into a [`TypeExpr`] with FILE-coordinate member spans. `None`
+/// when there is no leading JSDoc, no matching tag, or the tag carries no
+/// `{...}` payload.
+fn lower_first_jsdoc_tag_type(
+    source: &str,
+    target_start: u32,
+    tag_names: &[&str],
+) -> Option<TypeExpr> {
+    let (block_start, block_end) = find_leading_jsdoc_block_offsets(source, target_start)?;
+    let block = jsdoc_block_spans(source, block_start, block_end);
+    for tag in &block.tags {
+        let name = &source[tag.name.start as usize..tag.name.end as usize];
+        if !tag_names.contains(&name) {
+            continue;
+        }
+        let Some(text) = tag_text_slice(source, tag) else {
+            continue;
+        };
+        if let Some((lowered, _rest)) = lower_jsdoc_tag_type(source, text) {
+            return Some(lowered);
+        }
+    }
+    None
 }
 
 /// The `TypeExpr` declared by a leading JSDoc `@type {T}` annotation on the
@@ -94,14 +221,10 @@ fn lower_jsdoc_tag_type(text: Option<&str>) -> Option<TypeExpr> {
 /// when there is no leading JSDoc, no `@type` tag, or the tag carries no
 /// `{...}` payload.
 pub fn extract_jsdoc_type_at_offset(source: &str, target_start: u32) -> Option<TypeExpr> {
-    let raw = find_leading_jsdoc_near_offset(source, target_start)?;
-    let (_description, tags) = parse_jsdoc(raw);
     // `@type` is the explicit value-type annotation. A `@typedef`'s OWN type
     // also lives in its leading `{...}` payload (`/** @typedef {Foo} Bar */`),
     // so accept it here too for the rare inline form.
-    tags.iter()
-        .find(|tag| matches!(tag.name.as_str(), "type" | "typedef"))
-        .and_then(|tag| lower_jsdoc_tag_type(tag.text.as_deref()))
+    lower_first_jsdoc_tag_type(source, target_start, &["type", "typedef"])
 }
 
 /// The return-type `TypeExpr` declared by a leading JSDoc `@returns {T}` (or
@@ -109,41 +232,36 @@ pub fn extract_jsdoc_type_at_offset(source: &str, target_start: u32) -> Option<T
 /// `None` when absent. Used to type a JSDoc-documented function's return when no
 /// TS return annotation is present.
 pub fn extract_jsdoc_return_type_at_offset(source: &str, target_start: u32) -> Option<TypeExpr> {
-    let raw = find_leading_jsdoc_near_offset(source, target_start)?;
-    let (_description, tags) = parse_jsdoc(raw);
-    tags.iter()
-        .find(|tag| matches!(tag.name.as_str(), "returns" | "return"))
-        .and_then(|tag| lower_jsdoc_tag_type(tag.text.as_deref()))
+    lower_first_jsdoc_tag_type(source, target_start, &["returns", "return"])
 }
 
 /// The `@param {T} name` parameter types declared by a leading JSDoc block on
 /// the declaration whose name token starts at `target_start`, keyed by
-/// parameter name. Each entry's `TypeExpr` is the lowered `{T}` payload. Empty
-/// when there is no leading JSDoc or no `@param` tags carry a `{...}` payload.
-/// Used to type a JSDoc-documented function's parameters that lack a TS
-/// annotation.
+/// parameter name. Each entry's `TypeExpr` is the lowered `{T}` payload (member
+/// spans in FILE coordinates). Empty when there is no leading JSDoc or no
+/// `@param` tags carry a `{...}` payload. Used to type a JSDoc-documented
+/// function's parameters that lack a TS annotation.
 pub fn extract_jsdoc_param_types_at_offset(
     source: &str,
     target_start: u32,
 ) -> Vec<(String, TypeExpr)> {
-    let Some(raw) = find_leading_jsdoc_near_offset(source, target_start) else {
+    let Some((block_start, block_end)) = find_leading_jsdoc_block_offsets(source, target_start)
+    else {
         return Vec::new();
     };
-    let (_description, tags) = parse_jsdoc(raw);
+    let block = jsdoc_block_spans(source, block_start, block_end);
     let mut params = Vec::new();
-    for tag in &tags {
-        if !matches!(tag.name.as_str(), "param" | "arg" | "argument") {
+    for tag in &block.tags {
+        let tag_name = &source[tag.name.start as usize..tag.name.end as usize];
+        if !matches!(tag_name, "param" | "arg" | "argument") {
             continue;
         }
-        let Some(text) = tag.text.as_deref() else {
+        let Some(text) = tag_text_slice(source, tag) else {
             continue;
         };
-        let Some((payload, rest)) = split_jsdoc_brace_payload(text) else {
+        let Some((lowered, rest)) = lower_jsdoc_tag_type(source, text) else {
             continue;
         };
-        if payload.is_empty() {
-            continue;
-        }
         // The parameter name is the first whitespace-delimited token after the
         // `{T}` payload (`@param {Foo} value description`). An optional name is
         // written `[value]` in JSDoc; strip the brackets to recover the name.
@@ -159,7 +277,7 @@ pub fn extract_jsdoc_param_types_at_offset(
         if name.is_empty() {
             continue;
         }
-        params.push((name.to_string(), parse_jsdoc_tag_type_payload(payload)));
+        params.push((name.to_string(), lowered));
     }
     params
 }
@@ -202,25 +320,25 @@ pub fn collect_jsdoc_typedefs(comments: &[Comment], source: &str) -> Vec<JsdocTy
         }
         let start = comment.span.start as usize;
         let end = comment.span.end as usize;
-        let Some(raw) = source.get(start..end) else {
+        if end > source.len() {
             continue;
-        };
-        let (_description, tags) = parse_jsdoc(raw);
-        for tag in &tags {
-            if tag.name.as_str() != "typedef" {
+        }
+        // Drive off the span scanner so each tag's text is a file-coordinate
+        // sub-slice of `source` — the `{T}` payload's file offset is then exact.
+        let block = jsdoc_block_spans(source, start, end);
+        for tag in &block.tags {
+            let tag_name = &source[tag.name.start as usize..tag.name.end as usize];
+            if tag_name != "typedef" {
                 continue;
             }
-            let Some(text) = tag.text.as_deref() else {
+            let Some(text) = tag_text_slice(source, tag) else {
                 continue;
             };
             // `@typedef {T} Name` — the body is the `{T}` payload, the name is
             // the first identifier token after the closing brace.
-            let Some((payload, rest)) = split_jsdoc_brace_payload(text) else {
+            let Some((body, rest)) = lower_jsdoc_tag_type(source, text) else {
                 continue;
             };
-            if payload.is_empty() {
-                continue;
-            }
             let Some(raw_name) = rest.split_whitespace().next() else {
                 continue;
             };
@@ -230,7 +348,7 @@ pub fn collect_jsdoc_typedefs(comments: &[Comment], source: &str) -> Vec<JsdocTy
             }
             typedefs.push(JsdocTypedef {
                 name: name.to_string(),
-                body: parse_jsdoc_tag_type_payload(payload),
+                body,
             });
         }
     }
@@ -946,7 +1064,7 @@ mod tests {
 
     #[test]
     fn parse_jsdoc_tag_type_payload_lowers_primitive_keyword() {
-        let expr = parse_jsdoc_tag_type_payload("string");
+        let expr = parse_jsdoc_tag_type_payload("string", None);
         assert_eq!(
             expr,
             TypeExpr::Primitive(PrimitiveName::String),
@@ -959,7 +1077,7 @@ mod tests {
         // OXC lowers `Array<number>` to `TypeExpr::Array { element }`,
         // not a `Ref<Array, [number]>`. The lowering is canonical: any
         // `Array<T>` / `T[]` / `ReadonlyArray<T>` collapses into `Array`.
-        let expr = parse_jsdoc_tag_type_payload("Array<number>");
+        let expr = parse_jsdoc_tag_type_payload("Array<number>", None);
         match expr {
             TypeExpr::Array { element, .. } => {
                 assert_eq!(&*element, &TypeExpr::Primitive(PrimitiveName::Number));
@@ -970,7 +1088,7 @@ mod tests {
 
     #[test]
     fn parse_jsdoc_tag_type_payload_lowers_union() {
-        let expr = parse_jsdoc_tag_type_payload("string | number");
+        let expr = parse_jsdoc_tag_type_payload("string | number", None);
         match expr {
             TypeExpr::Union(members) => {
                 assert_eq!(members.len(), 2, "union must lower with two members");
@@ -987,7 +1105,7 @@ mod tests {
 
     #[test]
     fn parse_jsdoc_tag_type_payload_unknown_for_empty_input() {
-        let expr = parse_jsdoc_tag_type_payload("");
+        let expr = parse_jsdoc_tag_type_payload("", None);
         match expr {
             TypeExpr::Unknown { raw } => assert_eq!(raw, "", "empty input keeps empty raw"),
             other => panic!("expected Unknown for empty payload, got {other:?}"),

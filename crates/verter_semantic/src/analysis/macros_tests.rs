@@ -2557,7 +2557,8 @@ fn build_expanded_type_expr_consumes_type_expr_field_directly_without_reparse() 
     // the text parser would have produced. If they happened to coincide
     // (e.g. via accidental annotation choice), the test would not be
     // characterising anything.
-    let from_text = crate::analysis::jsdoc::parse_jsdoc_tag_type_payload("Garbage<<<unparseable");
+    let from_text =
+        crate::analysis::jsdoc::parse_jsdoc_tag_type_payload("Garbage<<<unparseable", None);
     assert_ne!(
         from_text, typed_indexed_access,
         "the annotation text MUST NOT round-trip back to the typed shape; \

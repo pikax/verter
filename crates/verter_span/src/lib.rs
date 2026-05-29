@@ -83,9 +83,8 @@ impl Span {
     #[inline]
     #[must_use]
     pub fn shifted(&self, delta: i64) -> Span {
-        let apply = |value: u32| -> u32 {
-            (i64::from(value) + delta).clamp(0, i64::from(u32::MAX)) as u32
-        };
+        let apply =
+            |value: u32| -> u32 { (i64::from(value) + delta).clamp(0, i64::from(u32::MAX)) as u32 };
         Span {
             start: apply(self.start),
             end: apply(self.end),
