@@ -42,7 +42,7 @@ use crate::host_manage::component_meta_request_impl::{
 
 /// Resolve a `.vue` macro's normalized component-meta DTOs through the shared
 /// typeinfo Vue surface path (`VerterHost::vue_macro_dtos`, FullMetadata) — the
-/// SOLE props/emits/slots authority post-cutover.
+/// SOLE props/emits/slots authority.
 ///
 /// `owner_canonical` is the SFC the macro CALL lives in; `macro_index` indexes
 /// that SFC's `FileAnalysisSnapshot::macros`. The host-cached, request-validated

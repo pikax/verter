@@ -4780,7 +4780,7 @@ fn define_props_macro_shape_reuses_expanded_fields_directly() {
 #[test]
 fn define_props_macro_shape_prefers_resolved_macro_when_expanded_fields_are_incomplete() {
     // Real SFC: `defineProps<Props>()` where `Props extends Pick<BaseProps,
-    // 'id' | 'label'>` adds `own`. Post-cutover the producer sources its prop
+    // 'id' | 'label'>` adds `own`. The producer sources its prop
     // member set from the typeinfo Vue surface (`vue_macro_dtos`), NOT a
     // synthetic `ResolvedMacroMeta.props`, so the SFC + its `BaseProps` carrier
     // must be REAL for the typeinfo path to resolve `[id, label, own]`.

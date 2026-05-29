@@ -11211,137 +11211,6 @@ fn imported_macro_surface_not_in_protocol_or_ffi() {
     );
 }
 
-/// Explicit-dispatch guard — every public bridge accessor takes
-/// a `ResolverContext` parameter.
-///
-/// Scans the bridge module's `impl ImportedMacroSurface` block via
-/// `syn` and asserts each `pub fn` / `pub(crate) fn` method (other
-/// than constructors / pure-identity accessors) carries a
-/// `ResolverContext` parameter. Constructors and identity accessors
-/// are exempt because they perform no dispatch — the bridge's
-/// invariant is that *dispatching* accessors take explicit
-/// `&dyn ResolverContext`.
-///
-/// Allowlist:
-///
-/// - `new` — pure constructor.
-/// - `identity` — returns a borrowed `&ImportedDeclarationIdentity`;
-///   no dispatch.
-///
-/// Any other public method MUST carry a `ResolverContext` parameter.
-#[test]
-fn imported_macro_surface_accessors_take_explicit_resolver_context() {
-    use syn::visit::Visit;
-
-    let root = workspace_root();
-    let bridge_path =
-        root.join("crates/verter_session/src/resolver_core/component_meta/imported_surface.rs");
-    let src = std::fs::read_to_string(&bridge_path).unwrap_or_else(|e| {
-        panic!(
-            "imported-macro-surface guard: cannot read bridge module `{}`: {e}",
-            bridge_path.display()
-        )
-    });
-    let parsed = syn::parse_file(&src).unwrap_or_else(|e| {
-        panic!(
-            "imported-macro-surface guard: bridge module `{}` failed to parse via syn: {e}",
-            bridge_path.display()
-        )
-    });
-
-    /// Method names exempt from the `ResolverContext` requirement.
-    /// All other public / crate-public methods on the bridge
-    /// MUST take a `ResolverContext` parameter.
-    const EXEMPT: &[&str] = &["new", "identity"];
-
-    struct BridgeVisitor {
-        in_imported_macro_surface_impl: bool,
-        violations: Vec<String>,
-        matched_methods: Vec<String>,
-    }
-
-    impl<'ast> Visit<'ast> for BridgeVisitor {
-        fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
-            // Only walk `impl ImportedMacroSurface` blocks.
-            let is_target = if let syn::Type::Path(tp) = &*item.self_ty {
-                tp.path
-                    .segments
-                    .last()
-                    .map(|s| s.ident == "ImportedMacroSurface")
-                    .unwrap_or(false)
-            } else {
-                false
-            };
-            if !is_target {
-                return;
-            }
-            self.in_imported_macro_surface_impl = true;
-            syn::visit::visit_item_impl(self, item);
-            self.in_imported_macro_surface_impl = false;
-        }
-
-        fn visit_impl_item_fn(&mut self, method: &'ast syn::ImplItemFn) {
-            if !self.in_imported_macro_surface_impl {
-                return;
-            }
-            // Only check `pub` / `pub(crate)` methods. Private
-            // helpers (`fn helper` without `pub`) are exempt.
-            let is_visible = matches!(method.vis, syn::Visibility::Public(_))
-                || matches!(method.vis, syn::Visibility::Restricted(_));
-            if !is_visible {
-                return;
-            }
-            let name = method.sig.ident.to_string();
-            self.matched_methods.push(name.clone());
-            if EXEMPT.contains(&name.as_str()) {
-                return;
-            }
-            // Look for at least one parameter whose type-syntax
-            // contains `ResolverContext`. The actual binding may
-            // be `ctx: &dyn ResolverContext` or
-            // `ctx: &impl ResolverContext`; matching by name
-            // substring on the tokenised type catches both.
-            let has_resolver_ctx = method.sig.inputs.iter().any(|input| match input {
-                syn::FnArg::Typed(pat) => {
-                    let token_str = quote::quote!(#pat).to_string();
-                    token_str.contains("ResolverContext")
-                }
-                syn::FnArg::Receiver(_) => false,
-            });
-            if !has_resolver_ctx {
-                self.violations.push(format!(
-                    "method `{name}` is public on `impl ImportedMacroSurface` \
-                     but does NOT take a `ResolverContext` parameter — \
-                     zero-arg `&self` dispatch accessors violate the \
-                     R25/R31 explicit-dispatch contract"
-                ));
-            }
-        }
-    }
-
-    let mut visitor = BridgeVisitor {
-        in_imported_macro_surface_impl: false,
-        violations: Vec::new(),
-        matched_methods: Vec::new(),
-    };
-    visitor.visit_file(&parsed);
-    assert!(
-        !visitor.matched_methods.is_empty(),
-        "guard `imported_macro_surface_accessors_take_explicit_resolver_context`: \
-         scan found NO public methods on `impl ImportedMacroSurface` — the bridge \
-         module's shape changed in a way that makes this guard meaningless. \
-         Update the visitor to track the new shape.",
-    );
-    assert!(
-        visitor.violations.is_empty(),
-        "guard `imported_macro_surface_accessors_take_explicit_resolver_context`: \
-         every dispatching public accessor on `ImportedMacroSurface` MUST take \
-         an explicit `ResolverContext` parameter. Zero-arg `&self` accessors \
-         that secretly dispatch through TLS would violate R25/R31 (hidden \
-         lazy reads behind `&self`). Offending methods:\n  {}",
-        visitor.violations.join("\n  "),
-    );
-}
 
 /// Walk a directory and apply `cb` to every `.rs` or `.ts` file.
 /// Shared by the protocol / FFI / compat scan above.
@@ -11376,134 +11245,7 @@ fn walk_dir_collect_rs_and_ts(dir: &std::path::Path, cb: &mut dyn FnMut(&std::pa
 // `ResolvedMacroMeta` bypasses the seam — it would interpret the eager arm's
 // fields directly and silently skip the lazy arm, defeating the migration.
 //
-// The binary structural fact this guard checks: in the two migrated modules,
-// the ONLY `.props` / `.emits` / `.slots` field accesses permitted are on
-// `evaluated_types` (the `ExpandedComponentTypes` analyzer surface — NOT a
-// `ResolvedMacroMeta`). Every macro-surface member read on a
-// `ResolvedMacroMeta` must route through
-// `ResolvedMacroSurface::from_eager_meta(..).{prop,emit,slot}_members(ctx)`,
-// which is a METHOD CALL (`*_members(...)`), not a field access. So the scan
-// flags any `ExprField` whose member is `props` / `emits` / `slots` and whose
-// base does not root at the `evaluated_types` binding.
 
-/// Root identifier of a field-access / method-call base chain — the
-/// leftmost segment of `a.b.c` / `a.b().c` etc. Returns `None` for a
-/// base that does not bottom out in a plain path (e.g. a literal,
-/// a parenthesised expression, a macro call).
-fn field_access_base_root(expr: &syn::Expr) -> Option<String> {
-    match expr {
-        syn::Expr::Path(p) => p.path.segments.first().map(|s| s.ident.to_string()),
-        syn::Expr::Field(f) => field_access_base_root(&f.base),
-        syn::Expr::MethodCall(m) => field_access_base_root(&m.receiver),
-        syn::Expr::Index(i) => field_access_base_root(&i.expr),
-        syn::Expr::Reference(r) => field_access_base_root(&r.expr),
-        syn::Expr::Paren(p) => field_access_base_root(&p.expr),
-        syn::Expr::Try(t) => field_access_base_root(&t.expr),
-        syn::Expr::Await(a) => field_access_base_root(&a.base),
-        syn::Expr::Unary(u) => field_access_base_root(&u.expr),
-        syn::Expr::Group(g) => field_access_base_root(&g.expr),
-        _ => None,
-    }
-}
-
-/// Architecture guard — the macro-authority cluster reads macro-surface
-/// members through `ResolvedMacroSurface`, never via direct `.props` /
-/// `.emits` / `.slots` field access on a `ResolvedMacroMeta`.
-///
-/// Pre-migration these modules contained `resolved.props`,
-/// `resolved_macro.emits`, `resolved.slots`, etc. — the guard fails
-/// against that tree. Post-migration those reads route through the
-/// shared accessor (a `*_members(ctx)` method call), so the only
-/// remaining `.props` / `.emits` / `.slots` field accesses are on the
-/// `evaluated_types` analyzer surface (`ExpandedComponentTypes`), which
-/// is explicitly allowed.
-#[test]
-fn macro_authority_reads_surface_not_direct_fields() {
-    use syn::visit::Visit;
-
-    /// The single binding whose `.props` / `.emits` / `.slots` field
-    /// access is permitted: the `ExpandedComponentTypes` analyzer
-    /// surface threaded into the macro-shape producers. It is NOT a
-    /// `ResolvedMacroMeta`, so reading its fields directly does not
-    /// bypass the `ResolvedMacroSurface` seam.
-    const ALLOWED_FIELD_BASE: &str = "evaluated_types";
-    const MACRO_SURFACE_FIELDS: &[&str] = &["props", "emits", "slots"];
-
-    let root = workspace_root();
-    let targets = [
-        "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
-        "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
-    ];
-
-    struct FieldVisitor {
-        rel: String,
-        violations: Vec<String>,
-        flagged_fields: usize,
-    }
-
-    impl<'ast> Visit<'ast> for FieldVisitor {
-        fn visit_expr_field(&mut self, node: &'ast syn::ExprField) {
-            if let syn::Member::Named(ident) = &node.member {
-                let field = ident.to_string();
-                if MACRO_SURFACE_FIELDS.contains(&field.as_str()) {
-                    let base_root = field_access_base_root(&node.base);
-                    // Permit only the `evaluated_types` analyzer surface.
-                    // Anything else (`resolved.props`,
-                    // `resolved_macro.slots`, …) is a direct
-                    // `ResolvedMacroMeta` field read that bypasses the
-                    // `ResolvedMacroSurface` seam.
-                    let allowed = base_root.as_deref() == Some(ALLOWED_FIELD_BASE);
-                    if !allowed {
-                        let base_str = quote::quote!(#node).to_string();
-                        self.violations.push(format!(
-                            "{}: direct `.{field}` field access `{}` (base root: {:?}) — \
-                             macro-surface members MUST be read through \
-                             `ResolvedMacroSurface::from_eager_meta(..).{}_members(ctx)`, \
-                             not via a direct field read on a `ResolvedMacroMeta`",
-                            self.rel,
-                            base_str,
-                            base_root,
-                            field.trim_end_matches('s'),
-                        ));
-                    }
-                }
-            }
-            // Continue walking nested expressions.
-            syn::visit::visit_expr_field(self, node);
-        }
-    }
-
-    let mut all_violations: Vec<String> = Vec::new();
-    let mut total_flagged = 0usize;
-    for rel in targets {
-        let path = root.join(rel);
-        let src = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("macro-authority guard: cannot read `{rel}`: {e}"));
-        let parsed = syn::parse_file(&src)
-            .unwrap_or_else(|e| panic!("macro-authority guard: `{rel}` failed to parse: {e}"));
-        let mut visitor = FieldVisitor {
-            rel: rel.to_string(),
-            violations: Vec::new(),
-            flagged_fields: 0,
-        };
-        visitor.visit_file(&parsed);
-        total_flagged += visitor.flagged_fields;
-        all_violations.extend(visitor.violations);
-    }
-    let _ = total_flagged;
-
-    assert!(
-        all_violations.is_empty(),
-        "guard `macro_authority_reads_surface_not_direct_fields`: the \
-         macro-authority cluster (`macro_shapes.rs` + `slot_binding_graph.rs`) \
-         MUST read `defineProps` / `defineEmits` / `defineSlots` member sets \
-         through the `ResolvedMacroSurface` enum's `{{prop,emit,slot}}_members` \
-         accessors — never via a direct `.props` / `.emits` / `.slots` field \
-         read on a `ResolvedMacroMeta`. A direct read bypasses the \
-         eager/lazy seam (Stage 2B.1). Offending field accesses:\n  {}",
-        all_violations.join("\n  "),
-    );
-}
 
 // ===========================================================================
 // Single Resolution Engine guards (CLAUDE.md "Single Resolution Engine Rule")
@@ -11569,8 +11311,12 @@ mod single_resolution_engine_guards {
     /// `test_only_module_is_only_consumed_by_test_files` guard pins that it is
     /// consumed only by test files). It is NOT a production rail, so it is
     /// exempt from these production-site ledgers.
-    const KNOWN_PROBE_FILES: &[&str] =
-        &["crates/verter_session/src/test_only_imported_macro_surface.rs"];
+    // The eager-rail test probe (`test_only_imported_macro_surface.rs`) is
+    // DELETED, so there are no by-exact-path probe exemptions. `test_only_`
+    // NAME-prefix alone still does NOT exempt (only an exact path in this list
+    // does — see `is_test_or_probe_file` /
+    // `test_only_prefix_alone_does_not_exempt_a_rogue_file`).
+    const KNOWN_PROBE_FILES: &[&str] = &[];
 
     /// Walk `<repo>/crates/<crate>/src/**` and yield every production
     /// `.rs` file as `(absolute_path, repo_relative_path)`. Excludes
@@ -12827,46 +12573,21 @@ mod single_resolution_engine_guards {
     // explicit by-path probe allowlist — NOT a `test_only_` name prefix; see
     // `is_test_or_probe_file`).
     // -----------------------------------------------------------------------
-    const FROM_EAGER_META_ALLOWLIST: &[(&str, u32, &str)] = &[
-        (
-            "crates/verter_session/src/resolver_core/component_meta/imported_surface.rs",
-            841,
-            "from_eager_meta",
-        ),
-        (
-            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
-            988,
-            "from_eager_meta",
-        ),
-        (
-            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
-            1109,
-            "from_eager_meta",
-        ),
-        (
-            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
-            1409,
-            "from_eager_meta",
-        ),
-        (
-            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
-            1512,
-            "from_eager_meta",
-        ),
-        (
-            "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
-            991,
-            "from_eager_meta",
-        ),
-    ];
-
+    
     #[test]
     fn no_new_from_eager_meta_production_site() {
+        // The eager macro-surface rail (`ResolvedMacroSurface::from_eager_meta`)
+        // is DELETED — production resolves props/emits/slots through the typeinfo
+        // Vue surface (`VerterHost::vue_macro_dtos`). `from_eager_meta` must not
+        // appear ANYWHERE (production source OR the wider `crates/*/src/**` tree
+        // the production collector scans); the seam constructor and its lazy arm
+        // are gone. A revival at any site fails this gate.
         let actual = scan_identifier_sites("from_eager_meta");
-        assert_exact_allowlist_match(
-            "no_new_from_eager_meta_production_site",
-            &actual,
-            FROM_EAGER_META_ALLOWLIST,
+        assert!(
+            actual.is_empty(),
+            "`from_eager_meta` is a RETIRED eager-rail symbol and must not appear in \
+             production source; found {} site(s):\n{actual:#?}",
+            actual.len(),
         );
     }
 
@@ -12974,7 +12695,7 @@ mod single_resolution_engine_guards {
             3,
         ),
         ("crates/verter_parser/src/utils/oxc/vue/script/setup.rs", 21),
-        ("crates/verter_session/src/host_manage/eval_program.rs", 9),
+        ("crates/verter_session/src/host_manage/eval_program.rs", 8),
         ("crates/verter_session/src/host_manage/jsdoc_resolve.rs", 4),
         ("crates/verter_session/src/host_manage/prepared_decl.rs", 7),
         ("crates/verter_session/src/host_manage.rs", 6),
@@ -13111,7 +12832,6 @@ mod single_resolution_engine_guards {
             23,
         ),
         ("crates/verter_parser/src/utils/oxc/vue/script/setup.rs", 1),
-        ("crates/verter_session/src/host_manage/eval_program.rs", 1),
         ("crates/verter_session/src/host_manage/jsdoc_resolve.rs", 1),
         ("crates/verter_session/src/host_manage/prepared_decl.rs", 4),
         ("crates/verter_session/src/host_manage.rs", 2),
@@ -13258,52 +12978,6 @@ mod single_resolution_engine_guards {
         let result = std::panic::catch_unwind(f);
         std::panic::set_hook(prev);
         result.is_err()
-    }
-
-    #[test]
-    fn line_precise_guard_discriminates_planted_site() {
-        // A planted NEW site at a fake, non-allowlisted path MUST be flagged.
-        let planted: Vec<(String, u32, String)> = vec![(
-            "crates/verter_session/src/some_new_consumer.rs".to_string(),
-            42,
-            "from_eager_meta".to_string(),
-        )];
-        assert!(
-            guard_reports_violation(|| assert_exact_allowlist_match(
-                "discriminator",
-                &planted,
-                FROM_EAGER_META_ALLOWLIST,
-            )),
-            "line-precise guard must FAIL on a planted new `from_eager_meta` \
-             site at a non-allowlisted path — a guard that cannot fail is a stub"
-        );
-
-        // The real allowlist fed against itself MUST NOT be flagged.
-        let real: Vec<(String, u32, String)> = FROM_EAGER_META_ALLOWLIST
-            .iter()
-            .map(|(p, ln, pat)| (p.to_string(), *ln, pat.to_string()))
-            .collect();
-        assert!(
-            !guard_reports_violation(|| assert_exact_allowlist_match(
-                "discriminator",
-                &real,
-                FROM_EAGER_META_ALLOWLIST,
-            )),
-            "line-precise guard must PASS when the actual set equals the allowlist"
-        );
-
-        // A planted REMOVED site (allowlist entry with no matching actual)
-        // MUST also be flagged — the shrinking-ledger / stale-entry half.
-        let one_missing: Vec<(String, u32, String)> = real.iter().skip(1).cloned().collect();
-        assert!(
-            guard_reports_violation(|| assert_exact_allowlist_match(
-                "discriminator",
-                &one_missing,
-                FROM_EAGER_META_ALLOWLIST,
-            )),
-            "line-precise guard must FAIL on a stale allowlist entry (a site \
-             that no longer exists) — this is what forces the ledger to shrink"
-        );
     }
 
     #[test]
@@ -13887,11 +13561,9 @@ pub fn run(p: &Program) {\n\
     #[test]
     fn scanner_excludes_test_and_probe_files() {
         // The production-source collector MUST exclude `*_tests.rs`,
-        // `tests.rs`, `tests/`-segment files, and the KNOWN probe bodies — the
-        // `from_eager_meta` probes in `test_only_imported_macro_surface.rs`
-        // must NOT appear as production sites (else the allowlist would need
-        // 3 extra entries and the guard would mis-classify a test probe as a
-        // production rail).
+        // `tests.rs`, and `tests/`-segment files. (The eager-rail test probe
+        // is deleted, so there are no by-exact-path probe exemptions left —
+        // `KNOWN_PROBE_FILES` is empty.)
         assert!(
             is_test_or_probe_file("crates/x/src/foo_tests.rs"),
             "`*_tests.rs` sibling must be excluded"
@@ -13904,31 +13576,27 @@ pub fn run(p: &Program) {\n\
             is_test_or_probe_file("crates/x/src/tests/regress.rs"),
             "file under a `tests/` segment must be excluded"
         );
-        assert!(
-            is_test_or_probe_file("crates/verter_session/src/test_only_imported_macro_surface.rs"),
-            "the KNOWN `test_only` probe body must be excluded"
-        );
         // A genuine production file must NOT be excluded.
         assert!(
             !is_test_or_probe_file(
-                "crates/verter_session/src/resolver_core/component_meta/imported_surface.rs"
+                "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs"
             ),
             "a genuine production source file must NOT be excluded"
         );
 
-        // End-to-end: the collected production set must include the
-        // `from_eager_meta` DEFINITION file but NOT the test-only probe file.
+        // End-to-end: the collected production set includes a real production
+        // file and excludes `*_tests.rs` siblings.
         let files = collect_production_rs_files();
         let rels: BTreeSet<String> = files.into_iter().map(|(_, rel)| rel).collect();
         assert!(
             rels.contains(
-                "crates/verter_session/src/resolver_core/component_meta/imported_surface.rs"
+                "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs"
             ),
-            "production collector must include the `from_eager_meta` definition file"
+            "production collector must include a real production file"
         );
         assert!(
-            !rels.contains("crates/verter_session/src/test_only_imported_macro_surface.rs"),
-            "production collector must exclude the KNOWN `test_only` probe body"
+            !rels.iter().any(|r| r.ends_with("_tests.rs")),
+            "production collector must exclude `*_tests.rs` sibling files"
         );
 
         // Every KNOWN_PROBE_FILES entry must actually EXIST on disk — a stale
@@ -13980,11 +13648,12 @@ pub fn run(p: &Program) {\n\
              the [P2] exemption-too-broad hole"
         );
 
-        // The KNOWN probe, by contrast, IS exempt (by exact path) — proving the
-        // exemption still works for the legitimate probe, just scoped.
+        // There are no known probes left (`KNOWN_PROBE_FILES` is empty after the
+        // eager-rail probe was deleted), so NO `test_only_*`-named file is
+        // exempt — the exemption is strictly by exact path.
         assert!(
-            is_test_or_probe_file(KNOWN_PROBE_FILES[0]),
-            "the KNOWN probe path must remain exempt"
+            KNOWN_PROBE_FILES.is_empty(),
+            "the eager-rail probe is deleted; `KNOWN_PROBE_FILES` is empty"
         );
 
         // Different-named rogue under another crate likewise not exempt.
@@ -14444,4 +14113,121 @@ pub fn after() {}\n";
              NOT count as a `test_only` consumption"
         );
     }
+}
+
+/// Architecture guard (CRITICAL: typeinfo spans-not-strings) — the typeinfo
+/// `TypeInfoSurface` family carries NAMES, node ids, spans, origins, flags, and
+/// JSDoc SPANS as authority — never RENDERED type strings or JSDoc TEXT.
+///
+/// The surface is the cache-owned, generation-stable projection a consumer
+/// slices source from on demand (like Verter's Vue compiler / `CodeTransform`):
+/// every span is a `(file, byte-range)` the consumer resolves against the
+/// cache-owned `IndexedReady` source at the FFI / consumer boundary. Storing a
+/// rendered `String` (a pre-sliced type display, a JSDoc description text) on
+/// the surface would (a) bloat the host-owned cache with owned text, (b) couple
+/// the surface to a display format, and (c) re-open the banned
+/// synthesise-then-reparse direction (a consumer parsing the stored string).
+///
+/// This guard parses `typeinfo/surface.rs` and asserts NO struct named
+/// `TypeInfo*` (the surface + member + signature + index-signature types) has a
+/// `String` / `Option<String>` / `Vec<String>` / `Box<str>` field. Names are
+/// `Arc<str>` (interned), positions are `CanonicalSpan` / `Span`, types are
+/// `SemanticNodeId`. A future `type_string: String` / `jsdoc_text: String`
+/// field fails this gate — fix the producer (carry a span) instead.
+#[test]
+fn typeinfo_surface_carries_spans_not_rendered_strings() {
+    use syn::visit::Visit;
+
+    const REL: &str = "crates/verter_session/src/typeinfo/surface.rs";
+    let src = read_workspace_file(REL);
+    let parsed = syn::parse_file(&src)
+        .unwrap_or_else(|e| panic!("spans-not-strings guard: `{REL}` failed to parse: {e}"));
+
+    /// Is `ty` a rendered-text field type (the banned authority shape)?
+    fn is_rendered_text_type(ty: &syn::Type) -> bool {
+        // Match the LAST path segment's identifier + (for Option/Vec/Box) its
+        // single generic argument.
+        fn last_ident(ty: &syn::Type) -> Option<String> {
+            match ty {
+                syn::Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
+                _ => None,
+            }
+        }
+        fn first_generic(ty: &syn::Type) -> Option<&syn::Type> {
+            let syn::Type::Path(p) = ty else { return None };
+            let seg = p.path.segments.last()?;
+            let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+                return None;
+            };
+            args.args.iter().find_map(|a| match a {
+                syn::GenericArgument::Type(t) => Some(t),
+                _ => None,
+            })
+        }
+        match last_ident(ty).as_deref() {
+            // `String` and `Box<str>` are owned rendered text.
+            Some("String") => true,
+            Some("Box") => matches!(
+                first_generic(ty).and_then(last_ident).as_deref(),
+                Some("str")
+            ),
+            // `Option<String>` / `Vec<String>` — recurse into the element type.
+            Some("Option") | Some("Vec") => {
+                first_generic(ty).is_some_and(is_rendered_text_type)
+            }
+            _ => false,
+        }
+    }
+
+    struct SurfaceStructVisitor {
+        violations: Vec<String>,
+    }
+    impl<'ast> Visit<'ast> for SurfaceStructVisitor {
+        fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
+            let struct_name = node.ident.to_string();
+            if struct_name.starts_with("TypeInfo") {
+                for field in &node.fields {
+                    if is_rendered_text_type(&field.ty) {
+                        let field_name = field
+                            .ident
+                            .as_ref()
+                            .map(|i| i.to_string())
+                            .unwrap_or_else(|| "<tuple>".to_string());
+                        self.violations.push(format!(
+                            "{struct_name}.{field_name} is a rendered-text field \
+                             — the typeinfo surface must carry a SPAN \
+                             (`CanonicalSpan`) or interned name (`Arc<str>`), NOT a \
+                             rendered type string / JSDoc text. Fix the producer to \
+                             carry a span the consumer slices on demand.",
+                        ));
+                    }
+                }
+            }
+            syn::visit::visit_item_struct(self, node);
+        }
+    }
+
+    let mut visitor = SurfaceStructVisitor {
+        violations: Vec::new(),
+    };
+    visitor.visit_file(&parsed);
+
+    // Positive precondition: the guard actually SAW the surface structs (a
+    // rename that moved them out of `TypeInfo*` would silently pass otherwise).
+    let saw_surface = parsed.items.iter().any(|it| {
+        matches!(it, syn::Item::Struct(s) if s.ident == "TypeInfoSurface")
+    });
+    assert!(
+        saw_surface,
+        "spans-not-strings guard: `TypeInfoSurface` struct not found in `{REL}` — \
+         did it move or get renamed? The guard must scan the real surface type."
+    );
+
+    assert!(
+        visitor.violations.is_empty(),
+        "typeinfo surface must carry spans/ids/names, not rendered strings; \
+         found {} violation(s):\n{}",
+        visitor.violations.len(),
+        visitor.violations.join("\n"),
+    );
 }

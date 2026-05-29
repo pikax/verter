@@ -7664,7 +7664,7 @@ fn backfill_member_index_surface_carries_prepared_member_spans_and_origin() {
 }
 
 
-/// U3c Commit 1 — discriminating: when a HERITAGE arm is a cross-file
+/// Discriminating: when a HERITAGE arm is a cross-file
 /// `Omit<Base, K>` (`interface Derived extends Omit<Base, K>`), `Base` is
 /// reached through `object_filter_source_surface`'s CARRIER branch (a
 /// `DeclRef` / `InstantiationRef`, NOT an inline `Object`, because heritage
@@ -7681,11 +7681,11 @@ fn backfill_member_index_surface_carries_prepared_member_spans_and_origin() {
 /// `Omit`'s signature-preserving arm now sees the real signatures and `Derived`
 /// inherits them.
 ///
-/// Discrimination: with `object_filter_source_surface`'s carrier arm dropping
-/// construct/index (the pre-Commit-1 behaviour) the asserts below observe ZERO
-/// inherited construct/index signatures and fail; with the helper they observe
-/// `Base`'s signatures inherited through the `Omit` heritage arm. Mutation-probe
-/// verified.
+/// Discrimination: a reader that drops construct/index signatures for a
+/// carrier-sourced `Omit` makes the asserts below observe ZERO inherited
+/// construct/index signatures and fail; the core `SurfaceView` reader carries
+/// `Base`'s signatures through the `Omit` heritage arm so they pass.
+/// Mutation-probe verified.
 #[test]
 fn cross_file_omit_heritage_carrier_preserves_construct_and_index_signatures() {
     let host = host();
