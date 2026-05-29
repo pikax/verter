@@ -10,8 +10,12 @@
 //! short-circuit makes the
 //! `..._skips_unsupported_arm_when_sibling_resolves` test fail.
 
+use super::ComponentMetaQueryEngine;
 use super::*;
 use crate::resolver_core::projected_surface_to_type_expr;
+use crate::types::{AnalysisLevel, HostConfig};
+use crate::VerterHost;
+use std::sync::Arc;
 use verter_semantic::analysis::type_solver::query_engine::{ProjectedMember, ProjectedSurface};
 use verter_type_expr::TypeExpr;
 
@@ -243,39 +247,62 @@ fn projected_surface_to_type_expr_keeps_synthetic_index_signature_span_none() {
 /// open-surface placeholder (`[key: string]: <projectedOpenSurface>` with
 /// span-`None`).
 ///
+/// The surface is projected from a REAL source declaration through the live
+/// engine (mirroring the cross-file
+/// `projected_member_declaration_origin_points_at_cross_file_declaration`
+/// test), so the index signature's spans are genuine OXC offsets — NOT
+/// fabricated constants. The discriminating asserts SLICE the source at those
+/// offsets: the declaration span must slice to the index-signature text, the
+/// key span to the index-parameter declaration `k: string`, and the value span
+/// to `number`.
+///
 /// Discriminating: the pre-fix reconstruction emitted `IndexSignature::synthetic`
 /// for any surface with `has_index_signature`, discarding the real value type
-/// (here `number`) and every span. Against that tree the value-type and span
-/// asserts below fail.
+/// (`number`, replaced by the `projectedOpenSurface` placeholder) and every
+/// span (forced to `None`). Against that tree the value-type assert and every
+/// `Some(..)`/slice assert below fail.
 #[test]
 fn projected_surface_to_type_expr_reemits_real_index_signature_shape_and_spans() {
-    use verter_semantic::analysis::type_solver::query_engine::ProjectedIndexSignature;
-    use verter_span::Span;
-    use verter_type_expr::{IndexSignatureSpans, ObjectMember, PrimitiveName};
+    use verter_type_expr::{ObjectMember, PrimitiveName};
 
-    // A concrete index signature `[k: string]: number` with real OXC spans, as
-    // `surface_view_to_projected_surface` / the object-expr projection would
-    // carry it.
-    let surface = ProjectedSurface {
-        members: Vec::new(),
-        call_signatures: Vec::new(),
-        construct_signatures: Vec::new(),
-        index_signatures: vec![ProjectedIndexSignature {
-            key_name: "k".to_string(),
-            key_type: TypeExpr::Primitive(PrimitiveName::String),
-            value_type: TypeExpr::Primitive(PrimitiveName::Number),
-            readonly: false,
-            spans: IndexSignatureSpans {
-                declaration: Some(Span::new(30, 48)),
-                key: Some(Span::new(31, 41)),
-                value: Some(Span::new(44, 50)),
-            },
-            declaration_origin: Some(std::sync::Arc::from("/decl.ts")),
-        }],
-        // The surface HAS an index signature, but it is a CONCRETE one — so the
-        // reconstruction must emit the real signature, NOT the open placeholder.
-        has_index_signature: true,
-    };
+    // A REAL type-literal alias carrying a concrete `[k: string]: number` index
+    // signature. A `type X = { .. }` alias body is a `TypeExpr::Object`, so the
+    // engine projects it through the IR object-expr path
+    // (`projected_surface_from_object_expr`), which preserves the SOURCE key
+    // parameter name (`k`) and the real OXC spans lowered by
+    // `verter_type_expr_oxc::lower_ts_type`. (The graph `SurfaceView` path
+    // hardcodes `key_name = "key"`; we deliberately drive the IR path here so
+    // the asserted `key_name` is the source-declared `k`.)
+    const SRC: &str = "export type Indexed = { [k: string]: number }\n";
+    const FILE: &str = "/src/indexed.ts";
+
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(FILE.to_string(), Arc::from(SRC));
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded(FILE));
+
+    let mut engine = ComponentMetaQueryEngine::new(&host);
+    let surface = engine
+        .project_prepared_root_surface(FILE, "Indexed")
+        .expect("`type Indexed = { [k: string]: number }` must project a surface");
+
+    // Sanity: the projected surface carries exactly one CONCRETE index signature
+    // (not merely the open-surface bool) sourced from the real declaration.
+    assert_eq!(
+        surface.index_signatures.len(),
+        1,
+        "the concrete `[k: string]: number` must be carried structurally, got {:?}",
+        surface.index_signatures
+    );
 
     let expr = projected_surface_to_type_expr(&surface)
         .expect("a surface with a concrete index signature reconstructs to an object type");
@@ -301,24 +328,62 @@ fn projected_surface_to_type_expr_reemits_real_index_signature_shape_and_spans()
     assert_eq!(
         index.value_type,
         TypeExpr::Primitive(PrimitiveName::Number),
-        "the declared value type must round-trip (not the open placeholder)"
+        "the declared value type must round-trip (not the open `projectedOpenSurface` placeholder)"
     );
 
-    // Spans: the real OXC declaration/key/value spans survive verbatim.
+    // key_name: the IR object-expr path preserves the SOURCE parameter name `k`
+    // (the graph path would have forced `key`). This proves we drove the IR
+    // path and that the source name survived the reconstruction.
     assert_eq!(
-        index.spans.declaration,
-        Some(Span::new(30, 48)),
-        "the real index-signature declaration span must round-trip"
+        index.key_name, "k",
+        "the IR object-expr path must preserve the source key parameter name `k`"
     );
+
+    // Spans are REAL OXC offsets: slicing SRC at each span yields the exact
+    // source token. A synthetic placeholder (the pre-fix state) carries
+    // span-`None`, so each `.expect(..)` below would panic on revert.
+    let declaration_span = index
+        .spans
+        .declaration
+        .expect("a concrete index signature must carry a real declaration span");
     assert_eq!(
-        index.spans.key,
-        Some(Span::new(31, 41)),
-        "the real index-signature key span must round-trip"
+        &SRC[declaration_span.start as usize..declaration_span.end as usize],
+        "[k: string]: number",
+        "the declaration span must slice SRC to the full index-signature text"
     );
+
+    // The OXC `key` span is the index PARAMETER declaration (`k: string` — the
+    // binding name plus its type annotation), per
+    // `verter_type_expr_oxc::lower_ts_type` (`param.span`). Slicing SRC at that
+    // span yields the full parameter text, which contains both the source key
+    // name `k` and the key type `string`.
+    let key_span = index
+        .spans
+        .key
+        .expect("a concrete index signature must carry a real key span");
     assert_eq!(
-        index.spans.value,
-        Some(Span::new(44, 50)),
-        "the real index-signature value span must round-trip"
+        &SRC[key_span.start as usize..key_span.end as usize],
+        "k: string",
+        "the key span must slice SRC to the index-parameter declaration `k: string`"
+    );
+
+    let value_span = index
+        .spans
+        .value
+        .expect("a concrete index signature must carry a real value span");
+    assert_eq!(
+        &SRC[value_span.start as usize..value_span.end as usize],
+        "number",
+        "the value-type span must slice SRC to `number`"
+    );
+
+    // The value span sits WITHIN the declaration span — the fabricated-constant
+    // version had the value extending past the declaration end, which a real
+    // OXC span never does.
+    assert!(
+        value_span.start >= declaration_span.start && value_span.end <= declaration_span.end,
+        "the real value span ({value_span:?}) must be contained in the declaration span \
+         ({declaration_span:?})"
     );
 
     // Exactly one index signature — the concrete one. The open placeholder must
