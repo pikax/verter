@@ -195,6 +195,9 @@ pub fn host_virtual_file_to_ffi(
             style_index: input.meta.style_index.map(|i| i as u32),
             custom_index: input.meta.custom_index.map(|i| i as u32),
         },
+        requested_mode: input.requested_mode.to_string(),
+        actual_mode: input.actual_mode.to_string(),
+        downgrade_reason: input.downgrade_reason.map(|r| r.to_string()),
     }
 }
 

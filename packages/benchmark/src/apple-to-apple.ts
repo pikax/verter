@@ -226,10 +226,22 @@ const verterMTStart = performance.now();
 const verterBatch: CompileBatchEntry[] = verterHostForBatch.compileMany(inputs, {
   threads: CPU_COUNT,
   priority: "interactive",
+  // Explicit default cache mode — the fact-validated session cache (the
+  // host default). Reported alongside the throughput numbers below so a
+  // benchmark run records which cache mode it measured.
+  defaultMode: "session",
 });
 const verterMTMs = performance.now() - verterMTStart;
 const verterSucceeded = verterBatch.filter((r) => r.errors.length === 0).length;
-console.log(` done — ${formatDuration(verterMTMs)} (${verterSucceeded} succeeded)`);
+// Surface the actual cache mode + any downgrade reason the batch
+// observed (every entry shares the same default mode here; a downgrade
+// would only appear for an explicit per-input Content request).
+const verterActualModes = new Set(verterBatch.map((r) => r.actualMode));
+const verterDowngrades = verterBatch.filter((r) => r.downgradeReason !== undefined).length;
+console.log(
+  ` done — ${formatDuration(verterMTMs)} (${verterSucceeded} succeeded, ` +
+    `modes=${[...verterActualModes].join("/")}, downgrades=${verterDowngrades})`,
+);
 
 // 2c. Vize MT via compileSfcBatch (native Rayon parallelism)
 process.stdout.write(`  Running Vize MT (${CPU_COUNT} Rayon threads)...`);

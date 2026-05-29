@@ -103,10 +103,33 @@ export declare function processStyle(
 // through the host's scheduler + dispatch + compile_cache.
 // =============================================================================
 
+/**
+ * Caller-requested compile cache mode. `"session"` (the default)
+ * consults the fact-validated session cache; `"content"` the pure
+ * content-addressed cache; `"stateless"` bypasses both.
+ */
+export type CompileCacheMode = "stateless" | "content" | "session";
+
+/** Why a requested compile cache mode was constrained. */
+export type DowngradeReason =
+  | "HasExternalSrc"
+  | "HasMacroTypeDeps"
+  | "HasWorkspaceAlias"
+  | "HasModuleAugmentation"
+  | "HasBlockOverride"
+  | "HasStyleOverride"
+  | "HasIdeOnlyAnalysis"
+  | "HasDevLastGood";
+
 export interface CompileBatchInput {
   canonicalId: string;
   /** SFC source. Accepts a string or a Buffer (UTF-8 bytes). */
   source: string | Buffer;
+  /**
+   * Requested compile cache mode. Omit to inherit the batch
+   * `defaultMode` (which itself defaults to "session").
+   */
+  requestedMode?: CompileCacheMode;
 }
 
 export interface CompileBatchOptions {
@@ -119,6 +142,11 @@ export interface CompileBatchOptions {
    * (benchmarks, CI cold-start measurement).
    */
   priority?: "interactive" | "background";
+  /**
+   * Default compile cache mode for inputs whose `requestedMode` is
+   * unset. Defaults to "session" (the host default).
+   */
+  defaultMode?: CompileCacheMode;
 }
 
 export interface CompileBatchEntry {
@@ -130,6 +158,12 @@ export interface CompileBatchEntry {
   durationMs: number;
   /** True iff the slot was already warm in compile_cache before this call. */
   cacheHit: boolean;
+  /** The compile cache mode the caller requested. */
+  requestedMode: CompileCacheMode;
+  /** The compile cache mode the runtime actually ran under. */
+  actualMode: CompileCacheMode;
+  /** Highest-priority downgrade reason, or undefined when none fired. */
+  downgradeReason?: DowngradeReason;
 }
 
 // =============================================================================

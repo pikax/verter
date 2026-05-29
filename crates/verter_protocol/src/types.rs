@@ -73,6 +73,10 @@ pub struct FfiCompileProfile {
     pub target: Option<String>,
     /// Experimental: strict slot children type checking.
     pub strict_slots: Option<bool>,
+    /// Requested compile cache mode: "stateless", "content", or
+    /// "session" (default). `FfiVirtualQuery` carries the mode through
+    /// this embedded profile.
+    pub requested_mode: Option<String>,
 }
 
 /// Request to upsert a file into the host.
@@ -287,6 +291,13 @@ pub struct FfiVirtualFileResponse {
     pub stale: bool,
     pub diagnostics: FfiDiagnosticsSnapshot,
     pub meta: FfiVirtualMeta,
+    /// Requested compile cache mode ("stateless" / "content" / "session").
+    pub requested_mode: String,
+    /// Actual compile cache mode the runtime ran under.
+    pub actual_mode: String,
+    /// Highest-priority downgrade reason (e.g. "HasMacroTypeDeps"), or
+    /// `None` when no reason fired.
+    pub downgrade_reason: Option<String>,
 }
 
 /// A single destructured binding's source mapping (target encoding).

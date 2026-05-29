@@ -243,6 +243,9 @@ pub struct NapiCompileProfile {
     pub target: Option<String>,
     /// Experimental: strict slot children type checking.
     pub strictSlots: Option<bool>,
+    /// Requested compile cache mode: "stateless", "content", or
+    /// "session" (default).
+    pub requestedMode: Option<String>,
 }
 
 impl From<NapiCompileProfile> for FfiCompileProfile {
@@ -263,6 +266,7 @@ impl From<NapiCompileProfile> for FfiCompileProfile {
             source_map: n.sourceMap,
             target: n.target,
             strict_slots: n.strictSlots,
+            requested_mode: n.requestedMode,
         }
     }
 }
@@ -515,6 +519,12 @@ pub struct NapiVirtualFileResponse {
     pub stale: bool,
     pub diagnostics: NapiDiagnosticsSnapshot,
     pub meta: NapiVirtualMeta,
+    /// Requested compile cache mode ("stateless" / "content" / "session").
+    pub requestedMode: String,
+    /// Actual compile cache mode the runtime ran under.
+    pub actualMode: String,
+    /// Highest-priority downgrade reason, or `None` when none fired.
+    pub downgradeReason: Option<String>,
 }
 
 /// A single destructured binding's source mapping (UTF-16 for JS).
@@ -1007,6 +1017,9 @@ fn host_virtual_file_to_napi(
             styleIndex: input.meta.style_index.map(|i| i as u32),
             customIndex: input.meta.custom_index.map(|i| i as u32),
         },
+        requestedMode: input.requested_mode.to_string(),
+        actualMode: input.actual_mode.to_string(),
+        downgradeReason: input.downgrade_reason.map(|r| r.to_string()),
     }
 }
 
@@ -2083,20 +2096,30 @@ impl NapiVerterHost {
         let inputs: Vec<host_compile::CompileBatchInput> = files
             .into_iter()
             .map(|f| {
+                let requested_mode = f
+                    .requestedMode
+                    .map(|m| ffi_compile_cache_mode_to_host(&m))
+                    .transpose()
+                    .map_err(ffi_err)?;
                 Ok(host_compile::CompileBatchInput {
                     canonical_id: f.canonicalId,
                     source: std::sync::Arc::from(buffer_to_string(f.source)?),
-                    requested_mode: None,
+                    requested_mode,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        let default_mode = opts
+            .defaultMode
+            .map(|m| ffi_compile_cache_mode_to_host(&m))
+            .transpose()
+            .map_err(ffi_err)?;
         let entries = catch_panic(std::panic::AssertUnwindSafe(|| {
             self.inner.compile_many(
                 inputs,
                 host_compile::CompileBatchOptions {
                     threads: opts.threads.map(|n| n as usize),
                     priority,
-                    default_mode: None,
+                    default_mode,
                 },
             )
         }))?;
@@ -2109,6 +2132,9 @@ impl NapiVerterHost {
                 errors: e.errors,
                 durationMs: e.duration_ms,
                 cacheHit: e.cache_hit,
+                requestedMode: e.requested_mode.to_string(),
+                actualMode: e.actual_mode.to_string(),
+                downgradeReason: e.downgrade_reason.map(|r| r.to_string()),
             })
             .collect())
     }
@@ -2745,6 +2771,9 @@ use verter_session::host_compile;
 pub struct NapiCompileBatchInput {
     pub canonicalId: String,
     pub source: Buffer,
+    /// Requested compile cache mode ("stateless" / "content" /
+    /// "session"). `None` inherits the batch `defaultMode`.
+    pub requestedMode: Option<String>,
 }
 
 /// Caller-configurable options for [`NapiVerterHost::compile_many`].
@@ -2757,6 +2786,9 @@ pub struct NapiCompileBatchOptions {
     /// Use `"interactive"` when there is no concurrent interactive
     /// work (benchmarks / CI cold-start measurement).
     pub priority: Option<String>,
+    /// Default compile cache mode for inputs whose `requestedMode` is
+    /// unset. `None` resolves to "session" (the host default).
+    pub defaultMode: Option<String>,
 }
 
 /// Result for a single original input position.
@@ -2771,6 +2803,12 @@ pub struct NapiCompileBatchEntry {
     /// `true` iff the slot was already warm in compile_cache before
     /// this call.
     pub cacheHit: bool,
+    /// Requested compile cache mode ("stateless" / "content" / "session").
+    pub requestedMode: String,
+    /// Actual compile cache mode the runtime ran under.
+    pub actualMode: String,
+    /// Highest-priority downgrade reason, or `None` when none fired.
+    pub downgradeReason: Option<String>,
 }
 
 #[cfg(test)]

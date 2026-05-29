@@ -607,6 +607,7 @@ fn profile_all_fields() {
         source_map: Some(true),
         target: Some("ide".to_string()),
         strict_slots: Some(true),
+        requested_mode: Some("content".to_string()),
     };
     let result = ffi_profile_to_host(Some(profile)).unwrap();
     assert_eq!(result.filename, Some("Comp.vue".to_string()));
@@ -614,6 +615,7 @@ fn profile_all_fields() {
     assert!(result.ssr);
     assert!(result.target.needs_tsx());
     assert!(result.strict_slots);
+    assert_eq!(result.requested_mode, host::CompileCacheMode::Content);
     assert_eq!(result.hmr_strategy, host::HmrStrategy::Vite);
     assert_eq!(result.component_id, Some("abc123".to_string()));
     assert_eq!(

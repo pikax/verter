@@ -24,6 +24,8 @@ pub enum FfiConversionError {
     InvalidProjectionMode(String),
     /// Invalid named-import variant tag.
     InvalidNamedImportKind(String),
+    /// Invalid `requestedMode` compile-cache-mode string.
+    InvalidCompileCacheMode(String),
 }
 
 impl std::fmt::Display for FfiConversionError {
@@ -64,6 +66,10 @@ impl std::fmt::Display for FfiConversionError {
             Self::InvalidNamedImportKind(v) => write!(
                 f,
                 "invalid named-import kind '{v}' (expected 'default', 'named', or 'namespace')"
+            ),
+            Self::InvalidCompileCacheMode(v) => write!(
+                f,
+                "invalid requestedMode '{v}' (expected 'stateless', 'content', or 'session')"
             ),
         }
     }

@@ -117,8 +117,29 @@ pub fn ffi_profile_to_host(
         if let Some(strict_slots) = input.strict_slots {
             out.strict_slots = strict_slots;
         }
+        if let Some(requested_mode) = input.requested_mode {
+            out.requested_mode = ffi_compile_cache_mode_to_host(&requested_mode)?;
+        }
     }
     Ok(out)
+}
+
+/// Parse a compile-cache-mode string to the host enum. Defaults are
+/// applied by the caller (a missing field keeps the profile default
+/// `Session`); this only parses an explicitly-supplied value. Exposed
+/// for the NAPI / WASM batch bindings, which parse a per-input mode
+/// string into [`host::CompileBatchInput::requested_mode`].
+pub fn ffi_compile_cache_mode_to_host(
+    mode: &str,
+) -> Result<host::CompileCacheMode, FfiConversionError> {
+    match mode.to_ascii_lowercase().as_str() {
+        "stateless" => Ok(host::CompileCacheMode::Stateless),
+        "content" => Ok(host::CompileCacheMode::Content),
+        "session" => Ok(host::CompileCacheMode::Session),
+        other => Err(FfiConversionError::InvalidCompileCacheMode(
+            other.to_string(),
+        )),
+    }
 }
 
 /// Convert a target string to `CompileTarget` bitflags.

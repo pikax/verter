@@ -8,6 +8,24 @@
 // This file must remain environment-agnostic (no Node.js or browser-only types).
 // =============================================================================
 
+/**
+ * Caller-requested compile cache mode. `"session"` (the default)
+ * consults the fact-validated session cache; `"content"` the pure
+ * content-addressed cache; `"stateless"` bypasses both.
+ */
+export type CompileCacheMode = "stateless" | "content" | "session";
+
+/** Why a requested compile cache mode was constrained. */
+export type DowngradeReason =
+  | "HasExternalSrc"
+  | "HasMacroTypeDeps"
+  | "HasWorkspaceAlias"
+  | "HasModuleAugmentation"
+  | "HasBlockOverride"
+  | "HasStyleOverride"
+  | "HasIdeOnlyAnalysis"
+  | "HasDevLastGood";
+
 export interface HostConfig {
   devMode?: boolean;
   compileErrorPolicy?: "strict" | "strictError" | "devServeLastKnownGood";
@@ -54,6 +72,8 @@ export interface HostCompileProfile {
   sourceMap?: boolean;
   /** Compilation target preset: "bundler" (default), "ide", or "analysis". */
   target?: "bundler" | "ide" | "analysis";
+  /** Requested compile cache mode. Defaults to "session". */
+  requestedMode?: CompileCacheMode;
 }
 
 export interface HostIdeProjectConfig {
@@ -215,6 +235,12 @@ export interface HostVirtualFileResponse {
   stale: boolean;
   diagnostics: HostDiagnosticsSnapshot;
   meta: HostVirtualMeta;
+  /** The compile cache mode the caller requested. */
+  requestedMode: CompileCacheMode;
+  /** The compile cache mode the runtime actually ran under. */
+  actualMode: CompileCacheMode;
+  /** Highest-priority downgrade reason, or undefined when none fired. */
+  downgradeReason?: DowngradeReason;
 }
 
 export interface HostUpsertRequest {
