@@ -295,3 +295,86 @@ fn targeted_invalidation_evicts_content_entry_and_forces_recompile() {
         "the cold recompute must re-publish exactly one content entry"
     );
 }
+
+#[test]
+fn content_request_with_side_effect_only_relative_augmenter_downgrades_to_stateless() {
+    // A side-effect-only relative import (`import "./augment";` — no
+    // named binding) of a file that carries a relative module
+    // augmentation (`declare module "./local" { ... }`) MUST downgrade a
+    // `Content` request to `Stateless`. The content-addressed key carries
+    // no augmenter fingerprint, so editing `augment.ts` would leave the
+    // key byte-identical and serve stale output unless the classifier
+    // recognises the side-effect-driven augmentation dependency.
+    //
+    // Discriminator: the previous probe enumerated only
+    // `ShallowFileState.import_targets`, which is keyed by local-binding
+    // name and therefore SKIPS side-effect imports entirely (no binding ⇒
+    // no entry). The pre-fix tree leaves the request in `Content` mode
+    // with one published content entry; the post-fix tree picks up the
+    // side-effect import via `IndexedReady.snapshot.imports` and floors
+    // the request to `Stateless` with no content entry.
+    let host = host();
+    // `/src/augment.ts` carries a relative-target augmentation. The
+    // exported value is unused (irrelevant to the discriminator) — only
+    // the side-effect import in `Comp.vue` keeps the augmenter in the
+    // owner's program.
+    upsert_ts(
+        &host,
+        "/src/local.ts",
+        "export interface Foo { a: number }\n",
+    );
+    upsert_ts(
+        &host,
+        "/src/augment.ts",
+        "declare module './local' {\n\
+         \x20 interface Foo { extension: string }\n\
+         }\n\
+         export {};\n",
+    );
+    // The owner SIDE-EFFECT-imports the augmenter (no binding) and uses
+    // an import from the augmented module — so the augmentation is in
+    // scope. The named import on the augmented module is unrelated to
+    // the side-effect path; it exists only so the owner has at least one
+    // cross-file reference (otherwise the SFC would have no cross-file
+    // surface at all and the classifier would never reach the
+    // augmentation probe).
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        "<script setup lang=\"ts\">\n\
+         import './augment';\n\
+         import type { Foo } from './local';\n\
+         const f: Foo | null = null;\n\
+         </script>\n\
+         <template><div>{{ f }}</div></template>\n",
+    );
+    let profile = content_profile();
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Script),
+            compile_profile: profile.clone(),
+        })
+        .expect("compile");
+
+    assert_eq!(response.requested_mode, CompileCacheMode::Content);
+    assert_eq!(
+        response.actual_mode,
+        CompileCacheMode::Stateless,
+        "a Content request whose owner SIDE-EFFECT-imports a relative augmenter MUST downgrade to Stateless"
+    );
+    assert_eq!(
+        response.downgrade_reason,
+        Some(DowngradeReason::HasModuleAugmentation),
+        "the firing reason must be HasModuleAugmentation, got {:?}",
+        response.downgrade_reason
+    );
+    // Stateless floor ⇒ NO content-addressed entry was published.
+    assert_eq!(
+        host.compile_output_pure_content_entry_count(),
+        0,
+        "a downgraded Content request must NOT publish a content-addressed entry"
+    );
+}

@@ -141,8 +141,31 @@ impl VerterHost {
         // through a matching import. `ensure_indexed_ready` materialises
         // the owner's artifact (and its shallow import table) into the
         // store on a miss.
+        //
+        // Two parallel sources contribute import specifiers:
+        // (1) [`ShallowFileState::import_targets`] — only carries imports
+        //     that introduced AT LEAST ONE local binding (named, default,
+        //     or namespace) because the shallow inventory is keyed on the
+        //     local name. A pure side-effect import
+        //     (`import "./augment";`) has NO local binding and therefore
+        //     leaves no entry here.
+        // (2) [`FileAnalysisSnapshot::imports`] — the parser-level
+        //     `AnalyzedImport` list always pushes ONE entry per
+        //     `ImportDeclaration` regardless of binding count, so a
+        //     side-effect import shows up here with `bindings.is_empty()`.
+        //     `resolve_snapshot_imports` populates `resolved_canonical_id`
+        //     for every entry, including side-effect ones.
+        //
+        // (1) is sufficient to cover named / default / namespace imports.
+        // The cache-mode classifier additionally needs side-effect imports
+        // because a side-effect augmenter (`import "./aug";` where
+        // `aug.ts` carries a `declare module "./local" {}` augmentation)
+        // would otherwise leave the consumer in `Content` mode and serve
+        // stale output when the augmenter is edited. Iterate snapshot
+        // imports to pick up the side-effect-only relative case.
         let mut per_import_targets: Vec<AugmentationTargetKind> = Vec::new();
-        if let Some(indexed) = self.ensure_indexed_ready(canonical) {
+        let indexed_opt = self.ensure_indexed_ready(canonical);
+        if let Some(indexed) = indexed_opt.as_ref() {
             for import in indexed.shallow_state.import_targets.values() {
                 // Materialise each resolved dependency so a direct-dep
                 // augmenter enters the store BEFORE any target probe runs:
@@ -164,6 +187,51 @@ impl VerterHost {
                         InternedSpecifier::from(specifier),
                     ));
                 }
+            }
+            // Side-effect imports (no bindings) escape the
+            // `import_targets` map because that map is keyed by local
+            // name. Walk the parser-level `snapshot.imports` list and
+            // emit a target for any entry whose `bindings.is_empty()`
+            // AND whose source is a relative specifier — that is the
+            // only shape that can re-export a `declare module "./..."`
+            // augmentation through a side-effect import. Bare-specifier
+            // side-effect imports cannot deliver a relative-target
+            // augmentation, so they need no additional probe beyond the
+            // ambient kinds handled below.
+            //
+            // The `IndexedReady` snapshot returned here may carry an
+            // unresolved `AnalyzedImport.resolved_canonical_id` (that
+            // field is populated by `resolve_snapshot_imports` on a
+            // separate code path used by component-meta callers; the
+            // augmentation probe is reached earlier). Resolve the
+            // specifier directly through the live type-dependency
+            // resolver — the same authority `import_targets` uses for
+            // binding-driven imports.
+            for import in &indexed.snapshot.imports {
+                if !import.bindings.is_empty() {
+                    continue;
+                }
+                let specifier = import.source.as_str();
+                if !(specifier.starts_with("./") || specifier.starts_with("../")) {
+                    continue;
+                }
+                let Some(resolved_canonical) =
+                    self.resolve_type_dependency_canonical(canonical, specifier)
+                else {
+                    continue;
+                };
+                if resolved_canonical.is_empty() {
+                    continue;
+                }
+                // Materialise the resolved dep so the augmenter's
+                // `FileArtifacts` (with its `ModuleAugmentationFact`
+                // entries) enter the index cold-scan corpus before any
+                // target probe runs (mirror of the
+                // `import_targets`-driven materialisation above).
+                let _ = self.ensure_indexed_ready(&resolved_canonical);
+                per_import_targets.push(AugmentationTargetKind::ResolvedRelativeCanonical(
+                    Arc::from(resolved_canonical.as_str()),
+                ));
             }
         }
 
