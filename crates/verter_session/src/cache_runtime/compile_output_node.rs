@@ -248,18 +248,34 @@ impl CompileOutputNodePureContent {
             self_root_canonicals: Arc::from(Vec::new().as_slice()),
             validated_at_generation,
         };
-        // `entries` is inserted BEFORE `by_canonical` so the reverse
-        // index never references a not-yet-published entry. Removal
-        // (`remove` / `remove_canonical`) clears `entries` directly, so a
-        // published entry can always be evicted by canonical regardless
-        // of reverse-index timing — the two maps are not lock-coupled, so
-        // a concurrent `remove_canonical` that runs before this
-        // `by_canonical` insert leaves at worst a reverse-index key
-        // pointing at an already-removed `entries` row, which the next
-        // `remove`/`remove_canonical` prunes (`entries.remove` no-ops on
-        // an absent key). The inverse order would orphan an `entries` row
-        // with no backref, which a later `remove_canonical` could never
-        // find.
+        // `entries` is inserted BEFORE `by_canonical` so no `entries`
+        // row can ever be orphaned: a concurrent `remove_canonical`
+        // interleaved with this publish can only run before
+        // `entries.insert` (in which case the new entry will be inserted
+        // afterward and the next `remove_canonical` finds it via the
+        // backref this publish installs) or after `entries.insert` (in
+        // which case the entry is already in `entries` and the racing
+        // `remove_canonical` evicts it). The inverse ordering
+        // (`by_canonical` first) would orphan an `entries` row whose
+        // backref a racing `remove_canonical` already evicted — that
+        // orphan would be permanently un-evictable by canonical. This
+        // invariant is locked down by the deterministic
+        // `publish_orders_entry_before_reverse_index_so_remove_canonical_always_evicts`
+        // test and the 20k-cycle concurrent race in
+        // `concurrent_publish_and_remove_canonical_never_orphans_content_entry`.
+        //
+        // The asymmetric tail: the two maps are not lock-coupled, so a
+        // `remove_canonical` interleaved BETWEEN `entries.insert` and
+        // `by_canonical.insert` may evict the (then-empty) reverse-index
+        // set first and let this publish reinstall a backref to an
+        // already-removed entry. That backref is bounded reverse-index
+        // dust — the key points at no live `entries` row, the next
+        // `remove_canonical` (or `clear_all`) prunes it, and an
+        // `entries.remove` on an absent key is a benign no-op. Dust is
+        // bounded by `≤ N_concurrent_publishers + 1` because each
+        // publisher can install at most one such backref before the
+        // racing remove drains the set, and any subsequent
+        // `remove_canonical` prunes whatever it observes.
         self.entries.insert(key.clone(), Arc::new(entry));
         self.by_canonical
             .entry(Arc::clone(&key.canonical_id))
