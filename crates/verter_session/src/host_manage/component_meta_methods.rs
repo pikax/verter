@@ -81,9 +81,10 @@ use crate::resolver_core::component_meta_registry::{
     component_meta_registry_expr_references_name,
     component_meta_registry_has_explicit_object_surface,
     component_meta_registry_has_non_object_top_level_surface,
-    component_meta_registry_raw_member_path_surface, enqueue_component_meta_registry_ref,
-    merge_component_meta_registry_candidates, owner_component_meta_registry_import_root,
-    upsert_component_meta_registry_entry, PendingComponentMetaRegistryRef,
+    component_meta_registry_raw_member_path_surface, component_meta_registry_ref_name,
+    enqueue_component_meta_registry_ref, merge_component_meta_registry_candidates,
+    owner_component_meta_registry_import_root, upsert_component_meta_registry_entry,
+    PendingComponentMetaRegistryRef,
 };
 
 impl VerterHost {
@@ -2349,8 +2350,36 @@ impl VerterHost {
                     query_engine.owner_collection_expr(owner_canonical, entry.name.as_str())
                 });
             if entry_is_imported {
+                // Shallow-by-default registry seeds publish imported helper
+                // aliases as a bare `Ref { name }` (the registry-shallow
+                // contract). A bare self-ref exposes none of the alias's
+                // declared body, so transitive helper references the
+                // published surface DOES materialize path-precise — e.g. a
+                // slot binding `default(props: { ui: Button['ui'] })` reached
+                // through an imported `ButtonSlots` — would never be
+                // discovered for registry publication.
+                //
+                // Resolve the imported alias's declared body in ITS OWN
+                // declaring scope and collect transitive refs from that body
+                // (with the declaring file as the source hint, so referenced
+                // names like `Button` resolve where they are declared). The
+                // imported-seed collector stays path-precise: it drops deep
+                // `MemberPath` routes (len > 1) and honours the registry
+                // cursor, so this does not breadth-walk unrelated imports.
+                let imported_collection_expr = component_meta_registry_ref_name(&entry.type_expr)
+                    .filter(|ref_name| *ref_name == meta.declaration.resolved_name)
+                    .filter(|_| !meta.declaration.canonical_source.is_empty())
+                    .and_then(|_| {
+                        query_engine.named_decl_body(
+                            meta.declaration.canonical_source.as_str(),
+                            meta.declaration.resolved_name.as_str(),
+                        )
+                    });
                 collect_imported_component_meta_registry_seed_refs(
-                    source_expr.as_ref().unwrap_or(&entry.type_expr),
+                    imported_collection_expr
+                        .as_ref()
+                        .or(source_expr.as_ref())
+                        .unwrap_or(&entry.type_expr),
                     &published_names,
                     &mut queued_names,
                     &mut referenced_names,
