@@ -16,7 +16,7 @@ use super::{
     CompileOutputPureContentKey, CompileOutputValue, SessionPublishOutcome,
 };
 use crate::cache_runtime::admission::SignatureAdmission;
-use crate::fact_signature_helpers::ReadSetSignature;
+use crate::fact_signature_helpers::{empty_fact_signature, ReadSetSignature};
 use crate::resolver_core::FactVersionRef;
 use crate::types::{CachedVirtualFile, DiagnosticsSnapshot, Hash16, ProfileState, VirtualNodeKind};
 
@@ -99,9 +99,7 @@ fn session_publish_then_lookup_round_trips_under_matching_hashes() {
     let node = CompileOutputNodeFactValidatedSession::new();
     let mut state = ProfileState::default();
     let semantic = [0x12u8; 16];
-    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(Arc::from(
-        Vec::<FactVersionRef>::new().as_slice(),
-    )));
+    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
     let outcome = node.publish(&mut state, 42, admission, value(semantic), 0);
     assert_eq!(outcome, SessionPublishOutcome::Admitted);
     let hit = node.lookup(&state, 42, &semantic, 0, 0, |_| true);
@@ -113,9 +111,7 @@ fn session_lookup_misses_when_semantic_hash_differs() {
     let node = CompileOutputNodeFactValidatedSession::new();
     let mut state = ProfileState::default();
     let semantic = [0x12u8; 16];
-    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(Arc::from(
-        Vec::<FactVersionRef>::new().as_slice(),
-    )));
+    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
     node.publish(&mut state, 42, admission, value(semantic), 0);
     // Live semantic_hash differs → miss.
     let other = [0xFF; 16];
@@ -157,9 +153,7 @@ fn session_publish_non_cacheable_removes_prior_slot() {
     let mut state = ProfileState::default();
     let semantic = [0x12u8; 16];
     // First publish: cacheable.
-    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(Arc::from(
-        Vec::<FactVersionRef>::new().as_slice(),
-    )));
+    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
     node.publish(&mut state, 42, admission, value(semantic), 0);
     assert!(node.lookup(&state, 42, &semantic, 0, 0, |_| true).is_some());
 
@@ -217,9 +211,7 @@ fn session_peek_output_returns_per_kind_pair() {
         None,
         None,
     );
-    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(Arc::from(
-        Vec::<FactVersionRef>::new().as_slice(),
-    )));
+    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
     node.publish(&mut state, 42, admission, value, 0);
     let (got, _diag) = node
         .peek_output(&state, 42, &VirtualNodeKind::Main)
