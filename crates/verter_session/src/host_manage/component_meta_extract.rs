@@ -1152,10 +1152,41 @@ fn resolve_relative_type_specifier(
     None
 }
 
-/// Resolve `exported_name` from `dep_canonical` as DefineProps and collect
-/// JSDoc descriptions/tags into `jsdoc_by_name`. Uses the host-cached parsed
-/// program and host-cached external type analysis — never reparses raw
-/// source. Returns true if the type was found and projected successfully.
+/// Slice a [`crate::typeinfo::surface::CanonicalSpan`] from its file's
+/// cache-owned `IndexedReady` source, memoising the per-file source read in
+/// `sources`. Returns `None` if the file is not loaded or the span is
+/// out-of-range. The single source-touching primitive for typeinfo JSDoc
+/// slicing — no fresh parse.
+fn slice_canonical_span_cached(
+    host: &VerterHost,
+    sources: &mut rustc_hash::FxHashMap<Arc<str>, Option<Arc<str>>>,
+    cspan: &crate::typeinfo::surface::CanonicalSpan,
+) -> Option<String> {
+    let source = sources
+        .entry(Arc::clone(&cspan.file))
+        .or_insert_with(|| {
+            host.ensure_indexed_ready(cspan.file.as_ref())
+                .map(|indexed| Arc::clone(&indexed.eval_source))
+        })
+        .clone()?;
+    let start = cspan.span.start as usize;
+    let end = cspan.span.end as usize;
+    source.get(start..end).map(|s| s.to_string())
+}
+
+/// Resolve `exported_name` from `dep_canonical` to its one-level typeinfo
+/// surface and collect each member's JSDoc description/tags into
+/// `jsdoc_by_name`. Returns `true` if the declaration resolved.
+///
+/// **Typed-IR-Only / no-reparse:** the JSDoc rides on the typeinfo surface's
+/// per-member span set (`jsdoc_description_span` / `jsdoc_tag_spans`), which the
+/// shared empty-path `Shallow` resolver stamps from each member's
+/// DECLARATION-origin file (so an inherited member's JSDoc is sliced from the
+/// heritage base's file, even across a multi-level cross-file `extends` chain).
+/// Replaces the retired `project_imported_macro_surfaces` OXC reparse loop (a
+/// hang source: it allocated a fresh OXC arena and reparsed the dependency on
+/// every call). Source slices come from the cache-owned `IndexedReady`
+/// `eval_source`, never a fresh parse.
 fn try_project_jsdoc_descriptions(
     host: &VerterHost,
     dep_canonical: &str,
@@ -1168,20 +1199,46 @@ fn try_project_jsdoc_descriptions(
         ),
     >,
 ) -> bool {
-    use verter_semantic::analysis::AnalyzedMacroKind;
+    use verter_semantic::analysis::types::JsdocTag;
 
-    let Some(projected) = host.project_imported_macro_surfaces(
-        dep_canonical,
-        exported_name,
-        AnalyzedMacroKind::DefineProps,
-    ) else {
+    let Some(surface) = host.resolve_shallow_surface(dep_canonical, exported_name) else {
         return false;
     };
-    for prop in projected.props {
-        if prop.description.is_some() || !prop.tags.is_empty() {
+
+    // Cache one cache-owned source read per declaration file across members.
+    let mut sources: rustc_hash::FxHashMap<Arc<str>, Option<Arc<str>>> =
+        rustc_hash::FxHashMap::default();
+
+    for member in surface.members.iter() {
+        let description = member
+            .jsdoc_description_span
+            .as_ref()
+            .and_then(|cs| slice_canonical_span_cached(host, &mut sources, cs))
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty());
+        let tags: Vec<JsdocTag> = member
+            .jsdoc_tag_spans
+            .iter()
+            .filter_map(|tag| {
+                let name = slice_canonical_span_cached(host, &mut sources, &tag.name_span)?
+                    .trim()
+                    .to_string();
+                if name.is_empty() {
+                    return None;
+                }
+                let text = tag
+                    .text_span
+                    .as_ref()
+                    .and_then(|cs| slice_canonical_span_cached(host, &mut sources, cs))
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty());
+                Some(JsdocTag { name, text })
+            })
+            .collect();
+        if description.is_some() || !tags.is_empty() {
             jsdoc_by_name
-                .entry(prop.name)
-                .or_insert((prop.description, prop.tags));
+                .entry(member.name.as_ref().to_string())
+                .or_insert((description, tags));
         }
     }
     true

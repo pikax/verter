@@ -29,8 +29,7 @@ pub struct ProjectedMacroSurfaces {
     pub slots: Vec<AnalyzedSlotField>,
     /// Lowered typed form of the entire `defineProps` / `withDefaults` /
     /// `defineModel` macro surface. Authoritative for downstream consumers
-    /// (`projected_macro_surfaces_to_type_expr`, `cold_resolver`,
-    /// `eval_program::project_imported_macro_surfaces`).
+    /// (`projected_macro_surfaces_to_type_expr`, `cold_resolver`).
     pub props_expr: Option<TypeExpr>,
     /// Scope of `props_expr`: canonical_id of the file whose OXC parse
     /// produced the typed expression. Pairing invariant:
