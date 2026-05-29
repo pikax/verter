@@ -17,8 +17,8 @@
 //! cross-file-downgrade negative assertion (entry count stays 0) fails.
 
 use verter_session::{
-    CompileCacheMode, CompileErrorPolicy, CompileProfile, FileKind, HostConfig, UpsertRequest,
-    VerterHost, VirtualNodeKind, VirtualQuery,
+    CompileCacheMode, CompileErrorPolicy, CompileProfile, DowngradeReason, FileKind, HostConfig,
+    UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
 
 /// A production (non-dev) host config. The default `HostConfig` enables
@@ -171,6 +171,73 @@ fn content_request_with_cross_file_dep_downgrades_to_stateless() {
         host.compile_slot_fact_dep_signature("/src/Comp.vue", &profile)
             .is_none(),
         "a downgraded Content request must NOT publish a session slot"
+    );
+}
+
+#[test]
+fn content_request_with_imported_module_augmentation_downgrades_to_stateless() {
+    // An augmenter that augments a module the owner imports leaves NO
+    // trace on the owner's OWN declared augmentations — it lives in a
+    // separate file (`declare module 'vue' { ... }`). The owner imports
+    // from 'vue' but declares no augmentation itself. A content-addressed
+    // key carries no augmenter fingerprint, so editing the augmenter would
+    // leave the key byte-identical and serve stale output; the classifier
+    // MUST recognise the imported augmentation (via the augmentation
+    // target index) and floor the Content request to Stateless.
+    let host = host();
+    // The augmenter both exports a value (so a relative import pulls it
+    // into the program) AND augments the imported module 'vue'.
+    upsert_ts(
+        &host,
+        "/src/augment.ts",
+        "export const marker = 1;\n\
+         declare module 'vue' {\n\
+         \x20 interface ComponentCustomProperties { $foo: string }\n\
+         }\n",
+    );
+    // The owner imports the augmenter relatively (forcing it into the
+    // program) and imports a value from 'vue' (the augmented module). It
+    // uses neither in a macro, so the ONLY cross-file reason available is
+    // the module augmentation — no HasMacroTypeDeps.
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        "<script setup lang=\"ts\">\n\
+         import { marker } from './augment';\n\
+         import { ref } from 'vue';\n\
+         const n = ref(marker);\n\
+         </script>\n\
+         <template><div>{{ n }}</div></template>\n",
+    );
+    let profile = content_profile();
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Script),
+            compile_profile: profile.clone(),
+        })
+        .expect("compile");
+
+    // The FIRST request already downgrades — no edit-replay needed.
+    assert_eq!(response.requested_mode, CompileCacheMode::Content);
+    assert_eq!(
+        response.actual_mode,
+        CompileCacheMode::Stateless,
+        "a Content request whose owner imports a module-augmented dependency MUST downgrade to Stateless"
+    );
+    assert_eq!(
+        response.downgrade_reason,
+        Some(DowngradeReason::HasModuleAugmentation),
+        "the highest-priority firing reason must be HasModuleAugmentation, got {:?}",
+        response.downgrade_reason
+    );
+    // Stateless floor ⇒ NO content-addressed entry was published.
+    assert_eq!(
+        host.compile_output_pure_content_entry_count(),
+        0,
+        "a downgraded Content request must NOT publish a content-addressed entry"
     );
 }
 

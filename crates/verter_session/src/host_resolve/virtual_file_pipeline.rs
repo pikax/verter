@@ -820,6 +820,15 @@ impl VerterHost {
                 // Classify EXACTLY ONCE per compile, here under the read
                 // lock, so `actual_mode` is known before the warm-hit
                 // consult and reused by the compile / publish routing.
+                // The augmentation signal is closure-aware (it consults
+                // the augmentation target index for every module the owner
+                // can consume, plus ambient / global augmenters) and pays a
+                // store scan, so it is computed only for a `Content`
+                // request — `Session` stays `Session` under every reason
+                // and `Stateless` ignores all reasons, so neither consults
+                // this bit.
+                let owner_has_module_augmentation = requested_mode == CompileCacheMode::Content
+                    && self.owner_has_module_augmentation_dependency(&canonical_id);
                 let classification = crate::compile_cache_mode::classify_compile_mode(
                     requested_mode,
                     &crate::compile_cache_mode::EligibilityInputs {
@@ -827,11 +836,7 @@ impl VerterHost {
                         profile: &query.compile_profile,
                         config: &self.config,
                         workspace_aliases: &self.workspace_aliases_for_canonical(&canonical_id),
-                        owner_has_module_augmentation:
-                            crate::compile_cache_mode::has_module_augmentation(
-                                &canonical_id,
-                                self.project_type_store.indexed(),
-                            ),
+                        owner_has_module_augmentation,
                     },
                 );
                 let actual_mode = classification.actual_mode;

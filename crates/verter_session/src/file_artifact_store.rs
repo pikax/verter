@@ -1506,6 +1506,46 @@ impl FileArtifactStore {
             .map(|entry| (entry.key().clone(), entry.value().fingerprint))
             .collect()
     }
+
+    /// Collect the distinct wildcard-ambient patterns
+    /// (`declare module "*.css"`) declared by any base artifact currently
+    /// in the store.
+    ///
+    /// A wildcard ambient applies to an importer through a matching
+    /// import, so its glob pattern cannot be derived from the importer's
+    /// own specifiers — a compile-eligibility probe must enumerate the
+    /// declared patterns and query each as a
+    /// [`AugmentationTargetKind::WildcardAmbient`] target. External
+    /// (`declare module "vue"`) and relative (`declare module "./x"`)
+    /// augmenters always require a matching importer specifier (the
+    /// importer derives those targets from its own import list), and a
+    /// global block is probed directly as
+    /// [`AugmentationTargetKind::GlobalAugmentation`]; this accessor
+    /// covers only the wildcard remainder.
+    ///
+    /// The scan reads declared [`ModuleAugmentationFact`] specifiers (the
+    /// authoritative augmentation source) and filters to base
+    /// ([`FileArtifactKey::is_legacy`]) artifacts — session-overlay
+    /// artifacts carry session-divergent augmentations and must not leak
+    /// into a base-domain probe set. The returned patterns are
+    /// deduplicated.
+    #[must_use]
+    pub fn declared_wildcard_ambient_patterns(&self) -> Vec<InternedGlobPattern> {
+        let mut wildcard_patterns: Vec<InternedGlobPattern> = Vec::new();
+        let mut seen_patterns: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
+        for artifact_entry in self.artifacts.iter() {
+            if !artifact_entry.key().is_legacy() {
+                continue;
+            }
+            for fact in artifact_entry.value().augmentations.iter() {
+                let specifier: &str = fact.specifier.as_ref();
+                if specifier.contains('*') && seen_patterns.insert(Arc::from(specifier)) {
+                    wildcard_patterns.push(InternedGlobPattern::from(specifier));
+                }
+            }
+        }
+        wildcard_patterns
+    }
 }
 
 impl crate::cache_schema::CacheSchemaVersioned for FileArtifactStore {

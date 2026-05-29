@@ -8,13 +8,19 @@
 //!
 //! ## Eligibility predicates
 //!
-//! Each downgrade reason has a small, testable eligibility predicate
+//! Most downgrade reasons have a small, testable eligibility predicate
 //! ([`has_external_src`], [`has_macro_type_deps`],
-//! [`has_workspace_alias`], [`has_module_augmentation`],
-//! [`has_block_override`], [`has_style_override`],
-//! [`has_ide_only_analysis`], [`has_dev_last_good`]). The composite
-//! [`classify_compile_mode`] walks them in deterministic priority
-//! order, collects every triggering reason into the
+//! [`has_workspace_alias`], [`has_block_override`],
+//! [`has_style_override`], [`has_ide_only_analysis`],
+//! [`has_dev_last_good`]). The module-augmentation reason is the one
+//! exception: it requires the augmentation TARGET index for every
+//! module the owner can consume, so the host computes it
+//! (`VerterHost::owner_has_module_augmentation_dependency`) and hands
+//! the resulting boolean to
+//! [`EligibilityInputs::owner_has_module_augmentation`], keeping the
+//! classifier itself free of `&FileArtifactStore`. The composite
+//! [`classify_compile_mode`] walks every reason in deterministic
+//! priority order, collects each triggering reason into the
 //! [`CompileModeClassification::downgrade_reasons`] vector, and folds
 //! the requested mode to the mode the inputs actually support.
 //!
@@ -155,35 +161,6 @@ fn specifier_matches_any_alias(specifier: &str, aliases: &[WorkspaceAlias]) -> b
     false
 }
 
-/// True iff `canonical_id` or any of its directly imported canonicals
-/// participates in module augmentation under the current project's
-/// resolve / lib env.
-///
-/// Routes through
-/// [`crate::file_artifact_store::FileArtifactStore`]: a single
-/// matching augmentation entry in the per-canonical
-/// `FileArtifacts.augmentations` is sufficient. The classifier checks
-/// the owner canonical's artifacts (cheap) — directly imported files
-/// are NOT walked here; the cold-build path's fact tracer captures
-/// downstream augmentation observations under `Session` mode.
-///
-/// The host pre-computes the boolean and hands it to
-/// [`EligibilityInputs::owner_has_module_augmentation`] so the
-/// classifier itself stays free of `&FileArtifactStore`. Tests build
-/// `EligibilityInputs` directly without an artifact store.
-#[inline]
-pub(crate) fn has_module_augmentation(
-    canonical_id: &str,
-    store: &crate::file_artifact_store::FileArtifactStore,
-) -> bool {
-    if let Some(artifacts) = store.get_artifacts_any(canonical_id) {
-        if !artifacts.augmentations.is_empty() {
-            return true;
-        }
-    }
-    false
-}
-
 /// True iff the compile input carries a block override (preprocessed
 /// script / template).
 #[inline]
@@ -237,14 +214,18 @@ pub(crate) struct EligibilityInputs<'a> {
     /// Configured workspace aliases for the owning project. Empty
     /// when no aliases are configured.
     pub(crate) workspace_aliases: &'a [WorkspaceAlias],
-    /// Whether the compile input's owning canonical participates in
-    /// module augmentation under the live project resolve / lib env.
+    /// Whether a compile of the owning canonical could consume any
+    /// module augmentation reachable from its declaration graph, under
+    /// the live project resolve / lib env.
     ///
-    /// The host pre-computes this via [`has_module_augmentation`] (a
-    /// `FileArtifactStore`-backed check) and hands the resulting bool
-    /// to the classifier so the classifier itself stays free of
-    /// `&dyn ResolverContext`. Tests can pass `true` / `false`
-    /// directly without an artifact store.
+    /// The host pre-computes this via
+    /// `VerterHost::owner_has_module_augmentation_dependency`, which
+    /// consults the augmentation TARGET index for every module the owner
+    /// can consume (its imported specifiers) plus ambient / global
+    /// augmenters — so an imported / ambient augmenter that leaves no
+    /// trace on the owner's own `FileArtifacts.augmentations` is still
+    /// caught. The classifier itself stays free of `&FileArtifactStore`;
+    /// tests pass `true` / `false` directly without an artifact store.
     pub(crate) owner_has_module_augmentation: bool,
 }
 

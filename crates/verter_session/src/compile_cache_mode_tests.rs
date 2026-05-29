@@ -6,10 +6,11 @@
 //!    ([`has_external_src`], [`has_macro_type_deps`],
 //!    [`has_workspace_alias`], [`has_block_override`],
 //!    [`has_style_override`], [`has_ide_only_analysis`],
-//!    [`has_dev_last_good`]) has a positive + negative case.
-//!    [`has_module_augmentation`] is covered indirectly by the
-//!    classifier-level table (the host pre-computes the boolean and
-//!    hands it to `EligibilityInputs.owner_has_module_augmentation`).
+//!    [`has_dev_last_good`]) has a positive + negative case. The
+//!    module-augmentation reason is covered indirectly by the
+//!    classifier-level table (the host computes the boolean via
+//!    `VerterHost::owner_has_module_augmentation_dependency` and hands
+//!    it to `EligibilityInputs.owner_has_module_augmentation`).
 //!
 //! 2. **Table-driven classifier test** — exercises every variant of
 //!    [`CompileCacheMode`] against every priority-ordered reason
