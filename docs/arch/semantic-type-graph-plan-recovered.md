@@ -1,4 +1,4 @@
-# Verter TypeInfo Semantic Graph Plan — Revision 4
+# Verter TypeInfo Semantic Graph Plan — Revision 17
 
 ## 0. Identity
 
@@ -37,6 +37,11 @@ If the graph cannot answer these, no projection can. Heuristic recovery — name
 - §10 — audit infrastructure integration, full enumeration (KindBit, accessor, batch counter, structured event, footprint miner, TS bindings, TLS propagation).
 - §11 — RFC for `parse_type_annotation` second exception (resolved: no second exception is taken; see C2 / §5.6).
 - §14 — final invariants table.
+- PART A / PART B divider — structural marker for the doc split at landing time.
+- §0.5 — existing-state survey (every codebase artifact touched by the plan, with disposition).
+- §0.6 — native-API name alignment (every plan-side reference mapped to its real codebase symbol).
+- §0.7 — design principle (one-paragraph statement of the foundational contract).
+- Rounds 3-15 Commitments Compendium (A.1-A.24) — cross-section consolidated commitments from orchestration rounds 3-15, organized by topic.
 
 ---
 
@@ -247,7 +252,7 @@ Framework adapters select surface roots and attach `TypeNodeId`s. They MUST NOT:
 - Override TypeScript semantics (optionality, readonly, call/construct signatures, index signatures, exactness) inside `FrameworkSurfaceMember`. Those originate from graph nodes only.
 - Reclassify callback props as events based on naming conventions (`on*`, `on{Name}`) or any other heuristic. See §6.3.3.
 
-The `FrameworkSurfaceMember` `kind` field and the `FrameworkTag` enum are CLOSED enums — no `Custom(InternedName)` variant, no `String` escape hatch. Adding a new framework requires a closed enum variant + regression test + `CRITICAL_RULE_GUARDS` entry, landed in the same change as the framework adapter. Guards: `framework_surface_member_enum_is_closed`, `framework_tag_enum_is_closed`, `framework_surface_member_does_not_override_optionality`, `framework_adapter_does_not_recompute_fallthrough`, `framework_adapter_does_not_reclassify_callback_props_as_events`.
+The `FrameworkSurfaceMember.kind` field stays CLOSED via `FrameworkSurfaceKind` (closed enum: `Prop, Event, Slot, Model, Exposed, Ref, Children, Snippet, Export, AcceptedProp, AcceptedEvent`). Framework identity itself is OPEN through `FrameworkAdapterId` (interned canonical string id, e.g., `"vue"`, `"svelte"`, `"react"`, `"solid"`) plus a session-time `FrameworkAdapterRegistry` (§6.4). Adding a new SURFACE KIND still requires a schema bump; adding a new FRAMEWORK only requires registry registration. Guards: `framework_surface_member_enum_is_closed`, `framework_surface_request_accepts_open_adapter_id`, `framework_adapter_id_canonicalization_rejects_case_alias`, `framework_adapter_registry_rejects_unknown_surface_kind_discriminant`, `framework_surface_member_does_not_override_optionality`, `framework_adapter_does_not_recompute_fallthrough`, `framework_adapter_does_not_reclassify_callback_props_as_events`.
 
 ### 2.19 Progressive Expansion Is A Semantic Query
 
@@ -442,7 +447,8 @@ message StructuredTypeExpression {
     ExprSatisfies satisfies_expr = 19;
     ExprUniqueSymbol unique_symbol = 20;
     ExprNoInfer no_infer = 21;                         // NoInfer<T> wrapper
-    // reserved 22 to 100 for additive growth — bump schema_version on add.
+    ExprLocalTypeRef local_type_ref = 22;              // R3: references mapped-type binder (binder_id)
+    // reserved 23 to 100 for additive growth — bump schema_version on add.
   }
 }
 
@@ -471,26 +477,38 @@ message ExprArray { StructuredTypeExpression element = 1; bool readonly = 2; }
 message ExprObject {
   repeated ObjectMemberExpr members = 1;
   repeated IndexSignatureExpr index_signatures = 2;
+  repeated ExprFunction call_signatures = 3;             // R14: ordered (overload order is meaning-affecting)
+  repeated ExprFunction construct_signatures = 4;        // R14: ordered
 }
 message ObjectMemberExpr {
   string name = 1;
-  uint32 name_kind = 2;                                // MemberNameKind (closed enum tag)
+  MemberNameKind name_kind = 2;                          // R10: closed enum, not uint32
   StructuredTypeExpression value = 3;
   bool optional_member = 4;
   bool readonly = 5;
 }
 message IndexSignatureExpr {
-  uint32 key_kind = 1;                                  // IndexKeyKind (closed enum tag)
+  IndexKeyKind key_kind = 1;                             // R10: closed enum, not uint32
   StructuredTypeExpression value = 2;
   bool readonly = 3;
 }
+// R3: mapped binder identity — name_remap/value_type reference binder_id
+message MappedTypeParamExpr {
+  string binder_id = 1;
+  string name = 2;
+  StructuredTypeExpression constraint = 3;
+}
+
+message ExprLocalTypeRef {
+  string binder_id = 1;                                 // resolves to a MappedTypeParamExpr.binder_id in scope
+}
+
 message ExprMapped {
-  StructuredTypeExpression key_type = 1;
-  StructuredTypeExpression source = 2;
-  optional StructuredTypeExpression name_remap = 3;
-  StructuredTypeExpression value_type = 4;
-  uint32 readonly_modifier = 5;                         // MappedModifier (closed enum tag)
-  uint32 optional_modifier = 6;
+  MappedTypeParamExpr type_param = 1;
+  optional StructuredTypeExpression name_remap = 2;
+  StructuredTypeExpression value_type = 3;
+  MappedModifier readonly_modifier = 4;                 // R10: closed enum, not uint32
+  MappedModifier optional_modifier = 5;                 // R10: closed enum, not uint32
 }
 message ExprConditional {
   StructuredTypeExpression check = 1;
@@ -499,7 +517,7 @@ message ExprConditional {
   StructuredTypeExpression false_branch = 4;
 }
 message ExprLiteral        { LiteralValue value = 1; }
-message ExprPrimitive      { uint32 kind = 1; }         // PrimitiveKind (closed enum tag)
+message ExprPrimitive      { PrimitiveKind kind = 1; }  // R10: closed enum, not uint32
 message ExprTemplateLiteral {
   repeated string quasis = 1;
   repeated StructuredTypeExpression expressions = 2;
@@ -510,9 +528,153 @@ message ExprInfer {
 }
 message ExprFunction {
   repeated TypeParameterExpr type_parameters = 1;
-  repeated FunctionParameterExpr parameters = 2;
-  StructuredTypeExpression return_type = 3;
-  bool is_construct = 4;
+  optional FunctionParameterExpr this_param = 2;          // R14: `this`-param
+  repeated FunctionParameterExpr parameters = 3;
+  FunctionReturnExpr return_expr = 4;                     // R14: oneof type/predicate/assertion
+  SignatureKind signature_kind = 5;                       // R11: Call | Construct | AbstractConstruct
+}
+
+message FunctionReturnExpr {
+  oneof kind {
+    StructuredTypeExpression type = 1;
+    TypePredicateExpr predicate = 2;
+    AssertionEffectExpr assertion = 3;
+  }
+}
+
+message TypePredicateExpr {
+  PredicateSubject parameter = 1;
+  StructuredTypeExpression predicate_type = 2;
+  bool asserts = 3;
+}
+
+message PredicateSubject {
+  oneof kind {
+    PredicateSubjectIdentifier identifier = 1;
+    PredicateSubjectThis this_subject = 2;
+  }
+}
+
+message PredicateSubjectIdentifier { uint32 name = 1; }
+message PredicateSubjectThis {}
+
+message AssertionEffectExpr {
+  oneof kind {
+    AssertionEffectIdentifier identifier = 1;
+    AssertionEffectThis this_assert = 2;
+    AssertionEffectCondition condition = 3;
+  }
+}
+
+message AssertionEffectIdentifier { uint32 name = 1; optional StructuredTypeExpression predicate = 2; }
+message AssertionEffectThis       { optional StructuredTypeExpression predicate = 1; }
+message AssertionEffectCondition  {}
+
+// R11: SignatureKind closed enum — Call | Construct | AbstractConstruct
+enum SignatureKind {
+  SIGNATURE_KIND_CALL = 0;
+  SIGNATURE_KIND_CONSTRUCT = 1;
+  SIGNATURE_KIND_ABSTRACT_CONSTRUCT = 2;
+}
+
+// R4/R7: helper messages referenced from ExprFunction / ExprClass
+message TypeParameterExpr {
+  string name = 1;
+  optional StructuredTypeExpression constraint = 2;
+  optional StructuredTypeExpression default_type = 3;
+  Variance variance = 4;
+  bool is_const = 5;
+}
+
+message FunctionParameterExpr {
+  string name = 1;
+  StructuredTypeExpression type_ref = 2;
+  bool optional = 3;
+  bool rest = 4;
+  InferencePolicy inference_policy = 5;
+}
+
+// R9: closed proto enums replacing prior uint32 fields
+enum Variance {
+  VARIANCE_INDEPENDENT = 0;
+  VARIANCE_IN = 1;
+  VARIANCE_OUT = 2;
+  VARIANCE_IN_OUT = 3;
+}
+
+enum InferencePolicy {
+  INFERENCE_POLICY_NORMAL = 0;
+  INFERENCE_POLICY_NO_INFER = 1;
+}
+
+enum MappedModifier {
+  MAPPED_MODIFIER_NONE = 0;
+  MAPPED_MODIFIER_ADD = 1;
+  MAPPED_MODIFIER_REMOVE = 2;
+}
+
+enum Accessibility {
+  ACCESSIBILITY_NONE = 0;
+  ACCESSIBILITY_PUBLIC = 1;
+  ACCESSIBILITY_PROTECTED = 2;
+  ACCESSIBILITY_PRIVATE = 3;
+}
+
+enum OptionalSemantics {
+  OPTIONAL_SEMANTICS_REQUIRED = 0;
+  OPTIONAL_SEMANTICS_MISSING_ONLY = 1;
+  OPTIONAL_SEMANTICS_MISSING_OR_UNDEFINED = 2;
+}
+
+enum MemberNameKind {
+  MEMBER_NAME_KIND_IDENTIFIER = 0;
+  MEMBER_NAME_KIND_STRING_LITERAL = 1;
+  MEMBER_NAME_KIND_NUMERIC_LITERAL = 2;
+  MEMBER_NAME_KIND_UNIQUE_SYMBOL_REF = 3;
+}
+
+enum IndexKeyKind {
+  INDEX_KEY_KIND_STRING = 0;
+  INDEX_KEY_KIND_NUMBER = 1;
+  INDEX_KEY_KIND_SYMBOL = 2;
+  INDEX_KEY_KIND_TEMPLATE_PATTERN = 3;
+}
+
+enum PrimitiveKind {
+  PRIMITIVE_KIND_ANY = 0;
+  PRIMITIVE_KIND_UNKNOWN = 1;
+  PRIMITIVE_KIND_NEVER = 2;
+  PRIMITIVE_KIND_VOID = 3;
+  PRIMITIVE_KIND_NULL = 4;
+  PRIMITIVE_KIND_UNDEFINED = 5;
+  PRIMITIVE_KIND_STRING = 6;
+  PRIMITIVE_KIND_NUMBER = 7;
+  PRIMITIVE_KIND_BOOLEAN = 8;
+  PRIMITIVE_KIND_BIGINT = 9;
+  PRIMITIVE_KIND_SYMBOL = 10;
+  PRIMITIVE_KIND_OBJECT = 11;
+}
+
+enum SignatureOrigin {
+  SIGNATURE_ORIGIN_FUNCTION_DECLARATION = 0;
+  SIGNATURE_ORIGIN_METHOD_DECLARATION = 1;
+  SIGNATURE_ORIGIN_CONSTRUCTOR = 2;
+  SIGNATURE_ORIGIN_CALL_SIGNATURE = 3;
+  SIGNATURE_ORIGIN_CONSTRUCT_SIGNATURE = 4;
+  SIGNATURE_ORIGIN_INDEX_SIGNATURE = 5;
+  SIGNATURE_ORIGIN_GETTER_ACCESSOR = 6;
+  SIGNATURE_ORIGIN_SETTER_ACCESSOR = 7;
+}
+
+enum ParameterVariancePolicy {
+  PARAMETER_VARIANCE_POLICY_STRICT = 0;
+  PARAMETER_VARIANCE_POLICY_BIVARIANT = 1;
+}
+
+enum EqualityKind {
+  EQUALITY_KIND_STRICT = 0;
+  EQUALITY_KIND_LOOSE = 1;
+  EQUALITY_KIND_NULLISH = 2;
 }
 message ExprClass {
   optional string class_name = 1;
@@ -1527,16 +1689,22 @@ export interface ExpandGraphAroundRequest {
 }
 
 // 9.
-export interface FrameworkSurfaceRequest {
+export interface ComponentSelector {
   canonicalId: string
-  framework: "vue" | "svelte" | "react"
-  componentRoot: TypeNodeRef
+  exportName?: string
+  frameworkAdapterId: string   // R7-EXT: open canonical adapter id (e.g., "vue", "svelte", "react", "solid", "my-corp-fw");
+                                // matches §6.4 FrameworkAdapterRegistry; host interns at receive.
+}
+
+export interface FrameworkSurfaceRequest {
+  selector: ComponentSelector
   context: ProjectionReductionContext
   closure: GraphClosurePolicy
   displayPolicy: DisplayPolicy
   includeProvenance: boolean
   includeDiagnostics: boolean
   includeProjection?: TypeInfoProjectionRequest[]
+  schemaVersion: number
 }
 
 export interface RelationPayload {
@@ -1611,7 +1779,7 @@ Guard: `evaluate_type_expression_does_not_call_parse_type_annotation` is a stati
 // verter_protocol::typeinfo::framework
 pub struct FrameworkSurfacePayload {
     pub kind: PayloadKind,
-    pub framework: FrameworkTag,                      // CLOSED ENUM — no Custom variant
+    pub framework_adapter_id: FrameworkAdapterId,     // R7-EXT: OPEN canonical id via FrameworkAdapterRegistry
     pub adapter: InternedName,
     pub component: ComponentIdentity,
     pub graph: SemanticTypeGraph,
@@ -1620,7 +1788,24 @@ pub struct FrameworkSurfacePayload {
     pub projections: Option<FrameworkProjectionBundle>,
 }
 
-pub enum FrameworkTag { Vue, Svelte, React }          // closed — adding a new framework requires a registry entry + regression test
+// R7-EXT: FrameworkAdapterId is an OPEN canonical interned id (registry-driven).
+// FrameworkSurfaceKind stays CLOSED (Prop, Event, Slot, Model, Exposed, Ref, Children, Snippet, Export, AcceptedProp, AcceptedEvent).
+// Adding a framework = registering an adapter; adding a surface kind = schema bump.
+pub struct FrameworkAdapterId(pub InternedName);
+
+pub struct FrameworkAdapterDescriptor {
+    pub adapter_id: FrameworkAdapterId,
+    pub display_name: InternedName,
+    pub version: u32,
+    pub supported_surfaces: BTreeSet<FrameworkSurfaceKind>,
+}
+
+impl FrameworkAdapterId {
+    /// R7: canonical-form normalization rejects case aliases.
+    /// Guard: framework_adapter_id_canonicalization_rejects_case_alias.
+    pub fn try_new(raw: &str) -> Result<Self, RegistryError> { /* lowercases + validates charset; rejects "Vue" after "vue" */ unimplemented!() }
+    pub fn canonicalize(raw: &str) -> Self { /* normalises to canonical form */ unimplemented!() }
+}
 
 pub struct FrameworkTypeSurfaces {
     pub props: Vec<FrameworkSurfaceMember>,
@@ -2497,6 +2682,17 @@ One row per §2.x invariant (per claude #18). The plan's acceptance criterion is
 
 ---
 
+## PART A / PART B DIVIDER
+
+PART A (final-state architecture: §1–§7, §10–§12, §14) reads as if no phase ever existed.
+PART B (implementation plan: §0, §0.5, §0.6, §0.7, §8, §9, §13, plus the Rounds 3-15 Commitments Compendium below) is the executor's playbook.
+This divider is structural — at landing time, PART A lives at `docs/arch/typeinfo-graph.md`, PART B at `docs/contributing/typeinfo-implementation-plan.md`.
+Guard: `part_a_carries_no_phase_archaeology` (Phase 0a static scan rejects "Phase", "Revision", "formerly", "moved", "previously", "retired" tokens inside PART A sections).
+
+Note on PART A residency: §0 (Identity / Why typeinfo Exists / Document Layout) sits at the top of this combined document for reader orientation but is PART B material at landing time. §8 (Phase Plan) and §9 (Risks And STOP Gates) appear in this combined document at lines ~1934 and ~2415 between §7 and §10; they are PART B material at landing time and move to the implementation-plan doc on split. The structural ordering of this combined file is reader-friendly, not landing-canonical.
+
+---
+
 ## 0.5 Existing State Survey
 
 This section enumerates every existing codebase artifact touched by the plan, with disposition (`preserve | rename | delete | migrate-to`). The implementer agent must reference this table when executing each phase; the `typeinfo_cutover_deletions_complete` guard in Phase 8 walks this table and asserts every deletion is realised.
@@ -2629,3 +2825,708 @@ Where a plan-side name does not yet exist (e.g. `TypeInfoGraphResultDb`, `TypeIn
 > Rendered strings answer only: **How should this type be shown for this projection?**
 
 The graph is the foundation. Projections are derivations. Framework adapters are selectors. The relation engine is public. Heuristic recovery is forbidden. Cache identity is typed. Publication is fenced. Every degraded state is observable. This is the foundation for replacing TypeScript. It is also the foundation for every framework adapter the project will ever write. The same shared optimized codebase serves both.
+
+---
+
+## Rounds 3-15 Commitments Compendium
+
+This compendium consolidates every architectural commitment landed across orchestration rounds 3-15. Each section is normative final-state — phase numbers appear only in PART B cross-references. The earlier sections (§1-§14, §0.5-§0.7) carry the inline edits applied across rounds; this compendium is the consolidated source-of-truth for items spanning multiple sections. It is PART B reference material at landing time.
+
+Items are organized by topic (A.1-A.24) rather than by round, because the same topic was often revisited across rounds and the final commitment supersedes earlier discussion. Where a single topic touches multiple §-sections of the main plan, the compendium row is the authoritative cross-section statement.
+
+### A.1 StructuredTypeExpression — Final 22-Arm Closed Schema
+
+The `oneof StructuredTypeExpression.kind` is closed at **22 arms**: `Reference`, `Union`, `Intersection`, `IndexedAccess`, `KeyOf`, `TypeOf`, `Tuple`, `Array`, `Object`, `Mapped`, `Conditional`, `Literal`, `Primitive`, `TemplateLiteral`, `Infer`, `Function`, `Class`, `ThisType`, `Satisfies`, `UniqueSymbol`, `NoInfer`, `LocalTypeRef`. Reserved range 23-100 for additive growth (bump `schema_version` on add). §5.6 dispatch table maps EVERY arm 1:1 — no ellipses. Guard `structured_type_expression_dispatch_table_complete` (Phase 0a) statically asserts cardinality equality between the proto source and the dispatch table source.
+
+### A.2 §5.6 Dispatch Table — Field-Complete
+
+Every `StructuredTypeExpression` proto field is consumed by §5.6 dispatch. Key dispatch rows (R15 final form):
+
+| Variant | Dispatch behavior |
+|---|---|
+| `Reference { scope_canonical, name, type_arguments, extra_imports }` | Resolve `name` in `scope_canonical`; recurse `type_arguments`; resolve `extra_imports`. |
+| `Union { members }` / `Intersection { members }` | Recurse every member. |
+| `IndexedAccess { object, index }` | Recurse `object`, then `index`. |
+| `KeyOf { operand }` | Recurse `operand`. |
+| `TypeOf { value_root_canonical, path }` | Resolve value declaration; navigate `path`. |
+| `Tuple { elements, readonly }` | Recurse each element's `value`. |
+| `Array { element, readonly }` | Recurse `element`. |
+| `Object { members, index_signatures, call_signatures, construct_signatures }` (R14): Recurse `members[].value`; recurse `index_signatures[].value`; recurse every `call_signatures[]` ExprFunction in source order (preserves overload order); recurse every `construct_signatures[]` ExprFunction in source order. |
+| `Mapped { type_param, name_remap, value_type, readonly_modifier, optional_modifier }` (R3 binder): Bind `type_param.binder_id`; recurse `type_param.constraint`; recurse `name_remap` if Some; recurse `value_type`. `LocalTypeRef { binder_id }` in `name_remap`/`value_type` references the bound `binder_id`. |
+| `Conditional { check, extends_type, true_branch, false_branch }` | Recurse all four. Open conditionals distribute path; closed conditionals reduce immediately. |
+| `Literal { value }` | Encode `LiteralValue`. |
+| `Primitive { kind }` | Encode `PrimitiveKind`. |
+| `TemplateLiteral { quasis, expressions }` | Recurse each expression. |
+| `Infer { name, constraint }` | Bind `name`; recurse `constraint` if Some. |
+| `Function { type_parameters, this_param, parameters, return_expr, signature_kind }` (R14 final): Recurse `type_parameters` (constraint + default); recurse `this_param` if Some; recurse `parameters[].type_ref`; dispatch `return_expr.kind`: `Type(t)` → lower to `Signature.return_type`, `Predicate(p)` → populate `Signature.return_predicate`, `Assertion(a)` → populate `Signature.asserts`. `signature_kind` discriminates Call / Construct / AbstractConstruct (R11). |
+| `Class { class_name, type_parameters, instance_members, static_members }` | Recurse type parameters and each member. |
+| `ThisType {}` | Encode `TypeNode::ThisType`. |
+| `Satisfies { value, constraint }` | Recurse both. |
+| `UniqueSymbol { decl_canonical, name }` | Resolve declaration. |
+| `NoInfer { inner }` | Recurse `inner`. |
+| `LocalTypeRef { binder_id }` | Resolve `binder_id` in current binder scope (set up by enclosing `Mapped`). |
+
+Guard `structured_type_expression_dispatch_table_field_coverage` (R15) — static-scan asserts every proto field on every `StructuredTypeExpression` message is consumed by the dispatch logic.
+
+### A.3 §4.3 CompletionFence + GetOrComputeOutcome + cooperative_admit_with_post_publish
+
+`TypeInfoGraphResultDb::get_or_compute(key, request) -> GetOrComputeOutcome<Arc<TypeInfoGraphPayload>>` where:
+
+```rust
+pub enum GetOrComputeOutcome<V> {
+    ColdPublish(V),
+    WarmHit(V),
+    Degraded { error: TypeInfoRequestError, partial: Option<V> },
+}
+```
+
+Cold path calls `self.completion_fence.publish_with_retry(build, revalidate)` (the struct field is `completion_fence: CompletionFence`, NOT `publication_fence`). The cooperative substrate routes through `cooperative_admit_with_post_publish` with `ComputeAdmission::Cacheable | WarmHit | ReturnOnly { value, error } | Failed`. Degraded recovery uses store-backed `degraded_store.peek_exact_only_partial(&key, request, &error)` (defined in §4.1.2). No `AtomicU8 cold_outcome_flag`, no `last_degraded_error()`, no `degraded_partial_from_fence` helper.
+
+The fact-signature path in §10.1: `let (outcome, fact_read_set) = ctx.with_fact_tracer(|| db.get_or_compute(slot_key, &request)); let signature = ReadSetSignature::new(finalise_signature_or_empty(fact_read_set));`. Per `crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:773`.
+
+### A.4 TypeInfoRequestError — Unified Closed Union
+
+```ts
+type TypeInfoRequestError =
+  | { kind: "MissingProjectionContext" }
+  | { kind: "MissingDisplayPolicy" }
+  | { kind: "InvalidMode"; mode: string }
+  | { kind: "MissingClosurePolicy" }
+  | { kind: "UnknownSchemaVersion"; clientVersion: number; serverSupportedVersions: number[] }
+  | { kind: "MalformedPayload"; detail: string }
+  | { kind: "OmittedRoots" }
+  | { kind: "UnstableState"; attempts: number }
+```
+
+Rust mirror: `client_version: u32, server_supported_versions: Vec<u32>`. Canonical shape (per round 4 reconciliation). Guard `typeinfo_request_error_union_is_consistent_across_sections` extends to scan documentation sections as well.
+
+### A.5 Schema Version — Negotiation + Per-Request Echo + Downlevel Encoding
+
+Every public request DTO carries `schemaVersion: number` (required, must match handshake-negotiated version). Servers advertise `supported_versions = [N, N-1, N-2]` ONLY for versions backed by a registered encoder. `SchemaVersionCapabilities::validated_supported_versions()` returns the validated set. Guard `server_supported_versions_have_encoders` asserts `capabilities.supported == capabilities.validated_supported_versions()`. When a session negotiates version V < current, the server emits via `encode_typeinfo_payload_for_version(V, payload)`. Newer-only variants project to compatible substitutes (e.g., post-V `ExpansionStatus::ExactOpenGeneric` may project to `ExactSymbolic { reason: GenericPreserved }` for v(N-1) consumers). If V supports `UnsupportedConstruct::DowngradedFromNewerSchema`, emit that; else downgrade to older fallback (`UnsupportedConstruct::Unsupported { construct: "schema_skew" }`); else degrade to `Opaque(Miss { reason: SchemaSkew })`. Guard `downgrade_encoder_never_emits_variant_unknown_to_target_version` validates each encoder against the `KNOWN_VARIANTS_AT_VERSION[target_version]` table (NOT `encoder.version`).
+
+### A.6 KNOWN_VARIANTS_AT_VERSION — Cumulative Exhaustive Sets
+
+The table is the truth; proto `since_schema_version` annotations must match. Each row is an EXHAUSTIVE enumeration (not cumulative deltas):
+
+```rust
+pub const KNOWN_VARIANTS_AT_VERSION: phf::Map<u32, &'static [VariantId]> = phf::phf_map! {
+    1u32 => &[
+        VariantId::PrimitiveNode, VariantId::LiteralNode, VariantId::UnionNode,
+        VariantId::IntersectionNode, VariantId::ObjectNode, VariantId::ArrayNode,
+        VariantId::TupleNode, VariantId::ReferenceNode, VariantId::AliasInstantiationNode,
+        VariantId::TypeParameterNode, VariantId::KeyOfNode, VariantId::IndexedAccessNode,
+        VariantId::ConditionalNode, VariantId::MappedNode, VariantId::TemplateLiteralNode,
+        VariantId::TypeOfNode, VariantId::SatisfiesNode, VariantId::ClassNode,
+        VariantId::ThisTypeNode, VariantId::MergedDeclarationNode, VariantId::AmbientModuleNode,
+        VariantId::ModuleAugmentationNode, VariantId::AmbientNamespaceNode,
+        VariantId::GlobalAugmentationNode, VariantId::RelationProofNode, VariantId::OpaqueNode,
+        VariantId::UniqueSymbolNode, VariantId::InferNode, VariantId::UnresolvedGeneric,
+        VariantId::EnumNode, VariantId::CycleNode,
+        VariantId::MemberKindField, VariantId::MemberKindMethod, VariantId::MemberKindGetter,
+        VariantId::MemberKindSetter,
+        VariantId::UnsupportedDecorator, VariantId::UnsupportedUmdGlobal,
+        VariantId::UnsupportedLegacyTypeguard, VariantId::UnsupportedLegacyConstAssertOutsideExpression,
+        VariantId::SignatureKindCall, VariantId::SignatureKindConstruct,
+        VariantId::FunctionReturnType, VariantId::FunctionReturnPredicate, VariantId::FunctionReturnAssertion,
+        VariantId::PredicateSubjectIdentifier, VariantId::PredicateSubjectThis,
+        VariantId::AssertionEffectIdentifier, VariantId::AssertionEffectThis, VariantId::AssertionEffectCondition,
+        VariantId::RelationFailureParameterContravariance, VariantId::RelationFailureMissingProperty,
+        VariantId::RelationFailureIncompatibleReturn, VariantId::RelationFailureIncompatibleConstructSignature,
+        VariantId::RelationFailureIncompatibleIndexSignature, VariantId::RelationFailurePrivateProtectedMismatch,
+        VariantId::RelationFailureExcessProperty, VariantId::RelationFailureReadOnlyMismatch,
+        VariantId::RelationFailureOptionalityMismatch,
+    ],
+    2u32 => &[
+        // v1 entries (re-listed in full) PLUS:
+        VariantId::NoInferNode, VariantId::JsxIntrinsicElementNode,
+        VariantId::MemberKindAutoAccessor, VariantId::UnsupportedSchemaSkew,
+        VariantId::SignatureKindAbstractConstruct,
+    ],
+    3u32 => &[
+        // v1 + v2 entries (re-listed in full) PLUS:
+        VariantId::UnsupportedDowngradedFromNewerSchema, VariantId::ExactOpenGeneric,
+    ],
+};
+```
+
+`VariantId` covers ONLY closed oneof arms: `TypeNode`, `StructuredTypeExpression`, `ExpansionStatus`, `UnsupportedConstruct`, `MemberKind`, `NarrowingCause`, `ContextPosition`, `FunctionReturnExpr`, `PredicateSubject`, `AssertionEffectExpr`, `RelationFailureReason`. Plain proto enum values (e.g., new `PrimitiveKind` arm) require a separate registration mechanism if ever needed — for v1..v3 this is not required (R14 narrows generator scope; the `enum_value_since_schema_version` claim is removed).
+
+Generator: `scripts/gen-known-variants-table.rs` reads proto AST with per-arm `[(verter.since_schema_version) = N]` custom options and emits the inverse map. Guard `known_variants_at_version_rows_are_cumulative_exact_sets` (R12). Guard `known_variants_table_matches_proto_at_version` regenerates the table at CI and asserts byte-identical match. Every non-v1 proto oneof arm carries `[(verter.since_schema_version) = N]` annotation; missing annotations default to v1.
+
+### A.7 MappedTypeParam + NoInfer + TypeOperand + JSX + OptionalSemantics + DiagnosticDirective
+
+`MappedTypeParam { name, constraint, symbol }` — binder identity carried on every mapped node. `name_remap` and `value_type` reference `type_param.symbol`. Fixture `mapped_remap_uses_bound_key_in_value_and_template.rs`.
+
+`NoInfer` is OCCURRENCE-LOCAL (on parameter occurrence), NOT on type parameter declaration. `TypeNode::NoInfer { inner: TypeNodeId }`. `SignatureParameter.inference_policy: InferencePolicy { Normal, NoInfer }`. The `no_infer: bool` is removed from `TypeParameter`. Fixture `no_infer_is_occurrence_local_on_overload_set.rs`, `no_infer_ambient_declaration_defaults_normal.rs`.
+
+`TypeOperand` sum type for `relate` / `projectPath`:
+
+```ts
+type TypeOperand =
+  | { kind: "node"; graph: GraphHandle; node: TypeNodeId }
+  | { kind: "symbol"; canonicalId: string; name: string; symbolSpace: SymbolSpace; typeArguments?: StructuredTypeExpression[] }
+  | { kind: "expression"; scopeCanonical: string; expression: StructuredTypeExpression; extraImports?: ImportSpec[] }
+```
+
+JSX intrinsic elements are first-class semantic queries: `SemanticQueryKey::ResolveJsxIntrinsicElement { namespace, tag }`, `SemanticQueryKey::ResolveJsxAttribute { element, name }`. `TypeNode::JsxIntrinsicElement { namespace, tag, attributes, children }`. `UnsupportedConstruct::JsxIntrinsicHostElement` is removed. Fixtures `jsx_intrinsic_element_attrs_resolve_from_provider.rs`, `jsx_intrinsic_empty_project_returns_miss_not_unsupported.rs`.
+
+`OptionalSemantics { Required | MissingOnly | MissingOrUndefined }` on `ObjectMember.optional` (replaces `optional: bool`). CORRECT classification (R4): `prop: T` → Required; `prop: T | undefined` → Required with value union (NOT MissingOrUndefined); `prop?: T` under `exactOptionalPropertyTypes: false` → MissingOrUndefined; `prop?: T` under `exactOptionalPropertyTypes: true` → MissingOnly. Fixture `optional_required_undefined_is_not_missing.rs`.
+
+`DiagnosticDirective { kind: TsExpectError | TsIgnore, span, applies_to: Option<DiagnosticId>, consumed: bool }` lives PAYLOAD-ONLY on `TypeInfoGraphPayload.diagnostic_directives` — NOT inside `SemanticTypeGraph` (R7 separation; R8 reaffirmation). `DiagnosticId(u32)` indexes `TypeInfoGraphPayload.diagnostics` (NOT `SemanticTypeGraph.diagnostics` — diagnostics are payload-only, R8 C3 Option A). Guard `diagnostics_only_on_typeinfo_graph_payload`. Unused `TsExpectError` projects to synthetic `TypeInfoDiagnostic { code: 2578, severity: Error }`; unused `TsIgnore` emits NO diagnostic. Fixture `ts_expect_error_unused_projects_ts2578_diagnostic.rs`. Wire round-trip guard preserves `applies_to` index-range validation and `consumed` round-trip (proto3 cannot distinguish empty-vs-absent — that assertion is removed).
+
+### A.8 ObjectMember + Signature — TS-Replacement-Grade Surface
+
+```rust
+pub enum MemberKind {
+    Field,
+    Method { signatures: Vec<SignatureRef> },
+    Getter { return_type: TypeNodeId },
+    Setter { param_type: TypeNodeId },
+    AutoAccessor { read_type: TypeNodeId, write_type: TypeNodeId },
+}
+
+pub struct ObjectMember {
+    name: InternedName,
+    name_kind: MemberNameKind,
+    kind: MemberKind,
+    value: TypeNodeId,
+    optional: OptionalSemantics,
+    readonly: bool,
+    accessibility: Accessibility,
+    static_side: bool,
+    declaration: Option<SymbolId>,
+    jsdoc: Option<JsdocMeta>,
+}
+
+pub enum SignatureOrigin {
+    FunctionDeclaration,
+    MethodDeclaration,
+    Constructor,
+    CallSignature,
+    ConstructSignature,
+    IndexSignature,
+    GetterAccessor,
+    SetterAccessor,
+}
+
+pub struct Signature {
+    type_parameters: Vec<TypeParameter>,
+    parameters: Vec<SignatureParameter>,
+    return_type: TypeNodeId,
+    this_param: Option<SignatureParameter>,
+    return_predicate: Option<TypePredicate>,
+    asserts: Option<AssertionEffect>,
+    origin: SignatureOrigin,
+    parameter_variance_policy: ParameterVariancePolicy,
+}
+
+pub enum ParameterVariancePolicy {
+    Strict,
+    Bivariant,
+}
+```
+
+**Variance producer-mapping rules (TS-correct, R8 + R9 + R10 final form):**
+
+| SignatureOrigin | strictFunctionTypes | ParameterVariancePolicy |
+|---|---|---|
+| FunctionDeclaration | true | Strict |
+| FunctionDeclaration | false | Bivariant |
+| MethodDeclaration | true | Bivariant (TS leaves method syntax bivariant under strict — R8 C1 correction) |
+| MethodDeclaration | false | Bivariant |
+| Constructor | true | Bivariant (TS 2.6 excludes constructors with methods — R9 C1 correction) |
+| Constructor | false | Bivariant |
+| CallSignature (function-property) | true | Strict |
+| CallSignature (function-property) | false | Bivariant |
+| ConstructSignature | true | Strict |
+| ConstructSignature | false | Bivariant |
+
+Fixtures: `method_vs_function_property_variance_under_strict_function_types.rs`, `constructor_bivariance_exception_under_strict_function_types.rs`, `strict_function_types_contravariant_parameters.rs`, `method_bivariance_exception.rs`, `incompatible_call_signature_intersection.rs`.
+
+Proto wire shape (R8 C6):
+
+```protobuf
+message ObjectMemberNode {
+  string name = 1;
+  MemberNameKind name_kind = 2;
+  oneof kind {
+    MemberKindField field = 3;
+    MemberKindMethod method = 4;
+    MemberKindGetter getter = 5;
+    MemberKindSetter setter = 6;
+    MemberKindAutoAccessor auto_accessor = 7;
+  }
+  uint32 value = 8;
+  OptionalSemantics optional = 9;
+  bool readonly = 10;
+  Accessibility accessibility = 11;
+  bool static_side = 12;
+  optional uint32 declaration = 13;
+}
+message MemberKindField {}
+message MemberKindMethod          { repeated uint32 signatures = 1; }
+message MemberKindGetter          { uint32 return_type = 1; }
+message MemberKindSetter          { uint32 param_type = 1; }
+message MemberKindAutoAccessor    { uint32 read_type = 1; uint32 write_type = 2; }
+
+message UnsupportedConstruct {
+  oneof kind {
+    UnsupportedDecorator decorator = 1 [(verter.since_schema_version) = 1];
+    UnsupportedUmdGlobal umd_global = 2 [(verter.since_schema_version) = 1];
+    UnsupportedLegacyTypeguard legacy_typeguard = 3 [(verter.since_schema_version) = 1];
+    UnsupportedLegacyConstAssertOutsideExpression legacy_const_assert = 4 [(verter.since_schema_version) = 1];
+    UnsupportedDowngradedFromNewerSchema downgraded_from_newer_schema = 5 [(verter.since_schema_version) = 3];
+    UnsupportedSchemaSkew schema_skew = 6 [(verter.since_schema_version) = 2];
+  }
+}
+message UnsupportedDowngradedFromNewerSchema {
+  uint32 added_in_version = 1;
+  uint32 current_negotiated_version = 2;
+}
+```
+
+### A.9 RelationOutcome — Closed Reason With Deterministic Priority
+
+```rust
+pub enum RelationFailureReason {
+    ParameterContravariance { parameter_index: u32 },
+    MissingProperty { name: InternedName },
+    IncompatibleReturn,
+    IncompatibleConstructSignature,
+    IncompatibleIndexSignature,
+    PrivateProtectedMismatch,
+    ExcessProperty { name: InternedName },
+    ReadOnlyMismatch,
+    OptionalityMismatch,
+}
+
+pub enum RelationOutcome {
+    Assignable,
+    NotAssignable {
+        primary_reason: RelationFailureReason,
+        secondary_reasons: Vec<RelationFailureReason>,
+    },
+    Unknown,
+}
+```
+
+R10 C4 — `primary_reason` is deterministic by priority order: `PrivateProtectedMismatch > MissingProperty > IncompatibleConstructSignature > IncompatibleIndexSignature > IncompatibleReturn > ParameterContravariance > ReadOnlyMismatch > OptionalityMismatch > ExcessProperty`. `secondary_reasons` preserves all observed failures. Fixture `relation_failure_reason_priority_is_stable.rs`. Proto mirror: `RelationOutcomeNode.NotAssignable { primary_reason: RelationFailureReason; secondary_reasons: repeated RelationFailureReason }`.
+
+### A.10 cycle_id + canonicalize_substitutions + CanonicalSubstitutionValueKey + LiteralValueKey + structural_object_fingerprint
+
+```rust
+pub fn cycle_id(
+    decl: &ResolvedDeclSlotIdentity,
+    substitutions: &[SubstitutionKey],
+) -> Result<u64, QueryErrorDto>;
+
+pub struct SubstitutionKey {
+    pub type_param_slot: ResolvedDeclSlotIdentity,
+    pub value: CanonicalSubstitutionValueKey,
+}
+
+pub enum CanonicalSubstitutionValueKey {
+    Symbol { decl: ResolvedDeclSlotIdentity, type_arguments: Arc<[CanonicalSubstitutionValueKey]> },
+    Literal { value: LiteralValueKey },
+    Primitive { kind: PrimitiveKind },
+    UniqueSymbol { decl: ResolvedDeclSlotIdentity },
+    Union { members: Arc<[CanonicalSubstitutionValueKey]> },
+    Intersection { members: Arc<[CanonicalSubstitutionValueKey]> },
+    TypeParam { id: TypeParameterId },
+    StructuralObject { fingerprint: Hash16 },
+}
+
+pub fn canonicalize_substitutions(
+    substitutions: &[SubstitutionKey],
+) -> Result<Arc<[CanonicalSubstitutionPair]>, CanonicalizationError>;
+
+pub struct CanonicalSubstitutionPair {
+    pub type_param: TypeParameterId,
+    pub value: CanonicalSubstitutionValueKey,
+}
+
+pub enum CanonicalizationError {
+    ConflictingBindings { type_param: TypeParameterId },
+}
+
+/// R14 C1 — HOST-STABLE identity. NOT a typedef of wire LiteralValue.
+/// Wire InternedName(u32) is a payload-local string-table index; using it in cache keys
+/// causes warm-cache aliasing across semantically-different types.
+pub enum LiteralValueKey {
+    String(Arc<str>),       // host-stable string identity
+    Number(F64Bits),        // bit-pattern stable (NaN canonicalized)
+    Boolean(bool),
+    BigInt(Arc<str>),       // host-stable string identity for arbitrary-precision values
+}
+
+pub fn structural_object_fingerprint(obj: &CanonicalStructuralObject) -> Hash16;
+
+pub struct CanonicalStructuralObject {
+    pub members: Vec<CanonicalStructuralMember>,
+    pub index_signatures: Vec<CanonicalIndexSignature>,
+    pub call_signatures: Vec<CanonicalSignatureKey>,     // R14 C2: PRESERVE source order (overload order is meaning-affecting)
+    pub construct_signatures: Vec<CanonicalSignatureKey>, // R14 C2: PRESERVE source order
+}
+
+pub struct CanonicalSignatureKey {
+    pub overload_ordinal: u16,                          // R14: explicit index in declaration order
+    pub origin: SignatureOrigin,
+    pub parameter_variance_policy: ParameterVariancePolicy,
+    pub type_parameters: Vec<(TypeParameterId, Option<CanonicalSubstitutionValueKey>)>,
+    pub parameters: Vec<CanonicalParameterKey>,
+    pub return_type: CanonicalSubstitutionValueKey,
+}
+```
+
+`CanonicalizationError::ConflictingBindings` maps to `QueryErrorDto::UnstableState { attempts: 0 }`. Fixtures:
+- `cycle_id_propagates_canonicalization_conflicts.rs`
+- `recursive_generic_cycle_distinguishes_type_arguments.rs` (`Box<string>` vs `Box<number>` produces distinct `cycle_id`)
+- `substitution_canonicalization_distinguishes_nested_generic_arguments.rs`
+- `structural_object_fingerprint_overload_order_matters.rs`
+- `structural_object_fingerprint_signature_parameter_type_matters.rs`
+
+Guards: `literal_value_key_is_independent_of_wire_string_table` (property-test: `LiteralValueKey::String(Arc::from("hello"))` produces consistent hashes across distinct `SemanticTypeGraph` payload instantiations), `structural_object_fingerprint_is_member_sensitive`. `CanonicalSubstitutionValueKey` is the single carrier — `SubstitutionConcrete` is retired (R13 C2). Sweep `SubstitutionValueKey` (without "Canonical" prefix) replaced consistently (R14 CX2).
+
+### A.11 ProgramAnalysisGraph + FlowNarrowing + ContextualType
+
+Per R7 P2-2 — `FlowNarrowing` and `ContextualType` move OUT of `TypeNode` into a sibling `ProgramAnalysisGraph` carrier on `TypeInfoGraphPayload`. `TypeNode` carries only type values (R7 guard `type_node_contains_only_type_values`):
+
+```rust
+pub struct TypeInfoGraphPayload {
+    pub graph: SemanticTypeGraph,
+    pub program_analysis: Option<ProgramAnalysisGraph>,
+    pub diagnostics: Vec<TypeInfoDiagnostic>,
+    pub diagnostic_directives: Vec<DiagnosticDirective>,
+}
+
+pub struct ProgramAnalysisGraph {
+    pub flow_narrowings: Vec<FlowNarrowing>,
+    pub contextual_types: Vec<ContextualType>,
+}
+```
+
+`ProgramAnalysisGraph` is populated only when the request's closure is `GraphClosurePolicy::ProjectionRequired { projection: FlowNarrowing | ContextualType }`. Guard `program_analysis_graph_gated_by_projection_required`.
+
+Proto messages (R13 C5):
+
+```protobuf
+message FlowNarrowing {
+  uint32 base = 1;
+  uint32 narrowed = 2;
+  NarrowingCause cause = 3;
+  SpanRef span = 4;
+}
+
+message NarrowingCause {
+  oneof kind {
+    TypeofGuard typeof_guard = 1;
+    InGuard in_guard = 2;
+    InstanceofGuard instanceof_guard = 3;
+    EqualityGuard equality_guard = 4;
+    TruthinessGuard truthiness_guard = 5;
+    UserPredicate user_predicate = 6;
+    AssertionEffectCause assertion_effect = 7;
+    AssignmentFlow assignment_flow = 8;
+    OptionalChainNullish optional_chain_nullish = 9;
+    DiscriminantUnion discriminant_union = 10;
+  }
+}
+
+message TypeofGuard           { PrimitiveKind target = 1; bool negated = 2; }
+message InGuard               { uint32 property = 1; bool negated = 2; }
+message InstanceofGuard       { uint32 ctor = 1; bool negated = 2; }
+message EqualityGuard         { uint32 against = 1; EqualityKind kind = 2; }
+message TruthinessGuard       { bool negated = 1; }
+message UserPredicate         { uint32 signature = 1; bool negated = 2; }
+message AssertionEffectCause  { uint32 signature = 1; }
+message AssignmentFlow        { uint32 new_type = 1; }
+message OptionalChainNullish  {}
+message DiscriminantUnion     { uint32 discriminant = 1; uint32 selected = 2; }
+
+message ContextualType {
+  uint32 contextual = 1;
+  ContextPosition target_position = 2;
+  repeated TypeParameterBinding inference_bindings = 3;
+}
+
+message ContextPosition {
+  oneof kind {
+    JsxAttributePos jsx_attribute = 1;
+    CallArgumentPos call_argument = 2;
+    ObjectLiteralPropertyPos object_literal_property = 3;
+    ArrayLiteralElementPos array_literal_element = 4;
+    ReturnExpressionPos return_expression = 5;
+  }
+}
+
+message JsxAttributePos {}
+message CallArgumentPos             { uint32 idx = 1; }
+message ObjectLiteralPropertyPos    { uint32 name = 1; }
+message ArrayLiteralElementPos      { uint32 idx = 1; }
+message ReturnExpressionPos {}
+```
+
+`SpanRef` and `TypeParameterBinding` are imported from `verter/v1/common.proto` (R14 CX4). TS API methods (R12 C2 Option A): both `evaluateFlowNarrowingAt(...)` and `evaluateContextualTypeAt(...)` return `Promise<AuditedResult<TypeInfoGraphPayload, TypeInfoRequestError>>`. The payload includes both `graph: SemanticTypeGraph` and `program_analysis: Option<ProgramAnalysisGraph>`. SDK consumers resolve `TypeNodeId`s through `payload.graph.nodes`.
+
+### A.12 ExactOpenGeneric — Warm-Cacheable
+
+```rust
+pub enum ExpansionStatus {
+    ExactResolved,
+    ExactSymbolic { reason: SymbolicPreservationReason },
+    ExactOpenGeneric { blockers: Vec<Blocker>, faithful: bool },    // R7-EXT P1-2: warm-cacheable
+    Partial { diagnostics: Vec<TypeInfoDiagnostic> },
+    BudgetExceeded { kind: BudgetKind },
+    UnstableState,
+    Unsupported { construct: UnsupportedConstruct },
+    Opaque { error: QueryErrorDto },
+}
+```
+
+`ExactResolved`, `ExactSymbolic`, `ExactOpenGeneric` are warm-admissible to the publication fence (R7-EXT 5-gate contract). Others route to `DegradedResultStore`. Guard `popover_slot_props_unresolved_warm_admits_as_exact_open_generic`. `VariantId::ExactOpenGeneric` is a SINGLE arm (R11 C3) — the `faithful: bool` discriminator is content within the variant, not a separate `VariantId`.
+
+### A.13 SDK Parser — `@verter/typeinfo/parse`
+
+Per R7-EXT P1-3 — SDK-side text-to-`StructuredTypeExpression` parser. NOT the resolver. Producer of typed DTOs only. R9 CX4 — return both versions for compatibility check:
+
+```ts
+export interface ParseStructuredTypeExpressionRequest {
+  typeText: string;
+  scopeCanonical: string;
+  extraImports?: ImportSpec[];
+  schemaVersion: number;
+}
+
+export interface ParseStructuredTypeExpressionResult {
+  expression: StructuredTypeExpression | null;
+  diagnostics: ParseDiagnostic[];
+  producerSchemaVersion: number;       // R9 CX4: SDK's compiled-in schema version
+  requiredSchemaVersion: number;       // R9 CX4: minimum version emitted DTO requires
+}
+
+export type ParseDiagnosticCode =
+  | "syntax_error"
+  | "unsupported_construct"
+  | "schema_version_skew"
+  | "unknown_identifier"
+  | "invalid_reference";
+
+export interface ParseDiagnostic {
+  message: string;
+  span: { start: number; end: number };
+  severity: "Error" | "Warning";
+  code: ParseDiagnosticCode;
+}
+
+export function parseStructuredTypeExpression(
+  request: ParseStructuredTypeExpressionRequest,
+): ParseStructuredTypeExpressionResult;
+
+export function assertStructuredTypeExpressionCompatible(
+  expression: StructuredTypeExpression,
+  negotiatedSchemaVersion: number,
+): { ok: true } | { ok: false; error: SchemaVersionSkewError };
+// Compat check: requiredSchemaVersion <= negotiatedSchemaVersion
+```
+
+Guards: `parser_lives_in_sdk_not_resolver` (static scan of `verter_session::typeinfo::*` for parser calls — must be zero), `sdk_parser_result_carries_schema_version`. Fixtures: `sdk_parser_round_trips_via_evaluate.rs`, `sdk_parser_schema_version_skew_reports_warning.rs`. Example call (R7 CX3) at §5.7:
+
+```ts
+const payload = await session.evaluateTypeExpressionGraph({
+  expression: parsed.expression,
+  scopeCanonical: request.scopeCanonical,
+  context: { mode: "expanded", demand: "published" },
+  closure: { kind: "expanded", nodeBudget: 4096, depthBudget: 64 },
+  displayPolicy: { preserveAliasIdentity: true, expandIndexedAccess: "ifPathPrecise", conditionalBranchDisplay: "selected", truncateUnion: null },
+  schemaVersion: SESSION_SCHEMA_VERSION,
+});
+```
+
+### A.14 .proto as Single Wire Source of Truth
+
+Per R7-EXT P2-1 — `.proto` at `crates/verter_protocol/proto/verter/v1/typeinfo.proto` is the SINGLE wire source of truth. Rust DTOs at `crates/verter_protocol/src/typeinfo/generated/*.rs` are GENERATED by `prost-build` (per `build.rs`). TypeScript DTOs at `packages/typeinfo/src/generated/graph.generated.ts` are GENERATED by `protoc-gen-ts` (or equivalent `ts-proto`) from `.proto`, NOT from Rust struct via `ts-rs`. `ts-rs` annotations for typeinfo wire-payload path are removed — they may persist only for non-wire types (audit records, internal carriers). §5.1 wording: "Wire DTOs are generated directly from proto; ts-rs is not used for typeinfo wire payloads." (R11 CX1). Guards: `wire_dtos_generated_only_from_proto` (file header includes `// @generated-do-not-edit`), `ts_rs_not_applied_to_wire_dtos` (static scan: zero `#[ts(...)]` attributes on wire DTOs), `proto_closed_enums_declared_not_raw_uint32` (R9 C3), `proto_no_duplicate_enum_declarations` (R10 C3).
+
+### A.15 FrameworkAdapterRegistry — Open Identity + Closed Surfaces
+
+Per R7-EXT P1-1 (§6.4 of the plan):
+
+```rust
+pub struct FrameworkAdapterRegistry {
+    descriptors: BTreeMap<FrameworkAdapterId, FrameworkAdapterDescriptor>,
+}
+
+impl FrameworkAdapterRegistry {
+    pub fn register(&mut self, wire: FrameworkAdapterDescriptorWire) -> Result<(), RegistryError> {
+        // R7 C2 Option A — validate RAW wire discriminants BEFORE typed conversion
+        for raw in &wire.supported_surface_discriminants {
+            FrameworkSurfaceKind::try_from_discriminant(*raw)
+                .ok_or(RegistryError::UnknownSurfaceKindDiscriminant { wire_value: *raw })?;
+        }
+        // ... typed conversion ...
+        Ok(())
+    }
+}
+
+pub enum RegistryError {
+    DuplicateAdapter { id: FrameworkAdapterId },
+    UnknownSurfaceKindDiscriminant { wire_value: u32 },
+    CaseAlias { canonical: FrameworkAdapterId, attempted: String },
+}
+```
+
+Guard `framework_adapter_registry_rejects_unknown_surface_kind_discriminant`. Fixture submits a wire descriptor with `wire_value: 9999`, asserts `RegistryError::UnknownSurfaceKindDiscriminant`.
+
+### A.16 TS API — Typed Errors via AuditedResult
+
+Per R11 CX3 — every public `TypeInfoSession` method returns `Promise<AuditedResult<T, TypeInfoRequestError>>`:
+
+```ts
+export interface TypeInfoSession {
+  listSymbols(canonicalId: string): SymbolEntry[];
+  resolveSymbolGraph(req: ResolveSymbolGraphRequest): Promise<AuditedResult<TypeInfoGraphPayload, TypeInfoRequestError>>;
+  evaluateTypeExpressionGraph(req: EvaluateTypeExpressionGraphRequest): Promise<AuditedResult<TypeInfoGraphPayload, TypeInfoRequestError>>;
+  projectPathGraph(req: ProjectPathGraphRequest): Promise<AuditedResult<TypeInfoGraphPayload, TypeInfoRequestError>>;
+  relate(req: RelateRequest): Promise<AuditedResult<RelationPayload, TypeInfoRequestError>>;
+  evaluateFlowNarrowingAt(req: FlowNarrowingRequest): Promise<AuditedResult<TypeInfoGraphPayload, TypeInfoRequestError>>;
+  evaluateContextualTypeAt(req: ContextualTypeRequest): Promise<AuditedResult<TypeInfoGraphPayload, TypeInfoRequestError>>;
+  expandGraphAround(req: ExpandGraphAroundRequest): Promise<AuditedResult<TypeInfoGraphPayload, TypeInfoRequestError>>;
+  frameworkSurface(req: FrameworkSurfaceRequest): Promise<AuditedResult<FrameworkSurfacePayload, TypeInfoRequestError>>;
+}
+```
+
+Matches native `_with_audit` API at §5.3. SDK consumers can mechanically switch on `result.value.kind === "ok"` vs `"err"` and discriminate `TypeInfoRequestError` variants.
+
+### A.17 §10 Audit Carrier — TypeInfoGraphPayloadAudit Field List
+
+```rust
+pub struct TypeInfoGraphPayloadAudit {
+    // existing fields ...
+    pub program_analysis_emitted: bool,             // R7 CX1
+    pub exactness_exact_open_generic: u32,          // R7 CX1 — count of ExactOpenGeneric variants in payload
+    pub schema_skew_miss_count: u32,                // R9 CX1 — count of SchemaSkewMiss degradations
+    // ... (other exactness counters)
+}
+
+pub enum DegradationReasonTag {
+    BudgetExceeded,
+    UnstableState,
+    Unsupported,
+    Miss,
+    Partial,
+    Cycle,
+    SchemaSkewMiss,                                  // R9 CX1
+}
+
+pub enum StructuredAuditEvent {
+    TypeInfoGraphPublished { layer: AuditLayerName, audit: TypeInfoGraphPayloadAudit },
+    TypeInfoGraphDegraded  { layer: AuditLayerName, audit: TypeInfoGraphPayloadAudit, reason: DegradationReasonTag },
+    // ... existing variants
+}
+```
+
+§10.1 audit pseudocode dispatches on `GetOrComputeOutcome`:
+- `ColdPublish(payload)` → emit `TypeInfoGraphPublished { layer, audit }`.
+- `WarmHit(payload)` → emit `TypeInfoGraphPublished { layer, audit }` (audit reflects warm-hit metadata).
+- `Degraded { error, partial }` → emit `TypeInfoGraphDegraded { layer, audit, reason: classify_error(&error) }`.
+
+Per R9 — drop the side-channel `audit_tag: "SchemaSkewMiss"` string; use the typed `DegradationReasonTag::SchemaSkewMiss` instead.
+
+### A.18 §0.5 / §0.6 Disposition Rows — Visibility / Phase / Drift
+
+- `crates/verter_session/src/semantic_query_memo/inflight.rs:226` → EXTEND visibility of `MAX_INFLIGHT_RETRIES` from `pub(super) const` to `pub(crate) const` so the new `TypeInfoSession`-owned `CompletionFence` adapter at `crates/verter_session/src/typeinfo/completion_fence.rs` can consume the canonical constant. Guard `completion_fence_uses_max_inflight_retries_constant` requires this visibility. Phase 0b/1.
+- `crates/verter_session/src/.../semantic_query.rs:833` (line drift from R4 cite: was `:826`) — `with_fact_tracer` pattern unchanged.
+
+### A.19 §7 Projections — Cycle Row Consumes Resolved Payload (No Native Call)
+
+Per R14 CX1 — §7.1 (Zod) and §7.2 (JSON Schema) projections consume the RESOLVED `Cycle { cycle_id }` and `Opaque(UnstableState)` nodes — they do NOT call `cycle_id(...)` from TS:
+
+- `Cycle { cycle_id }` → emit `z.lazy(() => memo.get(cycle_id))` (Zod) / `{ "$ref": "#/$defs/" + cycle_id }` (JSON Schema).
+- `Opaque(QueryErrorDto::UnstableState { attempts })` → emit `z.unknown()` with diagnostic `unstableCycle` (Zod) / `{}` with same diagnostic (JSON Schema).
+
+Normative mapping tables live IN §7 (R10 C5) — references to a non-existent "prior draft" are eliminated.
+
+### A.20 Phase Plan — Phase 4 Deletes Descriptor Bridge
+
+Per R5 C1 Option A — `descriptor-to-native.ts` / `native-to-descriptor.ts` are deleted in Phase 4. Phase 3 implements `@verter/typeinfo/projections/type-descriptor` BEFORE migrating consumers; Phase 4 deletes the legacy bridge files. R3 CL3 phase mis-cite at §8.4 line 2058 ("Phase 2") → "Phase 4". §8.1 Phase 0a step 9 adds:
+
+```
+9. Add crates/verter_audit/src/structured_event.rs:
+   - StructuredAuditEvent::TypeInfoGraphPublished { layer, audit }
+   - StructuredAuditEvent::TypeInfoGraphDegraded { layer, audit, reason }
+   - pub enum DegradationReasonTag { BudgetExceeded, UnstableState, Unsupported, Miss, Partial, Cycle, SchemaSkewMiss }
+```
+
+`RetentionGate` field type at §4.1.1 → `parking_lot::RwLock<()>` (matching `component_meta_caches.rs:2714` pattern).
+
+§8.2 step 2b (R11 C2): proto `Signature` adds `SignatureOrigin origin` and `ParameterVariancePolicy parameter_variance_policy` (closed proto enum types, NOT `uint32`).
+
+### A.21 Declaration-Merging Fixtures (R7 CX7)
+
+Added to §9.5 + §8.2 fixture list:
+- `class_namespace_merge_preserves_three_spaces.rs` (class + namespace)
+- `enum_namespace_merge_preserves_value_namespace.rs` (enum + namespace)
+
+### A.22 Phase Archaeology Sweep (R8 C4 + R9 C4 + R10 C5)
+
+PART A (final-state architecture sections §1-§7, §10-§14) contains NONE of: `formerly`, `moved`, `migration`, `replaces prior`, `retired carrier`, `NO LONGER`, `Effective version N`, `Revision N`, `previously`, `prior draft`, `from the prior draft`, `per the prior draft`, `retired`, `prior wire schemas`, `legacy boundary`, `deleted in Phase 0b/1` (when not in §8 phase plan). PART B (implementation playbook: §0, §0.5, §0.6, §0.7, §8, §9, §13) may reference phases.
+
+Specific line corrections applied:
+- §3.1 — strip "Revision-9 cleanup: prior duplicated carrier..." comment; replace with neutral "diagnostic_directives lives at the payload envelope level (not inside SemanticTypeGraph) because directives are span-scoped pragmas, not type-graph state."
+- §3.2.1 / §3.2.10 — strip "NO LONGER", "moved", "Effective version 8" residuals.
+- §5.1 — replace "ts-rs annotations are RETIRED" with "Wire DTOs are generated directly from proto; ts-rs is not used for typeinfo wire payloads."
+- §3.2 / §6.1 — strip `unimplemented!()` body from production-shaped snippets; replace with exhaustive match sketch or explicit pseudocode marker comment.
+
+### A.23 Final Invariants Table — Additions
+
+Append to §14 final invariants:
+
+| Invariant | Guard | Phase added |
+|---|---|---|
+| `StructuredTypeExpression` is exactly 22 closed arms | `structured_type_expression_dispatch_table_complete` | 0a |
+| `StructuredTypeExpression` dispatch consumes every proto field | `structured_type_expression_dispatch_table_field_coverage` | 0b/1 |
+| `cycle_id` is substitution-aware | `cycle_id_propagates_canonicalization_conflicts` | 0b/1 |
+| `LiteralValueKey` is host-stable (not wire `InternedName`) | `literal_value_key_is_independent_of_wire_string_table` | 0a |
+| Overload order preserved in `structural_object_fingerprint` | `structural_object_fingerprint_is_member_sensitive` | 0b/1 |
+| TS API methods return `AuditedResult<T, E>` | `ts_api_methods_return_audited_result` | 3 |
+| Diagnostics live payload-only | `diagnostics_only_on_typeinfo_graph_payload` | 0a |
+| `TypeNode` carries only type values | `type_node_contains_only_type_values` | 0a |
+| `ProgramAnalysisGraph` gated by projection-required closure | `program_analysis_graph_gated_by_projection_required` | 0b/1 |
+| Closed proto enums declared (not `uint32`) | `proto_closed_enums_declared_not_raw_uint32` | 0a |
+| No duplicate proto enum declarations | `proto_no_duplicate_enum_declarations` | 0a |
+| `KNOWN_VARIANTS_AT_VERSION` is cumulative exhaustive | `known_variants_at_version_rows_are_cumulative_exact_sets` | 0a |
+| Downgrade encoder checks `target_version` | `downgrade_encoder_never_emits_variant_unknown_to_target_version` | 0b/1 |
+| Server-advertised versions all have encoders | `server_supported_versions_have_encoders` | 0b/1 |
+| SDK parser carries `producerSchemaVersion` + `requiredSchemaVersion` | `sdk_parser_result_carries_schema_version` | 3 |
+| SDK parser lives outside the resolver | `parser_lives_in_sdk_not_resolver` | 3 |
+| `FrameworkAdapterId` accepts open canonical ids | `framework_surface_request_accepts_open_adapter_id` | 0a |
+| `FrameworkAdapterId::canonicalize` rejects case aliases | `framework_adapter_id_canonicalization_rejects_case_alias` | 0b/1 |
+| Framework adapter registry rejects unknown surface-kind discriminants | `framework_adapter_registry_rejects_unknown_surface_kind_discriminant` | 0b/1 |
+| Constructor variance is `Bivariant` regardless of `strictFunctionTypes` | `constructor_bivariance_exception_under_strict_function_types` | 0b/1 |
+| Method variance is `Bivariant` regardless of `strictFunctionTypes` | `method_vs_function_property_variance_under_strict_function_types` | 0b/1 |
+| `RelationFailureReason` priority is deterministic | `relation_failure_reason_priority_is_stable` | 0b/1 |
+| PART A carries no phase archaeology | `part_a_carries_no_phase_archaeology` | 0a |
+| `CompletionFence` consumes canonical `MAX_INFLIGHT_RETRIES` | `completion_fence_uses_max_inflight_retries_constant` | 0b/1 |
+| Wire DTOs generated only from proto | `wire_dtos_generated_only_from_proto` | 0a |
+| `ts-rs` not applied to wire DTOs | `ts_rs_not_applied_to_wire_dtos` | 0a |
+| `TypeInfoRequestError` shape uniform across plan + Rust + TS | `typeinfo_request_error_union_is_consistent_across_sections` | 0a |
+| `UnknownSchemaVersion` shape uniform across plan | `unknown_schema_version_shape_uniform_across_plan` | 0a |
+| Every public typeinfo request DTO carries `schemaVersion` | `every_typeinfo_request_carries_schema_version` | 0a |
+| `known_variants_table` regenerated from proto | `known_variants_table_matches_proto_at_version` | CI |
+
+### A.24 Production-Ready Bar (Unchanged Across Rounds)
+
+- Every phase lands code callable in production, audited, exercised by un-`#[ignore]`'d tests with discriminating assertions.
+- Cache layers fully validated on warm hits. Bundled `project_config_hash` FORBIDDEN. Five env-hash dimensions on every cache key or wrapper.
+- Every fallback path needs a named, observable, audited precondition.
+- Audit observability first-class per phase.
+- Performance contract: per-cold-path single materialisation; concurrent cold collapse; warm-cache reentry tests per phase.
+- Documentation in OWNING skill in the same change.
+- Long-horizon goal: gradually replace TypeScript itself. The TS-completeness commitments (binder identity, occurrence-local NoInfer, optional semantics, JSX first-class, method/constructor bivariance, this-params, type predicates, assertion functions, callable object overload order, ExactOpenGeneric warm-cacheable) directly serve this trajectory.
+
+---
+
+End of Rounds 3-15 Commitments Compendium.
+
+---
+
+End of Verter TypeInfo Semantic Graph Plan — Revision 17.
