@@ -2550,7 +2550,21 @@ resolved_source_name: string,
  * `true` when the resolution traversed an augmenter
  * surface; `false` for a bare native route.
  */
-augmented: boolean, } } | { "Custom": { 
+augmented: boolean, } } | { "CompileModeDowngrade": { 
+/**
+ * The cache mode the caller requested.
+ */
+requested: CompileCacheModeTag, 
+/**
+ * The cache mode the runtime actually ran under.
+ */
+actual: CompileCacheModeTag, 
+/**
+ * Every triggering reason, in priority order. Preserved in full
+ * for telemetry even though the public single-reason projection
+ * keeps only the first.
+ */
+reasons: Array<DowngradeReasonTag>, } } | { "Custom": { 
 /**
  * Short identifier for the event kind.
  */

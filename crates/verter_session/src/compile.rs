@@ -528,6 +528,9 @@ mod tests {
             tsx: None,
             tsc: None,
             template_data: None,
+            requested_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
+            actual_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
+            downgrade_reason: None,
         }
     }
 
@@ -586,6 +589,9 @@ mod tests {
             tsx: None,
             tsc: None,
             template_data: None,
+            requested_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
+            actual_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
+            downgrade_reason: None,
         };
         let profile = CompileProfile::default();
         let result = assemble_main_module("Comp.vue", &compiled, &FileMeta::default(), &profile);
@@ -611,6 +617,9 @@ mod tests {
             tsx: None,
             tsc: None,
             template_data: None,
+            requested_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
+            actual_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
+            downgrade_reason: None,
         };
         let profile = CompileProfile::default();
         let meta = FileMeta {
@@ -681,6 +690,9 @@ mod tests {
             tsx: None,
             tsc: None,
             template_data: None,
+            requested_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
+            actual_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
+            downgrade_reason: None,
         };
         let meta = FileMeta {
             style_langs: vec![None, Some("scss".to_string())],

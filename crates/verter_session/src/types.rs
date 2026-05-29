@@ -1351,6 +1351,16 @@ pub struct VirtualFileResponse {
     pub diagnostics: DiagnosticsSnapshot,
     /// Block-specific metadata (scope ID, block type, index).
     pub meta: VirtualMeta,
+    /// The compile cache mode the caller requested for this compile.
+    pub requested_mode: CompileCacheMode,
+    /// The compile cache mode the runtime actually ran under. Equals
+    /// `requested_mode` unless an explicit `Content` request downgraded
+    /// to `Stateless` (see [`DowngradeReason`]).
+    pub actual_mode: CompileCacheMode,
+    /// The highest-priority reason the requested mode was constrained,
+    /// or `None` when no reason fired. Populated for both `Session`
+    /// (telemetry) and `Content` (downgrade cause) requests.
+    pub downgrade_reason: Option<DowngradeReason>,
 }
 
 /// Input to [`VerterHost::upsert`](crate::VerterHost::upsert).

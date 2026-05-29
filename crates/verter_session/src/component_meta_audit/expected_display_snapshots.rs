@@ -93,6 +93,9 @@ pub const EXPECTED_EXPORT_ROUTE_RESOLVED_AUGMENTED: &str =
 pub const EXPECTED_EXPORT_ROUTE_RESOLVED_PLAIN: &str =
     "ExportRouteResolved(/w/providers/index.ts::Foo -> /w/lib.ts::Foo, augmented=false)";
 
+pub const EXPECTED_COMPILE_MODE_DOWNGRADE: &str =
+    "CompileModeDowngrade(Content -> Stateless, reasons=[HasMacroTypeDeps])";
+
 // ──────────────────────────────────────────────────────────────────
 // Fixture constructors — exactly one canonical instance per variant.
 // The DISPLAY_SNAPSHOTS table pairs each fixture with its expected
@@ -422,6 +425,14 @@ pub fn fixture_export_route_resolved_plain() -> Event {
     }
 }
 
+pub fn fixture_compile_mode_downgrade() -> Event {
+    Event::CompileModeDowngrade {
+        requested: verter_audit::payloads::tags::CompileCacheModeTag::Content,
+        actual: verter_audit::payloads::tags::CompileCacheModeTag::Stateless,
+        reasons: vec![verter_audit::payloads::tags::DowngradeReasonTag::HasMacroTypeDeps],
+    }
+}
+
 /// Pair each fixture with its expected Display string. The
 /// `structured_event_display_snapshot_byte_exact_for_every_variant`
 /// test iterates this table, and the companion `all_variants_covered`
@@ -543,6 +554,10 @@ pub fn all_snapshots() -> Vec<(Event, &'static str)> {
             fixture_export_route_resolved_plain(),
             EXPECTED_EXPORT_ROUTE_RESOLVED_PLAIN,
         ),
+        (
+            fixture_compile_mode_downgrade(),
+            EXPECTED_COMPILE_MODE_DOWNGRADE,
+        ),
     ]
 }
 
@@ -601,6 +616,7 @@ mod tests {
             | Event::FactRegistryWrite { .. }
             | Event::FactValidationSummary { .. }
             | Event::ExportRouteResolved { .. }
+            | Event::CompileModeDowngrade { .. }
             | Event::Custom { .. } => (),
         };
 
@@ -638,6 +654,7 @@ mod tests {
             "FactRegistryWrite",
             "FactValidationSummary",
             "ExportRouteResolved",
+            "CompileModeDowngrade",
         ];
         let covered: Vec<&'static str> = all_snapshots()
             .iter()
@@ -678,6 +695,7 @@ mod tests {
                 Event::FactRegistryWrite { .. } => "FactRegistryWrite",
                 Event::FactValidationSummary { .. } => "FactValidationSummary",
                 Event::ExportRouteResolved { .. } => "ExportRouteResolved",
+                Event::CompileModeDowngrade { .. } => "CompileModeDowngrade",
             })
             .collect();
         for v in expected_variants.iter() {

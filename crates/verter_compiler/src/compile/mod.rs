@@ -1386,6 +1386,14 @@ fn compile_inner(
         tsx: tsx_block,
         tsc: tsc_block,
         template_data: extracted_template_data,
+        // The compiler is cache-mode agnostic — it produces output for a
+        // single direct invocation. The host's cache routing wraps this
+        // call; a bare `compile()` reports the default Session mode with
+        // no downgrade. Host-side cache-routed paths set the public
+        // result fields from their own classification.
+        requested_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
+        actual_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
+        downgrade_reason: None,
     }
 }
 

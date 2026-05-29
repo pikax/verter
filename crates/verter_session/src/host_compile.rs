@@ -47,7 +47,8 @@ use verter_scheduler::stage::Priority;
 
 use crate::hash::hash_16;
 use crate::types::{
-    CompileProfile, FileKind, HostError, HostSeverity, UpsertRequest, VirtualNodeKind, VirtualQuery,
+    CompileCacheMode, CompileProfile, DowngradeReason, FileKind, HostError, HostSeverity,
+    UpsertRequest, VirtualNodeKind, VirtualQuery,
 };
 use crate::VerterHost;
 
@@ -64,6 +65,10 @@ pub(crate) const PANIC_INJECT_SENTINEL: &str = "/__phase09b_panic_inject__.vue";
 pub struct CompileBatchInput {
     pub canonical_id: String,
     pub source: Arc<str>,
+    /// Caller-requested compile cache mode for this input. `None`
+    /// inherits the batch default ([`CompileBatchOptions::default_mode`]),
+    /// which in turn defaults to [`CompileCacheMode::Session`].
+    pub requested_mode: Option<CompileCacheMode>,
 }
 
 /// Result for a single original input position. `cache_hit` is `true`
@@ -77,6 +82,15 @@ pub struct CompileBatchEntry {
     pub errors: Vec<String>,
     pub duration_ms: f64,
     pub cache_hit: bool,
+    /// The compile cache mode the caller requested for this input.
+    pub requested_mode: CompileCacheMode,
+    /// The compile cache mode the runtime actually ran under (equals
+    /// `requested_mode` unless an explicit `Content` request downgraded
+    /// to `Stateless`).
+    pub actual_mode: CompileCacheMode,
+    /// The highest-priority reason the requested mode was constrained,
+    /// or `None` when no reason fired.
+    pub downgrade_reason: Option<DowngradeReason>,
 }
 
 /// Caller-configurable batch options.
@@ -90,6 +104,10 @@ pub struct CompileBatchEntry {
 pub struct CompileBatchOptions {
     pub threads: Option<usize>,
     pub priority: Option<Priority>,
+    /// Default compile cache mode applied to inputs whose
+    /// [`CompileBatchInput::requested_mode`] is `None`. `None` resolves
+    /// to [`CompileCacheMode::Session`] (the host default).
+    pub default_mode: Option<CompileCacheMode>,
 }
 
 /// Bundler-default compile profile: production codegen, no SSR, no
@@ -128,6 +146,9 @@ impl VerterHost {
 
         let profile = compile_profile_for_bundler();
         let priority = options.priority.unwrap_or(Priority::Background);
+        // Batch default cache mode; a per-input `requested_mode` overrides
+        // it. `None` on both resolves to the host default `Session`.
+        let default_mode = options.default_mode.unwrap_or(CompileCacheMode::Session);
 
         // Build a local Rayon pool with an 8 MiB worker stack. The
         // local pool is ALWAYS built — None / Some(0) resolves to
@@ -213,7 +234,7 @@ impl VerterHost {
                 .par_iter()
                 .map(|input| {
                     let pre_err = group_errors.get(&input.canonical_id).cloned();
-                    let entry = self.compile_one_in_batch(input, &profile, pre_err);
+                    let entry = self.compile_one_in_batch(input, &profile, default_mode, pre_err);
                     (input.canonical_id.clone(), entry)
                 })
                 .collect()
@@ -229,6 +250,9 @@ impl VerterHost {
             .iter()
             .map(|input| {
                 if let Some(err) = group_errors.get(&input.canonical_id) {
+                    // Stage B failed before compile, so the request never
+                    // ran: report the requested mode unchanged, no reason.
+                    let requested = input.requested_mode.unwrap_or(default_mode);
                     return CompileBatchEntry {
                         canonical_id: input.canonical_id.clone(),
                         code: Arc::from(""),
@@ -236,6 +260,9 @@ impl VerterHost {
                         errors: vec![err.clone()],
                         duration_ms: 0.0,
                         cache_hit: false,
+                        requested_mode: requested,
+                        actual_mode: requested,
+                        downgrade_reason: None,
                     };
                 }
                 compiled
@@ -294,6 +321,7 @@ impl VerterHost {
         &self,
         input: &CompileBatchInput,
         profile: &CompileProfile,
+        default_mode: CompileCacheMode,
         precomputed_error: Option<String>,
     ) -> CompileBatchEntry {
         // Test-only: increment the call counter at the VERY TOP of the
@@ -307,6 +335,14 @@ impl VerterHost {
 
         let start = Instant::now();
 
+        // Effective requested mode for this input, and the per-input
+        // profile that carries it into `get_virtual_file`.
+        let requested_mode = input.requested_mode.unwrap_or(default_mode);
+        let per_input_profile = CompileProfile {
+            requested_mode,
+            ..profile.clone()
+        };
+
         if let Some(err) = precomputed_error {
             return CompileBatchEntry {
                 canonical_id: input.canonical_id.clone(),
@@ -315,13 +351,16 @@ impl VerterHost {
                 errors: vec![err],
                 duration_ms: start.elapsed().as_secs_f64() * 1000.0,
                 cache_hit: false,
+                requested_mode,
+                actual_mode: requested_mode,
+                downgrade_reason: None,
             };
         }
 
         // Probe warm state BEFORE the compile call so the result
         // reflects pre-call state (the get_virtual_file call below
         // populates the slot on a cold miss).
-        let was_warm = self.compile_slot_is_warm(&input.canonical_id, profile);
+        let was_warm = self.compile_slot_is_warm(&input.canonical_id, &per_input_profile);
 
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
             // Test-only panic injection inside the production
@@ -336,7 +375,7 @@ impl VerterHost {
                 raw_id: None,
                 canonical_id: Some(input.canonical_id.clone()),
                 node_kind: Some(VirtualNodeKind::Main),
-                compile_profile: profile.clone(),
+                compile_profile: per_input_profile.clone(),
             })
         }));
 
@@ -352,6 +391,9 @@ impl VerterHost {
                     .filter(|d| d.severity == HostSeverity::Error)
                     .map(|d| d.message.clone())
                     .collect();
+                // The actual mode + downgrade reason are authoritative on
+                // the response (set at classification time inside
+                // `get_virtual_file`).
                 CompileBatchEntry {
                     canonical_id: input.canonical_id.clone(),
                     code: response.code,
@@ -359,6 +401,9 @@ impl VerterHost {
                     errors,
                     duration_ms,
                     cache_hit: was_warm,
+                    requested_mode: response.requested_mode,
+                    actual_mode: response.actual_mode,
+                    downgrade_reason: response.downgrade_reason,
                 }
             }
             // CRITICAL: HostError::CompileError carries a
@@ -385,6 +430,9 @@ impl VerterHost {
                     errors,
                     duration_ms,
                     cache_hit: false,
+                    requested_mode,
+                    actual_mode: requested_mode,
+                    downgrade_reason: None,
                 }
             }
             Ok(Err(host_err)) => CompileBatchEntry {
@@ -394,6 +442,9 @@ impl VerterHost {
                 errors: vec![format!("{id_prefix}host error: {host_err}")],
                 duration_ms,
                 cache_hit: false,
+                requested_mode,
+                actual_mode: requested_mode,
+                downgrade_reason: None,
             },
             Err(panic_payload) => CompileBatchEntry {
                 canonical_id: input.canonical_id.clone(),
@@ -405,6 +456,9 @@ impl VerterHost {
                 )],
                 duration_ms,
                 cache_hit: false,
+                requested_mode,
+                actual_mode: requested_mode,
+                downgrade_reason: None,
             },
         }
     }

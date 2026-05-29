@@ -306,6 +306,16 @@ pub struct VerterCompileResult {
     pub tsc: Option<VerterTsxBlock>,
     /// Raw template data for cross-file analysis. Present when `extract_template_data` is true.
     pub template_data: Option<super::template_data::RawTemplateData>,
+    /// The compile cache mode the caller requested. Carried as the
+    /// audit-leaf tag type so this struct stays decoupled from the
+    /// session-layer `CompileCacheMode` enum (the host maps its enum to
+    /// this tag when constructing the result).
+    pub requested_mode: verter_audit::payloads::tags::CompileCacheModeTag,
+    /// The compile cache mode the runtime actually ran under.
+    pub actual_mode: verter_audit::payloads::tags::CompileCacheModeTag,
+    /// The highest-priority reason the requested mode was constrained,
+    /// or `None` when no reason fired.
+    pub downgrade_reason: Option<verter_audit::payloads::tags::DowngradeReasonTag>,
 }
 
 /// Generated output for the `<script>` or `<script setup>` block.

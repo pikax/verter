@@ -1260,6 +1260,9 @@ fn virtual_file_arc_to_string() {
             style_index: Some(2),
             custom_index: None,
         },
+        requested_mode: host::CompileCacheMode::Session,
+        actual_mode: host::CompileCacheMode::Session,
+        downgrade_reason: None,
     };
     let ffi = host_virtual_file_to_ffi(response, Some(source));
     assert_eq!(ffi.id, "Comp.vue._VERTER_.script.ts");
@@ -1295,6 +1298,9 @@ fn host_virtual_file_to_ffi_uses_utf16_conversion_for_embedded_diagnostics() {
             has_errors: true,
         },
         meta: host::VirtualMeta::default(),
+        requested_mode: host::CompileCacheMode::Session,
+        actual_mode: host::CompileCacheMode::Session,
+        downgrade_reason: None,
     };
 
     let ffi = host_virtual_file_to_ffi(response, Some(source));
@@ -1313,6 +1319,9 @@ fn virtual_file_no_source_map() {
         stale: false,
         diagnostics: host::DiagnosticsSnapshot::default(),
         meta: host::VirtualMeta::default(),
+        requested_mode: host::CompileCacheMode::Session,
+        actual_mode: host::CompileCacheMode::Session,
+        downgrade_reason: None,
     };
     let ffi = host_virtual_file_to_ffi(response, Some("source"));
     assert!(ffi.source_map.is_none());

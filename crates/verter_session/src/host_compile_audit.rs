@@ -117,6 +117,9 @@ impl VerterHost {
                     tsx: None,
                     tsc: None,
                     template_data: None,
+                    requested_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
+                    actual_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
+                    downgrade_reason: None,
                 };
                 empty
                     .errors

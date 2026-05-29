@@ -50,8 +50,8 @@ use crate::origin_graph::{
 };
 use crate::payloads::cache_outcomes::CacheOutcomeKind;
 use crate::payloads::tags::{
-    AdmissionRefusalReason, AugmentationTargetKindTag, FactKeyKindTag, FactLaneTag,
-    FileArtifactCacheAction,
+    AdmissionRefusalReason, AugmentationTargetKindTag, CompileCacheModeTag, DowngradeReasonTag,
+    FactKeyKindTag, FactLaneTag, FileArtifactCacheAction,
 };
 use crate::record::{u64_as_decimal_string, Hash16};
 
@@ -526,6 +526,22 @@ pub enum StructuredAuditEvent {
         /// surface; `false` for a bare native route.
         augmented: bool,
     },
+    /// A compile request's actual cache mode differs from the requested
+    /// mode. Emitted at most once per compile request, at classification
+    /// time, when `actual != requested`. Under the mode fold this is
+    /// exactly a `Content -> Stateless` downgrade (a `Content` request
+    /// hit a cross-file / session-scoped / IDE-shape reason and floored
+    /// to `Stateless`); `Session` and `Stateless` never change mode.
+    CompileModeDowngrade {
+        /// The cache mode the caller requested.
+        requested: CompileCacheModeTag,
+        /// The cache mode the runtime actually ran under.
+        actual: CompileCacheModeTag,
+        /// Every triggering reason, in priority order. Preserved in full
+        /// for telemetry even though the public single-reason projection
+        /// keeps only the first.
+        reasons: Vec<DowngradeReasonTag>,
+    },
     /// Escape hatch for ad-hoc events. Every construction site MUST
     /// carry a `// Custom justified: <reason>` comment.
     Custom {
@@ -767,6 +783,14 @@ impl std::fmt::Display for StructuredAuditEvent {
             } => write!(
                 f,
                 "ExportRouteResolved({provider_canonical}::{exported_name} -> {resolved_canonical}::{resolved_source_name}, augmented={augmented})"
+            ),
+            Self::CompileModeDowngrade {
+                requested,
+                actual,
+                reasons,
+            } => write!(
+                f,
+                "CompileModeDowngrade({requested:?} -> {actual:?}, reasons={reasons:?})"
             ),
             Self::Custom { name, detail } => write!(f, "Custom({name}, {detail})"),
         }

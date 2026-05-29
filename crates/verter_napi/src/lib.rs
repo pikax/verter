@@ -2086,6 +2086,7 @@ impl NapiVerterHost {
                 Ok(host_compile::CompileBatchInput {
                     canonical_id: f.canonicalId,
                     source: std::sync::Arc::from(buffer_to_string(f.source)?),
+                    requested_mode: None,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -2095,6 +2096,7 @@ impl NapiVerterHost {
                 host_compile::CompileBatchOptions {
                     threads: opts.threads.map(|n| n as usize),
                     priority,
+                    default_mode: None,
                 },
             )
         }))?;

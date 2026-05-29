@@ -42,6 +42,7 @@ fn ok_input(canonical_id: &str, source: &str) -> CompileBatchInput {
     CompileBatchInput {
         canonical_id: canonical_id.to_string(),
         source: Arc::from(source),
+        requested_mode: None,
     }
 }
 
@@ -286,6 +287,7 @@ fn compile_many_with_zero_inputs() {
             // short-circuit happens BEFORE pool construction.
             threads: Some(8),
             priority: None,
+            default_mode: None,
         },
     );
     assert!(
@@ -353,6 +355,7 @@ fn compile_many_propagates_interactive_priority() {
         CompileBatchOptions {
             threads: None,
             priority: Some(Priority::Interactive),
+            default_mode: None,
         },
     );
     assert_eq!(
@@ -371,6 +374,7 @@ fn compile_many_propagates_interactive_priority() {
         CompileBatchOptions {
             threads: None,
             priority: Some(Priority::Background),
+            default_mode: None,
         },
     );
     assert_eq!(
@@ -394,6 +398,7 @@ fn compile_many_priority_default_is_background() {
         CompileBatchOptions {
             threads: None,
             priority: None,
+            default_mode: None,
         },
     );
     assert_eq!(
@@ -465,6 +470,7 @@ fn compile_many_default_pool_has_8mib_stack() {
         CompileBatchOptions {
             threads: None, // default: available_parallelism, NOT 0/global pool
             priority: None,
+            default_mode: None,
         },
     );
     assert_eq!(entries.len(), 1);

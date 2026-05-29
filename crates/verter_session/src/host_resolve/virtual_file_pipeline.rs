@@ -796,6 +796,11 @@ impl VerterHost {
                     }
 
                     if let Some(found) = hit.outputs.get(&node_kind) {
+                        // A warm hit means the request was served for its
+                        // requested mode (Session always hits the session
+                        // node; Content only hits PureContent when it was
+                        // published as Content, i.e. no reason fired), so
+                        // actual == requested and no downgrade reason.
                         return Ok(VirtualFileResponse {
                             id: render_single_id(&canonical_id, &node_kind, &hit_meta, raw_was_lsp),
                             code: found.code.clone(),
@@ -804,6 +809,9 @@ impl VerterHost {
                             stale: false,
                             diagnostics: hit.diagnostics.clone(),
                             meta: found.meta.clone(),
+                            requested_mode,
+                            actual_mode: requested_mode,
+                            downgrade_reason: None,
                         });
                     }
                 }
@@ -928,6 +936,27 @@ impl VerterHost {
             },
         );
         let actual_mode = classification.actual_mode;
+        let downgrade_reason = classification.first_downgrade_reason();
+
+        // Emit the downgrade audit event at classification time, at most
+        // once per compile request, only when the actual mode differs
+        // from the requested mode (under the mode fold this is exactly a
+        // `Content -> Stateless` downgrade). The full ordered reason set
+        // is preserved on the event for telemetry even though the public
+        // single-reason projection keeps only the first.
+        if actual_mode != classification.requested_mode {
+            crate::host_manage::push_structured_event(
+                crate::component_meta_audit::StructuredAuditEvent::CompileModeDowngrade {
+                    requested: classification.requested_mode.into(),
+                    actual: actual_mode.into(),
+                    reasons: classification
+                        .downgrade_reasons
+                        .iter()
+                        .map(|r| (*r).into())
+                        .collect(),
+                },
+            );
+        }
 
         // Cold-compute prefetch: resolve + index the cross-file
         // dependency surface before compiling so the compile pass sees
@@ -1188,6 +1217,9 @@ impl VerterHost {
             stale,
             diagnostics,
             meta: found.meta.clone(),
+            requested_mode: classification.requested_mode,
+            actual_mode,
+            downgrade_reason,
         })
     }
 
