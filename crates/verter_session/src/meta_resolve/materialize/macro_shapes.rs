@@ -1133,12 +1133,9 @@ pub(crate) fn synthesize_define_props_shape_from_known_surface_with_authority(
 
     let mac = snapshot.macros.get(macro_index)?;
     let allow_known_surface_shortcuts = !define_props_has_direct_local_root(mac);
-    // Read the matching macro's prop member set through the
-    // `ResolvedMacroSurface` enum rather than the direct `.props`
-    // field. The eager arm returns `ResolvedMacroMeta.props` verbatim
-    // so this gate is bit-identical to the pre-migration
-    // `!resolved.props.is_empty()` filter; the surface seam is what
-    // lets the lazy-imported arm reconstruct the member set on demand.
+    // Gate the known-surface shortcut on the matching macro having a non-empty
+    // prop member set, read from the typeinfo Vue surface (`vue_macro_dtos`,
+    // FullMetadata) — the sole props authority.
     let resolved_macro = if allow_known_surface_shortcuts {
         // The prop member set is the typeinfo Vue surface (`vue_macro_dtos`,
         // FullMetadata) -- the sole props authority -- keyed on
@@ -1445,13 +1442,9 @@ pub(crate) fn synthesize_define_emits_shape_from_known_surface(
         ));
     }
 
-    // Read the matching macro's emit member set through the
-    // `ResolvedMacroSurface` enum. The eager arm returns
-    // `ResolvedMacroMeta.emits` verbatim, so this gate is bit-identical
-    // to the pre-migration `!resolved.emits.is_empty()` filter. The
-    // lazy-imported arm reconstructs the emit set — including
-    // call-signature event names extracted from the resolved surface's
-    // call signatures (NOT from `keyof`).
+    // Gate on the matching macro having a non-empty emit member set, read from
+    // the typeinfo Vue surface — including call-signature event names extracted
+    // from the surface's call signatures (NOT from `keyof`).
     // The emit member set is the typeinfo Vue surface (`vue_macro_dtos`,
     // FullMetadata) -- the sole emits authority, including call-signature event
     // extraction + payload first-param strip -- keyed on
@@ -1557,13 +1550,9 @@ pub(crate) fn synthesize_define_slots_shape_from_known_surface(
         ExpandedObjectShape, ExpandedProperty, ExpansionResult,
     };
 
-    // Read the matching macro's slot member set through the
-    // `ResolvedMacroSurface` enum. The eager arm returns
-    // `ResolvedMacroMeta.slots` verbatim, so this gate is bit-identical
-    // to the pre-migration `!resolved.slots.is_empty()` filter. The
-    // lazy-imported arm reconstructs the slot set — filtering
-    // non-function members and extracting bindings / return shape from
-    // function-like members.
+    // Gate on the matching macro having a non-empty slot member set, read from
+    // the typeinfo Vue surface — filtering non-function members and extracting
+    // bindings / return shape from function-like members.
     // The slot member set is the typeinfo Vue surface (`vue_macro_dtos`,
     // FullMetadata) -- the sole slots authority (function-like members +
     // first-param binding extraction) -- keyed on
