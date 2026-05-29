@@ -857,6 +857,53 @@ fn member_jsdoc_tag_spans_slice_to_exact_tag_tokens() {
     );
 }
 
+#[test]
+fn member_jsdoc_tag_text_span_recovers_multi_line_continuation() {
+    let host = make_host_with_footprint();
+    upsert_ts(&host, FILE, SHALLOW_SURFACE_FACTS);
+
+    let surface = host
+        .resolve_shallow_surface(FILE, "DocumentedSurface")
+        .expect("DocumentedSurface must resolve");
+
+    // `multiLineTag` carries a `@deprecated` whose description CONTINUES onto a
+    // second line. The tag text span(s) must cover the WHOLE continuation, not
+    // just the first line — pre-fix `jsdoc_block_spans` recorded only the first
+    // tag line and dropped the continuation.
+    let multi = member(&surface, "multiLineTag");
+    let tag = multi
+        .jsdoc_tag_spans
+        .iter()
+        .find(|t| slice(SHALLOW_SURFACE_FACTS, &t.name_span, FILE) == "deprecated")
+        .expect("`multiLineTag` must carry a `@deprecated` tag");
+    let text_span = tag
+        .text_span
+        .as_ref()
+        .expect("the multi-line `@deprecated` tag carries text");
+    let text = slice(SHALLOW_SURFACE_FACTS, text_span, FILE);
+
+    // DISCRIMINATING: the first line is always present; the SECOND line is only
+    // recovered once continuation lines extend the tag text span. Pre-fix the
+    // span stopped at the end of line 1, so `it will be removed` was absent.
+    assert!(
+        text.contains("use the replacement API instead;"),
+        "tag text span must cover the first tag line; got {text:?}"
+    );
+    assert!(
+        text.contains("it will be removed in the next major release."),
+        "tag text span must cover the CONTINUATION line — a span that stops at line 1 proves the \
+         multi-line continuation was dropped; got {text:?}"
+    );
+
+    // The continuation must NOT swallow the closing `*/` delimiter or the next
+    // member declaration (the span ends at the last continuation content).
+    assert!(
+        !text.contains("*/") && !text.contains("multiLineTag"),
+        "tag text span must end at the last continuation content, not run into the block \
+         delimiter or the member declaration; got {text:?}"
+    );
+}
+
 // NOTE on the prepared-member append path (`build.rs`
 // `backfill_member_index_surface`, the codex#2 P1 / Claude P2-b front): the
 // overlay's APPEND branch (which copies each `PreparedMember`'s `spans` +

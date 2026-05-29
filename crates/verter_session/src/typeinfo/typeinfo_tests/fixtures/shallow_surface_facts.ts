@@ -79,6 +79,12 @@ export interface DocumentedSurface {
    * @deprecated use somethingElse
    */
   tagged: number;
+  /**
+   * a field with a multi-line tag description.
+   * @deprecated use the replacement API instead;
+   * it will be removed in the next major release.
+   */
+  multiLineTag: string;
   undocumented: boolean;
 }
 

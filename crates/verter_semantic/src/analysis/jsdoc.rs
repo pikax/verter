@@ -503,10 +503,22 @@ fn jsdoc_block_spans(source: &str, block_start: usize, block_end: usize) -> Jsdo
                     name: verter_span::Span::new(name_start as u32, name_end as u32),
                     text,
                 });
-            } else if !in_tags {
-                // Description line (only while no tag has started; lines after
-                // the first tag belong to that tag's text, handled above by the
-                // per-line span — multi-line tag text is left to the consumer).
+            } else if in_tags {
+                // A non-`@` line AFTER a tag has started is a CONTINUATION of the
+                // most-recent tag's text (`@deprecated use X;\n more detail`).
+                // Extend that tag's text span through this continuation line's
+                // content so the full multi-line tag text is reconstructable from
+                // the single span (a bare tag gains its first continuation line as
+                // its text). Spans-only — no owned `String`.
+                if let Some(last) = tags.last_mut() {
+                    last.text = Some(match last.text {
+                        Some(existing) => verter_span::Span::new(existing.start, e as u32),
+                        None => verter_span::Span::new(s as u32, e as u32),
+                    });
+                }
+            } else {
+                // Description line (only while no tag has started; lines after the
+                // first tag are handled by the continuation branch above).
                 if description_start.is_none() {
                     description_start = Some(s);
                 }
@@ -817,6 +829,42 @@ mod tests {
             typedefs.is_empty(),
             "a payload-less `@typedef Foo` must not be registered as an alias; got {typedefs:?}"
         );
+    }
+
+    #[test]
+    fn jsdoc_block_spans_extend_tag_text_through_continuation_lines() {
+        use super::jsdoc_block_spans_at_offset;
+        // `@deprecated` text continues onto a second line; the tag's text span
+        // must cover BOTH lines (pre-fix it stopped at line 1). The description
+        // span must still stop before the first tag.
+        let source = "/**\n * a description line.\n * @deprecated first line of reason\n * second \
+                      line of reason\n */\nexport const target = 1;\n";
+        let target_start = source.find("target").expect("target name present") as u32;
+        let spans = jsdoc_block_spans_at_offset(source, target_start)
+            .expect("the JSDoc block governing `target` must produce spans");
+
+        assert_eq!(spans.tags.len(), 1, "exactly one `@deprecated` tag");
+        let tag = &spans.tags[0];
+        assert_eq!(
+            &source[tag.name.start as usize..tag.name.end as usize],
+            "deprecated"
+        );
+        let text_span = tag.text.expect("the `@deprecated` tag carries text");
+        let text = &source[text_span.start as usize..text_span.end as usize];
+        assert!(
+            text.contains("first line of reason"),
+            "tag text span must cover the first line; got {text:?}"
+        );
+        assert!(
+            text.contains("second line of reason"),
+            "tag text span must cover the CONTINUATION line — a span stopping at line 1 proves the \
+             continuation was dropped; got {text:?}"
+        );
+
+        // The description span must NOT swallow the tag.
+        let desc = spans.description.expect("description span present");
+        let desc_text = &source[desc.start as usize..desc.end as usize];
+        assert_eq!(desc_text, "a description line.");
     }
 
     #[test]
