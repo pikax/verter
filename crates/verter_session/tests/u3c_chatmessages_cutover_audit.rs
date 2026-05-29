@@ -20,9 +20,13 @@
 //!   `resolved_external_type_cache_negative_misses == 0` — no external OXC
 //!   frontier/reparse loop (the deleted `project_imported_macro_surfaces`
 //!   reparse hang source).
-//! - `expanded_instantiate_calls <= CHAT_MESSAGES_EXPANDED_INSTANTIATE_CEILING`
-//!   — the bounded residual Expanded work (the canonical owner surface), pinned
-//!   to the minimal value the corrected path produces.
+//! - `expanded_instantiate_calls == CHAT_MESSAGES_EXPANDED_INSTANTIATE_VALUE`
+//!   — the deterministic residual Expanded work (the canonical owner surface),
+//!   asserted EXACTLY (data over a `<=` heuristic).
+//! - Dependency-read / probe BREADTH: every `declared_dependency_files` entry is
+//!   an extension / index candidate of one of the SFC's own relative-import
+//!   roots (`CHAT_MESSAGES_DECLARED_DEPENDENCY_ROOTS`) — a per-entry structural
+//!   check that polices the "Do not walk unrelated imports" rule.
 //! - `indexed_ready_builds` for the audited request contains ONLY the owner
 //!   `/ChatMessages.vue` — no dependency IndexedReady is built (the imports are
 //!   unresolvable in the hermetic setup, and nothing forces an eager dep build).
@@ -55,12 +59,30 @@ const CHAT_MESSAGES_VUE: &str =
 /// materialisation (or an equivalent eager reduction) regressed back in.
 const CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING: u64 = 0;
 
-/// Ceiling for the request-wide `expanded_instantiate_calls` — the bounded
-/// residual Expanded work the corrected path produces resolving the canonical
-/// owner surface (NOT the deleted eager imported-macro-surface materialisation).
-/// Pinned to the minimal value the corrected path actually produces; a higher
-/// observation means new eager expansion crept in.
-const CHAT_MESSAGES_EXPANDED_INSTANTIATE_CEILING: u64 = 3;
+/// The EXACT request-wide `expanded_instantiate_calls` — the bounded residual
+/// Expanded work the corrected path produces resolving the canonical owner
+/// surface (NOT the deleted eager imported-macro-surface materialisation). This
+/// is deterministic for the fixture, so the gate asserts equality (data over a
+/// `<=` heuristic): a higher value means new eager expansion crept in; a lower
+/// value means the residual owner expansion changed and the gate is re-derived.
+const CHAT_MESSAGES_EXPANDED_INSTANTIATE_VALUE: u64 = 3;
+
+/// The declared-dependency ROOTS the audited ChatMessages resolve is allowed to
+/// touch — the SFC's own RELATIVE import targets plus the owner. Every
+/// `declared_dependency_files` entry must be an extension / index candidate of
+/// one of these roots; an entry outside this set is a BREADTH-WALK into an
+/// unrelated import (the CLAUDE.md "Do not walk unrelated imports" rule). The
+/// SFC's PACKAGE imports (`vue`, `ai`, `reka-ui`, `@vueuse/core`, `#build/*`,
+/// `#imports`, …) are unresolvable in the hermetic setup and produce NO
+/// extension-candidate probes, so they are correctly absent here.
+const CHAT_MESSAGES_DECLARED_DEPENDENCY_ROOTS: &[&str] = &[
+    "/ChatMessages.vue",
+    "/ChatMessage.vue",
+    "/Button.vue",
+    "/composables/useComponentUI",
+    "/types",
+    "/utils",
+];
 
 #[test]
 fn chatmessages_cutover_audit_has_no_eager_materialization_or_frontier_loop() {
@@ -88,16 +110,48 @@ fn chatmessages_cutover_audit_has_no_eager_materialization_or_frontier_loop() {
         CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING,
     );
 
-    // Bounded total Expanded work (the residual canonical-owner expansion).
-    assert!(
-        payload.expanded_instantiate_calls <= CHAT_MESSAGES_EXPANDED_INSTANTIATE_CEILING,
-        "ChatMessages cutover gate: expanded_instantiate_calls ({}) must stay \
-         <= {} — a higher value means new eager expansion crept in",
-        payload.expanded_instantiate_calls,
-        CHAT_MESSAGES_EXPANDED_INSTANTIATE_CEILING,
+    // Total Expanded work (the residual canonical-owner expansion) is
+    // DETERMINISTIC for this fixture — assert the EXACT value (data over
+    // heuristics). A higher value means new eager expansion crept in; a LOWER
+    // value means the residual owner expansion changed shape and the gate must
+    // be re-derived deliberately.
+    assert_eq!(
+        payload.expanded_instantiate_calls, CHAT_MESSAGES_EXPANDED_INSTANTIATE_VALUE,
+        "ChatMessages cutover gate: expanded_instantiate_calls ({}) must equal the \
+         committed value {} — a higher value means new eager expansion crept in",
+        payload.expanded_instantiate_calls, CHAT_MESSAGES_EXPANDED_INSTANTIATE_VALUE,
     );
 
     let fp = footprint_of(&record);
+
+    // Dependency-read / probe BREADTH gate: every declared dependency the
+    // request touched must be an extension / index candidate of one of the
+    // SFC's OWN declared relative-import roots (or the owner). An entry outside
+    // that set is a breadth-walk into an unrelated import — the CLAUDE.md macro
+    // traversal rule ("Do not walk unrelated imports"). This is a STRUCTURAL
+    // per-entry check (entry root ∈ declared roots), not a count threshold.
+    let is_candidate_of_declared_root = |entry: &str| -> bool {
+        CHAT_MESSAGES_DECLARED_DEPENDENCY_ROOTS.iter().any(|root| {
+            entry == *root
+                // `root.ext` (e.g. `/types.d.ts`) or `root/sub` (e.g.
+                // `/types/index.ts`, `/types/tv`) — but NOT `/typesX`.
+                || entry.strip_prefix(root).is_some_and(|rest| {
+                    rest.starts_with('.') || rest.starts_with('/')
+                })
+        })
+    };
+    let unrelated: Vec<String> = fp
+        .declared_dependency_files()
+        .into_iter()
+        .filter(|entry| !is_candidate_of_declared_root(entry.as_ref()))
+        .map(|entry| entry.as_ref().to_string())
+        .collect();
+    assert!(
+        unrelated.is_empty(),
+        "ChatMessages cutover gate: every declared dependency must be a candidate \
+         of one of the SFC's own relative-import roots {CHAT_MESSAGES_DECLARED_DEPENDENCY_ROOTS:?} \
+         — these entries are unrelated-import breadth-walks: {unrelated:?}",
+    );
 
     // No eager imported-macro-surface projection (that rail is deleted).
     assert_eq!(
