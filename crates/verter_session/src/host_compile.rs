@@ -19,9 +19,10 @@
 //!    existing public `upsert` does) at the caller-configured priority
 //!    and wait for all to commit.
 //! 3. **Stage C — compile each unique canonical group exactly once.**
-//!    Probe [`VerterHost::compile_slot_is_warm`], then call
-//!    [`VerterHost::get_virtual_file`] for `Main` inside
-//!    `std::panic::catch_unwind`. Read/process-once invariant: same
+//!    Call [`VerterHost::get_virtual_file`] for `Main` inside
+//!    `std::panic::catch_unwind`. The cache-hit determination and mode
+//!    metadata come back on the response, decided at the single
+//!    classification site. Read/process-once invariant: same
 //!    canonical+profile is never compiled twice within one batch even
 //!    if the input list contains duplicates.
 //! 4. **Stage D — fan out.** For each original input position, look up
@@ -72,8 +73,9 @@ pub struct CompileBatchInput {
 }
 
 /// Result for a single original input position. `cache_hit` is `true`
-/// iff the slot was already warm in `compile_cache` before this call
-/// (probed via [`VerterHost::compile_slot_is_warm`]).
+/// iff this input was served from a warm cache slot (the fact-validated
+/// session slot OR the content-addressed store), as decided by the
+/// single mode classifier and surfaced on the compile response.
 #[derive(Clone)]
 pub struct CompileBatchEntry {
     pub canonical_id: String,
@@ -381,11 +383,6 @@ impl VerterHost {
             };
         }
 
-        // Probe warm state BEFORE the compile call so the result
-        // reflects pre-call state (the get_virtual_file call below
-        // populates the slot on a cold miss).
-        let was_warm = self.compile_slot_is_warm(&input.canonical_id, &per_input_profile);
-
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
             // Test-only panic injection inside the production
             // `catch_unwind` boundary — same code path as a real
@@ -415,16 +412,16 @@ impl VerterHost {
                     .filter(|d| d.severity == HostSeverity::Error)
                     .map(|d| d.message.clone())
                     .collect();
-                // The actual mode + downgrade reason are authoritative on
-                // the response (set at classification time inside
-                // `get_virtual_file`).
+                // The cache-hit determination, actual mode, and downgrade
+                // reason are all authoritative on the response (decided at
+                // the single classification site inside `get_virtual_file`).
                 CompileBatchEntry {
                     canonical_id: input.canonical_id.clone(),
                     code: response.code,
                     source_map: response.source_map,
                     errors,
                     duration_ms,
-                    cache_hit: was_warm,
+                    cache_hit: response.cache_hit,
                     requested_mode: response.requested_mode,
                     actual_mode: response.actual_mode,
                     downgrade_reason: response.downgrade_reason,
@@ -437,8 +434,16 @@ impl VerterHost {
             // the variant explicitly so all error-severity diagnostics
             // reach `errors: Vec<String>`. Tested by
             // `compile_many_compile_error_preserves_all_diagnostics`.
-            Ok(Err(HostError::CompileError { diagnostics })) => {
-                let mut errors: Vec<String> = diagnostics
+            //
+            // The compile-failure payload also carries the mode metadata
+            // decided at classification time. A compile that errored after
+            // a downgrade (e.g. a `Content` request floored to `Stateless`)
+            // must report the mode it actually ran under, not the requested
+            // mode — so the error entry mirrors the success entry's mode
+            // surface instead of resetting to the request.
+            Ok(Err(HostError::CompileError(failure))) => {
+                let mut errors: Vec<String> = failure
+                    .diagnostics
                     .diagnostics
                     .iter()
                     .filter(|d| d.severity == HostSeverity::Error)
@@ -454,9 +459,9 @@ impl VerterHost {
                     errors,
                     duration_ms,
                     cache_hit: false,
-                    requested_mode,
-                    actual_mode: requested_mode,
-                    downgrade_reason: None,
+                    requested_mode: failure.requested_mode,
+                    actual_mode: failure.actual_mode,
+                    downgrade_reason: failure.downgrade_reason,
                 }
             }
             Ok(Err(host_err)) => CompileBatchEntry {

@@ -1358,6 +1358,10 @@ pub struct VirtualFileResponse {
     pub diagnostics: DiagnosticsSnapshot,
     /// Block-specific metadata (scope ID, block type, index).
     pub meta: VirtualMeta,
+    /// `true` iff this response was served from a warm cache slot
+    /// (the fact-validated session slot OR the content-addressed
+    /// store), `false` for a cold compute or last-known-good fallback.
+    pub cache_hit: bool,
     /// The compile cache mode the caller requested for this compile.
     pub requested_mode: CompileCacheMode,
     /// The compile cache mode the runtime actually ran under. Equals
@@ -1519,6 +1523,27 @@ impl DiagnosticsSnapshot {
     }
 }
 
+/// The payload of a failed compile attempt.
+///
+/// Carries the error diagnostics together with the mode metadata that
+/// was already decided by the single mode classifier before the compile
+/// ran. The error arm of a batch compile reads these so an errored
+/// entry reports the true cache mode the runtime ran under (e.g. a
+/// `Content` request that downgraded to `Stateless`) instead of echoing
+/// the requested mode.
+#[derive(Debug, Clone)]
+pub struct CompileFailure {
+    /// All diagnostics (errors and warnings) emitted by the failed compile.
+    pub diagnostics: DiagnosticsSnapshot,
+    /// The compile cache mode the caller requested.
+    pub requested_mode: CompileCacheMode,
+    /// The compile cache mode the runtime actually ran under.
+    pub actual_mode: CompileCacheMode,
+    /// The highest-priority reason the requested mode was constrained,
+    /// or `None` when no reason fired.
+    pub downgrade_reason: Option<DowngradeReason>,
+}
+
 /// Errors returned by [`VerterHost`](crate::VerterHost) operations.
 #[derive(Debug, Error)]
 pub enum HostError {
@@ -1531,9 +1556,10 @@ pub enum HostError {
     /// The requested virtual node does not exist for this file.
     #[error("missing virtual node for id '{canonical_id}'")]
     MissingVirtualNode { canonical_id: String },
-    /// Compilation failed. Contains the error diagnostics.
+    /// Compilation failed. Carries the error diagnostics plus the mode
+    /// metadata decided at classification time.
     #[error("compile error")]
-    CompileError { diagnostics: DiagnosticsSnapshot },
+    CompileError(CompileFailure),
     /// A scheduler error occurred.
     #[error("scheduler error: {0}")]
     Scheduler(#[from] verter_scheduler::job::SchedulerError),

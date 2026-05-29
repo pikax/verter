@@ -912,6 +912,7 @@ impl VerterHost {
                             stale: false,
                             diagnostics: hit.diagnostics.clone(),
                             meta: found.meta.clone(),
+                            cache_hit: true,
                             requested_mode,
                             actual_mode,
                             downgrade_reason: classification.first_downgrade_reason(),
@@ -1075,10 +1076,20 @@ impl VerterHost {
                         if let Some(last_good) = fallback_last_good.clone() {
                             (last_good, diagnostics, true, None, None)
                         } else {
-                            return Err(HostError::CompileError { diagnostics });
+                            return Err(HostError::CompileError(CompileFailure {
+                                diagnostics,
+                                requested_mode: classification.requested_mode,
+                                actual_mode,
+                                downgrade_reason,
+                            }));
                         }
                     } else {
-                        return Err(HostError::CompileError { diagnostics });
+                        return Err(HostError::CompileError(CompileFailure {
+                            diagnostics,
+                            requested_mode: classification.requested_mode,
+                            actual_mode,
+                            downgrade_reason,
+                        }));
                     }
                 }
             };
@@ -1258,6 +1269,7 @@ impl VerterHost {
             stale,
             diagnostics,
             meta: found.meta.clone(),
+            cache_hit: false,
             requested_mode: classification.requested_mode,
             actual_mode,
             downgrade_reason,

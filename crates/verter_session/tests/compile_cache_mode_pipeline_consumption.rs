@@ -310,3 +310,118 @@ fn compile_many_honors_per_input_requested_mode() {
     assert!(!results[0].code.is_empty());
     assert!(!results[1].code.is_empty());
 }
+
+/// A `compile_many` Content warm hit must report `cache_hit == true` on
+/// the second call. The first call cold-compiles and publishes a
+/// content-addressed entry (`cache_hit == false`); the second call
+/// serves that entry and must surface the warm-hit determination from
+/// the single classification site through `VirtualFileResponse`.
+///
+/// Discriminates: a tree that derives `cache_hit` from the session-slot
+/// probe alone cannot see the content-addressed entry, so the second
+/// Content call reports `cache_hit == false`. Sourcing `cache_hit` from
+/// the response makes it `true`.
+#[test]
+fn compile_many_content_warm_hit_reports_cache_hit() {
+    let host = prod_host();
+    // A fact-free SFC: a Content request stays Content under a production
+    // config, so the content-addressed warm-hit path is the one exercised.
+    let src = "<script setup lang=\"ts\">const n = 1</script>\
+         <template><div>{{ n }}</div></template>";
+    let source: Arc<str> = Arc::from(src);
+
+    let inputs = || {
+        vec![CompileBatchInput {
+            canonical_id: "/W.vue".to_string(),
+            source: source.clone(),
+            requested_mode: Some(CompileCacheMode::Content),
+        }]
+    };
+
+    let first = host.compile_many(inputs(), CompileBatchOptions::default());
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        first[0].actual_mode,
+        CompileCacheMode::Content,
+        "a fact-free Content request must run as Content under a production config"
+    );
+    assert!(
+        first[0].downgrade_reason.is_none(),
+        "no reason fires for a fact-free Content compile"
+    );
+    assert!(
+        !first[0].cache_hit,
+        "the first Content compile is a cold miss"
+    );
+
+    let second = host.compile_many(inputs(), CompileBatchOptions::default());
+    assert_eq!(second.len(), 1);
+    assert_eq!(
+        second[0].actual_mode,
+        CompileCacheMode::Content,
+        "the second Content request still classifies to Content"
+    );
+    assert!(
+        second[0].cache_hit,
+        "the second Content compile must report a content-addressed warm hit; \
+         a session-slot-only probe would report false"
+    );
+}
+
+/// A `compile_many` compile that fails AFTER a Content-to-Stateless
+/// downgrade must carry the true `actual_mode` + `downgrade_reason` on
+/// its error batch entry. The SFC declares `defineProps<Props>()` (a
+/// macro type dep → `HasMacroTypeDeps`) importing a missing module (→ a
+/// compile error). With a Content request, the classifier downgrades to
+/// `Stateless` for `HasMacroTypeDeps`, then the compile errors.
+///
+/// Discriminates: an error arm that resets to `requested_mode` / `None`
+/// reports `actual_mode == Content`, `downgrade_reason == None` — a lie,
+/// because the runtime ran `Stateless` for `HasMacroTypeDeps`. Reading
+/// the mode metadata off the compile-failure payload reports
+/// `actual_mode == Stateless`, `downgrade_reason == Some(HasMacroTypeDeps)`.
+#[test]
+fn compile_many_error_after_downgrade_reports_true_mode() {
+    let host = prod_host();
+    // `defineProps<Props>()` makes `Props` a macro type dep; the import
+    // target `./missing` is never upserted, so the compile fails with a
+    // missing-macro-type-dep error.
+    let src = "<script setup lang=\"ts\">\n\
+         import type { Props } from './missing';\n\
+         defineProps<Props>();\n\
+         </script>\n\
+         <template><div/></template>";
+    let source: Arc<str> = Arc::from(src);
+
+    let inputs = vec![CompileBatchInput {
+        canonical_id: "/E.vue".to_string(),
+        source,
+        requested_mode: Some(CompileCacheMode::Content),
+    }];
+
+    let results = host.compile_many(inputs, CompileBatchOptions::default());
+    assert_eq!(results.len(), 1);
+    let entry = &results[0];
+
+    assert!(
+        !entry.errors.is_empty(),
+        "the missing macro type dep must surface a compile error"
+    );
+    assert_eq!(
+        entry.requested_mode,
+        CompileCacheMode::Content,
+        "the requested mode is still Content on the error entry"
+    );
+    assert_eq!(
+        entry.actual_mode,
+        CompileCacheMode::Stateless,
+        "a Content request that fires HasMacroTypeDeps runs as Stateless; \
+         the error entry must report the true actual mode, not the requested one"
+    );
+    assert_eq!(
+        entry.downgrade_reason,
+        Some(DowngradeReason::HasMacroTypeDeps),
+        "the error entry must carry the real downgrade reason, not None"
+    );
+    assert!(!entry.cache_hit, "an errored compile is never a warm hit");
+}

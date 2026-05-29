@@ -80,7 +80,7 @@ fn compile_main_error(host: &VerterHost, canonical_id: &str) -> crate::Diagnosti
         node_kind: Some(VirtualNodeKind::Main),
         compile_profile: profile(),
     }) {
-        Err(HostError::CompileError { diagnostics }) => diagnostics,
+        Err(HostError::CompileError(failure)) => failure.diagnostics,
         Err(other) => panic!("expected compile error, got {other:?}"),
         Ok(result) => panic!(
             "expected compile error, got successful response {}",

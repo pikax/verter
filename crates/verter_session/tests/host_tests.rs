@@ -270,8 +270,9 @@ fn src_policy_missing_external_source_produces_deterministic_error() {
         .unwrap_err();
 
     match err {
-        HostError::CompileError { diagnostics } => {
-            assert!(diagnostics
+        HostError::CompileError(failure) => {
+            assert!(failure
+                .diagnostics
                 .diagnostics
                 .iter()
                 .any(|d| d.code == "HOST_MISSING_EXTERNAL_SOURCE"));
@@ -2443,15 +2444,16 @@ fn cross_file_type_resolution_missing_dep_reports_compile_error() {
         .unwrap_err();
 
     match err {
-        HostError::CompileError { diagnostics } => {
+        HostError::CompileError(failure) => {
             assert!(
-                diagnostics
+                failure
+                    .diagnostics
                     .diagnostics
                     .iter()
                     .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP"
                         && d.message.contains("./missing")),
                 "expected missing macro type dependency diagnostic, got: {:?}",
-                diagnostics.diagnostics
+                failure.diagnostics.diagnostics
             );
         }
         other => panic!("expected compile error, got {other:?}"),
