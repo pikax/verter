@@ -122,13 +122,40 @@ impl VerterHost {
         // resolve against the augmenter's own canonical through the live
         // type-dependency resolver — the same authority the
         // augmentation-stitching pass uses.
-        let resolver = |augmenter_canonical: &str, specifier: &str| {
-            self.resolve_type_dependency_canonical(augmenter_canonical, specifier)
-                .map(Arc::from)
+        //
+        // Memoise the `(augmenter_canonical, specifier) → resolved`
+        // map per invocation. The walk resolves the same tuple from
+        // multiple sites: direct emission for `declare module "./X"`
+        // facts, the re-export edge walk, the augmentation-index
+        // invalidation helper, and inside
+        // `ensure_augmentation_index_populated`'s cold scan
+        // (`augmenter_matches_target` calls the resolver per
+        // candidate fact). A multi-fact augmenter that retargets the
+        // same sibling specifier multiplies these duplicate resolves
+        // without the memo. The cache is invocation-local — the
+        // resolver is closure-bound to `&self` so a global cache would
+        // need a lifetime story; per-invocation suffices because the
+        // probe runs once per `Content` request.
+        type ResolveMemo =
+            std::cell::RefCell<rustc_hash::FxHashMap<(Arc<str>, Arc<str>), Option<Arc<str>>>>;
+        let resolve_memo: ResolveMemo = std::cell::RefCell::new(rustc_hash::FxHashMap::default());
+        let memoised_resolve = |augmenter_canonical: &str, specifier: &str| -> Option<Arc<str>> {
+            let key = (
+                Arc::<str>::from(augmenter_canonical),
+                Arc::<str>::from(specifier),
+            );
+            if let Some(cached) = resolve_memo.borrow().get(&key).cloned() {
+                return cached;
+            }
+            let resolved = self
+                .resolve_type_dependency_canonical(augmenter_canonical, specifier)
+                .map(Arc::<str>::from);
+            resolve_memo.borrow_mut().insert(key, resolved.clone());
+            resolved
         };
         // Bind a shared reference so each probe passes the resolver by
         // reference without re-borrowing at every call site.
-        let resolver = &resolver;
+        let resolver = &memoised_resolve;
         let any_non_empty = |target: AugmentationTargetKind| {
             !store
                 .ensure_augmentation_index_populated(&make_key(target), resolver)
@@ -254,15 +281,13 @@ impl VerterHost {
                     continue;
                 }
                 let specifier = import.source.as_str();
-                let Some(resolved_canonical) =
-                    self.resolve_type_dependency_canonical(canonical, specifier)
-                else {
+                let Some(resolved_canonical) = resolver(canonical, specifier) else {
                     continue;
                 };
                 if resolved_canonical.is_empty() {
                     continue;
                 }
-                queue.push_back((Arc::from(resolved_canonical.as_str()), 0));
+                queue.push_back((resolved_canonical, 0));
             }
             while let Some((resolved_canonical, depth)) = queue.pop_front() {
                 if !visited.insert(Arc::clone(&resolved_canonical)) {
@@ -319,15 +344,21 @@ impl VerterHost {
                             // Resolve the augmenter's relative
                             // `declare module "./X"` against the
                             // augmenter's own canonical — same authority
-                            // `augmenter_matches_target` uses.
-                            if let Some(target_canonical) = self.resolve_type_dependency_canonical(
-                                &resolved_canonical,
-                                fact_specifier,
-                            ) {
+                            // `augmenter_matches_target` uses. Routed
+                            // through the invocation-local memo so the
+                            // same `(augmenter, specifier)` tuple
+                            // resolves at most once across the per-fact
+                            // emission, the augmentation-index
+                            // invalidation helper, and the
+                            // `ensure_augmentation_index_populated`
+                            // cold scan.
+                            if let Some(target_canonical) =
+                                resolver(&resolved_canonical, fact_specifier)
+                            {
                                 if !target_canonical.is_empty() {
                                     per_import_targets.push(
                                         AugmentationTargetKind::ResolvedRelativeCanonical(
-                                            Arc::from(target_canonical.as_str()),
+                                            target_canonical,
                                         ),
                                     );
                                 }
@@ -367,12 +398,8 @@ impl VerterHost {
                             if !wildcard.canonical_id.is_empty() {
                                 Some(Arc::from(wildcard.canonical_id.as_str()))
                             } else {
-                                self.resolve_type_dependency_canonical(
-                                    &resolved_canonical,
-                                    &wildcard.source_specifier,
-                                )
-                                .filter(|c| !c.is_empty())
-                                .map(|c| Arc::from(c.as_str()))
+                                resolver(&resolved_canonical, &wildcard.source_specifier)
+                                    .filter(|c| !c.is_empty())
                             };
                         if let Some(c) = target_canonical {
                             queue.push_back((c, depth + 1));
@@ -389,12 +416,8 @@ impl VerterHost {
                             {
                                 Some(Arc::from(cached_canonical.as_str()))
                             } else {
-                                self.resolve_type_dependency_canonical(
-                                    &resolved_canonical,
-                                    source_specifier,
-                                )
-                                .filter(|c| !c.is_empty())
-                                .map(|c| Arc::from(c.as_str()))
+                                resolver(&resolved_canonical, source_specifier)
+                                    .filter(|c| !c.is_empty())
                             };
                             if let Some(c) = target_canonical {
                                 queue.push_back((c, depth + 1));
@@ -404,6 +427,19 @@ impl VerterHost {
                 }
             }
         }
+
+        // Dedup the emitted target set before probing. A multi-fact
+        // augmenter that retargets the same external module twice
+        // (`declare module "vue" { ... } declare module "vue" { ... }`),
+        // or whose facts overlap with the owner's binding-driven
+        // probes, would otherwise probe the same `(target, env)` key
+        // multiple times. Each duplicate probe still warm-hits the
+        // augmentation_index after the first, but the dedup keeps the
+        // walk linear in distinct targets — clearer when the probe
+        // count gets reported in audit telemetry.
+        let mut seen: rustc_hash::FxHashSet<AugmentationTargetKind> =
+            rustc_hash::FxHashSet::default();
+        per_import_targets.retain(|target| seen.insert(target.clone()));
 
         // Probe every target through the (now fully materialised) store.
         // Ambient kinds apply WITHOUT a precise importer-specifier match —
