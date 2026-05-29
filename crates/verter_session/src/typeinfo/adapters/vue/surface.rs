@@ -404,17 +404,24 @@ impl VerterHost {
 ///
 /// Returns `(None, empty)` when the member carries no JSDoc spans or the
 /// declaring file's source is unavailable.
+/// Slice a [`CanonicalSpan`]'s byte range out of its file's cache-owned source
+/// (`IndexedReady.eval_source`). `None` when the file is not loaded or the byte
+/// range is out of bounds (a stale / synthetic span). This is the single
+/// source-slicing primitive the normalizers use to materialize display text
+/// from a span at the consumer boundary — it does NOT re-resolve or re-parse.
+fn slice_canonical_span(host: &VerterHost, cspan: &CanonicalSpan) -> Option<String> {
+    let indexed = host.ensure_indexed_ready(cspan.file.as_ref())?;
+    let source = Arc::clone(&indexed.eval_source);
+    let start = cspan.span.start as usize;
+    let end = cspan.span.end as usize;
+    source.get(start..end).map(|s| s.to_string())
+}
+
 fn member_jsdoc_from_spans(
     host: &VerterHost,
     member: &TypeInfoSurfaceMember,
 ) -> (Option<String>, Vec<JsdocTag>) {
-    let slice = |cspan: &CanonicalSpan| -> Option<String> {
-        let indexed = host.ensure_indexed_ready(cspan.file.as_ref())?;
-        let source = Arc::clone(&indexed.eval_source);
-        let start = cspan.span.start as usize;
-        let end = cspan.span.end as usize;
-        source.get(start..end).map(|s| s.to_string())
-    };
+    let slice = |cspan: &CanonicalSpan| -> Option<String> { slice_canonical_span(host, cspan) };
 
     let description = member
         .jsdoc_description_span
@@ -573,10 +580,13 @@ fn model_prop_fields(host: &VerterHost, macro_surface: &VueMacroSurface) -> Vec<
 ///
 /// 1. **Call-signature emits FIRST.** Each call signature's first parameter is
 ///    the event name (a `String` literal, or a `Union` of `String` literals);
-///    the payload is the call-signature function with the leading event-name
-///    parameter STRIPPED (`(e: 'change', v: number) => void` → event `change`,
-///    payload `(v: number) => void`). The event name is NEVER read from `keyof`
-///    (which would surface numeric tuple indices).
+///    the typed `payload_expr` is the call-signature function with the leading
+///    event-name parameter STRIPPED (`(e: 'change', v: number) => void` → event
+///    `change`, payload `(v: number) => void`). The event name is NEVER read
+///    from `keyof` (which would surface numeric tuple indices). The display
+///    `payload_type` (→ `rawType`, no consumer parses it) is a CONSISTENT
+///    source-span slice of the call signature as written (local + cross-file
+///    alike); `None` for a synthetic signature with no span.
 /// 2. **Property-style emits as a FALLBACK** — only when no call-signature emit
 ///    was found. Each named member is an event; its value type is the payload.
 /// 3. **De-duplicate by event name, first-writer-wins** (matching the eager
@@ -615,11 +625,24 @@ pub fn emits_from_typeinfo_surface(
         // per-signature `member_expr_scope`. Falls back to the SFC owner for a
         // signature written in the SFC's own defineEmits type argument.
         let payload_scope = macro_surface.signature_expr_scope(sig);
+        // `payload_type` (→ `rawType`) is DISPLAY-ONLY — no consumer parses it
+        // (the typed `payload_expr` carries the semantics). Render it as a
+        // CONSISTENT source-span slice of the call signature as written (the
+        // payload function's span on the surface), for both local and cross-file
+        // signatures — `render_type_expr_display` returns `None` for a function
+        // and would diverge per-shape. `None` when the signature carries no span
+        // (a synthetic / composed signature).
+        let payload_type = sig
+            .signature_span
+            .as_ref()
+            .and_then(|cspan| slice_canonical_span(host, cspan))
+            .map(|text| text.trim().trim_end_matches(';').trim_end().to_string())
+            .filter(|text| !text.is_empty());
         let mut push_event = |name: String| {
             emits.push(AnalyzedEmitField {
                 name,
                 span: verter_span::Span::default(),
-                payload_type: render_type_expr_display(&payload_fn),
+                payload_type: payload_type.clone(),
                 payload_expr: Some(payload_fn.clone()),
                 payload_expr_scope: Some(payload_scope.clone()),
                 description: None,

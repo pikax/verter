@@ -312,6 +312,73 @@ fn cross_file_emit_call_signature_payload_scope_is_base_file() {
 }
 
 // ---------------------------------------------------------------------------
+// (3c) Emit call-signature `payload_type` (display-only `rawType`) is a
+//      CONSISTENT source-span slice of the call signature — for BOTH local and
+//      cross-file signatures.
+//
+//      Discriminating: pre-fix the call-sig `payload_type` was rendered via
+//      `render_type_expr_display(&payload_fn)`, which returns `None` for a
+//      function — so `payload_type` was `None`. Post-fix it is the trimmed
+//      source slice of the signature span (e.g.
+//      `(e: 'change', value: number): void`), and the SAME slice for the
+//      cross-file case (sourced from the base file). Asserting `is_some()` +
+//      the exact source text discriminates against both the pre-fix `None` and
+//      a normalized (non-source) rendering.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn emit_call_signature_payload_type_is_consistent_source_slice() {
+    const LOCAL: &str = "/w/EmitsLocalSlice.vue";
+    let host = make_host();
+    upsert(&host, LOCAL, VUE_EMITS_CALLSIG);
+
+    let local_emits = {
+        let request = props_request(&host, LOCAL, AnalyzedMacroKind::DefineEmits);
+        let surface = host.resolve_vue_macro_surface(&request).expect("surface");
+        emits_from_typeinfo_surface(&host, &surface)
+    };
+    let change = local_emits.iter().find(|e| e.name == "change").unwrap();
+    // The display slice is the call signature's source text (trimmed of the
+    // trailing `;`). It is SOME (pre-fix it was None) and is the exact source.
+    assert_eq!(
+        change.payload_type.as_deref(),
+        Some("(e: 'change', value: number): void"),
+        "the call-sig payload_type is the trimmed source slice of the signature"
+    );
+    let select = local_emits.iter().find(|e| e.name == "select").unwrap();
+    assert_eq!(
+        select.payload_type.as_deref(),
+        Some("(e: 'select', id: string, extra: boolean): void"),
+        "each call-sig event's payload_type is its own signature's source slice"
+    );
+
+    // Cross-file: the SAME consistent source-slice behavior, sourced from the
+    // base file the signature was declared in.
+    const BASE: &str = "/w/events.ts";
+    const CROSS: &str = "/w/EmitsCrossSlice.vue";
+    upsert(&host, BASE, EMIT_BASE);
+    upsert(&host, CROSS, VUE_EMITS_IMPORTED);
+    let cross_emits = {
+        let request = props_request(&host, CROSS, AnalyzedMacroKind::DefineEmits);
+        let surface = host.resolve_vue_macro_surface(&request).expect("surface");
+        emits_from_typeinfo_surface(&host, &surface)
+    };
+    let cross_change = cross_emits.iter().find(|e| e.name == "change").unwrap();
+    assert_eq!(
+        cross_change.payload_type.as_deref(),
+        Some("(e: 'change', value: number): void"),
+        "the cross-file call-sig payload_type is a source slice from the base file (consistent)"
+    );
+    // The cross-file display is byte-identical to the local one (the same
+    // signature text was written in both fixtures) — proving consistency, not a
+    // per-shape divergence.
+    assert_eq!(
+        cross_change.payload_type, change.payload_type,
+        "local and cross-file call-sig payload_type render through the SAME source-slice path"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // (4) defineSlots normalizer — function-like members only, first-param object
 //     bindings, return preserved.
 //
