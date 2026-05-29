@@ -1002,10 +1002,36 @@ fn binding_fields_from_param_ty(
     let Some(surface) = host.navigate_param_to_object_surface(scope.as_str(), param_ty) else {
         return Vec::new();
     };
+    // Shallow-by-default Pick member publication: when the slot param is a
+    // `Pick<NamedRoot, K>` the picked members stay SYMBOLIC at the published
+    // binding surface — each binding's value is the typed indexed access
+    // `NamedRoot['member']` (built from the typed param, not reparsed) so the
+    // raw type renders as e.g. `CalendarCellTriggerProps['day']`. A consumer
+    // that wants the concrete picked member re-resolves that member path on
+    // demand. Resolving the picked member eagerly here would both violate the
+    // shallow contract and (for a cross-file picked value) collapse to
+    // `Unknown(semanticMiss)` / `None`. Other shapes (plain alias `Ref`,
+    // `Parenthesized`, direct `IndexedAccess`) keep the navigated value.
+    let pick_symbolic_root = pick_named_source_root(param_ty);
     surface
         .members
         .iter()
         .map(|member| {
+            if let Some(root) = pick_symbolic_root {
+                let symbolic = TypeExpr::IndexedAccess {
+                    object: Arc::new(root.clone()),
+                    index: Arc::new(TypeExpr::Literal(LiteralValue::String(
+                        member.name.as_ref().to_string(),
+                    ))),
+                };
+                return AnalyzedSlotFieldBinding {
+                    name: member.name.as_ref().to_string(),
+                    type_annotation: render_type_expr_display(&symbolic),
+                    binding_expr: Some(symbolic),
+                    binding_expr_scope: Some(scope.clone()),
+                    span: verter_span::Span::default(),
+                };
+            }
             let binding_expr = raise_member_value(host, member);
             let binding_expr_scope = binding_expr
                 .as_ref()
@@ -1020,6 +1046,30 @@ fn binding_fields_from_param_ty(
             }
         })
         .collect()
+}
+
+/// When `param_ty` is structurally `Pick<NamedRoot, K>` (modulo
+/// `Parenthesized` wrappers) with `NamedRoot` a nominal [`TypeExpr::Ref`],
+/// return that source-root `Ref` so a slot binding can publish each picked
+/// member as the symbolic `NamedRoot['member']` indexed access. This is a
+/// STRUCTURAL match on the typed IR — no type-text sniffing, no reparse. Any
+/// other shape (a non-`Ref` Pick source, `Omit`, a plain alias `Ref`, a direct
+/// `IndexedAccess`) returns `None` and the navigated member value is used.
+fn pick_named_source_root(param_ty: &TypeExpr) -> Option<&TypeExpr> {
+    match param_ty {
+        TypeExpr::Parenthesized(inner) => pick_named_source_root(inner),
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if name.as_ref() == "Pick" && type_arguments.len() == 2 => {
+            let mut source = &type_arguments[0];
+            while let TypeExpr::Parenthesized(inner) = source {
+                source = inner;
+            }
+            matches!(source, TypeExpr::Ref { .. }).then_some(source)
+        }
+        _ => None,
+    }
 }
 
 /// The [`TypeExprScope`] a navigated binding member's `binding_expr` binds to —
