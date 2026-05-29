@@ -46,6 +46,7 @@ pub(super) fn lower_call_signature_payload(
         } else {
             None
         };
+        let has_ts_annotation = param.type_annotation.is_some();
         let ty = param
             .type_annotation
             .as_ref()
@@ -57,6 +58,7 @@ pub(super) fn lower_call_signature_payload(
             param.optional,
             false,
             Some(param.span.into()),
+            has_ts_annotation,
         ));
     }
     if let Some(rest) = &call_sig.params.rest {
@@ -65,6 +67,7 @@ pub(super) fn lower_call_signature_payload(
         } else {
             None
         };
+        let has_ts_annotation = rest.type_annotation.is_some();
         let ty = rest
             .type_annotation
             .as_ref()
@@ -76,6 +79,7 @@ pub(super) fn lower_call_signature_payload(
             false,
             true,
             Some(rest.span.into()),
+            has_ts_annotation,
         ));
     }
     let return_type = call_sig
@@ -657,6 +661,7 @@ fn lower_function_shape(
         } else {
             None
         };
+        let has_ts_annotation = param.type_annotation.is_some();
         let ty = param
             .type_annotation
             .as_ref()
@@ -668,6 +673,7 @@ fn lower_function_shape(
             param.optional,
             false,
             Some(param.span.into()),
+            has_ts_annotation,
         ));
     }
     if let Some(rest) = &params.rest {
@@ -676,6 +682,7 @@ fn lower_function_shape(
         } else {
             None
         };
+        let has_ts_annotation = rest.type_annotation.is_some();
         let ty = rest
             .type_annotation
             .as_ref()
@@ -687,6 +694,7 @@ fn lower_function_shape(
             false,
             true,
             Some(rest.span.into()),
+            has_ts_annotation,
         ));
     }
     let return_type_expr = return_type

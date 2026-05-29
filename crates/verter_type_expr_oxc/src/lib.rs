@@ -563,21 +563,40 @@ fn lower_formal_parameters(params: &FormalParameters<'_>, source: &str) -> Vec<F
         .iter()
         .map(|param| {
             let name = binding_pattern_name(&param.pattern);
+            // OXC structural fact: did this parameter carry an explicit TS
+            // annotation? (An explicit `: any` lowers to `Primitive(Any)` like a
+            // missing annotation, so the lowered `ty` cannot distinguish them.)
+            let has_ts_annotation = param.type_annotation.is_some();
             let ty = param
                 .type_annotation
                 .as_ref()
                 .map(|ta| lower_ts_type(&ta.type_annotation, source))
                 .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-            FunctionParam::with_span(name, ty, param.optional, false, Some(param.span().into()))
+            FunctionParam::with_span(
+                name,
+                ty,
+                param.optional,
+                false,
+                Some(param.span().into()),
+                has_ts_annotation,
+            )
         })
         .chain(params.rest.as_ref().map(|rest| {
             let name = binding_pattern_name(&rest.rest.argument);
+            let has_ts_annotation = rest.type_annotation.is_some();
             let ty = rest
                 .type_annotation
                 .as_ref()
                 .map(|ta| lower_ts_type(&ta.type_annotation, source))
                 .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-            FunctionParam::with_span(name, ty, false, true, Some(rest.span().into()))
+            FunctionParam::with_span(
+                name,
+                ty,
+                false,
+                true,
+                Some(rest.span().into()),
+                has_ts_annotation,
+            )
         }))
         .collect()
 }
@@ -824,6 +843,7 @@ fn normalize_nested_function_type_params(func: &FunctionExpr, scope: &[TypeParam
                     param.optional,
                     param.rest,
                     param.span,
+                    param.has_ts_annotation,
                 )
             })
             .collect(),

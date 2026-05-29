@@ -413,3 +413,86 @@ fn ts_annotation_on_arrow_value_wins_over_conflicting_jsdoc() {
         "the explicit TS `: Bar` return annotation must win over `@returns {{Wrong}}` (got {ret:?})"
     );
 }
+
+/// MIXED typed/untyped parameters on an arrow value. `x` carries an EXPLICIT TS
+/// `: any` annotation; `y` carries NO TS annotation. TypeScript never lets a
+/// JSDoc `@param` override an explicit annotation — including `: any`. So the
+/// `@param {Foo} x` must be IGNORED (x stays `any`) while the `@param {Foo} y`
+/// fills the genuinely-unannotated `y`. The return is untyped in TS, so
+/// `@returns {Bar}` applies.
+///
+/// This is the discriminating regression for the per-param precedence fix: the
+/// old `matches!(param.ty, Primitive(Any))` "no annotation" sentinel cannot
+/// distinguish an explicit `: any` from a missing annotation (both lower to
+/// `Primitive(Any)`), so it WRONGLY overwrote `x` with `Ref { Foo }`. The fix
+/// keys off the OXC structural fact (`FormalParameter` HAS a `type_annotation`),
+/// so `x` (annotated) is preserved and only `y` (unannotated) is filled.
+const JSDOC_FN_VALUE_MIXED_FIXTURE: &str = r#"
+export interface Foo { a: string }
+export interface Bar { b: number }
+
+/**
+ * @param {Foo} x
+ * @param {Foo} y
+ * @returns {Bar}
+ */
+export const partiallyTyped = (x: any, y) => ({ b: 1 });
+"#;
+
+#[test]
+fn explicit_any_param_is_preserved_while_jsdoc_fills_unannotated_param() {
+    let host = make_host_with_footprint();
+    upsert_ts(
+        &host,
+        "/fixtures/jsdoc-fn-mixed.ts",
+        JSDOC_FN_VALUE_MIXED_FIXTURE,
+    );
+
+    let (expr, _) = evaluate_expr(
+        &host,
+        "/fixtures/jsdoc-fn-mixed.ts",
+        "typeof partiallyTyped",
+        ProjectionMode::Expanded,
+    );
+
+    let func = function_type(&expr);
+    assert_eq!(
+        func.parameters.len(),
+        2,
+        "expected a two-parameter function, got {expr:?}"
+    );
+    let x_ty = func.parameters[0].ty.clone();
+    let y_ty = func.parameters[1].ty.clone();
+    let return_ty = func
+        .return_type
+        .as_ref()
+        .map(|rt| (**rt).clone())
+        .unwrap_or_else(|| panic!("function must carry a return type, got {expr:?}"));
+
+    // DISCRIMINATING: the EXPLICIT `: any` on `x` must be preserved. Pre-fix the
+    // `Primitive(Any)` sentinel could not tell an explicit `: any` from a missing
+    // annotation, so `@param {Foo} x` overwrote it to `Ref { Foo }` — exactly the
+    // heuristic this fix removes.
+    assert!(
+        matches!(x_ty, TypeExpr::Primitive(PrimitiveName::Any)),
+        "the explicit TS `x: any` annotation must be preserved; `@param {{Foo}} x` must NOT \
+         override it (TypeScript never lets JSDoc override an explicit annotation). A \
+         `Ref {{ Foo }}` here proves the old `Any`-sentinel heuristic overwrote an explicit \
+         annotation (got {x_ty:?})"
+    );
+    assert!(
+        !matches!(&x_ty, TypeExpr::Ref { name, .. } if name.as_ref() == "Foo"),
+        "explicit `x: any` must not become `Ref {{ Foo }}` (got {x_ty:?})"
+    );
+
+    // The genuinely-unannotated `y` IS filled from `@param {Foo} y`.
+    assert_ref(&y_ty, "Foo");
+    assert!(
+        !matches!(y_ty, TypeExpr::Primitive(PrimitiveName::Any)),
+        "the unannotated parameter `y` must be filled by `@param {{Foo}} y` — a leftover `any` \
+         proves the unannotated param was not enriched (got {y_ty:?})"
+    );
+
+    // The return is untyped in TS, so `@returns {Bar}` applies.
+    assert_ref(&return_ty, "Bar");
+}

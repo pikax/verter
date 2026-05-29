@@ -657,10 +657,14 @@ fn enrich_params_and_return_with_jsdoc(
         crate::analysis::jsdoc::extract_jsdoc_param_types_at_offset(source, name_offset);
     if !param_types.is_empty() {
         for param in parameters.iter_mut() {
-            // Only fill a parameter whose type is still the `Any` placeholder
-            // (`lower_function_params` defaults to `Any` when no TS annotation
-            // is present) — a real TS annotation is never overwritten.
-            if !matches!(param.ty, TypeExpr::Primitive(PrimitiveName::Any)) {
+            // Only fill a parameter that carried NO explicit TS annotation at its
+            // declaration site. `has_ts_annotation` is the OXC structural fact
+            // captured by `lower_function_params`; it is the correct authority
+            // here because an explicit `: any` lowers to `Primitive(Any)` exactly
+            // like a missing annotation — testing the lowered `ty` would wrongly
+            // overwrite an explicit `: any` (TS never lets JSDoc override an
+            // explicit annotation).
+            if param.has_ts_annotation {
                 continue;
             }
             let Some(param_name) = param.name.as_deref() else {
@@ -1555,24 +1559,45 @@ fn lower_function_params(params: &FormalParameters<'_>, source: &str) -> Vec<Fun
                 BindingPattern::BindingIdentifier(id) => Some(id.name.to_string()),
                 _ => None,
             };
+            // The OXC structural fact: did this parameter carry an explicit TS
+            // type annotation? Captured here (the AST node is in hand), it is the
+            // sole authority for JSDoc `@param` precedence downstream — an
+            // explicit `: any` lowers to `Primitive(Any)` exactly like a missing
+            // annotation, so the lowered `ty` cannot distinguish the two.
+            let has_ts_annotation = param.type_annotation.is_some();
             let ty = param
                 .type_annotation
                 .as_ref()
                 .map(|ta| lower_ts_type(&ta.type_annotation, source))
                 .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-            FunctionParam::with_span(name, ty, param.optional, false, Some(param.span.into()))
+            FunctionParam::with_span(
+                name,
+                ty,
+                param.optional,
+                false,
+                Some(param.span.into()),
+                has_ts_annotation,
+            )
         })
         .chain(params.rest.as_ref().map(|rest| {
             let name = match &rest.rest.argument {
                 BindingPattern::BindingIdentifier(id) => Some(id.name.to_string()),
                 _ => None,
             };
+            let has_ts_annotation = rest.type_annotation.is_some();
             let ty = rest
                 .type_annotation
                 .as_ref()
                 .map(|ta| lower_ts_type(&ta.type_annotation, source))
                 .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-            FunctionParam::with_span(name, ty, false, true, Some(rest.span.into()))
+            FunctionParam::with_span(
+                name,
+                ty,
+                false,
+                true,
+                Some(rest.span.into()),
+                has_ts_annotation,
+            )
         }))
         .collect()
 }

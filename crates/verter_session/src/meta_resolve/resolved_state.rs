@@ -205,6 +205,7 @@ pub(crate) fn walk_substitute_typeexpr(
                         fp.optional,
                         fp.rest,
                         fp.span,
+                        fp.has_ts_annotation,
                     )
                 })
                 .collect(),

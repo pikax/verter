@@ -501,6 +501,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             p.rest,
                             // Carry the graph parameter's span back to the IR.
                             p.span,
+                            // The TS-annotation-presence fact is a lowering-time
+                            // input to JSDoc `@param` precedence; it is consumed
+                            // ONLY by `enrich_params_and_return_with_jsdoc` at
+                            // build time, before any graph round-trip. A raised
+                            // function is the post-enrichment semantic form and is
+                            // never re-enriched, so the graph node does not carry
+                            // the fact and `false` is the correct, inert value.
+                            false,
                         ))
                     })
                     .collect();

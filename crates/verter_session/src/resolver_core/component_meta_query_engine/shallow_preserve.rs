@@ -1065,6 +1065,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             parameter.optional,
                             parameter.rest,
                             parameter.span,
+                            parameter.has_ts_annotation,
                         ))
                     })
                     .collect::<Option<Vec<_>>>()?;

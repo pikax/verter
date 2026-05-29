@@ -1015,7 +1015,17 @@ impl FunctionExpr {
 /// A function parameter.
 ///
 /// `span` is the OXC parameter span (in-memory provenance; not serialized).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+///
+/// `PartialEq`/`Eq`/`Hash` are implemented by hand to EXCLUDE
+/// [`has_ts_annotation`](Self::has_ts_annotation): that field is a transient
+/// lowering-time gate for JSDoc `@param` precedence, not part of a parameter's
+/// semantic type identity. Two parameters with the same name / type / optional /
+/// rest / span are the same parameter whether the annotation was written
+/// explicitly or filled from JSDoc — and the graph round-trip (the canonical
+/// semantic form) intentionally does not preserve the fact, so it must not split
+/// otherwise-equal parameters across cache keys or equivalence checks. `span`
+/// remains part of identity (it is a real provenance coordinate).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct FunctionParam {
@@ -1026,10 +1036,52 @@ pub struct FunctionParam {
     /// OXC span of the whole parameter (in-memory provenance; not serialized).
     #[serde(skip)]
     pub span: Option<Span>,
+    /// Whether this parameter carried an explicit TS type annotation at its
+    /// declaration site (`FormalParameter`/`BindingPattern` had a
+    /// `type_annotation`). This is the OXC STRUCTURAL FACT — captured once at
+    /// the lowering site — NOT a sentinel inferred from the lowered [`TypeExpr`]
+    /// (an explicit `: any` lowers to `Primitive(Any)` exactly like a missing
+    /// annotation does, so the lowered type cannot distinguish them). JSDoc
+    /// `@param` backfill fills a parameter ONLY when this is `false`, matching
+    /// TS precedence (an explicit annotation — including `: any` — always wins).
+    /// In-memory provenance; not serialized and NOT part of type identity (see
+    /// the type-level note on the hand-written `PartialEq`/`Eq`/`Hash`).
+    #[serde(skip)]
+    pub has_ts_annotation: bool,
+}
+
+impl PartialEq for FunctionParam {
+    fn eq(&self, other: &Self) -> bool {
+        // `has_ts_annotation` is a transient lowering-time gate, not semantic
+        // identity — deliberately excluded so equivalent parameters built by
+        // different paths (e.g. the eager IR path vs the graph round-trip)
+        // compare equal.
+        self.name == other.name
+            && self.ty == other.ty
+            && self.optional == other.optional
+            && self.rest == other.rest
+            && self.span == other.span
+    }
+}
+
+impl Eq for FunctionParam {}
+
+impl std::hash::Hash for FunctionParam {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Mirror `PartialEq`: hash every identity field EXCEPT
+        // `has_ts_annotation`, so equal parameters hash equally.
+        self.name.hash(state);
+        self.ty.hash(state);
+        self.optional.hash(state);
+        self.rest.hash(state);
+        self.span.hash(state);
+    }
 }
 
 impl FunctionParam {
-    /// Construct a parameter with NO source span.
+    /// Construct a parameter with NO source span. A synthesized parameter has no
+    /// declaration site, so it carries no TS-annotation fact (`has_ts_annotation
+    /// == false`); synthesized parameters are never JSDoc-enriched.
     #[must_use]
     pub fn synthetic(name: Option<String>, ty: TypeExpr, optional: bool, rest: bool) -> Self {
         Self {
@@ -1038,10 +1090,12 @@ impl FunctionParam {
             optional,
             rest,
             span: None,
+            has_ts_annotation: false,
         }
     }
 
-    /// Construct a parameter carrying its OXC span.
+    /// Construct a parameter carrying its OXC span and the structural fact of
+    /// whether it had an explicit TS type annotation at its declaration site.
     #[must_use]
     pub fn with_span(
         name: Option<String>,
@@ -1049,6 +1103,7 @@ impl FunctionParam {
         optional: bool,
         rest: bool,
         span: Option<Span>,
+        has_ts_annotation: bool,
     ) -> Self {
         Self {
             name,
@@ -1056,6 +1111,7 @@ impl FunctionParam {
             optional,
             rest,
             span,
+            has_ts_annotation,
         }
     }
 }
