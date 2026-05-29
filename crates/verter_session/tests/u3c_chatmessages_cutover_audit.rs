@@ -65,7 +65,16 @@ const CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING: u64 = 0;
 /// is deterministic for the fixture, so the gate asserts equality (data over a
 /// `<=` heuristic): a higher value means new eager expansion crept in; a lower
 /// value means the residual owner expansion changed and the gate is re-derived.
-const CHAT_MESSAGES_EXPANDED_INSTANTIATE_VALUE: u64 = 3;
+///
+/// Re-derived 3 -> 4: the path-precise `Pick`/`Omit` key-domain alias-carrier
+/// resolution added in `enumerate.rs::key_names_from_keyspace_node` resolves the
+/// barrel-cycle `Omit<…, Keys>` alias carrier to its declared body through the
+/// shared dispatch (one additional `Instantiate`) so the utility no longer
+/// collapses to `Opaque(Miss)` and drops inherited members. This is the
+/// canonical-owner residual path — NOT eager imported-macro-surface
+/// materialisation: `synthesis_expanded_instantiate_calls` (the eager-path
+/// signal) stays 0, asserted above.
+const CHAT_MESSAGES_EXPANDED_INSTANTIATE_VALUE: u64 = 4;
 
 /// The declared-dependency ROOTS the audited ChatMessages resolve is allowed to
 /// touch — the SFC's own RELATIVE import targets plus the owner. Every
