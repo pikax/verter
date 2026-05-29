@@ -552,6 +552,95 @@ fn cross_file_heritage_props_surface_with_own_body_vs_heritage_provenance() {
 }
 
 // ---------------------------------------------------------------------------
+// (7b) Generic inherited member — `type_expr_scope` follows the VALUE-NODE
+//      scope (the deriving file), NOT the member's declaration_origin (the
+//      base file). A `Base<T> { val: T }` instantiated `Base<Local>` has a
+//      SUBSTITUTED value node (`Local`) scoped to the DERIVING file where
+//      `Local` lives — so `Ref("Local")` must resolve THERE.
+//
+//      Discriminating: the eager rail (`imported_surface.rs::member_expr_scope`)
+//      scopes the raised `*_expr` to `node_scope(member.value)`; scoping it to
+//      the member's declaration_origin (the base file) — the pre-fix bug —
+//      makes the `Ref("Local")` resolve in the base file (a cross-file Miss).
+//      The test asserts the scope is the SFC and the scope's symbol table
+//      genuinely resolves `Local`.
+// ---------------------------------------------------------------------------
+
+const GENERIC_BASE: &str = r#"export interface Base<T> {
+  val: T;
+}
+"#;
+
+const VUE_GENERIC_HERITAGE: &str = r#"<script setup lang="ts">
+import type { Base } from './generic_base';
+interface Local {
+  tag: string;
+}
+interface Props extends Base<Local> {
+  count: number;
+}
+defineProps<Props>();
+</script>
+"#;
+
+#[test]
+fn generic_inherited_member_type_expr_scope_is_deriving_file() {
+    const BASE: &str = "/w/generic_base.ts";
+    const FILE: &str = "/w/GenericHeritage.vue";
+    let host = make_host();
+    upsert(&host, BASE, GENERIC_BASE);
+    upsert(&host, FILE, VUE_GENERIC_HERITAGE);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("generic heritage defineProps resolves a surface");
+    let props = props_from_typeinfo_surface(&host, &surface);
+
+    let val = props
+        .iter()
+        .find(|p| p.name == "val")
+        .expect("the inherited generic member `val` surfaces");
+
+    // The substituted value type is `Local` — a `Ref` the deriving file owns.
+    let type_expr = val.type_expr.as_ref().expect("val carries a typed form");
+    assert!(
+        matches!(
+            type_expr,
+            verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "Local"
+        ),
+        "val's substituted value type is Ref(\"Local\"), got {type_expr:?}"
+    );
+
+    // The scope MUST be the DERIVING file (where `Local` is declared), NOT the
+    // base file. Pre-fix (declaration_origin-first) this is the base file →
+    // `Local` would not resolve there.
+    assert_eq!(
+        val.type_expr_scope.as_ref().map(|s| s.as_str()),
+        Some(FILE),
+        "val's type_expr_scope follows the value-node scope (the deriving SFC), not the base file"
+    );
+    assert_ne!(
+        val.type_expr_scope.as_ref().map(|s| s.as_str()),
+        Some(BASE),
+        "the type_expr_scope must NOT be the heritage base file (negative — Local does not live there)"
+    );
+
+    // End-to-end: the scope genuinely resolves `Local` — `Ref("Local")` in the
+    // SFC scope resolves to Local's one-level surface (`{ tag }`). Scoping to
+    // the base file would Miss.
+    let resolved = host
+        .resolve_shallow_surface(FILE, "Local")
+        .expect("Local resolves in the deriving SFC scope");
+    let resolved_members: Vec<&str> = resolved.members.iter().map(|m| m.name.as_ref()).collect();
+    assert_eq!(
+        resolved_members,
+        vec!["tag"],
+        "Local resolves to its real surface in the scope val's type_expr is bound to"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // (8) `.vue` PUBLIC component type via public_type.rs — through typeinfo, no
 //     component-meta.
 //

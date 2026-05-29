@@ -24,9 +24,10 @@
 //! - **props** — one field per named member, carrying the surface's `optional`
 //!   / `readonly` (RICHER than the eager rail's hardcoded `false` — taken from
 //!   the surface) / `declared_in_macro_type_arg`, the member value raised to a
-//!   `TypeExpr` (scoped to the member's declaration-origin file), the
-//!   `defineModel` synthesized model prop from analyzer facts, and JSDoc sliced
-//!   from the surface's JSDoc SPANS.
+//!   `TypeExpr` (scoped to the member's VALUE-NODE file, matching the eager
+//!   rail — see [`VueMacroSurface::member_expr_scope`]), the `defineModel`
+//!   synthesized model prop from analyzer facts, and JSDoc sliced from the
+//!   surface's JSDoc SPANS.
 //! - **emits** — call-signature event extraction FIRST (the first parameter's
 //!   string-literal — or union of string literals — is the event name; the
 //!   payload is the call-signature function with the leading event-name
@@ -86,17 +87,42 @@ pub struct VueMacroSurface {
 
 impl VueMacroSurface {
     /// The scope a member's raised `*_expr` should bind to — the member's
-    /// DECLARATION-origin file (which survives substitution), falling back to
-    /// the SFC owner when the member carries no single-file origin (a synthetic
-    /// / structural member). Mirrors `ImportedMacroSurface::member_expr_scope`,
-    /// sourced from the typeinfo surface's `origin.canonical_file` instead of a
-    /// value-node scope lookup.
-    fn member_expr_scope(&self, member: &TypeInfoSurfaceMember) -> TypeExprScope {
-        member
-            .origin
-            .canonical_file
-            .as_ref()
+    /// VALUE-NODE scope (`node_scope(member.value)` → file), matching the eager
+    /// rail's `ImportedMacroSurface::member_expr_scope`.
+    ///
+    /// The value-node scope (NOT the member's declaration_origin) is the file
+    /// whose OXC parse produced the typed value expression, which is where its
+    /// nested `Ref`s must resolve. The two files DIVERGE for a generic
+    /// inherited member: `interface Props extends Base<Local>` over an imported
+    /// `Base<T> { val: T }` substitutes `val`'s value to `Local`, a node scoped
+    /// to the DERIVING file (where `Local` lives), while the member's
+    /// declaration_origin is the base file (where `val: T` is declared). Scoping
+    /// the raised `*_expr` to the declaration_origin (base) would make
+    /// `Ref("Local")` resolve in the wrong file — a cross-file Miss. JSDoc
+    /// deliberately uses the declaration_origin instead (see
+    /// [`member_jsdoc_from_spans`]); the two axes intentionally use different
+    /// files, exactly as the eager rail does.
+    ///
+    /// Falls back to the member's declaration_origin, then the SFC owner, when
+    /// the value node carries no single-file scope (a structural / scope-less
+    /// value node — a primitive, a shared literal-union).
+    fn member_expr_scope(
+        &self,
+        host: &VerterHost,
+        member: &TypeInfoSurfaceMember,
+    ) -> TypeExprScope {
+        host.project_type_store()
+            .semantic_graph()
+            .node_scope(member.value)
+            .and_then(|scope| scope.canonical_file())
             .map(|canonical| TypeExprScope::new(canonical.as_ref()))
+            .or_else(|| {
+                member
+                    .origin
+                    .canonical_file
+                    .as_ref()
+                    .map(|canonical| TypeExprScope::new(canonical.as_ref()))
+            })
             .unwrap_or_else(|| TypeExprScope::new(self.owner_canonical.as_ref()))
     }
 
@@ -375,9 +401,10 @@ fn raise_member_value(host: &VerterHost, member: &TypeInfoSurfaceMember) -> Opti
 /// `ImportedMacroSurface::prop_members` for cross-file) over the typeinfo
 /// surface: one field per named member, carrying the surface's `optional` /
 /// `readonly` / `declared_in_macro_type_arg`, the member value raised to a
-/// `TypeExpr` scoped to its declaration-origin file, the display
-/// `type_annotation` rendered from that typed form, and JSDoc sliced from the
-/// surface spans. Own-body-vs-heritage ordering + shadowing + union-common
+/// `TypeExpr` scoped to its VALUE-NODE file (see
+/// [`VueMacroSurface::member_expr_scope`]), the display `type_annotation`
+/// rendered from that typed form, and JSDoc sliced from the surface spans.
+/// Own-body-vs-heritage ordering + shadowing + union-common
 /// membership are ALREADY resolved on the surface (the merge ran in the shared
 /// projector) — this is a thin per-member transform.
 ///
@@ -411,7 +438,7 @@ pub fn props_from_typeinfo_surface(
             let type_expr = raise_member_value(host, member);
             let type_expr_scope = type_expr
                 .as_ref()
-                .map(|_| macro_surface.member_expr_scope(member));
+                .map(|_| macro_surface.member_expr_scope(host, member));
             let type_annotation = type_expr.as_ref().and_then(render_type_expr_display);
             let (description, tags) = member_jsdoc_from_spans(host, member);
             // `declared_in_macro_type_arg`: a member belongs to the macro-T own
@@ -551,7 +578,7 @@ pub fn emits_from_typeinfo_surface(
             let payload_expr = raise_member_value(host, member);
             let payload_expr_scope = payload_expr
                 .as_ref()
-                .map(|_| macro_surface.member_expr_scope(member));
+                .map(|_| macro_surface.member_expr_scope(host, member));
             let payload_type = payload_expr.as_ref().and_then(render_type_expr_display);
             let (description, tags) = member_jsdoc_from_spans(host, member);
             emits.push(AnalyzedEmitField {
@@ -580,7 +607,8 @@ pub fn emits_from_typeinfo_surface(
 /// non-function members are filtered); the slot's `bindings` come from the
 /// function's first-parameter object's properties; the `return_expr` /
 /// `return_type` come from the function's return type. Bindings + return are
-/// scoped to the slot member's declaration-origin file.
+/// scoped to the slot member's VALUE-NODE file (see
+/// [`VueMacroSurface::member_expr_scope`]).
 #[must_use]
 pub fn slots_from_typeinfo_surface(
     host: &VerterHost,
@@ -596,7 +624,7 @@ pub fn slots_from_typeinfo_surface(
                 TypeExpr::Function(func) => func,
                 _ => return None,
             };
-            let scope = macro_surface.member_expr_scope(member);
+            let scope = macro_surface.member_expr_scope(host, member);
             let bindings = func
                 .parameters
                 .first()
