@@ -99,6 +99,26 @@ impl VueMacroSurface {
             .map(|canonical| TypeExprScope::new(canonical.as_ref()))
             .unwrap_or_else(|| TypeExprScope::new(self.owner_canonical.as_ref()))
     }
+
+    /// The scope a call signature's stripped-payload `*_expr` should bind to —
+    /// the signature's DECLARATION-origin file, derived from its spans (each
+    /// [`crate::typeinfo::surface::CanonicalSpan`] carries the file the offsets
+    /// index into). For a cross-file emit interface's call signature the spans
+    /// live in the heritage base's file, so the payload `Ref`s resolve THERE
+    /// (matching `ImportedMacroSurface::member_expr_scope` for a signature
+    /// node). Falls back to the SFC owner when the signature carries no span
+    /// (a synthetic / composed signature).
+    fn signature_expr_scope(
+        &self,
+        sig: &crate::typeinfo::surface::TypeInfoSurfaceSignature,
+    ) -> TypeExprScope {
+        sig.signature_span
+            .as_ref()
+            .or(sig.return_type_span.as_ref())
+            .or_else(|| sig.parameter_spans.iter().flatten().next())
+            .map(|cspan| TypeExprScope::new(cspan.file.as_ref()))
+            .unwrap_or_else(|| TypeExprScope::new(self.owner_canonical.as_ref()))
+    }
 }
 
 impl VerterHost {
@@ -463,11 +483,12 @@ pub fn emits_from_typeinfo_surface(
             func.type_parameters.clone(),
             func.spans,
         )));
-        // Scope the payload to the SFC owner — the call signature was written in
-        // the SFC (or, for an imported emit interface, lives in its own file;
-        // the surface signature node carries no per-member origin, so the SFC
-        // owner is the correct default scope, matching the eager local rail).
-        let payload_scope = TypeExprScope::new(macro_surface.owner_canonical.as_ref());
+        // Scope the payload to the call signature's DECLARATION-origin file
+        // (derived from its spans) so an inherited cross-file emit signature's
+        // payload `Ref`s resolve in the base file, matching the eager rail's
+        // per-signature `member_expr_scope`. Falls back to the SFC owner for a
+        // signature written in the SFC's own defineEmits type argument.
+        let payload_scope = macro_surface.signature_expr_scope(sig);
         let mut push_event = |name: String| {
             emits.push(AnalyzedEmitField {
                 name,

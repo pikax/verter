@@ -256,6 +256,62 @@ fn define_emits_normalizer_property_style_fallback() {
 }
 
 // ---------------------------------------------------------------------------
+// (3b) Cross-file emit interface — call signatures live in an imported file.
+//      The stripped-payload scope must be the BASE file (so payload `Ref`s
+//      resolve there), not the SFC owner.
+//
+//      Discriminating: scoping the payload to the SFC owner (the naive default)
+//      would make this assertion fail — the payload's scope must follow the
+//      signature's declaration-origin file.
+// ---------------------------------------------------------------------------
+
+const EMIT_BASE: &str = r#"export interface Events {
+  (e: 'change', value: number): void;
+}
+"#;
+
+const VUE_EMITS_IMPORTED: &str = r#"<script setup lang="ts">
+import type { Events } from './events';
+defineEmits<Events>();
+</script>
+"#;
+
+#[test]
+fn cross_file_emit_call_signature_payload_scope_is_base_file() {
+    const BASE: &str = "/w/events.ts";
+    const FILE: &str = "/w/ImportedEmits.vue";
+    let host = make_host();
+    upsert(&host, BASE, EMIT_BASE);
+    upsert(&host, FILE, VUE_EMITS_IMPORTED);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineEmits);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("imported emit interface resolves a surface");
+    let emits = emits_from_typeinfo_surface(&host, &surface);
+
+    assert_eq!(
+        emits.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+        vec!["change"],
+        "the cross-file call-signature event name surfaces"
+    );
+    let change = &emits[0];
+    // The stripped payload's scope follows the SIGNATURE's declaration-origin
+    // file (the imported base), not the SFC owner.
+    assert_eq!(
+        change.payload_expr_scope.as_ref().map(|s| s.as_str()),
+        Some(BASE),
+        "the call-signature payload scope is the base file the signature was declared in"
+    );
+    // Negative: it is NOT the SFC owner.
+    assert_ne!(
+        change.payload_expr_scope.as_ref().map(|s| s.as_str()),
+        Some(FILE),
+        "the payload scope must not collapse to the SFC owner for an imported signature"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // (4) defineSlots normalizer — function-like members only, first-param object
 //     bindings, return preserved.
 //
