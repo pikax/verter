@@ -211,6 +211,64 @@ pub enum FactKeyKindTag {
     ModuleAugmentation,
 }
 
+/// Caller-requested compile cache mode — mirror of
+/// `verter_session::types::CompileCacheMode`.
+///
+/// Carried by
+/// [`super::super::structured_event::StructuredAuditEvent::CompileModeDowngrade`]
+/// at the `requested` / `actual` fields. `Copy + Hash + Eq` because
+/// audit consumers may aggregate downgrade counts per (requested,
+/// actual) pair.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "audit.generated.ts")]
+pub enum CompileCacheModeTag {
+    /// Bypass host caches entirely. The compile runs fresh and no
+    /// entry is published.
+    Stateless,
+    /// Consult the pure content-addressed cache only.
+    Content,
+    /// Consult the fact-validated session cache. Default — the
+    /// most cache-rich mode.
+    #[default]
+    Session,
+}
+
+/// Why the runtime downgraded a requested `CompileCacheMode` — mirror
+/// of `verter_session::types::DowngradeReason`. Carried by
+/// [`super::super::structured_event::StructuredAuditEvent::CompileModeDowngrade`]
+/// as a vector of every triggering reason in priority order.
+///
+/// `Copy + Hash + Eq` because audit consumers may aggregate downgrade
+/// counts per reason.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "audit.generated.ts")]
+pub enum DowngradeReasonTag {
+    /// Default — placeholder default; consumers compare on the
+    /// actual triggering reason rather than relying on this.
+    #[default]
+    HasExternalSrc,
+    /// The compile input has macro type dependencies.
+    HasMacroTypeDeps,
+    /// One of the compile input's script imports resolves through a
+    /// workspace alias.
+    HasWorkspaceAlias,
+    /// The compile input depends on a file that participates in
+    /// module augmentation.
+    HasModuleAugmentation,
+    /// The compile input carries a block override (preprocessed
+    /// script / template).
+    HasBlockOverride,
+    /// The compile input carries a style override (preprocessed
+    /// CSS).
+    HasStyleOverride,
+    /// The compile profile target is IDE-only analysis
+    /// (`CompileTarget::TSX` without runtime codegen).
+    HasIdeOnlyAnalysis,
+    /// The host is in dev mode with `DevServeLastKnownGood` error
+    /// policy.
+    HasDevLastGood,
+}
+
 /// Which lane (`Semantic` or `Display`) a fact carries. Audit-side
 /// mirror of `verter_semantic::facts::registry::FactLane`.
 ///

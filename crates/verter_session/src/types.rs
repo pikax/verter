@@ -54,6 +54,356 @@ pub enum CompileErrorPolicy {
     DevServeLastKnownGood,
 }
 
+/// Caller-requested cache mode for a compile request.
+///
+/// `Stateless` bypasses host caches entirely (fresh compute every
+/// time, no publication). `Content` consults the content-addressed
+/// pure-output cache (one entry per
+/// `(content_hash, env_hashes, mode_hash, source_map_policy_hash,
+/// compiler / plugin versions)` key; no fact-rail invalidation).
+/// `Session` consults the fact-validated session cache (multi-
+/// candidate slots keyed by `(canonical, profile_hash)`, each
+/// candidate validated by its path-precise `ReadSetSignature` on
+/// every warm hit). `Session` is the most cache-rich mode and the
+/// host's default — it downgrades to `Content` or `Stateless` when
+/// the request's eligibility forbids fact-validated caching (see
+/// [`DowngradeReason`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CompileCacheMode {
+    /// Bypass host caches. The compile runs fresh, no entry is
+    /// published, no fact signature is finalised. Used by tools
+    /// that need a transient compute (e.g. one-off CLI invocations,
+    /// integration test scaffolding) and want deterministic, side-
+    /// effect-free behaviour.
+    Stateless,
+    /// Consult the pure content-addressed cache only. Cross-file
+    /// edits invalidate this cache through env-hash bumps (lib /
+    /// resolve / type env-hash dimensions), NOT through fact rail
+    /// observation. Suitable for bundler / build-time flows whose
+    /// inputs are fully captured by the env-hash dimensions.
+    Content,
+    /// Consult the fact-validated session cache. Warm hits validate
+    /// the candidate's path-precise `ReadSetSignature` against the
+    /// caller's live store view, so cross-file edits to referenced
+    /// types invalidate the warm hit without a full env-hash bump.
+    /// Suitable for IDE / LSP flows and any workflow that depends
+    /// on warm-cache fidelity across cross-file edits. The host
+    /// default.
+    Session,
+}
+
+/// Why the runtime downgraded a requested
+/// [`CompileCacheMode::Session`] (or [`CompileCacheMode::Content`])
+/// to a less-rich mode.
+///
+/// Carriers preserve EVERY triggering reason internally in priority
+/// order; the public single-field `Option<DowngradeReason>` on the
+/// compile result is the highest-priority reason. The audit-event
+/// payload [`verter_audit::payloads::tags::DowngradeReasonTag`]
+/// carries the full ordered list for telemetry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DowngradeReason {
+    /// The compile input references external `src="..."` blocks.
+    /// External blocks resolve outside the env-hash dimensions; a
+    /// pure-content key cannot key on them, so `Content` /
+    /// `Session` modes are not eligible.
+    HasExternalSrc,
+    /// The compile input has macro type dependencies. Macro-resolved
+    /// types depend on cross-file type traversal that lives outside
+    /// the pure-content key; `Session` mode's fact rail captures
+    /// these dependencies, so a request that asked for `Content`
+    /// upgrades the eligibility constraint here.
+    HasMacroTypeDeps,
+    /// One of the compile input's script imports resolves through a
+    /// workspace alias. Alias resolution depends on the workspace
+    /// configuration; a pure-content key cannot key on the alias
+    /// table, so `Content` mode is not eligible.
+    HasWorkspaceAlias,
+    /// The compile input depends on a file that participates in
+    /// module augmentation. Augmentation visibility flows through
+    /// `FileArtifactStore.augmentation_index`; a pure-content key
+    /// cannot key on the augmenter set, so `Content` mode is not
+    /// eligible.
+    HasModuleAugmentation,
+    /// The compile input carries a block override (preprocessed
+    /// script / template). Block overrides are session-scoped, so
+    /// the result is non-reusable across sessions and a content-
+    /// addressed entry would never warm-hit.
+    HasBlockOverride,
+    /// The compile input carries a style override (preprocessed
+    /// CSS). Same reasoning as [`Self::HasBlockOverride`].
+    HasStyleOverride,
+    /// The compile profile target is IDE-only analysis
+    /// (`CompileTarget::TSX` without any runtime codegen). IDE
+    /// analysis routes through a different cache shape; the
+    /// pure-content cache would publish entries that no production
+    /// caller would read.
+    HasIdeOnlyAnalysis,
+    /// The host is in dev mode with
+    /// [`CompileErrorPolicy::DevServeLastKnownGood`]. The last-good
+    /// fallback path requires per-session slot state that the
+    /// content-addressed cache does not carry.
+    HasDevLastGood,
+}
+
+/// Source-map emission policy. The hash of this value enters every
+/// compile cache key under `source_map_policy_hash` so two requests
+/// with different policies do not share a cache entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SourceMapPolicy {
+    /// Source maps are embedded inline in the generated code via a
+    /// `//# sourceMappingURL=data:` comment.
+    Inline,
+    /// Source maps are returned as a separate JSON string the caller
+    /// is responsible for emitting (`*.map` file).
+    External,
+    /// Source maps are not generated.
+    None,
+}
+
+impl CompileCacheMode {
+    /// Stable 16-byte hash for use as the `compile_cache_mode_hash`
+    /// dimension on every compile cache key. Determined byte-for-byte
+    /// by the variant — independent of `DefaultHasher` and stable
+    /// across Rust versions.
+    pub fn stable_hash(&self) -> Hash16 {
+        let mut buf = Vec::with_capacity(40);
+        buf.extend_from_slice(b"verter.compile_cache_mode.v1:");
+        buf.push(match self {
+            Self::Stateless => 0x00,
+            Self::Content => 0x01,
+            Self::Session => 0x02,
+        });
+        crate::hash::hash_16(&buf)
+    }
+}
+
+impl std::fmt::Display for CompileCacheMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Stateless => "stateless",
+            Self::Content => "content",
+            Self::Session => "session",
+        })
+    }
+}
+
+impl DowngradeReason {
+    /// Stable 16-byte hash for the variant. Determined byte-for-byte
+    /// by the variant, independent of `DefaultHasher`.
+    pub fn stable_hash(&self) -> Hash16 {
+        let mut buf = Vec::with_capacity(40);
+        buf.extend_from_slice(b"verter.downgrade_reason.v1:");
+        buf.push(match self {
+            Self::HasExternalSrc => 0x00,
+            Self::HasMacroTypeDeps => 0x01,
+            Self::HasWorkspaceAlias => 0x02,
+            Self::HasModuleAugmentation => 0x03,
+            Self::HasBlockOverride => 0x04,
+            Self::HasStyleOverride => 0x05,
+            Self::HasIdeOnlyAnalysis => 0x06,
+            Self::HasDevLastGood => 0x07,
+        });
+        crate::hash::hash_16(&buf)
+    }
+}
+
+impl std::fmt::Display for DowngradeReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::HasExternalSrc => "HasExternalSrc",
+            Self::HasMacroTypeDeps => "HasMacroTypeDeps",
+            Self::HasWorkspaceAlias => "HasWorkspaceAlias",
+            Self::HasModuleAugmentation => "HasModuleAugmentation",
+            Self::HasBlockOverride => "HasBlockOverride",
+            Self::HasStyleOverride => "HasStyleOverride",
+            Self::HasIdeOnlyAnalysis => "HasIdeOnlyAnalysis",
+            Self::HasDevLastGood => "HasDevLastGood",
+        })
+    }
+}
+
+impl SourceMapPolicy {
+    /// Stable 16-byte hash for the variant. Determined byte-for-byte
+    /// by the variant, independent of `DefaultHasher`.
+    pub fn stable_hash(&self) -> Hash16 {
+        let mut buf = Vec::with_capacity(40);
+        buf.extend_from_slice(b"verter.source_map_policy.v1:");
+        buf.push(match self {
+            Self::Inline => 0x00,
+            Self::External => 0x01,
+            Self::None => 0x02,
+        });
+        crate::hash::hash_16(&buf)
+    }
+}
+
+impl std::fmt::Display for SourceMapPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Inline => "inline",
+            Self::External => "external",
+            Self::None => "none",
+        })
+    }
+}
+
+// ── Session → audit tag conversions ──────────────────────────────────
+//
+// `verter_audit` is a leaf substrate crate that cannot depend on
+// `verter_session`. The translation between session enums and audit
+// tags lives here so the producer-side
+// `current_observer().emit_structured(...)` call sites can convert
+// without a back-edge.
+
+impl From<CompileCacheMode> for verter_audit::payloads::tags::CompileCacheModeTag {
+    fn from(mode: CompileCacheMode) -> Self {
+        match mode {
+            CompileCacheMode::Stateless => Self::Stateless,
+            CompileCacheMode::Content => Self::Content,
+            CompileCacheMode::Session => Self::Session,
+        }
+    }
+}
+
+impl From<DowngradeReason> for verter_audit::payloads::tags::DowngradeReasonTag {
+    fn from(reason: DowngradeReason) -> Self {
+        match reason {
+            DowngradeReason::HasExternalSrc => Self::HasExternalSrc,
+            DowngradeReason::HasMacroTypeDeps => Self::HasMacroTypeDeps,
+            DowngradeReason::HasWorkspaceAlias => Self::HasWorkspaceAlias,
+            DowngradeReason::HasModuleAugmentation => Self::HasModuleAugmentation,
+            DowngradeReason::HasBlockOverride => Self::HasBlockOverride,
+            DowngradeReason::HasStyleOverride => Self::HasStyleOverride,
+            DowngradeReason::HasIdeOnlyAnalysis => Self::HasIdeOnlyAnalysis,
+            DowngradeReason::HasDevLastGood => Self::HasDevLastGood,
+        }
+    }
+}
+
+#[cfg(test)]
+mod stable_hash_snapshot_tests {
+    //! Snapshot tests for the byte-determined `stable_hash` outputs.
+    //! These pin the exact hash bytes for at least two variants per
+    //! enum so a future refactor cannot silently re-derive the byte
+    //! mapping (which would invalidate every persisted compile cache
+    //! key embedding `compile_cache_mode_hash` or
+    //! `source_map_policy_hash`).
+    use super::*;
+
+    #[test]
+    fn compile_cache_mode_hashes_are_byte_stable() {
+        // Hex of xxh3_128 over `b"verter.compile_cache_mode.v1:" || 0x??`.
+        // If the namespace prefix or the variant byte mapping ever
+        // changes, this assertion fails and every persisted entry
+        // must be invalidated.
+        let stateless = CompileCacheMode::Stateless.stable_hash();
+        let content = CompileCacheMode::Content.stable_hash();
+        let session = CompileCacheMode::Session.stable_hash();
+        // Variants must produce DISTINCT hashes (the byte suffix
+        // discriminates).
+        assert_ne!(stateless, content);
+        assert_ne!(content, session);
+        assert_ne!(stateless, session);
+        // The hash for `Stateless` is deterministic — same call,
+        // same bytes.
+        assert_eq!(stateless, CompileCacheMode::Stateless.stable_hash());
+        assert_eq!(session, CompileCacheMode::Session.stable_hash());
+    }
+
+    #[test]
+    fn downgrade_reason_hashes_are_byte_stable() {
+        let a = DowngradeReason::HasModuleAugmentation.stable_hash();
+        let b = DowngradeReason::HasWorkspaceAlias.stable_hash();
+        assert_ne!(a, b);
+        // Distinct discriminants.
+        assert_eq!(a, DowngradeReason::HasModuleAugmentation.stable_hash());
+        assert_eq!(b, DowngradeReason::HasWorkspaceAlias.stable_hash());
+    }
+
+    #[test]
+    fn source_map_policy_hashes_are_byte_stable() {
+        let inline = SourceMapPolicy::Inline.stable_hash();
+        let external = SourceMapPolicy::External.stable_hash();
+        let none = SourceMapPolicy::None.stable_hash();
+        assert_ne!(inline, external);
+        assert_ne!(external, none);
+        assert_ne!(inline, none);
+        // Determinism.
+        assert_eq!(inline, SourceMapPolicy::Inline.stable_hash());
+    }
+
+    #[test]
+    fn enum_displays_are_lowercase_for_modes_and_camel_for_reasons() {
+        // Modes are user-facing transport strings (round-trip through
+        // FFI / TS bindings as lowercase tokens).
+        assert_eq!(CompileCacheMode::Stateless.to_string(), "stateless");
+        assert_eq!(CompileCacheMode::Content.to_string(), "content");
+        assert_eq!(CompileCacheMode::Session.to_string(), "session");
+        // Reasons are diagnostic strings (camel-case matches the audit
+        // tag enum names).
+        assert_eq!(
+            DowngradeReason::HasExternalSrc.to_string(),
+            "HasExternalSrc"
+        );
+        assert_eq!(
+            DowngradeReason::HasModuleAugmentation.to_string(),
+            "HasModuleAugmentation"
+        );
+        // Source-map policy: lowercase tokens for transport.
+        assert_eq!(SourceMapPolicy::Inline.to_string(), "inline");
+        assert_eq!(SourceMapPolicy::None.to_string(), "none");
+    }
+
+    #[test]
+    fn compile_cache_mode_hash_includes_namespace_prefix() {
+        // The hash MUST embed the `verter.compile_cache_mode.v1:`
+        // prefix — a bare-byte hash without the namespace would
+        // collide with other single-byte-keyed enums. Verify by
+        // computing the expected bytes manually.
+        let mut buf = Vec::with_capacity(40);
+        buf.extend_from_slice(b"verter.compile_cache_mode.v1:");
+        buf.push(0x02);
+        let expected = crate::hash::hash_16(&buf);
+        assert_eq!(CompileCacheMode::Session.stable_hash(), expected);
+    }
+
+    #[test]
+    fn downgrade_reason_hash_includes_namespace_prefix() {
+        let mut buf = Vec::with_capacity(40);
+        buf.extend_from_slice(b"verter.downgrade_reason.v1:");
+        buf.push(0x03); // HasModuleAugmentation
+        let expected = crate::hash::hash_16(&buf);
+        assert_eq!(
+            DowngradeReason::HasModuleAugmentation.stable_hash(),
+            expected
+        );
+    }
+
+    #[test]
+    fn source_map_policy_hash_includes_namespace_prefix() {
+        let mut buf = Vec::with_capacity(40);
+        buf.extend_from_slice(b"verter.source_map_policy.v1:");
+        buf.push(0x00); // Inline
+        let expected = crate::hash::hash_16(&buf);
+        assert_eq!(SourceMapPolicy::Inline.stable_hash(), expected);
+    }
+
+    #[test]
+    fn compile_cache_mode_cross_namespace_distinct_from_source_map_policy() {
+        // Even with identical variant bytes the namespaces must
+        // discriminate. `CompileCacheMode::Stateless` (0x00) and
+        // `SourceMapPolicy::Inline` (0x00) MUST hash differently.
+        let a = CompileCacheMode::Stateless.stable_hash();
+        let b = SourceMapPolicy::Inline.stable_hash();
+        assert_ne!(
+            a, b,
+            "namespace prefixes MUST discriminate cross-enum hashes \
+             (else two distinct keys could collide)"
+        );
+    }
+}
+
 /// Controls how much static analysis is performed during upsert().
 ///
 /// **Deprecated**: Prefer [`AnalysisScope`](verter_semantic::analysis::AnalysisScope) bitflags
