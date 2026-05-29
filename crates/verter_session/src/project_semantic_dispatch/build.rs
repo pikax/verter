@@ -1146,6 +1146,85 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Drop the call/construct signatures whose Vue emit event NAME (the first
+    /// parameter's string-literal type — or each literal of a union first
+    /// parameter) is in `omit_set`. A signature whose first parameter is not a
+    /// string literal, or whose event name is not omitted, is kept verbatim.
+    ///
+    /// This is the call-signature analogue of property-name `Omit`: a Vue emit
+    /// interface declares each event as a call signature `(e: 'name', …): void`,
+    /// so omitting `'name'` must remove that signature. The event-name read uses
+    /// the SAME first-parameter-literal rule the emit normalizer
+    /// (`emits_from_typeinfo_surface`) uses, so the two agree on which signatures
+    /// represent which events.
+    fn filter_omitted_event_signatures(
+        &self,
+        signatures: &[SemanticNodeId],
+        omit_set: &FxHashSet<&str>,
+    ) -> Arc<[SemanticNodeId]> {
+        let kept: Vec<SemanticNodeId> = signatures
+            .iter()
+            .filter(|sig| {
+                // Keep the signature unless EVERY event name it declares is
+                // omitted (a single signature can declare a union of event
+                // names; only drop it when all are omitted, mirroring how the
+                // normalizer would surface the surviving names).
+                match self.call_signature_event_names(**sig) {
+                    Some(names) if !names.is_empty() => {
+                        !names.iter().all(|name| omit_set.contains(name.as_ref()))
+                    }
+                    // No string-literal event name → not an omittable emit
+                    // signature; keep it (general TS `Omit` leaves it intact).
+                    _ => true,
+                }
+            })
+            .copied()
+            .collect();
+        Arc::from(kept.into_boxed_slice())
+    }
+
+    /// The Vue emit event name(s) a call/construct signature declares — its
+    /// first parameter's string-literal type, or each literal of a union first
+    /// parameter. `None` when the node is not a `Function`, has no parameters,
+    /// or the first parameter is not a string-literal (union). Mirrors the
+    /// first-parameter event-name rule in `emits_from_typeinfo_surface`.
+    fn call_signature_event_names(&self, sig: SemanticNodeId) -> Option<Vec<Arc<str>>> {
+        let data = self.graph().node_data(sig)?;
+        let SemanticNodeData::Function { params, .. } = data.as_ref() else {
+            return None;
+        };
+        let first = params.first()?;
+        let mut names = Vec::new();
+        self.collect_string_literal_names(first.ty, &mut names);
+        if names.is_empty() {
+            None
+        } else {
+            Some(names)
+        }
+    }
+
+    /// Push the string-literal value(s) carried by `node` into `out` — the node
+    /// itself when it is a `Literal(String)`, or each `Literal(String)` arm when
+    /// it is a `Union`. A `Union` arm that is not a string literal is skipped
+    /// (the surrounding event-name rule only recognises string literals).
+    fn collect_string_literal_names(&self, node: SemanticNodeId, out: &mut Vec<Arc<str>>) {
+        let resolved = self.evaluate_deferred_semantic_node(node);
+        let Some(data) = self.graph().node_data(resolved) else {
+            return;
+        };
+        match data.as_ref() {
+            SemanticNodeData::Literal(LiteralValue::String(name)) => {
+                out.push(Arc::from(name.as_str()))
+            }
+            SemanticNodeData::Union(members) => {
+                for member in members.iter() {
+                    self.collect_string_literal_names(*member, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Built-in utility dispatch.
     ///
     /// Routes recognised utility names (`Partial`, `Required`, `Readonly`,
@@ -1607,13 +1686,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .filter(|m| !omit_set.contains(m.name.as_ref()))
                     .cloned()
                     .collect();
+                // `Omit<T, K>` over a property surface leaves call/construct
+                // signatures intact (TS mapped-type semantics touch only named
+                // properties). For a Vue EMIT interface the events are call
+                // signatures whose first parameter is a string-literal event
+                // NAME, so omitting an event name must drop the matching call
+                // signature(s) — the call-sig event name is the conceptual key.
+                // A signature whose first parameter is NOT a string literal in
+                // `omit_set` (any non-emit call signature) is unaffected.
+                let kept_call_signatures =
+                    self.filter_omitted_event_signatures(&surface.call_signatures, &omit_set);
+                let kept_construct_signatures =
+                    self.filter_omitted_event_signatures(&surface.construct_signatures, &omit_set);
                 let result_surface = SurfaceView {
                     members: Arc::from(kept.into_boxed_slice()),
-                    // Omit preserves source signatures (TS semantics):
-                    // `Omit<T, K>` only filters property names, leaving
-                    // call/construct/index signatures intact.
-                    call_signatures: Arc::clone(&surface.call_signatures),
-                    construct_signatures: Arc::clone(&surface.construct_signatures),
+                    call_signatures: kept_call_signatures,
+                    construct_signatures: kept_construct_signatures,
                     index_signatures: Arc::clone(&surface.index_signatures),
                     keyspace: surface.keyspace,
                     has_index_signature: surface.has_index_signature,
