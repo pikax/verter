@@ -1875,18 +1875,18 @@ fn ffi_payload_contains_instantiate_edge_for_generic_component() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// D9 #7 — CompileCacheMode round-trips cleanly across the FFI seam that
-// BOTH the NAPI and WASM bindings funnel through. NAPI converts
+// CompileCacheMode round-trips cleanly across the FFI seam that BOTH the
+// NAPI and WASM bindings funnel through. NAPI converts
 // `NapiCompileProfile -> FfiCompileProfile -> ffi_profile_to_host`, and
 // WASM deserialises `FfiCompileProfile` directly; both then serialise
 // `FfiVirtualFileResponse`. These tests pin the shared seam: the
 // requested-mode string parses into the host profile, an invalid string
 // is rejected, and the host response's mode fields serialise back out.
 //
-// Discrimination against the pre-B5 tree (`204b5ef9`):
+// Discrimination: before the compile-mode FFI seam existed,
 // `FfiCompileProfile.requested_mode`, the three `FfiVirtualFileResponse`
-// mode fields, and `FfiConversionError::InvalidCompileCacheMode` do not
-// exist — the test does not compile.
+// mode fields, and `FfiConversionError::InvalidCompileCacheMode` did not
+// exist — the test would not compile.
 // ─────────────────────────────────────────────────────────────────────
 
 #[test]
