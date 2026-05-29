@@ -20,6 +20,7 @@ use verter_session::{
     CompileCacheMode, CompileErrorPolicy, CompileProfile, DowngradeReason, FileKind, HostConfig,
     UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
+use verter_workspace::{ExactResolution, ResolvePhase, ResolveRequestKind};
 
 /// A production (non-dev) host config. The default `HostConfig` enables
 /// `dev_mode` + `DevServeLastKnownGood`, which fires the
@@ -422,4 +423,108 @@ fn upsert_evicts_prior_content_entries_for_canonical() {
              (the live content); the prior version's entry must have been evicted on upsert"
         );
     }
+}
+
+#[test]
+fn content_request_with_bare_side_effect_external_target_augmenter_downgrades_to_stateless() {
+    // A side-effect-only BARE-specifier import (`import "pkg-augment";` —
+    // no named binding, non-relative specifier) of a packaged augmenter
+    // whose `.d.ts` declares an EXTERNAL-target augmentation
+    // (`declare module "vue" { ... }`) MUST downgrade a `Content`
+    // request to `Stateless`. The content-addressed key carries no
+    // augmenter fingerprint, so editing the bare augmenter would leave
+    // the key byte-identical and serve stale output unless the
+    // classifier recognises the side-effect-driven augmentation
+    // dependency on its EXTERNAL augmentation target (`"vue"`), not
+    // just on the augmenter file's resolved canonical.
+    //
+    // Discriminator (vs the relative-only Step D probe): the prior
+    // side-effect walk filtered specifiers to relative-only
+    // (`./` / `../`), so a bare specifier never even reached
+    // `resolve_type_dependency_canonical`. Even after dropping the
+    // relative filter, pushing `ResolvedRelativeCanonical(<augmenter>)`
+    // would not match a `declare module "vue"` fact (whose specifier
+    // is bare, not relative). The structural fix walks the resolved
+    // augmenter's own `ModuleAugmentationFact` entries and emits an
+    // `ExternalSpecifier("vue")` probe per fact — the existing index
+    // probe then finds the augmenter and downgrades the request.
+    //
+    // Fixture: a packaged augmenter resolved through an exact
+    // resolution override. The owner SIDE-EFFECT-imports it; nothing
+    // else in the owner's program references "vue" by name (so the
+    // existing binding-driven probe path cannot catch it). The
+    // discriminator passes only when the bare-specifier side-effect
+    // branch walks the augmenter's facts and emits per-fact targets.
+    let host = host();
+    // Packaged augmenter: a `.d.ts` declaring `declare module "vue"`.
+    // The owner has no relative path to it; resolution goes through
+    // the exact-resolutions override.
+    upsert_ts(
+        &host,
+        "/node_modules/pkg-augment/index.d.ts",
+        "declare module 'vue' {\n\
+         \x20 interface ComponentCustomProperties { $foo: string }\n\
+         }\n\
+         export {};\n",
+    );
+    // The owner side-effect-imports the bare augmenter (no binding) and
+    // declares no binding on "vue". With no relative augmenter and no
+    // binding-driven probe target for "vue", the only way the
+    // classifier can recognise the augmentation is by walking the
+    // bare-specifier side-effect import's resolved augmenter facts.
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        "<script setup lang=\"ts\">\n\
+         import 'pkg-augment';\n\
+         const n = 1;\n\
+         </script>\n\
+         <template><div>{{ n }}</div></template>\n",
+    );
+    // Override the workspace resolver so the owner's bare side-effect
+    // import resolves to the packaged augmenter's `.d.ts`. Set AFTER
+    // upsert because the upsert path's `record_parsed_edges` clears
+    // any prior `exact_resolved` for the canonical (per
+    // `integrate_scheduler_snapshot` in `host_lifecycle.rs`). The
+    // wrapper handles invalidation of dependent caches.
+    host.set_exact_resolutions(
+        "/src/Comp.vue",
+        vec![ExactResolution {
+            specifier: "pkg-augment".to_string(),
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::TypeImport,
+            resolved_canonical_id: Some("/node_modules/pkg-augment/index.d.ts".to_string()),
+            possible_canonical_ids: vec!["/node_modules/pkg-augment/index.d.ts".to_string()],
+        }],
+    );
+    let profile = content_profile();
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Script),
+            compile_profile: profile.clone(),
+        })
+        .expect("compile");
+
+    assert_eq!(response.requested_mode, CompileCacheMode::Content);
+    assert_eq!(
+        response.actual_mode,
+        CompileCacheMode::Stateless,
+        "a Content request whose owner SIDE-EFFECT-imports a BARE-specifier augmenter \
+         whose `.d.ts` declares `declare module \"vue\"` MUST downgrade to Stateless"
+    );
+    assert_eq!(
+        response.downgrade_reason,
+        Some(DowngradeReason::HasModuleAugmentation),
+        "the firing reason must be HasModuleAugmentation, got {:?}",
+        response.downgrade_reason
+    );
+    // Stateless floor ⇒ NO content-addressed entry was published.
+    assert_eq!(
+        host.compile_output_pure_content_entry_count(),
+        0,
+        "a downgraded Content request must NOT publish a content-addressed entry"
+    );
 }

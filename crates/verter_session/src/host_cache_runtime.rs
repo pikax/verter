@@ -105,8 +105,9 @@ impl VerterHost {
     /// opt-in.
     #[must_use]
     pub(crate) fn owner_has_module_augmentation_dependency(&self, canonical: &str) -> bool {
+        use crate::fact_emission::GLOBAL_AUGMENTATION_TAG;
         use crate::file_artifact_store::{AugmentationTargetKey, AugmentationTargetKind};
-        use verter_semantic::facts::registry::InternedSpecifier;
+        use verter_semantic::facts::registry::{InternedGlobPattern, InternedSpecifier};
 
         let store = self.project_type_store.indexed();
         let env = self.host_view_env_hashes_for(canonical);
@@ -191,13 +192,20 @@ impl VerterHost {
             // Side-effect imports (no bindings) escape the
             // `import_targets` map because that map is keyed by local
             // name. Walk the parser-level `snapshot.imports` list and
-            // emit a target for any entry whose `bindings.is_empty()`
-            // AND whose source is a relative specifier — that is the
-            // only shape that can re-export a `declare module "./..."`
-            // augmentation through a side-effect import. Bare-specifier
-            // side-effect imports cannot deliver a relative-target
-            // augmentation, so they need no additional probe beyond the
-            // ambient kinds handled below.
+            // handle any entry whose `bindings.is_empty()`, regardless
+            // of whether the specifier is relative
+            // (`import "./augment";`) or bare
+            // (`import "pkg-augment";`). Both shapes can deliver a
+            // `declare module "<target>"` augmentation that the
+            // content-addressed key would otherwise miss — the relative
+            // form re-exports an augmenter file whose
+            // `declare module "./local"` retargets a sibling canonical;
+            // the bare form pulls in a packaged augmenter whose
+            // `declare module "vue"` (or similar) retargets an external
+            // module the owner does not import by binding. The probe's
+            // structural question is "does any canonical we materialise
+            // declare ANY augmentation" — the answer is independent of
+            // the augmentation's target shape.
             //
             // The `IndexedReady` snapshot returned here may carry an
             // unresolved `AnalyzedImport.resolved_canonical_id` (that
@@ -206,15 +214,29 @@ impl VerterHost {
             // augmentation probe is reached earlier). Resolve the
             // specifier directly through the live type-dependency
             // resolver — the same authority `import_targets` uses for
-            // binding-driven imports.
+            // binding-driven imports. The resolver handles both
+            // relative and bare specifiers uniformly (workspace
+            // routing, `.d.ts` preference, alias mappings).
+            //
+            // After materialising the resolved augmenter, enumerate its
+            // own `ModuleAugmentationFact` entries and emit one
+            // `AugmentationTargetKind` per fact so the existing index
+            // probe machinery (`ensure_augmentation_index_populated`)
+            // picks the augmenter up regardless of whether it augments
+            // an external module (`declare module "vue"`), a relative
+            // sibling (`declare module "./local"`), a wildcard ambient,
+            // or the global scope. This is the structural sibling of
+            // the binding-driven `import_targets` loop above: that
+            // loop derives the per-import target kind from the OWNER's
+            // import specifier (the augmented module the owner consumes);
+            // here we derive it from the AUGMENTER's own augmentation
+            // facts because a side-effect import gives the owner no
+            // local hint about which module is being augmented.
             for import in &indexed.snapshot.imports {
                 if !import.bindings.is_empty() {
                     continue;
                 }
                 let specifier = import.source.as_str();
-                if !(specifier.starts_with("./") || specifier.starts_with("../")) {
-                    continue;
-                }
                 let Some(resolved_canonical) =
                     self.resolve_type_dependency_canonical(canonical, specifier)
                 else {
@@ -225,13 +247,53 @@ impl VerterHost {
                 }
                 // Materialise the resolved dep so the augmenter's
                 // `FileArtifacts` (with its `ModuleAugmentationFact`
-                // entries) enter the index cold-scan corpus before any
-                // target probe runs (mirror of the
-                // `import_targets`-driven materialisation above).
+                // entries) enter the artifact store and the index
+                // cold-scan corpus before any target probe runs (mirror
+                // of the `import_targets`-driven materialisation
+                // above).
                 let _ = self.ensure_indexed_ready(&resolved_canonical);
-                per_import_targets.push(AugmentationTargetKind::ResolvedRelativeCanonical(
-                    Arc::from(resolved_canonical.as_str()),
-                ));
+                // Read the augmenter's own augmentation facts and emit
+                // a structurally-matching target kind per fact. The
+                // augmenter file may not even live in the store at
+                // legacy-key shape if materialisation produced only the
+                // content-addressed key — `get_artifacts_any` performs
+                // the permissive canonical-only lookup that ignores
+                // `content_hash` for this exact callsite.
+                if let Some(augmenter_artifacts) = store.get_artifacts_any(&resolved_canonical) {
+                    for fact in augmenter_artifacts.augmentations.iter() {
+                        let fact_specifier: &str = fact.specifier.as_ref();
+                        if fact_specifier == GLOBAL_AUGMENTATION_TAG {
+                            per_import_targets.push(AugmentationTargetKind::GlobalAugmentation);
+                        } else if fact_specifier.contains('*') {
+                            per_import_targets.push(AugmentationTargetKind::WildcardAmbient(
+                                InternedGlobPattern::from(fact_specifier),
+                            ));
+                        } else if fact_specifier.starts_with("./")
+                            || fact_specifier.starts_with("../")
+                        {
+                            // Resolve the augmenter's relative
+                            // `declare module "./X"` against the
+                            // augmenter's own canonical — same authority
+                            // `augmenter_matches_target` uses.
+                            if let Some(target_canonical) = self.resolve_type_dependency_canonical(
+                                &resolved_canonical,
+                                fact_specifier,
+                            ) {
+                                if !target_canonical.is_empty() {
+                                    per_import_targets.push(
+                                        AugmentationTargetKind::ResolvedRelativeCanonical(
+                                            Arc::from(target_canonical.as_str()),
+                                        ),
+                                    );
+                                }
+                            }
+                        } else {
+                            per_import_targets.push(AugmentationTargetKind::ExternalSpecifier(
+                                InternedSpecifier::from(fact_specifier),
+                            ));
+                        }
+                    }
+                }
             }
         }
 
