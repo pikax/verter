@@ -197,8 +197,6 @@ pub mod host_resolve_type_audit;
 mod host_semantic;
 #[cfg(test)]
 pub(crate) mod host_test_audit;
-#[cfg(test)]
-mod host_test_seed;
 mod host_upsert;
 mod host_views;
 mod host_workspace_audit;

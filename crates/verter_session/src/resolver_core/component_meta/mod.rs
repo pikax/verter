@@ -145,7 +145,7 @@ pub enum ComponentMetaResolutionPurpose {
 /// bubbles the entry's fact signature into any active outer fact tracer (so an
 /// outer component-meta cold trace inherits the DTO's cross-file carrier facts on
 /// a warm DTO hit), keeping the outer component-meta cache entry correctly keyed.
-pub fn component_meta_resolved_macros(
+pub(crate) fn component_meta_resolved_macros(
     ctx: &dyn crate::resolver_core::ResolverContext,
     owner_canonical: &str,
     snapshot_macros: &[AnalyzedMacro],

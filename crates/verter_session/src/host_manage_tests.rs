@@ -4166,20 +4166,6 @@ fn hm_prop_names(
     )
 }
 
-fn hm_emit_names(
-    host: &VerterHost,
-    owner: &str,
-    state: &crate::meta_resolve::ResolvedComponentMetaState,
-) -> Vec<String> {
-    names_for_kind(
-        host,
-        owner,
-        state,
-        verter_semantic::analysis::AnalyzedMacroKind::DefineEmits,
-        |d| d.emits.iter().map(|e| e.name.clone()).collect(),
-    )
-}
-
 fn hm_slot_names(
     host: &VerterHost,
     owner: &str,
