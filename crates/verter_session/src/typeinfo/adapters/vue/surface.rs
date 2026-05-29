@@ -312,13 +312,26 @@ impl VerterHost {
             macro_kind,
             request.level,
         );
-        if let Some(cached) = self.vue_shallow_metadata_store().get(&key) {
-            return cached;
+        // Warm read: the content-addressed key covers the SFC's OWN content,
+        // but the resolved DTOs read CROSS-FILE carrier types. Validate the
+        // recorded fact signature + project generation against the live view
+        // so a carrier edit (which leaves the SFC's `whole_hash` unchanged)
+        // invalidates the entry lazily.
+        let store_view = self.resolver_store_view();
+        let generation = self.project_type_store().current_project_generation();
+        if let Some(cached) =
+            self.vue_shallow_metadata_store()
+                .get_with_view(&key, &store_view, generation)
+        {
+            return std::sync::Arc::clone(&cached.dtos);
         }
 
         // Resolve the surface through a request carrying the VALIDATED identity
         // (live `whole_hash`) and the AUTHORITATIVE kind, so the surface
-        // resolution + normalizer dispatch never trust the caller's hint.
+        // resolution + normalizer dispatch never trust the caller's hint. The
+        // whole cold resolution runs under an installed fact tracer so the
+        // CROSS-FILE carrier facts it reads are captured into the entry's
+        // `ReadSetSignature` (the warm-read invalidation rail above).
         let validated_request = VueMacroSurfaceRequest {
             owner_canonical: Arc::clone(&request.owner_canonical),
             macro_index: request.macro_index,
@@ -326,34 +339,55 @@ impl VerterHost {
             root_identity: whole_hash,
             level: request.level,
         };
-        let dtos = match self.resolve_vue_macro_surface(&validated_request) {
-            Some(macro_surface) => match macro_kind {
-                AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::DefineModel => VueMacroDtos {
-                    props: props_from_typeinfo_surface(self, &macro_surface),
-                    ..VueMacroDtos::default()
+        let (dtos, finalise) = crate::fact_signature_helpers::install_fact_tracer(self, || {
+            match self.resolve_vue_macro_surface(&validated_request) {
+                Some(macro_surface) => match macro_kind {
+                    AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::DefineModel => {
+                        VueMacroDtos {
+                            props: props_from_typeinfo_surface(self, &macro_surface),
+                            ..VueMacroDtos::default()
+                        }
+                    }
+                    AnalyzedMacroKind::DefineEmits => VueMacroDtos {
+                        emits: emits_from_typeinfo_surface(self, &macro_surface),
+                        ..VueMacroDtos::default()
+                    },
+                    AnalyzedMacroKind::DefineSlots => VueMacroDtos {
+                        slots: slots_from_typeinfo_surface(self, &macro_surface),
+                        ..VueMacroDtos::default()
+                    },
+                    // `WithDefaults` is not a props-surface source on this path:
+                    // the outer `withDefaults` macro carries no type argument (it
+                    // is not `is_type_based`), so `resolve_vue_macro_surface`
+                    // returns `None` for it and this arm is unreachable. The
+                    // props come from the SEPARATELY-routed inner `DefineProps`
+                    // macro. Options / expose are separate subsystems. None of
+                    // these contribute a DTO bundle.
+                    AnalyzedMacroKind::WithDefaults
+                    | AnalyzedMacroKind::DefineOptions
+                    | AnalyzedMacroKind::DefineExpose => VueMacroDtos::default(),
                 },
-                AnalyzedMacroKind::DefineEmits => VueMacroDtos {
-                    emits: emits_from_typeinfo_surface(self, &macro_surface),
-                    ..VueMacroDtos::default()
-                },
-                AnalyzedMacroKind::DefineSlots => VueMacroDtos {
-                    slots: slots_from_typeinfo_surface(self, &macro_surface),
-                    ..VueMacroDtos::default()
-                },
-                // `WithDefaults` is not a props-surface source on this path: the
-                // outer `withDefaults` macro carries no type argument (it is not
-                // `is_type_based`), so `resolve_vue_macro_surface` returns `None`
-                // for it and this arm is unreachable. The props come from the
-                // SEPARATELY-routed inner `DefineProps` macro. Options / expose
-                // are separate subsystems. None of these contribute a DTO bundle.
-                AnalyzedMacroKind::WithDefaults
-                | AnalyzedMacroKind::DefineOptions
-                | AnalyzedMacroKind::DefineExpose => VueMacroDtos::default(),
-            },
-            None => VueMacroDtos::default(),
-        };
+                None => VueMacroDtos::default(),
+            }
+        });
 
-        self.vue_shallow_metadata_store().get_or_insert(key, dtos)
+        match finalise {
+            crate::resolver_core::FactReadSetFinalise::Ok(facts) => {
+                let entry = crate::typeinfo::adapters::vue::store::VueMacroDtosEntry {
+                    dtos: std::sync::Arc::new(dtos),
+                    read_set_signature:
+                        crate::fact_signature_helpers::ReadSetSignature::new(facts),
+                    validated_at_generation: generation,
+                };
+                std::sync::Arc::clone(&self.vue_shallow_metadata_store().insert(key, entry).dtos)
+            }
+            // Tracer overflowed: the DTOs are valid but cannot be admitted
+            // safely (the observation set was truncated, so warm-read
+            // validation could falsely pass against a changed carrier). Return
+            // the freshly-computed bundle WITHOUT caching — a repeat request
+            // recomputes, never serves an under-validated entry.
+            crate::resolver_core::FactReadSetFinalise::Overflow => std::sync::Arc::new(dtos),
+        }
     }
 
     /// Navigate a `TypeExpr` to its one-level object [`TypeInfoSurface`] through
@@ -611,14 +645,29 @@ pub fn emits_from_typeinfo_surface(
         let Some(first) = func.parameters.first() else {
             continue;
         };
-        // Payload = the call signature with the leading event-name parameter
-        // dropped. Preserves the function's spans + surviving parameter spans.
-        let payload_fn = TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr::with_spans(
-            func.parameters.iter().skip(1).cloned().collect(),
-            func.return_type.clone(),
-            func.type_parameters.clone(),
-            func.spans,
-        )));
+        // Payload = the call signature's REMAINING parameters (after the leading
+        // event-name parameter) as a TUPLE -- the Vue emit payload shape (the
+        // args passed to `emit('name', ...)`). `(e: 'change', payload: T) =>
+        // void` yields event `change` with payload tuple `[payload: T]`. This
+        // matches the eager OXC rail's `AnalyzedEmitField.payload_expr` (a
+        // `TypeExpr::Tuple`, NOT the whole call-signature function) so the
+        // downstream projector publishes an identical `event.payload`. Each
+        // surviving parameter maps to a labelled tuple element preserving its
+        // name / optional / rest.
+        let payload_tuple = TypeExpr::Tuple {
+            elements: func
+                .parameters
+                .iter()
+                .skip(1)
+                .map(|param| verter_type_expr::TupleElement {
+                    label: param.name.clone(),
+                    ty: param.ty.clone(),
+                    optional: param.optional,
+                    rest: param.rest,
+                })
+                .collect(),
+            readonly: false,
+        };
         // Scope the payload to the call signature's DECLARATION-origin file
         // (derived from its spans) so an inherited cross-file emit signature's
         // payload `Ref`s resolve in the base file, matching the eager rail's
@@ -643,7 +692,7 @@ pub fn emits_from_typeinfo_surface(
                 name,
                 span: verter_span::Span::default(),
                 payload_type: payload_type.clone(),
-                payload_expr: Some(payload_fn.clone()),
+                payload_expr: Some(payload_tuple.clone()),
                 payload_expr_scope: Some(payload_scope.clone()),
                 description: None,
                 tags: Vec::new(),
@@ -689,6 +738,67 @@ pub fn emits_from_typeinfo_surface(
     emits
 }
 
+/// Extract a slot callable's first-parameter type + return type from a slot
+/// member value, handling an INTERSECTION of function types.
+///
+/// A slot typed via an intersection of interfaces
+/// (`defineSlots<SlotA & SlotB>()`) has its `default` member resolve to
+/// `SlotA['default'] & SlotB['default']` — an `Intersection` of two function
+/// types (the TS-correct meaning of indexing an intersection), NOT a single
+/// pre-merged `Function`. Returns:
+///
+/// - `Function(f)` → `f`'s first-param type + return type directly.
+/// - `Intersection(arms)` where EVERY resolvable arm is a function → the
+///   INTERSECTION of the arms' first-param types (so `{ value?: string } &
+///   { value: string }` flows into [`binding_fields_from_param_ty`], whose
+///   resolver-navigation merges it required-wins) plus the intersection of the
+///   arms' return types. A non-function arm makes the member not slot-like.
+/// - Anything else → `None` (the member is not a slot).
+fn slot_callable_param_and_return(value: &TypeExpr) -> Option<(Option<TypeExpr>, Option<TypeExpr>)> {
+    match value {
+        TypeExpr::Function(func) => Some((
+            func.parameters.first().map(|p| p.ty.clone()),
+            func.return_type.as_ref().map(|rt| (**rt).clone()),
+        )),
+        TypeExpr::Intersection(arms) => {
+            let mut first_params: Vec<TypeExpr> = Vec::new();
+            let mut returns: Vec<TypeExpr> = Vec::new();
+            for arm in arms.iter() {
+                let TypeExpr::Function(func) = arm else {
+                    // A non-function arm means the member is not purely
+                    // slot-callable; fall out (not a slot).
+                    return None;
+                };
+                if let Some(p) = func.parameters.first() {
+                    first_params.push(p.ty.clone());
+                }
+                if let Some(rt) = func.return_type.as_ref() {
+                    returns.push((**rt).clone());
+                }
+            }
+            if first_params.is_empty() && returns.is_empty() {
+                return None;
+            }
+            let first_param = match first_params.len() {
+                0 => None,
+                1 => Some(first_params.into_iter().next().unwrap()),
+                _ => Some(TypeExpr::Intersection(std::sync::Arc::from(
+                    first_params.into_boxed_slice(),
+                ))),
+            };
+            let return_ty = match returns.len() {
+                0 => None,
+                1 => Some(returns.into_iter().next().unwrap()),
+                _ => Some(TypeExpr::Intersection(std::sync::Arc::from(
+                    returns.into_boxed_slice(),
+                ))),
+            };
+            Some((first_param, return_ty))
+        }
+        _ => None,
+    }
+}
+
 /// Normalize a `.vue` slots macro surface into the published
 /// [`AnalyzedSlotField`] set.
 ///
@@ -711,17 +821,15 @@ pub fn slots_from_typeinfo_surface(
         .iter()
         .filter_map(|member| {
             let value = raise_member_value(host, member)?;
-            let func = match &value {
-                TypeExpr::Function(func) => func,
-                _ => return None,
-            };
+            // A slot member is function-like: a single `Function`, or an
+            // `Intersection` of functions (`(SlotA & SlotB)['default']`). A
+            // non-callable member is not a slot.
+            let (first_param, return_expr) = slot_callable_param_and_return(&value)?;
             let scope = macro_surface.member_expr_scope(host, member);
-            let bindings = func
-                .parameters
-                .first()
-                .map(|param| binding_fields_from_param_ty(host, &param.ty, &scope))
+            let bindings = first_param
+                .as_ref()
+                .map(|param_ty| binding_fields_from_param_ty(host, param_ty, &scope))
                 .unwrap_or_default();
-            let return_expr = func.return_type.as_ref().map(|rt| (**rt).clone());
             let return_expr_scope = return_expr.as_ref().map(|_| scope.clone());
             let return_type = return_expr.as_ref().and_then(render_type_expr_display);
             let (description, tags) = member_jsdoc_from_spans(host, member);

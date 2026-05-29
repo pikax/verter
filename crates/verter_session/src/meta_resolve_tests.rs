@@ -4726,6 +4726,7 @@ fn define_props_macro_shape_reuses_expanded_fields_directly() {
     let (shape, source) = crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
         synthesize_define_props_shape_from_known_surface_with_authority(
             ctx,
+            "/test.vue",
             0,
             &snapshot,
             &[],
@@ -4778,6 +4779,36 @@ fn define_props_macro_shape_reuses_expanded_fields_directly() {
 
 #[test]
 fn define_props_macro_shape_prefers_resolved_macro_when_expanded_fields_are_incomplete() {
+    // Real SFC: `defineProps<Props>()` where `Props extends Pick<BaseProps,
+    // 'id' | 'label'>` adds `own`. Post-cutover the producer sources its prop
+    // member set from the typeinfo Vue surface (`vue_macro_dtos`), NOT a
+    // synthetic `ResolvedMacroMeta.props`, so the SFC + its `BaseProps` carrier
+    // must be REAL for the typeinfo path to resolve `[id, label, own]`.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base.ts",
+            "export interface BaseProps { id: string; label?: string; extra: number }",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { BaseProps } from './base'
+interface Props extends Pick<BaseProps, 'id' | 'label'> { own?: boolean }
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    assert!(host.ensure_loaded("/src/App.vue"));
+
+    // Synthetic snapshot + resolved-macro carry ONLY the gating facts the
+    // producer still reads from `ResolvedMacroMeta` (the matched `type_name`,
+    // `surface_is_authoritative`). The member SET is resolved from the real
+    // SFC's typeinfo surface, keyed on `(owner, macro_index=0, DefineProps)`.
     let snapshot = crate::types::FileAnalysisSnapshot {
         macros: vec![verter_semantic::analysis::types::AnalyzedMacro {
             kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
@@ -4819,51 +4850,14 @@ fn define_props_macro_shape_prefers_resolved_macro_when_expanded_fields_are_inco
             ),
         },
         native_props: Vec::new(),
-        props: vec![
-            verter_semantic::analysis::AnalyzedPropField {
-                name: "id".to_string(),
-                type_annotation: Some("string".to_string()),
-                is_optional: false,
-                span: verter_span::Span::new(0, 0),
-                description: None,
-                tags: Vec::new(),
-                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-                resolution_error: None,
-                type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
-                type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-                declared_in_macro_type_arg: false,
-            },
-            verter_semantic::analysis::AnalyzedPropField {
-                name: "label".to_string(),
-                type_annotation: Some("string".to_string()),
-                is_optional: true,
-                span: verter_span::Span::new(0, 0),
-                description: None,
-                tags: Vec::new(),
-                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-                resolution_error: None,
-                type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
-                type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-                declared_in_macro_type_arg: false,
-            },
-            verter_semantic::analysis::AnalyzedPropField {
-                name: "own".to_string(),
-                type_annotation: Some("boolean".to_string()),
-                is_optional: true,
-                span: verter_span::Span::new(0, 0),
-                description: None,
-                tags: Vec::new(),
-                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-                resolution_error: None,
-                type_expr: Some(TypeExpr::Primitive(PrimitiveName::Boolean)),
-                type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-                declared_in_macro_type_arg: false,
-            },
-        ],
+        props: Vec::new(),
         emits: Vec::new(),
         slots: Vec::new(),
         jsdoc: None,
     }];
+    // Expanded fields are INCOMPLETE — only `own` resolved — so the producer
+    // must fall back to the wider typeinfo `resolved_macro` surface
+    // (`[id, label, own]`) rather than truncating to `[own]`.
     let evaluated = verter_semantic::analysis::type_expand::ExpandedComponentTypes {
         props: vec![verter_semantic::analysis::type_expand::ExpandedField {
             name: "own".to_string(),
@@ -4885,10 +4879,10 @@ fn define_props_macro_shape_prefers_resolved_macro_when_expanded_fields_are_inco
         type_arguments: Vec::new().into(),
     };
 
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let (shape, source) = crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+    let (shape, source) = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         synthesize_define_props_shape_from_known_surface_with_authority(
             ctx,
+            "/src/App.vue",
             0,
             &snapshot,
             &resolved_macros,
@@ -4898,17 +4892,19 @@ fn define_props_macro_shape_prefers_resolved_macro_when_expanded_fields_are_inco
         )
     })
     .expect("defineProps should merge the wider resolved macro surface when expanded fields are incomplete");
-    let prop_names: Vec<&str> = shape
+    let mut prop_names: Vec<&str> = shape
         .value
         .properties
         .iter()
         .map(|property| property.name.as_str())
         .collect();
+    prop_names.sort_unstable();
 
     assert_eq!(
         prop_names,
         vec!["id", "label", "own"],
-        "resolved macro fallback should keep inherited imported props instead of truncating to the local evaluated field set"
+        "resolved macro fallback should keep inherited imported props (id, label via Pick<BaseProps>) \
+         instead of truncating to the local evaluated field set"
     );
     assert!(
         matches!(source, MacroShapeSource::ResolvedMacro),
@@ -4942,7 +4938,7 @@ fn define_props_fields_fast_path_allows_direct_object_literals() {
     let host = VerterHost::new_standalone(HostConfig::default());
     assert!(
         crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
-            define_props_fields_fast_path_allowed(ctx, &mac, 0, &[], Some(&lowered))
+            define_props_fields_fast_path_allowed(ctx, "/test.vue", &mac, 0, &[], Some(&lowered))
         }),
         "direct object literals should keep using the fields fast path"
     );
@@ -5027,6 +5023,7 @@ fn define_props_fields_fast_path_rejects_complex_heritage_refs() {
         !crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
             define_props_fields_fast_path_allowed(
                 ctx,
+                "/test.vue",
                 &snapshot.macros[0],
                 0,
                 &resolved_macros,
@@ -5134,7 +5131,7 @@ fn define_props_fields_fast_path_rejects_multi_surface_macro_candidates() {
     let host = VerterHost::new_standalone(HostConfig::default());
     assert!(
         !crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
-            define_props_fields_fast_path_allowed(ctx, &mac, 0, &resolved_macros, Some(&lowered))
+            define_props_fields_fast_path_allowed(ctx, "/test.vue", &mac, 0, &resolved_macros, Some(&lowered))
         }),
         "a defineProps macro with multiple resolved surfaces should not collapse to a single fields-only shape"
     );
@@ -7127,6 +7124,17 @@ withDefaults(defineProps<Props>(), {
         )
         .unwrap();
 
+    // Synthetic snapshot carries the gating facts only (`type_references`); the
+    // real SFC above is what `vue_macro_dtos` resolves the typeinfo surface
+    // from. For a UNION-typed `Props` the typeinfo surface is the COMMON members
+    // (`editor`, `layout`) — the TS-correct shallow reading of `A | B`. The full
+    // per-branch FLATTENING (`pluginKey`, `options`) is the EXPANSION's job and
+    // arrives via `evaluated_types.props`; the production union-flattening is
+    // covered end-to-end by
+    // `meta_tests::get_component_meta_editor_toolbar_union_keeps_base_and_plugin_props`.
+    // This test asserts the producer REUSES a populated authoritative expanded
+    // surface directly (the `use_all_expanded_props` Fields path) rather than
+    // truncating it.
     let snapshot = FileAnalysisSnapshot {
         macros: vec![verter_semantic::analysis::AnalyzedMacro {
             kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
@@ -7167,87 +7175,31 @@ withDefaults(defineProps<Props>(), {
             ),
         },
         native_props: Vec::new(),
-        props: vec![
-            verter_semantic::analysis::AnalyzedPropField {
-                name: "editor".to_string(),
-                type_annotation: Some("Editor".to_string()),
-                is_optional: false,
-                span: verter_span::Span::new(0, 0),
-                description: None,
-                tags: Vec::new(),
-                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-                resolution_error: None,
-                type_expr: Some(TypeExpr::Unknown { raw: "Editor".to_string() }),
-                type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-                declared_in_macro_type_arg: false,
-            },
-            verter_semantic::analysis::AnalyzedPropField {
-                name: "layout".to_string(),
-                type_annotation: Some("'fixed' | 'bubble' | 'floating'".to_string()),
-                is_optional: true,
-                span: verter_span::Span::new(0, 0),
-                description: None,
-                tags: Vec::new(),
-                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-                resolution_error: None,
-                type_expr: Some(TypeExpr::Unknown { raw: "'fixed' | 'bubble' | 'floating'".to_string() }),
-                type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-                declared_in_macro_type_arg: false,
-            },
-            verter_semantic::analysis::AnalyzedPropField {
-                name: "pluginKey".to_string(),
-                type_annotation: Some("string".to_string()),
-                is_optional: true,
-                span: verter_span::Span::new(0, 0),
-                description: None,
-                tags: Vec::new(),
-                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-                resolution_error: None,
-                type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
-                type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-                declared_in_macro_type_arg: false,
-            },
-            verter_semantic::analysis::AnalyzedPropField {
-                name: "options".to_string(),
-                type_annotation: Some(
-                    "{ strategy?: 'absolute' | 'fixed'; onShow?: () => void }".to_string(),
-                ),
-                is_optional: true,
-                span: verter_span::Span::new(0, 0),
-                description: None,
-                tags: Vec::new(),
-                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-                resolution_error: None,
-                type_expr: Some(TypeExpr::Unknown { raw: "{ strategy?: 'absolute' | 'fixed'; onShow?: () => void }".to_string() }),
-                type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-                declared_in_macro_type_arg: false,
-            },
-        ],
+        props: Vec::new(),
         emits: Vec::new(),
         slots: Vec::new(),
         jsdoc: None,
     }];
 
+    // The expansion has ALREADY produced the flattened per-branch surface (the
+    // production pipeline runs expansion before `produce_macro_object_shapes`).
+    let make_field = |name: &str, optional: bool| {
+        verter_semantic::analysis::type_expand::ExpandedField {
+            name: name.to_string(),
+            r#type: verter_type_expr::TypeExpr::primitive(verter_type_expr::PrimitiveName::Unknown),
+            raw_type: None,
+            optional,
+            exactness: verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete,
+            execution_status:
+                verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
+            diagnostics: Vec::new(),
+            shallow_type_expr: None,
+            shallow_type_expr_scope: None,
+            declared_in_macro_type_arg: false,
+        }
+    };
+
     let host = project.host();
-    let resolved_prop_names: Vec<&str> = resolved_macros[0]
-        .props
-        .iter()
-        .map(|prop| prop.name.as_str())
-        .collect();
-
-    assert!(
-        resolved_macros[0].surface_is_authoritative,
-        "projected local defineProps surfaces should be marked authoritative"
-    );
-    assert!(
-        resolved_prop_names.contains(&"editor")
-            && resolved_prop_names.contains(&"layout")
-            && resolved_prop_names.contains(&"pluginKey")
-            && resolved_prop_names.contains(&"options"),
-        "resolved macro surface should already contain the projected defineProps members, got {resolved_prop_names:?}"
-    );
-
-    let _store_view = host.resolver_store_view();
     let facts = host
         .ensure_indexed_ready("/src/App.vue")
         .expect("app facts should be present");
@@ -7255,6 +7207,12 @@ withDefaults(defineProps<Props>(), {
         VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let mut evaluated_types = verter_semantic::analysis::type_expand::ExpandedComponentTypes {
+        props: vec![
+            make_field("editor", false),
+            make_field("layout", true),
+            make_field("pluginKey", true),
+            make_field("options", true),
+        ],
         ..Default::default()
     };
 
@@ -7270,28 +7228,22 @@ withDefaults(defineProps<Props>(), {
     );
 
     assert_eq!(
-        0u32,
-        0,
-        "authoritative projected defineProps surfaces should be reused directly instead of triggering a second solve"
-    );
-    assert_eq!(
         evaluated_types.define_props.len(),
         1,
         "authoritative projected defineProps surfaces should still synthesize a macro object shape"
     );
-    let prop_names: Vec<&str> = evaluated_types.define_props[0]
+    let mut prop_names: Vec<&str> = evaluated_types.define_props[0]
         .result
         .value
         .properties
         .iter()
         .map(|property| property.name.as_str())
         .collect();
-    assert!(
-        prop_names.contains(&"editor")
-            && prop_names.contains(&"layout")
-            && prop_names.contains(&"pluginKey")
-            && prop_names.contains(&"options"),
-        "synthesized defineProps shape should preserve the authoritative projected surface, got {prop_names:?}"
+    prop_names.sort_unstable();
+    assert_eq!(
+        prop_names,
+        vec!["editor", "layout", "options", "pluginKey"],
+        "synthesized defineProps shape should reuse the authoritative populated expanded surface, got {prop_names:?}"
     );
 }
 

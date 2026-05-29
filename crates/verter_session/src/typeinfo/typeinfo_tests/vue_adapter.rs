@@ -208,41 +208,44 @@ fn define_emits_normalizer_extracts_call_signature_events_and_strips_event_param
         "event names come from the call-signature first param literal, NOT keyof"
     );
 
-    // The payload function strips the leading event-name parameter: `change`
-    // keeps `(value: number) => void` (1 param), `select` keeps
-    // `(id: string, extra: boolean) => void` (2 params).
+    // The payload is the call signature's REMAINING parameters as a TUPLE (the
+    // Vue emit payload shape): `change` keeps `[value: number]` (1 element),
+    // `select` keeps `[id: string, extra: boolean]` (2 elements). The leading
+    // event-name parameter is stripped.
     let change = emits.iter().find(|e| e.name == "change").unwrap();
     let payload = change
         .payload_expr
         .as_ref()
-        .expect("change payload_expr must be the stripped function");
-    let verter_type_expr::TypeExpr::Function(func) = payload else {
-        panic!("change payload must be a Function, got {payload:?}");
+        .expect("change payload_expr must be the stripped tuple");
+    let verter_type_expr::TypeExpr::Tuple { elements, .. } = payload else {
+        panic!("change payload must be a Tuple, got {payload:?}");
     };
     assert_eq!(
-        func.parameters.len(),
+        elements.len(),
         1,
-        "leading event-name param must be stripped from the change payload"
+        "leading event-name param must be stripped from the change payload tuple"
     );
-    // Negative: the first surviving parameter is NOT the event-name literal.
+    // Negative: the surviving tuple element is NOT the event-name literal.
     assert!(
         !matches!(
-            func.parameters[0].ty,
+            elements[0].ty,
             verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(_))
         ),
-        "the stripped payload's first param must not be the event-name literal"
+        "the stripped payload tuple's element must not be the event-name literal"
     );
 
     let select = emits.iter().find(|e| e.name == "select").unwrap();
-    let verter_type_expr::TypeExpr::Function(select_func) =
-        select.payload_expr.as_ref().expect("select payload_expr")
+    let verter_type_expr::TypeExpr::Tuple {
+        elements: select_elements,
+        ..
+    } = select.payload_expr.as_ref().expect("select payload_expr")
     else {
-        panic!("select payload must be a Function");
+        panic!("select payload must be a Tuple");
     };
     assert_eq!(
-        select_func.parameters.len(),
+        select_elements.len(),
         2,
-        "select keeps its two non-event params"
+        "select keeps its two non-event params as tuple elements"
     );
 }
 
@@ -327,29 +330,29 @@ fn define_emits_normalizer_mixed_callsig_excludes_property_members() {
         "a property member must NOT add an event alongside a call signature (negative)"
     );
 
-    // The call-sig payload is the stripped function `(value: number) => void` —
-    // the leading event-name parameter is dropped, leaving one parameter typed
-    // `number`.
+    // The call-sig payload is the stripped tuple `[value: number]` — the
+    // leading event-name parameter is dropped, leaving one tuple element typed
+    // `number` (the Vue emit payload shape).
     let change = &emits[0];
-    let verter_type_expr::TypeExpr::Function(func) = change
+    let verter_type_expr::TypeExpr::Tuple { elements, .. } = change
         .payload_expr
         .as_ref()
-        .expect("change payload_expr is the stripped function")
+        .expect("change payload_expr is the stripped tuple")
     else {
-        panic!("change payload must be a Function");
+        panic!("change payload must be a Tuple");
     };
     assert_eq!(
-        func.parameters.len(),
+        elements.len(),
         1,
-        "the leading event-name param is stripped, leaving the payload param"
+        "the leading event-name param is stripped, leaving the payload tuple element"
     );
     assert!(
         matches!(
-            func.parameters[0].ty,
+            elements[0].ty,
             verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
         ),
-        "the surviving payload param is typed `number`, got {:?}",
-        func.parameters[0].ty
+        "the surviving payload tuple element is typed `number`, got {:?}",
+        elements[0].ty
     );
     // The payload scope is the SFC (the signature was written in the SFC's own
     // defineEmits type argument).

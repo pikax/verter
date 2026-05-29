@@ -31,6 +31,8 @@ use verter_semantic::analysis::types::{
     AnalyzedEmitField, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField, Hash16,
 };
 
+use crate::fact_signature_helpers::ReadSetSignature;
+use crate::resolver_core::StoreView;
 use crate::typeinfo::types::TypeInfoQueryLevel;
 
 /// Cache key for one `.vue` macro surface's normalized DTOs.
@@ -99,6 +101,32 @@ pub struct VueMacroDtos {
     pub slots: Vec<AnalyzedSlotField>,
 }
 
+/// A cached [`VueMacroDtos`] bundle plus the cross-file dependency facts the
+/// resolution observed.
+///
+/// The DTO bundle is materialised by resolving the macro surface through the
+/// shared typeinfo path, which reads CROSS-FILE carrier types (imported
+/// interfaces / aliases). The SFC's own `whole_hash` keys the slot but does NOT
+/// change when a CARRIER file is edited, so a content-addressed key alone would
+/// serve stale DTOs after a dependency edit. This entry carries the
+/// path-precise [`ReadSetSignature`] observed under an installed fact tracer
+/// plus the project generation it was validated at; warm reads revalidate BOTH
+/// gates against the live [`StoreView`] (the same rail
+/// [`crate::component_meta_result_db::ComponentMetaResultDb`] uses) so a carrier
+/// edit invalidates the entry lazily through recorded facts.
+#[derive(Debug, Clone)]
+pub struct VueMacroDtosEntry {
+    /// The normalized DTO bundle (immutable, refcounted so warm reads hand out
+    /// the SAME `Arc` rather than re-cloning).
+    pub dtos: Arc<VueMacroDtos>,
+    /// Path-precise fact signature observed while resolving the surface.
+    pub read_set_signature: ReadSetSignature,
+    /// Project generation the entry was validated at. A generation reset bumps
+    /// no file content, so this gate rejects an entry whose facts still
+    /// validate but whose project shape was reset.
+    pub validated_at_generation: u64,
+}
+
 /// Host-owned cache of `.vue` macro-surface normalized DTOs.
 ///
 /// `DashMap`-backed (native) so concurrent cold requests for distinct
@@ -108,7 +136,7 @@ pub struct VueMacroDtos {
 /// so a reader holds a cheap refcount, never a borrow into the map.
 #[derive(Debug, Default)]
 pub struct VueShallowMetadataStore {
-    entries: DashMap<VueMacroDtoKey, Arc<VueMacroDtos>>,
+    entries: DashMap<VueMacroDtoKey, Arc<VueMacroDtosEntry>>,
 }
 
 impl VueShallowMetadataStore {
@@ -120,26 +148,51 @@ impl VueShallowMetadataStore {
         }
     }
 
-    /// Return the cached DTO bundle for `key`, if present. Cloning the
-    /// `Arc` is O(1) and releases the map shard immediately.
+    /// Return the cached entry for `key` IFF it still validates under the live
+    /// `view` and project `generation`.
+    ///
+    /// The content-addressed key (`whole_hash`) covers the SFC's own content;
+    /// the [`ReadSetSignature`] gate covers CROSS-FILE carrier edits (an
+    /// imported type the resolution read). Both must pass — a carrier edit that
+    /// bumps a dependency fact, or a project-generation reset, invalidates the
+    /// entry lazily without touching the SFC's own hash. An entry with an empty
+    /// signature (a macro whose surface read no cross-file facts) trivially
+    /// validates the fact rail.
     #[must_use]
-    pub fn get(&self, key: &VueMacroDtoKey) -> Option<Arc<VueMacroDtos>> {
-        self.entries.get(key).map(|entry| Arc::clone(entry.value()))
+    pub fn get_with_view<V: StoreView + ?Sized>(
+        &self,
+        key: &VueMacroDtoKey,
+        view: &V,
+        generation: u64,
+    ) -> Option<Arc<VueMacroDtosEntry>> {
+        let candidate = Arc::clone(self.entries.get(key)?.value());
+        if candidate.validated_at_generation != generation {
+            return None;
+        }
+        if !view.validates_fact_signature(&candidate.read_set_signature.facts) {
+            return None;
+        }
+        Some(candidate)
     }
 
-    /// Memoize `value` under `key` and return the canonical `Arc` for it.
+    /// Memoize `entry` under `key`, REPLACING any existing entry, and return
+    /// the canonical `Arc` for the freshly-inserted value.
     ///
-    /// First-writer-wins: if a concurrent cold request already published a
-    /// value for `key`, the existing `Arc` is returned and `value` is dropped
-    /// (the cache stays immutable-after-publish). The content-addressed key
-    /// guarantees both writers computed against the same content.
-    pub fn get_or_insert(&self, key: VueMacroDtoKey, value: VueMacroDtos) -> Arc<VueMacroDtos> {
-        Arc::clone(
-            self.entries
-                .entry(key)
-                .or_insert_with(|| Arc::new(value))
-                .value(),
-        )
+    /// The cold path that calls this runs ONLY after a `get_with_view` miss
+    /// (the slot was empty, or its existing entry failed fact / generation
+    /// validation). A carrier edit does NOT bump the project generation — it
+    /// bumps a per-canonical fact — so a stale carrier-dep entry and its fresh
+    /// replacement share the SAME `validated_at_generation`. A same-generation
+    /// keep would therefore PIN the stale value (every read would reject it via
+    /// the fact rail, recompute, then keep the stale entry on insert — and the
+    /// caller would receive the kept STALE entry, not its fresh compute). So
+    /// the insert unconditionally overwrites. Concurrent cold races compute the
+    /// SAME fresh value against the SAME content + carrier facts, so last-writer
+    /// -wins is value-equivalent to first-writer-wins.
+    pub fn insert(&self, key: VueMacroDtoKey, entry: VueMacroDtosEntry) -> Arc<VueMacroDtosEntry> {
+        let arc = Arc::new(entry);
+        self.entries.insert(key, Arc::clone(&arc));
+        arc
     }
 
     /// Number of cached entries. Test-only — exercised by the cache-identity

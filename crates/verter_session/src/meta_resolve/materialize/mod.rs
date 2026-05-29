@@ -16,7 +16,7 @@
 //! callsites keep working without churn.
 
 mod field_types;
-mod macro_shapes;
+pub(crate) mod macro_shapes;
 pub(crate) mod utility_types;
 
 pub(crate) use field_types::{
