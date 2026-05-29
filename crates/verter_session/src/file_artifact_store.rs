@@ -1543,6 +1543,76 @@ impl FileArtifactStore {
         }
     }
 
+    /// Invalidate every `augmentation_index` entry that the augmenter
+    /// at `augmenter_canonical` could contribute to.
+    ///
+    /// Called from the side-effect import probe walk
+    /// (`VerterHost::owner_has_module_augmentation_dependency`) after
+    /// newly materialising an augmenter via `ensure_indexed_ready`.
+    /// Without this step the next
+    /// [`Self::ensure_augmentation_index_populated`] call would
+    /// warm-hit any entry whose cold scan ran BEFORE the augmenter
+    /// entered the artifact store (and therefore saw no facts for
+    /// the queried target); that warm-empty hit would falsely report
+    /// "no augmenters for this target" and let a `Content` request
+    /// reuse a content-addressed entry that does not fingerprint the
+    /// augmenter.
+    ///
+    /// The invalidation removes entries the augmenter would
+    /// contribute to and lets the next probe cold-scan against the
+    /// now-fresh `artifacts` set. Entries the augmenter does NOT
+    /// contribute to are left untouched — they are unaffected by
+    /// this augmenter's materialisation.
+    ///
+    /// Snapshot-first / no-shard-guard discipline mirrors
+    /// [`Self::refresh_augmentation_index_for_canonical`]: the
+    /// resolver hook may re-enter the store (relative
+    /// `declare module "./X"` targets resolve through
+    /// `ensure_indexed_ready`), and `DashMap`'s `std::sync::RwLock`
+    /// shard guards are non-reentrant.
+    ///
+    /// Returns the count of entries actually removed.
+    pub fn invalidate_augmentation_index_for_augmenter<R>(
+        &self,
+        augmenter_canonical: &str,
+        augmenter_facts: &[ModuleAugmentationFact],
+        resolve_relative_canonical: R,
+    ) -> usize
+    where
+        R: Fn(&str, &str) -> Option<Arc<str>>,
+    {
+        if augmenter_facts.is_empty() {
+            return 0;
+        }
+        // Snapshot existing keys off the shard guard before computing
+        // contribution / removing entries: `augmenter_matches_target`
+        // may invoke the resolver hook for relative-target facts, and
+        // the resolver re-enters the store via `ensure_indexed_ready`.
+        let existing_keys: Vec<AugmentationTargetKey> = self
+            .augmentation_index
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+        let mut removed = 0usize;
+        for key in existing_keys {
+            let contributes = augmenter_facts.iter().any(|fact| {
+                augmenter_matches_target(
+                    fact,
+                    &key,
+                    augmenter_canonical,
+                    &resolve_relative_canonical,
+                )
+            });
+            if !contributes {
+                continue;
+            }
+            if self.augmentation_index.remove(&key).is_some() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     /// Drop every entry from the augmentation index.
     pub fn clear_augmentation_index(&self) {
         self.augmentation_index.clear();

@@ -528,3 +528,127 @@ fn content_request_with_bare_side_effect_external_target_augmenter_downgrades_to
         "a downgraded Content request must NOT publish a content-addressed entry"
     );
 }
+
+#[test]
+fn bare_side_effect_augmenter_invalidates_stale_empty_augmentation_index() {
+    // The augmentation_index entry for an augmentation target is warmed
+    // lazily on first probe via `ensure_augmentation_index_populated`'s
+    // cold scan. If the cold scan runs BEFORE the augmenter file has
+    // entered `FileArtifactStore`, the entry is warmed EMPTY. A later
+    // bare side-effect import that materialises the augmenter must
+    // invalidate the now-stale empty entry so the next probe rebuilds
+    // it against the materialised state — otherwise a side-effect
+    // augmenter loaded after a pre-warming compile leaves the owner
+    // in `Content` mode despite carrying a module-augmentation
+    // dependency.
+    //
+    // Discriminator: pre-warm the augmentation_index entry for the
+    // bare specifier (`"vue"`) by compiling a fact-free SFC that
+    // imports from `'vue'` — this seeds an empty `ExternalSpecifier
+    // ("vue")` set because pkg-augment is NOT yet in the store. Then
+    // upsert pkg-augment + a Content SFC that side-effect-imports it.
+    // Pre-fix: the probe warm-hits the stale-empty entry → owner stays
+    // Content. Post-fix: F1's walk invalidates the entry after
+    // materialising pkg-augment → next probe cold-scans against the
+    // now-fresh store → finds the augmenter → owner downgrades to
+    // Stateless.
+    let host = host();
+
+    // Pre-warm the augmentation_index for `ExternalSpecifier("vue")`
+    // by compiling a fact-free SFC that imports from 'vue'. This
+    // triggers `owner_has_module_augmentation_dependency` which calls
+    // `ensure_augmentation_index_populated` for `"vue"` — but no
+    // augmenter is loaded yet, so the entry is warmed EMPTY.
+    upsert_vue(
+        &host,
+        "/src/Prewarm.vue",
+        "<script setup lang=\"ts\">\n\
+         import { ref } from 'vue';\n\
+         const n = ref(1);\n\
+         </script>\n\
+         <template><div>{{ n }}</div></template>\n",
+    );
+    let profile = content_profile();
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Prewarm.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Script),
+            compile_profile: profile.clone(),
+        })
+        .expect("prewarm compile");
+
+    // Now load the bare-specifier augmenter that declares
+    // `declare module "vue"`. Its augmentations target `"vue"` — the
+    // same key the prewarm seeded EMPTY.
+    upsert_ts(
+        &host,
+        "/node_modules/pkg-augment/index.d.ts",
+        "declare module 'vue' {\n\
+         \x20 interface ComponentCustomProperties { $foo: string }\n\
+         }\n\
+         export {};\n",
+    );
+
+    // Owner SIDE-EFFECT-imports the augmenter; nothing else
+    // references "vue" by binding so only F1's side-effect walk can
+    // discover the augmentation.
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        "<script setup lang=\"ts\">\n\
+         import 'pkg-augment';\n\
+         const n = 1;\n\
+         </script>\n\
+         <template><div>{{ n }}</div></template>\n",
+    );
+    host.set_exact_resolutions(
+        "/src/Comp.vue",
+        vec![ExactResolution {
+            specifier: "pkg-augment".to_string(),
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::TypeImport,
+            resolved_canonical_id: Some("/node_modules/pkg-augment/index.d.ts".to_string()),
+            possible_canonical_ids: vec!["/node_modules/pkg-augment/index.d.ts".to_string()],
+        }],
+    );
+
+    // Snapshot the content-addressed entry count BEFORE compiling
+    // Comp.vue. The pre-warm Prewarm.vue compile may have published
+    // its own content entry (Prewarm is fact-free and runs as
+    // Content) — this prior entry is unrelated to the discriminator.
+    // The post-fix property is that the Comp.vue compile must NOT
+    // grow the count: a downgraded `Stateless` request publishes
+    // nothing.
+    let pre_count = host.compile_output_pure_content_entry_count();
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Script),
+            compile_profile: profile.clone(),
+        })
+        .expect("compile");
+
+    assert_eq!(response.requested_mode, CompileCacheMode::Content);
+    assert_eq!(
+        response.actual_mode,
+        CompileCacheMode::Stateless,
+        "a Content request whose bare side-effect augmenter loads AFTER a probe pre-warmed \
+         the augmentation_index empty MUST still downgrade to Stateless; the stale-empty \
+         entry must be invalidated when the augmenter materialises"
+    );
+    assert_eq!(
+        response.downgrade_reason,
+        Some(DowngradeReason::HasModuleAugmentation),
+        "the firing reason must be HasModuleAugmentation, got {:?}",
+        response.downgrade_reason
+    );
+    let post_count = host.compile_output_pure_content_entry_count();
+    assert_eq!(
+        post_count, pre_count,
+        "a downgraded Content request must NOT publish a content-addressed entry \
+         (pre={pre_count}, post={post_count})"
+    );
+}

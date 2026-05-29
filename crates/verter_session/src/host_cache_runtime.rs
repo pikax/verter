@@ -260,6 +260,25 @@ impl VerterHost {
                 // the permissive canonical-only lookup that ignores
                 // `content_hash` for this exact callsite.
                 if let Some(augmenter_artifacts) = store.get_artifacts_any(&resolved_canonical) {
+                    // Invalidate any `augmentation_index` entry whose
+                    // cold scan ran BEFORE this augmenter entered the
+                    // store. A pre-augmenter probe of the same target
+                    // (e.g. another file imported `'vue'` and triggered
+                    // an empty cold scan for `ExternalSpecifier("vue")`
+                    // before pkg-augment was loaded) would warm-hit
+                    // here and falsely report "no augmenters for this
+                    // target" — letting a `Content` request reuse a
+                    // content-addressed entry that does not fingerprint
+                    // the augmenter. Removing the stale entries forces
+                    // the next probe to cold-scan against the now-
+                    // fresh artifact set.
+                    if !augmenter_artifacts.augmentations.is_empty() {
+                        store.invalidate_augmentation_index_for_augmenter(
+                            &resolved_canonical,
+                            &augmenter_artifacts.augmentations,
+                            resolver,
+                        );
+                    }
                     for fact in augmenter_artifacts.augmentations.iter() {
                         let fact_specifier: &str = fact.specifier.as_ref();
                         if fact_specifier == GLOBAL_AUGMENTATION_TAG {
