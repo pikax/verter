@@ -462,7 +462,7 @@ impl VerterHost {
     ///   wildcard pattern declared anywhere in the base artifact set (a
     ///   wildcard ambient applies via a matching import, so it cannot be
     ///   derived from the owner's specifiers alone — see
-    ///   [`crate::file_artifact_store::FileArtifactStore::declared_ambient_augmentation_targets`]).
+    ///   [`crate::file_artifact_store::FileArtifactStore::declared_wildcard_ambient_patterns`]).
     ///
     /// Each target routes through
     /// [`crate::file_artifact_store::FileArtifactStore::ensure_augmentation_index_populated`],
