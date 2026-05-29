@@ -218,3 +218,128 @@ fn session_peek_output_returns_per_kind_pair() {
         .expect("output for Main");
     assert_eq!(&*got.code, "/* main */");
 }
+
+// ────────────────────────────────────────────────────────────────
+// Content-cache publish/invalidate consistency.
+//
+// `publish_content` inserts the `entries` row BEFORE its
+// `by_canonical` reverse-index member. `remove_canonical` takes the
+// reverse-index set and clears each key from `entries`. The ordering
+// guarantees that an entry can always be evicted by canonical: a live
+// `entries` row always gets a `by_canonical` backref, so a
+// `remove_canonical` that observes the canonical evicts the row. The
+// inverse order could orphan an `entries` row whose backref was taken
+// by a concurrent `remove_canonical` before the row existed, breaching
+// the force-recompute contract (the orphan would be permanently
+// un-evictable by canonical).
+// ────────────────────────────────────────────────────────────────
+
+/// Force-recompute invariant: after `publish_content` then
+/// `remove_canonical`, no content entry for the canonical remains
+/// peekable. The deterministic before/after contract — a single-thread
+/// publish→invalidate cannot reproduce the cross-map race, so this pins
+/// the contract the ordering protects rather than the race itself.
+#[test]
+fn publish_orders_entry_before_reverse_index_so_remove_canonical_always_evicts() {
+    let node = CompileOutputNodePureContent::new();
+
+    // Two distinct content versions of the same canonical.
+    let key_a = k("/a.vue", [1u8; 16]);
+    let key_b = k("/a.vue", [2u8; 16]);
+    node.publish_content(key_a.clone(), value([0xA1; 16]), 1);
+    node.publish_content(key_b.clone(), value([0xB2; 16]), 1);
+
+    // Both are warm BEFORE invalidation.
+    assert_eq!(node.entry_count(), 2, "both content versions published");
+    assert!(node.peek(&key_a).is_some());
+    assert!(node.peek(&key_b).is_some());
+
+    // A targeted per-canonical invalidation MUST evict every content
+    // entry for that canonical — the force-recompute contract.
+    node.remove_canonical("/a.vue");
+    assert_eq!(
+        node.entry_count(),
+        0,
+        "remove_canonical MUST evict every content entry for the canonical"
+    );
+    assert!(
+        node.peek(&key_a).is_none(),
+        "post-invalidation peek MUST miss (force-recompute)"
+    );
+    assert!(
+        node.peek(&key_b).is_none(),
+        "post-invalidation peek MUST miss (force-recompute)"
+    );
+
+    // A second invalidation for the now-empty canonical is a benign
+    // no-op (no panic, count stays 0) — removal is idempotent.
+    node.remove_canonical("/a.vue");
+    assert_eq!(node.entry_count(), 0);
+}
+
+/// Discriminating concurrency test: a publisher thread and an
+/// invalidator thread race on one canonical. After both join, a final
+/// `remove_canonical` MUST drive `entry_count()` to 0.
+///
+/// Under the PRE-fix ordering (`by_canonical` inserted before
+/// `entries`), an interleaving where `remove_canonical` takes the
+/// reverse-index set between the two inserts leaves an `entries` row
+/// with no surviving backref: the key was removed from `by_canonical`
+/// by the racing `remove_canonical`, but the `entries.insert` lands
+/// afterward. That orphan is permanently un-evictable by canonical, so
+/// the final `remove_canonical` cannot reach it and `entry_count()`
+/// stays > 0 — this test FAILS. Under the fixed ordering every live
+/// `entries` row carries a backref, so the final `remove_canonical`
+/// evicts all and `entry_count()` is 0.
+#[test]
+fn concurrent_publish_and_remove_canonical_never_orphans_content_entry() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+
+    let node = Arc::new(CompileOutputNodePureContent::new());
+    let canonical = "/race.vue";
+
+    // Many publish/remove cycles to reliably hit the publish-internal
+    // window where a concurrent remove_canonical can orphan an entry
+    // under the pre-fix ordering.
+    const CYCLES: u32 = 20_000;
+
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let publisher = {
+        let node = Arc::clone(&node);
+        thread::spawn(move || {
+            for i in 0..CYCLES {
+                let mut content = [0u8; 16];
+                content[0..4].copy_from_slice(&i.to_le_bytes());
+                node.publish_content(k(canonical, content), value([0xCC; 16]), 1);
+            }
+        })
+    };
+
+    let invalidator = {
+        let node = Arc::clone(&node);
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                node.remove_canonical(canonical);
+            }
+        })
+    };
+
+    publisher.join().expect("publisher thread");
+    stop.store(true, Ordering::Relaxed);
+    invalidator.join().expect("invalidator thread");
+
+    // Final invalidation with no concurrent publisher. Every entry that
+    // was ever published carries a by_canonical backref under the fixed
+    // ordering, so this MUST evict all of them.
+    node.remove_canonical(canonical);
+    assert_eq!(
+        node.entry_count(),
+        0,
+        "no content entry for the canonical may survive a final \
+         remove_canonical — an orphaned (backref-less) entries row \
+         would breach the force-recompute contract"
+    );
+}

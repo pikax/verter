@@ -248,11 +248,23 @@ impl CompileOutputNodePureContent {
             self_root_canonicals: Arc::from(Vec::new().as_slice()),
             validated_at_generation,
         };
+        // `entries` is inserted BEFORE `by_canonical` so the reverse
+        // index never references a not-yet-published entry. Removal
+        // (`remove` / `remove_canonical`) clears `entries` directly, so a
+        // published entry can always be evicted by canonical regardless
+        // of reverse-index timing — the two maps are not lock-coupled, so
+        // a concurrent `remove_canonical` that runs before this
+        // `by_canonical` insert leaves at worst a reverse-index key
+        // pointing at an already-removed `entries` row, which the next
+        // `remove`/`remove_canonical` prunes (`entries.remove` no-ops on
+        // an absent key). The inverse order would orphan an `entries` row
+        // with no backref, which a later `remove_canonical` could never
+        // find.
+        self.entries.insert(key.clone(), Arc::new(entry));
         self.by_canonical
             .entry(Arc::clone(&key.canonical_id))
             .or_default()
-            .insert(key.clone());
-        self.entries.insert(key, Arc::new(entry));
+            .insert(key);
     }
 
     /// Remove the entry for `key`, if any. Keeps the per-canonical
