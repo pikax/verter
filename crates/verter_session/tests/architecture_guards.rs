@@ -12713,7 +12713,6 @@ mod single_resolution_engine_guards {
             "crates/verter_session/src/host_resolve/frontier_helpers.rs",
             4,
         ),
-        ("crates/verter_session/src/host_test_seed.rs", 1),
         ("crates/verter_session/src/lib.rs", 2),
         ("crates/verter_session/src/project_type_store.rs", 5),
         (
@@ -12750,7 +12749,7 @@ mod single_resolution_engine_guards {
         ),
         (
             "crates/verter_session/src/resolver_core/surface_projector.rs",
-            10,
+            8,
         ),
         (
             "crates/verter_session/src/resolver_core/symbol_resolver.rs",
@@ -13250,18 +13249,18 @@ pub fn run(p: &Program) {\n\
 
         // End-to-end: bump an already-allowlisted file that imports-and-calls an
         // engine function by ONE extra bare call and assert the LEDGER fires.
-        // `surface_projector.rs` imports `analyze_external_type_program` and
-        // already calls it; under the path-token proxy a third call would not
-        // move its count. Simulate the observed count rising by 1 above its
+        // `script/macros.rs` imports `format_runtime_types` from the engine and
+        // already calls it (twice); under the path-token proxy a third call would
+        // not move its count. Simulate the observed count rising by 1 above its
         // allowlisted value and assert the comparison fails.
         let mut grew: Vec<(String, usize)> = RESOLVE_TYPE_PATH_FILE_ALLOWLIST
             .iter()
             .map(|(f, c)| (f.to_string(), *c))
             .collect();
-        let target = "crates/verter_session/src/resolver_core/surface_projector.rs";
+        let target = "crates/verter_compiler/src/script/macros.rs";
         let slot = grew.iter_mut().find(|(f, _)| f == target).expect(
-            "surface_projector.rs is allowlisted (imports + calls \
-                     analyze_external_type_program)",
+            "script/macros.rs is allowlisted (imports + calls \
+                     format_runtime_types from the engine)",
         );
         let bumped = slot.1 + 1;
         slot.1 = bumped;
@@ -13287,14 +13286,14 @@ pub fn run(p: &Program) {\n\
             engine_use > path_only,
             "{target}: live engine-use count ({engine_use}) must exceed the raw \
              path-token count ({path_only}) — proving bare imported-symbol calls \
-             (e.g. the two `analyze_external_type_program(…)` sites) are counted \
-             by the NEW logic on the real tree, not merely the path tokens"
+             (e.g. the two `format_runtime_types(…)` sites) are counted by the \
+             NEW logic on the real tree, not merely the path tokens"
         );
         let syms = collect_resolve_type_imported_symbols(&src);
         assert!(
-            syms.contains("analyze_external_type_program"),
-            "{target} must import `analyze_external_type_program` for this proof \
-             to exercise imported-symbol call counting"
+            syms.contains("format_runtime_types"),
+            "{target} must import `format_runtime_types` from the engine for this \
+             proof to exercise imported-symbol call counting"
         );
     }
 
