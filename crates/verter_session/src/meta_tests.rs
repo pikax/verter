@@ -19557,3 +19557,246 @@ defineProps<{ data: Foo }>()
          project-shape dependency was dropped at the dispatch bridge."
     );
 }
+
+// ===========================================================================
+// FIX 3 — restored discriminating coverage for behaviours the deleted
+// equivalence harnesses owned, now driven through the typeinfo / Vue
+// macro-surface publication path.
+// ===========================================================================
+
+/// FIX 3 #1 — an inherited METHOD-STYLE slot's JSDoc `description` survives
+/// through cross-file heritage onto the published slot surface. Sibling slot
+/// tests assert names / bindings / returns but not the inherited slot
+/// description; this fills that gap.
+///
+/// Discriminating: the `header` slot is declared (as a method signature with a
+/// leading JSDoc block) ONLY on the imported base `BaseSlots`; the component's
+/// own `MySlots` adds `footer`. The published `header` slot's description must
+/// be the base's JSDoc text — a resolver that dropped inherited-slot JSDoc, or
+/// failed to follow the cross-file heritage, would leave it `None`.
+#[test]
+fn inherited_method_style_slot_jsdoc_description_propagates_through_heritage() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base-slots.ts",
+            r#"export interface BaseSlots {
+  /** The header slot, rendered above the content. */
+  header(props: { title: string }): any
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { BaseSlots } from './base-slots'
+
+interface MySlots extends BaseSlots {
+  /** The footer slot. */
+  footer(props: {}): any
+}
+
+defineSlots<MySlots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+
+    let header = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "header")
+        .expect("inherited method-style header slot should be published");
+    assert_eq!(
+        header.description.as_deref(),
+        Some("The header slot, rendered above the content."),
+        "inherited method-style slot must carry its base-declared JSDoc description",
+    );
+    // Negative guard: a resolver that mis-attributed the OWN footer slot's
+    // description onto header would surface the wrong text.
+    assert_ne!(
+        header.description.as_deref(),
+        Some("The footer slot."),
+        "header slot must not pick up the own footer slot's description",
+    );
+
+    // The own footer slot keeps its own description (sanity that heritage merge
+    // did not clobber own-body JSDoc).
+    let footer = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "footer")
+        .expect("own footer slot should be published");
+    assert_eq!(footer.description.as_deref(), Some("The footer slot."));
+}
+
+/// FIX 3 #2a — ALIAS-CHAIN cross-file heritage through the Vue macro surface:
+/// `defineProps<ChildProps>` where `ChildProps extends MiddleAlias` and
+/// `MiddleAlias = BaseProps` (a one-hop alias of an imported interface). The
+/// published props must include the base members reached through the alias hop.
+///
+/// Discriminating: `base` is declared only on `BaseProps`, reached via the
+/// `MiddleAlias = BaseProps` alias; a resolver that failed to follow the alias
+/// hop in heritage would drop it.
+#[test]
+fn cross_file_alias_chain_heritage_through_macro_surface() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base.ts",
+            r#"export interface BaseProps {
+  base?: string
+}
+
+export type MiddleAlias = BaseProps
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { MiddleAlias } from './base'
+
+interface ChildProps extends MiddleAlias {
+  own?: number
+}
+
+defineProps<ChildProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let prop_names: BTreeSet<_> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    assert!(
+        prop_names.contains("own"),
+        "own member should be published, got {prop_names:?}",
+    );
+    assert!(
+        prop_names.contains("base"),
+        "alias-chain heritage must surface the base member reached through `MiddleAlias = BaseProps`, got {prop_names:?}",
+    );
+}
+
+/// FIX 3 #2b — TWO-LEVEL cross-file heritage through the Vue macro surface:
+/// `GrandchildProps extends ChildProps` (file B) `extends BaseProps` (file A),
+/// each declared in a different file. The published props must include members
+/// from all three levels.
+///
+/// Discriminating: `base` (file A), `mid` (file B), `own` (SFC) must ALL be
+/// present — a resolver that stopped after one heritage hop would drop `base`.
+#[test]
+fn two_level_cross_file_heritage_through_macro_surface() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base.ts",
+            r#"export interface BaseProps {
+  base?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/child.ts",
+            r#"import type { BaseProps } from './base'
+
+export interface ChildProps extends BaseProps {
+  mid?: boolean
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { ChildProps } from './child'
+
+interface GrandchildProps extends ChildProps {
+  own?: number
+}
+
+defineProps<GrandchildProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let prop_names: BTreeSet<_> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    assert!(
+        prop_names.contains("own") && prop_names.contains("mid") && prop_names.contains("base"),
+        "two-level cross-file heritage must surface members from all three levels (own/mid/base), got {prop_names:?}",
+    );
+}
+
+/// FIX 3 #3 — `defineProps<NoInfer<Base>>()` THROUGH macro-surface publication.
+/// `NoInfer<T>` is an identity wrapper (it only affects inference, not the
+/// resolved type); the published props must be exactly the members of the
+/// imported `Base` surface.
+///
+/// Discriminating: `label`/`count` come from `Base` wrapped in `NoInfer`; a
+/// resolver that failed to unwrap `NoInfer` (or treated it as opaque) would
+/// drop the props or collapse them to `never`.
+#[test]
+fn define_props_no_infer_base_through_macro_surface() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base.ts",
+            r#"export interface Base {
+  label?: string
+  count?: number
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Base } from './base'
+
+defineProps<NoInfer<Base>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let label = meta
+        .props
+        .iter()
+        .find(|p| p.name == "label")
+        .expect("NoInfer<Base> must publish the `label` prop through the macro surface");
+    assert!(
+        !matches!(label.type_expr, TypeExpr::Primitive(PrimitiveName::Never)),
+        "NoInfer<Base> prop must keep its resolved type, not collapse to never, got {:?}",
+        label.type_expr
+    );
+    let prop_names: BTreeSet<_> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    assert!(
+        prop_names.contains("label") && prop_names.contains("count"),
+        "NoInfer<Base> must publish the Base members unchanged (identity wrapper), got {prop_names:?}",
+    );
+}
