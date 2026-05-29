@@ -15,7 +15,7 @@
 //! | `compile_many_compiles_each_canonical_once` | Read-once invariant via compile_one_call_count. |
 //! | `compile_many_propagates_interactive_priority` | last_upsert_priority observable. |
 //! | `compile_many_priority_default_is_background` | Default = Background. |
-//! | `compile_many_compile_error_preserves_all_diagnostics` | Ok(Err(CompileError {..})) arm unpacks all diags. |
+//! | `compile_many_compile_error_preserves_all_diagnostics` | Ok(Err(CompileError(failure))) arm unpacks all diags. |
 //! | `compile_many_default_pool_has_8mib_stack` | Deeply-nested template under threads:None. |
 //! | `compile_many_throughput_smoke` | HARD perf gate. cache-hit ratio 0.0 cold, 1.0 warm. |
 
@@ -181,7 +181,7 @@ fn compile_many_records_all_errors_not_just_first() {
     // Note: the parser's exact error count varies, so we assert >=1
     // here. The discriminating multi-error test is
     // `compile_many_compile_error_preserves_all_diagnostics`, which
-    // exercises the `Ok(Err(CompileError {..}))` arm specifically.
+    // exercises the `Ok(Err(CompileError(failure)))` arm specifically.
 }
 
 // ---------------------------------------------------------------------------
