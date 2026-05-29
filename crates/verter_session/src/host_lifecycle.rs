@@ -273,6 +273,11 @@ impl VerterHost {
         for mut entry in self.compile_cache().iter_mut() {
             session_node.clear_compile_outputs_for_file(&mut entry);
         }
+        // The content-addressed compile-output node is a sibling
+        // compile-output store. Flush it alongside the session slots so a
+        // cache clear is complete: a subsequent `Content` request must not
+        // warm-hit an entry the caller explicitly flushed.
+        self.compile_output_pure_content().clear_all();
         // DerivedRawState (D48 — derived_raw_cache_db): source-derived
         // caches (raw template analysis, tsc extract, resolved meta,
         // fallthrough) are flushed. import_routes and evicted flag stay.

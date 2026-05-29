@@ -37,7 +37,7 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Instant;
@@ -184,8 +184,19 @@ impl VerterHost {
         // Per-canonical errors discovered in Stage B (duplicate-source
         // conflicts and upsert failures). Surfaced to every original
         // input position belonging to that canonical in Stage D.
+        // Source conflicts and upsert failures are properties of the
+        // canonical's source, not of the requested mode, so this map is
+        // keyed per-canonical and applies to every mode of that canonical.
         let mut group_errors: HashMap<String, String> = HashMap::new();
         let mut canonical_to_upsert: Vec<&CompileBatchInput> = Vec::new();
+        // Compile dedup is keyed by `(canonical, effective requested_mode)`:
+        // the requested mode is part of the compile identity (a different
+        // mode is a genuinely distinct compile with distinct routing and
+        // cache side-effects), so two inputs that share a canonical but
+        // request different modes each compile exactly once. The effective
+        // mode is `input.requested_mode.unwrap_or(default_mode)`, matching
+        // the per-input profile built in `compile_one_in_batch`.
+        let mut seen_compile_keys: HashSet<(String, CompileCacheMode)> = HashSet::new();
         let mut canonical_to_compile: Vec<&CompileBatchInput> = Vec::new();
         for (canonical_id, group) in &groups {
             let first = group[0];
@@ -200,9 +211,16 @@ impl VerterHost {
                 );
                 continue;
             }
-            canonical_to_compile.push(first);
+            // One upsert per canonical (source is mode-independent).
             if self.scheduler_source_differs_from(canonical_id, &first.source) {
                 canonical_to_upsert.push(first);
+            }
+            // One compile per distinct `(canonical, effective mode)`.
+            for input in group {
+                let effective_mode = input.requested_mode.unwrap_or(default_mode);
+                if seen_compile_keys.insert((canonical_id.clone(), effective_mode)) {
+                    canonical_to_compile.push(input);
+                }
             }
         }
 
@@ -229,13 +247,14 @@ impl VerterHost {
         // `compile_one_call_count` test-only counter on `VerterHost` is
         // incremented at the top of `compile_one_in_batch` to make the
         // read-once invariant directly observable.
-        let compiled: HashMap<String, CompileBatchEntry> = pool.install(|| {
+        let compiled: HashMap<(String, CompileCacheMode), CompileBatchEntry> = pool.install(|| {
             canonical_to_compile
                 .par_iter()
                 .map(|input| {
                     let pre_err = group_errors.get(&input.canonical_id).cloned();
                     let entry = self.compile_one_in_batch(input, &profile, default_mode, pre_err);
-                    (input.canonical_id.clone(), entry)
+                    let effective_mode = input.requested_mode.unwrap_or(default_mode);
+                    ((input.canonical_id.clone(), effective_mode), entry)
                 })
                 .collect()
         });
@@ -244,8 +263,12 @@ impl VerterHost {
         // For canonicals that errored in Stage B (duplicate-source
         // conflict) or Stage C (compile/host error / panic), every
         // original input position receives the same error entry.
-        // Cloning a `CompileBatchEntry` is refcount-only on the
-        // `Arc<str>` payloads — no string allocation.
+        // Otherwise each position receives the entry compiled for ITS OWN
+        // `(canonical, effective requested_mode)` group, so two positions
+        // that share a canonical but requested different modes each carry
+        // their own requested / actual mode and downgrade reason. Cloning a
+        // `CompileBatchEntry` is refcount-only on the `Arc<str>` payloads —
+        // no string allocation.
         inputs
             .iter()
             .map(|input| {
@@ -265,10 +288,11 @@ impl VerterHost {
                         downgrade_reason: None,
                     };
                 }
+                let effective_mode = input.requested_mode.unwrap_or(default_mode);
                 compiled
-                    .get(&input.canonical_id)
+                    .get(&(input.canonical_id.clone(), effective_mode))
                     .cloned()
-                    .expect("stage C compiled every non-error canonical group")
+                    .expect("stage C compiled every non-error (canonical, mode) group")
             })
             .collect()
     }

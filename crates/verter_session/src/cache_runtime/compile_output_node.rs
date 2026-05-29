@@ -163,19 +163,36 @@ impl CompileOutputValue {
 /// Content-addressed compile-output cache node.
 ///
 /// Implements [`ArtifactNode`] over a `DashMap<Key, Arc<CacheEntry>>`.
-/// No fact-validation rail — two requests with byte-identical keys
-/// MUST produce byte-identical output, so a single warm entry serves
+/// No fact-validation rail — the key already carries every observable
+/// env / profile dimension, so two requests with byte-identical keys
+/// MUST produce byte-identical output and a single warm entry serves
 /// both.
 ///
-/// `compute` is intentionally a stub at the trait surface: the typed
-/// node's production callers (`virtual_file_pipeline.rs`) cold-build
-/// the output inline (the existing `compile_entry` path) and admit the
-/// fresh value through [`Self::publish_content`]. The trait's
-/// `compute` arm exists so the node can later be wired into
-/// `cache_runtime::lookup` once the cold-build path is rehomed into a
-/// node closure.
+/// This node is NOT driven through [`crate::cache_runtime::lookup`].
+/// The production callsite (`virtual_file_pipeline.rs`) consults the
+/// store with [`Self::peek`] and, on a miss, cold-builds the output
+/// inline (the `compile_entry` path) and admits the fresh value through
+/// [`Self::publish_content`]. Cold-build deduplication is therefore not
+/// a concern of this node:
+///
+/// * `Session`-mode compile cold-build singleflight is owned by the
+///   scheduler (the fact-validated session node coordinates concurrent
+///   cold requests).
+/// * `Content`-mode cold-build needs no node-level dedup: the key is
+///   content-addressed, so a byte-identical key yields a byte-identical
+///   value, and a concurrent duplicate cold-build merely recomputes the
+///   same bytes and publishes the same entry idempotently.
+///
+/// The `entries` map is the store; the [`ArtifactNode`] trait also
+/// requires an `inflight` table and a `compute` arm, both supplied
+/// below. The `compute` arm fails loud (it is never reached on the
+/// inline cold-build path) so any future `lookup` consumer cannot
+/// silently short-circuit through an unimplemented compute path.
 pub(crate) struct CompileOutputNodePureContent {
     entries: DashMap<CompileOutputPureContentKey, Arc<CacheEntry<Arc<CompileOutputValue>>>>,
+    /// Required by the [`ArtifactNode`] trait. Unused on the inline
+    /// peek / publish cold-build path this node actually takes — see the
+    /// struct doc for why `Content` needs no node-level singleflight.
     inflight: InflightTable<QueryFlightKey<CompileOutputPureContentKey>>,
 }
 
@@ -221,6 +238,14 @@ impl CompileOutputNodePureContent {
     /// Remove the entry for `key`, if any.
     pub(crate) fn remove(&self, key: &CompileOutputPureContentKey) {
         self.entries.remove(key);
+    }
+
+    /// Drop every content-addressed entry. Used by whole-store
+    /// invalidation callers (e.g. [`crate::VerterHost::clear_compile_cache`])
+    /// so a cache clear flushes the content-addressed node alongside the
+    /// per-profile session slots.
+    pub(crate) fn clear_all(&self) {
+        self.entries.clear();
     }
 
     /// Entry count for the content-addressed store. Used by integration
