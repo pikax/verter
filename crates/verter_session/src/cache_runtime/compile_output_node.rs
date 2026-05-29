@@ -223,9 +223,12 @@ impl CompileOutputNodePureContent {
         self.entries.remove(key);
     }
 
-    /// Test-only entry count. Used by integration tests that verify
-    /// content-mode publishes vs session-mode publishes are disjoint.
-    #[cfg(test)]
+    /// Entry count for the content-addressed store. Used by integration
+    /// tests that verify content-mode publishes vs session-mode publishes
+    /// are disjoint. Available under `test` / `debug_assertions` so an
+    /// external `tests/` crate (which links the lib in the dev profile)
+    /// can observe the store footprint via a host accessor.
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn entry_count(&self) -> usize {
         self.entries.len()
     }

@@ -489,6 +489,17 @@ impl VerterHost {
         self.project_type_store.compile_output_pure_content()
     }
 
+    /// Number of entries in the content-addressed compile-output cache.
+    /// Used by integration tests to verify that `Content`-mode publishes
+    /// land in this node while `Session` / `Stateless` modes do not.
+    #[cfg(any(test, debug_assertions))]
+    #[must_use]
+    pub fn compile_output_pure_content_entry_count(&self) -> usize {
+        self.project_type_store
+            .compile_output_pure_content()
+            .entry_count()
+    }
+
     /// Reference to the source-content-domain DB's underlying storage
     /// (D48 split). Stores [`crate::types::DerivedRawState`] keyed by
     /// canonical id; call sites access source-derived caches

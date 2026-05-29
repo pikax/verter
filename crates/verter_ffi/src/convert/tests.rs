@@ -1873,3 +1873,101 @@ fn ffi_payload_contains_instantiate_edge_for_generic_component() {
         "proto encoding of origin graph must produce non-empty bytes"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// D9 #7 — CompileCacheMode round-trips cleanly across the FFI seam that
+// BOTH the NAPI and WASM bindings funnel through. NAPI converts
+// `NapiCompileProfile -> FfiCompileProfile -> ffi_profile_to_host`, and
+// WASM deserialises `FfiCompileProfile` directly; both then serialise
+// `FfiVirtualFileResponse`. These tests pin the shared seam: the
+// requested-mode string parses into the host profile, an invalid string
+// is rejected, and the host response's mode fields serialise back out.
+//
+// Discrimination against the pre-B5 tree (`204b5ef9`):
+// `FfiCompileProfile.requested_mode`, the three `FfiVirtualFileResponse`
+// mode fields, and `FfiConversionError::InvalidCompileCacheMode` do not
+// exist — the test does not compile.
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn ffi_seam_requested_mode_parses_each_variant() {
+    for (s, expected) in [
+        ("stateless", host::CompileCacheMode::Stateless),
+        ("content", host::CompileCacheMode::Content),
+        ("session", host::CompileCacheMode::Session),
+        // case-insensitive
+        ("Content", host::CompileCacheMode::Content),
+    ] {
+        let profile = FfiCompileProfile {
+            requested_mode: Some(s.to_string()),
+            ..Default::default()
+        };
+        let host_profile = ffi_profile_to_host(Some(profile)).expect("parse mode");
+        assert_eq!(
+            host_profile.requested_mode, expected,
+            "requestedMode '{s}' must parse to {expected:?}"
+        );
+    }
+
+    // A missing requestedMode keeps the host default (Session).
+    let default_profile = ffi_profile_to_host(Some(FfiCompileProfile::default())).unwrap();
+    assert_eq!(
+        default_profile.requested_mode,
+        host::CompileCacheMode::Session,
+        "an absent requestedMode must default to Session"
+    );
+}
+
+#[test]
+fn ffi_seam_invalid_requested_mode_is_rejected() {
+    let profile = FfiCompileProfile {
+        requested_mode: Some("turbo".to_string()),
+        ..Default::default()
+    };
+    let err = ffi_profile_to_host(Some(profile)).expect_err("invalid mode must error");
+    assert!(
+        matches!(err, FfiConversionError::InvalidCompileCacheMode(ref s) if s == "turbo"),
+        "an unknown requestedMode must produce InvalidCompileCacheMode, got {err:?}"
+    );
+}
+
+#[test]
+fn ffi_seam_response_serialises_mode_fields() {
+    // Build a host response carrying a Content->Stateless downgrade and
+    // confirm the FFI conversion surfaces all three mode fields as the
+    // expected strings (NAPI/WASM serialise this same shape out to JS).
+    let response = host::VirtualFileResponse {
+        id: "Comp.vue".to_string(),
+        code: Arc::from("export default {}"),
+        source_map: None,
+        lang: Some("ts".to_string()),
+        stale: false,
+        diagnostics: host::DiagnosticsSnapshot::default(),
+        meta: host::VirtualMeta::default(),
+        requested_mode: host::CompileCacheMode::Content,
+        actual_mode: host::CompileCacheMode::Stateless,
+        downgrade_reason: Some(host::DowngradeReason::HasMacroTypeDeps),
+    };
+    let ffi = host_virtual_file_to_ffi(response, None);
+    assert_eq!(ffi.requested_mode, "content");
+    assert_eq!(ffi.actual_mode, "stateless");
+    assert_eq!(ffi.downgrade_reason, Some("HasMacroTypeDeps".to_string()));
+
+    // No-downgrade case: a Session response reports session/session/None.
+    let session_response = host::VirtualFileResponse {
+        id: "Comp.vue".to_string(),
+        code: Arc::from(""),
+        source_map: None,
+        lang: None,
+        stale: false,
+        diagnostics: host::DiagnosticsSnapshot::default(),
+        meta: host::VirtualMeta::default(),
+        requested_mode: host::CompileCacheMode::Session,
+        actual_mode: host::CompileCacheMode::Session,
+        downgrade_reason: None,
+    };
+    let ffi2 = host_virtual_file_to_ffi(session_response, None);
+    assert_eq!(ffi2.requested_mode, "session");
+    assert_eq!(ffi2.actual_mode, "session");
+    assert_eq!(ffi2.downgrade_reason, None);
+}
