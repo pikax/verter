@@ -19644,7 +19644,9 @@ defineSlots<MySlots>()
 ///
 /// Discriminating: `base` is declared only on `BaseProps`, reached via the
 /// `MiddleAlias = BaseProps` alias; a resolver that failed to follow the alias
-/// hop in heritage would drop it.
+/// hop in heritage would drop it. The EXACT-SET assertion plus the `decoy`
+/// negative (a sibling interface in the SAME file that the heritage chain never
+/// touches) fail if heritage leaks unrelated declarations into the surface.
 #[test]
 fn cross_file_alias_chain_heritage_through_macro_surface() {
     let project = make_project();
@@ -19656,6 +19658,12 @@ fn cross_file_alias_chain_heritage_through_macro_surface() {
 }
 
 export type MiddleAlias = BaseProps
+
+// A sibling interface in the SAME file the heritage chain never reaches. A
+// resolver that over-collected file-level declarations would leak `decoy`.
+export interface UnrelatedProps {
+  decoy?: string
+}
 "#,
         )
         .unwrap();
@@ -19688,6 +19696,17 @@ defineProps<ChildProps>()
         prop_names.contains("base"),
         "alias-chain heritage must surface the base member reached through `MiddleAlias = BaseProps`, got {prop_names:?}",
     );
+    // NEGATIVE: the unrelated sibling interface's member must NOT leak.
+    assert!(
+        !prop_names.contains("decoy"),
+        "alias-chain heritage must NOT leak the unrelated `UnrelatedProps.decoy` member, got {prop_names:?}",
+    );
+    // EXACT surface: exactly the own member plus the alias-reached base member.
+    assert_eq!(
+        prop_names,
+        BTreeSet::from(["own", "base"]),
+        "alias-chain heritage surface must be EXACTLY {{own, base}}, got {prop_names:?}",
+    );
 }
 
 /// FIX 3 #2b — TWO-LEVEL cross-file heritage through the Vue macro surface:
@@ -19697,6 +19716,9 @@ defineProps<ChildProps>()
 ///
 /// Discriminating: `base` (file A), `mid` (file B), `own` (SFC) must ALL be
 /// present — a resolver that stopped after one heritage hop would drop `base`.
+/// The EXACT-SET assertion plus the `decoy` negative (a sibling interface in
+/// file B that the chain never extends) fail if heritage leaks unrelated
+/// declarations into the surface.
 #[test]
 fn two_level_cross_file_heritage_through_macro_surface() {
     let project = make_project();
@@ -19716,6 +19738,12 @@ fn two_level_cross_file_heritage_through_macro_surface() {
 
 export interface ChildProps extends BaseProps {
   mid?: boolean
+}
+
+// A sibling interface in file B that no level of the chain extends. A resolver
+// that over-collected file-level declarations would leak `decoy`.
+export interface UnrelatedChild {
+  decoy?: string
 }
 "#,
         )
@@ -19744,6 +19772,17 @@ defineProps<GrandchildProps>()
     assert!(
         prop_names.contains("own") && prop_names.contains("mid") && prop_names.contains("base"),
         "two-level cross-file heritage must surface members from all three levels (own/mid/base), got {prop_names:?}",
+    );
+    // NEGATIVE: the unrelated sibling interface's member must NOT leak.
+    assert!(
+        !prop_names.contains("decoy"),
+        "two-level heritage must NOT leak the unrelated `UnrelatedChild.decoy` member, got {prop_names:?}",
+    );
+    // EXACT surface: exactly the three heritage-chain members.
+    assert_eq!(
+        prop_names,
+        BTreeSet::from(["own", "mid", "base"]),
+        "two-level heritage surface must be EXACTLY {{own, mid, base}}, got {prop_names:?}",
     );
 }
 
@@ -19798,5 +19837,116 @@ defineProps<NoInfer<Base>>()
     assert!(
         prop_names.contains("label") && prop_names.contains("count"),
         "NoInfer<Base> must publish the Base members unchanged (identity wrapper), got {prop_names:?}",
+    );
+}
+
+/// FIX 3 #3 (alias-shell) — `export type Props = NoInfer<Base>; defineProps<Props>()`
+/// THROUGH macro-surface publication. This is the harder shape than the direct
+/// `defineProps<NoInfer<Base>>()` case above: the macro type argument is a NAMED
+/// alias whose body is the `NoInfer` identity wrapper around the imported
+/// `Base`. The transparent alias + `NoInfer` wrappers must resolve to `Base`'s
+/// own body, so the published surface is EXACTLY `Base`'s members.
+///
+/// Discriminating, typeinfo-native (asserts the full published shape, not just
+/// presence):
+/// - member names AND order are exactly `[label, count]` (Base's declared order);
+/// - both are optional (`required == false`) — the `?` survives the wrappers;
+/// - the typed forms are the concrete `string` / `number` primitives (NOT
+///   `never`, NOT a `Ref`/opaque) — a resolver treating `NoInfer` as opaque or
+///   failing the alias hop would collapse or drop them;
+/// - `declared_in_macro_type_arg == false` for BOTH — own-body provenance is
+///   the WRITTEN macro type-argument declaration's DIRECT `member_index`
+///   members (`build.rs::overlay_macro_type_arg_own_body`, which reads only
+///   direct Object members and skips Ref/instantiation arms). The written
+///   macro-arg here is the alias `Props`, whose body is the `NoInfer<Base>`
+///   instantiation — it has NO direct own-body members; `label`/`count` are
+///   reached by resolving the transparent alias + `NoInfer` hops to `Base`, so
+///   they carry own-body `false` (the inverse value would mean a resolver
+///   mis-stamped alias-reached members as the alias's own body).
+#[test]
+fn define_props_no_infer_base_alias_shell_through_macro_surface() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base.ts",
+            r#"export interface Base {
+  label?: string
+  count?: number
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Base } from './base'
+
+export type Props = NoInfer<Base>
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+
+    // Names AND order: exactly `[label, count]` (Base's declared order),
+    // preserved through the alias + NoInfer wrappers.
+    let ordered_names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(
+        ordered_names,
+        vec!["label", "count"],
+        "alias-shell NoInfer<Base> must publish exactly Base's members in declared order, got {ordered_names:?}",
+    );
+
+    let label = meta
+        .props
+        .iter()
+        .find(|p| p.name == "label")
+        .expect("alias-shell NoInfer<Base> must publish the `label` prop");
+    let count = meta
+        .props
+        .iter()
+        .find(|p| p.name == "count")
+        .expect("alias-shell NoInfer<Base> must publish the `count` prop");
+
+    // Optionality: the `?` survives the alias + NoInfer wrappers (NOT required).
+    assert!(
+        !label.required && !count.required,
+        "alias-shell NoInfer<Base> props must stay optional (required == false), got label.required={}, count.required={}",
+        label.required,
+        count.required,
+    );
+
+    // Typed form: concrete primitives, NOT collapsed to `never` / left as an
+    // opaque `Ref` — the alias + NoInfer wrappers resolved through to Base.
+    assert!(
+        matches!(label.type_expr, TypeExpr::Primitive(PrimitiveName::String)),
+        "alias-shell `label` must keep its `string` primitive type, got {:?}",
+        label.type_expr,
+    );
+    assert!(
+        matches!(count.type_expr, TypeExpr::Primitive(PrimitiveName::Number)),
+        "alias-shell `count` must keep its `number` primitive type, got {:?}",
+        count.type_expr,
+    );
+
+    // Provenance: own-body is the WRITTEN macro type-arg declaration's direct
+    // `member_index` members. The written macro-arg is the alias `Props`, whose
+    // body is the `NoInfer<Base>` instantiation — NO direct own-body members.
+    // `label`/`count` are reached through the transparent alias + NoInfer hops
+    // to `Base`, so `declared_in_macro_type_arg` is false for both. The inverse
+    // value would mean a resolver mis-stamped alias-reached members as the
+    // alias's own body.
+    assert!(
+        !label.declared_in_macro_type_arg && !count.declared_in_macro_type_arg,
+        "alias-shell NoInfer<Base> members are reached through the alias, NOT the macro type arg's own body (declared_in_macro_type_arg == false), got label={}, count={}",
+        label.declared_in_macro_type_arg,
+        count.declared_in_macro_type_arg,
     );
 }
