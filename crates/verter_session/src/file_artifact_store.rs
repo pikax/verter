@@ -416,6 +416,24 @@ impl AugmenterEntry {
     }
 }
 
+/// An owned snapshot of one base artifact's augmenter-relevant fields,
+/// captured off the `self.artifacts` DashMap so the augmenter match
+/// (and any resolver it invokes) runs after every shard guard is
+/// released. See [`FileArtifactStore::collect_base_augmenter_candidates`].
+struct AugmenterCandidate {
+    /// Exact content-addressed key of the candidate augmenter artifact.
+    artifact_key: FileArtifactKey,
+    /// The candidate's canonical id (also reachable via `artifact_key`,
+    /// kept alongside to avoid re-borrowing through the key on the hot
+    /// match loop).
+    canonical: Arc<str>,
+    /// `parse_stable_hash` folded into the augmenter-set fingerprint.
+    parse_stable_hash: Hash16,
+    /// The candidate's augmentation facts. Cloned `Arc` — a cheap
+    /// refcount bump, not a deep copy.
+    augmentations: Arc<Vec<ModuleAugmentationFact>>,
+}
+
 /// The set of augmenter files that contribute to a given
 /// [`AugmentationTargetKey`], sorted by `(augmenter_canonical,
 /// augmenter_parse_stable_hash)`.
@@ -1259,6 +1277,40 @@ impl FileArtifactStore {
         self.augmentation_index.insert(key, set)
     }
 
+    /// Snapshot the base-artifact augmenter rows into an owned `Vec`,
+    /// then drop the `self.artifacts` shard guards.
+    ///
+    /// The match step (`augmenter_matches_target`) may invoke a
+    /// caller-supplied resolver that re-enters `FileArtifactStore` and
+    /// inserts into `self.artifacts` (a relative `declare module "./x"`
+    /// target resolves its specifier through `ensure_indexed_ready`,
+    /// which materialises and inserts the dependency). The DashMap
+    /// shards are `std::sync::RwLock`, which is non-reentrant: a write
+    /// to a shard the current thread already read-locks via an active
+    /// `iter()` guard would block on itself. Collecting the candidate
+    /// rows first — and only matching/resolving after every shard guard
+    /// is released — keeps the resolver off the guard. Same discipline
+    /// as the existing snapshot in
+    /// [`Self::refresh_augmentation_index_for_canonical`].
+    ///
+    /// Only base ([`FileArtifactKey::is_legacy`]) artifacts carrying at
+    /// least one augmentation fact are collected: the augmentation index
+    /// is a base resolve-domain structure, so session-overlay artifacts
+    /// must not contribute (see `ensure_augmentation_index_populated`).
+    fn collect_base_augmenter_candidates(&self) -> Vec<AugmenterCandidate> {
+        self.artifacts
+            .iter()
+            .filter(|entry| entry.key().is_legacy())
+            .filter(|entry| !entry.value().augmentations.is_empty())
+            .map(|entry| AugmenterCandidate {
+                artifact_key: entry.key().clone(),
+                canonical: Arc::clone(&entry.key().canonical),
+                parse_stable_hash: entry.value().parse_stable_hash,
+                augmentations: Arc::clone(&entry.value().augmentations),
+            })
+            .collect()
+    }
+
     /// Lazily populate the augmentation-index entry for `key`, then
     /// return the `AugmenterSet`.
     ///
@@ -1309,30 +1361,30 @@ impl FileArtifactStore {
         // `EffectiveExportSet`. A session-overlay artifact
         // ([`FileArtifactKey::overlay_scoped`]) carries session-divergent
         // augmentations and must not poison that base index.
+        // Snapshot first, then match off the guard: the resolver invoked
+        // by `augmenter_matches_target` for a relative target re-enters
+        // the store and inserts into `self.artifacts`, which cannot run
+        // while a `self.artifacts.iter()` shard guard is held (see
+        // `collect_base_augmenter_candidates`).
+        let candidates = self.collect_base_augmenter_candidates();
         let mut matched: Vec<AugmenterEntry> = Vec::new();
         let mut seen_canonicals: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
-        for artifact_entry in self.artifacts.iter() {
-            if !artifact_entry.key().is_legacy() {
-                continue;
-            }
-            let augmenter_key = artifact_entry.key().clone();
-            let augmenter_canonical = Arc::clone(&augmenter_key.canonical);
-            let artifacts: &FileArtifacts = artifact_entry.value();
-            for fact in artifacts.augmentations.iter() {
+        for candidate in &candidates {
+            for fact in candidate.augmentations.iter() {
                 if augmenter_matches_target(
                     fact,
                     key,
-                    augmenter_canonical.as_ref(),
+                    candidate.canonical.as_ref(),
                     &resolve_relative_canonical,
                 ) {
-                    if seen_canonicals.insert(Arc::clone(&augmenter_canonical)) {
+                    if seen_canonicals.insert(Arc::clone(&candidate.canonical)) {
                         // Capture the EXACT artifact key — the stitch
                         // consumer re-fetches `.augmentations` via
                         // `get_artifacts(&key)` so it reads precisely
                         // the version fingerprinted here.
                         matched.push(AugmenterEntry {
-                            artifact_key: augmenter_key,
-                            parse_stable_hash: artifacts.parse_stable_hash,
+                            artifact_key: candidate.artifact_key.clone(),
+                            parse_stable_hash: candidate.parse_stable_hash,
                         });
                     }
                     break;
@@ -1402,13 +1454,24 @@ impl FileArtifactStore {
             return;
         }
 
-        // Snapshot existing keys so we don't hold a shard read-lock
-        // while we recompute + insert (DashMap re-entrance hazard).
+        // Snapshot existing keys so we don't hold an `augmentation_index`
+        // shard read-lock while we recompute + insert (DashMap
+        // re-entrance hazard).
         let existing_keys: Vec<AugmentationTargetKey> = self
             .augmentation_index
             .iter()
             .map(|entry| entry.key().clone())
             .collect();
+
+        // Snapshot the base augmenter rows once so the per-key rebuild
+        // scans an owned `Vec` rather than `self.artifacts.iter()`: the
+        // resolver `augmenter_matches_target` invokes for a relative
+        // target re-enters the store and inserts into `self.artifacts`,
+        // which must not run under a shard guard (see
+        // `collect_base_augmenter_candidates`). The artifact set is not
+        // mutated during the refresh — only `augmentation_index` is — so
+        // one snapshot serves every key.
+        let candidates = self.collect_base_augmenter_candidates();
 
         for key in existing_keys {
             // Does the new artifact contribute to this key? If not,
@@ -1427,30 +1490,26 @@ impl FileArtifactStore {
                 continue;
             }
 
-            // Rebuild the set with the new artifact folded in. Same
-            // base-only filter as `ensure_augmentation_index_populated`'s
-            // cold scan — overlay-scoped artifacts never contribute.
+            // Rebuild the set with the new artifact folded in over the
+            // owned candidate snapshot (no `self.artifacts` guard held).
+            // Same base-only filter as
+            // `ensure_augmentation_index_populated`'s cold scan —
+            // overlay-scoped artifacts never contribute.
             let mut matched: Vec<AugmenterEntry> = Vec::new();
             let mut seen_canonicals: rustc_hash::FxHashSet<Arc<str>> =
                 rustc_hash::FxHashSet::default();
-            for artifact_entry in self.artifacts.iter() {
-                if !artifact_entry.key().is_legacy() {
-                    continue;
-                }
-                let augmenter_key = artifact_entry.key().clone();
-                let augmenter_canon = Arc::clone(&augmenter_key.canonical);
-                let artifacts: &FileArtifacts = artifact_entry.value();
-                for fact in artifacts.augmentations.iter() {
+            for candidate in &candidates {
+                for fact in candidate.augmentations.iter() {
                     if augmenter_matches_target(
                         fact,
                         &key,
-                        augmenter_canon.as_ref(),
+                        candidate.canonical.as_ref(),
                         &resolve_relative_canonical,
                     ) {
-                        if seen_canonicals.insert(Arc::clone(&augmenter_canon)) {
+                        if seen_canonicals.insert(Arc::clone(&candidate.canonical)) {
                             matched.push(AugmenterEntry {
-                                artifact_key: augmenter_key,
-                                parse_stable_hash: artifacts.parse_stable_hash,
+                                artifact_key: candidate.artifact_key.clone(),
+                                parse_stable_hash: candidate.parse_stable_hash,
                             });
                         }
                         break;

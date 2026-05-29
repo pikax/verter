@@ -20,6 +20,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -148,6 +149,22 @@ fn insert_artifact_with_raw_source(
     };
     store.insert_artifacts(key.clone(), artifacts);
     key
+}
+
+/// Build an `Arc<FileArtifacts>` from raw source WITHOUT inserting it.
+/// Used to pre-build a reusable payload for cheap re-entrant writes in
+/// the resolver-off-guard test.
+fn build_filler_artifacts(raw: &str, content_hash: [u8; 16]) -> Arc<FileArtifacts> {
+    let indexed = build_indexed_with_source(raw, content_hash);
+    let emission = emit_parse_facts(&indexed);
+    let parse_stable_hash = verter_session::parse_stable_hash::compute_parse_stable_hash(&indexed);
+    Arc::new(FileArtifacts {
+        indexed,
+        facts: Arc::new(emission.facts),
+        parsed_edges: Arc::new(verter_session::file_artifact_store::ParsedEdges::empty()),
+        parse_stable_hash,
+        augmentations: Arc::new(emission.augmentations),
+    })
 }
 
 #[derive(Debug)]
@@ -1082,5 +1099,163 @@ fn effective_export_set_rejects_session_view() {
         &store,
         |_| Some([11u8; 16]),
         |_, _| None,
+    );
+}
+
+// ────────────────────────────────────────────────────────────────
+// Re-entrant resolver safety — the `ResolvedRelativeCanonical` probe
+// resolver runs OFF the `self.artifacts` DashMap guard.
+//
+// `ensure_augmentation_index_populated`'s cold scan for a
+// `ResolvedRelativeCanonical` target invokes the caller's resolver to
+// turn a relative `declare module "./x"` specifier into a canonical.
+// The production resolver
+// (`owner_has_module_augmentation_dependency`'s
+// `resolve_type_dependency_canonical`) reaches `ensure_indexed_ready`,
+// which materialises the dependency and INSERTS it into the same
+// `self.artifacts` DashMap the cold scan iterates.
+//
+// `DashMap` shards are non-reentrant `std::sync::RwLock`s, so an insert
+// into a shard the current thread already read-locks via an active
+// `iter()` guard would block on itself (a hang) — or, on a re-entrant
+// same-shard access dashmap detects, panic. This test seeds the store
+// with multiple base artifacts and a resolver closure that re-enters
+// the store with a real `insert_artifacts` write WHILE the probe runs,
+// then asserts the call COMPLETES and returns the correct augmenter
+// set.
+//
+// dashmap 6.2's `iter()` holds a read guard on the shard it is
+// currently walking, and every yielded `RefMulti` keeps that guard
+// alive while the loop body borrows it. A re-entrant `insert` that
+// hashes to the SAME shard takes that shard's write lock — a deadlock
+// on the non-reentrant per-shard `RwLock`. To make the discriminator
+// RELIABLE rather than probabilistic, the resolver below writes enough
+// distinct keys to cover every shard, so one write is guaranteed to
+// hit the shard the cold-scan iterator holds when the resolver fires.
+// Pre-fix (resolver inside `self.artifacts.iter()`) this deadlocks;
+// post-fix the snapshot drops every guard before the resolver runs, so
+// the call completes. A timeout-style hang assertion is unsafe (a true
+// deadlock would hang `cargo test`), so the discriminator is the call
+// COMPLETING and returning the correct set.
+// ────────────────────────────────────────────────────────────────
+
+#[test]
+fn relative_augmenter_resolver_runs_off_artifacts_guard() {
+    let store = FileArtifactStore::new();
+    let augmenter_canonical = "/dir/aug-relative.ts";
+
+    // Seed the relative augmenter (`declare module "./local"`).
+    let _aug_key = insert_artifact_from_fixture(
+        &store,
+        augmenter_canonical,
+        "module_augmentation_relative.ts",
+        [70u8; 16],
+    );
+
+    // Seed several additional base artifacts so the cold scan walks
+    // multiple DashMap shards before reaching the augmenter.
+    for i in 0..8u8 {
+        insert_artifact_with_raw_source(
+            &store,
+            &format!("/dir/filler-{i}.ts"),
+            "export const x = 1;\nexport {};\n",
+            [80u8 + i; 16],
+        );
+    }
+
+    let resolved_target = Arc::<str>::from("/dir/local.ts");
+    let target = AugmentationTargetKind::ResolvedRelativeCanonical(Arc::clone(&resolved_target));
+    let target_key = AugmentationTargetKey {
+        project_identity: ProjectIdentity([1u8; 16]),
+        resolve_env_hash: [2u8; 16],
+        lib_env_hash: [3u8; 16],
+        target,
+    };
+
+    // A reusable payload for the re-entrant writes — cloning the `Arc`
+    // is cheap, so the resolver can write many keys without re-parsing.
+    let reentrant_payload =
+        build_filler_artifacts("export const y = 2;\nexport {};\n", [200u8; 16]);
+
+    // The resolver re-enters the SAME `self.artifacts` DashMap with real
+    // writes — the exact hazard `ensure_indexed_ready ->
+    // artifacts.insert` poses in production. It writes enough distinct
+    // keys to span every shard, so one write is guaranteed to target the
+    // shard the cold-scan iterator holds when the resolver fires.
+    // Pre-fix that write deadlocks on the held shard guard; post-fix the
+    // snapshot has already dropped every guard.
+    let resolver_invoked = AtomicBool::new(false);
+    let reentrant_inserts = AtomicU32::new(0);
+    let resolver = |augmenter: &str, specifier: &str| -> Option<Arc<str>> {
+        resolver_invoked.store(true, Ordering::SeqCst);
+        let n = reentrant_inserts.fetch_add(1, Ordering::SeqCst);
+        // 1024 distinct keys >> any realistic dashmap shard count
+        // (default `4 * ncpu` rounded to a power of two), so every shard
+        // — including the one the iterator currently read-locks — is
+        // written. Reuses one payload `Arc` (no per-key re-parse).
+        for j in 0..1024u32 {
+            let key = FileArtifactKey {
+                canonical: Arc::from(format!("/dir/reentrant-{n}-{j}.ts").as_str()),
+                content_hash: {
+                    let mut h = [0u8; 16];
+                    h[0..4].copy_from_slice(&j.to_le_bytes());
+                    h[4] = n as u8;
+                    h
+                },
+                parse_env_hash: [0u8; 16],
+                parser_version: 1,
+            };
+            store.insert_artifacts(key, Arc::clone(&reentrant_payload));
+        }
+        if augmenter == augmenter_canonical && specifier == "./local" {
+            Some(Arc::<str>::from("/dir/local.ts"))
+        } else {
+            None
+        }
+    };
+
+    // The discriminator: this call RETURNS (no hang, no re-entrant-write
+    // panic) because the snapshot makes the resolver run off the guard.
+    let set = store.ensure_augmentation_index_populated(&target_key, &resolver);
+
+    assert!(
+        resolver_invoked.load(Ordering::SeqCst),
+        "the ResolvedRelativeCanonical probe MUST invoke the resolver"
+    );
+    assert!(
+        reentrant_inserts.load(Ordering::SeqCst) >= 1,
+        "the resolver MUST have performed at least one re-entrant \
+         same-map write (the production hazard this test exercises)"
+    );
+    assert!(
+        !set.entries.is_empty(),
+        "the relative augmenter's `./local` specifier resolves to the \
+         queried canonical, so the augmenter set MUST be non-empty"
+    );
+    assert!(
+        set.entries
+            .iter()
+            .any(|e| e.canonical().as_ref() == augmenter_canonical),
+        "the matched augmenter MUST be the relative augmenter file"
+    );
+
+    // NEGATIVE: a target whose canonical does NOT match the resolver's
+    // output yields an EMPTY set (the resolver returns a non-matching
+    // canonical for `./local`, so no augmenter contributes).
+    let non_matching_target = AugmentationTargetKind::ResolvedRelativeCanonical(Arc::<str>::from(
+        "/dir/some-other-module.ts",
+    ));
+    let non_matching_key = AugmentationTargetKey {
+        project_identity: ProjectIdentity([1u8; 16]),
+        resolve_env_hash: [2u8; 16],
+        lib_env_hash: [3u8; 16],
+        target: non_matching_target,
+    };
+    let empty_set = store.ensure_augmentation_index_populated(&non_matching_key, &resolver);
+    assert!(
+        empty_set.entries.is_empty(),
+        "a ResolvedRelativeCanonical target whose canonical does NOT \
+         match the augmenter's resolved relative specifier MUST yield \
+         an empty augmenter set"
     );
 }
