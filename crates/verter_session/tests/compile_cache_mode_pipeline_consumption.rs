@@ -209,6 +209,40 @@ fn clear_compile_cache_empties_pure_content_node() {
     );
 }
 
+/// `close()` (the release-all teardown) must flush the content-addressed
+/// node, symmetric with `clear_compile_cache`. `close()` documents
+/// "release all cached data" + frees the backing memory for NAPI-backed
+/// hosts, so a Content-mode compile output published into the
+/// content-addressed store must not survive it.
+///
+/// Discriminates: pre-fix `close()` clears the per-file compile cache and
+/// session slots but never touches the sibling content-addressed store, so
+/// the entry survives (`entry_count` stays 1); after the fix it drops to 0.
+/// The count is read directly off the store (not via the scheduler), so it
+/// stays valid even after `close()` resets the scheduler.
+#[test]
+fn close_empties_pure_content_node() {
+    let host = prod_host();
+    upsert_vue(&host, "/D.vue", SFC_WITH_STYLE);
+    let profile = content_profile();
+
+    let r = compile(&host, "/D.vue", VirtualNodeKind::Main, &profile);
+    assert_eq!(r.actual_mode, CompileCacheMode::Content);
+    assert_eq!(
+        host.compile_output_pure_content_entry_count(),
+        1,
+        "a Content compile must publish exactly one content-addressed entry"
+    );
+
+    host.close();
+
+    assert_eq!(
+        host.compile_output_pure_content_entry_count(),
+        0,
+        "close() must flush the content-addressed PureContent store"
+    );
+}
+
 /// Fix 5 — `compile_many` must honor per-input `requested_mode`, so two
 /// inputs sharing a canonical at different modes each carry their own
 /// requested / actual mode.

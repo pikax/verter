@@ -331,6 +331,13 @@ impl VerterHost {
         write_lock(&self.last_const_prop_overrides).clear();
 
         self.compile_cache().clear();
+        // The content-addressed compile-output store is a sibling
+        // compile-output cache; flush it so close() releases ALL cached
+        // compile state and frees the backing memory. The session slots
+        // cleared above live on the per-file compile cache; the
+        // content-addressed entries live on a separate store that
+        // dropping the compile cache does not touch.
+        self.compile_output_pure_content().clear_all();
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.scheduler.reset();
