@@ -1005,16 +1005,15 @@ fn collect_jsdoc_descriptions_from_root(
         {
             continue;
         }
-        let Some((raw_source, cached_parse, _)) =
-            host.current_eval_state(current_canonical.as_str())
-        else {
+        // Cache-owned shallow analysis — the barrel re-export targets ride on the
+        // file's `ShallowFileState` (populated once per `(canonical, whole_hash)`
+        // through the shared host ensure-path). No fresh OXC parse.
+        let Some(shallow) = host.shallow_file_state(current_canonical.as_str()) else {
             continue;
         };
-        let eval_source =
-            VerterHost::build_eval_script_source(&raw_source, cached_parse.as_deref());
         let candidates =
-            crate::resolver_core::surface_projector::find_type_import_sources_in_source(
-                eval_source.as_ref(),
+            crate::resolver_core::surface_projector::find_type_import_sources_in_analysis(
+                shallow.analysis.as_ref(),
                 current_name.as_str(),
             );
         if candidates.is_empty() {
@@ -1078,13 +1077,14 @@ fn follow_heritage_type_imports(
     if !host.is_evalable(defining_canonical) && !host.ensure_loaded(defining_canonical) {
         return;
     }
-    let Some((raw_source, cached_parse, _)) = host.current_eval_state(defining_canonical) else {
+    // Cache-owned shallow analysis — the heritage import edges ride on the file's
+    // `ShallowFileState`. No fresh OXC parse.
+    let Some(shallow) = host.shallow_file_state(defining_canonical) else {
         return;
     };
-    let eval_source = VerterHost::build_eval_script_source(&raw_source, cached_parse.as_deref());
     let heritage_imports =
-        crate::resolver_core::surface_projector::find_heritage_type_imports_in_source(
-            eval_source.as_ref(),
+        crate::resolver_core::surface_projector::find_heritage_type_imports_in_analysis(
+            shallow.analysis.as_ref(),
             type_name,
         );
     for (import_specifier, imported_name) in heritage_imports {

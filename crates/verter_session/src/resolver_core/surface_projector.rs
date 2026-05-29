@@ -1,5 +1,6 @@
-use oxc_allocator::Allocator;
-use verter_compiler::utils::oxc::vue::resolve_type::{ResolvedElements, ResolvedMemberVisibility};
+use verter_compiler::utils::oxc::vue::resolve_type::{
+    AnalyzedExternalTypeSource, ResolvedElements, ResolvedMemberVisibility,
+};
 use verter_semantic::analysis::types::AnalyzedMacroKind;
 use verter_type_expr::TypeExpr;
 
@@ -58,30 +59,24 @@ pub fn project_macro_surfaces_with_owner(
     }
 }
 
-/// When a type is not locally defined in a source file (e.g., barrel re-export),
+/// When a type is not locally defined in a file (e.g., barrel re-export),
 /// find its import source specifiers and imported name so the caller can follow
 /// the import chain. Handles `import { T } from '...'; export { T };`,
 /// `export { T } from '...'`, and `export * from '...'` patterns.
 ///
+/// Reads the cache-owned shallow analysis ([`AnalyzedExternalTypeSource`], held
+/// on the file's [`crate::resolver_core::ShallowFileState`]); it NEVER allocates
+/// a fresh OXC arena or reparses the dependency. The barrel-discovery overlay
+/// fetches the shallow state once per canonical via
+/// [`crate::VerterHost::shallow_file_state`] and passes the cache-owned analysis
+/// here.
+///
 /// Returns all candidates. For direct/named re-exports returns one entry.
 /// For `export *` wildcards returns one entry per wildcard source.
-pub fn find_type_import_sources_in_source(source: &str, type_name: &str) -> Vec<(String, String)> {
-    use verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program;
-
-    let source = source.trim();
-    if source.is_empty() {
-        return Vec::new();
-    }
-
-    let alloc = Allocator::new();
-    let source_type = oxc_span::SourceType::ts();
-    let parsed = oxc_parser::Parser::new(&alloc, source, source_type).parse();
-    if parsed.panicked {
-        return Vec::new();
-    }
-
-    let analysis = analyze_external_type_program(&parsed.program);
-
+pub fn find_type_import_sources_in_analysis(
+    analysis: &AnalyzedExternalTypeSource,
+    type_name: &str,
+) -> Vec<(String, String)> {
     // Check direct re-export: `export { T } from '...'`
     if let Some((specifier, imported_name)) = analysis.direct_reexport_target(type_name) {
         return vec![(specifier.to_string(), imported_name.to_string())];
@@ -103,32 +98,18 @@ pub fn find_type_import_sources_in_source(source: &str, type_name: &str) -> Vec<
         .collect()
 }
 
-/// Given a source file and a locally-defined type name, return the imported
-/// type dependencies that the type transitively references through its
-/// heritage chain (extends, intersection, etc.).
+/// Given a file's cache-owned shallow analysis and a locally-defined type name,
+/// return the imported type dependencies that the type transitively references
+/// through its heritage chain (extends, intersection, etc.).
 ///
-/// Each entry is `(import_specifier, imported_name)` — e.g.,
+/// Reads the cache-owned shallow analysis ([`AnalyzedExternalTypeSource`]); it
+/// NEVER reparses. Each entry is `(import_specifier, imported_name)` — e.g.,
 /// `("vue-router", "RouterLinkProps")` for a type that extends an imported
 /// interface.
-pub fn find_heritage_type_imports_in_source(
-    source: &str,
+pub fn find_heritage_type_imports_in_analysis(
+    analysis: &AnalyzedExternalTypeSource,
     type_name: &str,
 ) -> Vec<(String, String)> {
-    use verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program;
-
-    let source = source.trim();
-    if source.is_empty() {
-        return Vec::new();
-    }
-
-    let alloc = Allocator::new();
-    let source_type = oxc_span::SourceType::ts();
-    let parsed = oxc_parser::Parser::new(&alloc, source, source_type).parse();
-    if parsed.panicked {
-        return Vec::new();
-    }
-
-    let analysis = analyze_external_type_program(&parsed.program);
     let required_import_names = analysis.required_import_names(type_name);
 
     required_import_names
