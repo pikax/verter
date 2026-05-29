@@ -201,16 +201,14 @@ fn imported_registry_seed_refresh_keeps_symbolic_imported_surfaces_refreshable()
 }
 
 #[test]
-fn append_component_meta_registry_entries_seeds_explicit_object_surface_for_imported_props() {
-    // Discriminating invariant: the direct imported macro root must
-    // seed the initial registry with an explicit object surface
-    // (driven by the `imported_elements` graph). An optimization to
-    // skip the imported-registry refresh (gated on
-    // `imported_declaration_surface_is_authoritative`) would require
-    // the source-text declaration body to be retained without
-    // heritage markers; the graph-only resolver does not retain
-    // declaration text, so that optimization does not engage and the
-    // seeding half is the surviving discriminator.
+fn append_component_meta_registry_entries_seeds_shallow_ref_for_imported_props() {
+    // Discriminating invariant (shallow-by-default): the direct imported macro
+    // root seeds the registry with a SHALLOW `TypeExpr::Ref { name }` — NOT an
+    // eagerly-materialised object surface. Consumers re-resolve the named root
+    // through the registry on demand; the typeinfo / evaluated path is the
+    // single shape authority. A regression that eagerly inlined the imported
+    // declaration body at seed time would surface an `Object` here and FAIL this
+    // assertion, so the shallow-Ref seed is the surviving discriminator.
     let project = make_project();
     project
         .upsert_base("/src/types.ts", "export interface Props { label: string }")
@@ -246,9 +244,25 @@ defineProps<Props>()
         .iter()
         .find(|entry| entry.name == "Props")
         .expect("the direct imported macro root should seed the initial registry");
+    match &props_entry.type_expr {
+        verter_type_expr::TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            assert_eq!(name.as_ref(), "Props", "the shallow seed Ref names the root");
+            assert!(
+                type_arguments.is_empty(),
+                "the direct imported root seed carries no type arguments"
+            );
+        }
+        other => panic!(
+            "the direct imported seed should be a shallow Ref (shallow-by-default), got {other:?}"
+        ),
+    }
+    // Negative: it must NOT be an eagerly-materialised object surface.
     assert!(
-        matches!(props_entry.type_expr, verter_type_expr::TypeExpr::Object(_),),
-        "the initial direct imported seed should already hold an explicit object surface"
+        !matches!(props_entry.type_expr, verter_type_expr::TypeExpr::Object(_)),
+        "the seed must stay shallow — an eager object surface violates shallow-by-default"
     );
 }
 
