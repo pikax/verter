@@ -291,6 +291,9 @@ pub struct FfiVirtualFileResponse {
     pub stale: bool,
     pub diagnostics: FfiDiagnosticsSnapshot,
     pub meta: FfiVirtualMeta,
+    /// `true` iff this response was served from a warm cache slot (the
+    /// fact-validated session slot OR the content-addressed store).
+    pub cache_hit: bool,
     /// Requested compile cache mode ("stateless" / "content" / "session").
     pub requested_mode: String,
     /// Actual compile cache mode the runtime ran under.

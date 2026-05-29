@@ -156,7 +156,10 @@ export interface CompileBatchEntry {
   /** All compilation errors for this file. Empty on success. */
   errors: string[];
   durationMs: number;
-  /** True iff the slot was already warm in compile_cache before this call. */
+  /**
+   * True iff this input was served from a warm cache slot (the
+   * fact-validated session slot OR the content-addressed store).
+   */
   cacheHit: boolean;
   /** The compile cache mode the caller requested. */
   requestedMode: CompileCacheMode;

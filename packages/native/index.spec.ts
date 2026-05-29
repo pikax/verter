@@ -739,6 +739,56 @@ describe("VerterHost.compileMany", () => {
     expect(r1[0].code).toBe(r2[0].code);
   });
 
+  it("reports a content-addressed warm hit on the second Content call", () => {
+    // A production host (dev mode off) is required: the default dev host
+    // fires HasDevLastGood and downgrades every Content request to
+    // Stateless, which never warm-hits. A fact-free SFC under a Content
+    // request runs as Content and publishes a content-addressed entry.
+    const host = new VerterHost({ devMode: false, compileErrorPolicy: "strict" });
+    const inputs = () => [
+      {
+        canonicalId: "/W.vue",
+        source:
+          '<script setup lang="ts">const n = 1</script><template><div>{{ n }}</div></template>',
+        requestedMode: "content" as const,
+      },
+    ];
+    const r1 = host.compileMany(inputs(), {});
+    expect(r1[0].actualMode).toBe("content");
+    expect(r1[0].cacheHit).toBe(false);
+
+    const r2 = host.compileMany(inputs(), {});
+    expect(r2[0].actualMode).toBe("content");
+    // The content-addressed warm hit is invisible to a session-slot-only
+    // probe; sourcing cacheHit from the compile response makes it true.
+    expect(r2[0].cacheHit).toBe(true);
+  });
+
+  it("carries the true downgraded mode on a Content compile error", () => {
+    // defineProps<Props>() makes Props a macro type dep (HasMacroTypeDeps),
+    // and importing the missing './missing' module makes the compile fail.
+    // A Content request downgrades to Stateless for HasMacroTypeDeps before
+    // erroring, so the error entry must report the real mode + reason.
+    const host = new VerterHost({ devMode: false, compileErrorPolicy: "strict" });
+    const r = host.compileMany(
+      [
+        {
+          canonicalId: "/E.vue",
+          source:
+            "<script setup lang=\"ts\">\nimport type { Props } from './missing';\ndefineProps<Props>();\n</script>\n<template><div/></template>",
+          requestedMode: "content" as const,
+        },
+      ],
+      {},
+    );
+    expect(r[0].errors.length).toBeGreaterThanOrEqual(1);
+    expect(r[0].requestedMode).toBe("content");
+    // An error arm that reset to the requested mode would report "content"
+    // and no reason; reading the compile-failure payload reports the truth.
+    expect(r[0].actualMode).toBe("stateless");
+    expect(r[0].downgradeReason).toBe("HasMacroTypeDeps");
+  });
+
   it("accepts priority='interactive'", () => {
     const host = new VerterHost();
     const r = host.compileMany(

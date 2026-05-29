@@ -1262,6 +1262,7 @@ fn virtual_file_arc_to_string() {
             style_index: Some(2),
             custom_index: None,
         },
+        cache_hit: false,
         requested_mode: host::CompileCacheMode::Session,
         actual_mode: host::CompileCacheMode::Session,
         downgrade_reason: None,
@@ -1300,6 +1301,7 @@ fn host_virtual_file_to_ffi_uses_utf16_conversion_for_embedded_diagnostics() {
             has_errors: true,
         },
         meta: host::VirtualMeta::default(),
+        cache_hit: false,
         requested_mode: host::CompileCacheMode::Session,
         actual_mode: host::CompileCacheMode::Session,
         downgrade_reason: None,
@@ -1321,6 +1323,7 @@ fn virtual_file_no_source_map() {
         stale: false,
         diagnostics: host::DiagnosticsSnapshot::default(),
         meta: host::VirtualMeta::default(),
+        cache_hit: false,
         requested_mode: host::CompileCacheMode::Session,
         actual_mode: host::CompileCacheMode::Session,
         downgrade_reason: None,
@@ -1392,7 +1395,7 @@ fn host_error_missing_virtual_node() {
 
 #[test]
 fn host_error_compile_error_with_diagnostics() {
-    let err = host::HostError::CompileError {
+    let err = host::HostError::CompileError(host::CompileFailure {
         diagnostics: host::DiagnosticsSnapshot {
             diagnostics: vec![
                 host::HostDiagnostic {
@@ -1410,7 +1413,10 @@ fn host_error_compile_error_with_diagnostics() {
             ],
             has_errors: true,
         },
-    };
+        requested_mode: host::CompileCacheMode::Session,
+        actual_mode: host::CompileCacheMode::Session,
+        downgrade_reason: None,
+    });
     let s = host_error_to_string(&err);
     assert!(s.contains("CompileError"));
     assert!(s.contains("[PARSE_ERR] unexpected token"));
@@ -1933,9 +1939,10 @@ fn ffi_seam_invalid_requested_mode_is_rejected() {
 
 #[test]
 fn ffi_seam_response_serialises_mode_fields() {
-    // Build a host response carrying a Content->Stateless downgrade and
-    // confirm the FFI conversion surfaces all three mode fields as the
-    // expected strings (NAPI/WASM serialise this same shape out to JS).
+    // Build a host response carrying a Content->Stateless downgrade on a
+    // cold miss and confirm the FFI conversion surfaces all three mode
+    // fields plus `cache_hit` (NAPI/WASM serialise this same shape out to
+    // JS). The downgrade case is a cold miss (`cache_hit == false`).
     let response = host::VirtualFileResponse {
         id: "Comp.vue".to_string(),
         code: Arc::from("export default {}"),
@@ -1944,6 +1951,7 @@ fn ffi_seam_response_serialises_mode_fields() {
         stale: false,
         diagnostics: host::DiagnosticsSnapshot::default(),
         meta: host::VirtualMeta::default(),
+        cache_hit: false,
         requested_mode: host::CompileCacheMode::Content,
         actual_mode: host::CompileCacheMode::Stateless,
         downgrade_reason: Some(host::DowngradeReason::HasMacroTypeDeps),
@@ -1952,8 +1960,13 @@ fn ffi_seam_response_serialises_mode_fields() {
     assert_eq!(ffi.requested_mode, "content");
     assert_eq!(ffi.actual_mode, "stateless");
     assert_eq!(ffi.downgrade_reason, Some("HasMacroTypeDeps".to_string()));
+    assert!(
+        !ffi.cache_hit,
+        "a cold-miss response must serialise cache_hit == false through the FFI seam"
+    );
 
-    // No-downgrade case: a Session response reports session/session/None.
+    // No-downgrade warm-hit case: a Session response served from a warm
+    // slot reports session/session/None and `cache_hit == true`.
     let session_response = host::VirtualFileResponse {
         id: "Comp.vue".to_string(),
         code: Arc::from(""),
@@ -1962,6 +1975,7 @@ fn ffi_seam_response_serialises_mode_fields() {
         stale: false,
         diagnostics: host::DiagnosticsSnapshot::default(),
         meta: host::VirtualMeta::default(),
+        cache_hit: true,
         requested_mode: host::CompileCacheMode::Session,
         actual_mode: host::CompileCacheMode::Session,
         downgrade_reason: None,
@@ -1970,4 +1984,8 @@ fn ffi_seam_response_serialises_mode_fields() {
     assert_eq!(ffi2.requested_mode, "session");
     assert_eq!(ffi2.actual_mode, "session");
     assert_eq!(ffi2.downgrade_reason, None);
+    assert!(
+        ffi2.cache_hit,
+        "a warm-hit response must serialise cache_hit == true through the FFI seam"
+    );
 }

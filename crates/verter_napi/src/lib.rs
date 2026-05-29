@@ -80,7 +80,7 @@ fn host_error(err: host::HostError) -> Error {
         host::HostError::InvalidQuery
         | host::HostError::MissingSource { .. }
         | host::HostError::MissingVirtualNode { .. } => Status::InvalidArg,
-        host::HostError::CompileError { .. } => Status::GenericFailure,
+        host::HostError::CompileError(_) => Status::GenericFailure,
         #[allow(unreachable_patterns)]
         _ => Status::GenericFailure,
     };
@@ -519,6 +519,9 @@ pub struct NapiVirtualFileResponse {
     pub stale: bool,
     pub diagnostics: NapiDiagnosticsSnapshot,
     pub meta: NapiVirtualMeta,
+    /// `true` iff this response was served from a warm cache slot (the
+    /// fact-validated session slot OR the content-addressed store).
+    pub cacheHit: bool,
     /// Requested compile cache mode ("stateless" / "content" / "session").
     pub requestedMode: String,
     /// Actual compile cache mode the runtime ran under.
@@ -1017,6 +1020,7 @@ fn host_virtual_file_to_napi(
             styleIndex: input.meta.style_index.map(|i| i as u32),
             customIndex: input.meta.custom_index.map(|i| i as u32),
         },
+        cacheHit: input.cache_hit,
         requestedMode: input.requested_mode.to_string(),
         actualMode: input.actual_mode.to_string(),
         downgradeReason: input.downgrade_reason.map(|r| r.to_string()),

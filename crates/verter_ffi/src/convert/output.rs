@@ -195,6 +195,7 @@ pub fn host_virtual_file_to_ffi(
             style_index: input.meta.style_index.map(|i| i as u32),
             custom_index: input.meta.custom_index.map(|i| i as u32),
         },
+        cache_hit: input.cache_hit,
         requested_mode: input.requested_mode.to_string(),
         actual_mode: input.actual_mode.to_string(),
         downgrade_reason: input.downgrade_reason.map(|r| r.to_string()),
@@ -255,8 +256,9 @@ pub fn host_error_to_string(err: &host::HostError) -> String {
         host::HostError::MissingVirtualNode { canonical_id } => {
             format!("HostError::MissingVirtualNode: {}", canonical_id)
         }
-        host::HostError::CompileError { diagnostics } => {
-            let summary = diagnostics
+        host::HostError::CompileError(failure) => {
+            let summary = failure
+                .diagnostics
                 .diagnostics
                 .iter()
                 .map(|d| format!("[{}] {}", d.code, d.message))

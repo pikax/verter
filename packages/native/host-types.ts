@@ -235,6 +235,11 @@ export interface HostVirtualFileResponse {
   stale: boolean;
   diagnostics: HostDiagnosticsSnapshot;
   meta: HostVirtualMeta;
+  /**
+   * True iff this response was served from a warm cache slot (the
+   * fact-validated session slot OR the content-addressed store).
+   */
+  cacheHit: boolean;
   /** The compile cache mode the caller requested. */
   requestedMode: CompileCacheMode;
   /** The compile cache mode the runtime actually ran under. */
