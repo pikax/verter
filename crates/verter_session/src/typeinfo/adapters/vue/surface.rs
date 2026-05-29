@@ -375,8 +375,7 @@ impl VerterHost {
             crate::resolver_core::FactReadSetFinalise::Ok(facts) => {
                 let entry = crate::typeinfo::adapters::vue::store::VueMacroDtosEntry {
                     dtos: std::sync::Arc::new(dtos),
-                    read_set_signature:
-                        crate::fact_signature_helpers::ReadSetSignature::new(facts),
+                    read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(facts),
                     validated_at_generation: generation,
                 };
                 std::sync::Arc::clone(&self.vue_shallow_metadata_store().insert(key, entry).dtos)
@@ -754,7 +753,9 @@ pub fn emits_from_typeinfo_surface(
 ///   resolver-navigation merges it required-wins) plus the intersection of the
 ///   arms' return types. A non-function arm makes the member not slot-like.
 /// - Anything else → `None` (the member is not a slot).
-fn slot_callable_param_and_return(value: &TypeExpr) -> Option<(Option<TypeExpr>, Option<TypeExpr>)> {
+fn slot_callable_param_and_return(
+    value: &TypeExpr,
+) -> Option<(Option<TypeExpr>, Option<TypeExpr>)> {
     match value {
         TypeExpr::Function(func) => Some((
             func.parameters.first().map(|p| p.ty.clone()),

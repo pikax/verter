@@ -44,11 +44,10 @@ mod harness;
 
 use std::time::Instant;
 
-use harness::{
-    build_hermetic_host, build_preupserted_host, footprint_of, resolve_under_audit,
-};
+use harness::{build_hermetic_host, build_preupserted_host, footprint_of, resolve_under_audit};
 
-const CHAT_MESSAGES_VUE: &str = include_str!("component_meta_audit_corpus/fixtures/ChatMessages.vue");
+const CHAT_MESSAGES_VUE: &str =
+    include_str!("component_meta_audit_corpus/fixtures/ChatMessages.vue");
 
 /// Ceiling for `synthesis_expanded_instantiate_calls` — the synthesis path on
 /// the corrected (typeinfo) rail performs ZERO Expanded `Instantiate` calls for
@@ -75,13 +74,16 @@ fn chatmessages_cutover_audit_has_no_eager_materialization_or_frontier_loop() {
         .component_meta_payload()
         .expect("component-meta request must carry a ComponentMeta audit payload");
 
-    // The eager-path signal: synthesis-attributable Expanded Instantiate.
-    assert!(
-        payload.synthesis_expanded_instantiate_calls
-            <= CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING,
+    // The eager-path signal: synthesis-attributable Expanded Instantiate. The
+    // committed ceiling is 0 (the corrected typeinfo path does ZERO), so this
+    // is an exact-equality gate — any non-zero value means the eager
+    // imported-macro-surface materialisation regressed back in.
+    assert_eq!(
+        payload.synthesis_expanded_instantiate_calls,
+        CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING,
         "ChatMessages cutover gate: synthesis_expanded_instantiate_calls \
-         ({}) must stay <= {} — a non-zero value means the eager \
-         imported-macro-surface materialisation regressed back in",
+         ({}) must equal the committed ceiling {} — a non-zero value means the \
+         eager imported-macro-surface materialisation regressed back in",
         payload.synthesis_expanded_instantiate_calls,
         CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING,
     );
@@ -113,15 +115,21 @@ fn chatmessages_cutover_audit_has_no_eager_materialization_or_frontier_loop() {
          — no external OXC frontier/reparse loop",
     );
     assert_eq!(
-        fp.resolver_hot_path.frontier_closure_invocations_target_none, 0,
+        fp.resolver_hot_path
+            .frontier_closure_invocations_target_none,
+        0,
         "ChatMessages cutover gate: frontier_closure_invocations_target_none must be 0",
     );
     assert_eq!(
-        fp.resolver_hot_path.frontier_closure_redundant_target_none_pairs, 0,
+        fp.resolver_hot_path
+            .frontier_closure_redundant_target_none_pairs,
+        0,
         "ChatMessages cutover gate: frontier_closure_redundant_target_none_pairs must be 0",
     );
     assert_eq!(
-        fp.resolver_hot_path.resolved_external_type_cache_negative_misses, 0,
+        fp.resolver_hot_path
+            .resolved_external_type_cache_negative_misses,
+        0,
         "ChatMessages cutover gate: resolved_external_type_cache_negative_misses must be 0 \
          — no negative-cache thrash from a reparse loop",
     );
@@ -155,8 +163,10 @@ fn chatmessages_cutover_audit_has_no_eager_materialization_or_frontier_loop() {
     // component-meta resolve must reuse the cached owner IndexedReady — NO fresh
     // `indexed_ready_builds` for the audited request (the architectural
     // cache-reuse target).
-    let preindexed_host =
-        build_preupserted_host(&[("/ChatMessages.vue", CHAT_MESSAGES_VUE)], "/ChatMessages.vue");
+    let preindexed_host = build_preupserted_host(
+        &[("/ChatMessages.vue", CHAT_MESSAGES_VUE)],
+        "/ChatMessages.vue",
+    );
     let _ = preindexed_host.get_analysis("/ChatMessages.vue");
     let (_a2, _r2, record2) = resolve_under_audit(preindexed_host, "/ChatMessages.vue");
     let fp2 = footprint_of(&record2);

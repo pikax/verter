@@ -7183,8 +7183,8 @@ withDefaults(defineProps<Props>(), {
 
     // The expansion has ALREADY produced the flattened per-branch surface (the
     // production pipeline runs expansion before `produce_macro_object_shapes`).
-    let make_field = |name: &str, optional: bool| {
-        verter_semantic::analysis::type_expand::ExpandedField {
+    let make_field =
+        |name: &str, optional: bool| verter_semantic::analysis::type_expand::ExpandedField {
             name: name.to_string(),
             r#type: verter_type_expr::TypeExpr::primitive(verter_type_expr::PrimitiveName::Unknown),
             raw_type: None,
@@ -7196,8 +7196,7 @@ withDefaults(defineProps<Props>(), {
             shallow_type_expr: None,
             shallow_type_expr_scope: None,
             declared_in_macro_type_arg: false,
-        }
-    };
+        };
 
     let host = project.host();
     let facts = host

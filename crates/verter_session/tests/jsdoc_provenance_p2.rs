@@ -83,12 +83,19 @@ fn published_prop_description(host: &VerterHost, sfc_path: &str, prop: &str) -> 
     let meta = host
         .get_component_meta(sfc_path)
         .unwrap_or_else(|| panic!("`{sfc_path}` must produce component meta"));
-    let p = meta.props.iter().find(|p| p.name == prop).unwrap_or_else(|| {
-        panic!(
-            "prop `{prop}` must be published; got {:?}",
-            meta.props.iter().map(|p| p.name.clone()).collect::<Vec<_>>()
-        )
-    });
+    let p = meta
+        .props
+        .iter()
+        .find(|p| p.name == prop)
+        .unwrap_or_else(|| {
+            panic!(
+                "prop `{prop}` must be published; got {:?}",
+                meta.props
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect::<Vec<_>>()
+            )
+        });
     p.description.clone()
 }
 

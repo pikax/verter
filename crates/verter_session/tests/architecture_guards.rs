@@ -11211,7 +11211,6 @@ fn imported_macro_surface_not_in_protocol_or_ffi() {
     );
 }
 
-
 /// Walk a directory and apply `cb` to every `.rs` or `.ts` file.
 /// Shared by the protocol / FFI / compat scan above.
 fn walk_dir_collect_rs_and_ts(dir: &std::path::Path, cb: &mut dyn FnMut(&std::path::Path)) {
@@ -11245,7 +11244,6 @@ fn walk_dir_collect_rs_and_ts(dir: &std::path::Path, cb: &mut dyn FnMut(&std::pa
 // `ResolvedMacroMeta` bypasses the seam — it would interpret the eager arm's
 // fields directly and silently skip the lazy arm, defeating the migration.
 //
-
 
 // ===========================================================================
 // Single Resolution Engine guards (CLAUDE.md "Single Resolution Engine Rule")
@@ -12573,7 +12571,7 @@ mod single_resolution_engine_guards {
     // explicit by-path probe allowlist — NOT a `test_only_` name prefix; see
     // `is_test_or_probe_file`).
     // -----------------------------------------------------------------------
-    
+
     #[test]
     fn no_new_from_eager_meta_production_site() {
         // The eager macro-surface rail (`ResolvedMacroSurface::from_eager_meta`)
@@ -13589,9 +13587,7 @@ pub fn run(p: &Program) {\n\
         let files = collect_production_rs_files();
         let rels: BTreeSet<String> = files.into_iter().map(|(_, rel)| rel).collect();
         assert!(
-            rels.contains(
-                "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs"
-            ),
+            rels.contains("crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs"),
             "production collector must include a real production file"
         );
         assert!(
@@ -14172,9 +14168,7 @@ fn typeinfo_surface_carries_spans_not_rendered_strings() {
                 Some("str")
             ),
             // `Option<String>` / `Vec<String>` — recurse into the element type.
-            Some("Option") | Some("Vec") => {
-                first_generic(ty).is_some_and(is_rendered_text_type)
-            }
+            Some("Option") | Some("Vec") => first_generic(ty).is_some_and(is_rendered_text_type),
             _ => false,
         }
     }
@@ -14214,9 +14208,10 @@ fn typeinfo_surface_carries_spans_not_rendered_strings() {
 
     // Positive precondition: the guard actually SAW the surface structs (a
     // rename that moved them out of `TypeInfo*` would silently pass otherwise).
-    let saw_surface = parsed.items.iter().any(|it| {
-        matches!(it, syn::Item::Struct(s) if s.ident == "TypeInfoSurface")
-    });
+    let saw_surface = parsed
+        .items
+        .iter()
+        .any(|it| matches!(it, syn::Item::Struct(s) if s.ident == "TypeInfoSurface"));
     assert!(
         saw_surface,
         "spans-not-strings guard: `TypeInfoSurface` struct not found in `{REL}` — \

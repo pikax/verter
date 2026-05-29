@@ -7663,7 +7663,6 @@ fn backfill_member_index_surface_carries_prepared_member_spans_and_origin() {
     );
 }
 
-
 /// Discriminating: when a HERITAGE arm is a cross-file
 /// `Omit<Base, K>` (`interface Derived extends Omit<Base, K>`), `Base` is
 /// reached through `object_filter_source_surface`'s CARRIER branch (a

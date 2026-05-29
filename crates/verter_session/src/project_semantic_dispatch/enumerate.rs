@@ -17,7 +17,6 @@ use crate::semantic_query::{
 };
 use verter_semantic::facts::registry::{FactKey, InternedName, SymbolSpace};
 
-
 /// Worklist frame for the iterative `key_names_from_base_node`
 /// driver. `Expand` advances one node; `Combine*` reduces the top N
 /// prior results (one per arm) into the compound's key enumeration.
@@ -270,7 +269,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-        pub(super) fn key_names_from_keyspace_node(
+    pub(super) fn key_names_from_keyspace_node(
         &self,
         node: SemanticNodeId,
     ) -> Option<Vec<Arc<str>>> {

@@ -1160,9 +1160,8 @@ pub(crate) fn synthesize_define_props_shape_from_known_surface_with_authority(
                         == verter_semantic::analysis::AnalyzedMacroKind::DefineProps
                     && (!require_authoritative_surface || resolved.surface_is_authoritative)
             })
-            .filter_map(|resolved| {
-                (!props.props.is_empty()).then(|| (resolved, props.props.clone()))
-            });
+            .filter(|_resolved| !props.props.is_empty())
+            .map(|resolved| (resolved, props.props.clone()));
         let first = macro_surfaces.next();
         if macro_surfaces.next().is_none()
             && first.as_ref().is_some_and(|(resolved, _)| {
@@ -1470,7 +1469,8 @@ pub(crate) fn synthesize_define_emits_shape_from_known_surface(
             resolved.macro_index == macro_index
                 && resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits
         })
-        .filter_map(|_resolved| (!emits.emits.is_empty()).then(|| emits.emits.clone()));
+        .filter(|_resolved| !emits.emits.is_empty())
+        .map(|_resolved| emits.emits.clone());
     let resolved_macro = matching_macros.next();
     if matching_macros.next().is_some() {
         return None;
@@ -1581,7 +1581,8 @@ pub(crate) fn synthesize_define_slots_shape_from_known_surface(
             resolved.macro_index == macro_index
                 && resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots
         })
-        .filter_map(|_resolved| (!slots.slots.is_empty()).then(|| slots.slots.clone()));
+        .filter(|_resolved| !slots.slots.is_empty())
+        .map(|_resolved| slots.slots.clone());
     let resolved_slots = matching_macros.next()?;
     if matching_macros.next().is_some() {
         return None;
