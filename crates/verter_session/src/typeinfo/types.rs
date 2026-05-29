@@ -19,6 +19,57 @@ use verter_type_expr::TypeExpr;
 use crate::semantic_query::ProjectionMode;
 
 // ---------------------------------------------------------------------------
+// Query level
+// ---------------------------------------------------------------------------
+
+/// The *amount of meaning* a typeinfo query asks the host to compute for a
+/// declaration — the typeinfo unification's query-identity axis (codex
+/// BINDING `TypeInfoQueryLevel`).
+///
+/// This is **query identity, NOT an env-hash dimension** (R21 — the five env
+/// hashes `parse_env_hash` / `resolve_env_hash` / `type_env_hash` /
+/// `lib_env_hash` / `project_identity` stay split and unchanged). Two queries
+/// for the same declaration at different levels are DIFFERENT queries that
+/// produce DIFFERENT results and therefore must occupy DISTINCT cache slots —
+/// exactly like [`ProjectionMode`] / [`crate::semantic_query::SurfaceProvenanceContext`]
+/// are folded into the semantic query identity rather than into any env hash.
+/// The level is threaded into the request structs ([`ShallowSurfaceRequest`],
+/// [`VueMacroSurfaceRequest`]) and into the scratch / surface cache key where
+/// the two levels diverge (most importantly a `.vue`'s PUBLIC component type
+/// vs its FULL macro metadata), never into a workspace env hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TypeInfoQueryLevel {
+    /// The declaration's PUBLIC type — for a `.vue` SFC this is the
+    /// synthesized public component type (`$props` / `$emit` / `$slots` /
+    /// expose surface) that a TS `import Foo from './Foo.vue'` site sees,
+    /// resolved through typeinfo WITHOUT calling component-meta. For a plain
+    /// TS declaration it is the same one-level shallow surface the
+    /// [`FullMetadata`](Self::FullMetadata) level returns — the distinction
+    /// only bites for `.vue` carriers, where the public type is the
+    /// synthesized instance surface rather than the raw macro type argument.
+    PublicType,
+    /// The declaration's FULL resolved metadata — the span-rich one-level
+    /// [`crate::typeinfo::surface::TypeInfoSurface`] (and, for a `.vue` macro,
+    /// the normalized component-meta DTOs the
+    /// [`crate::typeinfo::adapters::vue`] surface adapter produces). This is
+    /// the level the macro-surface normalizers consume.
+    FullMetadata,
+}
+
+impl TypeInfoQueryLevel {
+    /// Stable discriminant byte folded into scratch / surface cache keys.
+    /// Distinct per level so the two levels never collide on one cache slot.
+    /// This is a QUERY-IDENTITY tag, not an env-hash input.
+    #[must_use]
+    pub const fn cache_tag(self) -> u8 {
+        match self {
+            TypeInfoQueryLevel::PublicType => 0,
+            TypeInfoQueryLevel::FullMetadata => 1,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Symbol inventory
 // ---------------------------------------------------------------------------
 
@@ -176,3 +227,67 @@ pub enum NamedImport {
 /// host methods. Aliased to a slice of [`TypeExpr`] for clarity at the
 /// call site — the lowering happens inside the host method per §5.2.
 pub type TypeArgList<'a> = &'a [Arc<TypeExpr>];
+
+// ---------------------------------------------------------------------------
+// Level-aware surface requests (typeinfo unification U3a)
+// ---------------------------------------------------------------------------
+
+/// Request for the level-aware shallow-surface resolver
+/// ([`crate::VerterHost::resolve_shallow_surface_for`]).
+///
+/// Threads the [`TypeInfoQueryLevel`] through the shallow-surface path so the
+/// resolver does not grow a positional `level` argument on every call site.
+/// `resolve_shallow_surface(canonical, name)` is the thin
+/// [`TypeInfoQueryLevel::FullMetadata`] wrapper over this request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShallowSurfaceRequest {
+    /// Canonical file id the declaration lives in.
+    pub canonical_id: Arc<str>,
+    /// The top-level declaration name to resolve.
+    pub name: Arc<str>,
+    /// The query level — query identity, NOT an env hash. For a plain TS
+    /// declaration both levels return the same one-level surface; for a `.vue`
+    /// carrier the levels diverge (PublicType = synthesized component type,
+    /// FullMetadata = raw declaration surface). Enters the surface cache key
+    /// via [`TypeInfoQueryLevel::cache_tag`].
+    pub level: TypeInfoQueryLevel,
+}
+
+impl ShallowSurfaceRequest {
+    /// Construct a request for `name` in `canonical_id` at `level`.
+    #[must_use]
+    pub fn new(canonical_id: Arc<str>, name: Arc<str>, level: TypeInfoQueryLevel) -> Self {
+        Self {
+            canonical_id,
+            name,
+            level,
+        }
+    }
+}
+
+/// Request for the typeinfo Vue-macro surface adapter
+/// ([`crate::typeinfo::adapters::vue::resolve_vue_macro_surface`]).
+///
+/// Identifies ONE macro call inside a `.vue` SFC (`owner_canonical` +
+/// `macro_index`) plus its kind and the query level. The adapter resolves the
+/// macro's type-argument surface through the shared typeinfo surface path (the
+/// same `resolve_shallow_surface` machinery, NEVER `surface_view_from_base_node`)
+/// and returns the span-rich [`crate::typeinfo::adapters::vue::VueMacroSurface`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VueMacroSurfaceRequest {
+    /// Canonical id of the `.vue` SFC that declares the macro.
+    pub owner_canonical: Arc<str>,
+    /// Stable index of the macro in the SFC's analysis snapshot
+    /// (`FileAnalysisSnapshot::macros`).
+    pub macro_index: usize,
+    /// Which macro this request targets (`DefineProps` / `DefineEmits` /
+    /// `DefineSlots` / `WithDefaults` / `DefineModel` / …).
+    pub macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
+    /// The `.vue` SFC's content identity (`IndexedReady::whole_hash`) — roots
+    /// the surface to the content it was extracted from so a content edit
+    /// produces a distinct cache identity. Carried explicitly so the adapter
+    /// does not re-derive it per call.
+    pub root_identity: verter_semantic::analysis::types::Hash16,
+    /// The query level — query identity, NOT an env hash.
+    pub level: TypeInfoQueryLevel,
+}

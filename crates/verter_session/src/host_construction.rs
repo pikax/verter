@@ -165,6 +165,8 @@ impl VerterHost {
                 Some(cap) => crate::typeinfo::scratch_cache::ScratchCache::with_capacity(cap),
                 None => crate::typeinfo::scratch_cache::ScratchCache::with_default_capacity(),
             }),
+            vue_shallow_metadata_store:
+                crate::typeinfo::adapters::vue::store::VueShallowMetadataStore::new(),
         }
     }
 
@@ -405,6 +407,17 @@ impl VerterHost {
         &self,
     ) -> &parking_lot::Mutex<crate::typeinfo::scratch_cache::ScratchCache> {
         &self.typeinfo_scratch_cache
+    }
+
+    /// Host-owned cache of `.vue` macro-surface normalized DTOs (the
+    /// typeinfo Vue adapter's shallow-metadata store). Used by
+    /// [`crate::typeinfo::adapters::vue::resolve_vue_macro_surface`] and the
+    /// normalizer entry points to materialize each `.vue` macro surface once
+    /// per `(canonical, content, macro, level)`.
+    pub(crate) fn vue_shallow_metadata_store(
+        &self,
+    ) -> &crate::typeinfo::adapters::vue::store::VueShallowMetadataStore {
+        &self.vue_shallow_metadata_store
     }
 
     // ──────────────────────────────────────────────────────────────────

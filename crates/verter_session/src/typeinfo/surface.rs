@@ -209,6 +209,23 @@ pub struct TypeInfoSurface {
 }
 
 impl TypeInfoSurface {
+    /// An empty surface — no members, signatures, index signatures, or
+    /// keyspace. Used by the Vue adapter for `defineModel`, whose props come
+    /// from analyzer facts rather than a type-argument object surface (the
+    /// macro carries no one-level member surface), so the adapter pairs the
+    /// analyzer-fact prop with an empty member surface.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            members: Arc::from(Vec::new().into_boxed_slice()),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        }
+    }
+
     /// Build a span-rich surface from a graph [`SurfaceView`].
     ///
     /// THIN projection: every span comes from the graph payload that already

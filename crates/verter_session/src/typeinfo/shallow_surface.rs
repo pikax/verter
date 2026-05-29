@@ -19,14 +19,19 @@ use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
     ProjectionMode, ProjectionReductionContext, QueryResult, ResolveDeclKey, ScopeId,
-    SemanticNodeData, SemanticQueryApi, SemanticQueryKey,
+    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
 };
 use crate::typeinfo::surface::TypeInfoSurface;
+use crate::typeinfo::types::{ShallowSurfaceRequest, TypeInfoQueryLevel};
 use crate::VerterHost;
 
 impl VerterHost {
     /// Resolve `name` in `canonical_id` to its span-rich one-level
-    /// [`TypeInfoSurface`].
+    /// [`TypeInfoSurface`] at [`TypeInfoQueryLevel::FullMetadata`].
+    ///
+    /// Thin wrapper over [`Self::resolve_shallow_surface_for`] — the historical
+    /// `(canonical, name)` accessor preserved for the many existing callers
+    /// that always want full metadata.
     ///
     /// Runs the empty-path `Shallow` projection on the declaration carrier and
     /// projects the resulting object surface. Returns `None` when the symbol
@@ -42,6 +47,32 @@ impl VerterHost {
         canonical_id: &str,
         name: &str,
     ) -> Option<TypeInfoSurface> {
+        self.resolve_shallow_surface_for(&ShallowSurfaceRequest::new(
+            Arc::from(canonical_id),
+            Arc::from(name),
+            TypeInfoQueryLevel::FullMetadata,
+        ))
+    }
+
+    /// Resolve a declaration to its span-rich one-level [`TypeInfoSurface`]
+    /// through the level-aware [`ShallowSurfaceRequest`].
+    ///
+    /// The [`TypeInfoQueryLevel`] is query identity, NOT an env-hash dimension
+    /// (R21). For a plain TS declaration both levels resolve the SAME one-level
+    /// surface — a named TS declaration has no "public vs full" distinction, so
+    /// the underlying `ResolveDecl` + empty-path `Shallow` `ProjectPath`
+    /// dispatch is level-independent and the two levels correctly share the
+    /// content-addressed dispatch memo slot. The level divergence bites for
+    /// `.vue` carriers, which the [`crate::typeinfo::adapters::vue`] adapter
+    /// owns: a `.vue`'s PUBLIC component type is the synthesized `default`
+    /// instance surface (`$props`/`$emit`/`$slots`), resolved via
+    /// [`crate::VerterHost::resolve_vue_public_type`], not a user-named
+    /// declaration reached through this path.
+    #[must_use]
+    pub fn resolve_shallow_surface_for(
+        &self,
+        request: &ShallowSurfaceRequest,
+    ) -> Option<TypeInfoSurface> {
         let store_view = self.resolver_store_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
@@ -53,22 +84,58 @@ impl VerterHost {
         // class vs alias) and classifies its heritage arms.
         let base = match dispatch.execute(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
-                canonical_id: Arc::from(canonical_id),
+                canonical_id: Arc::clone(&request.canonical_id),
                 local_scope: None,
             },
-            name: Arc::from(name),
+            name: Arc::clone(&request.name),
         })) {
             QueryResult::Value(node) | QueryResult::Recursive(node) => node,
             QueryResult::Error(_) => return None,
         };
 
+        self.project_shallow_surface_from_base(
+            &host_ctx,
+            &dispatch,
+            base,
+            ProjectionReductionContext::published(ProjectionMode::Shallow),
+        )
+    }
+
+    /// Project a resolved base node to its span-rich one-level
+    /// [`TypeInfoSurface`] via the empty-path `Shallow` synthesiser + JSDoc
+    /// enrichment. Shared by the named-declaration accessor
+    /// ([`Self::resolve_shallow_surface_for`]) and the Vue-macro surface
+    /// adapter, so both produce the surface through ONE code path.
+    ///
+    /// `context` is the empty-path `ProjectPath` reduction context. The
+    /// named-declaration accessor passes `published(Shallow)` (structural
+    /// provenance). The Vue **props** macro normalizer passes
+    /// `published_macro_type_arg_body(Shallow)` so the macro type-argument's
+    /// own-body members surface with `declared_in_macro_type_arg = true` while
+    /// heritage-reached members stay `false` — the same own-body-vs-heritage
+    /// provenance the eager rail records. `mode` MUST stay `Shallow` so the
+    /// surface is one-level (member values stay reference-style).
+    pub(crate) fn project_shallow_surface_from_base(
+        &self,
+        host_ctx: &crate::resolver_core::HostResolverContext<'_>,
+        dispatch: &ProjectSemanticDispatch<'_>,
+        base: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> Option<TypeInfoSurface> {
+        debug_assert_eq!(
+            context.mode,
+            ProjectionMode::Shallow,
+            "project_shallow_surface_from_base synthesises a one-level surface; mode must be Shallow"
+        );
         // Empty-path Shallow projection synthesises the one-level surface
         // (call / construct / index signatures + merged members) without
-        // expanding member bodies.
+        // expanding member bodies. U1 made this path PRESERVE call / construct
+        // signatures, so an emit interface's call signatures survive here (the
+        // emit normalizer reads them).
         let terminal = match dispatch.execute(SemanticQueryKey::ProjectPath {
             base,
             path: Arc::from(Vec::new().into_boxed_slice()),
-            context: ProjectionReductionContext::published(ProjectionMode::Shallow),
+            context,
         }) {
             QueryResult::Value(node) | QueryResult::Recursive(node) => node,
             QueryResult::Error(_) => return None,

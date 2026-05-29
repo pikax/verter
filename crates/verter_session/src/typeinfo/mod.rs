@@ -37,6 +37,7 @@
 //! - [`surface`] — the span-rich [`surface::TypeInfoSurface`] projection.
 //! - [`scratch_cache`] — host-owned LRU for typeinfo scratch URIs.
 
+pub mod adapters;
 pub mod evaluate_type_expression;
 pub mod raise;
 pub mod resolve_named_symbol;
@@ -52,7 +53,8 @@ pub use surface::{
     TypeInfoSurfaceMember, TypeInfoSurfaceSignature,
 };
 pub use types::{
-    EvaluateTypeExpressionRequest, ImportSpec, NamedImport, SymbolEntry, SymbolKind, TypeArgList,
+    EvaluateTypeExpressionRequest, ImportSpec, NamedImport, ShallowSurfaceRequest, SymbolEntry,
+    SymbolKind, TypeArgList, TypeInfoQueryLevel, VueMacroSurfaceRequest,
 };
 
 #[cfg(test)]

@@ -641,6 +641,13 @@ pub struct VerterHost {
     /// `typeinfo::scratch_cache::DEFAULT_CAPACITY` (64).
     pub(crate) typeinfo_scratch_cache:
         parking_lot::Mutex<crate::typeinfo::scratch_cache::ScratchCache>,
+    /// Host-owned cache of `.vue` SFC macro-surface normalized DTOs
+    /// (the typeinfo Vue adapter's shallow-metadata home). Materialized
+    /// once per `(canonical, content, macro, level)` per the Shallow File
+    /// Processing Core Invariant. See
+    /// `typeinfo::adapters::vue::store::VueShallowMetadataStore`.
+    pub(crate) vue_shallow_metadata_store:
+        crate::typeinfo::adapters::vue::store::VueShallowMetadataStore,
 }
 
 // Manual Debug impl because Arc<dyn WorkspaceAccess> doesn't implement Debug.
