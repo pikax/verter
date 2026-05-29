@@ -430,10 +430,9 @@ fn classify_empty_expr(expr: &Expr) -> Option<&'static str> {
             if matches!(
                 method.as_str(),
                 "into" | "into_boxed_slice" | "collect" | "as_slice"
-            ) {
-                if classify_empty_expr(&m.receiver).is_some() {
-                    return Some("empty `.into()`-chained constructor");
-                }
+            ) && classify_empty_expr(&m.receiver).is_some()
+            {
+                return Some("empty `.into()`-chained constructor");
             }
             None
         }
@@ -491,18 +490,16 @@ fn type_is_arc_slice_of_fact_version_ref(ty: &Type) -> bool {
             if ident == "Arc" {
                 if let syn::PathArguments::AngleBracketed(args) = &last.arguments {
                     for a in &args.args {
-                        if let syn::GenericArgument::Type(inner) = a {
-                            if let Type::Slice(slice) = inner {
-                                if let Type::Path(elem_path) = &*slice.elem {
-                                    if elem_path
-                                        .path
-                                        .segments
-                                        .last()
-                                        .map(|s| s.ident == "FactVersionRef")
-                                        .unwrap_or(false)
-                                    {
-                                        return true;
-                                    }
+                        if let syn::GenericArgument::Type(Type::Slice(slice)) = a {
+                            if let Type::Path(elem_path) = &*slice.elem {
+                                if elem_path
+                                    .path
+                                    .segments
+                                    .last()
+                                    .map(|s| s.ident == "FactVersionRef")
+                                    .unwrap_or(false)
+                                {
+                                    return true;
                                 }
                             }
                         }
