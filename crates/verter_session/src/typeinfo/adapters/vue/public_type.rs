@@ -14,10 +14,11 @@
 //! so a `.vue`'s public type resolves through typeinfo WITHOUT any
 //! component-meta call. This is the [`TypeInfoQueryLevel::PublicType`] level.
 //!
-//! Scope: U3a builds the DIRECT `.vue` public type (the one-level
+//! Scope: this builds the DIRECT `.vue` public type (the one-level
 //! `{ $props, $emit, $slots }` instance surface). Recursive `.vue`-import
-//! expansion (a `.vue` that imports another `.vue` component) is Stage 3 and
-//! out of scope here.
+//! expansion — a `.vue` whose public surface embeds another imported `.vue`
+//! component's surface — is a separate, later concern and is not performed
+//! here.
 
 use std::sync::Arc;
 

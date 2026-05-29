@@ -20,8 +20,9 @@
 //! stale entry can never be returned for changed content (content-addressed
 //! artifact cache discipline, R-series).
 //!
-//! This is U3a infrastructure: nothing in production reads it yet. The cutover
-//! batch (U3c) routes the macro-shape producers through this store.
+//! The macro-shape producers consult this store for a `.vue`'s normalized
+//! macro DTOs; the host owns it so the materialization is shared across
+//! requests rather than recomputed per query.
 
 use std::sync::Arc;
 

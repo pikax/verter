@@ -8,8 +8,8 @@
 //! SHARED typeinfo surface path — the macro type-argument is lowered through
 //! the shared lowering dispatch and projected by the SAME empty-path `Shallow`
 //! synthesiser [`crate::VerterHost::resolve_shallow_surface_for`] uses. It is
-//! NEVER read from `surface_view_from_base_node` (the parallel reader U3c
-//! deletes).
+//! NEVER read from `surface_view_from_base_node` — the macro surface routes
+//! through the one shared surface path, not a parallel reader.
 //!
 //! The three normalizers ([`props_from_typeinfo_surface`] /
 //! [`emits_from_typeinfo_surface`] / [`slots_from_typeinfo_surface`]) consume a
@@ -86,11 +86,11 @@ pub struct VueMacroSurface {
 
 impl VueMacroSurface {
     /// The scope a member's raised `*_expr` should bind to — the member's
-    /// DECLARATION-origin file (which U1 made survive substitution), falling
-    /// back to the SFC owner when the member carries no single-file origin (a
-    /// synthetic / structural member). Mirrors
-    /// `ImportedMacroSurface::member_expr_scope`, sourced from the typeinfo
-    /// surface's `origin.canonical_file` instead of a value-node scope lookup.
+    /// DECLARATION-origin file (which survives substitution), falling back to
+    /// the SFC owner when the member carries no single-file origin (a synthetic
+    /// / structural member). Mirrors `ImportedMacroSurface::member_expr_scope`,
+    /// sourced from the typeinfo surface's `origin.canonical_file` instead of a
+    /// value-node scope lookup.
     fn member_expr_scope(&self, member: &TypeInfoSurfaceMember) -> TypeExprScope {
         member
             .origin
@@ -257,7 +257,7 @@ impl VerterHost {
 }
 
 /// Slice a member's leading-JSDoc DESCRIPTION + TAG spans into owned text for
-/// the published DTO. The spans are already located on the surface (by U1's
+/// the published DTO. The spans are already located on the surface (by
 /// `with_member_jsdoc_spans`); this reads the declaring file's cache-owned
 /// source and slices — it does NOT re-locate the comment block and does NOT
 /// take the lazy `member_display_jsdoc` name-search path.

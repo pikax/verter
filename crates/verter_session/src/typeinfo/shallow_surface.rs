@@ -129,7 +129,7 @@ impl VerterHost {
         );
         // Empty-path Shallow projection synthesises the one-level surface
         // (call / construct / index signatures + merged members) without
-        // expanding member bodies. U1 made this path PRESERVE call / construct
+        // expanding member bodies. This path PRESERVES call / construct
         // signatures, so an emit interface's call signatures survive here (the
         // emit normalizer reads them).
         let terminal = match dispatch.execute(SemanticQueryKey::ProjectPath {

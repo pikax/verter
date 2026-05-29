@@ -229,7 +229,7 @@ pub enum NamedImport {
 pub type TypeArgList<'a> = &'a [Arc<TypeExpr>];
 
 // ---------------------------------------------------------------------------
-// Level-aware surface requests (typeinfo unification U3a)
+// Level-aware surface requests
 // ---------------------------------------------------------------------------
 
 /// Request for the level-aware shallow-surface resolver
