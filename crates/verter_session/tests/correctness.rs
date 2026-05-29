@@ -87,6 +87,77 @@ fn compute_for_fixture(fixture: &fixtures::CorrectnessFixture) -> ComponentMetaA
     }
 }
 
+/// Discriminating guard for the emit-surface invariant: a `defineEmits`
+/// object property whose VALUE is a tuple referencing an interface
+/// (`{ 'row-click': [event: RowClick] }`) must surface EXACTLY the
+/// declared event key (`row-click`). The payload type's members
+/// (`RowClick.row` / `RowClick.index`) are payload structure, NOT emit
+/// events, and must never leak as sibling top-level events.
+///
+/// This characterizes the now-correct shallow macro-surface +
+/// `emits_from_typeinfo_surface` path: the property's value (the tuple)
+/// stays on the macro object surface as the event payload; the
+/// referenced interface is NOT unfolded into the surface. The test
+/// FAILS against the pre-cutover behavior that unfolded the tuple's
+/// referenced interface into sibling events (the same defect that left
+/// the `pathological_table_loading_animation` regression baseline with
+/// stale `index` + `row` events) and PASSES against the current owner
+/// path. No production code change accompanies this guard — the
+/// surface-builder already resolves correctly; the guard locks the
+/// invariant against regression.
+#[test]
+fn emit_payload_interface_members_do_not_leak_as_events() {
+    let files: &[(&str, &str)] = &[
+        (
+            "/row_click.vue",
+            r#"<script setup lang="ts">
+import type { RowClick } from './row_click_types';
+defineEmits<{
+  'row-click': [event: RowClick];
+}>();
+</script>
+<template><div /></template>"#,
+        ),
+        (
+            "/row_click_types.ts",
+            "export interface RowClick { row: string; index: number; }",
+        ),
+    ];
+    let host = build_host(files);
+    let (analysis, _resolution, _record) =
+        verter_session::audited_request::AuditedRequest::builder()
+            .attach_to(host)
+            .resolve_component_meta("/row_click.vue")
+            .expect("/row_click.vue must resolve");
+
+    let event_names: Vec<&str> = analysis.events.iter().map(|e| e.name.as_str()).collect();
+
+    // POSITIVE: the declared event key surfaces.
+    assert!(
+        event_names.contains(&"row-click"),
+        "declared event `row-click` must surface; got {event_names:?}",
+    );
+    // EXACT: only the declared event surfaces — the tuple payload's
+    // referenced interface members must NOT be unfolded into events.
+    assert_eq!(
+        event_names,
+        vec!["row-click"],
+        "emit surface must contain EXACTLY the declared event key; the \
+         payload interface `RowClick`'s members (`row` / `index`) must \
+         not leak as sibling events; got {event_names:?}",
+    );
+    // NEGATIVE (discriminating): explicit checks so a member leak fails
+    // loudly with a member-specific message.
+    assert!(
+        !event_names.contains(&"row"),
+        "payload interface member `row` must not leak as an event; got {event_names:?}",
+    );
+    assert!(
+        !event_names.contains(&"index"),
+        "payload interface member `index` must not leak as an event; got {event_names:?}",
+    );
+}
+
 /// Phase 0 §0p.A.0 author-first workflow (Codex P1-4 r4 fix).
 ///
 /// For Class A fixtures, the .snap.json is GENERATED from the

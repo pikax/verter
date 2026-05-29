@@ -20,20 +20,8 @@
   ],
   "events": [
     {
-      "name": "icon",
-      "params_signature": "string"
-    },
-    {
-      "name": "id",
-      "params_signature": "string"
-    },
-    {
       "name": "item-click",
       "params_signature": "[item: ToolbarItem]"
-    },
-    {
-      "name": "label",
-      "params_signature": "string"
     }
   ],
   "slots": [],

@@ -28,14 +28,6 @@
   ],
   "events": [
     {
-      "name": "index",
-      "params_signature": "number"
-    },
-    {
-      "name": "row",
-      "params_signature": "T"
-    },
-    {
       "name": "row-click",
       "params_signature": "[event: TableRowClick<T>]"
     }

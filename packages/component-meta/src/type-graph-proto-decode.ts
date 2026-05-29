@@ -1419,24 +1419,6 @@ function decodeResolvedMacroMeta(
         decodeResolvedNativeProp(prop, graph),
       ),
     ),
-    ...maybeArray(
-      "props",
-      ((macro.props as ProtoRecord[] | undefined) ?? []).map((prop) =>
-        decodeResolvedPropField(prop, graph),
-      ),
-    ),
-    ...maybeArray(
-      "emits",
-      ((macro.emits as ProtoRecord[] | undefined) ?? []).map((emit) =>
-        decodeResolvedEmitField(emit, graph),
-      ),
-    ),
-    ...maybeArray(
-      "slots",
-      ((macro.slots as ProtoRecord[] | undefined) ?? []).map((slot) =>
-        decodeResolvedSlotField(slot, graph),
-      ),
-    ),
     ...maybe("jsdoc", decodeOptionalJsdocBlock(macro.jsdoc as ProtoRecord | undefined, graph)),
   };
 }
@@ -1454,48 +1436,6 @@ function decodeResolvedNativeProp(
     ),
     spanStart: Number(prop.spanStart ?? 0),
     spanEnd: Number(prop.spanEnd ?? 0),
-  };
-}
-
-function decodeResolvedPropField(
-  prop: ProtoRecord,
-  graph: DecodedTypeGraph,
-): Record<string, unknown> {
-  return {
-    name: graph.getString(readRequiredId(prop.nameId, "resolved prop name")),
-    isOptional: Boolean(prop.isOptional),
-    ...maybe("typeAnnotation", graph.getStringMaybe(Number(prop.typeAnnotationId ?? 0))),
-    ...maybe("description", graph.getStringMaybe(Number(prop.descriptionId ?? 0))),
-    ...maybeArray("tags", decodeJsdocTags((prop.tags as ProtoRecord[] | undefined) ?? [], graph)),
-  };
-}
-
-function decodeResolvedEmitField(
-  emit: ProtoRecord,
-  graph: DecodedTypeGraph,
-): Record<string, unknown> {
-  return {
-    name: graph.getString(readRequiredId(emit.nameId, "resolved emit name")),
-    ...maybe("payloadType", graph.getStringMaybe(Number(emit.payloadTypeId ?? 0))),
-    ...maybe("description", graph.getStringMaybe(Number(emit.descriptionId ?? 0))),
-    ...maybeArray("tags", decodeJsdocTags((emit.tags as ProtoRecord[] | undefined) ?? [], graph)),
-  };
-}
-
-function decodeResolvedSlotField(
-  slot: ProtoRecord,
-  graph: DecodedTypeGraph,
-): Record<string, unknown> {
-  return {
-    name: graph.getString(readRequiredId(slot.nameId, "resolved slot name")),
-    isRequired: Boolean(slot.isRequired),
-    bindings: ((slot.bindings as ProtoRecord[] | undefined) ?? []).map((binding) => ({
-      name: graph.getString(readRequiredId(binding.nameId, "resolved slot binding name")),
-      ...maybe("typeAnnotation", graph.getStringMaybe(Number(binding.typeAnnotationId ?? 0))),
-    })),
-    ...maybe("returnType", graph.getStringMaybe(Number(slot.returnTypeId ?? 0))),
-    ...maybe("description", graph.getStringMaybe(Number(slot.descriptionId ?? 0))),
-    ...maybeArray("tags", decodeJsdocTags((slot.tags as ProtoRecord[] | undefined) ?? [], graph)),
   };
 }
 
