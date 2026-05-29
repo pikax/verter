@@ -1,4 +1,4 @@
-//! D9 #2 — `Stateless` mode bypasses both typed cache nodes.
+//! `Stateless` mode bypasses both typed cache nodes.
 //!
 //! A `requested_mode == Stateless` compile produces fresh output every
 //! call, never reads or writes the session slot or the content-addressed
@@ -10,13 +10,12 @@
 //!     stays `None`, and `compile_slot_is_warm` stays `false`),
 //!   - the content-addressed node's entry count stays 0.
 //!
-//! Discrimination against the pre-B5 tree (`204b5ef9`): there is no
-//! `requested_mode` field on `CompileProfile`, no `actual_mode` on the
-//! response, no Stateless routing, and no
-//! `compile_output_pure_content_entry_count` accessor — so this test
-//! does not compile against the pre-B5 tree, and against any tree that
-//! routed Stateless through the session cache the
-//! `fact_dep_signature == None` + `entry_count == 0` assertions fail.
+//! Discrimination: before the `requested_mode` field on `CompileProfile`,
+//! the `actual_mode` response field, the Stateless routing, and the
+//! `compile_output_pure_content_entry_count` accessor existed, this test
+//! would not compile. The `fact_dep_signature == None` + `entry_count
+//! == 0` assertions additionally fail against any implementation that
+//! routes Stateless through the session cache.
 
 use verter_session::{
     CompileCacheMode, CompileProfile, FileKind, HostConfig, UpsertRequest, VerterHost,

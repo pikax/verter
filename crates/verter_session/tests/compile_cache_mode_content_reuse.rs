@@ -1,4 +1,4 @@
-//! D9 #3 — `Content` mode is content-addressed, never fact-validated.
+//! `Content` mode is content-addressed, never fact-validated.
 //!
 //! Positive: two compiles of a FACT-FREE SFC (no cross-file dep) with
 //! identical `(content, env, Content mode)` reuse one
@@ -11,10 +11,11 @@
 //! to `Stateless` per the matrix — it publishes NO content-addressed
 //! entry and NO session slot.
 //!
-//! Discrimination against the pre-B5 tree (`204b5ef9`): no `Content`
-//! mode, no content-addressed node, no entry-count accessor — does not
-//! compile. Against a tree that fact-validated Content, the
-//! cross-file-downgrade negative assertion (entry count stays 0) fails.
+//! Discrimination: before the `Content` mode, the content-addressed
+//! node, and the entry-count accessor existed, this test would not
+//! compile. The cross-file-downgrade negative assertion (entry count
+//! stays 0) additionally fails against any implementation that
+//! fact-validates Content mode.
 
 use verter_session::{
     CompileCacheMode, CompileErrorPolicy, CompileProfile, DowngradeReason, FileKind, HostConfig,

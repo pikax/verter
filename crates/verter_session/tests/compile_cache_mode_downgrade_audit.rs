@@ -1,4 +1,4 @@
-//! D9 #5 — the `CompileModeDowngrade` structured audit event.
+//! Coverage for the `CompileModeDowngrade` structured audit event.
 //!
 //! A `Content`-requested compile on an SFC with a downgrade reason emits
 //! `StructuredAuditEvent::CompileModeDowngrade` EXACTLY ONCE, with
@@ -9,10 +9,10 @@
 //! `CompileModeDowngrade` event (Session never changes mode under the
 //! matrix).
 //!
-//! Discrimination against the pre-B5 tree (`204b5ef9`): the
-//! `CompileModeDowngrade` variant and the `requested_mode` profile field
-//! do not exist — does not compile. Against a tree that emitted the
-//! event for Session moves, the negative assertion fails.
+//! Discrimination: before the `CompileModeDowngrade` variant and the
+//! `requested_mode` profile field existed, this test would not compile.
+//! The negative assertion additionally fails against any implementation
+//! that emits the event for Session moves.
 
 use std::sync::Arc;
 

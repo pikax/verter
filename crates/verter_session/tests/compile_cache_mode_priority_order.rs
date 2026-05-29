@@ -1,4 +1,4 @@
-//! D9 #6 — downgrade-reason priority ordering on the public result.
+//! Downgrade-reason priority ordering on the public compile result.
 //!
 //! When several downgrade conditions fire simultaneously, the public
 //! `downgrade_reason: Option<DowngradeReason>` on the compile response is
@@ -11,10 +11,10 @@
 //!   HasExternalSrc > HasBlockOverride > HasStyleOverride >
 //!   HasIdeOnlyAnalysis > HasDevLastGood
 //!
-//! Discrimination against the pre-B5 tree (`204b5ef9`): no
-//! `downgrade_reason` field, no `requested_mode` profile field — does
-//! not compile. The exact first-reason assertion fails against any tree
-//! whose priority ordering differs.
+//! Discrimination: before the public `downgrade_reason` field and the
+//! `requested_mode` profile field existed, this test would not compile.
+//! The exact first-reason assertion additionally fails against any
+//! implementation whose priority ordering differs.
 
 use verter_session::{
     CompileCacheMode, CompileProfile, DowngradeReason, FileKind, HostConfig, UpsertRequest,

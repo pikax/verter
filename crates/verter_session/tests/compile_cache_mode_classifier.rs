@@ -1,21 +1,23 @@
-//! D9 #1 — integration-scope classifier table.
+//! Integration-scope classifier table for `CompileCacheMode`.
 //!
 //! Exercises the real classifier through `get_virtual_file` (the
 //! production path; `classify_compile_mode` / `EligibilityInputs` are
 //! crate-private, so the integration scope observes the classification
 //! via the response's `requested_mode` / `actual_mode` /
 //! `downgrade_reason` fields). For each (requested_mode, eligibility)
-//! combination, the response must match the corrected matrix:
+//! combination, the response must match the matrix:
 //!
 //!   - Session + any reason  -> Session  (no public downgrade_reason move)
 //!   - Content + a reason     -> Stateless (downgrade_reason populated)
 //!   - Content + no reason    -> Content   (no downgrade)
 //!   - Stateless + anything   -> Stateless (no reasons)
 //!
-//! Discrimination against the pre-B5 tree (`204b5ef9`): no
-//! `requested_mode` / `actual_mode` / `downgrade_reason` fields — does
-//! not compile. Against the buggy `c8b8d709` fold (Session->Stateless),
-//! the `Session + reason -> Session` rows fail.
+//! Discrimination: before the public `requested_mode` / `actual_mode` /
+//! `downgrade_reason` surface existed, this test would not compile. The
+//! `Session + reason -> Session` rows additionally pin the invariant
+//! that Session never downgrades through eligibility reasons — a
+//! reverse-direction implementation that folded Session to Stateless
+//! would fail those rows.
 
 use verter_session::{
     CompileCacheMode, CompileErrorPolicy, CompileProfile, FileKind, HostConfig, UpsertRequest,
