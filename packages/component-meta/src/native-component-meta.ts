@@ -204,35 +204,6 @@ export interface NativeResolvedNativeProp {
   spanEnd: number;
 }
 
-export interface NativeResolvedPropField {
-  name: string;
-  isOptional: boolean;
-  typeAnnotation?: string;
-  description?: string;
-  tags?: NativeJsdocTag[];
-}
-
-export interface NativeResolvedEmitField {
-  name: string;
-  payloadType?: string;
-  description?: string;
-  tags?: NativeJsdocTag[];
-}
-
-export interface NativeResolvedSlotBinding {
-  name: string;
-  typeAnnotation?: string;
-}
-
-export interface NativeResolvedSlotField {
-  name: string;
-  isRequired: boolean;
-  bindings: NativeResolvedSlotBinding[];
-  returnType?: string;
-  description?: string;
-  tags?: NativeJsdocTag[];
-}
-
 export interface NativeResolvedJsdocTag extends NativeJsdocTag {
   rawType?: string;
   subjectName?: string;
@@ -251,9 +222,6 @@ export interface NativeResolvedMacroMeta {
   importSource: string;
   declaration: NativeResolvedTypeDeclaration;
   nativeProps?: NativeResolvedNativeProp[];
-  props?: NativeResolvedPropField[];
-  emits?: NativeResolvedEmitField[];
-  slots?: NativeResolvedSlotField[];
   jsdoc?: NativeResolvedJsdocBlock;
 }
 
