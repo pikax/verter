@@ -68,6 +68,10 @@ pub(crate) fn surface_view_to_projected_surface(
             readonly: member.readonly,
             is_method: member.is_method,
             declared_in_macro_type_arg: member.declared_in_macro_type_arg,
+            // Graph `SurfaceMember` carries the real OXC declaration-site spans
+            // (stamped during shallow lowering); carry them verbatim onto the
+            // projected member so the reconstruction re-emits them.
+            spans: member.spans,
         })
         .collect();
     let call_signatures = surface
@@ -425,6 +429,8 @@ pub(super) fn projected_surface_from_object_expr(
                 readonly: property.readonly,
                 is_method: false,
                 declared_in_macro_type_arg: from_root_body,
+                // IR property carries its real OXC spans verbatim.
+                spans: property.spans,
             }),
             ObjectMember::Method(method) => members.push(ProjectedMember {
                 name: method.name.clone(),
@@ -433,6 +439,8 @@ pub(super) fn projected_surface_from_object_expr(
                 readonly: false,
                 is_method: true,
                 declared_in_macro_type_arg: from_root_body,
+                // IR method carries its real OXC spans verbatim.
+                spans: method.spans,
             }),
             ObjectMember::CallSignature(function) => {
                 call_signatures.push(TypeExpr::Function(std::sync::Arc::new(function.clone())));
@@ -483,6 +491,9 @@ pub(super) fn projected_surface_from_object_expr_with_substitutions(
                 readonly: property.readonly,
                 is_method: false,
                 declared_in_macro_type_arg: from_root_body,
+                // Generic instantiation rewrites the member's value type but
+                // NOT its source declaration site — carry the real OXC spans.
+                spans: property.spans,
             }),
             ObjectMember::Method(method) => members.push(ProjectedMember {
                 name: method.name.clone(),
@@ -494,6 +505,9 @@ pub(super) fn projected_surface_from_object_expr_with_substitutions(
                 readonly: false,
                 is_method: true,
                 declared_in_macro_type_arg: from_root_body,
+                // Generic instantiation rewrites the member's value type but
+                // NOT its source declaration site — carry the real OXC spans.
+                spans: method.spans,
             }),
             ObjectMember::CallSignature(function) => call_signatures.push(TypeExpr::Function(
                 std::sync::Arc::new(substitute_function_expr_if_needed(function, substitutions)),
@@ -1007,8 +1021,8 @@ fn function_expr_references_substitutions(
 pub(crate) fn projected_surface_to_type_expr(surface: &ProjectedSurface) -> Option<TypeExpr> {
     use std::sync::Arc;
     use verter_type_expr::{
-        FunctionExpr, IndexSignature, IndexSignatureSpans, MemberSpans, MethodSignature,
-        ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName,
+        FunctionExpr, IndexSignature, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty,
+        PrimitiveName,
     };
 
     if surface.members.is_empty()
@@ -1027,28 +1041,21 @@ pub(crate) fn projected_surface_to_type_expr(surface: &ProjectedSurface) -> Opti
         return surface.call_signatures.first().cloned();
     }
 
-    // TODO(follow-up: U2): thread real member spans here; reverts the
-    // strip_spans masking in meta_resolve_tests.rs. `ProjectedMember` /
-    // `ProjectedSurface` are the U2 span-threading boundary — they carry no
-    // member-level span, so this reconstruction emits `MemberSpans::default()`.
-    // U1's `resolve_shallow_surface` bypasses this path (it reads the span-rich
-    // graph `SurfaceMember` directly); spans are threaded through the projected
-    // types in U2.
+    // `ProjectedMember` carries the real OXC declaration-site spans
+    // (`member.spans`), threaded from the graph `SurfaceMember` / `PreparedMember`
+    // / IR source the surface was projected from. Re-emit them verbatim onto the
+    // reconstructed IR member so the projection path is span-lossless end-to-end.
     let mut properties = surface
         .members
         .iter()
         .map(|member| {
             if member.is_method {
                 if let TypeExpr::Function(function) = &member.ty {
-                    // `ProjectedMember` carries no member-level span; the
-                    // function shape's own spans are preserved via the clone.
                     return ObjectMember::Method(MethodSignature::with_spans(
                         member.name.clone(),
                         (**function).clone(),
                         member.optional,
-                        // TODO(follow-up: U2): thread real member spans here;
-                        // reverts the strip_spans masking in meta_resolve_tests.rs.
-                        MemberSpans::default(),
+                        member.spans,
                     ));
                 }
             }
@@ -1058,9 +1065,7 @@ pub(crate) fn projected_surface_to_type_expr(surface: &ProjectedSurface) -> Opti
                 member.ty.clone(),
                 member.optional,
                 member.readonly,
-                // TODO(follow-up: U2): thread real member spans here; reverts
-                // the strip_spans masking in meta_resolve_tests.rs.
-                MemberSpans::default(),
+                member.spans,
             ))
         })
         .collect::<Vec<_>>();
@@ -1089,19 +1094,20 @@ pub(crate) fn projected_surface_to_type_expr(surface: &ProjectedSurface) -> Opti
     }
 
     if surface.has_index_signature {
-        // Fully synthetic open-surface index signature — no source site.
-        // TODO(follow-up: U2): thread real index-signature spans here; reverts
-        // the strip_spans masking in meta_resolve_tests.rs. `ProjectedSurface`
-        // carries only a `has_index_signature` bool, not the key/value nodes or
-        // their spans, so this reconstruction is synthetic.
-        properties.push(ObjectMember::IndexSignature(IndexSignature::with_spans(
+        // GENUINELY synthetic open-surface index signature — `ProjectedSurface`
+        // carries only a `has_index_signature: bool`, not the declared key/value
+        // nodes or their spans, so this `[key: string]: <open>` placeholder has
+        // no single OXC declaration site. Spans stay `None` by design (not a
+        // deferral): there is no source range to anchor to. A consumer that needs
+        // the real index-signature spans reads the span-rich graph
+        // `SurfaceView::index_signatures` directly.
+        properties.push(ObjectMember::IndexSignature(IndexSignature::synthetic(
             "key".to_string(),
             TypeExpr::Primitive(PrimitiveName::String),
             TypeExpr::Unknown {
                 raw: "projectedOpenSurface".to_string(),
             },
             false,
-            IndexSignatureSpans::default(),
         )));
     }
 

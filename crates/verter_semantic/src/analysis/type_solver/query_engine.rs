@@ -5,7 +5,7 @@
 //! `verter_session::resolver_core::component_meta_query_engine` surfaces as
 //! return types.
 
-use verter_type_expr::TypeExpr;
+use verter_type_expr::{MemberSpans, TypeExpr};
 
 // ---------------------------------------------------------------------------
 // Projection result types
@@ -25,6 +25,25 @@ pub struct ProjectedMember {
     /// in `verter_parser` for the structural definition. Propagated by
     /// `surface_projector` and prepared-surface walker.
     pub declared_in_macro_type_arg: bool,
+    /// OXC declaration-site spans for this member (declaration / name /
+    /// type-annotation byte offsets), mirroring [`verter_type_expr::MemberSpans`]
+    /// and carried verbatim from the source the projection was built from — the
+    /// graph `SurfaceMember::spans` (in `verter_session`), a
+    /// [`PreparedMember::spans`](super::prepared::PreparedMember::spans), or the
+    /// IR [`verter_type_expr::ObjectProperty::spans`] /
+    /// [`verter_type_expr::MethodSignature::spans`].
+    ///
+    /// Offsets are in the member's DECLARATION file's source coordinates; the
+    /// file itself is implicit (the projection's scope) and not carried here —
+    /// the component-meta reconstruction (`projected_surface_to_type_expr`) only
+    /// re-emits these offsets onto the IR, which is likewise file-implicit.
+    ///
+    /// Spans are content-version facts: they are NOT a query-identity key
+    /// dimension and never enter `parse_stable_hash`. `None` components ONLY for
+    /// a genuinely synthetic member (a union common-member, a mapped-produced
+    /// member, a generated macro artifact) with no single OXC declaration site —
+    /// never as a "not implemented" placeholder.
+    pub spans: MemberSpans,
 }
 
 /// The projected keyspace of a type surface — the set of known member names.

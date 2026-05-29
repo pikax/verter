@@ -841,6 +841,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         readonly: member.readonly,
                         is_method: member.is_method,
                         declared_in_macro_type_arg: from_root_body,
+                        // `PreparedMember` carries the real OXC declaration-site
+                        // spans; substitution rewrites the value type, not the
+                        // member's own declaration site.
+                        spans: member.spans,
                     };
                     if !type_expr_references_type_params(&member.ty, &prepared.type_parameters) {
                         self.cache_prepared_requested_member(
@@ -1003,6 +1007,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         readonly: property.readonly,
                         is_method: false,
                         declared_in_macro_type_arg: from_root_body,
+                        // IR property carries its real OXC spans verbatim;
+                        // substitution rewrites the value type, not the
+                        // member's own declaration site.
+                        spans: property.spans,
                     })
                 }
                 ObjectMember::Method(method) if method.name == member_name => {
@@ -1015,6 +1023,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         readonly: false,
                         is_method: true,
                         declared_in_macro_type_arg: from_root_body,
+                        // IR method carries its real OXC spans verbatim;
+                        // substitution rewrites the value type, not the
+                        // member's own declaration site.
+                        spans: method.spans,
                     })
                 }
                 _ => None,

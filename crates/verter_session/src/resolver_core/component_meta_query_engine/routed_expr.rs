@@ -93,6 +93,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     readonly: member.readonly,
                     is_method: member.is_method,
                     declared_in_macro_type_arg: false,
+                    // `PreparedMember` carries the real OXC declaration-site
+                    // spans (stamped at `build_member_index`).
+                    spans: member.spans,
                 })
             })
         }
@@ -395,6 +398,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         readonly: property.readonly,
                         is_method: false,
                         declared_in_macro_type_arg: false,
+                        // IR property carries its real OXC spans verbatim.
+                        spans: property.spans,
                     })
                 }
                 ObjectMember::Method(method) if requested.contains(method.name.as_str()) => {
@@ -405,6 +410,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         readonly: false,
                         is_method: true,
                         declared_in_macro_type_arg: false,
+                        // IR method carries its real OXC spans verbatim.
+                        spans: method.spans,
                     })
                 }
                 _ => None,
@@ -565,6 +572,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             readonly: member.readonly,
             is_method: member.is_method,
             declared_in_macro_type_arg: false,
+            // `PreparedMember` carries the real OXC declaration-site spans;
+            // the value type may be re-projected above, but the member's own
+            // declaration site is unchanged.
+            spans: member.spans,
         })
     }
 
@@ -1558,7 +1569,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         members: &[String],
     ) -> Option<TypeExpr> {
         use verter_type_expr::{
-            MemberSpans, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
+            MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
         };
 
         let prepared = self.prepared_type_decl(scope_canonical_id, symbol_name);
@@ -1585,16 +1596,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 dispatch_member_for_root_symbol(self, scope_canonical_id, symbol_name, member_name)?
             };
             self.cache_projected_member(scope_canonical_id, symbol_name, &projected_member);
+            // `ProjectedMember` now carries the real OXC declaration-site spans
+            // (`Copy`); re-emit them onto the reconstructed IR member.
+            let member_spans = projected_member.spans;
             if projected_member.is_method {
                 if let TypeExpr::Function(function) = &projected_member.ty {
-                    // `ProjectedMember` carries no member-level span; the
-                    // function shape's own spans are preserved via the clone.
                     properties.push(ObjectMember::Method(MethodSignature::with_spans(
                         projected_member.name,
                         (**function).clone(),
                         projected_member.optional,
-                        // TODO(follow-up: U2): thread real member spans here (see D1)
-                        MemberSpans::default(),
+                        member_spans,
                     )));
                     continue;
                 }
@@ -1604,8 +1615,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 projected_member.ty,
                 projected_member.optional,
                 projected_member.readonly,
-                // TODO(follow-up: U2): thread real member spans here (see D1)
-                MemberSpans::default(),
+                member_spans,
             )));
         }
         Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
@@ -1643,7 +1653,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         members: &[String],
     ) -> Option<TypeExpr> {
         use verter_type_expr::{
-            MemberSpans, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
+            MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
         };
 
         let prepared = self.prepared_type_decl(scope_canonical_id, symbol_name)?;
@@ -1655,17 +1665,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             }
             if member.is_method {
                 if let TypeExpr::Function(function) = &member.ty {
-                    // `PreparedMember` now carries member-level `spans` +
-                    // `declaration_origin` (stamped at `build_member_index`),
-                    // but this prepared-Pick reconstruction does not yet thread
-                    // them through (U2 boundary); the function shape's own spans
-                    // are preserved via the clone.
+                    // `PreparedMember` carries the real OXC declaration-site
+                    // spans (stamped at `build_member_index`); re-emit them.
                     properties.push(ObjectMember::Method(MethodSignature::with_spans(
                         member_name.clone(),
                         (**function).clone(),
                         member.optional,
-                        // TODO(follow-up: U2): thread real member spans here (see D1)
-                        MemberSpans::default(),
+                        member.spans,
                     )));
                     continue;
                 }
@@ -1675,8 +1681,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 member.ty.clone(),
                 member.optional,
                 member.readonly,
-                // TODO(follow-up: U2): thread real member spans here (see D1)
-                MemberSpans::default(),
+                member.spans,
             )));
         }
         Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {

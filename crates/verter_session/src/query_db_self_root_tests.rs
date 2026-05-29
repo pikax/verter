@@ -664,6 +664,8 @@ fn projected_member(marker: &str) -> ProjectedMember {
         readonly: false,
         is_method: false,
         declared_in_macro_type_arg: false,
+        // Synthetic test probe with no OXC declaration site — no spans.
+        spans: verter_type_expr::MemberSpans::default(),
     }
 }
 

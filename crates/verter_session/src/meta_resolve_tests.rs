@@ -6,117 +6,6 @@ use crate::VerterHost;
 use std::sync::Arc;
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
-/// Rebuild a `TypeExpr` with every OXC span dropped (member / signature /
-/// parameter / index spans → default `None`).
-///
-/// Used by structural-equivalence assertions that compare two surfaces
-/// produced by DIFFERENT layers, exactly one of which carries OXC span
-/// provenance. The raw `PreparedTypeDecl.body` (lowered directly from OXC)
-/// carries real spans; the dispatch → graph → `projected_surface_to_type_expr`
-/// path re-emits IR through the span-free `query_engine::ProjectedMember`
-/// projection. Threading spans through that component-meta projection layer is
-/// a follow-up (the projection-layer unification pass); until then, structural
-/// equivalence is asserted by normalising spans on both sides. This still
-/// discriminates the property under test (names / shape / types / modifiers /
-/// optionality / body structure remain compared).
-///
-/// TODO(follow-up: U2): thread real member spans through
-/// `ProjectedMember` / `ProjectedSurface` →
-/// `projected_surface_to_type_expr`, then DELETE this `strip_spans` masking
-/// and compare spans directly. U1 stamped the declaration-origin + real spans
-/// onto the graph `SurfaceMember` (read by `resolve_shallow_surface`); the
-/// projected types are the remaining span-free boundary.
-fn strip_spans(expr: &TypeExpr) -> TypeExpr {
-    use std::sync::Arc as StdArc;
-    use verter_type_expr::{
-        FunctionExpr, FunctionParam, IndexSignature, MethodSignature, ObjectExpr, ObjectMember,
-        TupleElement, TypeParam,
-    };
-    let strip_fn = |f: &FunctionExpr| -> FunctionExpr {
-        FunctionExpr::synthetic(
-            f.parameters
-                .iter()
-                .map(|p| {
-                    FunctionParam::synthetic(p.name.clone(), strip_spans(&p.ty), p.optional, p.rest)
-                })
-                .collect(),
-            f.return_type
-                .as_ref()
-                .map(|rt| StdArc::new(strip_spans(rt))),
-            f.type_parameters
-                .iter()
-                .map(|tp| TypeParam {
-                    name: tp.name.clone(),
-                    constraint: tp.constraint.as_ref().map(|c| StdArc::new(strip_spans(c))),
-                    default: tp.default.as_ref().map(|d| StdArc::new(strip_spans(d))),
-                })
-                .collect(),
-        )
-    };
-    match expr {
-        TypeExpr::Object(obj) => TypeExpr::Object(StdArc::new(ObjectExpr {
-            properties: obj
-                .properties
-                .iter()
-                .map(|m| match m {
-                    ObjectMember::Property(p) => {
-                        ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic(
-                            p.name.clone(),
-                            strip_spans(&p.ty),
-                            p.optional,
-                            p.readonly,
-                        ))
-                    }
-                    ObjectMember::Method(m) => ObjectMember::Method(MethodSignature::synthetic(
-                        m.name.clone(),
-                        strip_fn(&m.function),
-                        m.optional,
-                    )),
-                    ObjectMember::CallSignature(f) => ObjectMember::CallSignature(strip_fn(f)),
-                    ObjectMember::ConstructSignature(f) => {
-                        ObjectMember::ConstructSignature(strip_fn(f))
-                    }
-                    ObjectMember::IndexSignature(s) => {
-                        ObjectMember::IndexSignature(IndexSignature::synthetic(
-                            s.key_name.clone(),
-                            strip_spans(&s.key_type),
-                            strip_spans(&s.value_type),
-                            s.readonly,
-                        ))
-                    }
-                })
-                .collect(),
-        })),
-        TypeExpr::Function(f) => TypeExpr::Function(StdArc::new(strip_fn(f))),
-        TypeExpr::Union(arms) => TypeExpr::Union(StdArc::from(
-            arms.iter().map(strip_spans).collect::<Vec<_>>(),
-        )),
-        TypeExpr::Intersection(arms) => TypeExpr::Intersection(StdArc::from(
-            arms.iter().map(strip_spans).collect::<Vec<_>>(),
-        )),
-        TypeExpr::Array { element, readonly } => TypeExpr::Array {
-            element: StdArc::new(strip_spans(element)),
-            readonly: *readonly,
-        },
-        TypeExpr::Tuple { elements, readonly } => TypeExpr::Tuple {
-            elements: StdArc::from(
-                elements
-                    .iter()
-                    .map(|el| TupleElement {
-                        label: el.label.clone(),
-                        ty: strip_spans(&el.ty),
-                        optional: el.optional,
-                        rest: el.rest,
-                    })
-                    .collect::<Vec<_>>(),
-            ),
-            readonly: *readonly,
-        },
-        TypeExpr::Parenthesized(inner) => TypeExpr::Parenthesized(StdArc::new(strip_spans(inner))),
-        other => other.clone(),
-    }
-}
-
 // ===========================================================================
 // Test helpers
 // ===========================================================================
@@ -2106,16 +1995,54 @@ fn registry_decl_materialization_skips_raw_snapshot_fallback_for_snapshotless_im
     )
     .expect("registry decl materialization should resolve Props through dispatch");
 
-    // Structural equivalence: the dispatch-projected surface re-emits IR
-    // through the span-free `query_engine::ProjectedMember` projection, while
-    // `decl.body` carries the raw OXC spans. Normalise spans on both sides so
-    // the assertion checks the cache-reuse property (same names / shape /
-    // types / modifiers), not display-only span provenance (which the
-    // component-meta projection layer threads in a follow-up pass).
+    // FULL structural equivalence INCLUDING OXC spans: the dispatch → graph →
+    // `projected_surface_to_type_expr` projection now threads the member spans
+    // verbatim (D1 / U3b), so the projected IR equals the raw `decl.body` lowered
+    // directly from OXC — spans and all. `TypeExpr`'s `PartialEq` compares
+    // `MemberSpans`, so this `assert_eq!` discriminates span provenance: it would
+    // FAIL if the projection re-emitted `MemberSpans::default()` (as it did before
+    // D1). The earlier `strip_spans` masking that hid that loss is gone.
     assert_eq!(
-        strip_spans(&materialized),
-        strip_spans(&decl.body),
-        "registry decl projection should reuse cached prepared state from FileArtifactStore",
+        materialized, decl.body,
+        "registry decl projection should reuse cached prepared state from FileArtifactStore, \
+         spans included",
+    );
+
+    // Discriminating span-presence guard: prove the projected surface actually
+    // carries the REAL `label: string` declaration spans (not just that two empty
+    // span sets compare equal). The `label` member's name span must slice back to
+    // `label` in the source. FAILS against the pre-D1 tree (default/None spans).
+    let source = "export type Props = { label: string }\n";
+    let TypeExpr::Object(object) = &materialized else {
+        panic!("projected Props surface should be an object type, got {materialized:?}");
+    };
+    let label = object
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            verter_type_expr::ObjectMember::Property(property) if property.name == "label" => {
+                Some(property)
+            }
+            _ => None,
+        })
+        .expect("projected surface should contain the `label` property");
+    let name_span = label
+        .spans
+        .name
+        .expect("`label` property must carry its real OXC name span (D1 threading)");
+    assert_eq!(
+        name_span.slice(source),
+        "label",
+        "the threaded name span must slice back to the `label` token in source",
+    );
+    let type_span = label
+        .spans
+        .type_annotation
+        .expect("`label` property must carry its real OXC type-annotation span (D1 threading)");
+    assert_eq!(
+        type_span.slice(source),
+        "string",
+        "the threaded type-annotation span must slice back to the `string` token in source",
     );
 }
 
