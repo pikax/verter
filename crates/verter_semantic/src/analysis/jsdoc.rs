@@ -831,6 +831,83 @@ mod tests {
         );
     }
 
+    // The member spans on a JSDoc-`{Type}`-lowered body must be in FILE
+    // coordinates (sliceable against the original source), NOT the synthetic
+    // `type __T = <payload>` wrapper's coordinates. typeinfo carries spans, not
+    // owned strings (owner directive `feedback_typeinfo_spans_not_strings`): any
+    // consumer that slices a JSDoc-typed member's name / type span must recover
+    // the correct source token.
+    //
+    // The `@typedef` sits at a NON-ZERO file offset (text precedes it) so a
+    // wrapper-local span and the true file span differ. Pre-fix the body was
+    // lowered against `type __T = {a: number}` and its spans were left in
+    // wrapper coordinates: `a`'s name span came out `12..13` and sliced to the
+    // `\n` / wrapper-prefix region of the source instead of the real `a` token.
+    // This test FAILS against that tree (it slices the wrong text) and PASSES
+    // once the producer rebases the spans into file coordinates.
+    #[test]
+    fn collect_jsdoc_typedefs_member_spans_are_file_coordinates() {
+        use super::collect_jsdoc_typedefs;
+        use oxc_allocator::Allocator;
+        use oxc_parser::Parser;
+        use oxc_span::SourceType;
+        use verter_type_expr::ObjectMember;
+
+        // `const x = 1;\n` is 13 bytes, so the JSDoc block — and the `{a: number}`
+        // payload inside it — sits well past byte 0. A wrapper-local span (offset
+        // by the 11-byte `type __T = ` prefix) would slice the WRONG source text.
+        let source = "const x = 1;\n/** @typedef {{a: number}} Alias */\n";
+        let allocator = Allocator::default();
+        let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
+        let typedefs = collect_jsdoc_typedefs(&ret.program.comments, source);
+
+        assert_eq!(typedefs.len(), 1, "one `@typedef` must be recovered");
+        let TypeExpr::Object(object) = &typedefs[0].body else {
+            panic!(
+                "typedef body must lower to an object, got {:?}",
+                typedefs[0].body
+            );
+        };
+        let ObjectMember::Property(prop) = &object.properties[0] else {
+            panic!("expected `a` property, got {:?}", object.properties[0]);
+        };
+        assert_eq!(prop.name, "a");
+
+        let name_span = prop
+            .spans
+            .name
+            .expect("the JSDoc-typed member must carry its name span");
+        assert_eq!(
+            name_span.slice(source),
+            "a",
+            "the member NAME span must slice the file to the `a` token; a wrapper-local span \
+             slices the wrong source text (pre-fix it sliced `{:?}`)",
+            source.get(12..13),
+        );
+
+        let type_span = prop
+            .spans
+            .type_annotation
+            .expect("the JSDoc-typed member must carry its type-annotation span");
+        assert_eq!(
+            type_span.slice(source),
+            "number",
+            "the member TYPE span must slice the file to the `number` token; a wrapper-local span \
+             slices the wrong source text",
+        );
+
+        // The full member-declaration span must also be file-correct.
+        let decl_span = prop
+            .spans
+            .declaration
+            .expect("the JSDoc-typed member must carry its declaration span");
+        assert_eq!(
+            decl_span.slice(source),
+            "a: number",
+            "the member DECLARATION span must slice the file to `a: number`",
+        );
+    }
+
     #[test]
     fn jsdoc_block_spans_extend_tag_text_through_continuation_lines() {
         use super::jsdoc_block_spans_at_offset;

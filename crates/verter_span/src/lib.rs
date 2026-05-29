@@ -71,6 +71,26 @@ impl Span {
             end: self.end.saturating_sub(base),
         }
     }
+
+    /// Rebase the span by a signed byte `delta`, saturating each endpoint at the
+    /// `u32` bounds.
+    ///
+    /// Used to translate spans produced against one buffer into another buffer's
+    /// coordinates (e.g. a type lowered from a synthetic wrapper string rebased
+    /// into its real source file). `delta` is signed because the target offset
+    /// may be lower than the source buffer's; endpoints clamp to `[0, u32::MAX]`
+    /// rather than wrapping.
+    #[inline]
+    #[must_use]
+    pub fn shifted(&self, delta: i64) -> Span {
+        let apply = |value: u32| -> u32 {
+            (i64::from(value) + delta).clamp(0, i64::from(u32::MAX)) as u32
+        };
+        Span {
+            start: apply(self.start),
+            end: apply(self.end),
+        }
+    }
 }
 
 impl From<oxc_span::Span> for Span {
