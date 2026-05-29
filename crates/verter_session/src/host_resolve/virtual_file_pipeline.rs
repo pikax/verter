@@ -422,26 +422,30 @@ impl VerterHost {
                         .get(&profile_hash)
                         .map(|o| o.layer.hash)
                         .unwrap_or(0);
-                    if let Some(slot) = cc.compile_slots.get(&profile_hash) {
-                        // R3/R26/R28: the warm hit must validate the
-                        // SAME predicate `get_virtual_file` /
-                        // `compile_slot_is_warm` use — own-content
-                        // identity (`semantic_hash`), both override
-                        // hashes, AND the cross-file fact signature.
-                        // `semantic_hash` only covers this canonical's
-                        // own content; a cross-file dependency edit
-                        // (runtime import, macro type dep, external
-                        // `src=` file) surfaces solely through
-                        // `compile_slot_fact_signature_validates`.
-                        // Omitting it here would serve a stale slot
-                        // and return `Ok(())` without recompiling.
-                        if slot.semantic_hash == hd.parse.semantic_hash
-                            && slot.style_override_hash == soh
-                            && slot.content_override_hash == coh
-                            && self.compile_slot_fact_signature_validates(slot)
-                        {
-                            return Ok(());
-                        }
+                    // R3/R26/R28: the warm hit must validate the SAME
+                    // predicate `get_virtual_file` / `compile_slot_is_warm`
+                    // use — own-content identity (`semantic_hash`), both
+                    // override hashes, AND the cross-file fact signature.
+                    // `semantic_hash` only covers this canonical's own
+                    // content; a cross-file dependency edit (runtime
+                    // import, macro type dep, external `src=` file)
+                    // surfaces solely through the fact-signature validator
+                    // closure. Omitting it would serve a stale slot and
+                    // return `Ok(())` without recompiling.
+                    let session_node =
+                        crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                    if session_node
+                        .lookup(
+                            &cc,
+                            profile_hash,
+                            &hd.parse.semantic_hash,
+                            soh,
+                            coh,
+                            |sig| self.compile_slot_facts_validate(sig),
+                        )
+                        .is_some()
+                    {
+                        return Ok(());
                     }
                 }
             }
@@ -461,55 +465,33 @@ impl VerterHost {
         Ok(())
     }
 
-    /// R3/R26/R28 warm-hit fact-signature oracle.
+    /// R3/R26/R28 warm-hit fact validator closure body.
     ///
-    /// Validates every fact recorded on `slot.fact_dep_signature`
+    /// Validates every fact recorded on a non-empty
+    /// [`ReadSetSignature`](crate::fact_signature_helpers::ReadSetSignature)
     /// against the host's current `HostStoreView`. A single mismatch
     /// returns `false` and the warm hit misses; the caller falls
-    /// through to cold recompute. Empty signature (cold-compute
-    /// paths not yet wired to the tracer) trivially validates so
-    /// the existing pre-fact semantic_hash / override-hash fast path
-    /// remains the gating predicate until every compile-tier cold
-    /// path wires the tracer.
+    /// through to cold recompute.
     ///
-    /// `O(signature.len())` per call, zero allocation on the empty
-    /// path. Validation reads through the `HostStoreView` snapshot
-    /// captured at the start of the request; concurrent edits do
-    /// NOT race against this read.
+    /// This is the validator closure passed to
+    /// [`crate::cache_runtime::CompileOutputNodeFactValidatedSession::lookup`].
+    /// The node owns the warm-hit gate: it refuses an overflowed
+    /// carrier and short-circuits an empty fact rail (where the
+    /// upstream `semantic_hash` / override-hash pre-filter is the sole
+    /// gating predicate) BEFORE invoking this closure, so this method
+    /// only walks a non-empty fact set.
+    ///
+    /// `O(signature.len())` per call. Validation reads through the
+    /// `HostStoreView` snapshot captured at the start of the request;
+    /// concurrent edits do NOT race against this read.
     #[inline]
-    pub(crate) fn compile_slot_fact_signature_validates(
+    pub(crate) fn compile_slot_facts_validate(
         &self,
-        slot: &crate::types::CompileSlot,
+        signature: &crate::fact_signature_helpers::ReadSetSignature,
     ) -> bool {
-        // Carrier-defence: the cold-build producer refuses to publish
-        // an overflowed signature, so any admitted slot's carrier is
-        // `Cacheable`. Treat an overflowed carrier as an unconditional
-        // miss here — double-sided enforcement (producer refuses
-        // publish; validator refuses warm-hit) prevents a future
-        // regression of the producer-side refusal from trivially
-        // accepting stale warm hits. `is_cacheable()` is the primary
-        // fast-path predicate; emptiness is a secondary condition
-        // applied only AFTER the cacheability check.
-        if !slot.fact_dep_signature.is_cacheable() {
-            debug_assert!(
-                false,
-                "carrier invariant: overflowed slot must not be admitted (refused at publisher)",
-            );
-            return false;
-        }
-        // Empty rail = no facts to validate = trivially valid. The
-        // upstream `semantic_hash`/override-hash pre-filter remains
-        // the gating predicate for cold paths that have not yet wired
-        // the tracer.
-        if slot.fact_dep_signature.facts.is_empty() {
-            return true;
-        }
         let view = self.resolver_store_view();
         use crate::resolver_core::StoreView;
-        slot.fact_dep_signature
-            .facts
-            .iter()
-            .all(|fact| view.validates(fact))
+        signature.facts.iter().all(|fact| view.validates(fact))
     }
 
     /// Read-only predicate: would `get_virtual_file(query)` for this
@@ -560,14 +542,12 @@ impl VerterHost {
             .get(&profile_hash)
             .map(|o| o.layer.hash)
             .unwrap_or(0);
-        let slot = match cc.compile_slots.get(&profile_hash) {
-            Some(s) => s,
-            None => return false,
-        };
-        slot.semantic_hash == parse.semantic_hash
-            && slot.style_override_hash == soh
-            && slot.content_override_hash == coh
-            && self.compile_slot_fact_signature_validates(slot)
+        let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+        session_node
+            .lookup(&cc, profile_hash, &parse.semantic_hash, soh, coh, |sig| {
+                self.compile_slot_facts_validate(sig)
+            })
+            .is_some()
     }
 
     /// Public R3/R26/R28 inspector: returns a clone of the compile
@@ -587,11 +567,10 @@ impl VerterHost {
     ) -> Option<crate::fact_signature_helpers::ReadSetSignature> {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
         let profile_hash = compile_profile_hash(profile);
-        self.compile_cache().get(&canonical).and_then(|cc| {
-            cc.compile_slots
-                .get(&profile_hash)
-                .map(|s| s.fact_dep_signature.clone())
-        })
+        let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+        self.compile_cache()
+            .get(&canonical)
+            .and_then(|cc| session_node.peek_signature(&cc, profile_hash))
     }
 
     /// Retrieve a compiled virtual file (script, template, style, or main bundle).
@@ -676,45 +655,48 @@ impl VerterHost {
                     .unwrap_or(0);
 
                 if let Some(ref cc) = cc_ref {
-                    if let Some(slot) = cc.compile_slots.get(&profile_hash) {
-                        if slot.semantic_hash == parse.semantic_hash
-                            && slot.style_override_hash == soh
-                            && slot.content_override_hash == coh
-                            && self.compile_slot_fact_signature_validates(slot)
-                        {
-                            #[cfg(feature = "session_metrics")]
-                            self.metrics
-                                .compile_cache_hits
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let session_node =
+                        crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                    if let Some(hit) = session_node.lookup(
+                        cc,
+                        profile_hash,
+                        &parse.semantic_hash,
+                        soh,
+                        coh,
+                        |sig| self.compile_slot_facts_validate(sig),
+                    ) {
+                        #[cfg(feature = "session_metrics")]
+                        self.metrics
+                            .compile_cache_hits
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                            // Build effective meta for cache-hit render_ids
-                            let mut hit_meta = parse.meta.clone();
-                            if let Some(so) = cc.style_overrides.get(&profile_hash) {
-                                for (idx, lang) in so.lang_overrides.iter().enumerate() {
-                                    if let Some(ref l) = lang {
-                                        if idx < hit_meta.style_langs.len() {
-                                            hit_meta.style_langs[idx] = Some(l.clone());
-                                        }
+                        // Build effective meta for cache-hit render_ids
+                        let mut hit_meta = parse.meta.clone();
+                        if let Some(so) = cc.style_overrides.get(&profile_hash) {
+                            for (idx, lang) in so.lang_overrides.iter().enumerate() {
+                                if let Some(ref l) = lang {
+                                    if idx < hit_meta.style_langs.len() {
+                                        hit_meta.style_langs[idx] = Some(l.clone());
                                     }
                                 }
                             }
+                        }
 
-                            if let Some(found) = slot.outputs.get(&node_kind) {
-                                return Ok(VirtualFileResponse {
-                                    id: render_single_id(
-                                        &canonical_id,
-                                        &node_kind,
-                                        &hit_meta,
-                                        raw_was_lsp,
-                                    ),
-                                    code: found.code.clone(),
-                                    source_map: found.source_map.clone(),
-                                    lang: found.lang.clone(),
-                                    stale: false,
-                                    diagnostics: slot.diagnostics.clone(),
-                                    meta: found.meta.clone(),
-                                });
-                            }
+                        if let Some(found) = hit.outputs.get(&node_kind) {
+                            return Ok(VirtualFileResponse {
+                                id: render_single_id(
+                                    &canonical_id,
+                                    &node_kind,
+                                    &hit_meta,
+                                    raw_was_lsp,
+                                ),
+                                code: found.code.clone(),
+                                source_map: found.source_map.clone(),
+                                lang: found.lang.clone(),
+                                stale: false,
+                                diagnostics: hit.diagnostics.clone(),
+                                meta: found.meta.clone(),
+                            });
                         }
                     }
                 }
@@ -740,9 +722,9 @@ impl VerterHost {
                         .map(|o| o.layer.clone())
                 });
                 let fallback_last_good = cc_ref.as_ref().and_then(|cc| {
-                    cc.compile_slots
-                        .get(&profile_hash)
-                        .and_then(|slot| slot.last_good_outputs.clone())
+                    let session_node =
+                        crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                    session_node.peek_last_good(cc, profile_hash)
                 });
 
                 // Style v-bind vars from raw analysis (override-independent)
@@ -868,13 +850,14 @@ impl VerterHost {
         });
         // Typed admission: route the finalised tracer through
         // `SignatureAdmission`. `Cacheable(sig)` → publish the
-        // `CompileSlot` with the path-precise signature. `NonCacheable`
-        // (overflow) → refuse `compile_slots.insert` and return the
-        // freshly computed value to the caller without admitting,
-        // preserving the carrier invariant `present in compile_slots
-        // ⇒ admitted cache entry`. The caller-visible compile result
-        // is computed independently of admission; both arms hand back
-        // the same value.
+        // compile-output slot through the typed session node under the
+        // path-precise signature. `NonCacheable` (overflow) → the
+        // session node removes any prior slot and the freshly computed
+        // value is returned to the caller without admitting, preserving
+        // the carrier invariant `present in the session slot map ⇒
+        // admitted cache entry`. The caller-visible compile result is
+        // computed independently of admission; both arms hand back the
+        // same value.
         let compile_admission =
             crate::cache_runtime::SignatureAdmission::from_finalise(fact_read_set.finalise());
         let (compiled_outputs, diagnostics, stale, compiled_tsx, compiled_template_analysis) =
@@ -913,120 +896,118 @@ impl VerterHost {
 
         let last_tick = self.tick.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Store compile results.
-        // compile_cache is the authority for profile state.
+        // Store compile results. The compile cache is the authority for
+        // profile state.
         //
-        // `Cacheable(sig)` → publish the slot under the path-precise
-        // signature AND commit the scheduler artifact snapshot — both
-        // observable warm-hit substrates land together.
-        // `NonCacheable(_)` (overflow) → skip BOTH writes and remove
-        // any prior slot for the same `(canonical, profile)` so the
-        // carrier invariant `present in compile_slots ⇒ admitted cache
+        // Route the finalised admission through the typed session node.
+        // `Cacheable(sig)` publishes the compile-output slot under the
+        // path-precise signature AND commits the scheduler artifact
+        // snapshot — both observable warm-hit substrates land together.
+        // `NonCacheable(_)` (overflow) skips BOTH writes and removes any
+        // prior slot for this `(canonical, profile)` so the carrier
+        // invariant `present in the session slot map ⇒ admitted cache
         // entry for the current version` survives a recompute that
-        // overflows after a prior successful publish. The
-        // `latest_diagnostics` + generation bump path still runs on
-        // either arm (errors surface), and the caller still receives
-        // the freshly computed virtual file below.
-        match compile_admission {
-            crate::cache_runtime::SignatureAdmission::Cacheable(compile_fact_dep_signature) => {
-                if let Some(mut cc) = self.compile_cache().get_mut(&canonical_id) {
-                    cc.compile_slots.insert(
+        // overflows after a prior successful publish. The sibling writes
+        // below (latest-diagnostics + generation bump, DerivedRawState
+        // template analysis, scheduler artifact commit / eviction) are
+        // NOT compile-output slots, so they stay with this caller and
+        // are gated on the admission outcome captured in `is_cacheable`;
+        // the latest-diagnostics + generation bump runs on either arm so
+        // errors surface, and the caller still receives the freshly
+        // computed virtual file below.
+        let is_cacheable = matches!(
+            compile_admission,
+            crate::cache_runtime::SignatureAdmission::Cacheable(_)
+        );
+        let session_publish_value = crate::cache_runtime::CompileOutputValue::from_compile_record(
+            captured_semantic_hash,
+            style_override_hash,
+            content_override_hash,
+            compiled_outputs.clone(),
+            diagnostics.clone(),
+            if stale {
+                fallback_last_good.clone()
+            } else {
+                Some(compiled_outputs.clone())
+            },
+            compiled_tsx.clone(),
+            compiled_template_analysis.clone(),
+        );
+        if let Some(mut cc) = self.compile_cache().get_mut(&canonical_id) {
+            let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+            session_node.publish(
+                &mut cc,
+                profile_hash,
+                compile_admission,
+                session_publish_value,
+                last_tick,
+            );
+            // The `latest_diagnostics` + generation bump runs on either
+            // arm so errors surface regardless of cacheability.
+            cc.latest_diagnostics
+                .insert(profile_hash, diagnostics.clone());
+            cc.diagnostics_generation += 1;
+        }
+
+        if is_cacheable {
+            // Persist raw template analysis on DerivedRawState (the
+            // profileless source-derived cache). Only for
+            // non-override compiles.
+            if compiled_template_analysis.is_some()
+                && compile_input.content_override_layer.is_none()
+            {
+                let mut derived_ref = self
+                    .derived_raw_cache()
+                    .entry(canonical_id.clone())
+                    .or_default();
+                derived_ref.value_mut().raw_template_analysis =
+                    compiled_template_analysis.clone().map(Arc::new);
+            }
+
+            // Commit to scheduler artifact snapshot (scheduler path
+            // only). Gated on `Cacheable` admission so the carrier
+            // invariant holds at the artifact substrate layer too —
+            // a refused compile must not be observable via
+            // `try_get_artifact` or pending Artifact requests.
+            if let Some(ref snap) = sched_snapshot_at_start {
+                self.scheduler.commit_artifact(
+                    &canonical_id,
+                    profile_hash,
+                    verter_scheduler::node::ArtifactSnapshot {
+                        generation: snap.generation,
                         profile_hash,
-                        CompileSlot {
-                            semantic_hash: captured_semantic_hash,
-                            style_override_hash,
-                            content_override_hash,
+                        data: Arc::new(crate::host_executor::HostArtifactData {
                             outputs: compiled_outputs.clone(),
                             diagnostics: diagnostics.clone(),
-                            last_good_outputs: if stale {
-                                fallback_last_good.clone()
-                            } else {
-                                Some(compiled_outputs.clone())
-                            },
-                            last_access_tick: last_tick,
-                            tsx: compiled_tsx.clone(),
-                            template_analysis: compiled_template_analysis.clone(),
-                            fact_dep_signature: compile_fact_dep_signature,
-                        },
-                    );
-                    cc.latest_diagnostics
-                        .insert(profile_hash, diagnostics.clone());
-                    cc.diagnostics_generation += 1;
-                }
-
-                // Persist raw template analysis on DerivedRawState (the
-                // profileless source-derived cache). Only for
-                // non-override compiles.
-                if compiled_template_analysis.is_some()
-                    && compile_input.content_override_layer.is_none()
-                {
-                    let mut derived_ref = self
-                        .derived_raw_cache()
-                        .entry(canonical_id.clone())
-                        .or_default();
-                    derived_ref.value_mut().raw_template_analysis =
-                        compiled_template_analysis.clone().map(Arc::new);
-                }
-
-                // Commit to scheduler artifact snapshot (scheduler path
-                // only). Gated on `Cacheable` admission so the carrier
-                // invariant holds at the artifact substrate layer too —
-                // a refused compile must not be observable via
-                // `try_get_artifact` or pending Artifact requests.
-                if let Some(ref snap) = sched_snapshot_at_start {
-                    self.scheduler.commit_artifact(
-                        &canonical_id,
-                        profile_hash,
-                        verter_scheduler::node::ArtifactSnapshot {
-                            generation: snap.generation,
-                            profile_hash,
-                            data: Arc::new(crate::host_executor::HostArtifactData {
-                                outputs: compiled_outputs.clone(),
-                                diagnostics: diagnostics.clone(),
-                            }),
-                        },
-                    );
-                }
+                        }),
+                    },
+                );
             }
-            crate::cache_runtime::SignatureAdmission::NonCacheable(_) => {
-                // Refused admission. Remove any prior slot for
-                // this `(canonical, profile)` so a stale-cacheable
-                // entry from an earlier successful compile cannot
-                // satisfy a warm-hit read after a re-compute refuses.
-                // Symmetrically evict any prior scheduler artifact
-                // snapshot so `try_get_artifact` and pending Artifact
-                // requests cannot return a stale result on the
-                // companion warm-hit substrate. The
-                // `latest_diagnostics` + generation bump still
-                // runs; no fresh artifact is committed. The caller
-                // still receives the freshly computed virtual file
-                // from `compile_result` below.
-                //
-                // The scheduler eviction is gated on the compile's
-                // start-of-compile generation captured in
-                // `sched_snapshot_at_start`: a slow refused compile
-                // that started at generation N can race with a fast
-                // successful compile at N+k that already committed a
-                // newer artifact, and an unconditional evict would
-                // clobber the newer artifact. Passing the captured
-                // start generation as `max_generation` makes the
-                // eviction symmetric with `commit_artifact`'s own
-                // node-generation rejection: the newer artifact at
-                // N+k survives, and the stale artifact at N is
-                // dropped.
-                if let Some(mut cc) = self.compile_cache().get_mut(&canonical_id) {
-                    cc.compile_slots.remove(&profile_hash);
-                    cc.latest_diagnostics
-                        .insert(profile_hash, diagnostics.clone());
-                    cc.diagnostics_generation += 1;
-                }
-                if let Some(ref snap) = sched_snapshot_at_start {
-                    self.scheduler.remove_artifact_if_not_newer_than(
-                        &canonical_id,
-                        profile_hash,
-                        snap.generation,
-                    );
-                }
+        } else {
+            // Refused admission. Symmetrically evict any prior scheduler
+            // artifact snapshot so `try_get_artifact` and pending
+            // Artifact requests cannot return a stale result on the
+            // companion warm-hit substrate; no fresh artifact is
+            // committed. The caller still receives the freshly computed
+            // virtual file from `compile_result` below.
+            //
+            // The scheduler eviction is gated on the compile's
+            // start-of-compile generation captured in
+            // `sched_snapshot_at_start`: a slow refused compile that
+            // started at generation N can race with a fast successful
+            // compile at N+k that already committed a newer artifact,
+            // and an unconditional evict would clobber the newer
+            // artifact. Passing the captured start generation as
+            // `max_generation` makes the eviction symmetric with
+            // `commit_artifact`'s own node-generation rejection: the
+            // newer artifact at N+k survives, and the stale artifact at
+            // N is dropped.
+            if let Some(ref snap) = sched_snapshot_at_start {
+                self.scheduler.remove_artifact_if_not_newer_than(
+                    &canonical_id,
+                    profile_hash,
+                    snap.generation,
+                );
             }
         }
 
@@ -1069,8 +1050,8 @@ impl VerterHost {
                 return None;
             }
             let cc = self.compile_cache().get(&canonical)?;
-            let slot = cc.compile_slots.get(&profile_hash)?;
-            let tsx = slot.tsx.as_ref()?;
+            let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+            let tsx = session_node.peek_tsx(&cc, profile_hash)?;
             Some(IdeResponse {
                 code: tsx.code.clone(),
                 source_map: tsx.source_map.clone(),

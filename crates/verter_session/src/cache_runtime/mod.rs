@@ -85,3 +85,16 @@ pub(crate) use node::{lookup, query, ArtifactNode, ComputeCtx, QueryFlightKey, Q
 // any particular consumer.
 #[allow(unused_imports)]
 pub(crate) use candidate_store::ReverseIndexedCandidateStore;
+
+// The typed compile-output cache nodes. The content-addressed
+// `CompileOutputNodePureContent` and the query-identity
+// `CompileOutputNodeFactValidatedSession` own the sole read / write /
+// invalidation surface for compiled SFC output; `host_resolve`,
+// `host_manage`, `host_lifecycle`, and `host_upsert` route every
+// compile-slot access through the session node's typed methods rather
+// than touching `ProfileState::compile_slots` directly.
+#[allow(unused_imports)]
+pub(crate) use compile_output_node::{
+    CompileOutputNodeFactValidatedSession, CompileOutputNodePureContent,
+    CompileOutputPureContentKey, CompileOutputValue, SessionLookupHit, SessionPublishOutcome,
+};

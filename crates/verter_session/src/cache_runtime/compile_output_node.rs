@@ -129,8 +129,7 @@ pub(crate) struct CompileOutputValue {
     /// Optional combined TSX output (IDE / LSP).
     pub tsx: Option<CachedTsx>,
     /// Optional template-analysis snapshot extracted during compile.
-    pub template_analysis:
-        Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+    pub template_analysis: Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
 }
 
 impl CompileOutputValue {
@@ -144,9 +143,7 @@ impl CompileOutputValue {
         diagnostics: DiagnosticsSnapshot,
         last_good_outputs: Option<FxHashMap<VirtualNodeKind, CachedVirtualFile>>,
         tsx: Option<CachedTsx>,
-        template_analysis: Option<
-            verter_semantic::analysis::template::TemplateAnalysisSnapshot,
-        >,
+        template_analysis: Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
     ) -> Self {
         Self {
             semantic_hash,
@@ -260,11 +257,7 @@ impl ArtifactNode for CompileOutputNodePureContent {
     /// short-circuit through an unimplemented compute path —
     /// callers that need cold-build routing must wire the closure
     /// at the call site.
-    fn compute(
-        &self,
-        _key: &Self::Key,
-        _cx: &mut ComputeCtx<'_>,
-    ) -> CacheAdmission<Self::Value> {
+    fn compute(&self, _key: &Self::Key, _cx: &mut ComputeCtx<'_>) -> CacheAdmission<Self::Value> {
         CacheAdmission::Failed {
             reason: verter_audit::NonAdmissionReason::ComputeFailed,
         }
@@ -299,10 +292,11 @@ impl ArtifactNode for CompileOutputNodePureContent {
 /// the field stays private to the typed-node module and every read /
 /// write routes through the methods below.
 ///
-/// Warm-hit validation runs the same path-precise oracle the legacy
-/// `compile_slot_fact_signature_validates` ran (the helper has been
-/// folded into this node's `lookup` impl per the Plan B / B5
-/// deletion list).
+/// Warm-hit validation runs the path-precise fact oracle inside this
+/// node's [`Self::lookup`] impl: the caller supplies a validator
+/// closure that checks every recorded fact against its live store
+/// view, and the node gates the warm hit on that closure plus the
+/// cheaper own-content / override-hash predicates.
 pub(crate) struct CompileOutputNodeFactValidatedSession {
     inflight: InflightTable<QueryFlightKey<CompileOutputSessionKey>>,
 }
@@ -471,6 +465,34 @@ impl CompileOutputNodeFactValidatedSession {
     pub(crate) fn remove(&self, profile_state: &mut ProfileState, profile_hash: u64) {
         profile_state.compile_slot_remove_for_node(profile_hash);
     }
+
+    /// Drop every per-profile compile-output slot for the file the
+    /// `profile_state` belongs to. Used by whole-file invalidation
+    /// callers (source-content change, file eviction, reverse-dep
+    /// sweep, explicit cache clear).
+    ///
+    /// Clears ONLY the compile-output slots. The caller retains
+    /// ownership of the sibling override maps, the latest-diagnostics
+    /// map, and the diagnostics-generation counter — those are compile
+    /// inputs / observable state outside this node's authority, and the
+    /// invalidation caller clears or bumps them as its own logic
+    /// requires.
+    pub(crate) fn clear_compile_outputs_for_file(&self, profile_state: &mut ProfileState) {
+        profile_state.compile_slots_clear_for_node();
+    }
+
+    /// Read-only access to a session slot's template-analysis snapshot,
+    /// when present. Used by the CSS-variable flow analysis to read the
+    /// override-derived template analysis without exposing the slot.
+    pub(crate) fn peek_template_analysis(
+        &self,
+        profile_state: &ProfileState,
+        profile_hash: u64,
+    ) -> Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot> {
+        profile_state
+            .compile_slot_for_node(profile_hash)
+            .and_then(|slot| slot.template_analysis.clone())
+    }
 }
 
 impl Default for CompileOutputNodeFactValidatedSession {
@@ -516,11 +538,7 @@ impl QueryNode for CompileOutputNodeFactValidatedSession {
     /// references they have at hand. The arm returns `None` so any
     /// future `query::lookup` consumer cannot silently short-circuit
     /// through an unrouted lookup path.
-    fn lookup_candidate(
-        &self,
-        _key: &Self::Key,
-        _cx: &ComputeCtx<'_>,
-    ) -> Option<Self::Value> {
+    fn lookup_candidate(&self, _key: &Self::Key, _cx: &ComputeCtx<'_>) -> Option<Self::Value> {
         None
     }
 
@@ -529,11 +547,7 @@ impl QueryNode for CompileOutputNodeFactValidatedSession {
     /// [`Self::publish`]. The substrate-trait arm returns
     /// [`CacheAdmission::Failed`] so an unrouted `query::lookup`
     /// consumer cannot silently short-circuit.
-    fn compute(
-        &self,
-        _key: &Self::Key,
-        _cx: &mut ComputeCtx<'_>,
-    ) -> CacheAdmission<Self::Value> {
+    fn compute(&self, _key: &Self::Key, _cx: &mut ComputeCtx<'_>) -> CacheAdmission<Self::Value> {
         CacheAdmission::Failed {
             reason: verter_audit::NonAdmissionReason::ComputeFailed,
         }
@@ -569,9 +583,7 @@ impl QueryNode for CompileOutputNodeFactValidatedSession {
         _candidate: Candidate<Self::Discriminant, Self::Value>,
     ) -> PublishCoreOutcome<Self::Key> {
         PublishCoreOutcome {
-            outcome: PublishOutcome::Rejected(
-                verter_audit::NonAdmissionReason::ComputeFailed,
-            ),
+            outcome: PublishOutcome::Rejected(verter_audit::NonAdmissionReason::ComputeFailed),
             deferred_victims: DeferredVictims::new(),
         }
     }

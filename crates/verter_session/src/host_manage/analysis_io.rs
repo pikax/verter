@@ -1322,10 +1322,13 @@ impl VerterHost {
     pub fn invalidate_compile_slots(&self, canonical_or_alias: &str) {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
-        // ProfileState owns compile_slots; DerivedRawState owns the
-        // cached_resolved_meta + cached_meta_payload (D48 split).
+        // ProfileState owns the compile-output slots; DerivedRawState
+        // owns the cached_resolved_meta + cached_meta_payload (D48
+        // split). The compile-output slots are cleared through the
+        // typed session node.
         if let Some(mut cc) = self.compile_cache().get_mut(&canonical) {
-            cc.compile_slots.clear();
+            let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+            session_node.clear_compile_outputs_for_file(&mut cc);
         }
         if let Some(mut derived) = self.derived_raw_cache().get_mut(&canonical) {
             derived.cached_resolved_meta.clear();
@@ -1363,7 +1366,9 @@ impl VerterHost {
         let dependents = self.ws().reverse_deps_for(&canonical);
         for owner in &dependents {
             if let Some(mut cc) = self.compile_cache().get_mut(owner) {
-                cc.compile_slots.clear();
+                let session_node =
+                    crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                session_node.clear_compile_outputs_for_file(&mut cc);
             }
             if let Some(mut derived) = self.derived_raw_cache().get_mut(owner) {
                 derived.cached_resolved_meta.clear();
@@ -1763,9 +1768,10 @@ impl VerterHost {
                     .get(&canonical_id)
                     .and_then(|cc| {
                         if cc.content_overrides.contains_key(&profile_hash) {
-                            cc.compile_slots
-                                .get(&profile_hash)
-                                .and_then(|slot| slot.template_analysis.clone())
+                            let session_node =
+                                crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                            session_node
+                                .peek_template_analysis(&cc, profile_hash)
                                 .map(Arc::new)
                         } else {
                             None

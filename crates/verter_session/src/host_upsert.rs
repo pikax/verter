@@ -320,7 +320,9 @@ impl VerterHost {
                 );
             }
             if changes.changed && changes.semantic_changed {
-                profile.compile_slots.clear();
+                let session_node =
+                    crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                session_node.clear_compile_outputs_for_file(profile);
                 profile.latest_diagnostics.clear();
                 profile.diagnostics_generation += 1;
                 crate::host_manage::push_cache_drained_at_upsert("compile_slots", &canonical_id);
@@ -706,7 +708,9 @@ impl VerterHost {
                         hash: override_hash,
                     },
                 );
-                cc.compile_slots.remove(&profile_hash);
+                let session_node =
+                    crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                session_node.remove(&mut cc, profile_hash);
             }
 
             let mut changed_nodes: Vec<VirtualNodeKind> = by_index
@@ -888,7 +892,9 @@ impl VerterHost {
                         source: synthetic_arc,
                     },
                 );
-                cc.compile_slots.remove(&profile_hash);
+                let session_node =
+                    crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                session_node.remove(&mut cc, profile_hash);
             }
 
             let meta = &new_snapshot.meta;

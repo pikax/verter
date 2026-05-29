@@ -268,9 +268,10 @@ impl VerterHost {
     /// compile results while keeping the file set intact.
     pub fn clear_compile_cache(&self) {
         // ProfileState (D48 — compile_cache_db): per-profile compile
-        // outputs are flushed.
+        // outputs are flushed through the typed session node.
+        let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
         for mut entry in self.compile_cache().iter_mut() {
-            entry.compile_slots.clear();
+            session_node.clear_compile_outputs_for_file(&mut entry);
         }
         // DerivedRawState (D48 — derived_raw_cache_db): source-derived
         // caches (raw template analysis, tsc extract, resolved meta,
@@ -552,7 +553,8 @@ impl VerterHost {
         if let Some(mut profile) = self.compile_cache().get_mut(canonical_id) {
             profile.content_overrides.clear();
             profile.style_overrides.clear();
-            profile.compile_slots.clear();
+            let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+            session_node.clear_compile_outputs_for_file(&mut profile);
             profile.latest_diagnostics.clear();
         }
         // DerivedRawState (derived_raw_cache_db): set the evicted flag

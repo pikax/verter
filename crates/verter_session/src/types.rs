@@ -1860,11 +1860,7 @@ impl ProfileState {
     /// from the typed compile-output node's `publish` method, which
     /// gates admission on a `Cacheable` [`SignatureAdmission`]
     /// carrier.
-    pub(crate) fn compile_slot_insert_for_node(
-        &mut self,
-        profile_hash: u64,
-        slot: CompileSlot,
-    ) {
+    pub(crate) fn compile_slot_insert_for_node(&mut self, profile_hash: u64, slot: CompileSlot) {
         self.compile_slots.insert(profile_hash, slot);
     }
 
@@ -1877,6 +1873,19 @@ impl ProfileState {
         profile_hash: u64,
     ) -> Option<CompileSlot> {
         self.compile_slots.remove(&profile_hash)
+    }
+
+    /// Typed-node bulk clear for every per-profile compile slot.
+    ///
+    /// Routed exclusively from the typed compile-output node's
+    /// `clear_compile_outputs_for_file` method. Drops ONLY the
+    /// compile-output slots — the sibling `content_overrides`,
+    /// `style_overrides`, `latest_diagnostics`, and
+    /// `diagnostics_generation` fields are compile *inputs* /
+    /// observable state owned by their own invalidation callers and
+    /// are left untouched here.
+    pub(crate) fn compile_slots_clear_for_node(&mut self) {
+        self.compile_slots.clear();
     }
 }
 

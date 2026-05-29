@@ -12,8 +12,8 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use super::{
-    CompileOutputNodeFactValidatedSession, CompileOutputNodePureContent, CompileOutputPureContentKey,
-    CompileOutputValue, SessionPublishOutcome,
+    CompileOutputNodeFactValidatedSession, CompileOutputNodePureContent,
+    CompileOutputPureContentKey, CompileOutputValue, SessionPublishOutcome,
 };
 use crate::cache_runtime::admission::SignatureAdmission;
 use crate::fact_signature_helpers::ReadSetSignature;
@@ -166,14 +166,11 @@ fn session_publish_non_cacheable_removes_prior_slot() {
     // Second publish: NonCacheable (overflow). Must REMOVE the prior
     // slot so the carrier invariant `present ⇒ admitted cacheable`
     // holds across re-publishes.
-    let admission = SignatureAdmission::NonCacheable(
-        verter_audit::NonAdmissionReason::SignatureOverflow,
-    );
+    let admission =
+        SignatureAdmission::NonCacheable(verter_audit::NonAdmissionReason::SignatureOverflow);
     let outcome = node.publish(&mut state, 42, admission, value(semantic), 1);
     match outcome {
-        SessionPublishOutcome::Refused(
-            verter_audit::NonAdmissionReason::SignatureOverflow,
-        ) => {}
+        SessionPublishOutcome::Refused(verter_audit::NonAdmissionReason::SignatureOverflow) => {}
         other => panic!("expected Refused(SignatureOverflow), got {other:?}"),
     }
     assert!(
