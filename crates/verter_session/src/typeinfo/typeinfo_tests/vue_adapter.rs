@@ -372,6 +372,128 @@ fn define_slots_normalizer_filters_to_functions_and_extracts_bindings() {
 }
 
 // ---------------------------------------------------------------------------
+// (4a) defineSlots normalizer — non-function members are FILTERED, and the
+//      function slots' return type is preserved.
+//
+//      Discriminating: a `notASlot: string` property member is NOT a slot —
+//      it must be absent. The function slot's `return_expr` / `return_type`
+//      must reflect the declared return (not dropped).
+// ---------------------------------------------------------------------------
+
+const VUE_SLOTS_MIXED: &str = r#"<script setup lang="ts">
+defineSlots<{
+  body(props: { row: number }): string;
+  notASlot: string;
+}>();
+</script>
+"#;
+
+#[test]
+fn define_slots_normalizer_filters_non_function_members_and_preserves_return() {
+    const FILE: &str = "/w/SlotsMixed.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_SLOTS_MIXED);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("defineSlots must resolve a surface");
+    let slots = slots_from_typeinfo_surface(&host, &surface);
+
+    let names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["body"],
+        "only the function-like member is a slot; the property member is filtered (negative)"
+    );
+    assert!(
+        !slots.iter().any(|s| s.name == "notASlot"),
+        "a non-function property member is NOT a slot (explicit negative)"
+    );
+
+    let body = &slots[0];
+    // The function returns `string` — the return is preserved as a typed expr
+    // and a display string, not dropped.
+    let return_expr = body
+        .return_expr
+        .as_ref()
+        .expect("the slot function's return type is preserved");
+    assert!(
+        matches!(
+            return_expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        ),
+        "body's return_expr is the primitive `string`, got {return_expr:?}"
+    );
+    assert_eq!(
+        body.return_type.as_deref(),
+        Some("string"),
+        "the display return_type renders the typed return"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (4b) defineSlots normalizer — a `Pick<T,'k'>` first parameter yields the
+//      picked bindings (matching the eager local-SFC rail). The new path must
+//      navigate the first-param type through the SHARED resolver to its object
+//      surface, NOT only accept a literal `TypeExpr::Object` (the pre-fix bug
+//      dropped Pick bindings entirely).
+//
+//      Discriminating: pre-fix `binding_fields_from_param_ty` matches only
+//      `TypeExpr::Object`, so a `Pick<RowApi, 'name'|'value'>` first param
+//      yields ZERO bindings. Post-fix the bindings are `name` + `value`.
+// ---------------------------------------------------------------------------
+
+const VUE_SLOTS_PICK: &str = r#"<script setup lang="ts">
+interface RowApi {
+  name: string;
+  value: number;
+  hidden: boolean;
+}
+defineSlots<{
+  row(props: Pick<RowApi, 'name' | 'value'>): void;
+}>();
+</script>
+"#;
+
+#[test]
+fn define_slots_normalizer_extracts_pick_bindings() {
+    const FILE: &str = "/w/SlotsPick.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_SLOTS_PICK);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("defineSlots with a Pick first-param resolves a surface");
+    let slots = slots_from_typeinfo_surface(&host, &surface);
+
+    let row = slots
+        .iter()
+        .find(|s| s.name == "row")
+        .expect("the row slot surfaces");
+
+    let mut binding_names: Vec<&str> = row.bindings.iter().map(|b| b.name.as_str()).collect();
+    binding_names.sort_unstable();
+    assert_eq!(
+        binding_names,
+        vec!["name", "value"],
+        "the Pick<RowApi,'name'|'value'> first param contributes name + value bindings"
+    );
+    // Negative: the un-picked `hidden` key is NOT a binding.
+    assert!(
+        !row.bindings.iter().any(|b| b.name == "hidden"),
+        "the un-picked `hidden` key must not surface as a binding (negative)"
+    );
+    // Each binding carries a typed binding_expr (navigated through the shared
+    // resolver, not a text/shape sniff).
+    assert!(
+        row.bindings.iter().all(|b| b.binding_expr.is_some()),
+        "each Pick binding carries its typed binding_expr"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // (5) defineModel normalizer — the synthesized model prop from analyzer facts.
 //
 //     Discriminating: a defineModel type arg is the model VALUE type (`string`),

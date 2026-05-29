@@ -332,6 +332,45 @@ impl VerterHost {
 
         self.vue_shallow_metadata_store().get_or_insert(key, dtos)
     }
+
+    /// Navigate a `TypeExpr` to its one-level object [`TypeInfoSurface`] through
+    /// the SHARED resolver, lowering it in `scope_canonical` then projecting the
+    /// empty-path `Shallow` surface — the SAME machinery
+    /// [`Self::resolve_shallow_surface_for`] uses for a named declaration.
+    ///
+    /// Used by the slot-binding extractor to resolve a slot's first-parameter
+    /// type (`Pick<RowApi, 'name'>` / a named alias / a parenthesized form) to
+    /// the binding object WITHOUT a nominal shape-sniff: `Pick` is navigated,
+    /// `Parenthesized` is unwrapped, and an alias `Ref` is resolved by the one
+    /// shared resolver rather than a per-utility special case. Returns `None`
+    /// when the scope file is not loaded or the type does not project to an
+    /// object surface (a primitive / union first param has no binding object).
+    #[must_use]
+    pub(crate) fn navigate_param_to_object_surface(
+        &self,
+        scope_canonical: &str,
+        param_ty: &TypeExpr,
+    ) -> Option<TypeInfoSurface> {
+        let store_view = self.resolver_store_view();
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+
+        // Lower the parameter type in its scope under structural-transit
+        // Navigate (member values stay shallow); the empty-path Shallow
+        // projection then synthesises the one-level object surface.
+        let base = dispatch.lower_type_expr_in_scope_with_context(
+            scope_canonical,
+            param_ty,
+            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+        )?;
+        self.project_shallow_surface_from_base(
+            &host_ctx,
+            &dispatch,
+            base,
+            ProjectionReductionContext::published(ProjectionMode::Shallow),
+        )
+    }
 }
 
 /// Slice a member's leading-JSDoc DESCRIPTION + TAG spans into owned text for
@@ -604,11 +643,12 @@ pub fn emits_from_typeinfo_surface(
 ///
 /// Reproduces `ImportedMacroSurface::slot_members` over the typeinfo surface:
 /// keep FUNCTION-LIKE members only (the value raises to a `TypeExpr::Function`;
-/// non-function members are filtered); the slot's `bindings` come from the
-/// function's first-parameter object's properties; the `return_expr` /
-/// `return_type` come from the function's return type. Bindings + return are
-/// scoped to the slot member's VALUE-NODE file (see
-/// [`VueMacroSurface::member_expr_scope`]).
+/// non-function members are filtered); the slot's `bindings` come from
+/// resolving the function's first-parameter type to its object surface (a
+/// literal object, a `Pick<…>`, or a named alias — see
+/// [`binding_fields_from_param_ty`]); the `return_expr` / `return_type` come
+/// from the function's return type. Bindings + return are scoped to the slot
+/// member's VALUE-NODE file (see [`VueMacroSurface::member_expr_scope`]).
 #[must_use]
 pub fn slots_from_typeinfo_surface(
     host: &VerterHost,
@@ -628,7 +668,7 @@ pub fn slots_from_typeinfo_surface(
             let bindings = func
                 .parameters
                 .first()
-                .map(|param| binding_fields_from_param_ty(&param.ty, &scope))
+                .map(|param| binding_fields_from_param_ty(host, &param.ty, &scope))
                 .unwrap_or_default();
             let return_expr = func.return_type.as_ref().map(|rt| (**rt).clone());
             let return_expr_scope = return_expr.as_ref().map(|_| scope.clone());
@@ -650,28 +690,103 @@ pub fn slots_from_typeinfo_surface(
 }
 
 /// Reconstruct a slot's binding fields from its function's first-parameter
-/// object. Each object property becomes one [`AnalyzedSlotFieldBinding`]
-/// carrying the property's value `TypeExpr` as `binding_expr`. A non-object
-/// parameter yields no bindings — matching the eager rail. Mirrors
-/// `imported_surface::binding_fields_from_param_ty`.
+/// type. Each member of the parameter's OBJECT surface becomes one
+/// [`AnalyzedSlotFieldBinding`] carrying that member's value `TypeExpr` as
+/// `binding_expr`.
+///
+/// The first parameter is the slot-props object. It can be written several
+/// ways, all of which the LOCAL eager rail
+/// (`surface_projector::bindings_from_first_param_ty`) accepts: a literal
+/// object (`(props: { item: string })`), a `Pick<T, 'k'>` over a named type
+/// (`(props: Pick<RowApi, 'name'>)`), or a parenthesized form. To handle all of
+/// them WITHOUT a nominal shape-sniff (no `name == "Pick"` matching, no text
+/// splitting), the binding object is obtained by RESOLVING the first-parameter
+/// type through the SHARED resolver:
+///
+/// - A literal [`TypeExpr::Object`] is read directly (no resolution needed — it
+///   is already the binding object). This is a STRUCTURAL match on the typed
+///   IR, not a nominal sniff.
+/// - Any other shape (`Pick<…>` / `Omit<…>` / a `Ref` to a named alias /
+///   `Parenthesized`) is lowered in the slot member's value-node scope and
+///   projected to its one-level object surface
+///   ([`VerterHost::navigate_param_to_object_surface`]); each surface member
+///   becomes a binding. The shared resolver navigates `Pick` / unwraps
+///   `Parenthesized` / resolves the alias — there is no per-utility special
+///   case here.
+///
+/// A first parameter that does not resolve to an object surface yields no
+/// bindings — matching the eager rail's non-object outcome.
 fn binding_fields_from_param_ty(
+    host: &VerterHost,
     param_ty: &TypeExpr,
     scope: &TypeExprScope,
 ) -> Vec<AnalyzedSlotFieldBinding> {
-    let TypeExpr::Object(obj) = param_ty else {
+    // Literal object: read its properties directly (structural typed-IR match).
+    if let TypeExpr::Object(obj) = param_ty {
+        return obj
+            .properties
+            .iter()
+            .filter_map(|member| match member {
+                verter_type_expr::ObjectMember::Property(prop) => Some(AnalyzedSlotFieldBinding {
+                    name: prop.name.clone(),
+                    type_annotation: render_type_expr_display(&prop.ty),
+                    binding_expr: Some(prop.ty.clone()),
+                    binding_expr_scope: Some(scope.clone()),
+                    span: verter_span::Span::default(),
+                }),
+                _ => None,
+            })
+            .collect();
+    }
+
+    // Non-object first param (`Pick<…>` / alias `Ref` / `Parenthesized`):
+    // navigate it through the shared resolver to its object surface and read
+    // the resolved members. Each member's `binding_expr` is its raised value
+    // type, scoped to that value's own file (so a `Pick<RowApi,'k'>` whose
+    // picked member is a cross-file `Ref` resolves in the right file).
+    let Some(surface) = host.navigate_param_to_object_surface(scope.as_str(), param_ty) else {
         return Vec::new();
     };
-    obj.properties
+    surface
+        .members
         .iter()
-        .filter_map(|member| match member {
-            verter_type_expr::ObjectMember::Property(prop) => Some(AnalyzedSlotFieldBinding {
-                name: prop.name.clone(),
-                type_annotation: render_type_expr_display(&prop.ty),
-                binding_expr: Some(prop.ty.clone()),
-                binding_expr_scope: Some(scope.clone()),
+        .map(|member| {
+            let binding_expr = raise_member_value(host, member);
+            let binding_expr_scope = binding_expr
+                .as_ref()
+                .map(|_| macro_member_value_scope(host, member, scope));
+            let type_annotation = binding_expr.as_ref().and_then(render_type_expr_display);
+            AnalyzedSlotFieldBinding {
+                name: member.name.as_ref().to_string(),
+                type_annotation,
+                binding_expr,
+                binding_expr_scope,
                 span: verter_span::Span::default(),
-            }),
-            _ => None,
+            }
         })
         .collect()
+}
+
+/// The [`TypeExprScope`] a navigated binding member's `binding_expr` binds to —
+/// its value-node scope (matching [`VueMacroSurface::member_expr_scope`]),
+/// falling back to the slot's scope when the member's value node is
+/// structural / scope-less.
+fn macro_member_value_scope(
+    host: &VerterHost,
+    member: &TypeInfoSurfaceMember,
+    fallback: &TypeExprScope,
+) -> TypeExprScope {
+    host.project_type_store()
+        .semantic_graph()
+        .node_scope(member.value)
+        .and_then(|scope| scope.canonical_file())
+        .map(|canonical| TypeExprScope::new(canonical.as_ref()))
+        .or_else(|| {
+            member
+                .origin
+                .canonical_file
+                .as_ref()
+                .map(|canonical| TypeExprScope::new(canonical.as_ref()))
+        })
+        .unwrap_or_else(|| fallback.clone())
 }
