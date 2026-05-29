@@ -59,13 +59,16 @@ impl VerterHost {
 
         // The synthesized `default` value symbol's construct-signature return
         // type is the instance object `{ $props, $emit, $slots }`
-        // (`vue_default_synth::synthesise_vue_default_value_symbol`). It lives
-        // on the SFC's cache-owned `ShallowFileState`, materialized once per
-        // content hash through the shared host path — we read it, never rebuild
-        // it. A non-`.vue` / macro-less file has no such symbol and yields
-        // `None`.
-        let shallow = self.shallow_file_state(canonical_id)?;
-        let default_symbol = shallow.value_symbol("default")?;
+        // (`vue_default_synth::synthesise_vue_default_value_symbol`). It is
+        // injected into the SFC's `ShallowFileState` during the `IndexedReady`
+        // build (`prepared_decl::ensure_indexed_ready`), so we materialize that
+        // artifact (idempotent — warm hits reuse it) and read its
+        // shallow-state's `default`. Reading `shallow_file_state` cold could
+        // fall through to a route-owned / artifact-only shallow state that has
+        // NOT had the Vue default injected. A non-`.vue` / macro-less file has
+        // no such symbol and yields `None`.
+        let indexed = self.ensure_indexed_ready(canonical_id)?;
+        let default_symbol = indexed.shallow_state.value_symbol("default")?;
         let instance_shape: &TypeExpr = default_symbol
             .function_signature
             .as_ref()?

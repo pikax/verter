@@ -155,9 +155,18 @@ impl VerterHost {
 
         let type_arg = mac.parsed_type_argument.as_ref()?;
 
-        // Provenance per macro axis. Props carry macro-T own-body provenance so
-        // the author-declared members are flagged; emits / slots are structural.
-        let context = match request.macro_kind {
+        // Provenance per macro axis. Props request the macro-T own-body
+        // provenance on the terminal surface synthesis so the author-declared
+        // members are flagged; emits / slots are structural
+        // (`declared_in_macro_type_arg` is a props-axis concern). The terminal
+        // `MacroTypeArgOwnBody` context flags every member of the macro-T
+        // surface `declared_in_macro_type_arg = true`; the normalizer then masks
+        // heritage-reached members back to `false` using the surface's
+        // authoritative `merge_role` (which the empty-path Shallow synthesiser
+        // bakes correctly per arm — `Heritage` for `extends`-reached members,
+        // `OwnBody` for the declaration's own body). See
+        // `props_from_typeinfo_surface`.
+        let terminal_context = match request.macro_kind {
             AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
                 ProjectionReductionContext::published_macro_type_arg_body(ProjectionMode::Shallow)
             }
@@ -169,9 +178,10 @@ impl VerterHost {
         let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
 
-        // Lower the macro type argument in the SFC scope. `Navigate` lowering
-        // keeps member values shallow; the empty-path `Shallow` projection then
-        // synthesises the one-level surface under `context`.
+        // Lower the macro type argument in the SFC scope. `Navigate` /
+        // structural-transit lowering keeps member values shallow; the
+        // empty-path `Shallow` projection then synthesises the one-level surface
+        // under `terminal_context`.
         let base = dispatch.lower_type_expr_in_scope_with_context(
             request.owner_canonical.as_ref(),
             type_arg,
@@ -179,7 +189,7 @@ impl VerterHost {
         )?;
 
         let surface =
-            self.project_shallow_surface_from_base(&host_ctx, &dispatch, base, context)?;
+            self.project_shallow_surface_from_base(&host_ctx, &dispatch, base, terminal_context)?;
 
         Some(VueMacroSurface {
             surface,
@@ -352,6 +362,17 @@ pub fn props_from_typeinfo_surface(
                 .map(|_| macro_surface.member_expr_scope(member));
             let type_annotation = type_expr.as_ref().and_then(render_type_expr_display);
             let (description, tags) = member_jsdoc_from_spans(host, member);
+            // `declared_in_macro_type_arg`: a member belongs to the macro-T own
+            // body iff it is NOT heritage-reached. The terminal
+            // `MacroTypeArgOwnBody` synthesis flags every macro-T-surface member
+            // `true`; mask back to `false` for members whose authoritative
+            // `merge_role` is `Heritage` (reached via `interface Props extends
+            // Base`). This reproduces the eager rail's own-body-vs-heritage
+            // provenance from the surface's `merge_role` (the brief's
+            // "already on the surface's merge_role" contract) without trusting
+            // the over-stamped per-member flag.
+            let declared_in_macro_type_arg = member.declared_in_macro_type_arg
+                && member.origin.merge_role != crate::semantic_query::MemberMergeRole::Heritage;
             AnalyzedPropField {
                 name: member.name.as_ref().to_string(),
                 is_optional: member.optional,
@@ -363,7 +384,7 @@ pub fn props_from_typeinfo_surface(
                 tags,
                 resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
                 resolution_error: None,
-                declared_in_macro_type_arg: member.declared_in_macro_type_arg,
+                declared_in_macro_type_arg,
             }
         })
         .collect()

@@ -419,3 +419,132 @@ fn with_defaults_normalizer_uses_inner_props_surface_with_raw_optionality() {
     let label = props.iter().find(|p| p.name == "label").unwrap();
     assert!(!label.is_optional, "label is required (no `?`)");
 }
+
+// ---------------------------------------------------------------------------
+// (7) Cross-file heritage props — `interface Props extends Base` where Base is
+//     imported. The inherited members surface (own-body merge ran on the shared
+//     surface), with own-body-vs-heritage provenance correct.
+//
+//     Discriminating: the inherited `baseFlag` must surface AND must be
+//     `declared_in_macro_type_arg == false` (it arrived via heritage, not the
+//     macro-T own body); the own-body `count` must be `true`.
+// ---------------------------------------------------------------------------
+
+const BASE_TYPES: &str = r#"export interface Base {
+  baseFlag: boolean;
+}
+"#;
+
+const VUE_HERITAGE: &str = r#"<script setup lang="ts">
+import type { Base } from './base';
+interface Props extends Base {
+  count: number;
+}
+defineProps<Props>();
+</script>
+"#;
+
+#[test]
+fn cross_file_heritage_props_surface_with_own_body_vs_heritage_provenance() {
+    const BASE: &str = "/w/base.ts";
+    const FILE: &str = "/w/HeritageComp.vue";
+    let host = make_host();
+    upsert(&host, BASE, BASE_TYPES);
+    upsert(&host, FILE, VUE_HERITAGE);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("cross-file heritage defineProps resolves a surface");
+    let props = props_from_typeinfo_surface(&host, &surface);
+
+    let mut names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec!["baseFlag", "count"],
+        "the inherited Base member surfaces alongside the own-body member"
+    );
+
+    let count = props.iter().find(|p| p.name == "count").unwrap();
+    assert!(
+        count.declared_in_macro_type_arg,
+        "count is in the macro type arg's own body"
+    );
+    let base_flag = props.iter().find(|p| p.name == "baseFlag").unwrap();
+    assert!(
+        !base_flag.declared_in_macro_type_arg,
+        "baseFlag arrived via heritage — NOT declared in the macro type arg (negative)"
+    );
+
+    // The inherited member's declaration origin is the BASE file, not the SFC.
+    let base_member = surface
+        .surface
+        .members
+        .iter()
+        .find(|m| m.name.as_ref() == "baseFlag")
+        .expect("baseFlag on surface");
+    assert_eq!(
+        base_member
+            .origin
+            .canonical_file
+            .as_ref()
+            .map(|c| c.as_ref()),
+        Some(BASE),
+        "baseFlag's declaration origin is the heritage base file"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (8) `.vue` PUBLIC component type via public_type.rs — through typeinfo, no
+//     component-meta.
+//
+//     Discriminating: the public surface must carry the synthesized
+//     `$props` / `$emit` / `$slots` instance members built from the macros.
+//     A `.ts` file (no synthesized default) must return None.
+// ---------------------------------------------------------------------------
+
+const VUE_FULL_COMPONENT: &str = r#"<script setup lang="ts">
+defineProps<{ count: number }>();
+defineEmits<{ (e: 'change', v: number): void }>();
+defineSlots<{ default(props: { item: string }): any }>();
+</script>
+"#;
+
+#[test]
+fn vue_public_type_carries_synthesized_instance_members_without_component_meta() {
+    const FILE: &str = "/w/FullComp.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_FULL_COMPONENT);
+
+    let public_surface = host
+        .resolve_vue_public_type(FILE, TypeInfoQueryLevel::PublicType)
+        .expect("a .vue with type-based macros has a public component type");
+
+    let mut members: Vec<&str> = public_surface
+        .members
+        .iter()
+        .map(|m| m.name.as_ref())
+        .collect();
+    members.sort_unstable();
+    assert_eq!(
+        members,
+        vec!["$emit", "$props", "$slots"],
+        "the public component type carries the synthesized instance members"
+    );
+}
+
+#[test]
+fn vue_public_type_returns_none_for_plain_ts_file() {
+    const FILE: &str = "/w/plain.ts";
+    let host = make_host();
+    upsert(&host, FILE, "export interface Foo { a: number }\n");
+
+    // A plain `.ts` file has no synthesized `default` instance object — no
+    // public component type (negative).
+    assert!(
+        host.resolve_vue_public_type(FILE, TypeInfoQueryLevel::PublicType)
+            .is_none(),
+        "a plain .ts file has no .vue public component type"
+    );
+}
