@@ -157,10 +157,23 @@ impl VerterHost {
     /// type argument does not project to an object surface (a macro typed as a
     /// primitive / union has no one-level member surface).
     ///
-    /// **Provenance:** a props macro (`DefineProps` / `WithDefaults`) lowers
-    /// its type argument under
-    /// [`ProjectionReductionContext::published_macro_type_arg_body`] so the
-    /// type-argument's OWN-body members surface with
+    /// **`withDefaults` returns `None` here — by design.** The analyzer routes
+    /// `withDefaults(defineProps<Props>(), { … })` as TWO macros: a `DefineProps`
+    /// macro carrying the `Props` type argument AND an OUTER `WithDefaults`
+    /// macro that has NO type argument (the type parameter lives on the inner
+    /// `defineProps`, never on the `withDefaults` call — `withDefaults<…>(…)` is
+    /// not valid Vue). The outer macro is therefore `is_type_based == false` and
+    /// falls out at the `is_type_based` guard below. The props surface comes
+    /// from the SEPARATELY-routed inner `DefineProps` macro, exactly as the
+    /// eager rail resolves it (the `WithDefaults` macro's `resolved_local_types`
+    /// is empty, so the eager `cold_resolver` macro loop projects nothing for
+    /// it either). The defaults the `withDefaults` call supplies flip
+    /// `required` / `has_default` DOWNSTREAM at the component-meta PropAnalysis
+    /// layer, not on this surface.
+    ///
+    /// **Provenance:** the props macro (`DefineProps`) lowers its type argument
+    /// under [`ProjectionReductionContext::published_macro_type_arg_body`] so
+    /// the type-argument's OWN-body members surface with
     /// `declared_in_macro_type_arg = true` and heritage-reached members stay
     /// `false`. Structural macros (`DefineEmits` / `DefineSlots`) lower under
     /// the structural `published` context (`declared_in_macro_type_arg` is a
@@ -205,15 +218,22 @@ impl VerterHost {
         // provenance on the terminal surface synthesis so the author-declared
         // members are flagged; emits / slots are structural
         // (`declared_in_macro_type_arg` is a props-axis concern). The terminal
-        // `MacroTypeArgOwnBody` context flags every member of the macro-T
-        // surface `declared_in_macro_type_arg = true`; the normalizer then masks
-        // heritage-reached members back to `false` using the surface's
-        // authoritative `merge_role` (which the empty-path Shallow synthesiser
-        // bakes correctly per arm — `Heritage` for `extends`-reached members,
-        // `OwnBody` for the declaration's own body). See
-        // `props_from_typeinfo_surface`.
+        // `MacroTypeArgOwnBody` synthesis restamps `declared_in_macro_type_arg =
+        // true` for EXACTLY the declaration's own-body direct members — it reads
+        // the prepared decl's `member_index`, which is populated from direct
+        // Object members only and SKIPS heritage `extends` `Ref` arms
+        // (`build.rs::overlay_macro_type_arg_own_body`). Heritage-reached members
+        // are NOT in `member_index`, so they are left at the structural `false`
+        // the empty-path Shallow body lowering assigned. The surface's
+        // `merge_role` is independently baked per arm (`Heritage` for
+        // `extends`-reached members, `OwnBody` for the declaration's own body).
+        // See `props_from_typeinfo_surface`.
+        // Only `DefineProps` reaches here as a props macro: `WithDefaults` is
+        // never `is_type_based` (it bailed at the guard above) and `DefineModel`
+        // returned its empty surface above. `DefineProps` requests the macro-T
+        // own-body provenance; emits / slots are structural.
         let terminal_context = match request.macro_kind {
-            AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
+            AnalyzedMacroKind::DefineProps => {
                 ProjectionReductionContext::published_macro_type_arg_body(ProjectionMode::Shallow)
             }
             _ => ProjectionReductionContext::published(ProjectionMode::Shallow),
@@ -308,9 +328,7 @@ impl VerterHost {
         };
         let dtos = match self.resolve_vue_macro_surface(&validated_request) {
             Some(macro_surface) => match macro_kind {
-                AnalyzedMacroKind::DefineProps
-                | AnalyzedMacroKind::WithDefaults
-                | AnalyzedMacroKind::DefineModel => VueMacroDtos {
+                AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::DefineModel => VueMacroDtos {
                     props: props_from_typeinfo_surface(self, &macro_surface),
                     ..VueMacroDtos::default()
                 },
@@ -322,10 +340,15 @@ impl VerterHost {
                     slots: slots_from_typeinfo_surface(self, &macro_surface),
                     ..VueMacroDtos::default()
                 },
-                // Options / expose are separate subsystems — no DTO bundle.
-                AnalyzedMacroKind::DefineOptions | AnalyzedMacroKind::DefineExpose => {
-                    VueMacroDtos::default()
-                }
+                // `WithDefaults` is not a props-surface source on this path: the
+                // outer `withDefaults` macro carries no type argument (it is not
+                // `is_type_based`), so `resolve_vue_macro_surface` returns `None`
+                // for it and this arm is unreachable. The props come from the
+                // SEPARATELY-routed inner `DefineProps` macro. Options / expose
+                // are separate subsystems. None of these contribute a DTO bundle.
+                AnalyzedMacroKind::WithDefaults
+                | AnalyzedMacroKind::DefineOptions
+                | AnalyzedMacroKind::DefineExpose => VueMacroDtos::default(),
             },
             None => VueMacroDtos::default(),
         };
@@ -482,13 +505,18 @@ pub fn props_from_typeinfo_surface(
             let (description, tags) = member_jsdoc_from_spans(host, member);
             // `declared_in_macro_type_arg`: a member belongs to the macro-T own
             // body iff it is NOT heritage-reached. The terminal
-            // `MacroTypeArgOwnBody` synthesis flags every macro-T-surface member
-            // `true`; mask back to `false` for members whose authoritative
-            // `merge_role` is `Heritage` (reached via `interface Props extends
-            // Base`). This reproduces the eager rail's own-body-vs-heritage
-            // provenance from the surface's `merge_role` (the brief's
-            // "already on the surface's merge_role" contract) without trusting
-            // the over-stamped per-member flag.
+            // `MacroTypeArgOwnBody` synthesis already stamps this correctly — it
+            // restamps `true` ONLY for the declaration's own-body
+            // `member_index` members and leaves heritage-reached members at
+            // `false` (`build.rs::overlay_macro_type_arg_own_body` skips
+            // `extends` arms). So `member.declared_in_macro_type_arg` is already
+            // authoritative. The `&& merge_role != Heritage` conjunct is
+            // REDUNDANT defense-in-depth: a member can only carry
+            // `declared_in_macro_type_arg == true` if it is an own-body
+            // `member_index` member, which is never `merge_role == Heritage`.
+            // It is kept as a belt-and-braces cross-check of the two
+            // independently-baked provenance facts (the restamped flag and the
+            // merge role), not because the surface over-stamps heritage members.
             let declared_in_macro_type_arg = member.declared_in_macro_type_arg
                 && member.origin.merge_role != crate::semantic_query::MemberMergeRole::Heritage;
             AnalyzedPropField {

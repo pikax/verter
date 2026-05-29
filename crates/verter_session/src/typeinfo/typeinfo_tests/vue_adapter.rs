@@ -599,6 +599,65 @@ fn with_defaults_normalizer_uses_inner_props_surface_with_raw_optionality() {
 }
 
 // ---------------------------------------------------------------------------
+// (6a) withDefaults outer-macro routing — the OUTER `withDefaults(...)` macro
+//      carries no type argument; the props come from the SEPARATELY-routed
+//      inner `defineProps<Props>` macro (matching the eager rail).
+//
+//      Discriminating: the analyzer emits BOTH a DefineProps macro (with the
+//      type arg) and an outer WithDefaults macro (no type arg). The WithDefaults
+//      macro must NOT resolve a surface (it has no type arg → `None`) and
+//      `vue_macro_dtos` on it must yield an EMPTY props bundle (the inner
+//      DefineProps is the props source — no double-count). Asserting the inner
+//      DefineProps carries the props proves the routing.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn with_defaults_outer_macro_resolves_inner_define_props_surface() {
+    const FILE: &str = "/w/WithDefaultsRouting.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_WITH_DEFAULTS);
+
+    // The analyzer emits a separate inner DefineProps macro AND an outer
+    // WithDefaults macro.
+    let with_defaults_index = macro_index_of(&host, FILE, AnalyzedMacroKind::WithDefaults);
+    let define_props_index = macro_index_of(&host, FILE, AnalyzedMacroKind::DefineProps);
+    assert_ne!(
+        with_defaults_index, define_props_index,
+        "withDefaults emits both an outer WithDefaults macro and an inner DefineProps macro"
+    );
+
+    // The OUTER WithDefaults macro carries no type argument → no macro surface.
+    let outer_request = VueMacroSurfaceRequest {
+        owner_canonical: Arc::from(FILE),
+        macro_index: with_defaults_index,
+        macro_kind: AnalyzedMacroKind::WithDefaults,
+        root_identity: whole_hash(&host, FILE),
+        level: TypeInfoQueryLevel::FullMetadata,
+    };
+    assert!(
+        host.resolve_vue_macro_surface(&outer_request).is_none(),
+        "the outer withDefaults macro has no type arg, so it resolves no surface (negative)"
+    );
+    // And its DTO bundle is empty — the props are NOT double-counted here.
+    let outer_dtos = host.vue_macro_dtos(&outer_request);
+    assert!(
+        outer_dtos.props.is_empty(),
+        "the outer withDefaults macro contributes no props (the inner DefineProps does)"
+    );
+
+    // The INNER DefineProps macro (routed separately) carries the props.
+    let inner_request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
+    let inner_dtos = host.vue_macro_dtos(&inner_request);
+    let mut names: Vec<&str> = inner_dtos.props.iter().map(|p| p.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec!["label", "size"],
+        "the inner defineProps macro is the props source for a withDefaults component"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // (7) Cross-file heritage props — `interface Props extends Base` where Base is
 //     imported. The inherited members surface (own-body merge ran on the shared
 //     surface), with own-body-vs-heritage provenance correct.
