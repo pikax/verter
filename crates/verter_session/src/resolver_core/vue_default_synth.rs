@@ -1,4 +1,4 @@
-﻿//! Synthesise the implicit `default` export for a Vue Single File
+//! Synthesise the implicit `default` export for a Vue Single File
 //! Component scope.
 //!
 //! A `<script setup>` block does not contain a literal `export default`
@@ -189,7 +189,8 @@ mod tests {
     use verter_type_expr::TypeExpr;
 
     fn type_based_macro(kind: AnalyzedMacroKind, type_text: &str) -> AnalyzedMacro {
-        let parsed = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(type_text);
+        let parsed =
+            verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(type_text, None);
         AnalyzedMacro {
             kind,
             is_type_based: true,

@@ -664,7 +664,14 @@ pub(crate) fn resolve_jsdoc_tag_type(
     raw_type: &str,
     tracked_deps: &mut std::collections::BTreeSet<String>,
 ) -> Option<verter_type_expr::TypeExpr> {
-    let parsed = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(raw_type);
+    // `raw_type` is the display string reconstructed by `parse_jsdoc_tag_payload`
+    // (the JSDoc comment text line-joined and re-trimmed), NOT a contiguous slice
+    // of the source file — there is no honest file position for its members.
+    // Lower with `None` so the resulting type's spans are cleared (this `TypeExpr`
+    // is consumed only to resolve the referenced type through the shared dispatch;
+    // its member spans are never sliced against the file — `raw_type` carries the
+    // display text separately on `ResolvedJsdocTag.raw_type`).
+    let parsed = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(raw_type, None);
     let parsed = if parsed.is_unknown() {
         verter_type_expr::TypeExpr::Unknown {
             raw: raw_type.to_string(),

@@ -4937,7 +4937,7 @@ fn define_props_fields_fast_path_allows_direct_object_literals() {
         span: verter_span::Span::new(0, 0),
     };
     let lowered =
-        verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("{ title: string }");
+        verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("{ title: string }", None);
 
     let host = VerterHost::new_standalone(HostConfig::default());
     assert!(
@@ -5020,7 +5020,7 @@ fn define_props_fields_fast_path_rejects_complex_heritage_refs() {
         slots: Vec::new(),
         jsdoc: None,
     }];
-    let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("LinkProps");
+    let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("LinkProps", None);
 
     let host = VerterHost::new_standalone(HostConfig::default());
     assert!(
@@ -5129,7 +5129,7 @@ fn define_props_fields_fast_path_rejects_multi_surface_macro_candidates() {
             jsdoc: None,
         },
     ];
-    let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("LinkProps");
+    let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("LinkProps", None);
 
     let host = VerterHost::new_standalone(HostConfig::default());
     assert!(
@@ -5205,7 +5205,7 @@ defineProps<Props>()
     let host = project.host();
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Props");
+    let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Props", None);
 
     let projection = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
         crate::meta_resolve::projection_demand::PublishedSurfaceKind::Props,
@@ -5262,7 +5262,7 @@ defineProps<Props>()
     let host = project.host();
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Props");
+    let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Props", None);
 
     let projection = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
         crate::meta_resolve::projection_demand::PublishedSurfaceKind::Props,
@@ -6458,6 +6458,7 @@ defineEmits<Emits>()
                 name: "save".to_string(),
                 r#type: verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
                     "[id: number]",
+                    None,
                 ),
                 raw_type: Some("[id: number]".to_string()),
                 optional: false,
@@ -6474,6 +6475,7 @@ defineEmits<Emits>()
                 name: "update:open".to_string(),
                 r#type: verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
                     "[value: boolean]",
+                    None,
                 ),
                 raw_type: Some("[value: boolean]".to_string()),
                 optional: false,
@@ -6564,18 +6566,18 @@ defineEmits<Emits>()
         ..Default::default()
     };
     let resolved_macros = Vec::new();
-    let mut evaluated_types = verter_semantic::analysis::type_expand::ExpandedComponentTypes {
-        define_emits: vec![
-            verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
-                macro_index: 0,
-                result: verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
-                    verter_semantic::analysis::type_expand::ExpandedObjectShape {
-                        properties: vec![
+    let mut evaluated_types =
+        verter_semantic::analysis::type_expand::ExpandedComponentTypes {
+            define_emits: vec![
+                verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
+                    macro_index: 0,
+                    result: verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
+                        verter_semantic::analysis::type_expand::ExpandedObjectShape {
+                            properties: vec![
                             verter_semantic::analysis::type_expand::ExpandedProperty {
                                 name: "save".to_string(),
                                 ty: verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
-                                    "[id: number]",
-                                ),
+                                    "[id: number]", None),
                                 optional: false,
                                 readonly: false,
                                 declared_in_macro_type_arg: false,
@@ -6583,21 +6585,20 @@ defineEmits<Emits>()
                             verter_semantic::analysis::type_expand::ExpandedProperty {
                                 name: "update:open".to_string(),
                                 ty: verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
-                                    "[value: boolean]",
-                                ),
+                                    "[value: boolean]", None),
                                 optional: false,
                                 readonly: false,
                                 declared_in_macro_type_arg: false,
                             },
                         ],
-                        index_signatures: Vec::new(),
-                        call_signatures: Vec::new(),
-                    },
-                ),
-            },
-        ],
-        ..Default::default()
-    };
+                            index_signatures: Vec::new(),
+                            call_signatures: Vec::new(),
+                        },
+                    ),
+                },
+            ],
+            ..Default::default()
+        };
 
     let host = project.host();
     let _store_view = host.resolver_store_view();
@@ -6693,6 +6694,7 @@ defineModel<string>('searchTerm')
                 name: "save".to_string(),
                 r#type: verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
                     "[id: number]",
+                    None,
                 ),
                 raw_type: Some("[id: number]".to_string()),
                 optional: false,
@@ -6709,6 +6711,7 @@ defineModel<string>('searchTerm')
                 name: "update:open".to_string(),
                 r#type: verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
                     "[value: boolean]",
+                    None,
                 ),
                 raw_type: Some("[value: boolean]".to_string()),
                 optional: false,
@@ -6876,6 +6879,7 @@ defineEmits<Emits>()
                 name: "save".to_string(),
                 r#type: verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
                     "[id: number]",
+                    None,
                 ),
                 raw_type: Some("[id: number]".to_string()),
                 optional: false,
@@ -6892,6 +6896,7 @@ defineEmits<Emits>()
                 name: "update:open".to_string(),
                 r#type: verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
                     "[value: boolean]",
+                    None,
                 ),
                 raw_type: Some("[value: boolean]".to_string()),
                 optional: false,
@@ -7381,7 +7386,7 @@ defineProps<Props<T>>()
     let host = project.host();
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Props<T>");
+    let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Props<T>", None);
 
     let projection = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
         crate::meta_resolve::projection_demand::PublishedSurfaceKind::Props,
@@ -7487,8 +7492,10 @@ defineProps<ColorModeSelectProps>()
     let host = project.host();
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let lowered =
-        verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("ColorModeSelectProps");
+    let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
+        "ColorModeSelectProps",
+        None,
+    );
 
     let projection = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
         crate::meta_resolve::projection_demand::PublishedSurfaceKind::Props,
@@ -7580,7 +7587,7 @@ defineProps<Props>()
     let host = project.host();
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Props");
+    let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Props", None);
 
     let projection = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
         crate::meta_resolve::projection_demand::PublishedSurfaceKind::Props,
@@ -7807,8 +7814,10 @@ defineProps<ColorModeSelectProps>()
     );
 
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let lowered =
-        verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("ColorModeSelectProps");
+    let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
+        "ColorModeSelectProps",
+        None,
+    );
 
     let projection = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
         crate::meta_resolve::projection_demand::PublishedSurfaceKind::Props,
@@ -8135,8 +8144,10 @@ defineProps<ColorModeSelectProps>()
         has_prop_shape_surface(&prepared_overlay_shape),
         "overlay-backed prepared root surface should still expose props after registry append",
     );
-    let lowered =
-        verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("ColorModeSelectProps");
+    let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
+        "ColorModeSelectProps",
+        None,
+    );
     let direct_solves_before = 0u32;
     let projection = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
         crate::meta_resolve::projection_demand::PublishedSurfaceKind::Props,
@@ -8486,7 +8497,7 @@ defineProps<{ ui?: Button['ui'] }>()
     let host = project.host();
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let expr = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Button['ui']");
+    let expr = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Button['ui']", None);
 
     let first = query_engine.materialize_member_surface_expr("/src/button-types.ts", &expr, true);
     let cache_len_after_first = query_engine.materialized_member_surface_cache_len();
@@ -8537,6 +8548,7 @@ defineProps<{ first: Inner; second: Inner }>()
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let expr = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
         "{ first: Inner; second: Inner }",
+        None,
     );
 
     let first = query_engine.materialize_member_surface_expr("/src/types.ts", &expr, true);

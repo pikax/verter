@@ -438,7 +438,7 @@ fn build_public_instance_slot_type_consumes_return_expr_not_return_type() {
     // the display string. This guards against a text-mode reparse
     // fallback re-entering the consumer.
     let lowered_from_display =
-        verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("VNode[]");
+        verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("VNode[]", None);
     assert_ne!(
         *return_type, lowered_from_display,
         "build_public_instance_slot_type MUST NOT reparse `slot.return_type`          when `slot.return_expr` is present."

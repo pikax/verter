@@ -657,6 +657,7 @@ defineEmits<Emits>()
                 type_expr: Some(
                     verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
                         "interface Emits extends RootEmits {}",
+                        None,
                     ),
                 ),
                 span: Span::new(0, source.len() as u32),
@@ -755,8 +756,7 @@ fn local_resolved_macro_types_project_into_resolved_macro_surfaces() {
                     "{ 'update:modelValue': [value: (T extends 'single' ? string : string[]) | undefined] }"
                         .to_string(),
                 type_expr: Some(verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
-                    "{ 'update:modelValue': [value: (T extends 'single' ? string : string[]) | undefined] }",
-                )),
+                    "{ 'update:modelValue': [value: (T extends 'single' ? string : string[]) | undefined] }", None)),
                 span: Span::new(0, 1),
             }],
             parsed_type_argument: None,
@@ -950,6 +950,7 @@ defineSlots<CalendarSlots>()
                 type_expr: Some(
                     verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
                         "{ day?: (props: { day: Date }) => any }",
+                        None,
                     ),
                 ),
                 span: Span::new(0, source.len() as u32),
@@ -1738,6 +1739,7 @@ type Props = Omit<ImportedBase, 'hidden'>
                 type_expr: Some(
                     verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
                         "Omit<ImportedBase, 'hidden'>",
+                        None,
                     ),
                 ),
                 span: Span::new(0, source.len() as u32),

@@ -2540,6 +2540,7 @@ mod tests {
     fn indexed_access_route_preserves_full_member_path() {
         let expr = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
             "Button['variants']['color']",
+            None,
         );
 
         assert_eq!(
@@ -2553,7 +2554,8 @@ mod tests {
 
     #[test]
     fn collect_registry_refs_preserves_indexed_access_member_path() {
-        let expr = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Button['ui']");
+        let expr =
+            verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Button['ui']", None);
         let published_names = rustc_hash::FxHashSet::default();
         let mut queued_names = rustc_hash::FxHashSet::default();
         let mut output = VecDeque::new();
@@ -2698,6 +2700,7 @@ mod tests {
     fn field_expr_actionable_route_recognizes_direct_generic_refs() {
         let expr = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
             "GetModelValue<T, VK, true>",
+            None,
         );
 
         assert!(

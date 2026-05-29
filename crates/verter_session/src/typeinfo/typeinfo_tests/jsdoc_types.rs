@@ -207,15 +207,12 @@ fn jsdoc_typedef_resolves_through_shared_resolver_identically_to_ts_type_alias()
     //
     // NOTE: full byte-identical `assert_eq!(jsdoc_alias_expr, ts_alias_expr)` is
     // NOT asserted here. The two declarations sit at DIFFERENT source positions
-    // (the `@typedef` comment vs the TS `type`), so their member spans differ,
-    // AND the JSDoc `@typedef` payload is currently lowered via a synthetic
-    // `format!("type __T = {payload}")` wrapper (`parse_jsdoc_tag_type_payload`),
-    // so its member spans are in WRAPPER-local coordinates, not file coordinates
-    // — a pre-existing producer-side span bug, orthogonal to the component-meta
-    // projection-path span threading (D1/U3b) this suite's other tests cover.
-    // U3b surfaced it (the projection no longer masks spans); it is fixed at the
-    // JSDoc producer in a separate task. Structural identity is asserted here;
-    // the TS-side real spans are verified below.
+    // (the `@typedef` comment vs the TS `type`), so their member SPANS differ by
+    // construction. Structural identity (name / modifiers / member type) is
+    // asserted here; both sides' REAL file-coordinate spans are verified below —
+    // the JSDoc producer now rebases its `{Type}` payload spans into file
+    // coordinates (no longer wrapper-local), so the JSDoc-typed member's spans
+    // slice the source to the correct tokens exactly like the TS-alias path.
     let jsdoc_a = &jsdoc_props["a"];
     let ts_a = &ts_props["a"];
     assert_eq!(
@@ -256,6 +253,41 @@ fn jsdoc_typedef_resolves_through_shared_resolver_identically_to_ts_type_alias()
         ts_type_span.slice(JSDOC_TYPEDEF_FIXTURE),
         "number",
         "TS-alias type-annotation span must slice to the `number` token"
+    );
+
+    // JSDoc producer span fix: the `@typedef {{a: number}} Alias` member spans
+    // are now in FILE coordinates (rebased out of the synthetic
+    // `type __T = <payload>` wrapper), so they slice the SAME source to the same
+    // `a` / `number` tokens the TS-alias path does. Pre-fix these spans were
+    // wrapper-local and sliced the wrong source text (e.g. the `@typedef`
+    // comment prefix), so this block is the discriminating JSDoc-side assertion.
+    let jsdoc_name_span = jsdoc_a
+        .spans
+        .name
+        .expect("JSDoc-typedef member must carry its file-coordinate name span");
+    assert_eq!(
+        jsdoc_name_span.slice(JSDOC_TYPEDEF_FIXTURE),
+        "a",
+        "JSDoc `@typedef` member NAME span must slice the file to the `a` token — a wrapper-local \
+         span would slice the wrong source text"
+    );
+    let jsdoc_type_span = jsdoc_a
+        .spans
+        .type_annotation
+        .expect("JSDoc-typedef member must carry its file-coordinate type-annotation span");
+    assert_eq!(
+        jsdoc_type_span.slice(JSDOC_TYPEDEF_FIXTURE),
+        "number",
+        "JSDoc `@typedef` member TYPE span must slice the file to the `number` token"
+    );
+    // The JSDoc-side spans sit at a DIFFERENT file position than the TS-alias
+    // spans (the `@typedef` comment precedes the `type` declaration), proving
+    // the spans are real per-declaration file coordinates, not a shared/aliased
+    // span accidentally carried across both declarations.
+    assert_ne!(
+        jsdoc_name_span, ts_name_span,
+        "the JSDoc typedef and TS alias declare `a` at distinct source positions, so their name \
+         spans must differ (equal spans would prove one declaration's span leaked onto the other)"
     );
 
     // And a `@type {Alias}` value resolves `Alias` through the same dispatch —
