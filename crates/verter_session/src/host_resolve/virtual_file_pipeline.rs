@@ -820,13 +820,17 @@ impl VerterHost {
                 // Classify EXACTLY ONCE per compile, here under the read
                 // lock, so `actual_mode` is known before the warm-hit
                 // consult and reused by the compile / publish routing.
-                // The augmentation signal is closure-aware (it consults
-                // the augmentation target index for every module the owner
-                // can consume, plus ambient / global augmenters) and pays a
-                // store scan, so it is computed only for a `Content`
-                // request — `Session` stays `Session` under every reason
-                // and `Stateless` ignores all reasons, so neither consults
-                // this bit.
+                // `HasModuleAugmentation` is probed ONLY when
+                // `requested_mode == CompileCacheMode::Content`. The
+                // closure-aware probe (`owner_has_module_augmentation_dependency`,
+                // which consults the augmentation target index for every
+                // module the owner can consume plus ambient / global
+                // augmenters) pays a store scan, and a Session request
+                // preserves Session under every reason while a Stateless
+                // request is the floor that ignores all reasons (see
+                // `classify_compile_mode` in `compile_cache_mode.rs`), so
+                // neither consults this bit and the scan is paid only on
+                // the rare explicit Content opt-in.
                 let owner_has_module_augmentation = requested_mode == CompileCacheMode::Content
                     && self.owner_has_module_augmentation_dependency(&canonical_id);
                 let classification = crate::compile_cache_mode::classify_compile_mode(
