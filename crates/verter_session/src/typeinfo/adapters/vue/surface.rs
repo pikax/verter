@@ -828,11 +828,17 @@ pub fn emits_from_typeinfo_surface(
 /// - Anything else → `None` (the member is not a slot).
 fn slot_callable_param_and_return(
     value: &TypeExpr,
-) -> Option<(Option<TypeExpr>, Option<TypeExpr>)> {
+) -> Option<(Option<TypeExpr>, Option<TypeExpr>, Option<verter_span::Span>)> {
     match value {
         TypeExpr::Function(func) => Some((
             func.parameters.first().map(|p| p.ty.clone()),
             func.return_type.as_ref().map(|rt| (**rt).clone()),
+            // The return-type annotation span (file-relative to the slot
+            // member's value-node file). Lets the caller slice the EXACT source
+            // text for the display `return_type` when the typed return contains
+            // an unresolved reference (`VNode` not imported) that
+            // `render_type_expr_display` cannot surface.
+            func.spans.return_type,
         )),
         TypeExpr::Intersection(arms) => {
             let mut first_params: Vec<TypeExpr> = Vec::new();
@@ -867,7 +873,9 @@ fn slot_callable_param_and_return(
                     returns.into_boxed_slice(),
                 ))),
             };
-            Some((first_param, return_ty))
+            // An intersection of function arms has no single return-type span;
+            // the caller renders the composed return from the typed form.
+            Some((first_param, return_ty, None))
         }
         _ => None,
     }
@@ -898,14 +906,28 @@ pub fn slots_from_typeinfo_surface(
             // A slot member is function-like: a single `Function`, or an
             // `Intersection` of functions (`(SlotA & SlotB)['default']`). A
             // non-callable member is not a slot.
-            let (first_param, return_expr) = slot_callable_param_and_return(&value)?;
+            let (first_param, return_expr, return_span) =
+                slot_callable_param_and_return(&value)?;
             let scope = macro_surface.member_expr_scope(host, member);
             let bindings = first_param
                 .as_ref()
                 .map(|param_ty| binding_fields_from_param_ty(host, param_ty, &scope))
                 .unwrap_or_default();
             let return_expr_scope = return_expr.as_ref().map(|_| scope.clone());
-            let return_type = return_expr.as_ref().and_then(render_type_expr_display);
+            // Display `return_type`: prefer the EXACT source text sliced from the
+            // return-type annotation span in the slot member's value-node file —
+            // this preserves a name the typed return cannot surface (an
+            // unresolved imported `VNode` raises to `Unknown { raw:
+            // "semanticMiss" }`, which `render_type_expr_display` renders as
+            // `None`, yet the source says `VNode[]`). Fall back to rendering the
+            // typed return when there is no span (synthetic / intersection
+            // return). Display-only; `return_expr` stays the semantic authority.
+            let return_type = return_span
+                .map(|span| CanonicalSpan::new(scope.as_str().into(), span))
+                .and_then(|cspan| slice_canonical_span(host, &cspan))
+                .map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty())
+                .or_else(|| return_expr.as_ref().and_then(render_type_expr_display));
             let (description, tags) = member_jsdoc_from_spans(host, member);
             Some(AnalyzedSlotField {
                 name: member.name.as_ref().to_string(),
