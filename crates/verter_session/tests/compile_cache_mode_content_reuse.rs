@@ -652,3 +652,104 @@ fn bare_side_effect_augmenter_invalidates_stale_empty_augmentation_index() {
          (pre={pre_count}, post={post_count})"
     );
 }
+
+#[test]
+fn bare_side_effect_barrel_with_reexported_augmenter_downgrades_to_stateless() {
+    // A bare side-effect import (`import "pkg";`) may resolve to a
+    // barrel `index.d.ts` that carries NO `ModuleAugmentationFact`
+    // entries itself but re-exports the actual augmenter file. F1's
+    // walk must follow the barrel's re-export edges and probe each
+    // re-exported file's augmentation facts — otherwise a packaged
+    // augmenter delivered through a barrel is missed and the owner
+    // stays in Content mode despite carrying a module-augmentation
+    // dependency.
+    //
+    // Discriminator: the barrel itself has empty `augmentations`; the
+    // augmentation lives in `pkg/augment.d.ts` which the barrel
+    // re-exports. The pre-fix walk stops at the barrel → owner stays
+    // Content. The post-fix walk follows the re-export chain →
+    // discovers the augmenter → owner downgrades to Stateless.
+    let host = host();
+
+    // The actual augmenter — declares `declare module "vue"`.
+    upsert_ts(
+        &host,
+        "/node_modules/pkg/augment.d.ts",
+        "declare module 'vue' {\n\
+         \x20 interface ComponentCustomProperties { $bar: string }\n\
+         }\n\
+         export {};\n",
+    );
+    // The barrel — empty augmentations, re-exports from ./augment.
+    upsert_ts(
+        &host,
+        "/node_modules/pkg/index.d.ts",
+        "export * from './augment';\n",
+    );
+    // Owner SIDE-EFFECT-imports the barrel only. With no relative
+    // augmenter, no binding-driven probe target for "vue", and no
+    // facts on the barrel itself, the only way the classifier can
+    // recognise the augmentation is by walking the barrel's
+    // re-export edges to discover the actual augmenter file.
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        "<script setup lang=\"ts\">\n\
+         import 'pkg';\n\
+         const n = 1;\n\
+         </script>\n\
+         <template><div>{{ n }}</div></template>\n",
+    );
+    host.set_exact_resolutions(
+        "/src/Comp.vue",
+        vec![ExactResolution {
+            specifier: "pkg".to_string(),
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::TypeImport,
+            resolved_canonical_id: Some("/node_modules/pkg/index.d.ts".to_string()),
+            possible_canonical_ids: vec!["/node_modules/pkg/index.d.ts".to_string()],
+        }],
+    );
+    // The barrel `export * from "./augment"` must resolve to
+    // pkg/augment.d.ts under the live resolver — set the override so
+    // the F1 walk's re-export traversal can follow the edge.
+    host.set_exact_resolutions(
+        "/node_modules/pkg/index.d.ts",
+        vec![ExactResolution {
+            specifier: "./augment".to_string(),
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::TypeImport,
+            resolved_canonical_id: Some("/node_modules/pkg/augment.d.ts".to_string()),
+            possible_canonical_ids: vec!["/node_modules/pkg/augment.d.ts".to_string()],
+        }],
+    );
+    let profile = content_profile();
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Script),
+            compile_profile: profile.clone(),
+        })
+        .expect("compile");
+
+    assert_eq!(response.requested_mode, CompileCacheMode::Content);
+    assert_eq!(
+        response.actual_mode,
+        CompileCacheMode::Stateless,
+        "a Content request whose owner SIDE-EFFECT-imports a barrel that re-exports an \
+         augmenter MUST downgrade to Stateless; the F1 walk must follow re-export edges"
+    );
+    assert_eq!(
+        response.downgrade_reason,
+        Some(DowngradeReason::HasModuleAugmentation),
+        "the firing reason must be HasModuleAugmentation, got {:?}",
+        response.downgrade_reason
+    );
+    assert_eq!(
+        host.compile_output_pure_content_entry_count(),
+        0,
+        "a downgraded Content request must NOT publish a content-addressed entry"
+    );
+}

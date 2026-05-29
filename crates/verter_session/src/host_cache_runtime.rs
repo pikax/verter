@@ -232,6 +232,23 @@ impl VerterHost {
             // here we derive it from the AUGMENTER's own augmentation
             // facts because a side-effect import gives the owner no
             // local hint about which module is being augmented.
+            // Side-effect imports may resolve to a barrel that itself
+            // carries NO `ModuleAugmentationFact` entries but re-exports
+            // the actual augmenter file (`pkg/index.d.ts` doing
+            // `export * from "./augment"` where `augment.d.ts` declares
+            // `declare module "vue"`). Walk each side-effect-imported
+            // canonical and its re-export edges iteratively so the
+            // augmenter is discovered regardless of whether it lives at
+            // the import target or deeper in the re-export chain.
+            //
+            // `REEXPORT_WALK_DEPTH` bounds the chain length; a barrel
+            // re-exporting through a few internal modules is normal,
+            // but unbounded recursion would let a pathological re-export
+            // cycle stall the probe.
+            const REEXPORT_WALK_DEPTH: usize = 8;
+            let mut visited: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
+            let mut queue: std::collections::VecDeque<(Arc<str>, usize)> =
+                std::collections::VecDeque::new();
             for import in &indexed.snapshot.imports {
                 if !import.bindings.is_empty() {
                     continue;
@@ -243,6 +260,15 @@ impl VerterHost {
                     continue;
                 };
                 if resolved_canonical.is_empty() {
+                    continue;
+                }
+                queue.push_back((Arc::from(resolved_canonical.as_str()), 0));
+            }
+            while let Some((resolved_canonical, depth)) = queue.pop_front() {
+                if !visited.insert(Arc::clone(&resolved_canonical)) {
+                    continue;
+                }
+                if depth >= REEXPORT_WALK_DEPTH {
                     continue;
                 }
                 // Materialise the resolved dep so the augmenter's
@@ -310,6 +336,69 @@ impl VerterHost {
                             per_import_targets.push(AugmentationTargetKind::ExternalSpecifier(
                                 InternedSpecifier::from(fact_specifier),
                             ));
+                        }
+                    }
+                }
+                // A barrel entry may carry NO augmentation facts itself
+                // and re-export the actual augmenter through
+                // `export * from "./augment"` or
+                // `export { X } from "./augment"`. The resolver
+                // materialises the barrel; walking its re-export edges
+                // here lets the per-fact probe see the augmenter at
+                // the next BFS level. The same iterative walk also
+                // covers chained barrels (a barrel re-exporting a
+                // barrel) up to `REEXPORT_WALK_DEPTH`.
+                //
+                // The `shallow_state.wildcard_reexports[i].canonical_id`
+                // and `ExportTarget::Reexport.canonical_id` fields are
+                // populated by the shallow-analysis resolver, which can
+                // leave them empty for declaration files whose
+                // module-resolution context differs from the live
+                // type-dependency resolver (e.g. packaged `.d.ts`
+                // entries). Re-resolve the raw source specifier through
+                // `resolve_type_dependency_canonical` here — same
+                // authority the binding-driven walk above uses — so a
+                // barrel whose shallow-time resolver returned `""`
+                // still surfaces the re-exported augmenter.
+                if let Some(barrel_indexed) = store.get_any(&resolved_canonical) {
+                    use crate::resolver_core::shallow_file_state::ExportTarget;
+                    for wildcard in &barrel_indexed.shallow_state.wildcard_reexports {
+                        let target_canonical: Option<Arc<str>> =
+                            if !wildcard.canonical_id.is_empty() {
+                                Some(Arc::from(wildcard.canonical_id.as_str()))
+                            } else {
+                                self.resolve_type_dependency_canonical(
+                                    &resolved_canonical,
+                                    &wildcard.source_specifier,
+                                )
+                                .filter(|c| !c.is_empty())
+                                .map(|c| Arc::from(c.as_str()))
+                            };
+                        if let Some(c) = target_canonical {
+                            queue.push_back((c, depth + 1));
+                        }
+                    }
+                    for target in barrel_indexed.shallow_state.exports.values() {
+                        if let ExportTarget::Reexport {
+                            canonical_id: cached_canonical,
+                            source_specifier,
+                            ..
+                        } = target
+                        {
+                            let target_canonical: Option<Arc<str>> = if !cached_canonical.is_empty()
+                            {
+                                Some(Arc::from(cached_canonical.as_str()))
+                            } else {
+                                self.resolve_type_dependency_canonical(
+                                    &resolved_canonical,
+                                    source_specifier,
+                                )
+                                .filter(|c| !c.is_empty())
+                                .map(|c| Arc::from(c.as_str()))
+                            };
+                            if let Some(c) = target_canonical {
+                                queue.push_back((c, depth + 1));
+                            }
                         }
                     }
                 }
