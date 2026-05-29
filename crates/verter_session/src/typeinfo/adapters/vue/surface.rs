@@ -490,21 +490,24 @@ pub(crate) fn normalize_jsdoc_body(raw: &str) -> String {
     out.trim().to_string()
 }
 
-fn member_jsdoc_from_spans(
+/// Slice a leading-JSDoc description span + tag spans into the published
+/// `(description, tags)` display pair. Shared by the member path
+/// ([`member_jsdoc_from_spans`]) and the call-signature emit path
+/// ([`signature_jsdoc_from_spans`]) — both anchor JSDoc on the typeinfo
+/// surface's spans, never a reparse.
+fn jsdoc_from_spans(
     host: &VerterHost,
-    member: &TypeInfoSurfaceMember,
+    description_span: Option<&CanonicalSpan>,
+    tag_spans: &[crate::typeinfo::surface::JsdocTagSpan],
 ) -> (Option<String>, Vec<JsdocTag>) {
     let slice = |cspan: &CanonicalSpan| -> Option<String> { slice_canonical_span(host, cspan) };
 
-    let description = member
-        .jsdoc_description_span
-        .as_ref()
+    let description = description_span
         .and_then(&slice)
         .map(|text| normalize_jsdoc_body(&text))
         .filter(|text| !text.is_empty());
 
-    let tags: Vec<JsdocTag> = member
-        .jsdoc_tag_spans
+    let tags: Vec<JsdocTag> = tag_spans
         .iter()
         .filter_map(|tag| {
             let name = slice(&tag.name_span)?.trim().to_string();
@@ -522,6 +525,28 @@ fn member_jsdoc_from_spans(
         .collect();
 
     (description, tags)
+}
+
+fn member_jsdoc_from_spans(
+    host: &VerterHost,
+    member: &TypeInfoSurfaceMember,
+) -> (Option<String>, Vec<JsdocTag>) {
+    jsdoc_from_spans(
+        host,
+        member.jsdoc_description_span.as_ref(),
+        &member.jsdoc_tag_spans,
+    )
+}
+
+/// Slice a call/construct signature's leading-JSDoc into `(description, tags)`.
+/// A call-signature emit (`(e: 'change', v: T): void`) documents the event via
+/// the JSDoc on the signature itself — extracted here from the signature's
+/// typeinfo JSDoc spans (symmetric with [`member_jsdoc_from_spans`]).
+fn signature_jsdoc_from_spans(
+    host: &VerterHost,
+    sig: &crate::typeinfo::surface::TypeInfoSurfaceSignature,
+) -> (Option<String>, Vec<JsdocTag>) {
+    jsdoc_from_spans(host, sig.jsdoc_description_span.as_ref(), &sig.jsdoc_tag_spans)
 }
 
 /// Raise a member's value node to a [`TypeExpr`] through the shared structural
@@ -726,6 +751,12 @@ pub fn emits_from_typeinfo_surface(
             .and_then(|cspan| slice_canonical_span(host, cspan))
             .map(|text| text.trim().trim_end_matches(';').trim_end().to_string())
             .filter(|text| !text.is_empty());
+        // The event's JSDoc rides on the call signature itself (the leading
+        // `/** */` block documenting `(e: 'change', …): void`), sliced from the
+        // signature's typeinfo JSDoc spans — symmetric with the property-style
+        // fallback's `member_jsdoc_from_spans`. A union of event-name literals on
+        // ONE signature shares that signature's JSDoc across each event it names.
+        let (description, tags) = signature_jsdoc_from_spans(host, sig);
         let mut push_event = |name: String| {
             emits.push(AnalyzedEmitField {
                 name,
@@ -733,8 +764,8 @@ pub fn emits_from_typeinfo_surface(
                 payload_type: payload_type.clone(),
                 payload_expr: Some(payload_tuple.clone()),
                 payload_expr_scope: Some(payload_scope.clone()),
-                description: None,
-                tags: Vec::new(),
+                description: description.clone(),
+                tags: tags.clone(),
             });
         };
         match &first.ty {
