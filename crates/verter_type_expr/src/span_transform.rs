@@ -460,27 +460,44 @@ mod tests {
         &prop.spans
     }
 
-    /// Construct a `RecursiveRef` whose `conditional_context` holds ONE frame
-    /// whose `check` and `extends` are inline object types carrying member
-    /// spans. The walker must reach into the frame for either transform to be
-    /// correct — a `RecursiveRef` arm that only recurses `type_arguments`
-    /// leaves these spans untouched.
-    fn recursive_ref_with_frame(check: TypeExpr, extends: TypeExpr) -> TypeExpr {
-        TypeExpr::RecursiveRef {
-            name: Arc::from("Self"),
-            type_arguments: Arc::from(Vec::<TypeExpr>::new()),
-            conditional_context: Arc::from(vec![RecursiveConditionalFrame {
+    /// One inline `(check, extends)` pair for a [`RecursiveConditionalFrame`],
+    /// each an object type carrying member spans at the supplied base offset.
+    struct FrameFixture {
+        check: TypeExpr,
+        extends: TypeExpr,
+    }
+
+    /// Construct a `RecursiveRef` carrying:
+    ///
+    /// - ONE span-bearing `type_arguments` entry (`type_arg`, an inline object
+    ///   type) — guards that the `RecursiveRef` arm still recurses
+    ///   `type_arguments` after it was split out of the shared `Ref` arm. An
+    ///   empty `type_arguments` slice would let a regressed arm that drops the
+    ///   `shift_arc_slice`/`clear_arc_slice` call pass unnoticed.
+    /// - TWO `conditional_context` frames whose `check` / `extends` are inline
+    ///   object types carrying member spans at distinct offsets — guards the
+    ///   `shift_frame_slice` / `clear_frame_slice` loop: an impl that transforms
+    ///   only frame `0` leaves frame `1` untouched and must be caught.
+    fn recursive_ref_fixture(type_arg: TypeExpr, frames: [FrameFixture; 2]) -> TypeExpr {
+        let conditional_context: Vec<RecursiveConditionalFrame> = frames
+            .into_iter()
+            .map(|frame| RecursiveConditionalFrame {
                 branch: RecursiveConditionalBranch::True,
                 decided: false,
-                check: Arc::new(check),
-                extends: Arc::new(extends),
-            }]),
+                check: Arc::new(frame.check),
+                extends: Arc::new(frame.extends),
+            })
+            .collect();
+        TypeExpr::RecursiveRef {
+            name: Arc::from("Self"),
+            type_arguments: Arc::from(vec![type_arg]),
+            conditional_context: Arc::from(conditional_context),
         }
     }
 
-    /// Extract the (check, extends) sub-types of a `RecursiveRef`'s first
-    /// conditional frame.
-    fn frame_types(ty: &TypeExpr) -> (&TypeExpr, &TypeExpr) {
+    /// Extract the (check, extends) sub-types of a `RecursiveRef`'s frame at
+    /// `index`, panicking if `index` is out of range.
+    fn frame_types(ty: &TypeExpr, index: usize) -> (&TypeExpr, &TypeExpr) {
         let TypeExpr::RecursiveRef {
             conditional_context,
             ..
@@ -488,105 +505,295 @@ mod tests {
         else {
             panic!("expected a RecursiveRef, got {ty:?}");
         };
-        let frame = &conditional_context[0];
+        let frame = conditional_context
+            .get(index)
+            .unwrap_or_else(|| panic!("expected frame {index}, got {conditional_context:?}"));
         (&frame.check, &frame.extends)
+    }
+
+    /// Extract the single `type_arguments` entry of a `RecursiveRef`, panicking
+    /// if the shape is not the one [`recursive_ref_fixture`] built.
+    fn sole_type_argument(ty: &TypeExpr) -> &TypeExpr {
+        let TypeExpr::RecursiveRef { type_arguments, .. } = ty else {
+            panic!("expected a RecursiveRef, got {ty:?}");
+        };
+        assert_eq!(
+            type_arguments.len(),
+            1,
+            "fixture must carry exactly one type argument, got {type_arguments:?}",
+        );
+        &type_arguments[0]
     }
 
     // Fix 1 (BINDING P1) — `shift_spans` must rebase the member spans held INSIDE
     // a `RecursiveRef`'s `conditional_context` frames (`check` / `extends`), not
     // only the `type_arguments`. Pre-fix the `RecursiveRef` arm shared the `Ref`
     // arm and shifted `type_arguments` only, so a frame holding an object type
-    // kept its stale wrapper-local member spans. This test FAILS against that
-    // tree (the nested span does not move) and PASSES once both `check` and
-    // `extends` are recursed.
+    // kept its stale wrapper-local member spans. This test also pins the two
+    // promises the dedicated arm now keeps: it STILL recurses `type_arguments`
+    // (a span-bearing arg shifts), and `shift_frame_slice` walks EVERY frame
+    // (both frame 0 AND frame 1 shift). It FAILS against an arm that skips
+    // `conditional_context`, drops the `type_arguments` recursion, or only
+    // transforms the first frame; it PASSES once all three are handled.
     #[test]
     fn shift_spans_rebases_recursive_ref_conditional_frame_member_spans() {
         let delta: i64 = 100;
-        // `check` and `extends` start at DIFFERENT offsets so a single accidental
-        // shift of one cannot masquerade as both being correct.
-        let check =
-            object_with_member_spans("a", Span::new(10, 19), Span::new(10, 11), Span::new(13, 19));
-        let extends =
-            object_with_member_spans("b", Span::new(40, 49), Span::new(40, 41), Span::new(43, 49));
-        let mut ty = recursive_ref_with_frame(check, extends);
+        // The type argument and every frame `check` / `extends` start at DISTINCT
+        // offsets so a single accidental shift of one cannot masquerade as all of
+        // them being correct.
+        let type_arg = object_with_member_spans(
+            "arg",
+            Span::new(70, 79),
+            Span::new(70, 73),
+            Span::new(75, 79),
+        );
+        let frames = [
+            FrameFixture {
+                check: object_with_member_spans(
+                    "a",
+                    Span::new(10, 19),
+                    Span::new(10, 11),
+                    Span::new(13, 19),
+                ),
+                extends: object_with_member_spans(
+                    "b",
+                    Span::new(40, 49),
+                    Span::new(40, 41),
+                    Span::new(43, 49),
+                ),
+            },
+            // Second frame: distinct offsets so a "frame 0 only" loop is caught.
+            FrameFixture {
+                check: object_with_member_spans(
+                    "c",
+                    Span::new(200, 209),
+                    Span::new(200, 201),
+                    Span::new(203, 209),
+                ),
+                extends: object_with_member_spans(
+                    "d",
+                    Span::new(230, 239),
+                    Span::new(230, 231),
+                    Span::new(233, 239),
+                ),
+            },
+        ];
+        let mut ty = recursive_ref_fixture(type_arg, frames);
 
         ty.shift_spans(delta);
 
-        let (check_after, extends_after) = frame_types(&ty);
-
-        let check_spans = member_spans(check_after);
+        // The span-bearing `type_arguments` entry must still shift: guards that
+        // the dedicated `RecursiveRef` arm did not drop `shift_arc_slice`.
+        let type_arg_spans = member_spans(sole_type_argument(&ty));
         assert_eq!(
-            check_spans.name,
+            type_arg_spans.name,
+            Some(Span::new(170, 173)),
+            "the `type_arguments` member NAME span must shift by exactly {delta}; an unchanged \
+             70..73 proves the `RecursiveRef` arm stopped recursing `type_arguments`",
+        );
+        assert_eq!(
+            type_arg_spans.type_annotation,
+            Some(Span::new(175, 179)),
+            "the `type_arguments` member TYPE span must shift by exactly {delta}",
+        );
+        assert_eq!(
+            type_arg_spans.declaration,
+            Some(Span::new(170, 179)),
+            "the `type_arguments` member DECLARATION span must shift by exactly {delta}",
+        );
+
+        // Frame 0.
+        let (check_0, extends_0) = frame_types(&ty, 0);
+        let check_0_spans = member_spans(check_0);
+        assert_eq!(
+            check_0_spans.name,
             Some(Span::new(110, 111)),
-            "the frame `check` member NAME span must shift by exactly {delta}; an unchanged \
+            "the frame-0 `check` member NAME span must shift by exactly {delta}; an unchanged \
              10..11 proves `shift_spans` skipped `conditional_context`",
         );
         assert_eq!(
-            check_spans.type_annotation,
+            check_0_spans.type_annotation,
             Some(Span::new(113, 119)),
-            "the frame `check` member TYPE span must shift by exactly {delta}",
+            "the frame-0 `check` member TYPE span must shift by exactly {delta}",
         );
         assert_eq!(
-            check_spans.declaration,
+            check_0_spans.declaration,
             Some(Span::new(110, 119)),
-            "the frame `check` member DECLARATION span must shift by exactly {delta}",
+            "the frame-0 `check` member DECLARATION span must shift by exactly {delta}",
         );
 
-        let extends_spans = member_spans(extends_after);
+        let extends_0_spans = member_spans(extends_0);
         assert_eq!(
-            extends_spans.name,
+            extends_0_spans.name,
             Some(Span::new(140, 141)),
-            "the frame `extends` member NAME span must shift by exactly {delta}; an unchanged \
+            "the frame-0 `extends` member NAME span must shift by exactly {delta}; an unchanged \
              40..41 proves `extends` was not recursed",
         );
         assert_eq!(
-            extends_spans.type_annotation,
+            extends_0_spans.type_annotation,
             Some(Span::new(143, 149)),
-            "the frame `extends` member TYPE span must shift by exactly {delta}",
+            "the frame-0 `extends` member TYPE span must shift by exactly {delta}",
+        );
+
+        // Frame 1 — must shift identically: guards `shift_frame_slice` walks the
+        // WHOLE slice, not just frame 0.
+        let (check_1, extends_1) = frame_types(&ty, 1);
+        let check_1_spans = member_spans(check_1);
+        assert_eq!(
+            check_1_spans.name,
+            Some(Span::new(300, 301)),
+            "the frame-1 `check` member NAME span must shift by exactly {delta}; an unchanged \
+             200..201 proves `shift_frame_slice` only transformed frame 0",
+        );
+        assert_eq!(
+            check_1_spans.type_annotation,
+            Some(Span::new(303, 309)),
+            "the frame-1 `check` member TYPE span must shift by exactly {delta}",
+        );
+        assert_eq!(
+            check_1_spans.declaration,
+            Some(Span::new(300, 309)),
+            "the frame-1 `check` member DECLARATION span must shift by exactly {delta}",
+        );
+
+        let extends_1_spans = member_spans(extends_1);
+        assert_eq!(
+            extends_1_spans.name,
+            Some(Span::new(330, 331)),
+            "the frame-1 `extends` member NAME span must shift by exactly {delta}; an unchanged \
+             230..231 proves frame 1 was skipped",
+        );
+        assert_eq!(
+            extends_1_spans.type_annotation,
+            Some(Span::new(333, 339)),
+            "the frame-1 `extends` member TYPE span must shift by exactly {delta}",
         );
     }
 
     // Fix 1 (BINDING P1) — `clear_spans` must drop the member spans held INSIDE a
     // `RecursiveRef`'s `conditional_context` frames. Pre-fix the spans survived
     // (honest absence was requested but a wrapper-local offset was retained).
-    // This test FAILS against that tree (the nested span is still `Some`) and
-    // PASSES once both `check` and `extends` are recursed.
+    // This test also pins the dedicated arm's two further promises: it STILL
+    // clears `type_arguments` (a span-bearing arg drops to `None`), and
+    // `clear_frame_slice` walks EVERY frame (frame 0 AND frame 1 clear). It
+    // FAILS against an arm that skips `conditional_context`, drops the
+    // `type_arguments` recursion, or only clears the first frame; it PASSES once
+    // all three are handled.
     #[test]
     fn clear_spans_drops_recursive_ref_conditional_frame_member_spans() {
-        let check =
-            object_with_member_spans("a", Span::new(10, 19), Span::new(10, 11), Span::new(13, 19));
-        let extends =
-            object_with_member_spans("b", Span::new(40, 49), Span::new(40, 41), Span::new(43, 49));
-        let mut ty = recursive_ref_with_frame(check, extends);
+        let type_arg = object_with_member_spans(
+            "arg",
+            Span::new(70, 79),
+            Span::new(70, 73),
+            Span::new(75, 79),
+        );
+        let frames = [
+            FrameFixture {
+                check: object_with_member_spans(
+                    "a",
+                    Span::new(10, 19),
+                    Span::new(10, 11),
+                    Span::new(13, 19),
+                ),
+                extends: object_with_member_spans(
+                    "b",
+                    Span::new(40, 49),
+                    Span::new(40, 41),
+                    Span::new(43, 49),
+                ),
+            },
+            // Second frame: a "frame 0 only" clear leaves these spans `Some`.
+            FrameFixture {
+                check: object_with_member_spans(
+                    "c",
+                    Span::new(200, 209),
+                    Span::new(200, 201),
+                    Span::new(203, 209),
+                ),
+                extends: object_with_member_spans(
+                    "d",
+                    Span::new(230, 239),
+                    Span::new(230, 231),
+                    Span::new(233, 239),
+                ),
+            },
+        ];
+        let mut ty = recursive_ref_fixture(type_arg, frames);
 
         ty.clear_spans();
 
-        let (check_after, extends_after) = frame_types(&ty);
-
-        let check_spans = member_spans(check_after);
+        // The span-bearing `type_arguments` entry must be cleared: guards that
+        // the dedicated `RecursiveRef` arm did not drop `clear_arc_slice`.
+        let type_arg_spans = member_spans(sole_type_argument(&ty));
         assert_eq!(
-            check_spans.name, None,
-            "the frame `check` member NAME span must be cleared; a surviving span proves \
+            type_arg_spans.name, None,
+            "the `type_arguments` member NAME span must be cleared; a surviving 70..73 proves \
+             the `RecursiveRef` arm stopped clearing `type_arguments`",
+        );
+        assert_eq!(
+            type_arg_spans.type_annotation, None,
+            "the `type_arguments` member TYPE span must be cleared",
+        );
+        assert_eq!(
+            type_arg_spans.declaration, None,
+            "the `type_arguments` member DECLARATION span must be cleared",
+        );
+
+        // Frame 0.
+        let (check_0, extends_0) = frame_types(&ty, 0);
+        let check_0_spans = member_spans(check_0);
+        assert_eq!(
+            check_0_spans.name, None,
+            "the frame-0 `check` member NAME span must be cleared; a surviving span proves \
              `clear_spans` skipped `conditional_context`",
         );
         assert_eq!(
-            check_spans.type_annotation, None,
-            "the frame `check` member TYPE span must be cleared",
+            check_0_spans.type_annotation, None,
+            "the frame-0 `check` member TYPE span must be cleared",
         );
         assert_eq!(
-            check_spans.declaration, None,
-            "the frame `check` member DECLARATION span must be cleared",
+            check_0_spans.declaration, None,
+            "the frame-0 `check` member DECLARATION span must be cleared",
         );
 
-        let extends_spans = member_spans(extends_after);
+        let extends_0_spans = member_spans(extends_0);
         assert_eq!(
-            extends_spans.name, None,
-            "the frame `extends` member NAME span must be cleared; a surviving span proves \
+            extends_0_spans.name, None,
+            "the frame-0 `extends` member NAME span must be cleared; a surviving span proves \
              `extends` was not recursed",
         );
         assert_eq!(
-            extends_spans.type_annotation, None,
-            "the frame `extends` member TYPE span must be cleared",
+            extends_0_spans.type_annotation, None,
+            "the frame-0 `extends` member TYPE span must be cleared",
+        );
+
+        // Frame 1 — must clear identically: guards `clear_frame_slice` walks the
+        // WHOLE slice, not just frame 0.
+        let (check_1, extends_1) = frame_types(&ty, 1);
+        let check_1_spans = member_spans(check_1);
+        assert_eq!(
+            check_1_spans.name, None,
+            "the frame-1 `check` member NAME span must be cleared; a surviving 200..201 proves \
+             `clear_frame_slice` only transformed frame 0",
+        );
+        assert_eq!(
+            check_1_spans.type_annotation, None,
+            "the frame-1 `check` member TYPE span must be cleared",
+        );
+        assert_eq!(
+            check_1_spans.declaration, None,
+            "the frame-1 `check` member DECLARATION span must be cleared",
+        );
+
+        let extends_1_spans = member_spans(extends_1);
+        assert_eq!(
+            extends_1_spans.name, None,
+            "the frame-1 `extends` member NAME span must be cleared; a surviving 230..231 proves \
+             frame 1 was skipped",
+        );
+        assert_eq!(
+            extends_1_spans.type_annotation, None,
+            "the frame-1 `extends` member TYPE span must be cleared",
         );
     }
 }
