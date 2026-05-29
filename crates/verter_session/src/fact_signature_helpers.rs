@@ -72,6 +72,7 @@ use std::sync::Arc;
 
 use verter_semantic::facts::registry::{FactKey, FactLane, InternedName, SymbolSpace};
 
+use crate::cache_runtime::{NonAdmissionReason, SignatureAdmission};
 use crate::resolver_core::{
     FactReadSetFinalise, FactVersionRef, ParseFactRef, ResolverContext, StoreView,
     FACT_SIGNATURE_CAP,
@@ -449,11 +450,12 @@ fn observed_self_root_fact(canonical_id: &str, observed_hash: Hash16) -> FactVer
 /// fact hashes live when the producer observed the file, not whatever
 /// is current at signature-build time.
 ///
-/// Returns `None` when the observed version's parse-fact registry
-/// cannot be recovered (no content-addressed artifact for
-/// `(canonical_id, observed_hash)`). A `None` result refuses
-/// shared-cache admission — the caller still returns the
-/// freshly-computed value, it only forgoes the shared cache.
+/// Returns [`SignatureAdmission::NonCacheable`] with
+/// [`NonAdmissionReason::UnresolvedProvenance`] when the observed
+/// version's parse-fact registry cannot be recovered (no
+/// content-addressed artifact for `(canonical_id, observed_hash)`).
+/// The caller still returns the freshly-computed value, it only
+/// forgoes the shared cache.
 ///
 /// Use this helper for caches keyed on `(canonical, exporter,
 /// member, space)` — e.g. `PreparedMemberDb`, slot-binding member
@@ -465,7 +467,7 @@ pub(crate) fn fact_signature_for_canonical_member(
     member: &str,
     space: SymbolSpace,
     observed_hash: Hash16,
-) -> Option<Arc<[FactVersionRef]>> {
+) -> SignatureAdmission {
     let exporter_name = InternedName::from(exporter);
     let member_name = InternedName::from(member);
     let presence_key = FactKey::MemberPresence {
@@ -481,24 +483,36 @@ pub(crate) fn fact_signature_for_canonical_member(
     // Lead with the observed-hash self-root `FileWholeHash`, then add
     // the path-precise `MemberPresence` / `Member` parse facts pinned
     // to the SAME observed content version.
+    let presence_fact = match parse_fact_ref_for_observed_current_content(
+        ctx,
+        canonical_id,
+        observed_hash,
+        presence_key,
+        FactLane::Semantic,
+    ) {
+        Some(fact) => fact,
+        None => {
+            return SignatureAdmission::NonCacheable(NonAdmissionReason::UnresolvedProvenance);
+        }
+    };
+    let body_fact = match parse_fact_ref_for_observed_current_content(
+        ctx,
+        canonical_id,
+        observed_hash,
+        body_key,
+        FactLane::Semantic,
+    ) {
+        Some(fact) => fact,
+        None => {
+            return SignatureAdmission::NonCacheable(NonAdmissionReason::UnresolvedProvenance);
+        }
+    };
     let entries: Vec<FactVersionRef> = vec![
         observed_self_root_fact(canonical_id, observed_hash),
-        FactVersionRef::Parse(parse_fact_ref_for_observed_current_content(
-            ctx,
-            canonical_id,
-            observed_hash,
-            presence_key,
-            FactLane::Semantic,
-        )?),
-        FactVersionRef::Parse(parse_fact_ref_for_observed_current_content(
-            ctx,
-            canonical_id,
-            observed_hash,
-            body_key,
-            FactLane::Semantic,
-        )?),
+        FactVersionRef::Parse(presence_fact),
+        FactVersionRef::Parse(body_fact),
     ];
-    Some(Arc::from(entries))
+    SignatureAdmission::Cacheable(ReadSetSignature::new(Arc::from(entries)))
 }
 
 /// Build a provenance-pure signature for a cache whose validity
@@ -523,16 +537,17 @@ pub(crate) fn fact_signature_for_canonical_member(
 /// All three parse facts are content-addressed against `observed_hash`
 /// via [`parse_fact_ref_for_observed_current_content`].
 ///
-/// Returns `None` when the observed version's parse-fact registry
-/// cannot be recovered. A `None` result refuses shared-cache admission
-/// — the caller still returns the freshly-computed value.
+/// Returns [`SignatureAdmission::NonCacheable`] with
+/// [`NonAdmissionReason::UnresolvedProvenance`] when the observed
+/// version's parse-fact registry cannot be recovered. The caller
+/// still returns the freshly-computed value.
 pub(crate) fn fact_signature_for_exported_type(
     ctx: &dyn ResolverContext,
     canonical_id: &str,
     type_name: &str,
     space: SymbolSpace,
     observed_hash: Hash16,
-) -> Option<Arc<[FactVersionRef]>> {
+) -> SignatureAdmission {
     let name = InternedName::from(type_name);
     let export_key = FactKey::Export {
         name: name.clone(),
@@ -549,31 +564,49 @@ pub(crate) fn fact_signature_for_exported_type(
     // Lead with the observed-hash self-root `FileWholeHash`, then add
     // the top-level-identity `Export` / `LocalDecl` / `MemberShape`
     // parse facts pinned to the SAME observed content version.
+    let export_fact = match parse_fact_ref_for_observed_current_content(
+        ctx,
+        canonical_id,
+        observed_hash,
+        export_key,
+        FactLane::Semantic,
+    ) {
+        Some(fact) => fact,
+        None => {
+            return SignatureAdmission::NonCacheable(NonAdmissionReason::UnresolvedProvenance);
+        }
+    };
+    let local_decl_fact = match parse_fact_ref_for_observed_current_content(
+        ctx,
+        canonical_id,
+        observed_hash,
+        local_decl_key,
+        FactLane::Semantic,
+    ) {
+        Some(fact) => fact,
+        None => {
+            return SignatureAdmission::NonCacheable(NonAdmissionReason::UnresolvedProvenance);
+        }
+    };
+    let member_shape_fact = match parse_fact_ref_for_observed_current_content(
+        ctx,
+        canonical_id,
+        observed_hash,
+        member_shape_key,
+        FactLane::Semantic,
+    ) {
+        Some(fact) => fact,
+        None => {
+            return SignatureAdmission::NonCacheable(NonAdmissionReason::UnresolvedProvenance);
+        }
+    };
     let entries: Vec<FactVersionRef> = vec![
         observed_self_root_fact(canonical_id, observed_hash),
-        FactVersionRef::Parse(parse_fact_ref_for_observed_current_content(
-            ctx,
-            canonical_id,
-            observed_hash,
-            export_key,
-            FactLane::Semantic,
-        )?),
-        FactVersionRef::Parse(parse_fact_ref_for_observed_current_content(
-            ctx,
-            canonical_id,
-            observed_hash,
-            local_decl_key,
-            FactLane::Semantic,
-        )?),
-        FactVersionRef::Parse(parse_fact_ref_for_observed_current_content(
-            ctx,
-            canonical_id,
-            observed_hash,
-            member_shape_key,
-            FactLane::Semantic,
-        )?),
+        FactVersionRef::Parse(export_fact),
+        FactVersionRef::Parse(local_decl_fact),
+        FactVersionRef::Parse(member_shape_fact),
     ];
-    Some(Arc::from(entries))
+    SignatureAdmission::Cacheable(ReadSetSignature::new(Arc::from(entries)))
 }
 
 /// Build a provenance-pure, whole-canonical signature for a cache
@@ -595,26 +628,36 @@ pub(crate) fn fact_signature_for_exported_type(
 /// signature this way. The `query_identity_self_root_substrate_tests`
 /// substrate suite exercises this helper to characterise the
 /// observed-hash self-root prepend.
+///
+/// Returns [`SignatureAdmission::NonCacheable`] with
+/// [`NonAdmissionReason::UnresolvedProvenance`] when the observed
+/// version's parse-fact registry cannot be recovered.
 #[cfg(test)]
 pub(crate) fn fact_signature_for_canonical_surface(
     ctx: &dyn ResolverContext,
     canonical_id: &str,
     observed_hash: Hash16,
-) -> Option<Arc<[FactVersionRef]>> {
+) -> SignatureAdmission {
     // Lead with the observed-hash self-root `FileWholeHash`, then add
     // the `SyntacticExportSet` surface parse fact pinned to the SAME
     // observed content version.
+    let surface_fact = match parse_fact_ref_for_observed_current_content(
+        ctx,
+        canonical_id,
+        observed_hash,
+        FactKey::SyntacticExportSet,
+        FactLane::Semantic,
+    ) {
+        Some(fact) => fact,
+        None => {
+            return SignatureAdmission::NonCacheable(NonAdmissionReason::UnresolvedProvenance);
+        }
+    };
     let entries: Vec<FactVersionRef> = vec![
         observed_self_root_fact(canonical_id, observed_hash),
-        FactVersionRef::Parse(parse_fact_ref_for_observed_current_content(
-            ctx,
-            canonical_id,
-            observed_hash,
-            FactKey::SyntacticExportSet,
-            FactLane::Semantic,
-        )?),
+        FactVersionRef::Parse(surface_fact),
     ];
-    Some(Arc::from(entries))
+    SignatureAdmission::Cacheable(ReadSetSignature::new(Arc::from(entries)))
 }
 
 /// Empty signature constructor for cache entries published outside
@@ -630,8 +673,14 @@ pub(crate) fn empty_fact_signature() -> Arc<[FactVersionRef]> {
 /// path-precise `FactVersionRef` signature plus the explicit self-root
 /// canonical set the warm-read validator checks **strictly**. Produced
 /// by `materialize_structure_read_set` (the `MaterializeStructureDb`
-/// carrier) and `ref_cycle_read_set` (the `RefCycleResultDb` carrier);
-/// a `None` result refuses shared-cache admission.
+/// carrier) and `ref_cycle_read_set` (the `RefCycleResultDb` carrier).
+/// `materialize_structure_read_set` returns
+/// `Result<StructuralCarrierReadSet, NonAdmissionReason>` so refusal
+/// modes (`SelfRootConflict`, `RouteGenerationDependency`) reach the
+/// caller verbatim; `ref_cycle_read_set` returns
+/// `Option<StructuralCarrierReadSet>` because its single refusal mode
+/// is a torn self-root observation (`SelfRootConflict`), which the
+/// caller attributes at the call site.
 pub(crate) type StructuralCarrierReadSet = (Arc<[FactVersionRef]>, Arc<[Arc<str>]>);
 
 /// A cache entry's dependency signature — the path-precise fact
@@ -840,6 +889,21 @@ impl ReadSetSignature {
     #[inline]
     pub fn is_overflow(&self) -> bool {
         self.overflowed
+    }
+
+    /// True iff this signature may be promoted into a warm cache entry.
+    ///
+    /// Cacheability is a function of overflow alone: an overflowed
+    /// signature is too large to admit safely and must route through
+    /// `ComputeAdmission::ReturnOnly`. **Emptiness is NOT a
+    /// non-cacheable condition** — a tracer that observed zero facts
+    /// validates vacuously on warm hits and is still safely cacheable.
+    /// Producers that need to distinguish "no facts observed" from
+    /// "non-empty fact rail" should read `self.facts.is_empty()`
+    /// directly.
+    #[inline]
+    pub fn is_cacheable(&self) -> bool {
+        !self.overflowed
     }
 }
 

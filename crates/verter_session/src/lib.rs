@@ -114,7 +114,12 @@ mod component_meta_slot_binding_skip_tests;
 mod component_meta_terminal_mode_tests;
 pub mod cross_file;
 pub mod fact_emission;
+// `fact_signature_helpers` is `pub(crate)`: the module's internals are
+// implementation detail. The only externally-needed type is
+// `ReadSetSignature` — the return type of the public inspector
+// `compile_slot_fact_dep_signature` — selectively re-exported below.
 pub(crate) mod fact_signature_helpers;
+pub use crate::fact_signature_helpers::ReadSetSignature;
 pub mod file_artifact_store;
 mod hash;
 pub(crate) mod instant;

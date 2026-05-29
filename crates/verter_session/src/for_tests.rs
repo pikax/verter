@@ -30,6 +30,12 @@ pub use crate::capture_token::{
 /// `crate::semantic_query_memo::SemanticGraphStore` directly.
 pub use crate::semantic_query_memo::{BatchExpandError, SemanticGraphStore};
 
+/// Re-export the validate-running probe surface so the
+/// `family_warm_read_releases_mutex_before_validate.rs`
+/// concurrency-fitness discriminator can arm + assert the post-fix
+/// snapshot+outside-lock-validate invariant.
+pub use crate::semantic_query_memo::{ValidateRunningProbeGuard, VALIDATE_RUNNING_PROBE_TEST_LOCK};
+
 /// Integration tests that drive the counter-helper dual-target
 /// write (`record_inflight_aborted_retry` /
 /// `record_cold_abort_swept`) need a `DepSignature` constructor
@@ -126,6 +132,20 @@ pub fn materialize_force_overflow_observations_for_tests(
 ) -> crate::component_meta_materialize::MaterializeForceOverflowGuard {
     crate::component_meta_materialize::MaterializeForceOverflowGuard::arm(n)
 }
+
+/// Arm the compile-tier's test-only fact-injection knob with `n`
+/// synthetic `FileWholeHash` observations per cold-compute call. When
+/// `n > FACT_SIGNATURE_CAP` (1024), the cold compute's installed fact
+/// tracer finalises with `Overflow`, exercising the
+/// refuse-publish-on-overflow contract on `CompileSlot` without
+/// requiring a workspace fixture that organically emits thousands of
+/// facts. The returned guard zeroes the knob on drop.
+pub fn compile_force_overflow_observations_for_tests(n: usize) -> CompileForceOverflowGuard {
+    CompileForceOverflowGuard::arm(n)
+}
+
+#[doc(hidden)]
+pub use crate::host_resolve::CompileForceOverflowGuard;
 
 /// Read the materialiser's `materialize_structure_overflow_refusals`
 /// counter for the given host. Test surface; production callers reach
@@ -304,3 +324,41 @@ pub fn component_meta_cold_traced_read_set_for_tests(
 pub use crate::tests::dispatch_bridges::{
     accumulate_dispatch_dep_signature_for_tests, observe_fence_entry_for_tests,
 };
+
+/// Test-only probe: returns `true` iff the scheduler holds an
+/// artifact snapshot for the `(canonical, profile)` pair. Mirrors
+/// the artifact-substrate side of the compile-tier carrier
+/// invariant `present in compile_slots ⇒ admitted cache entry`:
+/// after an overflowed compile the scheduler must NOT carry an
+/// artifact for the refused profile.
+pub fn compile_scheduler_artifact_present_for_tests(
+    host: &crate::VerterHost,
+    canonical_id: &str,
+    profile: &crate::types::CompileProfile,
+) -> bool {
+    let profile_hash = crate::hash::compile_profile_hash(profile);
+    host.scheduler
+        .try_get_artifact(canonical_id, profile_hash)
+        .is_some()
+}
+
+/// Test-only probe: returns `true` iff the scheduler holds ANY
+/// artifact snapshot for the `(canonical, profile)` pair regardless
+/// of generation coherence. Discriminates the eviction-on-refusal
+/// invariant from the generation-coherence filter on
+/// [`try_get_artifact`](verter_scheduler::scheduler::Scheduler::try_get_artifact):
+/// a stale artifact left in the map (because the refusal arm did not
+/// call `remove_artifact_if_not_newer_than`) is invisible to
+/// `try_get_artifact` after a generation bump, but visible here via
+/// `last_known_good_artifact`. After an overflowed compile that
+/// follows a successful one this MUST return `false`.
+pub fn compile_scheduler_last_known_good_artifact_present_for_tests(
+    host: &crate::VerterHost,
+    canonical_id: &str,
+    profile: &crate::types::CompileProfile,
+) -> bool {
+    let profile_hash = crate::hash::compile_profile_hash(profile);
+    host.scheduler
+        .try_get_last_known_good(canonical_id, profile_hash)
+        .is_some()
+}
