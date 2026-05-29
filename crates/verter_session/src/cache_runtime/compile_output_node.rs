@@ -190,6 +190,21 @@ impl CompileOutputValue {
 /// silently short-circuit through an unimplemented compute path.
 pub(crate) struct CompileOutputNodePureContent {
     entries: DashMap<CompileOutputPureContentKey, Arc<CacheEntry<Arc<CompileOutputValue>>>>,
+    /// Per-canonical reverse index: `canonical_id` → the set of content
+    /// keys published for that canonical. Maintained alongside `entries`
+    /// on every `publish_content` / `remove` / `clear_all` so a targeted
+    /// per-file invalidation can evict every content entry for one
+    /// canonical without enumerating the full key space.
+    ///
+    /// This is invalidation plumbing for a content-addressed store, NOT a
+    /// fact-validation rail: a key's content / env dimensions remain its
+    /// sole identity, and the reverse index never participates in cache
+    /// validity. It mirrors the session node's
+    /// `clear_compile_outputs_for_file` so explicit
+    /// `invalidate_compile_slots` / file-removal callers flush the
+    /// content-addressed entries for a canonical the same way they flush
+    /// the per-profile session slots.
+    by_canonical: DashMap<Arc<str>, rustc_hash::FxHashSet<CompileOutputPureContentKey>>,
     /// Required by the [`ArtifactNode`] trait. Unused on the inline
     /// peek / publish cold-build path this node actually takes — see the
     /// struct doc for why `Content` needs no node-level singleflight.
@@ -201,6 +216,7 @@ impl CompileOutputNodePureContent {
     pub(crate) fn new() -> Self {
         Self {
             entries: DashMap::new(),
+            by_canonical: DashMap::new(),
             inflight: InflightTable::new(),
         }
     }
@@ -232,12 +248,43 @@ impl CompileOutputNodePureContent {
             self_root_canonicals: Arc::from(Vec::new().as_slice()),
             validated_at_generation,
         };
+        self.by_canonical
+            .entry(Arc::clone(&key.canonical_id))
+            .or_default()
+            .insert(key.clone());
         self.entries.insert(key, Arc::new(entry));
     }
 
-    /// Remove the entry for `key`, if any.
+    /// Remove the entry for `key`, if any. Keeps the per-canonical
+    /// reverse index consistent — the key is dropped from its
+    /// canonical's set, and an emptied set is pruned.
     pub(crate) fn remove(&self, key: &CompileOutputPureContentKey) {
         self.entries.remove(key);
+        if let Some(mut set) = self.by_canonical.get_mut(&key.canonical_id) {
+            set.remove(key);
+            if set.is_empty() {
+                drop(set);
+                self.by_canonical.remove(&key.canonical_id);
+            }
+        }
+    }
+
+    /// Evict every content-addressed entry published for `canonical`.
+    ///
+    /// The targeted per-file invalidation surface for this node, paired
+    /// with the session node's `clear_compile_outputs_for_file`: an
+    /// explicit `invalidate_compile_slots` / file-removal caller flushes
+    /// the content-addressed entries for the canonical so a subsequent
+    /// `Content` request recompiles instead of serving a warm entry. A
+    /// content key carries no fact rail, so without this eviction a
+    /// same-content recompile after invalidation would warm-hit and
+    /// report `cache_hit = true`, breaking the force-recompute contract.
+    pub(crate) fn remove_canonical(&self, canonical: &str) {
+        if let Some((_, keys)) = self.by_canonical.remove(canonical) {
+            for key in keys {
+                self.entries.remove(&key);
+            }
+        }
     }
 
     /// Drop every content-addressed entry. Used by whole-store
@@ -246,6 +293,7 @@ impl CompileOutputNodePureContent {
     /// per-profile session slots.
     pub(crate) fn clear_all(&self) {
         self.entries.clear();
+        self.by_canonical.clear();
     }
 
     /// Entry count for the content-addressed store. Used by integration

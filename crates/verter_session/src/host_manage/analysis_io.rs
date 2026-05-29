@@ -1334,6 +1334,13 @@ impl VerterHost {
             derived.cached_resolved_meta.clear();
             derived.cached_meta_payload = None;
         }
+        // The content-addressed node is keyed independently of the
+        // per-profile session slots, so a targeted invalidation must flush
+        // it explicitly — a `Content` key carries no fact rail, so a
+        // same-content recompile would otherwise warm-hit and break the
+        // force-recompute contract.
+        self.compile_output_pure_content()
+            .remove_canonical(&canonical);
     }
 
     /// Remove a file from the host, cleaning up aliases, dependencies,
@@ -1374,6 +1381,11 @@ impl VerterHost {
                 derived.cached_resolved_meta.clear();
                 derived.cached_meta_payload = None;
             }
+            // Flush each dependent owner's content-addressed entries too —
+            // the removed file may have contributed to their compiled
+            // output, and the content node is keyed independently of the
+            // session slots cleared above.
+            self.compile_output_pure_content().remove_canonical(owner);
         }
 
         // notify_delete fires EdgeStore::remove_file (surgical per-owner

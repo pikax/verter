@@ -173,3 +173,58 @@ fn content_request_with_cross_file_dep_downgrades_to_stateless() {
         "a downgraded Content request must NOT publish a session slot"
     );
 }
+
+#[test]
+fn targeted_invalidation_evicts_content_entry_and_forces_recompile() {
+    // A `Content` key carries no fact rail, so a targeted
+    // `invalidate_compile_slots` MUST evict the content-addressed entry
+    // for that canonical — otherwise a same-content recompile would warm-
+    // hit and report `cache_hit = true`, breaking the force-recompute
+    // contract. The per-canonical reverse index on the content node is the
+    // eviction authority.
+    let host = host();
+    upsert_vue(&host, "/Plain.vue", FACT_FREE);
+    let profile = content_profile();
+
+    // First Content compile publishes exactly one content entry.
+    let _ = compile(&host, "/Plain.vue", &profile);
+    assert_eq!(
+        host.compile_output_pure_content_entry_count(),
+        1,
+        "first Content compile of a fact-free SFC must publish exactly one content entry"
+    );
+
+    // Targeted invalidation must flush the content-addressed entry.
+    host.invalidate_compile_slots("/Plain.vue");
+    assert_eq!(
+        host.compile_output_pure_content_entry_count(),
+        0,
+        "invalidate_compile_slots MUST evict the content-addressed entry for the canonical"
+    );
+
+    // The next request recompiles (cold) instead of warm-hitting.
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/Plain.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile.clone(),
+        })
+        .expect("recompile");
+    assert_eq!(
+        response.actual_mode,
+        CompileCacheMode::Content,
+        "the fact-free SFC still classifies as Content after invalidation"
+    );
+    assert!(
+        !response.cache_hit,
+        "after a targeted invalidation the next Content request MUST recompile (cache_hit == false), \
+         not warm-hit a stale content entry"
+    );
+    // The cold recompute re-publishes exactly one entry.
+    assert_eq!(
+        host.compile_output_pure_content_entry_count(),
+        1,
+        "the cold recompute must re-publish exactly one content entry"
+    );
+}
