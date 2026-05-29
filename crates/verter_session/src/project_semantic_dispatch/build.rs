@@ -1121,32 +1121,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// carrier in `Navigate` / `Skeleton`, which the deferred evaluator
     /// deliberately does NOT unwrap (it would over-evaluate symbolic
     /// IndexedAccess hops — see `evaluate.rs`). For those carrier sources we
-    /// read the one-level surface through the shared carrier-complete
-    /// reader [`Self::surface_view_from_base_node`] (Structural provenance —
-    /// a Pick/Omit source is never the macro-T own body) and synthesize a
-    /// `SurfaceView` from it. The carrier reader does not surface
-    /// construct/index signatures, so a carrier-sourced `Omit` drops those
-    /// (the cross-file heritage sources that exercise this path are plain
-    /// interfaces / classes without them); the resolved-`Object` fast path
-    /// above keeps them for every non-carrier source.
+    /// read the one-level surface through the shared empty-path `Shallow`
+    /// reader [`Self::resolve_typeinfo_surface_view`], which routes through the
+    /// SOLE query-time resolver and returns the core [`SurfaceView`]
+    /// PRESERVING call / construct / index signatures + keyspace. The `Omit`
+    /// arm then carries those signatures through (TS semantics: `Omit<T, K>`
+    /// filters property names only), where the old `MacroSurfaceView` reader
+    /// silently dropped construct / index signatures for a carrier-sourced
+    /// `Omit`.
     fn object_filter_source_surface(&self, source_resolved: SemanticNodeId) -> Option<SurfaceView> {
         match self.graph().node_data(source_resolved).as_deref() {
             Some(SemanticNodeData::Object(view)) => Some(view.clone()),
             Some(SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. }) => {
-                let macro_view = self.surface_view_from_base_node(
+                // A Pick/Omit source is never the macro-T own body — read it
+                // under the structural `published(Shallow)` context.
+                self.resolve_typeinfo_surface_view(
                     source_resolved,
-                    crate::semantic_query::SurfaceProvenanceContext::Structural,
-                )?;
-                Some(SurfaceView {
-                    members: Arc::from(macro_view.members.into_boxed_slice()),
-                    call_signatures: Arc::from(macro_view.call_signatures.into_boxed_slice()),
-                    construct_signatures: Arc::from(
-                        Vec::<SemanticNodeId>::new().into_boxed_slice(),
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Shallow,
                     ),
-                    index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
-                    keyspace: None,
-                    has_index_signature: false,
-                })
+                )
             }
             _ => None,
         }

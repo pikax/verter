@@ -532,6 +532,57 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Resolve a base node to its one-level core [`SurfaceView`] —
+    /// members + call / construct / index signatures + keyspace — via the
+    /// empty-path `Shallow` `ProjectPath` synthesiser.
+    ///
+    /// This is the SINGLE shared surface reader for the macro-shape and
+    /// object-filter paths: it routes through the SOLE query-time type
+    /// resolver (`SemanticQueryKey::ProjectPath { path: [] }`, the canonical
+    /// "expand the whole surface" shape) and returns the resolver's own
+    /// terminal `SemanticNodeData::Object(view)` verbatim. Because it reads
+    /// the core [`SurfaceView`] (not the lossy `MacroSurfaceView`) it PRESERVES
+    /// construct signatures, index signatures, the keyspace, and the
+    /// `has_index_signature` flag — the cross-file `Omit<Base, K>` carrier path
+    /// that the old reader silently dropped.
+    ///
+    /// `context.mode` MUST be [`ProjectionMode::Shallow`] so member values stay
+    /// reference-style (one-level surface, no recursive expansion). The
+    /// empty-path Shallow synthesiser already owns the declaration-placeholder
+    /// unwrap, the `A & B` Intersection own-body-shadows-heritage merge, the
+    /// union-common-member synthesis, and the cross-file `DeclRef` /
+    /// `InstantiationRef` carrier resolution — the same composition the
+    /// macro-surface reader open-codes — so this helper carries none of that
+    /// logic itself.
+    ///
+    /// Returns `None` when the projection errors or the terminal is not an
+    /// `Object` surface (a primitive / unresolvable carrier has no one-level
+    /// member surface).
+    pub(crate) fn resolve_typeinfo_surface_view(
+        &self,
+        base: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<crate::semantic_query::SurfaceView> {
+        debug_assert_eq!(
+            context.mode,
+            crate::semantic_query::ProjectionMode::Shallow,
+            "resolve_typeinfo_surface_view synthesises a one-level surface; mode must be Shallow"
+        );
+        let terminal = match self.execute(crate::semantic_query::SemanticQueryKey::ProjectPath {
+            base,
+            path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+            context,
+        }) {
+            crate::semantic_query::QueryResult::Value(node)
+            | crate::semantic_query::QueryResult::Recursive(node) => node,
+            crate::semantic_query::QueryResult::Error(_) => return None,
+        };
+        match self.graph().node_data(terminal).as_deref() {
+            Some(SemanticNodeData::Object(view)) => Some(view.clone()),
+            _ => None,
+        }
+    }
+
     /// Instantiate a declaration identity in `Skeleton` mode and read its
     /// one-level surface (the `DeclPlaceholder` / `DeclRef` carrier path of
     /// [`Self::surface_view_from_base_node`]).

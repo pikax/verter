@@ -7662,3 +7662,106 @@ fn backfill_member_index_surface_carries_prepared_member_spans_and_origin() {
          origin, not None — build.rs append transfer",
     );
 }
+
+
+/// U3c Commit 1 — discriminating: when a HERITAGE arm is a cross-file
+/// `Omit<Base, K>` (`interface Derived extends Omit<Base, K>`), `Base` is
+/// reached through `object_filter_source_surface`'s CARRIER branch (a
+/// `DeclRef` / `InstantiationRef`, NOT an inline `Object`, because heritage
+/// arms lower in the carrier-preserving Skeleton/Navigate mode). `Derived`'s
+/// shallow surface MUST therefore inherit `Base`'s construct AND index
+/// signatures.
+///
+/// This characterises the bug the new `resolve_typeinfo_surface_view` helper
+/// fixes: the retired `MacroSurfaceView` reader carried `members +
+/// call_signatures` ONLY, so `object_filter_source_surface` synthesised a
+/// `SurfaceView` with EMPTY construct/index vectors for a carrier-sourced
+/// `Omit`. The new helper reads the core `SurfaceView` (members + call +
+/// construct + index + keyspace) through the empty-path Shallow resolver, so
+/// `Omit`'s signature-preserving arm now sees the real signatures and `Derived`
+/// inherits them.
+///
+/// Discrimination: with `object_filter_source_surface`'s carrier arm dropping
+/// construct/index (the pre-Commit-1 behaviour) the asserts below observe ZERO
+/// inherited construct/index signatures and fail; with the helper they observe
+/// `Base`'s signatures inherited through the `Omit` heritage arm. Mutation-probe
+/// verified.
+#[test]
+fn cross_file_omit_heritage_carrier_preserves_construct_and_index_signatures() {
+    let host = host();
+    // `Base` carries a construct signature AND an index signature alongside its
+    // named members. `Omit<Base, 'a'>` (TS semantics) drops only the named
+    // member `a`, leaving the construct + index signatures intact; `Derived`
+    // then inherits the Omit'd surface through `extends`.
+    upsert_ts(
+        &host,
+        "/base.ts",
+        "export interface Base { new (): Base; [k: string]: unknown; a: string; b: number }",
+    );
+    upsert_ts(
+        &host,
+        "/consumer.ts",
+        "import type { Base } from './base';\n\
+         export interface Derived extends Omit<Base, 'a'> { own: number }",
+    );
+
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    // Resolve `Derived`'s declaration, then read its one-level surface through
+    // the SAME empty-path Shallow reader the cutover routes the macro/object-filter
+    // paths through. The `extends Omit<Base, 'a'>` heritage arm forces `Base`
+    // through `object_filter_source_surface`'s carrier branch.
+    let derived = match dispatch.execute(SemanticQueryKey::ResolveDecl(
+        crate::semantic_query::ResolveDeclKey {
+            scope: ScopeId {
+                canonical_id: Arc::from("/consumer.ts"),
+                local_scope: None,
+            },
+            name: Arc::from("Derived"),
+        },
+    )) {
+        QueryResult::Value(node) => node,
+        other => panic!("ResolveDecl(Derived) failed: {other:?}"),
+    };
+
+    let surface = dispatch
+        .resolve_typeinfo_surface_view(
+            derived,
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow),
+        )
+        .expect("Derived projects to an Object surface");
+
+    let member_names: Vec<&str> = surface.members.iter().map(|m| m.name.as_ref()).collect();
+    assert!(
+        member_names.contains(&"own"),
+        "Derived's own member `own` must be present: {member_names:?}"
+    );
+    assert!(
+        member_names.contains(&"b"),
+        "Derived inherits the non-omitted member `b` through `extends Omit<Base, 'a'>`: {member_names:?}"
+    );
+    assert!(
+        !member_names.contains(&"a"),
+        "the omitted member `a` must NOT be inherited: {member_names:?}"
+    );
+
+    // The bug-fix assertions: the cross-file `Omit` heritage carrier MUST carry
+    // through `Base`'s construct + index signatures into `Derived`'s surface.
+    // The retired `MacroSurfaceView` reader dropped both for the carrier source.
+    assert_eq!(
+        surface.construct_signatures.len(),
+        1,
+        "Derived must inherit Base's construct signature through `extends Omit<Base, 'a'>` \
+         (the retired MacroSurfaceView reader dropped it on the carrier path)"
+    );
+    assert!(
+        surface.has_index_signature,
+        "Derived must inherit Base's index-signature flag through `extends Omit<Base, 'a'>`"
+    );
+    assert_eq!(
+        surface.index_signatures.len(),
+        1,
+        "Derived must inherit Base's index signature through `extends Omit<Base, 'a'>` \
+         (the retired MacroSurfaceView reader dropped it on the carrier path)"
+    );
+}
