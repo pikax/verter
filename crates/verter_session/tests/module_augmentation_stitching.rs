@@ -1140,6 +1140,7 @@ fn effective_export_set_rejects_session_view() {
 // ────────────────────────────────────────────────────────────────
 
 #[test]
+#[allow(clippy::needless_borrows_for_generic_args)]
 fn relative_augmenter_resolver_runs_off_artifacts_guard() {
     let store = FileArtifactStore::new();
     let augmenter_canonical = "/dir/aug-relative.ts";
