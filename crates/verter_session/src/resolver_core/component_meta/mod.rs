@@ -8,35 +8,20 @@ use verter_semantic::analysis::types::{
 };
 
 use crate::resolver_core::{
-    resolve_type_declaration, surface_projector::ProjectedMacroSurfaces,
-    DeclarationMetadataResolver, FactVersionRef, ResolvedNativeProp, ResolvedTypeDeclaration,
+    resolve_type_declaration, DeclarationMetadataResolver, FactVersionRef, ResolvedNativeProp,
+    ResolvedTypeDeclaration,
 };
 
 mod cold_resolver;
 mod direct_macro;
-mod projected_type_expr;
 
 #[cfg(test)]
 mod tests;
 
 pub use cold_resolver::resolve_component_meta_parts;
-// Typed-IR bridge for imported macro surfaces — composes
-// `ResolveDecl` + `ProjectPath` dispatch via an explicit
-// `ResolverContext` parameter. See `imported_surface.rs` for the
-// full invariants and the architecture guards in
-// `tests/architecture_guards.rs` that pin its containment.
-pub use projected_type_expr::resolved_elements_to_type_expr_via_type_text;
-// Re-export `projected_macro_surfaces_to_type_expr` so the original
-// `crate::resolver_core::component_meta::projected_macro_surfaces_to_type_expr`
-// path keeps resolving (legacy public path; no in-tree consumers, but
-// preserved for downstream callers per Tier 2 W5d "public API
-// unchanged" acceptance gate).
 pub(crate) use direct_macro::{
     imported_declaration_surface_is_authoritative, imported_registry_seed_can_skip_refresh,
 };
-pub(crate) use projected_type_expr::project_macro_surfaces_from_expanded_shape;
-#[allow(unused_imports)]
-pub use projected_type_expr::projected_macro_surfaces_to_type_expr;
 
 /// Collect the set of binding names exposed by macros (e.g., `defineExpose` fields).
 /// Used as a filter for which `env.value_symbols` entries to expand as bindings
@@ -67,6 +52,20 @@ pub struct ResolvedTypeRegistryMeta {
     pub declaration: ResolvedTypeDeclaration,
 }
 
+/// Resolved per-macro metadata: declaration identity, authority/provenance
+/// gating, and the native-only `native_props` carrier.
+///
+/// The published props/emits/slots surface is NOT carried here. Those derive
+/// solely from the typeinfo macro-surface path
+/// ([`crate::VerterHost::vue_macro_dtos`]); [`component_meta_resolved_macros`]
+/// sources `ResolvedMacroInput.{props,emits,slots}` from that path keyed on the
+/// admitted macro index. `ResolvedMacroMeta` exists to (1) gate which
+/// macro indices contribute (the `surface_is_authoritative` /
+/// `type_references` filter consumed by the materialiser and the
+/// `component_meta_resolved_macros` adapter), (2) carry declaration identity +
+/// JSDoc for the registry seed, and (3) carry `native_props` (the
+/// private/protected class-member visibility surface with a real FFI/proto/JS
+/// consumer that the typeinfo surface does not cover).
 #[derive(Debug, Clone)]
 pub struct ResolvedMacroMeta {
     pub macro_index: usize,
@@ -76,9 +75,6 @@ pub struct ResolvedMacroMeta {
     pub surface_is_authoritative: bool,
     pub declaration: ResolvedTypeDeclaration,
     pub native_props: Vec<ResolvedNativeProp>,
-    pub props: Vec<verter_semantic::analysis::AnalyzedPropField>,
-    pub emits: Vec<verter_semantic::analysis::AnalyzedEmitField>,
-    pub slots: Vec<verter_semantic::analysis::AnalyzedSlotField>,
     pub jsdoc: Option<ResolvedJsdocBlock>,
 }
 
@@ -127,26 +123,68 @@ pub enum ComponentMetaResolutionPurpose {
     Fallthrough,
 }
 
+/// Build the [`verter_semantic::analysis::component_meta::ResolvedMacroInput`]
+/// set the `verter_semantic` component-meta extractor consumes, sourcing the
+/// props/emits/slots from the SOLE typeinfo macro-surface authority
+/// (`vue_macro_dtos`, reached through the resolver-context seam).
+///
+/// `resolved_macros` is consulted ONLY for gating + provenance: an entry
+/// contributes iff its macro index survives the `raw_macro_surface_is_authoritative`
+/// filter (a `defineExpose` with no fields stays authoritative and is excluded;
+/// every other macro kind passes). The field DATA comes from `vue_macro_dtos`,
+/// keyed on `(owner, macro_index, kind)` — the same key the materialiser's
+/// `synthesize_*_from_known_surface` path already uses. Because `vue_macro_dtos`
+/// returns ONE bundle per macro index, admitted indices are DEDUPLICATED here:
+/// multiple `ResolvedMacroMeta` entries per index (imported + owner-local) are
+/// gating/provenance facts, not distinct field authorities.
+///
+/// Host state is reached through `&dyn ResolverContext` (the §10a resolver-tier
+/// seal): `ctx.host_for_fact_tracer_install()` is the same bridge the
+/// materialiser's `typeinfo_macro_dtos` helper uses, so this stays inside the
+/// single resolution engine. `vue_macro_dtos` validates its own cached entry and
+/// bubbles the entry's fact signature into any active outer fact tracer (so an
+/// outer component-meta cold trace inherits the DTO's cross-file carrier facts on
+/// a warm DTO hit), keeping the outer component-meta cache entry correctly keyed.
 pub fn component_meta_resolved_macros(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    owner_canonical: &str,
     snapshot_macros: &[AnalyzedMacro],
     resolved_macros: &[ResolvedMacroMeta],
 ) -> Vec<verter_semantic::analysis::component_meta::ResolvedMacroInput> {
-    resolved_macros
-        .iter()
-        .filter(|resolved| {
-            snapshot_macros
-                .get(resolved.macro_index)
-                .is_none_or(|mac| !raw_macro_surface_is_authoritative(mac))
-        })
-        .map(
-            |resolved| verter_semantic::analysis::component_meta::ResolvedMacroInput {
+    let mut seen_indices = FxHashSet::default();
+    let mut inputs = Vec::new();
+    for resolved in resolved_macros {
+        let admitted = snapshot_macros
+            .get(resolved.macro_index)
+            .is_none_or(|mac| !raw_macro_surface_is_authoritative(mac));
+        if !admitted {
+            continue;
+        }
+        if !seen_indices.insert(resolved.macro_index) {
+            continue;
+        }
+        let Some(mac) = snapshot_macros.get(resolved.macro_index) else {
+            continue;
+        };
+        let dtos = ctx.host_for_fact_tracer_install().vue_macro_dtos(
+            &crate::typeinfo::types::VueMacroSurfaceRequest {
+                owner_canonical: std::sync::Arc::from(owner_canonical),
                 macro_index: resolved.macro_index,
-                props: resolved.props.clone(),
-                emits: resolved.emits.clone(),
-                slots: resolved.slots.clone(),
+                macro_kind: mac.kind,
+                root_identity: ctx.get_whole_hash(owner_canonical).unwrap_or([0u8; 16]),
+                level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
             },
-        )
-        .collect()
+        );
+        inputs.push(
+            verter_semantic::analysis::component_meta::ResolvedMacroInput {
+                macro_index: resolved.macro_index,
+                props: dtos.props.clone(),
+                emits: dtos.emits.clone(),
+                slots: dtos.slots.clone(),
+            },
+        );
+    }
+    inputs
 }
 
 pub fn component_meta_type_registry(
@@ -209,13 +247,23 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
             .is_empty()
     }
 
-    fn resolve_owner_local_macro_surface(
+    /// Whether the owner-local root `root_name` projects to a NON-EMPTY
+    /// prepared macro surface for `macro_kind`.
+    ///
+    /// This is the authority gate for the cold resolver's owner-local arm: it
+    /// pushes an authoritative [`ResolvedMacroMeta`] entry for the root iff
+    /// this returns `true`. The published props/emits/slots surface itself is
+    /// NOT projected here — it is owned by the typeinfo macro-surface path
+    /// (`vue_macro_dtos`); this method only signals "does this owner-local root
+    /// have a real surface to gate on", folding the prior emptiness check that
+    /// inspected the projected props/emits/slots.
+    fn owner_local_macro_root_has_surface(
         &self,
         _owner_canonical: &str,
         _root_name: &str,
         _macro_kind: AnalyzedMacroKind,
-    ) -> Option<ProjectedMacroSurfaces> {
-        None
+    ) -> bool {
+        false
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -321,179 +369,6 @@ fn placeholder_type_declaration(
         span: verter_span::Span::default(),
         kind: crate::resolver_core::ResolvedDeclarationKind::Unknown,
         text: None,
-    }
-}
-
-/// Reconstruct the original `JsdocTag.text` payload from the
-/// post-parse `(text, raw_type, subject_name)` triple stored on
-/// `ResolvedJsdocTag`.
-///
-/// `parse_jsdoc_tag_payload` (in `meta_resolve.rs`) splits a tag's raw
-/// trailing text into three pieces: the `{Type}` block (`raw_type`),
-/// an optional subject name (only for `@param`/`@arg`/`@argument`),
-/// and the remaining trailing description text (`text`). The simple
-/// `JsdocTag.text` form keeps everything as one string. To round-trip
-/// through `host.resolve_jsdoc_block` we reassemble the three pieces
-/// in the order the parser took them apart.
-fn jsdoc_tag_text_from_resolved(tag: &ResolvedJsdocTag) -> Option<String> {
-    if let Some(raw_type) = &tag.raw_type {
-        let mut out = String::new();
-        out.push('{');
-        out.push_str(raw_type);
-        out.push('}');
-        if let Some(subject) = &tag.subject_name {
-            out.push(' ');
-            out.push_str(subject);
-        }
-        if let Some(text) = &tag.text {
-            out.push(' ');
-            out.push_str(text);
-        }
-        Some(out)
-    } else {
-        tag.text.clone()
-    }
-}
-
-fn jsdoc_tags_from_resolved(
-    resolved: &[ResolvedJsdocTag],
-) -> Vec<verter_semantic::analysis::types::JsdocTag> {
-    resolved
-        .iter()
-        .map(|tag| verter_semantic::analysis::types::JsdocTag {
-            name: tag.name.clone(),
-            text: jsdoc_tag_text_from_resolved(tag),
-        })
-        .collect()
-}
-
-/// graph-native per-member JSDoc enrichment.
-///
-/// Walks the resolved cross-file `elements` parallel to the way
-/// `project_macro_surfaces` projected them, and asks
-/// `host.resolve_jsdoc_block` (an existing host API) for the JSDoc
-/// block sitting near each source-element span. Found descriptions
-/// and tags overwrite the empty `description = None` / `tags = vec![]`
-/// values that the graph-native projection (which
-/// receives `source = None`) wrote.
-///
-/// the resolver passed the imported declaration's raw
-/// source text into `project_macro_surfaces`, which then called
-/// `member_jsdoc(source, prop.span)` per element. deleted
-/// the host source-text reader from this resolver and the fallback
-/// paths it fed; the source-text inputs are gone. This helper reuses the
-/// shared `host.resolve_jsdoc_block` helper (the same path the
-/// declaration-level JSDoc already uses), which reads from the
-/// host-owned analysis source cache rather than re-parsing raw
-/// text — preserving the cache-owned recovery rule (CLAUDE.md
-/// "Component-Meta Native Vs Compat" + Macro Type Traversal Rule).
-#[allow(clippy::too_many_arguments)]
-fn enrich_projected_jsdoc<H>(
-    host: &H,
-    declaration: &ResolvedTypeDeclaration,
-    elements: &ResolvedElements,
-    macro_kind: AnalyzedMacroKind,
-    projected: &mut ProjectedMacroSurfaces,
-    expanded: bool,
-    tracked_deps: &mut BTreeSet<String>,
-    cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-    visiting: &mut FxHashSet<(String, String)>,
-) where
-    H: ComponentMetaResolverHost,
-{
-    if declaration.canonical_source.is_empty() {
-        return;
-    }
-
-    let mut apply_jsdoc =
-        |span: verter_span::Span,
-         description_slot: &mut Option<String>,
-         tags_slot: &mut Vec<verter_semantic::analysis::types::JsdocTag>| {
-            if span.start == 0 && span.end == 0 {
-                return;
-            }
-            if let Some(block) = host.resolve_jsdoc_block(
-                declaration.canonical_source.as_str(),
-                span,
-                expanded,
-                tracked_deps,
-                cache,
-                visiting,
-            ) {
-                if block.description.is_some() {
-                    *description_slot = block.description;
-                }
-                if !block.tags.is_empty() {
-                    *tags_slot = jsdoc_tags_from_resolved(&block.tags);
-                }
-            }
-        };
-
-    match macro_kind {
-        AnalyzedMacroKind::DefineProps
-        | AnalyzedMacroKind::WithDefaults
-        | AnalyzedMacroKind::DefineModel => {
-            // `project_macro_surfaces` collects public props in the
-            // same iteration order; walk the same filter to align
-            // source spans 1:1 with `projected.props[i]`.
-            let public_props: Vec<&_> = elements
-                .props
-                .iter()
-                .filter(|prop| prop.visibility.is_public())
-                .collect();
-            for (proj, src) in projected.props.iter_mut().zip(public_props.iter()) {
-                apply_jsdoc(src.span, &mut proj.description, &mut proj.tags);
-            }
-        }
-        AnalyzedMacroKind::DefineEmits => {
-            if !elements.emits.is_empty() {
-                for (proj, src) in projected.emits.iter_mut().zip(elements.emits.iter()) {
-                    apply_jsdoc(src.span, &mut proj.description, &mut proj.tags);
-                }
-            } else {
-                // Property-style emits: `project_macro_surfaces`
-                // walks `elements.props` filtering public + dedup'd
-                // by name. Reproduce the same filter to align spans.
-                let mut seen = FxHashSet::default();
-                let mut prop_iter = elements
-                    .props
-                    .iter()
-                    .filter(|prop| prop.visibility.is_public())
-                    .filter_map(|prop| {
-                        let name = prop.key_name.clone()?;
-                        if !seen.insert(name) {
-                            return None;
-                        }
-                        Some(prop)
-                    });
-                for proj in projected.emits.iter_mut() {
-                    if let Some(src) = prop_iter.next() {
-                        apply_jsdoc(src.span, &mut proj.description, &mut proj.tags);
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-        AnalyzedMacroKind::DefineSlots => {
-            // `project_macro_surfaces` walks public props and keeps
-            // those whose type either yields slot bindings, a return
-            // type, or resolves as a function. Match by name to align
-            // (slots' projected order is the public-prop order with
-            // non-slot entries dropped).
-            let mut by_name: std::collections::HashMap<&str, &_> = elements
-                .props
-                .iter()
-                .filter(|prop| prop.visibility.is_public())
-                .filter_map(|prop| prop.key_name.as_deref().map(|name| (name, prop)))
-                .collect();
-            for proj in projected.slots.iter_mut() {
-                if let Some(src) = by_name.remove(proj.name.as_str()) {
-                    apply_jsdoc(src.span, &mut proj.description, &mut proj.tags);
-                }
-            }
-        }
-        AnalyzedMacroKind::DefineExpose | AnalyzedMacroKind::DefineOptions => {}
     }
 }
 

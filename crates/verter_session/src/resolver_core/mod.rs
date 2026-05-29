@@ -69,10 +69,9 @@ pub use route_db::{
 pub type ResolverHash16 = verter_semantic::analysis::Hash16;
 pub use component_meta::{
     collect_requested_binding_names, component_meta_resolved_macros, component_meta_type_registry,
-    resolve_component_meta_parts, resolved_elements_to_type_expr_via_type_text,
-    ComponentMetaEvalOutputs, ComponentMetaResolutionPurpose, ComponentMetaResolverHost,
-    ResolvedComponentMetaParts, ResolvedImportedMacroSurface, ResolvedJsdocBlock, ResolvedJsdocTag,
-    ResolvedMacroMeta, ResolvedTypeRegistryMeta,
+    resolve_component_meta_parts, ComponentMetaEvalOutputs, ComponentMetaResolutionPurpose,
+    ComponentMetaResolverHost, ResolvedComponentMetaParts, ResolvedImportedMacroSurface,
+    ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta, ResolvedTypeRegistryMeta,
 };
 pub use component_meta_query_engine::ComponentMetaQueryEngine;
 pub(crate) use component_meta_query_engine::{
@@ -130,9 +129,7 @@ pub use shallow_file_state::{
     ShallowFileState, ShallowImportResolver, ShallowTypeSymbol, ShallowTypeView,
     ShallowValueSymbol, WildcardReexport,
 };
-pub use surface_projector::{
-    project_macro_surfaces, slot_info_from_type_expr, ProjectedMacroSurfaces, ResolvedNativeProp,
-};
+pub use surface_projector::{project_macro_surfaces, ProjectedMacroSurfaces, ResolvedNativeProp};
 
 /// Lane-identity token for singleflight deduplication.
 ///

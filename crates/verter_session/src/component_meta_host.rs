@@ -643,6 +643,8 @@ fn extract_component_meta_from_resolved_with_evaluated(
     include_fallthrough: bool,
 ) -> ComponentMetaAnalysis {
     let resolved_macros = resolver_component_meta_resolved_macros(
+        host,
+        canonical_id,
         resolved.snapshot.macros.as_ref(),
         &resolved.resolved_macros,
     );

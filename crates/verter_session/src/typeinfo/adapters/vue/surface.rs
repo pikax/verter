@@ -323,6 +323,16 @@ impl VerterHost {
             self.vue_shallow_metadata_store()
                 .get_with_view(&key, &store_view, generation)
         {
+            // Bubble the cached entry's cross-file carrier fact signature into
+            // any active outer fact tracer. An outer component-meta cold trace
+            // (e.g. `component_meta_resolved_macros` consuming these DTOs)
+            // inherits the DTO's carrier facts on this warm hit; without the
+            // bubble a prewarmed DTO would under-key the outer cache entry (a
+            // carrier edit that invalidates this DTO entry must also invalidate
+            // the component-meta entry that read it). Cold misses bubble
+            // automatically: the `install_fact_tracer` scope below nests under
+            // the outer tracer and `observe_fan_out` reaches every active cell.
+            cached.read_set_signature.bubble_via_tls();
             return std::sync::Arc::clone(&cached.dtos);
         }
 

@@ -12718,11 +12718,7 @@ mod single_resolution_engine_guards {
         ("crates/verter_session/src/project_type_store.rs", 5),
         (
             "crates/verter_session/src/resolver_core/component_meta/mod.rs",
-            4,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta/projected_type_expr.rs",
-            2,
+            3,
         ),
         (
             "crates/verter_session/src/resolver_core/component_meta_query_engine/mod.rs",
@@ -12754,7 +12750,7 @@ mod single_resolution_engine_guards {
         ),
         (
             "crates/verter_session/src/resolver_core/surface_projector.rs",
-            17,
+            10,
         ),
         (
             "crates/verter_session/src/resolver_core/symbol_resolver.rs",
@@ -12851,11 +12847,7 @@ mod single_resolution_engine_guards {
         ),
         (
             "crates/verter_session/src/resolver_core/component_meta/mod.rs",
-            4,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta/projected_type_expr.rs",
-            2,
+            3,
         ),
         (
             "crates/verter_session/src/resolver_core/external_macro_types.rs",

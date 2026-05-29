@@ -22,8 +22,7 @@ use crate::verter::v1::{
     ObjectMember as ProtoObjectMember, ObjectNode, OriginEdge as ProtoOriginEdge,
     OriginGraph as ProtoOriginGraph, OriginNode as ProtoOriginNode, ParenthesizedNode,
     PartialBranchReason, PropMeta, PublicInstanceMemberMeta, PublicInstanceMeta, RefNode,
-    ResolvedEmitField, ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta, ResolvedNativeProp,
-    ResolvedPropField, ResolvedRootStep, ResolvedSlotBinding, ResolvedSlotField,
+    ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta, ResolvedNativeProp, ResolvedRootStep,
     ResolvedTypeDeclaration, RestNode, RootBranch, RootInfo, RootReachability, RootTargetRef,
     ScriptBlockMeta, SelectorMeta, SfcAttributeMeta, SfcBlocksMeta, SlotBindingMeta, SlotMeta,
     StyleBlockMeta as ProtoStyleBlockMeta, StyleMeta, TemplateBlockMeta, TemplateLiteralNode,
@@ -968,59 +967,6 @@ fn resolved_macro_meta_to_proto(
                 visibility_id: builder.string_id(&prop.visibility),
                 span_start: prop.span_start,
                 span_end: prop.span_end,
-            })
-            .collect(),
-        props: mac
-            .props
-            .iter()
-            .map(|prop| ResolvedPropField {
-                name_id: builder.string_id(&prop.name),
-                is_optional: prop.is_optional,
-                type_annotation_id: builder.string_id_opt(prop.type_annotation.as_deref()),
-                description_id: builder.string_id_opt(prop.description.as_deref()),
-                tags: prop
-                    .tags
-                    .iter()
-                    .map(|tag| jsdoc_tag_to_proto(builder, tag))
-                    .collect(),
-            })
-            .collect(),
-        emits: mac
-            .emits
-            .iter()
-            .map(|emit| ResolvedEmitField {
-                name_id: builder.string_id(&emit.name),
-                payload_type_id: builder.string_id_opt(emit.payload_type.as_deref()),
-                description_id: builder.string_id_opt(emit.description.as_deref()),
-                tags: emit
-                    .tags
-                    .iter()
-                    .map(|tag| jsdoc_tag_to_proto(builder, tag))
-                    .collect(),
-            })
-            .collect(),
-        slots: mac
-            .slots
-            .iter()
-            .map(|slot| ResolvedSlotField {
-                name_id: builder.string_id(&slot.name),
-                is_required: slot.is_required,
-                bindings: slot
-                    .bindings
-                    .iter()
-                    .map(|binding| ResolvedSlotBinding {
-                        name_id: builder.string_id(&binding.name),
-                        type_annotation_id: builder
-                            .string_id_opt(binding.type_annotation.as_deref()),
-                    })
-                    .collect(),
-                return_type_id: builder.string_id_opt(slot.return_type.as_deref()),
-                description_id: builder.string_id_opt(slot.description.as_deref()),
-                tags: slot
-                    .tags
-                    .iter()
-                    .map(|tag| jsdoc_tag_to_proto(builder, tag))
-                    .collect(),
             })
             .collect(),
         jsdoc: mac

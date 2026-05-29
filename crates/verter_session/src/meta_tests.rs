@@ -68,6 +68,38 @@ fn prop_names(snapshot: &crate::types::FileAnalysisSnapshot) -> Vec<String> {
         .collect()
 }
 
+/// Resolved-macro prop names sourced from the SOLE typeinfo macro-surface
+/// authority (`vue_macro_dtos`, FullMetadata), keyed on each DefineProps macro
+/// index (deduped, mirroring the production producer). The resolved-state
+/// `ResolvedMacroMeta` no longer carries the published props/emits/slots
+/// surface; it supplies only the macro index + kind for provenance.
+fn resolved_macro_prop_names(
+    host: &VerterHost,
+    owner: &str,
+    state: &crate::meta_resolve::ResolvedComponentMetaState,
+) -> Vec<String> {
+    let mut seen = rustc_hash::FxHashSet::default();
+    state
+        .resolved_macros
+        .iter()
+        .filter(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .filter(|m| seen.insert(m.macro_index))
+        .flat_map(|m| {
+            host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
+                owner_canonical: std::sync::Arc::from(owner),
+                macro_index: m.macro_index,
+                macro_kind: m.macro_kind,
+                root_identity: host.current_or_read_whole_hash(owner).unwrap_or([0u8; 16]),
+                level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+            })
+            .props
+            .iter()
+            .map(|p| p.name.clone())
+            .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 fn evaluated_prop_type<'a>(types: &'a ExpandedComponentTypes, name: &str) -> &'a TypeExpr {
     &types
         .props
@@ -5880,8 +5912,8 @@ defineProps<Props>()
         "`ProjectionMode::Expanded` should resolve cross-file macro types on second call"
     );
     assert_eq!(
-        first.resolved_macros[0].props.len(),
-        second.resolved_macros[0].props.len(),
+        resolved_macro_prop_names(project.host(), "/App.vue", &first).len(),
+        resolved_macro_prop_names(project.host(), "/App.vue", &second).len(),
         "repeated calls should produce the same resolved prop count"
     );
 
@@ -5991,13 +6023,9 @@ defineProps<Props>()
         !first.resolved_macros.is_empty(),
         "`ProjectionMode::Expanded` should resolve cross-file macro types"
     );
-    let first_prop_names: Vec<&str> = first.resolved_macros[0]
-        .props
-        .iter()
-        .map(|p| p.name.as_str())
-        .collect();
+    let first_prop_names = resolved_macro_prop_names(project.host(), "/src/App.vue", &first);
     assert!(
-        first_prop_names.contains(&"a") && first_prop_names.contains(&"b"),
+        first_prop_names.contains(&"a".to_string()) && first_prop_names.contains(&"b".to_string()),
         "first call should resolve props a and b, got: {:?}",
         first_prop_names
     );
@@ -6020,15 +6048,11 @@ defineProps<Props>()
         !second.resolved_macros.is_empty(),
         "should still have resolved macros after dep change"
     );
-    let second_prop_names: Vec<&str> = second.resolved_macros[0]
-        .props
-        .iter()
-        .map(|p| p.name.as_str())
-        .collect();
+    let second_prop_names = resolved_macro_prop_names(project.host(), "/src/App.vue", &second);
 
     // Assert+: result includes the new prop 'c'
     assert!(
-        second_prop_names.contains(&"c"),
+        second_prop_names.contains(&"c".to_string()),
         "dependency change should produce updated props including 'c', got: {:?}",
         second_prop_names
     );
@@ -11991,15 +12015,28 @@ defineProps<ChildProps>()
         .iter()
         .find(|meta| meta.type_name == "ButtonProps")
         .expect("should resolve ButtonProps");
+    let button_dtos =
+        project
+            .host()
+            .vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
+                owner_canonical: std::sync::Arc::from("/src/App.vue"),
+                macro_index: button.macro_index,
+                macro_kind: button.macro_kind,
+                root_identity: project
+                    .host()
+                    .current_or_read_whole_hash("/src/App.vue")
+                    .unwrap_or([0u8; 16]),
+                level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+            });
     assert!(
-        button.props.iter().any(|prop| prop.name == "loading"),
+        button_dtos.props.iter().any(|prop| prop.name == "loading"),
         "resolved ButtonProps should include inherited props, got: {:?}",
-        button.props
+        button_dtos.props
     );
     assert!(
-        button.props.iter().any(|prop| prop.name == "label"),
+        button_dtos.props.iter().any(|prop| prop.name == "label"),
         "resolved ButtonProps should include button props, got: {:?}",
-        button.props
+        button_dtos.props
     );
 }
 

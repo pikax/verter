@@ -628,15 +628,19 @@ message ComponentMetaResolution {
 }
 
 message ResolvedMacroMeta {
+  // Tags 7/8/9 (props/emits/slots) are RESERVED: the resolved-macro debug
+  // projection no longer carries the published props/emits/slots surface.
+  // That surface is owned solely by the typeinfo macro-surface path; the
+  // resolved-macro entry exists for declaration identity + native_props (the
+  // class-member visibility surface) + authority/provenance gating.
+  reserved 7, 8, 9;
+  reserved "props", "emits", "slots";
   uint32 macro_index = 1;
   uint32 macro_kind_id = 2;
   uint32 type_name_id = 3;
   uint32 import_source_id = 4;
   ResolvedTypeDeclaration declaration = 5;
   repeated ResolvedNativeProp native_props = 6;
-  repeated ResolvedPropField props = 7;
-  repeated ResolvedEmitField emits = 8;
-  repeated ResolvedSlotField slots = 9;
   ResolvedJsdocBlock jsdoc = 10;
 }
 
@@ -647,35 +651,6 @@ message ResolvedNativeProp {
   uint32 visibility_id = 4;
   uint32 span_start = 5;
   uint32 span_end = 6;
-}
-
-message ResolvedPropField {
-  uint32 name_id = 1;
-  bool is_optional = 2;
-  uint32 type_annotation_id = 3;
-  uint32 description_id = 4;
-  repeated JsdocTag tags = 5;
-}
-
-message ResolvedEmitField {
-  uint32 name_id = 1;
-  uint32 payload_type_id = 2;
-  uint32 description_id = 3;
-  repeated JsdocTag tags = 5;
-}
-
-message ResolvedSlotField {
-  uint32 name_id = 1;
-  bool is_required = 2;
-  repeated ResolvedSlotBinding bindings = 3;
-  uint32 return_type_id = 4;
-  uint32 description_id = 5;
-  repeated JsdocTag tags = 6;
-}
-
-message ResolvedSlotBinding {
-  uint32 name_id = 1;
-  uint32 type_annotation_id = 2;
 }
 
 message ResolvedJsdocBlock {

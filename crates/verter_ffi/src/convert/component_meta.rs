@@ -392,46 +392,6 @@ pub(super) fn resolved_macro_to_ffi(
                 span_end: prop.span.end,
             })
             .collect(),
-        props: resolved
-            .props
-            .iter()
-            .map(|prop| FfiResolvedPropField {
-                name: prop.name.clone(),
-                is_optional: prop.is_optional,
-                type_annotation: prop.type_annotation.clone(),
-                description: prop.description.clone(),
-                tags: prop.tags.iter().cloned().map(jsdoc_to_ffi).collect(),
-            })
-            .collect(),
-        emits: resolved
-            .emits
-            .iter()
-            .map(|emit| FfiResolvedEmitField {
-                name: emit.name.clone(),
-                payload_type: emit.payload_type.clone(),
-                description: emit.description.clone(),
-                tags: emit.tags.iter().cloned().map(jsdoc_to_ffi).collect(),
-            })
-            .collect(),
-        slots: resolved
-            .slots
-            .iter()
-            .map(|slot| FfiResolvedSlotField {
-                name: slot.name.clone(),
-                is_required: slot.is_required,
-                bindings: slot
-                    .bindings
-                    .iter()
-                    .map(|binding| FfiResolvedSlotBinding {
-                        name: binding.name.clone(),
-                        type_annotation: binding.type_annotation.clone(),
-                    })
-                    .collect(),
-                return_type: slot.return_type.clone(),
-                description: slot.description.clone(),
-                tags: slot.tags.iter().cloned().map(jsdoc_to_ffi).collect(),
-            })
-            .collect(),
         jsdoc: resolved.jsdoc.as_ref().map(|jsdoc| FfiResolvedJsdocBlock {
             description: jsdoc.description.clone(),
             tags: jsdoc.tags.iter().map(resolved_jsdoc_tag_to_ffi).collect(),

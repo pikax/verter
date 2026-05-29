@@ -1504,6 +1504,8 @@ pub(crate) fn extract_component_meta_from_resolved(
 ) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
     let resolved_macros = resolver_component_meta_resolved_macros(
+        host,
+        canonical.as_str(),
         resolved.snapshot.macros.as_ref(),
         &resolved.resolved_macros,
     );
@@ -1584,6 +1586,8 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
 ) {
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
     let resolved_macros = resolver_component_meta_resolved_macros(
+        host,
+        canonical.as_str(),
         resolved.snapshot.macros.as_ref(),
         &resolved.resolved_macros,
     );

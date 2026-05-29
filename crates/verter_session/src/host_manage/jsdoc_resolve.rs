@@ -335,26 +335,43 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
             .collect()
     }
 
-    fn resolve_owner_local_macro_surface(
+    fn owner_local_macro_root_has_surface(
         &self,
         owner_canonical: &str,
         root_name: &str,
         macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind,
-    ) -> Option<crate::resolver_core::surface_projector::ProjectedMacroSurfaces> {
-        // bridge via per-engine helper.
+    ) -> bool {
+        // Project the owner-local root's prepared shape and report whether it
+        // is a non-empty macro surface. The actual props/emits/slots are NOT
+        // materialised here — they are owned by the typeinfo macro-surface
+        // path (`vue_macro_dtos`); this is purely the authority gate the cold
+        // resolver uses to decide whether to push an owner-local entry.
         let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self.ctx);
-        let shape = project_prepared_type_surface_shape_via_host_threaded(
+        let Some(shape) = project_prepared_type_surface_shape_via_host_threaded(
             &mut query_engine,
             owner_canonical,
             root_name,
-        )?;
-        Some(
-            crate::resolver_core::component_meta::project_macro_surfaces_from_expanded_shape(
-                macro_kind,
-                &shape,
-                Some(owner_canonical),
-            ),
-        )
+        ) else {
+            return false;
+        };
+        match macro_kind {
+            // Props / model / slots gate on any member surface.
+            verter_semantic::analysis::AnalyzedMacroKind::DefineProps
+            | verter_semantic::analysis::AnalyzedMacroKind::WithDefaults
+            | verter_semantic::analysis::AnalyzedMacroKind::DefineModel
+            | verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
+                !shape.properties.is_empty()
+                    || !shape.call_signatures.is_empty()
+                    || !shape.index_signatures.is_empty()
+            }
+            // Emits surface comes from either property-style members or
+            // call-signature events.
+            verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
+                !shape.properties.is_empty() || !shape.call_signatures.is_empty()
+            }
+            verter_semantic::analysis::AnalyzedMacroKind::DefineExpose
+            | verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => false,
+        }
     }
 
     fn resolve_macro_elements(
