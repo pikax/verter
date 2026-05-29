@@ -1,0 +1,582 @@
+//! Typed compile-output cache nodes.
+//!
+//! Two typed nodes own the read/write surface for compiled SFC output:
+//!
+//! * [`CompileOutputNodePureContent`] — a content-addressed
+//!   [`ArtifactNode`] keyed by every deterministic input the compiled
+//!   bytes depend on. One entry per key; no fact-validation rail. Used
+//!   by callers that opt into pure content-keyed reuse and accept that
+//!   cross-file edits invalidate only through env-hash bumps.
+//!
+//! * [`CompileOutputNodeFactValidatedSession`] — a query-identity
+//!   [`QueryNode`] keyed by `(canonical_id, profile_hash)`. Multi-
+//!   candidate slots coexist under the per-slot cap, each candidate
+//!   validated against the path-precise [`ReadSetSignature`]. Backed
+//!   by the per-profile [`ProfileState::compile_slots`] table — the
+//!   public interface is this node's typed methods; direct
+//!   `compile_slots` access from outside this module is forbidden
+//!   (`virtual_file_pipeline.rs` routes its reads and writes through
+//!   the methods below).
+//!
+//! Both nodes are stateless adapters over host storage: the
+//! [`PureContent`] entries live in this struct's [`DashMap`]; the
+//! [`FactValidatedSession`] entries live on the host's
+//! [`ProfileState`] map. The node types carry only the inflight
+//! tables and (for `PureContent`) the entry map; the host hands the
+//! node a `&ProfileState` (or the compile-cache shard) at call time.
+//!
+//! `#![allow(dead_code)]` at module scope: substrate types and
+//! methods landed before the routing rehome in
+//! `virtual_file_pipeline.rs`. The inline `tests` module exercises
+//! every public surface independently of the routing.
+#![allow(dead_code)]
+
+use std::sync::Arc;
+
+use dashmap::DashMap;
+use rustc_hash::FxHashMap;
+
+use super::admission::{
+    CacheAdmission, CacheEntry, Candidate, DeferredVictims, FactCandidateDiscriminant,
+    PublishCoreOutcome, PublishOutcome, SignatureAdmission,
+};
+use super::node::{ArtifactNode, ComputeCtx, QueryFlightKey, QueryNode};
+use super::singleflight::InflightTable;
+use crate::fact_signature_helpers::ReadSetSignature;
+use crate::types::{
+    CachedTsx, CachedVirtualFile, CompileSlot, DiagnosticsSnapshot, Hash16, ProfileState,
+    VirtualNodeKind,
+};
+
+// ── Key shapes ────────────────────────────────────────────────────────
+
+/// Cache key for the content-addressed compile-output node.
+///
+/// Every byte-determined input the compiled artifact depends on enters
+/// the key: the source canonical and its content hash, the four split
+/// env-dimension hashes from [`super::world_snapshot::CompileEnvDims`],
+/// the public-API mode hash, the source-map policy hash, and the
+/// compiler / plugin version hashes. Two requests that agree on every
+/// key dimension MUST produce byte-identical output, so a single
+/// content entry serves both — no fact-validation rail is required.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct CompileOutputPureContentKey {
+    /// Canonical id of the SFC whose output is cached.
+    pub canonical_id: Arc<str>,
+    /// `whole_hash` of the source content at compile time.
+    pub content_hash: Hash16,
+    /// Parse-domain env hash (lib + parser flags).
+    pub parse_env_hash: Hash16,
+    /// Resolve-domain env hash (workspace aliases, paths, etc.).
+    pub resolve_env_hash: Hash16,
+    /// Type-domain env hash (lib.d.ts, compilerOptions).
+    pub type_env_hash: Hash16,
+    /// Library env hash (the global TS lib set).
+    pub lib_env_hash: Hash16,
+    /// Project identity hash (tsconfig path, project root).
+    pub project_identity: Hash16,
+    /// Public-API mode hash projecting the compile mode discriminator.
+    pub compile_cache_mode_hash: Hash16,
+    /// Source-map emission policy hash.
+    pub source_map_policy_hash: Hash16,
+    /// Compiler crate semantic-version hash.
+    pub compiler_version: Hash16,
+    /// Plugin set semantic-version hash.
+    pub plugin_versions: Hash16,
+}
+
+/// Slot key for the fact-validated session compile-output node.
+///
+/// Per R6, this key carries NO content/version hash — multi-candidate
+/// slots coexist on the same `(canonical, profile_hash)` pair, each
+/// candidate validated by its own fact signature against the caller's
+/// live view. The `profile_hash` is the same `u64` the legacy
+/// `compile_slots` table is keyed by; carrying it here keeps the
+/// session-node slot key one-to-one with the underlying storage.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct CompileOutputSessionKey {
+    /// Canonical id of the SFC whose output is cached.
+    pub canonical_id: Arc<str>,
+    /// Profile-hash discriminator (same as `ProfileState.compile_slots`
+    /// map key).
+    pub profile_hash: u64,
+}
+
+// ── Value shape ───────────────────────────────────────────────────────
+
+/// Cached compile output. Mirrors the publishable subset of
+/// [`CompileSlot`] used by both typed nodes — virtual-file outputs,
+/// diagnostics, optional fallback / IDE artifacts, and the captured
+/// hashes that the legacy warm-hit pre-filter consults. The fact rail
+/// lives separately on the [`ArtifactNode::Value`] / [`Candidate`]
+/// envelope, NOT inside the value (so the value is identical between
+/// pure-content and session-mode entries).
+#[derive(Clone)]
+pub(crate) struct CompileOutputValue {
+    /// Cached semantic hash of the source content at compile time.
+    pub semantic_hash: Hash16,
+    /// Cached style-override hash captured at publish.
+    pub style_override_hash: u64,
+    /// Cached content-override hash captured at publish.
+    pub content_override_hash: u64,
+    /// Per-virtual-node-kind outputs (Script, Template, Style, Main,
+    /// Custom).
+    pub outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
+    /// Snapshot of compile diagnostics published with this entry.
+    pub diagnostics: DiagnosticsSnapshot,
+    /// Optional last-good outputs for `DevServeLastKnownGood`.
+    pub last_good_outputs: Option<FxHashMap<VirtualNodeKind, CachedVirtualFile>>,
+    /// Optional combined TSX output (IDE / LSP).
+    pub tsx: Option<CachedTsx>,
+    /// Optional template-analysis snapshot extracted during compile.
+    pub template_analysis:
+        Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+}
+
+impl CompileOutputValue {
+    /// Build a value from a compile-tier publish record. Threads the
+    /// override + semantic hashes and the per-kind outputs unchanged.
+    pub(crate) fn from_compile_record(
+        semantic_hash: Hash16,
+        style_override_hash: u64,
+        content_override_hash: u64,
+        outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
+        diagnostics: DiagnosticsSnapshot,
+        last_good_outputs: Option<FxHashMap<VirtualNodeKind, CachedVirtualFile>>,
+        tsx: Option<CachedTsx>,
+        template_analysis: Option<
+            verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+        >,
+    ) -> Self {
+        Self {
+            semantic_hash,
+            style_override_hash,
+            content_override_hash,
+            outputs,
+            diagnostics,
+            last_good_outputs,
+            tsx,
+            template_analysis,
+        }
+    }
+}
+
+// ── PureContent node ──────────────────────────────────────────────────
+
+/// Content-addressed compile-output cache node.
+///
+/// Implements [`ArtifactNode`] over a `DashMap<Key, Arc<CacheEntry>>`.
+/// No fact-validation rail — two requests with byte-identical keys
+/// MUST produce byte-identical output, so a single warm entry serves
+/// both.
+///
+/// `compute` is intentionally a stub at the trait surface: the typed
+/// node's production callers (`virtual_file_pipeline.rs`) cold-build
+/// the output inline (the existing `compile_entry` path) and admit the
+/// fresh value through [`Self::publish_content`]. The trait's
+/// `compute` arm exists so the node can later be wired into
+/// `cache_runtime::lookup` once the cold-build path is rehomed into a
+/// node closure.
+pub(crate) struct CompileOutputNodePureContent {
+    entries: DashMap<CompileOutputPureContentKey, Arc<CacheEntry<Arc<CompileOutputValue>>>>,
+    inflight: InflightTable<QueryFlightKey<CompileOutputPureContentKey>>,
+}
+
+impl CompileOutputNodePureContent {
+    /// Construct a fresh node with empty storage.
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: DashMap::new(),
+            inflight: InflightTable::new(),
+        }
+    }
+
+    /// Read-only peek for a pure-content entry. Returns the cached
+    /// value when an entry exists. Validation against the caller's
+    /// live world generation is the caller's responsibility — for
+    /// pure-content mode, the env-hash dimensions in the key already
+    /// invalidate on every observable env change.
+    pub(crate) fn peek(
+        &self,
+        key: &CompileOutputPureContentKey,
+    ) -> Option<Arc<CompileOutputValue>> {
+        self.entries.get(key).map(|e| e.value.clone())
+    }
+
+    /// Publish a freshly compiled value into the content-addressed
+    /// store. The value is wrapped in `Arc` at admission so subsequent
+    /// peeks pay only the refcount bump.
+    pub(crate) fn publish_content(
+        &self,
+        key: CompileOutputPureContentKey,
+        value: CompileOutputValue,
+        validated_at_generation: u64,
+    ) {
+        let entry = CacheEntry {
+            value: Arc::new(value),
+            signature: ReadSetSignature::new(Arc::from(Vec::new().as_slice())),
+            self_root_canonicals: Arc::from(Vec::new().as_slice()),
+            validated_at_generation,
+        };
+        self.entries.insert(key, Arc::new(entry));
+    }
+
+    /// Remove the entry for `key`, if any.
+    pub(crate) fn remove(&self, key: &CompileOutputPureContentKey) {
+        self.entries.remove(key);
+    }
+
+    /// Test-only entry count. Used by integration tests that verify
+    /// content-mode publishes vs session-mode publishes are disjoint.
+    #[cfg(test)]
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+impl Default for CompileOutputNodePureContent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ArtifactNode for CompileOutputNodePureContent {
+    type Key = CompileOutputPureContentKey;
+    type Value = Arc<CompileOutputValue>;
+
+    fn entries(&self) -> &DashMap<Self::Key, Arc<CacheEntry<Self::Value>>> {
+        &self.entries
+    }
+
+    fn inflight(&self) -> &InflightTable<QueryFlightKey<Self::Key>> {
+        &self.inflight
+    }
+
+    /// Pure-content nodes do NOT cold-build through the substrate;
+    /// the production callsite (`virtual_file_pipeline.rs`) builds
+    /// the value inline and admits through [`Self::publish_content`].
+    /// The trait arm returns a [`CacheAdmission::Failed`] so that
+    /// any future `cache_runtime::lookup` consumer cannot silently
+    /// short-circuit through an unimplemented compute path —
+    /// callers that need cold-build routing must wire the closure
+    /// at the call site.
+    fn compute(
+        &self,
+        _key: &Self::Key,
+        _cx: &mut ComputeCtx<'_>,
+    ) -> CacheAdmission<Self::Value> {
+        CacheAdmission::Failed {
+            reason: verter_audit::NonAdmissionReason::ComputeFailed,
+        }
+    }
+
+    /// Validate a published entry against the caller's view. For
+    /// pure-content mode this is a trivial generation gate — the
+    /// env-hash dimensions in the key already discriminate every
+    /// observable env-state change.
+    fn validate(
+        &self,
+        _key: &Self::Key,
+        entry: &CacheEntry<Self::Value>,
+        cx: &ComputeCtx<'_>,
+    ) -> Option<Self::Value> {
+        if entry.validated_at_generation == cx.generation() {
+            Some(entry.value.clone())
+        } else {
+            None
+        }
+    }
+}
+
+// ── FactValidatedSession node ─────────────────────────────────────────
+
+/// Query-identity compile-output cache node backed by the per-profile
+/// [`ProfileState::compile_slots`] table.
+///
+/// The node owns the `lookup` / `publish` / `remove` typed methods
+/// every caller in `virtual_file_pipeline.rs` consults. Direct
+/// `compile_slots` access from outside this module is forbidden —
+/// the field stays private to the typed-node module and every read /
+/// write routes through the methods below.
+///
+/// Warm-hit validation runs the same path-precise oracle the legacy
+/// `compile_slot_fact_signature_validates` ran (the helper has been
+/// folded into this node's `lookup` impl per the Plan B / B5
+/// deletion list).
+pub(crate) struct CompileOutputNodeFactValidatedSession {
+    inflight: InflightTable<QueryFlightKey<CompileOutputSessionKey>>,
+}
+
+impl CompileOutputNodeFactValidatedSession {
+    /// Construct a fresh node. The node holds no entry storage of its
+    /// own — entries live on the host's [`ProfileState::compile_slots`]
+    /// map and are addressed through `(canonical, profile_hash)` at
+    /// every method.
+    pub(crate) fn new() -> Self {
+        Self {
+            inflight: InflightTable::new(),
+        }
+    }
+
+    /// Warm-hit lookup over the per-canonical [`ProfileState`].
+    ///
+    /// Returns `Some(value)` only when:
+    /// 1. A slot exists for `profile_hash`.
+    /// 2. The slot's `semantic_hash`, `style_override_hash`, and
+    ///    `content_override_hash` match the supplied references.
+    /// 3. The slot's path-precise fact signature validates against the
+    ///    caller's live store view (`validate_facts` callback).
+    /// 4. The slot's carrier is `Cacheable` (i.e. not an overflowed
+    ///    signature that snuck in).
+    ///
+    /// The caller passes the live override / semantic hashes and a
+    /// closure that validates the fact rail. The closure is invoked
+    /// at most once per lookup and only after the cheaper hash
+    /// predicates pass.
+    pub(crate) fn lookup<F>(
+        &self,
+        profile_state: &ProfileState,
+        profile_hash: u64,
+        live_semantic_hash: &Hash16,
+        live_style_override_hash: u64,
+        live_content_override_hash: u64,
+        validate_facts: F,
+    ) -> Option<SessionLookupHit>
+    where
+        F: FnOnce(&ReadSetSignature) -> bool,
+    {
+        let slot = profile_state.compile_slot_for_node(profile_hash)?;
+        // Carrier-defence: overflowed slots must never satisfy a warm
+        // read — the cold-build producer refuses to publish them.
+        // Double-sided enforcement (producer refuses; lookup refuses)
+        // prevents a regression of either side from accepting stale
+        // warm hits.
+        if !slot.fact_dep_signature.is_cacheable() {
+            return None;
+        }
+        if slot.semantic_hash != *live_semantic_hash
+            || slot.style_override_hash != live_style_override_hash
+            || slot.content_override_hash != live_content_override_hash
+        {
+            return None;
+        }
+        if !slot.fact_dep_signature.facts.is_empty() && !validate_facts(&slot.fact_dep_signature) {
+            return None;
+        }
+        Some(SessionLookupHit {
+            outputs: slot.outputs.clone(),
+            diagnostics: slot.diagnostics.clone(),
+            tsx: slot.tsx.clone(),
+        })
+    }
+
+    /// Publish a freshly compiled value into the session slot. Routes
+    /// through the `SignatureAdmission` carrier: `Cacheable` publishes
+    /// the slot under the path-precise signature; `NonCacheable`
+    /// (overflow / forced refusal / budget exceeded) refuses
+    /// admission AND removes any prior slot for the same
+    /// `(canonical, profile_hash)` so the carrier invariant `present
+    /// in compile_slots ⇒ admitted cacheable entry` holds across
+    /// re-computes.
+    ///
+    /// Returns `SessionPublishOutcome::Admitted` when the slot was
+    /// published, or `SessionPublishOutcome::Refused(reason)` when
+    /// admission was refused.
+    pub(crate) fn publish(
+        &self,
+        profile_state: &mut ProfileState,
+        profile_hash: u64,
+        admission: SignatureAdmission,
+        value: CompileOutputValue,
+        last_access_tick: u64,
+    ) -> SessionPublishOutcome {
+        match admission {
+            SignatureAdmission::Cacheable(signature) => {
+                let slot = CompileSlot {
+                    semantic_hash: value.semantic_hash,
+                    style_override_hash: value.style_override_hash,
+                    content_override_hash: value.content_override_hash,
+                    outputs: value.outputs,
+                    diagnostics: value.diagnostics,
+                    last_good_outputs: value.last_good_outputs,
+                    last_access_tick,
+                    tsx: value.tsx,
+                    template_analysis: value.template_analysis,
+                    fact_dep_signature: signature,
+                };
+                profile_state.compile_slot_insert_for_node(profile_hash, slot);
+                SessionPublishOutcome::Admitted
+            }
+            SignatureAdmission::NonCacheable(reason) => {
+                profile_state.compile_slot_remove_for_node(profile_hash);
+                SessionPublishOutcome::Refused(reason)
+            }
+        }
+    }
+
+    /// Read-only peek for the fact-signature of a session slot. Used
+    /// by tests and external observability surfaces to verify the
+    /// producer recorded the expected cross-file fact set.
+    pub(crate) fn peek_signature(
+        &self,
+        profile_state: &ProfileState,
+        profile_hash: u64,
+    ) -> Option<ReadSetSignature> {
+        profile_state
+            .compile_slot_for_node(profile_hash)
+            .map(|slot| slot.fact_dep_signature.clone())
+    }
+
+    /// Read-only access to a session slot's combined IDE / LSP TSX
+    /// output, when present. Used by `get_ide` to satisfy the IDE
+    /// surface without exposing the slot directly.
+    pub(crate) fn peek_tsx(
+        &self,
+        profile_state: &ProfileState,
+        profile_hash: u64,
+    ) -> Option<CachedTsx> {
+        profile_state
+            .compile_slot_for_node(profile_hash)
+            .and_then(|slot| slot.tsx.clone())
+    }
+
+    /// Read-only access to the last-good outputs, when present. Used
+    /// by `DevServeLastKnownGood` fallback paths.
+    pub(crate) fn peek_last_good(
+        &self,
+        profile_state: &ProfileState,
+        profile_hash: u64,
+    ) -> Option<FxHashMap<VirtualNodeKind, CachedVirtualFile>> {
+        profile_state
+            .compile_slot_for_node(profile_hash)
+            .and_then(|slot| slot.last_good_outputs.clone())
+    }
+
+    /// Read-only access to the full set of outputs for a given
+    /// virtual-node kind. Used by the warm-hit fast path in
+    /// `get_virtual_file`.
+    pub(crate) fn peek_output(
+        &self,
+        profile_state: &ProfileState,
+        profile_hash: u64,
+        node_kind: &VirtualNodeKind,
+    ) -> Option<(CachedVirtualFile, DiagnosticsSnapshot)> {
+        let slot = profile_state.compile_slot_for_node(profile_hash)?;
+        let output = slot.outputs.get(node_kind)?.clone();
+        Some((output, slot.diagnostics.clone()))
+    }
+
+    /// Remove the session slot for `profile_hash`. Used when an
+    /// upstream invalidation drops the per-profile entry.
+    pub(crate) fn remove(&self, profile_state: &mut ProfileState, profile_hash: u64) {
+        profile_state.compile_slot_remove_for_node(profile_hash);
+    }
+}
+
+impl Default for CompileOutputNodeFactValidatedSession {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Result of a successful [`CompileOutputNodeFactValidatedSession::lookup`].
+pub(crate) struct SessionLookupHit {
+    /// Per-virtual-node-kind outputs.
+    pub outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
+    /// Diagnostics snapshot from compile time.
+    pub diagnostics: DiagnosticsSnapshot,
+    /// Optional combined TSX output (IDE / LSP).
+    pub tsx: Option<CachedTsx>,
+}
+
+/// Result of [`CompileOutputNodeFactValidatedSession::publish`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionPublishOutcome {
+    /// Slot was published under a `Cacheable` admission.
+    Admitted,
+    /// Admission refused. The carried reason classifies why.
+    Refused(verter_audit::NonAdmissionReason),
+}
+
+impl QueryNode for CompileOutputNodeFactValidatedSession {
+    type Key = CompileOutputSessionKey;
+    type Discriminant = FactCandidateDiscriminant;
+    type Value = Arc<CompileOutputValue>;
+
+    fn inflight(&self) -> &InflightTable<QueryFlightKey<Self::Key>> {
+        &self.inflight
+    }
+
+    /// Session-mode candidate lookup. Defers to the host-side
+    /// `lookup` method which inspects the per-profile compile slot
+    /// against the caller's live override / semantic hashes. The
+    /// trait-level entry point is intentionally a no-op stub at the
+    /// substrate boundary — production callers route through the
+    /// concrete `lookup` method on this type with the live hash
+    /// references they have at hand. The arm returns `None` so any
+    /// future `query::lookup` consumer cannot silently short-circuit
+    /// through an unrouted lookup path.
+    fn lookup_candidate(
+        &self,
+        _key: &Self::Key,
+        _cx: &ComputeCtx<'_>,
+    ) -> Option<Self::Value> {
+        None
+    }
+
+    /// Session-mode cold-build is owned by `virtual_file_pipeline.rs`;
+    /// the typed node admits the freshly built value through
+    /// [`Self::publish`]. The substrate-trait arm returns
+    /// [`CacheAdmission::Failed`] so an unrouted `query::lookup`
+    /// consumer cannot silently short-circuit.
+    fn compute(
+        &self,
+        _key: &Self::Key,
+        _cx: &mut ComputeCtx<'_>,
+    ) -> CacheAdmission<Self::Value> {
+        CacheAdmission::Failed {
+            reason: verter_audit::NonAdmissionReason::ComputeFailed,
+        }
+    }
+
+    /// Discriminant for an admitted session candidate.
+    ///
+    /// Same-discriminant re-publishes (under the same view's
+    /// generation and observed fact set) replace in place; any
+    /// difference admits a distinct candidate up to the slot's
+    /// candidate cap.
+    fn discriminant(
+        &self,
+        _key: &Self::Key,
+        _value: &Self::Value,
+        signature: &ReadSetSignature,
+        validated_at_generation: u64,
+    ) -> Self::Discriminant {
+        FactCandidateDiscriminant {
+            validated_at_generation,
+            facts: signature.facts.clone(),
+        }
+    }
+
+    /// Session-mode publish-core is not routed through the substrate's
+    /// `query::lookup` yet — production publish flows through
+    /// [`Self::publish`] above. The arm returns a rejection so an
+    /// unrouted `query::lookup` consumer cannot silently advance a
+    /// FIFO budget.
+    fn publish_core(
+        &self,
+        _key: Self::Key,
+        _candidate: Candidate<Self::Discriminant, Self::Value>,
+    ) -> PublishCoreOutcome<Self::Key> {
+        PublishCoreOutcome {
+            outcome: PublishOutcome::Rejected(
+                verter_audit::NonAdmissionReason::ComputeFailed,
+            ),
+            deferred_victims: DeferredVictims::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "compile_output_node_tests.rs"]
+mod tests;

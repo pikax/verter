@@ -1490,6 +1490,46 @@ pub struct ProfileState {
     pub(crate) diagnostics_generation: u64,
 }
 
+#[allow(dead_code)]
+impl ProfileState {
+    /// Typed-node accessor for the per-profile compile slot.
+    ///
+    /// The slot storage is private to the typed compile-output node
+    /// module — every read / write outside that module routes through
+    /// the typed [`crate::cache_runtime::compile_output_node`]
+    /// surfaces. The accessor returns a borrow scoped to the caller's
+    /// slot-map read so callers cannot mutate the slot under the
+    /// node's nose.
+    pub(crate) fn compile_slot_for_node(&self, profile_hash: u64) -> Option<&CompileSlot> {
+        self.compile_slots.get(&profile_hash)
+    }
+
+    /// Typed-node admission for the per-profile compile slot.
+    ///
+    /// Replaces any prior slot for `profile_hash`. Routed exclusively
+    /// from the typed compile-output node's `publish` method, which
+    /// gates admission on a `Cacheable` [`SignatureAdmission`]
+    /// carrier.
+    pub(crate) fn compile_slot_insert_for_node(
+        &mut self,
+        profile_hash: u64,
+        slot: CompileSlot,
+    ) {
+        self.compile_slots.insert(profile_hash, slot);
+    }
+
+    /// Typed-node removal for the per-profile compile slot. Routed
+    /// from the typed compile-output node's `publish` (on a refused
+    /// admission) and `remove` methods. Returns the removed slot when
+    /// one existed.
+    pub(crate) fn compile_slot_remove_for_node(
+        &mut self,
+        profile_hash: u64,
+    ) -> Option<CompileSlot> {
+        self.compile_slots.remove(&profile_hash)
+    }
+}
+
 /// Source-content-domain state for the scheduler-backed compile cache (D48).
 ///
 /// Stored in [`crate::project_type_store::DerivedRawCacheDb`] keyed by canonical id.
