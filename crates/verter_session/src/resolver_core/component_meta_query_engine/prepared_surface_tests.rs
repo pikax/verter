@@ -31,6 +31,7 @@ fn surface_with_member(name: &str) -> std::sync::Arc<ProjectedSurface> {
         }],
         call_signatures: Vec::new(),
         construct_signatures: Vec::new(),
+        index_signatures: Vec::new(),
         has_index_signature: false,
     })
 }
@@ -158,6 +159,7 @@ fn projected_surface_to_type_expr_reemits_member_spans() {
         members: vec![member],
         call_signatures: Vec::new(),
         construct_signatures: Vec::new(),
+        index_signatures: Vec::new(),
         has_index_signature: false,
     };
 
@@ -201,6 +203,7 @@ fn projected_surface_to_type_expr_keeps_synthetic_index_signature_span_none() {
         members: Vec::new(),
         call_signatures: Vec::new(),
         construct_signatures: Vec::new(),
+        index_signatures: Vec::new(),
         has_index_signature: true,
     };
 
@@ -228,5 +231,103 @@ fn projected_surface_to_type_expr_keeps_synthetic_index_signature_span_none() {
     assert_eq!(
         index.spans.value, None,
         "synthetic open-surface index signature value has no source site"
+    );
+}
+
+/// FIX 1 (positive): a REAL `[k: string]: number` index signature carried
+/// structurally on `ProjectedSurface::index_signatures` round-trips its
+/// declared key/value SHAPE *and* its real OXC spans through
+/// `projected_surface_to_type_expr` — it is NOT collapsed to the synthetic
+/// open-surface placeholder (`[key: string]: <projectedOpenSurface>` with
+/// span-`None`).
+///
+/// Discriminating: the pre-fix reconstruction emitted `IndexSignature::synthetic`
+/// for any surface with `has_index_signature`, discarding the real value type
+/// (here `number`) and every span. Against that tree the value-type and span
+/// asserts below fail.
+#[test]
+fn projected_surface_to_type_expr_reemits_real_index_signature_shape_and_spans() {
+    use verter_semantic::analysis::type_solver::query_engine::ProjectedIndexSignature;
+    use verter_span::Span;
+    use verter_type_expr::{IndexSignatureSpans, ObjectMember, PrimitiveName};
+
+    // A concrete index signature `[k: string]: number` with real OXC spans, as
+    // `surface_view_to_projected_surface` / the object-expr projection would
+    // carry it.
+    let surface = ProjectedSurface {
+        members: Vec::new(),
+        call_signatures: Vec::new(),
+        construct_signatures: Vec::new(),
+        index_signatures: vec![ProjectedIndexSignature {
+            key_name: "k".to_string(),
+            key_type: TypeExpr::Primitive(PrimitiveName::String),
+            value_type: TypeExpr::Primitive(PrimitiveName::Number),
+            readonly: false,
+            spans: IndexSignatureSpans {
+                declaration: Some(Span::new(30, 48)),
+                key: Some(Span::new(31, 41)),
+                value: Some(Span::new(44, 50)),
+            },
+            declaration_origin: Some(std::sync::Arc::from("/decl.ts")),
+        }],
+        // The surface HAS an index signature, but it is a CONCRETE one — so the
+        // reconstruction must emit the real signature, NOT the open placeholder.
+        has_index_signature: true,
+    };
+
+    let expr = projected_surface_to_type_expr(&surface)
+        .expect("a surface with a concrete index signature reconstructs to an object type");
+    let TypeExpr::Object(object) = &expr else {
+        panic!("expected an object type, got {expr:?}");
+    };
+    let index = object
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::IndexSignature(sig) => Some(sig),
+            _ => None,
+        })
+        .expect("the concrete index signature must reconstruct an index signature");
+
+    // Shape: the real `string` key and `number` value survive — NOT the open
+    // `projectedOpenSurface` placeholder value.
+    assert_eq!(
+        index.key_type,
+        TypeExpr::Primitive(PrimitiveName::String),
+        "the declared key type must round-trip"
+    );
+    assert_eq!(
+        index.value_type,
+        TypeExpr::Primitive(PrimitiveName::Number),
+        "the declared value type must round-trip (not the open placeholder)"
+    );
+
+    // Spans: the real OXC declaration/key/value spans survive verbatim.
+    assert_eq!(
+        index.spans.declaration,
+        Some(Span::new(30, 48)),
+        "the real index-signature declaration span must round-trip"
+    );
+    assert_eq!(
+        index.spans.key,
+        Some(Span::new(31, 41)),
+        "the real index-signature key span must round-trip"
+    );
+    assert_eq!(
+        index.spans.value,
+        Some(Span::new(44, 50)),
+        "the real index-signature value span must round-trip"
+    );
+
+    // Exactly one index signature — the concrete one. The open placeholder must
+    // NOT also be appended.
+    let index_count = object
+        .properties
+        .iter()
+        .filter(|member| matches!(member, ObjectMember::IndexSignature(_)))
+        .count();
+    assert_eq!(
+        index_count, 1,
+        "a concrete index signature must NOT additionally emit the open placeholder"
     );
 }

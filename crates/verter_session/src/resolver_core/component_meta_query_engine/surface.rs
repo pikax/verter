@@ -84,10 +84,38 @@ pub(crate) fn surface_view_to_projected_surface(
         .iter()
         .filter_map(|signature| dispatch.raise_node_to_type_expr(*signature))
         .collect();
+    // Graph `SurfaceView::index_signatures` carries the declared key/value
+    // nodes + real OXC spans + the declaration file. Raise the key/value nodes
+    // to `TypeExpr` and carry the spans/origin verbatim so the reconstruction
+    // re-emits a real `[k: K]: V` rather than the synthetic open placeholder.
+    let index_signatures = surface
+        .index_signatures
+        .iter()
+        .map(|signature| {
+            use verter_semantic::analysis::type_solver::query_engine::ProjectedIndexSignature;
+            ProjectedIndexSignature {
+                key_name: "key".to_string(),
+                key_type: dispatch
+                    .raise_node_to_type_expr(signature.key_type)
+                    .unwrap_or(TypeExpr::Unknown {
+                        raw: SEMANTIC_SURFACE_MEMBER.to_string(),
+                    }),
+                value_type: dispatch
+                    .raise_node_to_type_expr(signature.value_type)
+                    .unwrap_or(TypeExpr::Unknown {
+                        raw: SEMANTIC_SURFACE_MEMBER.to_string(),
+                    }),
+                readonly: signature.readonly,
+                spans: signature.spans,
+                declaration_origin: signature.declaration_origin.clone(),
+            }
+        })
+        .collect();
     ProjectedSurface {
         members,
         call_signatures,
         construct_signatures,
+        index_signatures,
         has_index_signature: surface.has_index_signature,
     }
 }
@@ -405,12 +433,15 @@ pub(super) fn projected_surface_is_empty(surface: &ProjectedSurface) -> bool {
 pub(super) fn projected_surface_from_object_expr(
     object: &verter_type_expr::ObjectExpr,
     from_root_body: bool,
+    scope_canonical_id: Option<&str>,
 ) -> ProjectedSurface {
+    use verter_semantic::analysis::type_solver::query_engine::ProjectedIndexSignature;
     use verter_type_expr::ObjectMember;
 
     let mut members = Vec::new();
     let mut call_signatures = Vec::new();
     let mut construct_signatures = Vec::new();
+    let mut index_signatures = Vec::new();
     let mut has_index_signature = false;
 
     // `from_root_body` is the caller's macro-T own-body flag
@@ -449,7 +480,21 @@ pub(super) fn projected_surface_from_object_expr(
                 construct_signatures
                     .push(TypeExpr::Function(std::sync::Arc::new(function.clone())));
             }
-            ObjectMember::IndexSignature(_) => has_index_signature = true,
+            // A REAL `[k: K]: V` index signature carries its declared key/value
+            // shape AND OXC spans — preserve them structurally instead of
+            // collapsing to the open-surface `has_index_signature` bool. The
+            // declaration file is the scope the object literal is lowered in.
+            ObjectMember::IndexSignature(signature) => {
+                has_index_signature = true;
+                index_signatures.push(ProjectedIndexSignature {
+                    key_name: signature.key_name.clone(),
+                    key_type: signature.key_type.clone(),
+                    value_type: signature.value_type.clone(),
+                    readonly: signature.readonly,
+                    spans: signature.spans,
+                    declaration_origin: scope_canonical_id.map(std::sync::Arc::from),
+                });
+            }
         }
     }
 
@@ -457,6 +502,7 @@ pub(super) fn projected_surface_from_object_expr(
         members,
         call_signatures,
         construct_signatures,
+        index_signatures,
         has_index_signature,
     }
 }
@@ -466,16 +512,19 @@ pub(super) fn projected_surface_from_object_expr_with_substitutions(
     _type_params: &[verter_type_expr::TypeParam],
     substitutions: &FxHashMap<String, TypeExpr>,
     from_root_body: bool,
+    scope_canonical_id: Option<&str>,
 ) -> ProjectedSurface {
+    use verter_semantic::analysis::type_solver::query_engine::ProjectedIndexSignature;
     use verter_type_expr::ObjectMember;
 
     if substitutions.is_empty() {
-        return projected_surface_from_object_expr(object, from_root_body);
+        return projected_surface_from_object_expr(object, from_root_body, scope_canonical_id);
     }
 
     let mut members = Vec::new();
     let mut call_signatures = Vec::new();
     let mut construct_signatures = Vec::new();
+    let mut index_signatures = Vec::new();
     let mut has_index_signature = false;
 
     // `from_root_body` is the caller's macro-T own-body flag
@@ -517,7 +566,23 @@ pub(super) fn projected_surface_from_object_expr_with_substitutions(
                     substitute_function_expr_if_needed(function, substitutions),
                 )))
             }
-            ObjectMember::IndexSignature(_) => has_index_signature = true,
+            // Generic instantiation rewrites the key/value types but NOT the
+            // index signature's source declaration site — carry the real OXC
+            // spans + declaration file verbatim.
+            ObjectMember::IndexSignature(signature) => {
+                has_index_signature = true;
+                index_signatures.push(ProjectedIndexSignature {
+                    key_name: signature.key_name.clone(),
+                    key_type: apply_type_param_substitutions(&signature.key_type, substitutions),
+                    value_type: apply_type_param_substitutions(
+                        &signature.value_type,
+                        substitutions,
+                    ),
+                    readonly: signature.readonly,
+                    spans: signature.spans,
+                    declaration_origin: scope_canonical_id.map(std::sync::Arc::from),
+                });
+            }
         }
     }
 
@@ -525,6 +590,7 @@ pub(super) fn projected_surface_from_object_expr_with_substitutions(
         members,
         call_signatures,
         construct_signatures,
+        index_signatures,
         has_index_signature,
     }
 }
@@ -536,6 +602,7 @@ pub(super) fn projected_surface_from_function_expr(
         members: Vec::new(),
         call_signatures: vec![TypeExpr::Function(std::sync::Arc::new(function.clone()))],
         construct_signatures: Vec::new(),
+        index_signatures: Vec::new(),
         has_index_signature: false,
     }
 }
@@ -555,6 +622,7 @@ pub(super) fn projected_surface_from_function_expr_with_substitutions(
             substitute_function_expr_if_needed(function, substitutions),
         ))],
         construct_signatures: Vec::new(),
+        index_signatures: Vec::new(),
         has_index_signature: false,
     }
 }
@@ -569,6 +637,7 @@ pub(super) fn projected_surface_from_parts_intersection(
     let mut merged_members: FxHashMap<String, ProjectedMember> = FxHashMap::default();
     let mut call_signatures = Vec::new();
     let mut construct_signatures = Vec::new();
+    let mut index_signatures = Vec::new();
     let mut has_index_signature = false;
 
     for surface in parts {
@@ -578,6 +647,10 @@ pub(super) fn projected_surface_from_parts_intersection(
         }
         call_signatures.extend(surface.call_signatures);
         construct_signatures.extend(surface.construct_signatures);
+        // A concrete index signature on an intersection arm survives into the
+        // intersection — each arm's real `[k: K]: V` (with its own declaration
+        // file + spans) carries through verbatim.
+        index_signatures.extend(surface.index_signatures);
         has_index_signature |= surface.has_index_signature;
     }
 
@@ -588,6 +661,7 @@ pub(super) fn projected_surface_from_parts_intersection(
         members,
         call_signatures,
         construct_signatures,
+        index_signatures,
         has_index_signature,
     }))
 }
@@ -648,10 +722,16 @@ pub(super) fn projected_surface_from_parts_union(
         .collect::<Vec<_>>();
     members.sort_by(|left, right| left.name.cmp(&right.name));
 
+    // A union does NOT preserve a per-arm concrete index signature: an
+    // index signature present in only some variants is not a guaranteed
+    // surface property, and a merged one has no single OXC declaration site.
+    // `has_index_signature` (the open-surface bool) still flows through and
+    // drives the synthetic-`None` reconstruction placeholder.
     PreparedSurfaceProjection::Surface(std::sync::Arc::new(ProjectedSurface {
         members,
         call_signatures,
         construct_signatures,
+        index_signatures: Vec::new(),
         has_index_signature,
     }))
 }
@@ -1093,14 +1173,27 @@ pub(crate) fn projected_surface_to_type_expr(surface: &ProjectedSurface) -> Opti
         }
     }
 
-    if surface.has_index_signature {
-        // GENUINELY synthetic open-surface index signature — `ProjectedSurface`
-        // carries only a `has_index_signature: bool`, not the declared key/value
-        // nodes or their spans, so this `[key: string]: <open>` placeholder has
-        // no single OXC declaration site. Spans stay `None` by design (not a
-        // deferral): there is no source range to anchor to. A consumer that needs
-        // the real index-signature spans reads the span-rich graph
-        // `SurfaceView::index_signatures` directly.
+    // A REAL `[k: K]: V` index signature (sourced from an OXC declaration site,
+    // carried structurally on `ProjectedSurface::index_signatures`) re-emits its
+    // declared key/value shape AND its real spans — losslessly. Reverting this
+    // to the synthetic-`None` placeholder (the pre-fix state) drops both the
+    // shape and the spans.
+    for signature in &surface.index_signatures {
+        properties.push(ObjectMember::IndexSignature(IndexSignature::with_spans(
+            signature.key_name.clone(),
+            signature.key_type.clone(),
+            signature.value_type.clone(),
+            signature.readonly,
+            signature.spans,
+        )));
+    }
+
+    // Emit the synthetic open-surface placeholder ONLY when the surface is
+    // GENUINELY OPEN — `has_index_signature` is set but no concrete signature
+    // payload was carried (e.g. a mapped/inferred open surface). This placeholder
+    // has no single OXC declaration site, so its spans stay `None` by design
+    // (not a deferral): there is no source range to anchor to.
+    if surface.has_index_signature && surface.index_signatures.is_empty() {
         properties.push(ObjectMember::IndexSignature(IndexSignature::synthetic(
             "key".to_string(),
             TypeExpr::Primitive(PrimitiveName::String),
@@ -1163,7 +1256,17 @@ pub(crate) fn projected_surface_to_expanded_shape(
         .collect::<Vec<_>>();
 
     let mut index_signatures = Vec::new();
-    if surface.has_index_signature {
+    // Concrete declared index signatures preserve their real key/value shape
+    // (the expand layer does not track spans).
+    for signature in &surface.index_signatures {
+        index_signatures.push(ExpandedIndexSignature {
+            key_type: signature.key_type.clone(),
+            value_type: signature.value_type.clone(),
+            readonly: signature.readonly,
+        });
+    }
+    // Genuinely-open surface (flag set, no concrete payload) → open placeholder.
+    if surface.has_index_signature && surface.index_signatures.is_empty() {
         index_signatures.push(ExpandedIndexSignature {
             key_type: TypeExpr::Primitive(PrimitiveName::String),
             value_type: TypeExpr::Unknown {

@@ -417,6 +417,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     &prepared.type_parameters,
                     substitutions,
                     from_root_body,
+                    Some(scope_canonical_id),
                 ),
             )),
             TypeExpr::Function(function) => PreparedSurfaceProjection::Surface(
@@ -691,6 +692,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             members,
             call_signatures: Vec::new(),
             construct_signatures: Vec::new(),
+            // Pick selects named members from the target — never an index
+            // signature, so the projected surface carries none.
+            index_signatures: Vec::new(),
             has_index_signature: false,
         }))
     }

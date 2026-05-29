@@ -5,7 +5,9 @@
 //! `verter_session::resolver_core::component_meta_query_engine` surfaces as
 //! return types.
 
-use verter_type_expr::{MemberSpans, TypeExpr};
+use std::sync::Arc;
+
+use verter_type_expr::{IndexSignatureSpans, MemberSpans, TypeExpr};
 
 // ---------------------------------------------------------------------------
 // Projection result types
@@ -46,6 +48,37 @@ pub struct ProjectedMember {
     pub spans: MemberSpans,
 }
 
+/// A single projected index signature (`[k: K]: V`) from a type surface.
+///
+/// Carries the declared key/value type shape AND the OXC declaration-site spans
+/// so the component-meta reconstruction (`projected_surface_to_type_expr`)
+/// re-emits a real `[k: K]: V` rather than collapsing it to the synthetic
+/// open-surface placeholder. Populated from the graph
+/// [`SurfaceView::index_signatures`](../../../../../verter_session) and the IR
+/// [`verter_type_expr::IndexSignature`] at the object-expr projection sites.
+///
+/// `spans` follows the same provenance contract as
+/// [`ProjectedMember::spans`]: real offsets in the declaration file, `None`
+/// only for a genuinely synthetic index signature with no single OXC site.
+#[derive(Debug, Clone)]
+pub struct ProjectedIndexSignature {
+    /// The index key parameter name (`k` in `[k: K]: V`). Display-only.
+    pub key_name: String,
+    /// The declared key type (`K`).
+    pub key_type: TypeExpr,
+    /// The declared value type (`V`).
+    pub value_type: TypeExpr,
+    pub readonly: bool,
+    /// OXC declaration-site spans for this index signature, carried verbatim
+    /// from the graph / IR source. `None` components only for a genuinely
+    /// synthetic index signature.
+    pub spans: IndexSignatureSpans,
+    /// Canonical file the index-signature DECLARATION lives in — mirrors
+    /// [`ProjectedMember::declaration_origin`]. `None` only for a genuinely
+    /// synthetic index signature.
+    pub declaration_origin: Option<Arc<str>>,
+}
+
 /// The projected keyspace of a type surface — the set of known member names.
 #[derive(Debug, Clone)]
 pub struct ProjectedKeyspace {
@@ -63,6 +96,17 @@ pub struct ProjectedSurface {
     pub call_signatures: Vec<TypeExpr>,
     /// Construct signatures.
     pub construct_signatures: Vec<TypeExpr>,
-    /// Whether the surface includes an open index signature.
+    /// Concrete declared index signatures (`[k: K]: V`) with their real key/value
+    /// shape and OXC declaration-site spans. A REAL index signature lives here so
+    /// the reconstruction can re-emit `[k: K]: V` losslessly. Distinct from the
+    /// `has_index_signature` open-surface flag below: an entry here is a concrete
+    /// signature sourced from an OXC declaration site, NOT a synthesized
+    /// open-surface placeholder.
+    pub index_signatures: Vec<ProjectedIndexSignature>,
+    /// Whether the surface includes an index signature at all. When this is set
+    /// but [`Self::index_signatures`] is empty, the surface is GENUINELY OPEN
+    /// (e.g. a mapped-type / inferred open surface with no concrete declared
+    /// key/value payload) — the reconstruction emits a synthetic-`None`
+    /// placeholder for it.
     pub has_index_signature: bool,
 }
