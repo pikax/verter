@@ -1,55 +1,42 @@
-//! Discriminating regressions for the JSDoc-provenance fixes P2-2 / P2-3 /
-//! P2-4 (carried from Stage 1.5), driven through the component-meta LAZY
-//! imported-macro-surface rail — the path that attaches a member's display
-//! JSDoc (`ImportedMacroSurface::member_display_jsdoc`).
+//! Discriminating regressions for JSDoc-provenance scenarios P2-2 / P2-3 /
+//! P2-4, driven end-to-end through the production component-meta path
+//! (`defineProps<T>()` → `get_component_meta` → `prop.description`), which
+//! attributes JSDoc via the shared typeinfo surface
+//! (`TypeInfoSurface::with_member_jsdoc_spans`) — the SOLE post-cutover JSDoc
+//! attribution path.
 //!
-//! # Why this path (and not `resolve_shallow_surface`)
-//!
-//! The typeinfo PUBLIC surface (`resolve_shallow_surface` →
-//! `TypeInfoSurface::with_member_jsdoc_spans`) already locates each member's
-//! JSDoc STRUCTURALLY — from the member's `declaration_origin` + its own
-//! name-token offset — so it is immune to all three bugs. The component-meta
-//! lazy rail (`ResolvedMacroSurface::LazyImported` → `prop_members` →
-//! `member_display_jsdoc`) is the surface that still attributed JSDoc by the
-//! member's VALUE-node origin + a file-wide / value-node-disambiguated textual
-//! search, so the P2 bugs manifest HERE. These tests therefore drive
-//! `lazy_prop_members` (via the test-only [`ImportedMacroSurfaceProbe`]) and
-//! assert on the resulting `AnalyzedPropField::description`, which is the exact
-//! JSDoc text `member_display_jsdoc` returns.
-//!
-//! Each test is DISCRIMINATING: it FAILS against the pre-fix tree (the
-//! value-node-origin + `?`-only textual matcher) and PASSES post-fix:
+//! The typeinfo surface locates each member's JSDoc STRUCTURALLY: from the
+//! member's `declaration_origin` file plus its own name-token offset. The three
+//! P2 scenarios that the retired component-meta lazy imported-macro-surface rail
+//! got wrong (value-node-origin attribution + a `?`-only / value-node-collision
+//! textual matcher) are immune on this path — these tests pin that the published
+//! prop JSDoc is correct for each scenario:
 //!
 //! - **P2-2** — generic inherited member. `interface Base<T> { /** base doc */
-//!   x: T }`; a derived interface instantiates `Base<string>`. After
-//!   substitution the inherited `x`'s VALUE node points at `string` in the
-//!   DERIVED file, so the pre-fix value-node-origin lookup read derived.ts and
-//!   found NO JSDoc (`description == None`). Post-fix attributes JSDoc via the
-//!   member's `declaration_origin` (= base.ts) → `Some("base doc")`.
+//!   x: T }`; the consuming props type instantiates `Base<string>`. The
+//!   inherited `x`'s JSDoc resolves from its `declaration_origin` (= base.ts),
+//!   which survives the `Base<string>` substitution — NOT a substituted
+//!   value-node origin (which would point at `string` in the consuming file).
 //! - **P2-3** — duplicate-name same-value. Two declarations declare the same
-//!   member name AND the same value type; their value nodes intern identically,
-//!   so the pre-fix value-node disambiguation cannot tell them apart and
-//!   collapses to ONE declaration's doc for BOTH. Querying the OTHER
-//!   declaration returns the wrong doc. Post-fix anchors on the member's OWN
-//!   declaration / name span → each declaration returns its own doc.
-//! - **P2-4** — class definite-assignment field. The pre-fix textual matcher
-//!   accepted `name` → `?` → `:`/`(` but NOT `!`, so `/** doc */ foo!: string`
-//!   was missed (`description == None`). Post-fix attaches JSDoc structurally
-//!   from the member's name-token offset (the `!` is AFTER the name) → the doc
-//!   resolves.
+//!   member name AND the same value type (so their member value nodes intern
+//!   identically); each member's JSDoc is anchored on its OWN declaration /
+//!   name span, so the consuming props surface gets the correct declaration's
+//!   doc (no value-node collision).
+//! - **P2-4** — class definite-assignment field `/** doc */ foo!: string`. The
+//!   JSDoc attaches from the member's name-token offset (the `!` follows the
+//!   name and does not block the leading-comment walk), so the doc resolves.
 
 #![allow(clippy::too_many_lines)]
 
 use std::sync::Arc;
 
-use verter_session::test_only::imported_macro_surface::ImportedMacroSurfaceProbe;
 use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 /// Build a hermetic host with `files` injected into the workspace AND upserted
 /// (parsed + shallow-indexed). A `.vue` path is upserted as an SFC, everything
 /// else as a non-SFC TS/JS file.
-fn build_host(files: &[(&'static str, &'static str)]) -> Arc<VerterHost> {
+fn build_host(files: &[(&str, &str)]) -> Arc<VerterHost> {
     let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
     for (path, source) in files {
         workspace.inject_file((*path).into(), Arc::from(*source));
@@ -80,26 +67,29 @@ fn build_host(files: &[(&'static str, &'static str)]) -> Arc<VerterHost> {
     host
 }
 
-/// Resolve `type_name` in `canonical` through the LAZY imported-macro-surface
-/// `prop_members` rail and return the `description` (JSDoc) attached to the
-/// named member. Panics (loudly, with the observed member set) when the member
-/// is absent — a silent `None` would mask a projection regression.
-fn member_prop_description(
-    host: &VerterHost,
-    canonical: &str,
-    type_name: &str,
-    member: &str,
-) -> Option<String> {
-    let probe =
-        ImportedMacroSurfaceProbe::new(Arc::from(canonical), Arc::from(type_name), [0u8; 16]);
-    let props = probe.lazy_prop_members(host);
-    let field = props.iter().find(|p| p.name == member).unwrap_or_else(|| {
+/// `<script setup>` SFC source that imports `type_name` from `import_path` and
+/// applies it as `defineProps<TypeName>()`.
+fn props_sfc(import_path: &str, type_name: &str) -> String {
+    format!(
+        "<script setup lang=\"ts\">\nimport type {{ {type_name} }} from '{import_path}'\ndefineProps<{type_name}>()\n</script>\n<template><div /></template>"
+    )
+}
+
+/// Resolve the SFC at `sfc_path` (which does `defineProps<T>()`) through
+/// `get_component_meta` and return the published JSDoc `description` of the
+/// named prop. Panics (loudly, with the observed prop set) when the prop is
+/// absent — a silent `None` would mask a projection regression.
+fn published_prop_description(host: &VerterHost, sfc_path: &str, prop: &str) -> Option<String> {
+    let meta = host
+        .get_component_meta(sfc_path)
+        .unwrap_or_else(|| panic!("`{sfc_path}` must produce component meta"));
+    let p = meta.props.iter().find(|p| p.name == prop).unwrap_or_else(|| {
         panic!(
-            "member `{member}` must be projected onto `{type_name}`'s prop surface; got {:?}",
-            props.iter().map(|p| p.name.clone()).collect::<Vec<_>>()
+            "prop `{prop}` must be published; got {:?}",
+            meta.props.iter().map(|p| p.name.clone()).collect::<Vec<_>>()
         )
     });
-    field.description.clone()
+    p.description.clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +100,7 @@ fn member_prop_description(
 fn p2_2_generic_inherited_member_jsdoc_resolves_to_base_declaration_file() {
     const BASE: &str = "/w/base.ts";
     const DERIVED: &str = "/w/derived.ts";
+    const SFC: &str = "/w/P2_2.vue";
     // The base member `x` is GENERIC (`x: T`) and carries the JSDoc. The decoy
     // `/** derived doc */` sits on the DERIVED interface declaration and must
     // NOT be attached to `x` (which is declared only in base.ts).
@@ -118,19 +109,20 @@ fn p2_2_generic_inherited_member_jsdoc_resolves_to_base_declaration_file() {
         /** derived doc */\n\
         export interface Derived extends Base<string> {\n  derivedOnly: number;\n}\n";
 
-    let host = build_host(&[(BASE, base_src), (DERIVED, derived_src)]);
+    let sfc_src = props_sfc("./derived", "Derived");
+    let host = build_host(&[(BASE, base_src), (DERIVED, derived_src), (SFC, &sfc_src)]);
 
     // POSITIVE: the inherited generic member `x` carries its BASE-declared
-    // JSDoc, attributed via `declaration_origin` (which survives the
-    // `Base<string>` substitution) — NOT the substituted value-node origin
-    // (which post-substitution points at `string` in derived.ts).
-    let x_doc = member_prop_description(&host, DERIVED, "Derived", "x");
+    // JSDoc, attributed via the typeinfo surface member's `declaration_origin`
+    // (= base.ts, which survives the `Base<string>` substitution) — NOT a
+    // substituted value-node origin (which would point at `string` in
+    // derived.ts).
+    let x_doc = published_prop_description(&host, SFC, "x");
     assert_eq!(
         x_doc.as_deref(),
         Some("base doc"),
         "the generic inherited member `x`'s JSDoc must resolve from the BASE declaration file \
-         (via declaration_origin). Pre-fix this was `None` because the substituted value node \
-         pointed at `string` in the derived file."
+         via the typeinfo surface member's declaration_origin"
     );
 
     // NEGATIVE: the inherited member's JSDoc must NOT be the derived
@@ -146,32 +138,33 @@ fn p2_2_generic_inherited_member_jsdoc_resolves_to_base_declaration_file() {
 // P2-3 — duplicate-name same-value JSDoc.
 //
 // `Decoy.field` and `Real.field` have the SAME member name AND the SAME value
-// type (`string`), so their member value nodes intern identically. The pre-fix
-// value-node disambiguation in `declaring_decl_span` therefore cannot tell the
-// two declarations apart and collapses to ONE declaration's doc for BOTH:
-// querying EITHER `Decoy` or `Real` returned `Real`'s `/** right */`. Querying
-// `Decoy` is thus the discriminator — pre-fix returns the wrong `right`,
-// post-fix returns `Decoy`'s own `wrong` (anchored on `Decoy.field`'s own
-// declaration span).
+// type (`string`), so their member value nodes intern identically. The typeinfo
+// surface anchors each member's JSDoc on its OWN declaration / name span, so a
+// `defineProps<Real>()` surface gets `Real.field`'s `right` doc — never
+// `Decoy.field`'s `wrong` doc (the value-node-collision bug).
 // ---------------------------------------------------------------------------
 
 #[test]
 fn p2_3_duplicate_name_same_value_jsdoc_disambiguates_by_declaration_span() {
     const FILE: &str = "/w/dup.ts";
+    const SFC_REAL: &str = "/w/P2_3_real.vue";
+    const SFC_DECOY: &str = "/w/P2_3_decoy.vue";
     let src = "export interface Decoy {\n  /** wrong */\n  field: string;\n}\n\
         export interface Real {\n  /** right */\n  field: string;\n}\n";
 
-    let host = build_host(&[(FILE, src)]);
+    let real_sfc = props_sfc("./dup", "Real");
+    let decoy_sfc = props_sfc("./dup", "Decoy");
+    let host = build_host(&[(FILE, src), (SFC_REAL, &real_sfc), (SFC_DECOY, &decoy_sfc)]);
 
-    // DISCRIMINATOR: querying `Decoy` must return ITS OWN doc (`wrong`). Pre-fix
-    // the value-node collision returned `Real`'s `right` for `Decoy` too; only
-    // the per-member declaration-span anchor reads `Decoy.field`'s own JSDoc.
-    let decoy_doc = member_prop_description(&host, FILE, "Decoy", "field");
+    // DISCRIMINATOR: a `defineProps<Decoy>()` surface must get `Decoy.field`'s
+    // OWN doc (`wrong`). A value-node-collision attribution would return
+    // `Real`'s `right`; the typeinfo surface's per-member name-span anchor reads
+    // `Decoy.field`'s own JSDoc.
+    let decoy_doc = published_prop_description(&host, SFC_DECOY, "field");
     assert_eq!(
         decoy_doc.as_deref(),
         Some("wrong"),
-        "`Decoy.field`'s JSDoc must be its OWN `wrong` doc, disambiguated by its declaration \
-         span. Pre-fix the same-name same-value collision returned `Real`'s `right` here."
+        "`Decoy.field`'s JSDoc must be its OWN `wrong` doc, anchored on its own name span"
     );
     assert_ne!(
         decoy_doc.as_deref(),
@@ -179,9 +172,9 @@ fn p2_3_duplicate_name_same_value_jsdoc_disambiguates_by_declaration_span() {
         "`Decoy.field` must NOT pick up `Real.field`'s `right` doc (the value-node-collision bug)"
     );
 
-    // CONTROL: querying `Real` returns its own `right` doc (both pre- and
-    // post-fix). Proves the fix did not merely swap which declaration wins.
-    let real_doc = member_prop_description(&host, FILE, "Real", "field");
+    // CONTROL: a `defineProps<Real>()` surface gets `Real.field`'s own `right`
+    // doc. Proves the attribution did not merely swap which declaration wins.
+    let real_doc = published_prop_description(&host, SFC_REAL, "field");
     assert_eq!(
         real_doc.as_deref(),
         Some("right"),
@@ -190,32 +183,20 @@ fn p2_3_duplicate_name_same_value_jsdoc_disambiguates_by_declaration_span() {
 }
 
 // ---------------------------------------------------------------------------
-// P2-4 — class `/** doc */ foo!: string` definite-assignment field, STRUCTURAL
-// lazy-path coverage (NOT the discriminating `!:`-matcher gate).
+// P2-4 — class `/** doc */ foo!: string` definite-assignment field.
 //
-// HONEST framing: this test confirms a `foo!: string` definite-assignment field
-// reaches the lazy imported-macro-surface `prop_members` rail WITH its JSDoc.
-// But it is NOT discriminating for the `3387740cf` `!:`-matcher fix: after P2-3,
-// `member_display_jsdoc` returns early via the STRUCTURAL `member.spans.name`
-// attach (`extract_jsdoc_near_offset` walks backward from the name token, and
-// the `!` follows the name, so it is unaffected). Reverting the `!:` change to
-// the NON-authority textual matchers would NOT fail this test — the structural
-// path short-circuits before any matcher runs.
-//
-// The DISCRIMINATING guards for the `!:` matcher change live elsewhere, each
-// directly exercising a matcher the structural path bypasses:
-//   - `verter_semantic::analysis::jsdoc::tests::
-//      extract_jsdoc_for_property_name_accepts_definite_assignment_field`
-//     (the `jsdoc.rs` expanded-prop / synthetic-member fallback), and
-//   - `imported_surface::tests::member_decl_site_in_range_accepts_definite_assignment_field`
-//     (the `imported_surface.rs` declaring-declaration presence probe used by
-//     `declaring_decl_span` when a member has NO name span).
-// Both FAIL if `3387740cf`'s `!:` acceptance is reverted.
+// The typeinfo surface attaches JSDoc from the member's name-token offset; the
+// `!` follows the name and must not drop the member or block the leading-comment
+// walk. (The discriminating `!:`-matcher guard for the `jsdoc.rs`
+// expanded-prop / synthetic-member fallback lives in
+// `verter_semantic::analysis::jsdoc::tests::
+// extract_jsdoc_for_property_name_accepts_definite_assignment_field`.)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn p2_4_class_definite_assignment_field_reaches_lazy_surface_with_jsdoc_via_structural_attach() {
+fn p2_4_class_definite_assignment_field_reaches_surface_with_jsdoc() {
     const FILE: &str = "/w/definite.ts";
+    const SFC: &str = "/w/P2_4.vue";
     // `foo!: string` is a documented definite-assignment field; `plain: number`
     // is a documented normal field (control); `bare!: boolean` is a
     // definite-assignment field with NO JSDoc (negative control).
@@ -226,20 +207,21 @@ fn p2_4_class_definite_assignment_field_reaches_lazy_surface_with_jsdoc_via_stru
         plain: number;\n  \
         bare!: boolean;\n}\n";
 
-    let host = build_host(&[(FILE, src)]);
+    let sfc_src = props_sfc("./definite", "WithDefinite");
+    let host = build_host(&[(FILE, src), (SFC, &sfc_src)]);
 
-    // POSITIVE: the documented definite-assignment field `foo!: string` reaches
-    // the lazy prop surface WITH its JSDoc via the structural name-span attach
-    // (the `!` must not drop the member or block the leading-comment walk).
-    let foo_doc = member_prop_description(&host, FILE, "WithDefinite", "foo");
+    // POSITIVE: the documented definite-assignment field `foo!: string` is
+    // published WITH its JSDoc via the name-span attach (the `!` must not drop
+    // the member or block the leading-comment walk).
+    let foo_doc = published_prop_description(&host, SFC, "foo");
     assert_eq!(
         foo_doc.as_deref(),
         Some("the definite field"),
-        "`foo!: string` must reach the lazy surface with its JSDoc via the structural attach"
+        "`foo!: string` must be published with its JSDoc via the name-span attach"
     );
 
     // CONTROL: the plain documented field still resolves (no regression).
-    let plain_doc = member_prop_description(&host, FILE, "WithDefinite", "plain");
+    let plain_doc = published_prop_description(&host, SFC, "plain");
     assert_eq!(
         plain_doc.as_deref(),
         Some("the plain field"),
@@ -248,7 +230,7 @@ fn p2_4_class_definite_assignment_field_reaches_lazy_surface_with_jsdoc_via_stru
 
     // NEGATIVE: an undocumented definite-assignment field carries no JSDoc (the
     // attach must not invent one for `bare`).
-    let bare_doc = member_prop_description(&host, FILE, "WithDefinite", "bare");
+    let bare_doc = published_prop_description(&host, SFC, "bare");
     assert_eq!(
         bare_doc, None,
         "an undocumented definite-assignment field `bare!: boolean` must carry NO JSDoc"
