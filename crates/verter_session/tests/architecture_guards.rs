@@ -14115,20 +14115,35 @@ pub fn after() {}\n";
 /// the surface to a display format, and (c) re-open the banned
 /// synthesise-then-reparse direction (a consumer parsing the stored string).
 ///
-/// This guard parses `typeinfo/surface.rs` and asserts NO struct named
-/// `TypeInfo*` (the surface + member + signature + index-signature types) has a
-/// `String` / `Option<String>` / `Vec<String>` / `Box<str>` field. Names are
-/// `Arc<str>` (interned), positions are `CanonicalSpan` / `Span`, types are
+/// This guard parses the typeinfo surface files — the core
+/// `typeinfo/surface.rs` AND the Vue-adapter surface
+/// `typeinfo/adapters/vue/surface.rs` (which carries the `.vue`-macro
+/// `VueMacroSurface`) — and asserts NO surface struct (a name containing
+/// `Surface` or starting with `TypeInfo`: the surface + member + signature +
+/// index-signature + adapter-macro-surface types) has a `String` /
+/// `Option<String>` / `Vec<String>` / `Box<str>` field. Names are `Arc<str>`
+/// (interned), positions are `CanonicalSpan` / `Span`, types are
 /// `SemanticNodeId`. A future `type_string: String` / `jsdoc_text: String`
-/// field fails this gate — fix the producer (carry a span) instead.
+/// field on EITHER file fails this gate — fix the producer (carry a span)
+/// instead.
 #[test]
 fn typeinfo_surface_carries_spans_not_rendered_strings() {
     use syn::visit::Visit;
 
-    const REL: &str = "crates/verter_session/src/typeinfo/surface.rs";
-    let src = read_workspace_file(REL);
-    let parsed = syn::parse_file(&src)
-        .unwrap_or_else(|e| panic!("spans-not-strings guard: `{REL}` failed to parse: {e}"));
+    // The surface authority spans both the core surface module and the
+    // per-adapter surface modules; the spans-not-strings invariant must hold on
+    // every one. Each entry pairs the file with the precondition struct that
+    // proves the guard actually parsed the real surface there.
+    const SURFACE_FILES: &[(&str, &str)] = &[
+        (
+            "crates/verter_session/src/typeinfo/surface.rs",
+            "TypeInfoSurface",
+        ),
+        (
+            "crates/verter_session/src/typeinfo/adapters/vue/surface.rs",
+            "VueMacroSurface",
+        ),
+    ];
 
     /// Is `ty` a rendered-text field type (the banned authority shape)?
     fn is_rendered_text_type(ty: &syn::Type) -> bool {
@@ -14164,13 +14179,23 @@ fn typeinfo_surface_carries_spans_not_rendered_strings() {
         }
     }
 
+    /// Is `name` a surface-authority struct (the types this invariant
+    /// governs)? Matches the `TypeInfo*` family AND any `*Surface*` struct
+    /// (e.g. the adapter `VueMacroSurface`, `SurfaceMemberOrigin`,
+    /// `TypeInfoSurfaceMember`), so an adapter surface that carries owned text
+    /// is caught regardless of its module prefix.
+    fn is_surface_struct(name: &str) -> bool {
+        name.starts_with("TypeInfo") || name.contains("Surface")
+    }
+
     struct SurfaceStructVisitor {
+        rel: &'static str,
         violations: Vec<String>,
     }
     impl<'ast> Visit<'ast> for SurfaceStructVisitor {
         fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
             let struct_name = node.ident.to_string();
-            if struct_name.starts_with("TypeInfo") {
+            if is_surface_struct(&struct_name) {
                 for field in &node.fields {
                     if is_rendered_text_type(&field.ty) {
                         let field_name = field
@@ -14178,9 +14203,10 @@ fn typeinfo_surface_carries_spans_not_rendered_strings() {
                             .as_ref()
                             .map(|i| i.to_string())
                             .unwrap_or_else(|| "<tuple>".to_string());
+                        let rel = self.rel;
                         self.violations.push(format!(
-                            "{struct_name}.{field_name} is a rendered-text field \
-                             — the typeinfo surface must carry a SPAN \
+                            "{rel}: {struct_name}.{field_name} is a rendered-text \
+                             field — the typeinfo surface must carry a SPAN \
                              (`CanonicalSpan`) or interned name (`Arc<str>`), NOT a \
                              rendered type string / JSDoc text. Fix the producer to \
                              carry a span the consumer slices on demand.",
@@ -14192,28 +14218,38 @@ fn typeinfo_surface_carries_spans_not_rendered_strings() {
         }
     }
 
-    let mut visitor = SurfaceStructVisitor {
-        violations: Vec::new(),
-    };
-    visitor.visit_file(&parsed);
+    let mut violations: Vec<String> = Vec::new();
+    for (rel, precondition_struct) in SURFACE_FILES {
+        let src = read_workspace_file(rel);
+        let parsed = syn::parse_file(&src)
+            .unwrap_or_else(|e| panic!("spans-not-strings guard: `{rel}` failed to parse: {e}"));
 
-    // Positive precondition: the guard actually SAW the surface structs (a
-    // rename that moved them out of `TypeInfo*` would silently pass otherwise).
-    let saw_surface = parsed
-        .items
-        .iter()
-        .any(|it| matches!(it, syn::Item::Struct(s) if s.ident == "TypeInfoSurface"));
-    assert!(
-        saw_surface,
-        "spans-not-strings guard: `TypeInfoSurface` struct not found in `{REL}` — \
-         did it move or get renamed? The guard must scan the real surface type."
-    );
+        let mut visitor = SurfaceStructVisitor {
+            rel,
+            violations: Vec::new(),
+        };
+        visitor.visit_file(&parsed);
+        violations.extend(visitor.violations);
+
+        // Positive precondition: the guard actually SAW the surface struct (a
+        // rename/move would silently pass otherwise).
+        let saw_surface = parsed
+            .items
+            .iter()
+            .any(|it| matches!(it, syn::Item::Struct(s) if s.ident == precondition_struct));
+        assert!(
+            saw_surface,
+            "spans-not-strings guard: `{precondition_struct}` struct not found in \
+             `{rel}` — did it move or get renamed? The guard must scan the real \
+             surface type."
+        );
+    }
 
     assert!(
-        visitor.violations.is_empty(),
+        violations.is_empty(),
         "typeinfo surface must carry spans/ids/names, not rendered strings; \
          found {} violation(s):\n{}",
-        visitor.violations.len(),
-        visitor.violations.join("\n"),
+        violations.len(),
+        violations.join("\n"),
     );
 }

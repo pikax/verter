@@ -45,8 +45,8 @@ pub fn project_macro_surfaces(
 /// published props/emits/slots are owned exclusively by the typeinfo
 /// macro-surface path; `source`, `owner_canonical`, and `macro_kind` no longer
 /// participate in the projection and are retained on the signature for the
-/// existing callers (`cold_resolver`, `projected_type_expr`,
-/// `resolved_elements_to_native_props`) without behavioural effect.
+/// existing caller ([`project_macro_surfaces`], reached from
+/// `component_meta::cold_resolver`) without behavioural effect.
 pub fn project_macro_surfaces_with_owner(
     source: Option<&str>,
     owner_canonical: Option<&str>,

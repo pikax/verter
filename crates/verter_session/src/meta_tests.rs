@@ -12248,7 +12248,7 @@ defineSlots<{
 }
 
 #[test]
-fn imported_slot_binding_indexed_access_helpers_resolve_to_concrete_members() {
+fn imported_slot_binding_indexed_access_stays_symbolic_member_path() {
     let project = make_project();
     project
         .upsert_base(
