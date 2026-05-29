@@ -289,6 +289,32 @@ impl CompileOutputNodePureContent {
         //   installs the first `by_canonical` backref. RESULT: live
         //   backref → live entry. No orphan.
         //
+        // - Re-publish at the same key (an identical compile runs twice
+        //   between invalidations, so `this_key` IS already in the
+        //   prior `by_canonical[canonical]` set): a `remove_canonical`
+        //   interleaved between this publish's `entries.insert` and
+        //   `by_canonical.insert` will walk the prior key set and
+        //   `entries.remove(this_key)` AFTER this publish installed it,
+        //   then drop the `by_canonical` row. This publish's later
+        //   `by_canonical.insert(this_key)` then re-installs a backref
+        //   pointing at no live `entries` row. RESULT: bounded transient
+        //   dust — a stale backref with no entry. The dust state is
+        //   self-cleaning: the next `remove_canonical` for `canonical`
+        //   drains the dust backref via the reverse index (its
+        //   `entries.remove(this_key)` is a no-op, which is harmless),
+        //   and `clear_all` flushes both maps unconditionally. The bound
+        //   is at most one stale backref per concurrent same-key
+        //   re-publisher outstanding against this `canonical`. The dust
+        //   cannot escape the cache-runtime substrate: the
+        //   force-recompute contract still holds because a future
+        //   `Content` request after the next `remove_canonical` finds
+        //   no `entries` row and recomputes. The
+        //   `concurrent_publish_and_remove_canonical_never_orphans_content_entry`
+        //   20k-cycle race does NOT exercise this subcase (each cycle
+        //   publishes a distinct key, so `this_key` is never already in
+        //   the prior set); the bound is established by the reverse-
+        //   index drain semantics above rather than by that stress test.
+        //
         // The remaining race is a `remove_canonical` that runs AFTER
         // this publish completes both inserts: that case is the
         // standard eviction path — the backref is drained, the entries
