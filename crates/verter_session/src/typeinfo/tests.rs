@@ -879,7 +879,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         }
     };
     let mut names = Vec::new();
-    collect_surface_member_names(&store, node, &mut names);
+    collect_surface_member_names(store, node, &mut names);
     for inherited in ["open", "defaultOpen", "disabled"] {
         assert!(
             names.iter().any(|n| n == inherited),
@@ -911,7 +911,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
     let resolved = resolved.expect("ColorModeSelectProps must resolve");
     let _ = assert_one_typeresolution_record(&record);
     let mut public_names = Vec::new();
-    collect_surface_member_names(&store, resolved, &mut public_names);
+    collect_surface_member_names(store, resolved, &mut public_names);
     for inherited in ["open", "defaultOpen", "disabled"] {
         assert!(
             public_names.iter().any(|n| n == inherited),

@@ -168,7 +168,7 @@ fn record_published_field_edges_for_macro_shape(
 /// This routes through the SAME dispatch primitives the props/emits/slots
 /// projector pipeline and `vue_macro_dtos` use
 /// ([`resolve_macro_payload`](crate::meta_resolve::projectors::resolve_macro_payload)
-/// + [`resolve_payload_surface`](crate::meta_resolve::projectors::resolve_payload_surface)),
+/// and [`resolve_payload_surface`](crate::meta_resolve::projectors::resolve_payload_surface)),
 /// so the materialised shape collides path-independently with the dispatch
 /// surface in the shared content-addressed cache.
 ///
