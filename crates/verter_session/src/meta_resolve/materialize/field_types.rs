@@ -349,11 +349,12 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
             crate::loop5_instrumentation::MATERIALIZE_MEMO_PUBLISHES
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-            let cache_key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole_with_context(
-                std::sync::Arc::<str>::from(scope_canonical_id),
-                std::sync::Arc::new(expr.clone()),
-                reduction_context,
-            );
+            let cache_key =
+                crate::component_meta_caches::ShapeCacheKey::type_expr_whole_with_context(
+                    std::sync::Arc::<str>::from(scope_canonical_id),
+                    std::sync::Arc::new(expr.clone()),
+                    reduction_context,
+                );
             let host_db = ctx.project_type_store().shape_cache_db();
             let captured_value = materialized.clone();
             // The SINGLE tear-free scope observation taken above is threaded

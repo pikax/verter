@@ -426,7 +426,13 @@ fn dispatch_only_imported_mapped_slots_define_shape_and_bindings() {
          slots: {:?}",
         meta.slots
             .iter()
-            .map(|s| (s.name.clone(), s.bindings.iter().map(|b| b.name.clone()).collect::<Vec<_>>()))
+            .map(|s| (
+                s.name.clone(),
+                s.bindings
+                    .iter()
+                    .map(|b| b.name.clone())
+                    .collect::<Vec<_>>()
+            ))
             .collect::<Vec<_>>()
     );
 }
@@ -602,8 +608,14 @@ fn owner_local_macro_root_authority_uses_typeinfo_surface() {
             "the macro-root authority gate returns FALSE for \
              defineExpose; no props/events may be published from it. Got \
              props={:?} events={:?}",
-            meta.props.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
-            meta.events.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            meta.props
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            meta.events
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
         );
     }
 
@@ -620,8 +632,14 @@ fn owner_local_macro_root_authority_uses_typeinfo_surface() {
             "the macro-root authority gate returns FALSE for \
              defineOptions; no props/events may be published from it. Got \
              props={:?} events={:?}",
-            meta.props.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
-            meta.events.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            meta.props
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            meta.events
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
         );
     }
 }
@@ -653,8 +671,8 @@ defineProps<UnionAlias>();
 
 #[test]
 fn p2a_aliased_union_define_props_enumerates_both_arms() {
-    use verter_session::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
     use verter_semantic::analysis::AnalyzedMacroKind;
+    use verter_session::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
 
     let host = harness::build_hermetic_host_with_lib(
         &[("/AliasedUnionProps.vue", ALIASED_UNION_PROPS_VUE)],

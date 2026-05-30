@@ -249,7 +249,11 @@ defineProps<Props>()
             name,
             type_arguments,
         } => {
-            assert_eq!(name.as_ref(), "Props", "the shallow seed Ref names the root");
+            assert_eq!(
+                name.as_ref(),
+                "Props",
+                "the shallow seed Ref names the root"
+            );
             assert!(
                 type_arguments.is_empty(),
                 "the direct imported root seed carries no type arguments"
@@ -10407,7 +10411,9 @@ defineProps<FixedProps | BubbleProps>()
 // ─────────────────────────────────────────────────────────────────────
 #[test]
 fn dispatch_aliased_conditional_emits_branch_merge() {
-    use crate::meta_resolve::projectors::{resolve_payload_surface_with_scope, PayloadSurfaceScope};
+    use crate::meta_resolve::projectors::{
+        resolve_payload_surface_with_scope, PayloadSurfaceScope,
+    };
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{ProjectionMode, SemanticNodeData};
 
@@ -10507,7 +10513,9 @@ defineEmits<ConditionalEmits>()
 // ─────────────────────────────────────────────────────────────────────
 #[test]
 fn dispatch_long_alias_chain_to_conditional_emits_branch_merge() {
-    use crate::meta_resolve::projectors::{resolve_payload_surface_with_scope, PayloadSurfaceScope};
+    use crate::meta_resolve::projectors::{
+        resolve_payload_surface_with_scope, PayloadSurfaceScope,
+    };
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{ProjectionMode, SemanticNodeData};
 

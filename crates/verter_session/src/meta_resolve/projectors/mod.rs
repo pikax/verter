@@ -75,13 +75,13 @@ pub(crate) mod slots;
 // the definition site: not every macro kind currently consumes every
 // substrate primitive, but the re-exports keep the boundary stable as
 // new consumers wire in.
+#[cfg(test)]
+pub(crate) use macro_payload_substrate::EMIT_CARRIER_WALK_FUSE;
 #[allow(unused_imports)]
 pub(crate) use macro_payload_substrate::{
     resolve_emit_payload_to_conditional_root, resolve_macro_payload_diagnostic_probe,
     resolve_payload_surface_with_scope, MemberValueRole, PayloadSurfaceScope,
 };
-#[cfg(test)]
-pub(crate) use macro_payload_substrate::EMIT_CARRIER_WALK_FUSE;
 
 pub(crate) use emits::project_emits;
 pub(crate) use exposed::project_exposed;
@@ -781,8 +781,7 @@ fn member_shape_peek_or_compute(
     // `Navigate`, `Published` otherwise). A bare `published(mode)` key
     // collided a transit-lowered carrier publication with a published
     // consumer over the same `(scope, node)`.
-    let member_reduction_context =
-        super::materialize::type_expr_materializer_context(mode);
+    let member_reduction_context = super::materialize::type_expr_materializer_context(mode);
     let key = crate::component_meta_caches::ShapeCacheKey::semantic_node_whole_with_context(
         Arc::<str>::from(scope_canonical_id),
         member_value,

@@ -51,9 +51,7 @@ use verter_type_expr::{LiteralValue, TypeExpr, TypeExprScope};
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::surface_projector::render_type_expr_display;
-use crate::semantic_query::{
-    ProjectionMode, ProjectionReductionContext, SurfaceProvenanceContext,
-};
+use crate::semantic_query::{ProjectionMode, ProjectionReductionContext, SurfaceProvenanceContext};
 use crate::typeinfo::adapters::vue::store::{VueMacroDtoKey, VueMacroDtos};
 use crate::typeinfo::surface::{CanonicalSpan, TypeInfoSurface, TypeInfoSurfaceMember};
 use crate::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
