@@ -45,8 +45,71 @@ fn projected_surface_from_semantic_node_inner(
             result
         }
         SemanticNodeData::Object(surface) => Some(surface_view_to_projected_surface(ctx, surface)),
+        // Compound roots (`A | B`, `A & B` / interface heritage overlay,
+        // `Foo<Bar>`) carry no single `Object` surface on the node itself —
+        // `dispatch_root_instantiated` returns the unmerged Union /
+        // Intersection / InstantiationRef root. Route these EXACT shapes
+        // through the shared empty-path Shallow surface walker
+        // (`ProjectPath { [], MacroObjectSurface(Shallow) }` via
+        // `resolve_typeinfo_surface_view`), which already owns the
+        // union-of-arm-members merge, the required-wins / readonly /
+        // own-body-shadows-heritage intersection merge, and the
+        // `Instantiate { StructuralTransit(Navigate) }` instantiation of an
+        // `InstantiationRef`'s body. The composed `SurfaceView` is then
+        // reconstructed verbatim (span-lossless) by
+        // `surface_view_to_projected_surface`.
+        //
+        // This is a ROUTING extension over the one shared resolver — NOT a
+        // parallel walker. It matches ONLY these compound shapes: every
+        // other node returns `None` so the bridge fallback still covers
+        // re-exported / barrel-routed declarations the dispatch root does
+        // not reach. Returning `Some(empty)` here would preempt that
+        // fallback with a wrong (empty) member set, so an empty composed
+        // surface is reported as `None` (an empty surface is never a
+        // COMPLETE compound-root projection).
+        SemanticNodeData::Union(_)
+        | SemanticNodeData::Intersection(_)
+        | SemanticNodeData::InstantiationRef { .. } => {
+            projected_compound_root_surface_via_dispatch(ctx, node)
+        }
         _ => None,
     }
+}
+
+/// Compose the shallow surface of a compound root node (`Union` /
+/// `Intersection` / `InstantiationRef`) through the shared empty-path
+/// Shallow surface walker.
+///
+/// Drives `ProjectPath { base: node, path: [],
+/// context: macro_object_surface(Shallow, Structural) }` via
+/// `resolve_typeinfo_surface_view`, then reconstructs the resolver's own
+/// terminal `SurfaceView` into a `ProjectedSurface`. Returns `None` (so the
+/// root-surface bridge fallback can fire) when the walker cannot resolve an
+/// `Object` terminal OR the composed surface is empty — an incomplete
+/// surface must never preempt the fallback.
+fn projected_compound_root_surface_via_dispatch(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+) -> Option<ProjectedSurface> {
+    use crate::semantic_query::{
+        ProjectionMode, ProjectionReductionContext, SurfaceProvenanceContext,
+    };
+
+    let surface = ctx.dispatch().resolve_typeinfo_surface_view(
+        node,
+        ProjectionReductionContext::macro_object_surface(
+            ProjectionMode::Shallow,
+            SurfaceProvenanceContext::Structural,
+        ),
+    )?;
+    let projected = surface_view_to_projected_surface(ctx, &surface);
+    // An empty composed surface is not a COMPLETE compound-root projection;
+    // report it as `None` so the prepared-decl bridge fallback still covers
+    // the root rather than being preempted by a wrong empty member set.
+    if projected_surface_is_empty(&projected) {
+        return None;
+    }
+    Some(projected)
 }
 
 pub(crate) fn surface_view_to_projected_surface(
