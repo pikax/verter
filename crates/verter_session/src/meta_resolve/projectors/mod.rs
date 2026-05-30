@@ -667,13 +667,24 @@ pub(crate) fn resolve_payload_surface(
     // `FooProps`'s OWN-body members surface with
     // `declared_in_macro_type_arg = true`. Structural-provenance kinds
     // (emits / slots / …) pass `Structural` and observe `false`.
+    // Vue macro object-surface publication (Stage 4-pre Gap 2). The macro
+    // surface enumerates the UNION of object-arm members
+    // (`defineProps<FixedProps | BubbleProps>()` declares every arm's
+    // props), NOT the TS property-access common-member intersection that
+    // an ordinary `Published(Shallow)` ProjectPath would synthesise. The
+    // `MacroObjectSurface` demand selects the union-arm rule at the
+    // empty-path Shallow terminal surface and is cache-keyed in a distinct
+    // `ModeSlot` so the macro surface never collides with an ordinary
+    // `Published(Shallow)` read of the same payload node. `provenance`
+    // (macro-T own-body for props; structural for slots / emits) rides on
+    // the context unchanged.
     let surface_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: payload_node,
         path: empty_path(),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::ProjectionReductionContext::macro_object_surface(
             ProjectionMode::Shallow,
-        )
-        .with_provenance(provenance),
+            provenance,
+        ),
     });
     emit_dispatch_dep_signature_facts(dispatch.ctx, &surface_read.dep_signature);
     if !surface_read.walker_diagnostics.is_empty() {

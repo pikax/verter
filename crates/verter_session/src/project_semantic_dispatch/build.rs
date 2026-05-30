@@ -26,7 +26,7 @@ use crate::semantic_query::{
 
 /// Encode a [`ProjectionReductionContext`] as a compact u32 bit
 /// pattern used in the Phase G mapped-member-materialization
-/// identity tuple. Layout: bits 0 (demand) and 1–3 (mode tag).
+/// identity tuple. Layout: bits 0–1 (demand tag) and 2+ (mode tag).
 #[inline]
 pub(super) fn encode_projection_reduction_context_bits(
     context: crate::semantic_query::ProjectionReductionContext,
@@ -38,11 +38,15 @@ pub(super) fn encode_projection_reduction_context_bits(
         ProjectionMode::Expanded => 3,
         ProjectionMode::Skeleton => 4,
     };
-    let demand_bit: u32 = match context.demand {
+    // 2-bit demand tag (three demands: Published / StructuralTransit /
+    // MacroObjectSurface — Gap 2). Mode shifts by 2 so the demand axis
+    // stays disjoint in the packed identity.
+    let demand_tag: u32 = match context.demand {
         ReductionDemand::Published => 0,
         ReductionDemand::StructuralTransit => 1,
+        ReductionDemand::MacroObjectSurface => 2,
     };
-    (mode_tag << 1) | demand_bit
+    (mode_tag << 2) | demand_tag
 }
 
 // Per-call counter (test-only). Incremented every time

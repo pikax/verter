@@ -2180,7 +2180,18 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                 });
                         }
                     }
-                    let merged = merge_union_surfaces(self.graph(), &arm_surfaces);
+                    // Gap 2 — Vue macro object-surface publication enumerates
+                    // the UNION of arm members; ordinary `ProjectPath` /
+                    // `keyof` uses the TS common-member intersection. The
+                    // demand axis on the walker's context selects the rule;
+                    // both are cache-keyed in distinct slots
+                    // (`MacroSurfaceShallow` vs the `Shallow` publication
+                    // slot) so they never collide.
+                    let merged = if self.context.is_macro_object_surface() {
+                        merge_union_surfaces_for_macro(self.graph(), &arm_surfaces)
+                    } else {
+                        merge_union_surfaces(self.graph(), &arm_surfaces)
+                    };
                     self.contribute_surface(
                         parent_target,
                         &mut root_contribution,
@@ -3477,6 +3488,109 @@ fn merge_union_surfaces(
             // Union common-member: the name appears in every arm, so there is
             // no single source declaration site — genuinely synthetic. No spans
             // and no single declaration file (a multi-origin fact).
+            spans: verter_type_expr::MemberSpans::default(),
+            declaration_origin: None,
+        });
+    }
+    Some(ShallowSurface {
+        members,
+        call_signatures: Vec::new(),
+        construct_signatures: Vec::new(),
+        index_signatures: Vec::new(),
+        keyspace: None,
+    })
+}
+
+/// Merge per-arm union surfaces under the **Vue macro object-surface**
+/// rule (Stage 4-pre Gap 2) — the UNION of arm members, NOT the TS
+/// property-access common-member intersection.
+///
+/// A prop / slot present in ANY union arm is part of the component macro
+/// surface (`defineProps<FixedProps | BubbleProps>()` declares every
+/// arm's props). Per the codex BINDING ruling:
+///
+/// - A member survives iff it is present (by name) in AT LEAST ONE arm.
+/// - Its value is the UNION of the per-arm member values for the arms
+///   that declare it (a single declaring arm stays as-is).
+/// - `optional` iff optional in ANY arm OR ABSENT from any arm (a member
+///   not declared by every arm is optional on the merged surface).
+/// - `readonly` iff readonly in ALL arms that declare it.
+/// - `is_method` / `declared_in_macro_type_arg` are `false`; merge role is
+///   [`MemberMergeRole::Authored`] — a member reached THROUGH the union is
+///   neither macro-T own-body nor heritage.
+/// - A union has no single call/construct/index surface, so the merged
+///   surface carries none.
+///
+/// Returns `Some(empty)` when no arm declares any Object member. Returns
+/// `None` only when the arm vector is empty (defensive). Unlike the
+/// common-member rule, a non-Object (`None`) arm does NOT collapse the
+/// whole surface — the Object arms still contribute their members (a
+/// `{ a } | string` macro surface publishes `a`, optional).
+fn merge_union_surfaces_for_macro(
+    graph: &SemanticGraphStore,
+    arm_surfaces: &[Option<ShallowSurface>],
+) -> Option<ShallowSurface> {
+    use crate::semantic_query::MemberMergeRole;
+
+    if arm_surfaces.is_empty() {
+        return None;
+    }
+    let arm_count = arm_surfaces.len();
+    let live: Vec<&ShallowSurface> = arm_surfaces.iter().filter_map(|s| s.as_ref()).collect();
+    if live.is_empty() {
+        return Some(ShallowSurface::empty());
+    }
+    // A non-Object arm (`None`) means that arm declares NO members, so
+    // every member is effectively absent from it → optional on the union.
+    let has_non_object_arm = arm_surfaces.iter().any(|s| s.is_none());
+
+    // Enumerate member names in first-seen order across all arms.
+    let mut ordered_names: Vec<Arc<str>> = Vec::new();
+    let mut seen: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
+    for arm in &live {
+        for member in &arm.members {
+            if seen.insert(Arc::clone(&member.name)) {
+                ordered_names.push(Arc::clone(&member.name));
+            }
+        }
+    }
+
+    let mut members: Vec<ShallowSurfaceMember> = Vec::with_capacity(ordered_names.len());
+    for name in &ordered_names {
+        let mut per_arm_values: Vec<SemanticNodeId> = Vec::with_capacity(live.len());
+        let mut optional_in_any = false;
+        let mut readonly_in_all = true;
+        let mut declaring_arms = 0usize;
+        for arm in &live {
+            if let Some(arm_member) = arm.members.iter().find(|m| &m.name == name) {
+                declaring_arms += 1;
+                per_arm_values.push(arm_member.value);
+                optional_in_any |= arm_member.optional;
+                readonly_in_all &= arm_member.readonly;
+            }
+        }
+        // Absent from at least one arm (a live arm without it, or a
+        // non-Object arm) ⇒ optional on the merged surface.
+        if declaring_arms < arm_count || has_non_object_arm {
+            optional_in_any = true;
+        }
+        let value = if per_arm_values.len() == 1 {
+            per_arm_values[0]
+        } else {
+            graph.intern_node(SemanticNodeData::Union(Arc::from(
+                per_arm_values.into_boxed_slice(),
+            )))
+        };
+        members.push(ShallowSurfaceMember {
+            name: Arc::clone(name),
+            value,
+            optional: optional_in_any,
+            readonly: readonly_in_all,
+            is_method: false,
+            declared_in_macro_type_arg: false,
+            merge_role: MemberMergeRole::Authored,
+            // Union arm-member: reached THROUGH the union, no single source
+            // declaration site — genuinely synthetic (multi-origin).
             spans: verter_type_expr::MemberSpans::default(),
             declaration_origin: None,
         });

@@ -10298,6 +10298,76 @@ defineProps<DirectProps>()
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Stage 4-pre Gap 2 — Vue macro object-surface UNION enumeration.
+//
+// `defineProps<FixedProps | BubbleProps>()` publishes the UNION of the
+// arm members (a prop present in ANY arm is part of the macro surface —
+// the Vue macro convention), NOT the TS property-access INTERSECTION of
+// common members. The dispatch macro object-surface demand
+// (`ReductionDemand::MacroObjectSurface`) selects the union-arm rule at
+// the empty-path Shallow terminal surface, cache-keyed distinctly from
+// ordinary `ProjectPath` (which keeps the intersection).
+//
+// Asserts the DISPATCH projector surface via `evaluate_types().props`.
+// ─────────────────────────────────────────────────────────────────────
+#[test]
+fn dispatch_macro_props_union_enumerates_all_arm_members() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+type FixedProps = { kind: 'fixed'; size: number }
+type BubbleProps = { kind: 'bubble'; color: string }
+defineProps<FixedProps | BubbleProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session
+        .evaluate_types("/src/App.vue")
+        .expect("evaluate_types must resolve")
+        .expect("some evaluated types");
+    let names: Vec<&str> = evaluated.props.iter().map(|p| p.name.as_str()).collect();
+
+    // Common member present in BOTH arms.
+    assert!(
+        names.contains(&"kind"),
+        "Gap 2 — common union member `kind` must be on the dispatch macro surface, \
+         got: {names:?}"
+    );
+    // Branch-specific members present in only ONE arm — the union
+    // convention keeps them (the intersection rule would drop them).
+    for required in ["size", "color"] {
+        assert!(
+            names.contains(&required),
+            "Gap 2 — the dispatch macro object-surface MUST enumerate the UNION of \
+             object-arm members; branch-specific `{required}` (present in only one \
+             arm) must survive. The intersection rule would drop it. Got: {names:?}"
+        );
+    }
+
+    // Requiredness: a member absent from any arm becomes optional; a
+    // member present in all arms stays required.
+    let size = evaluated.props.iter().find(|p| p.name == "size").unwrap();
+    let kind = evaluated.props.iter().find(|p| p.name == "kind").unwrap();
+    assert!(
+        size.optional,
+        "Gap 2 — `size` is declared in only one arm, so it MUST be optional on the \
+         merged macro surface. Got optional={}",
+        size.optional
+    );
+    assert!(
+        !kind.optional,
+        "Gap 2 — `kind` is declared in BOTH arms (and required in each), so it MUST \
+         stay required on the merged macro surface. Got optional={}",
+        kind.optional
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Stage 4-pre Gap 4 — aliased conditional-emits carrier walk (dispatch).
 //
 // `defineEmits<ConditionalEmits>()` where
