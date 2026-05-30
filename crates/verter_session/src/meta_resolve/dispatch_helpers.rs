@@ -961,12 +961,12 @@ pub(crate) fn instantiate_local_generic_ref_via_dispatch(
 // shared dispatch surface projector ALONE — `dispatch_projected_surface`
 // composes Object / Alias roots directly and compound (Union /
 // Intersection / InstantiationRef) roots from the decl anchor through the
-// shared empty-path Shallow walker. The legacy prepared-decl root-surface
-// rescue (`.or_else(cached_prepared_root_surface)`) was removed in
-// Stage 4-disp: dispatch is the sole root-surface authority here. (The
+// shared empty-path Shallow walker. Dispatch is the sole root-surface
+// authority here; there is no prepared-decl root-surface rescue
+// (`.or_else(cached_prepared_root_surface)`) behind dispatch. (The
 // prepared-decl path itself survives only for explicit prepared-surface
-// callers; it is no longer a root-surface fallback behind dispatch.) The
-// `root_surface_fallback_absent` architecture guard enforces this absence.
+// callers.) The `root_surface_bridges_carry_no_prepared_decl_fallback`
+// architecture guard enforces this absence.
 pub(crate) fn project_type_surface_expr_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,

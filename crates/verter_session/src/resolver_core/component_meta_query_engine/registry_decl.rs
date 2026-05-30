@@ -948,8 +948,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // empty-path Shallow surface walker
         // (`ProjectPath { [], MacroObjectSurface(Shallow) }`). This is the
         // one shared resolver driven from the non-lossy base — not a
-        // parallel walker. Returns `None` (so the bridge fallback can fire)
-        // when the anchor is unresolved or the composed surface is empty.
+        // parallel walker. Returns `None` when the anchor is unresolved or
+        // the composed surface is empty.
         let anchor = self.dispatch_decl_anchor(scope_canonical_id, symbol_name)?;
         projected_compound_root_surface_via_dispatch(self.ctx, anchor)
     }

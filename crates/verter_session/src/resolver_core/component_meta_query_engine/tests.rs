@@ -1479,10 +1479,10 @@ export type IdentityProps<T> = RootProps<T>
 #[test]
 fn project_route_surface_expr_pick_reuses_request_local_routed_expr_cache() {
     // `Props extends Pick<BaseProps, ...>` is a compound (Intersection)
-    // dispatch root. After Stage 4-disp `dispatch_projected_surface`
-    // composes that compound root through the shared shallow walker, so the
-    // `RouteDemand::Pick` route is dispatch-resolved (it no longer falls to
-    // the prepared-member-projection path). Reuse for the dispatch-resolved
+    // dispatch root. `dispatch_projected_surface` composes that compound
+    // root through the shared shallow walker, so the `RouteDemand::Pick`
+    // route is dispatch-resolved (it does not fall to the
+    // prepared-member-projection path). Reuse for the dispatch-resolved
     // route is provided by the request-local routed-expr cache (consulted at
     // the top of `project_routed_expr_surface_expr`), so this test
     // characterizes that cache rather than the now-bypassed prepared-member
@@ -4482,16 +4482,16 @@ fn projected_member_declaration_origin_points_at_cross_file_declaration() {
     );
 }
 
-// ── Stage 4-disp: dispatch-authoritative compound-root surfaces ─────
+// ── Dispatch-authoritative compound-root surfaces ──────────────────
 //
 // These tests drive the REAL root-surface bridge
-// (`project_type_surface_expr_via_host_threaded`). After Stage 4-disp the
-// bridge carries NO prepared-decl root-surface rescue — dispatch is the
-// sole root-surface authority — so each test proves the dispatch surface
-// composition (`dispatch_projected_surface`, which composes compound roots
-// from the decl anchor through the shared empty-path Shallow walker)
-// produces a COMPLETE shallow surface for `Union` / `Intersection`
-// (heritage) / `InstantiationRef` roots.
+// (`project_type_surface_expr_via_host_threaded`). The bridge carries NO
+// prepared-decl root-surface rescue — dispatch is the sole root-surface
+// authority — so each test proves the dispatch surface composition
+// (`dispatch_projected_surface`, which composes compound roots from the
+// decl anchor through the shared empty-path Shallow walker) produces a
+// COMPLETE shallow surface for `Union` / `Intersection` (heritage) /
+// `InstantiationRef` roots.
 //
 // Discrimination: with no fallback present, if dispatch fails to compose
 // the compound root the bridge returns `None` and the `.expect` panics —

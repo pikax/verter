@@ -3872,9 +3872,9 @@ export interface HTMLAttributes {
 
     let _store_view = project.host().resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(project.host());
-    // After Stage 4-disp the bridge carries NO prepared-decl root-surface
-    // rescue, so this proves the re-exported intrinsic shape is resolved by
-    // the DISPATCH surface ALONE.
+    // The bridge carries NO prepared-decl root-surface rescue, so this
+    // proves the re-exported intrinsic shape is resolved by the DISPATCH
+    // surface ALONE.
     let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
         &mut query_engine,
         "/jsx_runtime.ts",
@@ -3900,8 +3900,8 @@ export interface HTMLAttributes {
 
 /// Registry-materialization caller rail: the registry decl materializer
 /// projects a root symbol through `project_type_surface_expr_via_host_threaded`
-/// (a root-surface bridge that, after Stage 4-disp, carries NO prepared-decl
-/// rescue). A CROSS-FILE generic `Omit`-heritage interface
+/// (a root-surface bridge that carries NO prepared-decl rescue). A
+/// CROSS-FILE generic `Omit`-heritage interface
 /// (`ButtonProps extends Omit<LinkProps, 'href'>`) is the hard case: its
 /// dispatch root is an Intersection whose generic-Omit carrier arm can
 /// collapse to `Opaque(Miss)` under the root `Published(Expanded)`
@@ -3983,8 +3983,8 @@ export interface ButtonProps extends Omit<LinkProps, 'href'> {
 
 /// Slot-deepening caller rail: `defineSlots<T>` lowers its slot surface
 /// through `project_type_surface_shape_via_host_threaded` (the second
-/// root-surface bridge that, after Stage 4-disp, carries NO prepared-decl
-/// rescue). A slot type that is a compound intersection of an imported
+/// root-surface bridge that carries NO prepared-decl rescue). A slot type
+/// that is a compound intersection of an imported
 /// mapped/record slot branch and a named-slot literal is the hard case;
 /// this proves the slot rail composes the compound slot surface through
 /// dispatch alone, so `default` survives to final meta.

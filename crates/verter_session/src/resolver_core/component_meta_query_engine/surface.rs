@@ -45,42 +45,31 @@ fn projected_surface_from_semantic_node_inner(
             result
         }
         SemanticNodeData::Object(surface) => Some(surface_view_to_projected_surface(ctx, surface)),
-        // Compound roots (`A | B`, `A & B` / interface heritage overlay,
-        // `Foo<Bar>`) carry no single `Object` surface on the
-        // post-`Published(Expanded)` instantiated node — and that node can
-        // collapse a generic heritage / `Omit` carrier arm to
-        // `Opaque(Miss)`, which the shared shallow walker cannot re-resolve
-        // from the already-collapsed node. So this projector does NOT route
-        // the instantiated root; it returns `None` here and the seam
-        // (`dispatch_projected_surface`) composes the compound root through
-        // the ONE shared empty-path Shallow surface walker
-        // (`projected_compound_root_surface_via_dispatch`) driven from the
-        // decl anchor (carrier intact). Returning `None` for every non-
-        // Object/Alias shape also keeps the prepared-decl bridge fallback
-        // available for re-exported / barrel-routed declarations the
-        // dispatch root does not reach.
+        // Compound roots (`A | B`, `A & B` / heritage overlay, `Foo<Bar>`)
+        // carry no single `Object` surface on the post-`Published(Expanded)`
+        // instantiated node, and that node can collapse a generic heritage /
+        // `Omit` carrier arm to `Opaque(Miss)`. So this projector returns
+        // `None` here; the seam (`dispatch_projected_surface`) composes the
+        // compound root via `projected_compound_root_surface_via_dispatch`
+        // driven from the decl anchor (carrier intact).
         _ => None,
     }
 }
 
 /// Compose the shallow surface of a compound root node (`Union` /
 /// `Intersection` / `InstantiationRef`) through the shared empty-path
-/// Shallow surface walker.
+/// Shallow surface walker: drives `ProjectPath { base: node, path: [],
+/// macro_object_surface(Shallow, Structural) }` via
+/// `resolve_typeinfo_surface_view`, then reconstructs the terminal
+/// `SurfaceView` into a `ProjectedSurface`.
 ///
-/// Drives `ProjectPath { base: node, path: [],
-/// context: macro_object_surface(Shallow, Structural) }` via
-/// `resolve_typeinfo_surface_view`, then reconstructs the resolver's own
-/// terminal `SurfaceView` into a `ProjectedSurface`. Returns `None` (so the
-/// root-surface bridge fallback can fire) when the walker cannot resolve an
-/// `Object` terminal OR the composed surface is empty — an incomplete
-/// surface must never preempt the fallback.
-///
-/// `node` is the base the shared walker composes from. The seam
-/// (`dispatch_projected_surface`) drives this with the decl-anchor
-/// placeholder for compound roots, because the post-`Published(Expanded)`
-/// instantiated root can collapse a generic heritage/`Omit` carrier arm to
-/// `Opaque(Miss)` (which the shared walker cannot re-resolve), whereas the
-/// decl anchor still carries the heritage/`Omit` carrier intact.
+/// `node` is the decl-anchor base the seam supplies — NOT the
+/// post-`Published(Expanded)` instantiated root, which can collapse a
+/// generic heritage / `Omit` carrier arm to `Opaque(Miss)` (the shared
+/// walker cannot re-resolve an already-collapsed node, whereas the decl
+/// anchor still carries the carrier intact). Returns `None` when the walker
+/// resolves no `Object` terminal OR the composed surface is empty (an empty
+/// surface is never a COMPLETE compound-root projection).
 pub(super) fn projected_compound_root_surface_via_dispatch(
     ctx: &dyn ResolverContext,
     node: SemanticNodeId,
@@ -97,9 +86,6 @@ pub(super) fn projected_compound_root_surface_via_dispatch(
         ),
     )?;
     let projected = surface_view_to_projected_surface(ctx, &surface);
-    // An empty composed surface is not a COMPLETE compound-root projection;
-    // report it as `None` so the prepared-decl bridge fallback still covers
-    // the root rather than being preempted by a wrong empty member set.
     if projected_surface_is_empty(&projected) {
         return None;
     }
