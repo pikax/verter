@@ -1736,8 +1736,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     }
 
     #[cfg(test)]
-    pub(super) fn debug_prepared_member_cache_len(&self) -> usize {
-        self.prepared_member_cache.borrow().len()
+    pub(super) fn debug_routed_expr_surface_cache_len(&self) -> usize {
+        self.routed_expr_surface_cache.borrow().len()
     }
 
     #[cfg(test)]

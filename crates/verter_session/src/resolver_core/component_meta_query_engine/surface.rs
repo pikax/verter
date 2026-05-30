@@ -46,32 +46,19 @@ fn projected_surface_from_semantic_node_inner(
         }
         SemanticNodeData::Object(surface) => Some(surface_view_to_projected_surface(ctx, surface)),
         // Compound roots (`A | B`, `A & B` / interface heritage overlay,
-        // `Foo<Bar>`) carry no single `Object` surface on the node itself —
-        // `dispatch_root_instantiated` returns the unmerged Union /
-        // Intersection / InstantiationRef root. Route these EXACT shapes
-        // through the shared empty-path Shallow surface walker
-        // (`ProjectPath { [], MacroObjectSurface(Shallow) }` via
-        // `resolve_typeinfo_surface_view`), which already owns the
-        // union-of-arm-members merge, the required-wins / readonly /
-        // own-body-shadows-heritage intersection merge, and the
-        // `Instantiate { StructuralTransit(Navigate) }` instantiation of an
-        // `InstantiationRef`'s body. The composed `SurfaceView` is then
-        // reconstructed verbatim (span-lossless) by
-        // `surface_view_to_projected_surface`.
-        //
-        // This is a ROUTING extension over the one shared resolver — NOT a
-        // parallel walker. It matches ONLY these compound shapes: every
-        // other node returns `None` so the bridge fallback still covers
-        // re-exported / barrel-routed declarations the dispatch root does
-        // not reach. Returning `Some(empty)` here would preempt that
-        // fallback with a wrong (empty) member set, so an empty composed
-        // surface is reported as `None` (an empty surface is never a
-        // COMPLETE compound-root projection).
-        SemanticNodeData::Union(_)
-        | SemanticNodeData::Intersection(_)
-        | SemanticNodeData::InstantiationRef { .. } => {
-            projected_compound_root_surface_via_dispatch(ctx, node)
-        }
+        // `Foo<Bar>`) carry no single `Object` surface on the
+        // post-`Published(Expanded)` instantiated node — and that node can
+        // collapse a generic heritage / `Omit` carrier arm to
+        // `Opaque(Miss)`, which the shared shallow walker cannot re-resolve
+        // from the already-collapsed node. So this projector does NOT route
+        // the instantiated root; it returns `None` here and the seam
+        // (`dispatch_projected_surface`) composes the compound root through
+        // the ONE shared empty-path Shallow surface walker
+        // (`projected_compound_root_surface_via_dispatch`) driven from the
+        // decl anchor (carrier intact). Returning `None` for every non-
+        // Object/Alias shape also keeps the prepared-decl bridge fallback
+        // available for re-exported / barrel-routed declarations the
+        // dispatch root does not reach.
         _ => None,
     }
 }
@@ -87,7 +74,14 @@ fn projected_surface_from_semantic_node_inner(
 /// root-surface bridge fallback can fire) when the walker cannot resolve an
 /// `Object` terminal OR the composed surface is empty — an incomplete
 /// surface must never preempt the fallback.
-fn projected_compound_root_surface_via_dispatch(
+///
+/// `node` is the base the shared walker composes from. The seam
+/// (`dispatch_projected_surface`) drives this with the decl-anchor
+/// placeholder for compound roots, because the post-`Published(Expanded)`
+/// instantiated root can collapse a generic heritage/`Omit` carrier arm to
+/// `Opaque(Miss)` (which the shared walker cannot re-resolve), whereas the
+/// decl anchor still carries the heritage/`Omit` carrier intact.
+pub(super) fn projected_compound_root_surface_via_dispatch(
     ctx: &dyn ResolverContext,
     node: SemanticNodeId,
 ) -> Option<ProjectedSurface> {

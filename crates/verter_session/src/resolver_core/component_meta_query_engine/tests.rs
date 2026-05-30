@@ -1478,7 +1478,16 @@ export type IdentityProps<T> = RootProps<T>
 }
 
 #[test]
-fn project_route_surface_expr_pick_reuses_request_local_member_cache() {
+fn project_route_surface_expr_pick_reuses_request_local_routed_expr_cache() {
+    // `Props extends Pick<BaseProps, ...>` is a compound (Intersection)
+    // dispatch root. After Stage 4-disp `dispatch_projected_surface`
+    // composes that compound root through the shared shallow walker, so the
+    // `RouteDemand::Pick` route is dispatch-resolved (it no longer falls to
+    // the prepared-member-projection path). Reuse for the dispatch-resolved
+    // route is provided by the request-local routed-expr cache (consulted at
+    // the top of `project_routed_expr_surface_expr`), so this test
+    // characterizes that cache rather than the now-bypassed prepared-member
+    // cache.
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -1523,11 +1532,25 @@ export interface Props extends Pick<BaseProps, 'open' | 'defaultOpen' | 'disable
         "Props",
         &route,
     )
-    .expect("prepared pick route should project");
-    let member_cache_after_first = query_engine.debug_prepared_member_cache_len();
+    .expect("pick route over a Pick-heritage interface should project");
+
+    // The picked surface keeps exactly the three requested members and drops
+    // the heritage-excluded (`name`) and own-body (`label`) members.
+    let picked = projected_object_member_names(&first);
+    assert_eq!(
+        picked,
+        vec![
+            "defaultOpen".to_string(),
+            "disabled".to_string(),
+            "open".to_string()
+        ],
+        "pick route must keep only the requested members; got {picked:?}",
+    );
+
+    let routed_cache_after_first = query_engine.debug_routed_expr_surface_cache_len();
     assert!(
-        member_cache_after_first > 0,
-        "first prepared pick projection should populate the request-local member cache",
+        routed_cache_after_first > 0,
+        "first pick projection should populate the request-local routed-expr cache",
     );
 
     let second = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
@@ -1536,13 +1559,13 @@ export interface Props extends Pick<BaseProps, 'open' | 'defaultOpen' | 'disable
         "Props",
         &route,
     )
-    .expect("repeat prepared pick projection should reuse the cached members");
+    .expect("repeat pick projection should reuse the cached routed expr");
 
     assert_eq!(first, second);
     assert_eq!(
-        query_engine.debug_prepared_member_cache_len(),
-        member_cache_after_first,
-        "repeat prepared pick projection should reuse the existing request-local member entries",
+        query_engine.debug_routed_expr_surface_cache_len(),
+        routed_cache_after_first,
+        "repeat pick projection should reuse the existing request-local routed-expr entry",
     );
 }
 

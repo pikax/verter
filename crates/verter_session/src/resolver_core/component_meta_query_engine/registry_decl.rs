@@ -43,7 +43,8 @@ use verter_type_expr::TypeExpr;
 use super::helpers::{is_builtin_name, resolve_imported_registry_symbol_with_budget};
 use super::surface::{
     dispatch_route_expr_is_materialized, filtered_projected_surface,
-    projected_surface_from_semantic_node, projected_surface_to_type_expr,
+    projected_compound_root_surface_via_dispatch, projected_surface_from_semantic_node,
+    projected_surface_to_type_expr,
 };
 use super::{
     empty_semantic_args, engine_fact_signature_for_exported_type,
@@ -854,6 +855,41 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         ProjectSemanticDispatch::new(self.ctx)
     }
 
+    /// Resolve the decl-anchor node for `(scope, symbol)` — the
+    /// `ResolveDecl` placeholder for the root declaration BEFORE any
+    /// `Instantiate` step. This node still carries the declaration's
+    /// heritage / `Omit` carrier intact (the post-`Published(Expanded)`
+    /// instantiated root can collapse a generic carrier arm to
+    /// `Opaque(Miss)`), so it is the correct base for the shared
+    /// empty-path Shallow surface walker when composing a compound root.
+    fn dispatch_decl_anchor(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<SemanticNodeId> {
+        // Resolve the root identity via
+        // `bare_name_resolve::resolve_bare_name_in_scope` directly —
+        // no `SessionSolverHost` construction. Matches the dispatch
+        // lowering path in `shallow_lower_type_expr`.
+        let scope_payload_arc = self.scope_payload_for_scope(scope_canonical_id);
+        let resolved_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+            self.ctx,
+            scope_canonical_id,
+            scope_payload_arc.as_deref(),
+            symbol_name,
+        )
+        .map(|root| (root.canonical_id, root.symbol_name))
+        .unwrap_or_else(|| (scope_canonical_id.to_string(), symbol_name.to_string()));
+        let dispatch = self.semantic_dispatch();
+        match dispatch.execute(SemanticQueryKey::ResolveDecl(resolve_decl_key(
+            resolved_root.0.as_str(),
+            resolved_root.1.as_str(),
+        ))) {
+            QueryResult::Value(id) => Some(id),
+            _ => None,
+        }
+    }
+
     fn dispatch_root_instantiated(
         &mut self,
         scope_canonical_id: &str,
@@ -915,7 +951,22 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         symbol_name: &str,
     ) -> Option<ProjectedSurface> {
         let root = self.dispatch_root_instantiated(scope_canonical_id, symbol_name)?;
-        projected_surface_from_semantic_node(self.ctx, root)
+        if let Some(surface) = projected_surface_from_semantic_node(self.ctx, root) {
+            return Some(surface);
+        }
+        // The post-`Published(Expanded)` instantiated root did not yield a
+        // complete surface — for a compound root that carries a generic
+        // heritage / `Omit` carrier the instantiation can collapse an arm
+        // to `Opaque(Miss)`, which the shared shallow walker cannot
+        // re-resolve from the already-collapsed node. Compose the surface
+        // from the decl anchor (carrier intact) through the SAME shared
+        // empty-path Shallow surface walker
+        // (`ProjectPath { [], MacroObjectSurface(Shallow) }`). This is the
+        // one shared resolver driven from the non-lossy base — not a
+        // parallel walker. Returns `None` (so the bridge fallback can fire)
+        // when the anchor is unresolved or the composed surface is empty.
+        let anchor = self.dispatch_decl_anchor(scope_canonical_id, symbol_name)?;
+        projected_compound_root_surface_via_dispatch(self.ctx, anchor)
     }
 
     pub(crate) fn dispatch_projected_member(
