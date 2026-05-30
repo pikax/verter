@@ -231,6 +231,82 @@ pub(crate) enum PayloadSurfaceScope {
 /// than dropping the whole inherited emit set); a hard failure on
 /// both branches publishes a single
 /// `macro-payload-surface-branch-merge-error` diagnostic.
+///
+/// Resolve an emit macro payload node to its underlying `Conditional`
+/// root, walking through `DeclRef` carriers for named conditional
+/// aliases (Stage 4-pre Gap 4).
+///
+/// `resolve_macro_payload` lowers in `Navigate` mode, so
+/// `defineEmits<ConditionalEmits>()` (where
+/// `type ConditionalEmits = Mode extends X ? Y : Z`) surfaces as a
+/// terminal `DeclRef` carrier rather than the `Conditional` node the
+/// branch-merge needs. This helper reaches the alias body and recurses
+/// through chained aliases until it finds a `Conditional` (returns
+/// `Some`) or a non-`Conditional`/non-carrier node (returns `None`).
+/// Bounded at depth 8 — generous for real alias chains, tight enough to
+/// fail loudly on pathological graphs. The branch-merge only fires for
+/// the undecided-conditional emit-inheritance carve-out, so a `None`
+/// here correctly routes the (decided / object / union) payload to the
+/// default single-dispatch surface.
+fn resolve_emit_payload_to_conditional_root(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+    depth: u8,
+) -> Option<SemanticNodeId> {
+    if depth > 8 {
+        return None;
+    }
+    match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node).as_deref() {
+        // Already the Conditional — done.
+        Some(SemanticNodeData::Conditional { .. }) => Some(node),
+        // Navigate-mode carrier for a named alias. Resolve the alias's
+        // body and recurse. `ResolveDecl` on a navigate `DeclRef`
+        // returns an `Opaque(DeclPlaceholder)` deferral (the body is NOT
+        // materialised by `ResolveDecl`), so reach the body by lowering
+        // the prepared declaration's body `TypeExpr` directly — the same
+        // mechanism the structural `named_decl_body` walker used.
+        Some(SemanticNodeData::DeclRef { identity }) => lower_decl_body_to_node(
+            dispatch,
+            &identity.canonical_id,
+            &identity.decl_name,
+        )
+        .filter(|resolved| *resolved != node)
+        .and_then(|resolved| {
+            resolve_emit_payload_to_conditional_root(dispatch, resolved, depth + 1)
+        }),
+        // A `DeclPlaceholder` deferral (e.g. surfaced by an upstream
+        // `ResolveDecl`). Reach its body the same way.
+        Some(SemanticNodeData::Opaque(
+            crate::semantic_query::QueryError::DeclPlaceholder {
+                canonical_id, name, ..
+            },
+        )) => lower_decl_body_to_node(dispatch, canonical_id, name)
+            .filter(|resolved| *resolved != node)
+            .and_then(|resolved| {
+                resolve_emit_payload_to_conditional_root(dispatch, resolved, depth + 1)
+            }),
+        _ => None,
+    }
+}
+
+/// Lower a named declaration's prepared body `TypeExpr` to a semantic
+/// node in `Navigate` mode (terminal carriers preserved). Returns the
+/// lowered body node — for a conditional alias body
+/// (`type X = A extends B ? C : D`) this is the `Conditional` node whose
+/// branch refs the emit branch-merge enumerates.
+fn lower_decl_body_to_node(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    canonical_id: &str,
+    name: &str,
+) -> Option<SemanticNodeId> {
+    let prepared = dispatch.ctx.prepared_type_decl(canonical_id, name)?;
+    dispatch.lower_type_expr_in_scope_with_mode(
+        canonical_id,
+        &prepared.body,
+        ProjectionMode::Navigate,
+    )
+}
+
 #[allow(dead_code)]
 pub(crate) fn resolve_payload_surface_with_scope(
     dispatch: &ProjectSemanticDispatch<'_>,
@@ -255,18 +331,23 @@ pub(crate) fn resolve_payload_surface_with_scope(
         );
     }
 
-    // Emit-class macro object scope. Peek the payload's node data
-    // to detect an undecided `Conditional` shell BEFORE dispatching
-    // the outer `ProjectPath`. The pre-dispatch peek is non-invasive
-    // (it reads already-interned `SemanticNodeData` without re-
-    // dispatch); it does NOT emit any dep-signature on its own.
-    let payload_is_conditional = matches!(
-        crate::project_semantic_dispatch::node_data_for(dispatch.ctx, payload_node).as_deref(),
-        Some(SemanticNodeData::Conditional { .. })
-    );
+    // Emit-class macro object scope. Resolve the payload to its
+    // underlying `Conditional` root BEFORE dispatching the outer
+    // `ProjectPath`. The payload node may be the `Conditional` directly,
+    // OR a `DeclRef` carrier for a NAMED alias whose body is the
+    // `Conditional` (`defineEmits<ConditionalEmits>()` where
+    // `type ConditionalEmits = Mode extends X ? Y : Z`).
+    // `resolve_macro_payload` lowers in `Navigate` mode, so a named
+    // conditional alias surfaces as a terminal `DeclRef` here, not the
+    // `Conditional`. The carrier walk follows DeclRef/DeclPlaceholder
+    // carriers to the conditional root (Stage 4-pre Gap 4). The walk is
+    // non-invasive (it reads already-interned `SemanticNodeData` and
+    // lowers prepared bodies in Navigate); the branch dispatches below
+    // emit the dep-signature.
+    let conditional_node = resolve_emit_payload_to_conditional_root(dispatch, payload_node, 0);
 
-    if !payload_is_conditional {
-        // Not a Conditional payload — branch-merge is inapplicable.
+    let Some(conditional_node) = conditional_node else {
+        // No Conditional reachable — branch-merge is inapplicable.
         // Fall through to the Default path.
         return super::resolve_payload_surface(
             dispatch,
@@ -280,14 +361,14 @@ pub(crate) fn resolve_payload_surface_with_scope(
             super::macro_payload_surface_provenance(AnalyzedMacroKind::DefineEmits),
             diag_sink,
         );
-    }
+    };
 
     // Conditional payload under emit-class scope. Project both
     // branches under `Published(Shallow)` and merge their top-level
     // Object members.
     let (true_branch, false_branch) = match crate::project_semantic_dispatch::node_data_for(
         dispatch.ctx,
-        payload_node,
+        conditional_node,
     )
     .as_deref()
     {
@@ -297,7 +378,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
             ..
         }) => (*true_branch_ref, *false_branch_ref),
         _ => {
-            // Unreachable per the peek above, but fall through
+            // Unreachable per the resolution above, but fall through
             // safely.
             return super::resolve_payload_surface(
                 dispatch,

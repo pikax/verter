@@ -8838,7 +8838,7 @@ defineProps<Props<T>>()
         name: StdArc::from("Props"),
         type_arguments: StdArc::from(vec![TypeExpr::Ref {
             name: StdArc::from("T"),
-            type_arguments: StdArc::from(Vec::<TypeExpr>::new()),
+            type_arguments: std::sync::Arc::from(Vec::<TypeExpr>::new()),
         }]),
     };
     let lowered = dispatch
@@ -9338,7 +9338,7 @@ defineProps<Wrapper<Inner>>()
         name: StdArc::from("Wrapper"),
         type_arguments: StdArc::from(vec![TypeExpr::Ref {
             name: StdArc::from("Inner"),
-            type_arguments: StdArc::from(Vec::<TypeExpr>::new()),
+            type_arguments: std::sync::Arc::from(Vec::<TypeExpr>::new()),
         }]),
     };
 
@@ -10295,6 +10295,108 @@ defineProps<DirectProps>()
          transparent identity carrier). The downgrade MUST NOT regress this. Got \
          title.declared_in_macro_type_arg=false",
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Stage 4-pre Gap 4 — aliased conditional-emits carrier walk (dispatch).
+//
+// `defineEmits<ConditionalEmits>()` where
+// `type ConditionalEmits = Mode extends 'editor' ? EditorEmits : ViewerEmits`
+// lowers (Navigate) to a terminal DeclRef carrier, NOT the Conditional
+// directly. The emits branch-merge (`resolve_payload_surface_with_scope`,
+// EmitClassMacroObject) only fired when the payload node was DIRECTLY a
+// Conditional, so a NAMED conditional-emit alias missed the merge and the
+// inherited emit set collapsed. The carrier walk
+// (`resolve_emit_payload_to_conditional_root`) follows DeclRef /
+// DeclPlaceholder carriers to the Conditional root before the branch
+// projection.
+//
+// This drives `resolve_payload_surface_with_scope` DIRECTLY with the
+// aliased-conditional payload node (the named-alias DeclRef carrier the
+// macro projector resolves it to under Navigate), asserting the shared
+// branch-merge surface enumerates BOTH branches' events. Driving the
+// branch-merge in isolation keeps the test discriminating for the carrier
+// walk specifically, independent of the upstream macro-payload-resolution
+// path's handling of unbound component generics.
+// ─────────────────────────────────────────────────────────────────────
+#[test]
+fn dispatch_aliased_conditional_emits_branch_merge() {
+    use crate::meta_resolve::projectors::{resolve_payload_surface_with_scope, PayloadSurfaceScope};
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{ProjectionMode, SemanticNodeData};
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts" generic="Mode extends 'editor' | 'viewer'">
+type EditorEmits = { itemEdited: [id: number] }
+type ViewerEmits = { itemViewed: [id: number] }
+type ConditionalEmits = Mode extends 'editor' ? EditorEmits : ViewerEmits
+defineEmits<ConditionalEmits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    // Seed the canonical state through the public consumer path.
+    let _ = session.evaluate_types("/src/App.vue").unwrap();
+    let host = project.host();
+
+    let scope = "/src/App.vue";
+    let dispatch = ProjectSemanticDispatch::new(host);
+
+    // The macro projector resolves `defineEmits<ConditionalEmits>()`'s type
+    // argument in Navigate mode, which yields a terminal `DeclRef` carrier
+    // for the NAMED conditional alias (NOT the `Conditional` node). Lower
+    // the alias reference the same way to obtain that carrier payload node.
+    let conditional_ref = TypeExpr::Ref {
+        name: std::sync::Arc::from("ConditionalEmits"),
+        type_arguments: std::sync::Arc::from(Vec::<TypeExpr>::new().into_boxed_slice()),
+    };
+    let payload_node = dispatch
+        .lower_type_expr_in_scope_with_mode(scope, &conditional_ref, ProjectionMode::Navigate)
+        .expect("ConditionalEmits must lower to a Navigate carrier node");
+
+    // Pre-condition: the payload is a carrier (NOT a bare Conditional),
+    // exactly the shape that defeated the direct-only branch-merge.
+    assert!(
+        !matches!(
+            crate::project_semantic_dispatch::node_data_for(host, payload_node).as_deref(),
+            Some(SemanticNodeData::Conditional { .. })
+        ),
+        "fixture precondition: the Navigate-lowered named conditional alias must \
+         be a CARRIER (DeclRef/DeclPlaceholder), not a bare Conditional — that is \
+         the shape gap 4's carrier walk must follow"
+    );
+
+    let mut diag_sink = Vec::new();
+    let surface = resolve_payload_surface_with_scope(
+        &dispatch,
+        payload_node,
+        0,
+        verter_semantic::analysis::component_meta::MacroExpansionKind::DefineEmits,
+        PayloadSurfaceScope::EmitClassMacroObject,
+        &mut diag_sink,
+    );
+    let surface = surface.expect(
+        "Gap 4 — the emits branch-merge must resolve the aliased-conditional \
+         payload surface by following the DeclRef carrier to the Conditional root",
+    );
+    let members = crate::meta_resolve::projectors::read_surface_members(host, surface);
+    let event_names: Vec<String> = members.iter().map(|m| m.name.to_string()).collect();
+
+    for required in ["itemEdited", "itemViewed"] {
+        assert!(
+            event_names.iter().any(|n| n == required),
+            "Gap 4 — the branch-merge surface MUST merge BOTH branches of the \
+             undecided NAMED conditional emit alias `ConditionalEmits` (Mode \
+             extends 'editor' ? EditorEmits : ViewerEmits). Event `{required}` is \
+             missing — the merge must follow the DeclRef carrier to the \
+             Conditional root. Got events: {event_names:?}"
+        );
+    }
 }
 
 mod node_predicates_tests {
