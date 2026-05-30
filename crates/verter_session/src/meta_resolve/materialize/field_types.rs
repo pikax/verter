@@ -30,6 +30,44 @@ pub(crate) fn type_expr_materializer_context(
     }
 }
 
+/// The EXACT [`ProjectionReductionContext`] the whole-expression
+/// materialiser lowers + reduces `expr` under, given the caller's
+/// `mode`.
+///
+/// gap1: the `ShapeCacheDb` peek/publish slot MUST be keyed by this
+/// context so a cache entry's stored value (reduced under this context)
+/// is only ever served to a consumer that lowered under the SAME
+/// context. The whole-expression materialiser has TWO reduction
+/// contexts for a `Navigate` caller:
+///
+/// - a `Navigate` caller whose `expr` root is itself a *published*
+///   operator (`Pick`/`Omit`/`IndexedAccess`/...) reduces under
+///   `Published(Navigate)` — the explicit narrowing IS consumer demand,
+///   so the operator reduces path-precisely even at the shallow
+///   publication boundary; and
+/// - every other `Navigate` caller reduces under
+///   `StructuralTransit(Navigate)` (operators carrier-stop).
+///
+/// `Expanded` / other modes reduce under `Published(mode)`.
+///
+/// Keying the slot on a bare `published(mode)` while reducing under
+/// `StructuralTransit(mode)` stored a transit-lowered value at a
+/// published-keyed slot and served it to a published consumer — the
+/// gap1 poisoning. This helper is the single source for both the
+/// reduction and the cache key.
+pub(crate) fn type_expr_materialize_reduction_context(
+    expr: &verter_type_expr::TypeExpr,
+    mode: crate::semantic_query::ProjectionMode,
+) -> crate::semantic_query::ProjectionReductionContext {
+    if matches!(mode, crate::semantic_query::ProjectionMode::Navigate)
+        && type_expr_root_is_published_operator(expr)
+    {
+        crate::semantic_query::ProjectionReductionContext::published(mode)
+    } else {
+        type_expr_materializer_context(mode)
+    }
+}
+
 fn type_expr_root_is_published_operator(expr: &verter_type_expr::TypeExpr) -> bool {
     use verter_type_expr::TypeExpr;
 
@@ -118,27 +156,23 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     #[cfg(test)]
     MTL_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    // §4.5 items 2-5: per-request memo keyed on `(scope, candidate, mode)`.
-    let memo_key = (
-        scope_canonical_id.to_string(),
-        expr.clone(),
-        matches!(mode, crate::semantic_query::ProjectionMode::Navigate),
-    );
-    #[cfg(test)]
-    crate::spike_instrumentation::record_cache_read("materialize_memo");
-    if let Some(cached) = query_engine
-        .materialize_memo
-        .borrow()
-        .get(&memo_key)
-        .cloned()
-    {
-        return cached;
-    }
+    // gap1: the host-owned `ShapeCacheDb` is THE materialiser cache.
+    // The former request-local `materialize_memo` keyed on
+    // `(scope, expr, navigate_bool)` was a SECOND authoritative cache
+    // (a host-owned-cache-principle violation) AND keyed only on a
+    // mode-collapsed `navigate_bool` — distinct reduction contexts over
+    // the same `(scope, expr)` collided onto one cell. It is gone.
+    //
+    // The cache slot is keyed by the EXACT
+    // [`ProjectionReductionContext`] the reduction below actually runs
+    // under (`reduction_context`, computed here so the peek key and the
+    // value share one identity). Keying on `published(mode)` while
+    // reducing under `StructuralTransit(mode)` (the `Navigate` case)
+    // poisoned a published consumer with a transit-lowered value.
+    let reduction_context = type_expr_materialize_reduction_context(expr, mode);
 
     // Peek the universal ShapeCacheDb (TypeExpr subject,
-    // whole-subject demand). Path-precise demand narrowing emerges
-    // in Commits C–F when projectors thread `SurfaceProjection`
-    // cursors and consult `ShapeCacheDb` per-hop.
+    // whole-subject demand under the exact reduction context).
     {
         // Loop-5 instrumentation — bump peek for every host-memo
         // read attempt; bump hit only on the cached return path.
@@ -146,19 +180,15 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let ctx = query_engine.ctx();
-        let cache_key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
+        let cache_key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole_with_context(
             std::sync::Arc::<str>::from(scope_canonical_id),
             std::sync::Arc::new(expr.clone()),
-            mode,
+            reduction_context,
         );
         let host_db = ctx.project_type_store().shape_cache_db();
         if let Some(cached) = host_db.peek(&cache_key, ctx) {
             crate::loop5_instrumentation::MATERIALIZE_MEMO_HITS
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            query_engine
-                .materialize_memo
-                .borrow_mut()
-                .insert(memo_key, cached.clone());
             return cached;
         }
     }
@@ -243,13 +273,8 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
             scope_canonical_id, mode
         );
     }
-    let reduction_context = if matches!(mode, crate::semantic_query::ProjectionMode::Navigate)
-        && type_expr_root_is_published_operator(expr)
-    {
-        crate::semantic_query::ProjectionReductionContext::published(mode)
-    } else {
-        type_expr_materializer_context(mode)
-    };
+    // `reduction_context` was computed at function entry (gap1) so the
+    // ShapeCacheDb peek/publish key shares one identity with the value.
     let _us_lower_t0 = Instant::now();
     let lowered = dispatch.shallow_lower_type_expr_with_context(
         expr,
@@ -324,10 +349,10 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
             crate::loop5_instrumentation::MATERIALIZE_MEMO_PUBLISHES
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-            let cache_key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
+            let cache_key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole_with_context(
                 std::sync::Arc::<str>::from(scope_canonical_id),
                 std::sync::Arc::new(expr.clone()),
-                mode,
+                reduction_context,
             );
             let host_db = ctx.project_type_store().shape_cache_db();
             let captured_value = materialized.clone();
@@ -369,18 +394,10 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         }
     }
 
-    // Engine-local memo: skip on `cache_suppress=true` so the same
-    // request's later reduce calls do not pick the partial up as a
-    // warm-hit (the per-engine memo is request-scoped, but it can be
-    // consulted multiple times within one component-meta resolution
-    // for different fields that share the same `(scope, expr, mode)`
-    // key).
-    if !materialized.cache_suppress {
-        query_engine
-            .materialize_memo
-            .borrow_mut()
-            .insert(memo_key, materialized.clone());
-    }
+    // gap1: no request-local write-through. The host-owned
+    // `ShapeCacheDb` get_or_compute above is the SOLE materialiser
+    // cache; the same request's later reduce calls re-peek it (a warm
+    // hit under the exact `reduction_context` identity).
     materialized
 }
 

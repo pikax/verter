@@ -399,10 +399,17 @@ pub(crate) fn peek_member_shape_known(
             // per-query workspace-snapshot rebuild cost the peek path
             // exists to avoid).
             let ctx: &dyn ResolverContext = query_engine.ctx;
-            let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
+            // gap1: key the operator-shape slot by the EXACT reduction
+            // context the whole-expression materialiser
+            // (`materialize_component_meta_type_expr_until_stable_full`)
+            // writes under, so this peek and that publish share one
+            // cache identity. A bare `published(mode)` key would miss a
+            // `StructuralTransit(Navigate)`-published entry (or, worse,
+            // hit a published entry storing a transit-lowered value).
+            let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole_with_context(
                 Arc::<str>::from(scope_canonical_id),
                 Arc::new(expr.clone()),
-                mode,
+                super::materialize::type_expr_materialize_reduction_context(expr, mode),
             );
             ctx.project_type_store()
                 .shape_cache_db()
@@ -768,10 +775,18 @@ fn member_shape_peek_or_compute(
     use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
 
     let ctx: &dyn ResolverContext = query_engine.ctx;
-    let key = crate::component_meta_caches::ShapeCacheKey::semantic_node_whole(
+    // gap1: key the per-member SemanticNode slot by the EXACT reduction
+    // context the cold path reduces under
+    // (`type_expr_materializer_context(mode)` — `StructuralTransit` for
+    // `Navigate`, `Published` otherwise). A bare `published(mode)` key
+    // collided a transit-lowered carrier publication with a published
+    // consumer over the same `(scope, node)`.
+    let member_reduction_context =
+        super::materialize::type_expr_materializer_context(mode);
+    let key = crate::component_meta_caches::ShapeCacheKey::semantic_node_whole_with_context(
         Arc::<str>::from(scope_canonical_id),
         member_value,
-        mode,
+        member_reduction_context,
     );
 
     // (1) Peek FIRST — warm path pays zero raise/gate cost. The cached
@@ -1106,10 +1121,13 @@ fn admit_type_expr_shape_if_possible(
         dep_signature,
         cache_suppress: false,
     };
-    let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
+    // gap1: admit into the SAME slot identity the whole-expression
+    // materialiser + `peek_member_shape_known` use — keyed by the exact
+    // reduction context, not a bare `published(mode)`.
+    let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole_with_context(
         Arc::<str>::from(scope_canonical_id),
         Arc::new(expr.clone()),
-        mode,
+        super::materialize::type_expr_materialize_reduction_context(expr, mode),
     );
     let _ = admit_member_shape_if_possible(ctx, &key, value);
 }

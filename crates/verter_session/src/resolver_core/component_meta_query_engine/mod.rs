@@ -649,7 +649,6 @@ pub(crate) struct FastShallowFieldExpr {
 /// | `scope_payloads` | (a) | Per-request `Arc<DeclarationScopePayload>` clones; the bundle is ctx-owned, this just reuses the Arc within one request. |
 /// | `prepared_surface_cache` / `prepared_member_cache` / `prepared_target_cache` / `routed_expr_surface_cache` | (b) | All four are pre-lowering route projections — same justification as above. |
 /// | `prepared_type_decls` | (a) | Arc-cache for `Arc<PreparedTypeDecl>` from ctx; no semantic computation — only refcount avoidance. |
-/// | `materialize_memo` | (b) | — `(scope, expr, navigate_flag) → MaterializedTypeExpr` memo. Dispatch's post-lowering memo cannot replace this because the key is the un-lowered `TypeExpr`. |
 /// | `prepared_*_query_count`, `prepared_*_hit_count` | (a) | `#[cfg(test)]` instrumentation counters. |
 /// | `fuse_budgets` / `fuse_state` | (a) | Engine-construction-scoped fuse rails (§1.4). |
 /// | `projection_chain_scopes` | (a) | Call-scoped scope chain for prepared-route projection. |
@@ -716,14 +715,6 @@ pub struct ComponentMetaQueryEngine<'a> {
     prepared_type_decls: FxHashMap<
         (String, String),
         Option<std::sync::Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>>,
-    >,
-    /// Read-through view; authority is
-    /// `ProjectTypeStore::materialize_memo_db()`.
-    pub(crate) materialize_memo: RefCell<
-        FxHashMap<
-            (String, verter_type_expr::TypeExpr, bool),
-            crate::project_semantic_dispatch::raise::MaterializedTypeExpr,
-        >,
     >,
     #[cfg(test)]
     prepared_type_decl_query_count: usize,
@@ -1119,10 +1110,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             prepared_target_cache: RefCell::new(FxHashMap::default()),
             routed_expr_surface_cache: RefCell::new(FxHashMap::default()),
             prepared_type_decls: FxHashMap::default(),
-            materialize_memo: RefCell::new(FxHashMap::with_capacity_and_hasher(
-                64,
-                Default::default(),
-            )),
             #[cfg(test)]
             prepared_type_decl_query_count: 0,
             #[cfg(test)]
