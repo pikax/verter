@@ -453,14 +453,17 @@ impl VerterHost {
 ///
 /// Returns `(None, empty)` when the member carries no JSDoc spans or the
 /// declaring file's source is unavailable.
-/// Slice a [`CanonicalSpan`]'s byte range out of its file's cache-owned source
-/// (`IndexedReady.eval_source`). `None` when the file is not loaded or the byte
-/// range is out of bounds (a stale / synthetic span). This is the single
-/// source-slicing primitive the normalizers use to materialize display text
-/// from a span at the consumer boundary — it does NOT re-resolve or re-parse.
+/// Slice a [`CanonicalSpan`]'s byte range out of its file's cache-owned RAW
+/// source (`IndexedReady.raw_source`). [`CanonicalSpan`] offsets are
+/// SFC-absolute (the eval source is position-preserving, so OXC stamps spans
+/// in raw-file coordinates), so the slice indexes the raw source directly.
+/// `None` when the file is not loaded or the byte range is out of bounds (a
+/// stale / synthetic span). This is the single source-slicing primitive the
+/// normalizers use to materialize display text from a span at the consumer
+/// boundary — it does NOT re-resolve or re-parse.
 fn slice_canonical_span(host: &VerterHost, cspan: &CanonicalSpan) -> Option<String> {
     let indexed = host.ensure_indexed_ready(cspan.file.as_ref())?;
-    let source = Arc::clone(&indexed.eval_source);
+    let source = Arc::clone(&indexed.raw_source);
     let start = cspan.span.start as usize;
     let end = cspan.span.end as usize;
     source.get(start..end).map(|s| s.to_string())

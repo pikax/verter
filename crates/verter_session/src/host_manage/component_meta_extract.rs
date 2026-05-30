@@ -1153,10 +1153,12 @@ fn resolve_relative_type_specifier(
 }
 
 /// Slice a [`crate::typeinfo::surface::CanonicalSpan`] from its file's
-/// cache-owned `IndexedReady` source, memoising the per-file source read in
-/// `sources`. Returns `None` if the file is not loaded or the span is
-/// out-of-range. The single source-touching primitive for typeinfo JSDoc
-/// slicing — no fresh parse.
+/// cache-owned `IndexedReady` RAW source, memoising the per-file source read in
+/// `sources`. [`CanonicalSpan`](crate::typeinfo::surface::CanonicalSpan)
+/// offsets are SFC-absolute (the eval source is position-preserving), so the
+/// slice indexes `raw_source` directly. Returns `None` if the file is not
+/// loaded or the span is out-of-range. The single source-touching primitive for
+/// typeinfo JSDoc slicing — no fresh parse.
 fn slice_canonical_span_cached(
     host: &VerterHost,
     sources: &mut rustc_hash::FxHashMap<Arc<str>, Option<Arc<str>>>,
@@ -1166,7 +1168,7 @@ fn slice_canonical_span_cached(
         .entry(Arc::clone(&cspan.file))
         .or_insert_with(|| {
             host.ensure_indexed_ready(cspan.file.as_ref())
-                .map(|indexed| Arc::clone(&indexed.eval_source))
+                .map(|indexed| Arc::clone(&indexed.raw_source))
         })
         .clone()?;
     let start = cspan.span.start as usize;
@@ -1186,7 +1188,7 @@ fn slice_canonical_span_cached(
 /// Replaces the retired `project_imported_macro_surfaces` OXC reparse loop (a
 /// hang source: it allocated a fresh OXC arena and reparsed the dependency on
 /// every call). Source slices come from the cache-owned `IndexedReady`
-/// `eval_source`, never a fresh parse.
+/// `raw_source` (SFC-absolute spans), never a fresh parse.
 fn try_project_jsdoc_descriptions(
     host: &VerterHost,
     dep_canonical: &str,

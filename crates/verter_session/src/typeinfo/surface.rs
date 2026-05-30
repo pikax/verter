@@ -42,9 +42,10 @@ use crate::semantic_query_memo::SemanticGraphStore;
 /// identity; a surface member's origin can be a DIFFERENT file from the
 /// declaration that referenced it (an inherited member originates in its
 /// heritage base's file), so the span MUST carry the canonical file id. The
-/// offsets are in that file's source coordinate system (the SFC-extracted
-/// `<script>` content for `.vue`, the raw source otherwise) — the same
-/// coordinates the OXC lowering stamped.
+/// offsets are FILE-ABSOLUTE (SFC-absolute for `.vue`): a `.vue` file's eval
+/// source is position-preserving — script content sits at its raw SFC byte
+/// offsets — so the OXC lowering stamps every span in the raw-file coordinate
+/// system, the same coordinates a raw-`.vue` consumer slices.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CanonicalSpan {
     /// Canonical file id the span's offsets index into.
@@ -283,8 +284,8 @@ impl TypeInfoSurface {
     /// (which require locating the leading `/** */` block in the declaring file)
     /// are populated HERE, at the host accessor layer that can read the source.
     /// `source_for(canonical)` returns the cache-owned source of a canonical
-    /// file (the host passes `IndexedReady.eval_source`), or `None` when it is
-    /// unavailable.
+    /// file (the host passes `IndexedReady.raw_source`, against which member /
+    /// signature spans are SFC-absolute), or `None` when it is unavailable.
     ///
     /// Each member's JSDoc is located via its DECLARATION origin
     /// ([`SurfaceMemberOrigin::canonical_file`], which U1 made survive
