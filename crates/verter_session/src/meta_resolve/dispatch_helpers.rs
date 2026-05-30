@@ -957,6 +957,39 @@ pub(crate) fn instantiate_local_generic_ref_via_dispatch(
 // is gated `#[cfg(test)]` because tests are its only consumer.
 // =============================================================================
 
+/// The SOLE root-surface bridge fallback: when `dispatch_projected_surface`
+/// returns `None`, the two root-surface bridges
+/// (`project_type_surface_expr_via_host_threaded` /
+/// `project_type_surface_shape_via_host_threaded`) consult the
+/// prepared-decl walker (`cached_prepared_root_surface`) through this one
+/// shim. Centralising it here keeps the fallback-disable guard
+/// instrumentation in a single place and makes the Stage-4 root-surface
+/// fallback removal a single-call swap per bridge.
+///
+/// Under the test-only
+/// [`crate::resolver_core::component_meta_query_engine::disable_prepared_root_surface_fallback_for_tests`]
+/// guard the rescue is suppressed (returns `None`) and one bridge-fallback
+/// reach is recorded — so a test driving the real bridge can assert
+/// dispatch was authoritative for a compound root.
+fn root_surface_bridge_fallback<'ctx>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
+    scope_canonical_id: &str,
+    symbol_name: &str,
+) -> Option<verter_semantic::analysis::type_solver::query_engine::ProjectedSurface> {
+    #[cfg(any(test, debug_assertions))]
+    {
+        use crate::resolver_core::component_meta_query_engine::{
+            prepared_root_surface_fallback_disabled_for_current_thread,
+            record_prepared_root_surface_bridge_fallback_reached,
+        };
+        if prepared_root_surface_fallback_disabled_for_current_thread() {
+            record_prepared_root_surface_bridge_fallback_reached();
+            return None;
+        }
+    }
+    engine.cached_prepared_root_surface(scope_canonical_id, symbol_name)
+}
+
 pub(crate) fn project_type_surface_expr_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
@@ -968,7 +1001,7 @@ pub(crate) fn project_type_surface_expr_via_host_threaded<'ctx>(
     }
     let surface = engine
         .dispatch_projected_surface(scope_canonical_id, symbol_name)
-        .or_else(|| engine.cached_prepared_root_surface(scope_canonical_id, symbol_name))?;
+        .or_else(|| root_surface_bridge_fallback(engine, scope_canonical_id, symbol_name))?;
     projected_surface_to_type_expr(&surface)
 }
 
@@ -983,7 +1016,7 @@ pub(crate) fn project_type_surface_shape_via_host_threaded<'ctx>(
     }
     let surface = engine
         .dispatch_projected_surface(scope_canonical_id, symbol_name)
-        .or_else(|| engine.cached_prepared_root_surface(scope_canonical_id, symbol_name))?;
+        .or_else(|| root_surface_bridge_fallback(engine, scope_canonical_id, symbol_name))?;
     Some(projected_surface_to_expanded_shape(&surface))
 }
 

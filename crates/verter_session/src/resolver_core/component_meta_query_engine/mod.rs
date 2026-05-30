@@ -498,7 +498,7 @@ pub(crate) fn engine_dep_signature_for_two_canonicals(
     std::sync::Arc::from(entries.into_boxed_slice())
 }
 
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 use std::cell::Cell;
 
 /// Composite-scope context for prepared-member-path projection.
@@ -719,8 +719,6 @@ pub struct ComponentMetaQueryEngine<'a> {
     #[cfg(test)]
     prepared_type_decl_query_count: usize,
     #[cfg(test)]
-    prepared_root_surface_projection_count: usize,
-    #[cfg(test)]
     #[allow(dead_code)]
     prepared_shared_surface_hit_count: usize,
     #[cfg(test)]
@@ -810,6 +808,98 @@ pub(crate) fn forbid_prepared_structural_substitution_slow_lane_for_tests(
         depth.set(depth.get().saturating_add(1));
     });
     PreparedStructuralSubstitutionSlowLaneGuard
+}
+
+// ── Prepared root-surface bridge-fallback disable guard ─────────────
+//
+// Test-only RAII guard used to prove the dispatch surface projector
+// (`projected_surface_from_semantic_node`) is AUTHORITATIVE for compound
+// roots — i.e. the two root-surface bridges
+// (`project_type_surface_expr_via_host_threaded` /
+// `project_type_surface_shape_via_host_threaded`) never need the
+// prepared-decl walker rescue (`cached_prepared_root_surface`) to compose
+// the surface.
+//
+// When the guard is active and the bridge reaches its
+// `.or_else(cached_prepared_root_surface)` fallback, the fallback returns
+// `None` (rescue disabled) and records one bridge-fallback reach. A test
+// driving the real bridge under the guard asserts the bridge still
+// produced the complete surface (dispatch was authoritative) AND that the
+// reach counter stayed `0`.
+//
+// Gated `#[cfg(any(test, debug_assertions))]` so the instrumentation at
+// the bridge `.or_else` shim compiles in debug builds (no-op unless a
+// guard is active) — release builds carry zero instrumentation and the
+// production behaviour is identical.
+#[cfg(any(test, debug_assertions))]
+thread_local! {
+    /// Non-zero while at least one
+    /// [`PreparedRootSurfaceFallbackGuard`] is alive on this thread.
+    static DISABLE_PREPARED_ROOT_SURFACE_FALLBACK: Cell<usize> = const { Cell::new(0) };
+    /// Counts how many times the root-surface bridge fallback shim was
+    /// REACHED (i.e. dispatch returned `None` and the bridge tried the
+    /// prepared-decl rescue). Reset to `0` when a guard is constructed so
+    /// each guarded test observes only its own bridge reaches.
+    static PREPARED_ROOT_SURFACE_BRIDGE_FALLBACK_REACHES: Cell<usize> = const { Cell::new(0) };
+}
+
+/// RAII guard that disables the prepared root-surface bridge fallback for
+/// the current thread for the guard's lifetime (test-only). Construct via
+/// [`disable_prepared_root_surface_fallback_for_tests`].
+///
+/// Compiled in debug builds (`any(test, debug_assertions)`) but consumed
+/// only from `#[cfg(test)]` tests, so the non-test debug-lib build sees it
+/// unused.
+#[cfg(any(test, debug_assertions))]
+#[allow(dead_code)]
+pub(crate) struct PreparedRootSurfaceFallbackGuard;
+
+#[cfg(any(test, debug_assertions))]
+impl Drop for PreparedRootSurfaceFallbackGuard {
+    fn drop(&mut self) {
+        DISABLE_PREPARED_ROOT_SURFACE_FALLBACK.with(|depth| {
+            depth.set(depth.get().saturating_sub(1));
+        });
+    }
+}
+
+/// Disable the prepared root-surface bridge fallback for the current
+/// thread until the returned guard is dropped, and reset the
+/// bridge-fallback reach counter to `0`. Test-only (consumed only from
+/// `#[cfg(test)]`, so the non-test debug-lib build sees it unused).
+#[cfg(any(test, debug_assertions))]
+#[allow(dead_code)]
+pub(crate) fn disable_prepared_root_surface_fallback_for_tests() -> PreparedRootSurfaceFallbackGuard
+{
+    PREPARED_ROOT_SURFACE_BRIDGE_FALLBACK_REACHES.with(|reaches| reaches.set(0));
+    DISABLE_PREPARED_ROOT_SURFACE_FALLBACK.with(|depth| {
+        depth.set(depth.get().saturating_add(1));
+    });
+    PreparedRootSurfaceFallbackGuard
+}
+
+/// Whether the prepared root-surface bridge fallback is currently
+/// disabled on this thread.
+#[cfg(any(test, debug_assertions))]
+pub(crate) fn prepared_root_surface_fallback_disabled_for_current_thread() -> bool {
+    DISABLE_PREPARED_ROOT_SURFACE_FALLBACK.with(|depth| depth.get() > 0)
+}
+
+/// Record that the root-surface bridge reached its prepared-decl
+/// fallback shim (dispatch returned `None`).
+#[cfg(any(test, debug_assertions))]
+pub(crate) fn record_prepared_root_surface_bridge_fallback_reached() {
+    PREPARED_ROOT_SURFACE_BRIDGE_FALLBACK_REACHES
+        .with(|reaches| reaches.set(reaches.get().saturating_add(1)));
+}
+
+/// Read the bridge-fallback reach counter (number of times the
+/// root-surface bridge reached its prepared-decl fallback shim since the
+/// active guard was constructed). Test asserts `== 0` to prove dispatch
+/// was authoritative.
+#[cfg(any(test, debug_assertions))]
+pub(crate) fn prepared_root_surface_bridge_fallback_reaches() -> usize {
+    PREPARED_ROOT_SURFACE_BRIDGE_FALLBACK_REACHES.with(Cell::get)
 }
 
 // Unused after trampoline
@@ -1112,8 +1202,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             prepared_type_decls: FxHashMap::default(),
             #[cfg(test)]
             prepared_type_decl_query_count: 0,
-            #[cfg(test)]
-            prepared_root_surface_projection_count: 0,
             #[cfg(test)]
             prepared_shared_surface_hit_count: 0,
             #[cfg(test)]

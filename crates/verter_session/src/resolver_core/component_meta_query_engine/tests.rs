@@ -7,6 +7,7 @@
 //! engine-impl methods as `pub(super)` from sibling modules so the
 //! tests resolve symmetrically regardless of which sibling
 //! `impl<'a> ComponentMetaQueryEngine<'a>` block defined the method.
+use super::disable_prepared_root_surface_fallback_for_tests;
 use super::forbid_direct_pick_routed_expr_slow_lane_for_tests;
 use super::forbid_structural_slow_lane_for_tests;
 use super::ComponentMetaQueryEngine;
@@ -4456,5 +4457,263 @@ fn projected_member_declaration_origin_points_at_cross_file_declaration() {
         comp_slice,
         Some("x"),
         "pairing the declaration offsets with the WRONG (importing) file must not yield `x`"
+    );
+}
+
+// ── Stage 4-disp: dispatch-authoritative compound-root surfaces ─────
+//
+// These tests drive the REAL root-surface bridge
+// (`project_type_surface_expr_via_host_threaded`) with the prepared-decl
+// rescue DISABLED via `disable_prepared_root_surface_fallback_for_tests`.
+// They prove the dispatch surface projector
+// (`projected_surface_from_semantic_node`) composes a COMPLETE shallow
+// surface for `Union` / `Intersection` (heritage) / `InstantiationRef`
+// roots — without the prepared-decl walker fallback.
+//
+// Discrimination: before the surface.rs compound-root arms exist, the
+// projector returns `None` for these roots, the bridge reaches the
+// (disabled) fallback and returns `None`, and the `.expect` panics —
+// the test FAILS. After the arms route the root through
+// `ProjectPath{[], MacroObjectSurface(Shallow)}`, the bridge produces the
+// complete surface and `debug_prepared_root_surface_projection_count()`
+// stays `0` (dispatch was authoritative).
+
+/// Collect property + method member names from a projected object surface
+/// `TypeExpr`. Panics if `expr` is not an `Object` so a mis-shaped
+/// projection fails loudly rather than silently asserting an empty set.
+#[cfg(test)]
+fn projected_object_member_names(expr: &TypeExpr) -> Vec<String> {
+    let object = match expr {
+        TypeExpr::Object(object) => object,
+        other => panic!("expected projected Object surface, got {other:?}"),
+    };
+    let mut names = object
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(property) => Some(property.name.clone()),
+            ObjectMember::Method(method) => Some(method.name.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+#[test]
+fn dispatch_authoritative_union_alias_surface_without_prepared_fallback() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    // Generic union alias: each arm shares `shared` and carries one
+    // branch-only member. The Vue macro object-surface union merge
+    // (selected by the surface.rs Union arm's `MacroObjectSurface`
+    // context) enumerates the UNION of arm members — so all three
+    // members appear, with branch-only members optional. A common-member
+    // INTERSECTION merge would keep only `shared`; asserting the
+    // branch-only members present discriminates union-of-members from
+    // common-member-only.
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+export interface ArmA {
+  shared?: string
+  onlyA?: number
+}
+export interface ArmB {
+  shared?: string
+  onlyB?: boolean
+}
+export type UnionAlias<T = ArmA> = ArmA | ArmB
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let _fallback_guard = disable_prepared_root_surface_fallback_for_tests();
+    let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
+        &mut query_engine,
+        "/src/App.vue",
+        "UnionAlias",
+    )
+    .expect(
+        "dispatch must compose the union-alias root surface without the prepared-decl fallback",
+    );
+
+    let names = projected_object_member_names(&projected);
+    assert!(
+        names.iter().any(|name| name == "shared"),
+        "union surface keeps the shared base member; got {names:?}",
+    );
+    assert!(
+        names.iter().any(|name| name == "onlyA"),
+        "union surface keeps ArmA's branch-only member (union-of-members, not common-member-only); got {names:?}",
+    );
+    assert!(
+        names.iter().any(|name| name == "onlyB"),
+        "union surface keeps ArmB's branch-only member (union-of-members, not common-member-only); got {names:?}",
+    );
+    assert_eq!(
+        query_engine.debug_prepared_root_surface_projection_count(),
+        0,
+        "the union-alias root surface must be dispatch-authoritative — the prepared-decl bridge fallback must NOT be reached",
+    );
+}
+
+#[test]
+fn dispatch_authoritative_generic_omit_heritage_surface_without_prepared_fallback() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/src/base.ts".to_string(),
+        Arc::from(
+            r#"
+export interface RootProps<T> {
+  open?: boolean
+  defaultOpen?: boolean
+  disabled?: boolean
+  modelValue?: T
+}
+"#,
+        ),
+    );
+    // `ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'>`
+    // where `SelectMenuProps<T> extends Pick<RootProps<T>, 'open' |
+    // 'defaultOpen' | 'disabled'> { items?: T }`. The dispatch root is an
+    // Intersection (heritage overlay over the `Omit<...>` carrier). The
+    // surface.rs Intersection arm must compose `open` / `defaultOpen` /
+    // `disabled` (inherited via Pick) and OMIT `items`.
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+import type { RootProps } from './base'
+
+type Item = { label?: string }
+
+export interface SelectMenuProps<T = Item[]> extends Pick<RootProps<T>, 'open' | 'defaultOpen' | 'disabled'> {
+  items?: T
+}
+
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let _fallback_guard = disable_prepared_root_surface_fallback_for_tests();
+    let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
+        &mut query_engine,
+        "/src/App.vue",
+        "ColorModeSelectProps",
+    )
+    .expect(
+        "dispatch must compose the generic Omit-heritage root surface without the prepared-decl fallback",
+    );
+
+    let names = projected_object_member_names(&projected);
+    for kept in ["open", "defaultOpen", "disabled"] {
+        assert!(
+            names.iter().any(|name| name == kept),
+            "Omit-heritage surface keeps inherited `{kept}` (via Pick<RootProps>); got {names:?}",
+        );
+    }
+    assert!(
+        !names.iter().any(|name| name == "items"),
+        "Omit<SelectMenuProps, 'items'> must drop `items` from the surface; got {names:?}",
+    );
+    assert_eq!(
+        query_engine.debug_prepared_root_surface_projection_count(),
+        0,
+        "the Omit-heritage root surface must be dispatch-authoritative — the prepared-decl bridge fallback must NOT be reached",
+    );
+}
+
+#[test]
+fn dispatch_authoritative_ordinary_heritage_surface_without_prepared_fallback() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    // Ordinary (non-generic) heritage: `Derived extends ButtonProps`.
+    // The dispatch root is an Intersection (heritage overlay). The
+    // surface.rs Intersection arm must compose the inherited `disabled`
+    // and the derived own-body `extra`.
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+export interface ButtonProps {
+  disabled?: boolean
+  label?: string
+}
+export interface Derived extends ButtonProps {
+  extra?: number
+}
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let _fallback_guard = disable_prepared_root_surface_fallback_for_tests();
+    let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
+        &mut query_engine,
+        "/src/App.vue",
+        "Derived",
+    )
+    .expect(
+        "dispatch must compose the ordinary heritage root surface without the prepared-decl fallback",
+    );
+
+    let names = projected_object_member_names(&projected);
+    assert!(
+        names.iter().any(|name| name == "disabled"),
+        "ordinary heritage surface keeps inherited `disabled` from ButtonProps; got {names:?}",
+    );
+    assert!(
+        names.iter().any(|name| name == "extra"),
+        "ordinary heritage surface keeps the derived own-body `extra`; got {names:?}",
+    );
+    assert_eq!(
+        query_engine.debug_prepared_root_surface_projection_count(),
+        0,
+        "the ordinary heritage root surface must be dispatch-authoritative — the prepared-decl bridge fallback must NOT be reached",
     );
 }
