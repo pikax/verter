@@ -592,8 +592,7 @@ pub enum ReductionDemand {
     /// substitution, cycle BFS). Operators carrier-stop regardless of
     /// `mode`.
     StructuralTransit,
-    /// Vue macro object-surface publication (`defineProps` / `defineSlots`)
-    /// — Stage 4-pre Gap 2.
+    /// Vue macro object-surface publication (`defineProps` / `defineSlots`).
     ///
     /// Distinct from [`Self::Published`] in EXACTLY ONE behavioural axis:
     /// the empty-path Shallow terminal-surface synthesis enumerates the
@@ -766,7 +765,7 @@ impl ProjectionReductionContext {
     }
 
     /// Construct a Vue macro object-surface publication context
-    /// (`defineProps` / `defineSlots`) — Stage 4-pre Gap 2.
+    /// (`defineProps` / `defineSlots`).
     ///
     /// [`ReductionDemand::MacroObjectSurface`] enumerates the UNION of
     /// object-arm members at the empty-path Shallow terminal surface (the
@@ -786,9 +785,9 @@ impl ProjectionReductionContext {
         }
     }
 
-    /// Whether this context publishes a Vue macro object-surface (Gap 2 —
+    /// Whether this context publishes a Vue macro object-surface —
     /// the single predicate the union-arm merge consults to choose
-    /// union-of-members over the common-member intersection).
+    /// union-of-members over the common-member intersection.
     #[must_use]
     pub const fn is_macro_object_surface(self) -> bool {
         matches!(self.demand, ReductionDemand::MacroObjectSurface)
@@ -952,7 +951,7 @@ impl ProjectionReductionContext {
 /// follows the same code path as the builtin `Pick<T,K>` and obeys
 /// the SAME predicate.
 pub const fn may_reduce_operator(ctx: ProjectionReductionContext) -> bool {
-    // `MacroObjectSurface` is a publication demand (Gap 2): operators reduce
+    // `MacroObjectSurface` is a publication demand: operators reduce
     // exactly like `Published`. The two demands differ ONLY in the
     // union-arm merge rule at the empty-path Shallow terminal surface.
     matches!(

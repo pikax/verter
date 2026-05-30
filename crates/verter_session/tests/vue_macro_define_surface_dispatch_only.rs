@@ -1,4 +1,4 @@
-//! Stage 4a — dispatch-only `define_*` coverage proof.
+//! Dispatch-only `define_*` coverage proof.
 //!
 //! These tests pin the architectural invariant that the public
 //! `evaluated_types.define_props` / `define_emits` / `define_slots`
@@ -132,7 +132,7 @@ fn dispatch_only_owner_local_props_extends_imported_omit_define_shape() {
     for required in ["alpha", "gamma", "delta"] {
         assert!(
             define_names.iter().any(|n| n == required),
-            "Stage 4a — `interface Props extends Omit<ExternalProps, 'beta'>` \
+            "`interface Props extends Omit<ExternalProps, 'beta'>` \
              define_props mirror MUST carry inherited member `{required}` via \
              the dispatch heritage surface. Got define_props: {define_names:?}"
         );
@@ -140,7 +140,7 @@ fn dispatch_only_owner_local_props_extends_imported_omit_define_shape() {
     // The omitted key MUST be absent.
     assert!(
         !define_names.iter().any(|n| n == "beta"),
-        "Stage 4a — `Omit<ExternalProps, 'beta'>` MUST exclude `beta` from the \
+        "`Omit<ExternalProps, 'beta'>` MUST exclude `beta` from the \
          define_props mirror. Got: {define_names:?}"
     );
 
@@ -152,12 +152,12 @@ fn dispatch_only_owner_local_props_extends_imported_omit_define_shape() {
     for required in ["alpha", "gamma", "delta"] {
         assert!(
             prop_names.contains(&required),
-            "Stage 4a — final meta MUST keep inherited prop `{required}`. Got: {prop_names:?}"
+            "final meta MUST keep inherited prop `{required}`. Got: {prop_names:?}"
         );
     }
     assert!(
         !prop_names.contains(&"beta"),
-        "Stage 4a — final meta MUST exclude omitted prop `beta`. Got: {prop_names:?}"
+        "final meta MUST exclude omitted prop `beta`. Got: {prop_names:?}"
     );
 }
 
@@ -199,7 +199,7 @@ fn dispatch_only_generic_carrier_define_props_instantiates_surface() {
     for required in ["items", "selected", "multiple"] {
         assert!(
             define_names.iter().any(|n| n == required),
-            "Stage 4a — generic carrier `AccordionProps<string>` define_props \
+            "generic carrier `AccordionProps<string>` define_props \
              mirror MUST instantiate its member surface via dispatch. Got: \
              {define_names:?}"
         );
@@ -212,7 +212,7 @@ fn dispatch_only_generic_carrier_define_props_instantiates_surface() {
     if let Some(selected_ty) = define_props_member_type(&evaluated, "selected") {
         assert!(
             !matches!(selected_ty, TypeExpr::TypeParameter(_)),
-            "Stage 4a — `selected: T` substituted with `string` MUST NOT publish \
+            "`selected: T` substituted with `string` MUST NOT publish \
              a bare unresolved `TypeParameter`. Generic substitution must travel \
              through the dispatch instantiation. Got: {selected_ty:?}"
         );
@@ -223,7 +223,7 @@ fn dispatch_only_generic_carrier_define_props_instantiates_surface() {
     for forbidden in ["length", "push", "pop"] {
         assert!(
             !define_names.iter().any(|n| n == forbidden),
-            "Stage 4a — generic carrier publication MUST stay bounded; \
+            "generic carrier publication MUST stay bounded; \
              `{forbidden}` (an array member of the `T[]` body) must NOT leak \
              into the macro surface. Got: {define_names:?}"
         );
@@ -236,7 +236,7 @@ fn dispatch_only_generic_carrier_define_props_instantiates_surface() {
     for required in ["items", "selected", "multiple"] {
         assert!(
             prop_names.contains(&required),
-            "Stage 4a — final meta MUST carry generic carrier prop `{required}`. \
+            "final meta MUST carry generic carrier prop `{required}`. \
              Got: {prop_names:?}"
         );
     }
@@ -270,7 +270,7 @@ fn dispatch_only_inherited_emits_conditional_branch_merge_define_shape() {
 
     assert!(
         !evaluated.define_emits.is_empty(),
-        "Stage 4a — undecided-conditional `defineEmits<ConditionalEmits>()` MUST \
+        "undecided-conditional `defineEmits<ConditionalEmits>()` MUST \
          produce a define_emits mirror entry via the dispatch branch-merge \
          (`resolve_payload_surface_with_scope(EmitClassMacroObject)`). Got empty \
          define_emits."
@@ -281,7 +281,7 @@ fn dispatch_only_inherited_emits_conditional_branch_merge_define_shape() {
     for required in ["itemEdited", "itemViewed"] {
         assert!(
             event_names.iter().any(|n| n == required),
-            "Stage 4a — the define_emits mirror MUST merge BOTH branches of the \
+            "the define_emits mirror MUST merge BOTH branches of the \
              undecided conditional emit payload (`Mode extends 'editor' ? \
              EditorEmits : ViewerEmits`). Event `{required}` is missing. The \
              branch-merge lives in `resolve_payload_surface_with_scope` and is \
@@ -321,14 +321,14 @@ fn dispatch_only_non_conditional_inherited_emits_define_shape() {
 
     assert!(
         !evaluated.define_emits.is_empty(),
-        "Stage 4a — non-conditional imported `defineEmits<BaseEmits>()` MUST \
+        "non-conditional imported `defineEmits<BaseEmits>()` MUST \
          produce a define_emits mirror via the single-dispatch path. Got empty."
     );
     let event_names = define_emits_event_names(&evaluated.define_emits[0]);
     for required in ["change", "reset"] {
         assert!(
             event_names.iter().any(|n| n == required),
-            "Stage 4a — non-conditional define_emits mirror MUST carry imported \
+            "non-conditional define_emits mirror MUST carry imported \
              emit `{required}` from the dispatch surface. Got: {event_names:?}"
         );
     }
@@ -340,7 +340,7 @@ fn dispatch_only_non_conditional_inherited_emits_define_shape() {
     for required in ["change", "reset"] {
         assert!(
             final_events.contains(&required),
-            "Stage 4a — final meta MUST carry emit `{required}`. Got: {final_events:?}"
+            "final meta MUST carry emit `{required}`. Got: {final_events:?}"
         );
     }
 }
@@ -383,7 +383,7 @@ fn dispatch_only_imported_mapped_slots_define_shape_and_bindings() {
 
     assert!(
         !evaluated.define_slots.is_empty(),
-        "Stage 4a — imported mapped `defineSlots<TableSlots>()` MUST produce a \
+        "imported mapped `defineSlots<TableSlots>()` MUST produce a \
          define_slots mirror via dispatch. Got empty define_slots."
     );
     let slot_names: Vec<String> = evaluated
@@ -395,7 +395,7 @@ fn dispatch_only_imported_mapped_slots_define_shape_and_bindings() {
     for required in ["header", "body"] {
         assert!(
             slot_names.iter().any(|n| n == required),
-            "Stage 4a — define_slots mirror MUST enumerate the mapped slot key \
+            "define_slots mirror MUST enumerate the mapped slot key \
              `{required}` via the dispatch mapped-surface. Got slots: {slot_names:?}"
         );
     }
@@ -408,7 +408,7 @@ fn dispatch_only_imported_mapped_slots_define_shape_and_bindings() {
     for required in ["header", "body"] {
         assert!(
             final_slots.contains(&required),
-            "Stage 4a — final meta MUST carry slot `{required}`. Got: {final_slots:?}"
+            "final meta MUST carry slot `{required}`. Got: {final_slots:?}"
         );
     }
     // At least one slot must carry resolved scoped bindings (`row` /
@@ -421,7 +421,7 @@ fn dispatch_only_imported_mapped_slots_define_shape_and_bindings() {
     });
     assert!(
         has_binding,
-        "Stage 4a — mapped slots MUST resolve their scoped bindings (`row` / \
+        "mapped slots MUST resolve their scoped bindings (`row` / \
          `index` from `RowProps`) through the dispatch slot-binding graph. Got \
          slots: {:?}",
         meta.slots
@@ -508,7 +508,7 @@ fn owner_local_macro_root_authority_uses_typeinfo_surface() {
         let names = define_props_member_names(&evaluated);
         assert!(
             names.iter().any(|n| n == "title") && names.iter().any(|n| n == "count"),
-            "Stage 4a — owner-local props root MUST expose a non-empty dispatch \
+            "owner-local props root MUST expose a non-empty dispatch \
              surface (gate=true). Got define_props: {names:?}"
         );
     }
@@ -527,7 +527,7 @@ fn owner_local_macro_root_authority_uses_typeinfo_surface() {
         let slot_names: Vec<&str> = meta.slots.iter().map(|s| s.name.as_str()).collect();
         assert!(
             slot_names.contains(&"default"),
-            "Stage 4a — owner-local slots root MUST expose a non-empty surface \
+            "owner-local slots root MUST expose a non-empty surface \
              (gate=true) and publish the `default` slot. Got slots: {slot_names:?}"
         );
     }
@@ -544,7 +544,7 @@ fn owner_local_macro_root_authority_uses_typeinfo_surface() {
                 && define_emits_event_names(&evaluated.define_emits[0])
                     .iter()
                     .any(|n| n == "change"),
-            "Stage 4a — owner-local emits root (property form) MUST expose a \
+            "owner-local emits root (property form) MUST expose a \
              non-empty dispatch surface (gate=true)."
         );
     }
@@ -558,14 +558,14 @@ fn owner_local_macro_root_authority_uses_typeinfo_surface() {
         let evaluated = host.evaluate_types("/AuthorityEmitsCallsig.vue").unwrap();
         assert!(
             !evaluated.define_emits.is_empty(),
-            "Stage 4a — owner-local emits root (call-signature form) MUST produce \
+            "owner-local emits root (call-signature form) MUST produce \
              a define_emits mirror."
         );
         let event_names = define_emits_event_names(&evaluated.define_emits[0]);
         for required in ["click", "hover"] {
             assert!(
                 event_names.iter().any(|n| n == required),
-                "Stage 4a — call-signature emits MUST surface event `{required}` \
+                "call-signature emits MUST surface event `{required}` \
                  from the leading event-name literal via the dispatch surface \
                  (gate=true for call-signature event surfaces). Got: {event_names:?}"
             );
@@ -583,7 +583,7 @@ fn owner_local_macro_root_authority_uses_typeinfo_surface() {
         let names = define_props_member_names(&evaluated);
         assert!(
             names.is_empty(),
-            "Stage 4a — an empty `defineProps<{{}}>()` root MUST expose an EMPTY \
+            "an empty `defineProps<{{}}>()` root MUST expose an EMPTY \
              dispatch surface (gate=false). Got define_props: {names:?}"
         );
     }
@@ -599,7 +599,7 @@ fn owner_local_macro_root_authority_uses_typeinfo_surface() {
         let meta = host.get_component_meta("/AuthorityExpose.vue").unwrap();
         assert!(
             meta.props.is_empty() && meta.events.is_empty(),
-            "Stage 4a — the macro-root authority gate returns FALSE for \
+            "the macro-root authority gate returns FALSE for \
              defineExpose; no props/events may be published from it. Got \
              props={:?} events={:?}",
             meta.props.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
@@ -617,7 +617,7 @@ fn owner_local_macro_root_authority_uses_typeinfo_surface() {
         let meta = host.get_component_meta("/AuthorityOptions.vue").unwrap();
         assert!(
             meta.props.is_empty() && meta.events.is_empty(),
-            "Stage 4a — the macro-root authority gate returns FALSE for \
+            "the macro-root authority gate returns FALSE for \
              defineOptions; no props/events may be published from it. Got \
              props={:?} events={:?}",
             meta.props.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
@@ -627,10 +627,10 @@ fn owner_local_macro_root_authority_uses_typeinfo_surface() {
 }
 
 // The JSX intrinsic projection regression test lives in-crate
-// (`meta_resolve_tests.rs::stage4a_namespace_qualified_global_resolves_via_dispatch_only`)
+// (`meta_resolve_tests.rs::reexported_intrinsic_shape_resolves_via_dispatch_only`)
 // because it must call the `pub(crate)`
 // `project_type_surface_expr_via_host_threaded` bridge directly — that
-// bridge is the one whose `cached_prepared_root_surface` fallback Stage
-// 4a removes, and the JSX-intrinsic consumer
-// (`host_manage/intrinsic_projection.rs`) resolves the
-// namespace-qualified `JSX.IntrinsicElements` global through it.
+// bridge carries no `cached_prepared_root_surface` walker fallback, and
+// the JSX-intrinsic consumer
+// (`host_manage/intrinsic_projection.rs`) resolves the re-exported
+// intrinsic attribute shape through it.

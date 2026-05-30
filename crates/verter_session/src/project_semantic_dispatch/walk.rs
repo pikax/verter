@@ -499,7 +499,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     }
 
     /// Effective surface provenance for a carrier-unwrap dispatch in the
-    /// shallow-surface worklist (Stage 4-pre Gap 3).
+    /// shallow-surface worklist (transparent-carrier provenance downgrade).
     ///
     /// When a `Frame::Visit` carries a `provenance_override` (set when the
     /// walker crossed a TRANSPARENT carrier — an identity-utility `Alias`
@@ -2141,7 +2141,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         member_role_override: arm_role_override,
                         heritage_overlay_body: false,
                         // Arm descent inherits the parent's transparent-carrier
-                        // downgrade (Gap 3): a union/intersection nested under a
+                        // downgrade: a union/intersection nested under a
                         // crossed transparent carrier keeps the structural
                         // provenance for its members.
                         provenance_override,
@@ -2180,7 +2180,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                 });
                         }
                     }
-                    // Gap 2 — Vue macro object-surface publication enumerates
+                    // Vue macro object-surface publication enumerates
                     // the UNION of arm members; ordinary `ProjectPath` /
                     // `keyof` uses the TS common-member intersection. The
                     // demand axis on the walker's context selects the rule;
@@ -2420,9 +2420,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // here drops the provenance and the macro-T-root own-body
                 // members all report `false`.
                 //
-                // Stage 4-pre Gap 3: when this DeclPlaceholder was reached
-                // THROUGH a transparent carrier (an identity-utility `Alias`
-                // such as `NoInfer<Base>`), `provenance_override` is
+                // Transparent-carrier provenance downgrade: when this
+                // DeclPlaceholder was reached THROUGH a transparent carrier
+                // (an identity-utility `Alias` such as `NoInfer<Base>`),
+                // `provenance_override` is
                 // `Some(Structural)` and `effective_provenance` downgrades the
                 // unwrap so `Base`'s own-body members are NOT mis-stamped as
                 // the macro type argument's own body.
@@ -2579,7 +2580,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // flag so an identity-alias wrapper of a heritage carrier /
                 // interface body keeps its role classification.
                 //
-                // Stage 4-pre Gap 3 — TRANSPARENT-carrier provenance downgrade.
+                // TRANSPARENT-carrier provenance downgrade.
                 // An `Alias` node is a transparent carrier: it is produced by an
                 // identity utility (`NoInfer<T>` interns `Alias(T)`) or by an
                 // alias-target indirection. Its own body has NO declared
@@ -2632,7 +2633,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             // `Heritage` override flowing into the resolved
                             // declaration's body (cross-file / same-file
                             // heritage members surface as `Heritage`).
-                            // Gap 3: thread any active transparent-carrier
+                            // Thread any active transparent-carrier
                             // downgrade so a `DeclRef` reached through a
                             // transparent alias keeps the structural provenance.
                             work.push(Frame::Visit {
@@ -3053,7 +3054,8 @@ enum Frame {
         /// `Object` arm keeps its lowered `OwnBody` role. Only meaningful for
         /// the immediate decl-body Intersection; sub-visits default to false.
         heritage_overlay_body: bool,
-        /// Surface-provenance override (Stage 4-pre Gap 3): when `Some`, the
+        /// Surface-provenance override (transparent-carrier downgrade): when
+        /// `Some`, the
         /// carrier-unwrap dispatches (Alias-target Instantiate via
         /// DeclPlaceholder / InstantiationRef) below this node use this
         /// provenance INSTEAD of the walker's `self.provenance()`. Set to
@@ -3085,7 +3087,8 @@ enum Frame {
         /// body: REFERENCE-carrier arms get `Some(Heritage)`, own `Object`
         /// arms keep their lowered role.
         heritage_overlay: bool,
-        /// Surface-provenance override (Stage 4-pre Gap 3) propagated to each
+        /// Surface-provenance override (transparent-carrier downgrade)
+        /// propagated to each
         /// arm's `Visit`. `None` for ordinary intersections / unions; carries
         /// the transparent-carrier downgrade through arm descents.
         provenance_override: Option<crate::semantic_query::SurfaceProvenanceContext>,
@@ -3502,7 +3505,7 @@ fn merge_union_surfaces(
 }
 
 /// Merge per-arm union surfaces under the **Vue macro object-surface**
-/// rule (Stage 4-pre Gap 2) — the UNION of arm members, NOT the TS
+/// rule — the UNION of arm members, NOT the TS
 /// property-access common-member intersection.
 ///
 /// A prop / slot present in ANY union arm is part of the component macro

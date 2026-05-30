@@ -669,7 +669,7 @@ pub(crate) fn resolve_payload_surface(
     // `FooProps`'s OWN-body members surface with
     // `declared_in_macro_type_arg = true`. Structural-provenance kinds
     // (emits / slots / …) pass `Structural` and observe `false`.
-    // Vue macro object-surface publication (Stage 4-pre Gap 2). The macro
+    // Vue macro object-surface publication. The macro
     // surface enumerates the UNION of object-arm members
     // (`defineProps<FixedProps | BubbleProps>()` declares every arm's
     // props), NOT the TS property-access common-member intersection that

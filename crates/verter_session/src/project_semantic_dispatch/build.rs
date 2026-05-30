@@ -39,7 +39,7 @@ pub(super) fn encode_projection_reduction_context_bits(
         ProjectionMode::Skeleton => 4,
     };
     // 2-bit demand tag (three demands: Published / StructuralTransit /
-    // MacroObjectSurface — Gap 2). Mode shifts by 2 so the demand axis
+    // MacroObjectSurface). Mode shifts by 2 so the demand axis
     // stays disjoint in the packed identity.
     let demand_tag: u32 = match context.demand {
         ReductionDemand::Published => 0,

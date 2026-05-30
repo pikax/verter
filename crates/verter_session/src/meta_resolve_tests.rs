@@ -3812,28 +3812,27 @@ defineProps<Types.Props>()
     );
 }
 
-/// Stage 4a — JSX intrinsic projection regression.
+/// Re-exported JSX-intrinsic attribute shape resolves through the
+/// dispatch surface alone — no prepared-decl walker fallback.
 ///
 /// The JSX-intrinsic consumer (`host_manage/intrinsic_projection.rs`)
 /// resolves the intrinsic attribute shapes (`HTMLAttributes`, the
 /// per-tag bodies, and the re-exported `JSX.IntrinsicElements` surface)
-/// through [`project_type_surface_expr_via_host_threaded`]. Stage 4a
-/// removes that bridge's `.or_else(cached_prepared_root_surface)` walker
-/// fallback, so the intrinsic-shape symbol MUST resolve through the
-/// dispatch surface alone.
+/// through [`project_type_surface_expr_via_host_threaded`]. That bridge
+/// carries NO `.or_else(cached_prepared_root_surface)` walker fallback,
+/// so the intrinsic-shape symbol MUST resolve through the dispatch
+/// surface alone.
 ///
 /// Discrimination: a re-exported intrinsic attribute interface
 /// (`HTMLAttributes`, modelled on Vue's `vue/jsx-runtime` shape, reached
-/// through a barrel re-export — the "re-exported intrinsic shape" the
-/// Stage-4 verdict names) is projected through the bridge by its plain
-/// symbol name; the projected surface MUST carry the declared attribute
-/// members. At HEAD the walker fallback could rescue a prepared-decl
-/// surface here; post-removal the dispatch path is the sole resolver and
-/// this test fires loudly if dispatch cannot resolve the re-exported
+/// through a barrel re-export) is projected through the bridge by its
+/// plain symbol name; the projected surface MUST carry the declared
+/// attribute members. The dispatch path is the sole resolver and this
+/// test fires loudly if dispatch cannot resolve the re-exported
 /// intrinsic shape. The fix for any miss is in dispatch/typeinfo surface
 /// reading — never a restored walker fallback.
 #[test]
-fn stage4a_reexported_intrinsic_shape_resolves_via_dispatch_only() {
+fn reexported_intrinsic_shape_resolves_via_dispatch_only() {
     let project = make_project();
     project
         .upsert_base(
@@ -3875,10 +3874,10 @@ export interface HTMLAttributes {
         "HTMLAttributes",
     )
     .expect(
-        "Stage 4a — the re-exported intrinsic attribute shape `HTMLAttributes` \
+        "the re-exported intrinsic attribute shape `HTMLAttributes` \
          MUST resolve through the dispatch surface (the JSX-intrinsic consumer \
-         resolves intrinsic shapes through this bridge). If this returns None \
-         after the walker fallback removal, the fix is in dispatch/typeinfo \
+         resolves intrinsic shapes through this bridge). If this returns None, \
+         the fix is in dispatch/typeinfo \
          re-export surface reading — NOT a restored walker fallback.",
     );
     let projected_debug = format!("{projected:?}");
@@ -3886,7 +3885,7 @@ export interface HTMLAttributes {
         projected_debug.contains("id")
             && projected_debug.contains("class")
             && projected_debug.contains("role"),
-        "Stage 4a — the projected re-exported `HTMLAttributes` surface MUST \
+        "the projected re-exported `HTMLAttributes` surface MUST \
          enumerate the declared attribute members (`id` / `class` / `role`) \
          through dispatch. Got: {projected_debug}"
     );
@@ -10135,7 +10134,7 @@ defineEmits<Emits>()
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Stage 4-pre Gap 3 — alias-reached-member provenance (dispatch path).
+// Transparent-carrier alias-reached-member provenance (dispatch path).
 //
 // A member reached ONLY through a transparent alias / instantiation shell
 // (`NoInfer<Base>`, a utility identity wrapper) whose own body has no
@@ -10150,13 +10149,15 @@ defineEmits<Emits>()
 // NOT the materializer-fed `define_props` mirror.
 // ─────────────────────────────────────────────────────────────────────
 
-/// Gap 3 discriminating: `defineProps<NoInfer<Base>>()` — `Base`'s members
-/// are reached THROUGH the transparent `NoInfer` identity carrier, so the
-/// dispatch surface MUST stamp `declared_in_macro_type_arg = false`.
+/// Transparent-carrier discriminating: `defineProps<NoInfer<Base>>()` —
+/// `Base`'s members are reached THROUGH the transparent `NoInfer`
+/// identity carrier, so the dispatch surface MUST stamp
+/// `declared_in_macro_type_arg = false`.
 ///
-/// PRE-FIX the dispatch propagated `MacroTypeArgOwnBody` through the
-/// `Alias(Base)` carrier and stamped Base's members `true`. POST-FIX the
-/// transparent-carrier crossing downgrades provenance to `Structural`.
+/// The transparent-carrier crossing downgrades provenance to
+/// `Structural`: propagating `MacroTypeArgOwnBody` through the
+/// `Alias(Base)` carrier and stamping Base's members `true` would be the
+/// bug this guards against.
 #[test]
 fn dispatch_no_infer_alias_member_provenance_is_false() {
     let project = make_project();
@@ -10203,7 +10204,7 @@ defineProps<NoInfer<Base>>()
 
     assert!(
         !label.declared_in_macro_type_arg && !count.declared_in_macro_type_arg,
-        "Gap 3 — members reached THROUGH the transparent `NoInfer<Base>` carrier \
+        "members reached THROUGH the transparent `NoInfer<Base>` carrier \
          MUST carry `declared_in_macro_type_arg == false` on the dispatch surface \
          (the carrier's own body has no declared members). Got label={}, count={}",
         label.declared_in_macro_type_arg,
@@ -10211,10 +10212,11 @@ defineProps<NoInfer<Base>>()
     );
 }
 
-/// Gap 3 discriminating (alias-shell): `export type Props = NoInfer<Base>;
-/// defineProps<Props>()` — the macro arg is a named alias whose body is the
-/// `NoInfer<Base>` instantiation (no direct own-body members). All members
-/// are reached through the transparent alias + NoInfer hops → `false`.
+/// Transparent-carrier discriminating (alias-shell): `export type Props =
+/// NoInfer<Base>; defineProps<Props>()` — the macro arg is a named alias
+/// whose body is the `NoInfer<Base>` instantiation (no direct own-body
+/// members). All members are reached through the transparent alias +
+/// NoInfer hops → `false`.
 #[test]
 fn dispatch_no_infer_alias_shell_member_provenance_is_false() {
     let project = make_project();
@@ -10253,17 +10255,18 @@ defineProps<Props>()
         .collect();
     assert!(
         stamped_true.is_empty(),
-        "Gap 3 — alias-shell `NoInfer<Base>` members are reached through the \
+        "alias-shell `NoInfer<Base>` members are reached through the \
          transparent alias + NoInfer carriers (the alias `Props`'s own body has \
          NO direct members), so NONE may carry `declared_in_macro_type_arg == \
          true` on the dispatch surface. Mis-stamped: {stamped_true:?}",
     );
 }
 
-/// Gap 3 GUARD (must stay correct): a DIRECTLY-referenced object alias that
-/// IS the macro argument keeps `declared_in_macro_type_arg = true` for its
-/// own-body members. The transparent-carrier downgrade MUST NOT regress
-/// this — a direct object alias is NOT a transparent identity carrier.
+/// Transparent-carrier GUARD (must stay correct): a DIRECTLY-referenced
+/// object alias that IS the macro argument keeps
+/// `declared_in_macro_type_arg = true` for its own-body members. The
+/// transparent-carrier downgrade MUST NOT regress this — a direct object
+/// alias is NOT a transparent identity carrier.
 #[test]
 fn dispatch_direct_object_alias_member_provenance_stays_true() {
     let project = make_project();
@@ -10290,7 +10293,8 @@ defineProps<DirectProps>()
         .expect("direct alias must publish `title`");
     assert!(
         title.declared_in_macro_type_arg,
-        "Gap 3 GUARD — a DIRECT object alias that IS the macro argument keeps its \
+        "transparent-carrier GUARD — a DIRECT object alias that IS the macro \
+         argument keeps its \
          own-body members `declared_in_macro_type_arg == true` (it is not a \
          transparent identity carrier). The downgrade MUST NOT regress this. Got \
          title.declared_in_macro_type_arg=false",
@@ -10298,7 +10302,7 @@ defineProps<DirectProps>()
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Stage 4-pre Gap 2 — Vue macro object-surface UNION enumeration.
+// Vue macro object-surface UNION enumeration.
 //
 // `defineProps<FixedProps | BubbleProps>()` publishes the UNION of the
 // arm members (a prop present in ANY arm is part of the macro surface —
@@ -10335,7 +10339,7 @@ defineProps<FixedProps | BubbleProps>()
     // Common member present in BOTH arms.
     assert!(
         names.contains(&"kind"),
-        "Gap 2 — common union member `kind` must be on the dispatch macro surface, \
+        "common union member `kind` must be on the dispatch macro surface, \
          got: {names:?}"
     );
     // Branch-specific members present in only ONE arm — the union
@@ -10343,7 +10347,7 @@ defineProps<FixedProps | BubbleProps>()
     for required in ["size", "color"] {
         assert!(
             names.contains(&required),
-            "Gap 2 — the dispatch macro object-surface MUST enumerate the UNION of \
+            "the dispatch macro object-surface MUST enumerate the UNION of \
              object-arm members; branch-specific `{required}` (present in only one \
              arm) must survive. The intersection rule would drop it. Got: {names:?}"
         );
@@ -10355,20 +10359,20 @@ defineProps<FixedProps | BubbleProps>()
     let kind = evaluated.props.iter().find(|p| p.name == "kind").unwrap();
     assert!(
         size.optional,
-        "Gap 2 — `size` is declared in only one arm, so it MUST be optional on the \
+        "`size` is declared in only one arm, so it MUST be optional on the \
          merged macro surface. Got optional={}",
         size.optional
     );
     assert!(
         !kind.optional,
-        "Gap 2 — `kind` is declared in BOTH arms (and required in each), so it MUST \
+        "`kind` is declared in BOTH arms (and required in each), so it MUST \
          stay required on the merged macro surface. Got optional={}",
         kind.optional
     );
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Stage 4-pre Gap 4 — aliased conditional-emits carrier walk (dispatch).
+// Aliased conditional-emits carrier walk (dispatch).
 //
 // `defineEmits<ConditionalEmits>()` where
 // `type ConditionalEmits = Mode extends 'editor' ? EditorEmits : ViewerEmits`
@@ -10438,7 +10442,7 @@ defineEmits<ConditionalEmits>()
         ),
         "fixture precondition: the Navigate-lowered named conditional alias must \
          be a CARRIER (DeclRef/DeclPlaceholder), not a bare Conditional — that is \
-         the shape gap 4's carrier walk must follow"
+         the shape the carrier walk must follow"
     );
 
     let mut diag_sink = Vec::new();
@@ -10451,7 +10455,7 @@ defineEmits<ConditionalEmits>()
         &mut diag_sink,
     );
     let surface = surface.expect(
-        "Gap 4 — the emits branch-merge must resolve the aliased-conditional \
+        "the emits branch-merge must resolve the aliased-conditional \
          payload surface by following the DeclRef carrier to the Conditional root",
     );
     let members = crate::meta_resolve::projectors::read_surface_members(host, surface);
@@ -10460,7 +10464,7 @@ defineEmits<ConditionalEmits>()
     for required in ["itemEdited", "itemViewed"] {
         assert!(
             event_names.iter().any(|n| n == required),
-            "Gap 4 — the branch-merge surface MUST merge BOTH branches of the \
+            "the branch-merge surface MUST merge BOTH branches of the \
              undecided NAMED conditional emit alias `ConditionalEmits` (Mode \
              extends 'editor' ? EditorEmits : ViewerEmits). Event `{required}` is \
              missing — the merge must follow the DeclRef carrier to the \

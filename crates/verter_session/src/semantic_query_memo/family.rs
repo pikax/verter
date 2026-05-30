@@ -210,7 +210,7 @@ pub(super) enum ModeSlot {
     TransitNavigate,
     TransitShallow,
     TransitExpanded,
-    /// Vue macro object-surface publication slot (Stage 4-pre Gap 2).
+    /// Vue macro object-surface publication slot.
     /// `ReductionDemand::MacroObjectSurface` at the Shallow macro
     /// publication boundary lands here — the empty-path Shallow surface
     /// enumerates the UNION of object-arm members (Vue macro convention)
@@ -243,7 +243,7 @@ pub(super) struct FamilySlots {
     transit_navigate: Option<MemoEntry>,
     transit_shallow: Option<MemoEntry>,
     transit_expanded: Option<MemoEntry>,
-    /// Vue macro object-surface publication slot (Gap 2). Independent of
+    /// Vue macro object-surface publication slot. Independent of
     /// the publication + transit slots; no backfill in either direction.
     macro_surface_shallow: Option<MemoEntry>,
 }
@@ -448,7 +448,7 @@ pub(super) fn context_to_slot(ctx: ProjectionReductionContext) -> ModeSlot {
             // outside the reduction-demand axis.
             ProjectionMode::Skeleton => ModeSlot::Skeleton,
         },
-        // Vue macro object-surface publication (Gap 2). The macro
+        // Vue macro object-surface publication. The macro
         // publication boundary always runs at Shallow mode (the
         // empty-path terminal-surface synthesis is where the union-arm
         // rule applies), so all modes land in the dedicated
