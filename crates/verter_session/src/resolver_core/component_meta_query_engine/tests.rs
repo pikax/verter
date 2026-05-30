@@ -4526,9 +4526,9 @@ fn dispatch_authoritative_union_alias_surface_without_prepared_fallback() {
         verter_workspace::MemoryOptions::default(),
     ));
     // Generic union alias: each arm shares `shared` and carries one
-    // branch-only member. The Vue macro object-surface union merge
-    // (selected by the surface.rs Union arm's `MacroObjectSurface`
-    // context) enumerates the UNION of arm members — so all three
+    // branch-only member. The dispatch compound-root composition drives
+    // the shared shallow walker under the `MacroObjectSurface` context,
+    // whose union merge enumerates the UNION of arm members — so all three
     // members appear, with branch-only members optional. A common-member
     // INTERSECTION merge would keep only `shared`; asserting the
     // branch-only members present discriminates union-of-members from
@@ -4609,8 +4609,8 @@ export interface RootProps<T> {
     // where `SelectMenuProps<T> extends Pick<RootProps<T>, 'open' |
     // 'defaultOpen' | 'disabled'> { items?: T }`. The dispatch root is an
     // Intersection (heritage overlay over the `Omit<...>` carrier). The
-    // surface.rs Intersection arm must compose `open` / `defaultOpen` /
-    // `disabled` (inherited via Pick) and OMIT `items`.
+    // dispatch compound-root composition must compose `open` / `defaultOpen`
+    // / `disabled` (inherited via Pick) and OMIT `items`.
     ws.inject_file(
         "/src/App.vue".to_string(),
         Arc::from(
@@ -4670,8 +4670,8 @@ fn dispatch_authoritative_ordinary_heritage_surface_without_prepared_fallback() 
     ));
     // Ordinary (non-generic) heritage: `Derived extends ButtonProps`.
     // The dispatch root is an Intersection (heritage overlay). The
-    // surface.rs Intersection arm must compose the inherited `disabled`
-    // and the derived own-body `extra`.
+    // dispatch compound-root composition must compose the inherited
+    // `disabled` and the derived own-body `extra`.
     ws.inject_file(
         "/src/App.vue".to_string(),
         Arc::from(
