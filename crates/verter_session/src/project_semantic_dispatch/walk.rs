@@ -817,10 +817,22 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     current = resolved;
                 }
                 SemanticNodeData::IndexedAccess { object, index: ix } => {
+                    // Path-precision rule (mirrors the `InstantiationRef`
+                    // intermediate-hop demotion above and `evaluate.rs`):
+                    // this arm only runs inside `while index < path.len()`,
+                    // so a path segment is ALWAYS still pending — the
+                    // deferred `T[K]` shell is an INTERMEDIATE hop whose
+                    // resolved surface the next segment walks. Re-dispatch
+                    // it in `Navigate` so the intermediate stays shallow
+                    // (its sibling members are NOT eagerly expanded when
+                    // the caller demanded `Expanded`). Only the consumed
+                    // TERMINAL segment runs in the caller's mode — that is
+                    // handled after the loop by
+                    // `resolve_expanded_terminal_carrier`.
                     let resolved = match self.dispatch.execute(SemanticQueryKey::IndexedAccess {
                         base: *object,
                         index: ix.clone(),
-                        mode: self.mode(),
+                        mode: ProjectionMode::Navigate,
                     }) {
                         QueryResult::Value(id) => id,
                         _ => {

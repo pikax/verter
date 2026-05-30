@@ -576,6 +576,208 @@ fn indexed_access_canonicalises_to_project_path_before_admission() {
     );
 }
 
+/// PATH-PRECISION (shallow-by-default): a nested indexed access
+/// `Root['a']['b']` must keep the INTERMEDIATE hop `Root['a']` in
+/// `Navigate` — only the consumed TERMINAL segment runs in the caller's
+/// mode. The intermediate's sibling members (`sib`) must NOT be eagerly
+/// expanded when the caller demanded `Expanded`. This pins the two
+/// remaining intermediate-mode-leak sites the deferred-shell evaluator
+/// (`evaluate.rs`) already closed: the eager-projection object-operand
+/// lowering (`lower.rs`) and the deferred `IndexedAccess` re-dispatch in
+/// the path walker (`walk.rs`).
+///
+/// Non-`.vue`, non-macro: this is the SHARED indexed-access path, so the
+/// regression is exercised through the generic typed-IR dispatch
+/// directly (no SFC, no `defineProps`).
+///
+/// **Discriminating — empirically validated by revert-and-observe:**
+/// - Restoring the caller's mode on the `walk.rs` re-dispatch
+///   (`mode: self.mode()`) makes the `Expanded` walk synthesise the
+///   intermediate `Root['a']` Object surface and BACKFILL the narrower
+///   `Navigate` slot (broader-satisfies-narrower memo backfill), so the
+///   Part A peek of `IndexedAccess{Root,'a', Navigate}` returns an
+///   `Object` and the `!Object` assertion FAILS.
+/// - Restoring the caller's mode on the `lower.rs` object-operand
+///   lowering (`reduction_context` instead of
+///   `reduction_context.with_mode(Navigate)`) makes the inner
+///   `{a:Mid}['a']` eager-project under `Expanded`, expanding the `Mid`
+///   carrier to an Object so the OUTER `['b']` eager-reduces to a bare
+///   `number`; the Part B assertion that the intermediate stays shallow
+///   (the outer DEFERS to an `IndexedAccess` shell) FAILS.
+#[test]
+fn indexed_access_intermediate_hop_stays_navigate_only_terminal_expands() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/nested.ts",
+        "export type Leaf = { deep: string };\n\
+         export type Mid = { b: number; sib: Leaf };\n\
+         export type Root = { a: Mid };\n\
+         export type MixedNested = { a: Mid }['a']['b'];\n",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+
+    // ── Part A: the path-walker deferred-shell re-dispatch (walk.rs). ──
+    // Resolve `Root`, build the deferred `Root['a']` IndexedAccess shell,
+    // then project `['b']` over it in `Expanded`. The walker hits the
+    // intermediate-shell arm with a pending `['b']` segment.
+    let root = match dispatch.execute(SemanticQueryKey::ResolveDecl(resolve_decl_key(
+        "/w/nested.ts",
+        "Root",
+    ))) {
+        QueryResult::Value(node) => node,
+        other => panic!("Root must resolve: {other:?}"),
+    };
+    let shell = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: root,
+        index: IndexKey::String(Arc::from("a")),
+    });
+    let terminal = match dispatch.execute(SemanticQueryKey::ProjectPath {
+        base: shell,
+        path: Arc::from(vec![PathSegment::Member(Arc::from("b"))].into_boxed_slice()),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
+    }) {
+        QueryResult::Value(node) => node,
+        other => panic!("Root['a']['b'] terminal must resolve: {other:?}"),
+    };
+    // Terminal `b` is the consumed segment → runs in the caller's mode →
+    // resolves to the concrete `number`.
+    assert!(
+        matches!(
+            graph.node_data(terminal).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+        ),
+        "terminal `Root['a']['b']` must expand to `number`; got {:?}",
+        graph.node_data(terminal).as_deref()
+    );
+
+    // Peek the INTERMEDIATE `Root['a']` in `Navigate`. The fix re-dispatches
+    // the intermediate shell in `Navigate`, so this slot holds a SHALLOW
+    // carrier (a `Mid` declaration placeholder / `DeclRef`). The bug would
+    // have run the intermediate in `Expanded`, synthesising the `Mid`
+    // Object surface and backfilling this narrower slot — an `Object` here
+    // means the intermediate over-expanded.
+    let intermediate = match dispatch.execute(SemanticQueryKey::IndexedAccess {
+        base: root,
+        index: IndexKey::String(Arc::from("a")),
+        mode: ProjectionMode::Navigate,
+    }) {
+        QueryResult::Value(node) => node,
+        other => panic!("intermediate Root['a'] must resolve: {other:?}"),
+    };
+    assert!(
+        !matches!(
+            graph.node_data(intermediate).as_deref(),
+            Some(SemanticNodeData::Object(_))
+        ),
+        "intermediate `Root['a']` must stay a SHALLOW carrier — an Object \
+         here means the nested walk over-expanded the intermediate (its \
+         `sib` sibling would be materialised). The terminal-only expand \
+         contract is violated. got {:?}",
+        graph.node_data(intermediate).as_deref()
+    );
+    // Positive shape check: the shallow intermediate is the `Mid`
+    // declaration carrier (discriminating — not merely "not Object",
+    // which a primitive miss would also satisfy).
+    assert!(
+        matches!(
+            graph.node_data(intermediate).as_deref(),
+            Some(SemanticNodeData::Opaque(QueryError::DeclPlaceholder { name, .. }))
+                if name.as_ref() == "Mid"
+        ) || matches!(
+            graph.node_data(intermediate).as_deref(),
+            Some(SemanticNodeData::DeclRef { identity }) if identity.decl_name.as_ref() == "Mid"
+        ) || matches!(
+            graph.node_data(intermediate).as_deref(),
+            Some(SemanticNodeData::Alias(_) | SemanticNodeData::IndexedAccess { .. })
+        ),
+        "intermediate carrier must be the `Mid` declaration placeholder / \
+         DeclRef / alias / unreduced shell; got {:?}",
+        graph.node_data(intermediate).as_deref()
+    );
+
+    // ── Part B: the eager-projection object-operand lowering (lower.rs). ──
+    // `MixedNested = { a: Mid }['a']['b']` lowers the OUTER `['b']` whose
+    // object operand is the inner `{ a: Mid }['a']`. The inner object
+    // operand `{ a: Mid }` lowers to an Object so the inner eager-projects
+    // `a` → the `Mid` ALIAS carrier. The fix lowers that object operand in
+    // `Navigate`, so the inner `Mid` stays a shallow carrier and the OUTER
+    // `['b']` has a non-Object operand → it DEFERS to an IndexedAccess
+    // shell (the intermediate is NOT eagerly expanded). The bug would have
+    // lowered the inner under `Expanded`, expanding `Mid` to an Object so
+    // the outer eager-reduces straight to a bare `number`.
+    let mixed = match dispatch.execute(SemanticQueryKey::ResolveDecl(resolve_decl_key(
+        "/w/nested.ts",
+        "MixedNested",
+    ))) {
+        QueryResult::Value(node) => node,
+        other => panic!("MixedNested must resolve: {other:?}"),
+    };
+    let mixed_body = match dispatch.execute(SemanticQueryKey::Instantiate {
+        base: DeclIdentity {
+            canonical_id: Arc::from("/w/nested.ts"),
+            whole_hash: host
+                .ensure_indexed_ready("/w/nested.ts")
+                .expect("indexed ready")
+                .whole_hash,
+            decl_name: Arc::from("MixedNested"),
+        },
+        args: Arc::from(Vec::new().into_boxed_slice()),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
+    }) {
+        QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+        other => panic!("MixedNested body must materialise: {other:?}"),
+    };
+    let _ = mixed;
+    // The intermediate stayed shallow → the outer access could NOT
+    // eager-project and DEFERRED to an IndexedAccess shell. A bare
+    // `number` here means the intermediate `{a:Mid}['a']` over-expanded.
+    assert!(
+        matches!(
+            graph.node_data(mixed_body).as_deref(),
+            Some(SemanticNodeData::IndexedAccess { .. })
+        ),
+        "MixedNested intermediate `{{a:Mid}}['a']` must stay shallow so the \
+         outer `['b']` DEFERS to an IndexedAccess shell (path-precise, \
+         terminal-only expand). A concrete `number` here means the eager \
+         lower.rs path expanded the intermediate under the caller's mode. \
+         got {:?}",
+        graph.node_data(mixed_body).as_deref()
+    );
+    // Correctness is preserved: demanding the deferred shell's single
+    // hop reduces it to `number` (the deferral is shallow-by-default,
+    // NOT a lost reduction). Re-dispatch the shell's own
+    // `IndexedAccess{object, index}` — the canonical reducer — in the
+    // caller's mode; the `object` Mid carrier resolves and `['b']`
+    // projects `number`.
+    let (shell_object, shell_index) = match graph.node_data(mixed_body).as_deref() {
+        Some(SemanticNodeData::IndexedAccess { object, index }) => (*object, index.clone()),
+        other => panic!("expected IndexedAccess shell, got {other:?}"),
+    };
+    let mixed_terminal = match dispatch.execute(SemanticQueryKey::IndexedAccess {
+        base: shell_object,
+        index: shell_index,
+        mode: ProjectionMode::Expanded,
+    }) {
+        QueryResult::Value(node) => node,
+        other => panic!("MixedNested deferred shell must reduce on demand: {other:?}"),
+    };
+    assert!(
+        matches!(
+            graph.node_data(mixed_terminal).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+        ),
+        "the deferred MixedNested shell must reduce to `number` when its \
+         terminal is demanded; got {:?}",
+        graph.node_data(mixed_terminal).as_deref()
+    );
+}
+
 /// B1a: `SurfaceView::members` carries the full TypeScript member
 /// metadata via [`SurfaceMember`]. The struct's `optional`, `readonly`,
 /// and `is_method` fields round-trip through interning unchanged so
