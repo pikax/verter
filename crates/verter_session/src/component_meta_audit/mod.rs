@@ -179,7 +179,7 @@ pub fn snapshot_cache_layers_from_tls() -> verter_audit::store::CacheLayerBreakd
     }
 }
 
-/// Snapshot the per-request Block-7.5 bypass diagnostic counters
+/// Snapshot the per-request bypass diagnostic counters
 /// from the currently installed [`crate::request_context::RequestContext`]
 /// into a [`verter_audit::store::BypassDiagnostics`] DTO. Returns a
 /// default (all-zero) struct when no context is installed — the

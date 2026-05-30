@@ -16,6 +16,7 @@ pub mod mcp;
 pub mod semantic;
 pub mod tags;
 pub mod type_resolution;
+pub mod typeinfo_graph;
 pub mod workspace;
 
 pub use bundler::{BundlerBatchPayload, SlowRecordSummary};
@@ -25,4 +26,8 @@ pub use lsp::{LspRequestPayload, PositionInfo};
 pub use mcp::McpToolPayload;
 pub use semantic::SemanticAnalysisPayload;
 pub use type_resolution::TypeResolutionPayload;
+pub use typeinfo_graph::{
+    ExactnessTag, GraphClosurePolicyTag, GraphOperationTag, ReductionDemandTag,
+    TypeInfoDegradationReasonTag, TypeInfoGraphPayload,
+};
 pub use workspace::{WorkspaceOp, WorkspacePayload};

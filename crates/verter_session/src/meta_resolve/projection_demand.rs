@@ -206,9 +206,9 @@ pub(crate) struct SurfaceProjection {
 }
 
 impl SurfaceProjection {
-    /// "Whole surface in `Expanded` mode" — the substrate's
-    /// pre-Block-6.i default. Used by call sites that have not yet
-    /// adopted path-precision.
+    /// "Whole surface in `Expanded` mode" — the pre-path-precision
+    /// default. Used by call sites that have not yet adopted
+    /// path-precision.
     pub(crate) fn whole_surface(kind: PublishedSurfaceKind) -> Self {
         Self {
             surface: kind,
@@ -271,8 +271,8 @@ impl<'a> ProjectionCursor<'a> {
     ///    path-precision such as `Foo['a']['b']`).
     /// 2. Else if the parent cursor is GENUINELY whole-surface
     ///    (empty `children` + `KeyFilter::All`) → self-pin (the
-    ///    pre-Block-6.i backward-compat mode for callers that have
-    ///    not yet adopted narrowed projections).
+    ///    pre-path-precision backward-compat mode for callers that
+    ///    have not yet adopted narrowed projections).
     /// 3. Else if the parent's key filter ADMITS the segment but
     ///    has no explicit child entry → descend into a fresh
     ///    whole-surface child cursor (the parent's narrowing
@@ -381,7 +381,7 @@ impl<'a> ProjectionCursor<'a> {
     }
 
     /// `true` when this cursor admits ALL keys (no narrowing). The
-    /// pre-Block-6.i whole-surface mode.
+    /// pre-path-precision whole-surface mode.
     pub(crate) fn is_whole_surface(&self) -> bool {
         matches!(self.node.key_filter, KeyFilter::All) && self.node.children.is_empty()
     }

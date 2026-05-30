@@ -323,10 +323,11 @@ pub(crate) fn empty_path() -> Arc<[PathSegment]> {
 //    projector publishes the Ref shallow; consumers re-resolve through
 //    the registry on demand. No reduction needed.
 //  - `PeekedShape::Cached` — the expression already has an entry in
-//    `MaterializeMemoDb` keyed on `(scope, expr, mode)`. The peek
-//    re-emits the cached entry's `fact_dep_signature` into the active
-//    fact tracer (mirroring the `MemberShapeCacheDb::peek` protocol) so
-//    the cm-result cache validation invariants are preserved.
+//    `ShapeCacheDb` keyed on `(scope, expr, mode)`. The peek re-emits
+//    the cached entry's `fact_dep_signature` into the active fact tracer
+//    (the same `peek` protocol that the per-member slot of `ShapeCacheDb`
+//    indexed by `ShapeSubject::SemanticNode` follows) so the cm-result
+//    cache validation invariants are preserved.
 //  - `None` — the cache is cold for this triple; the caller must decide
 //    whether to reduce (operator-shape / generic instantiation cases) or
 //    publish shallow (bare alias case already covered above).
@@ -715,8 +716,10 @@ pub(crate) fn resolve_payload_surface(
 /// Peek-before-raise per-member helper.
 ///
 /// Wraps the cold compute path for one `(scope, member_value, mode)`
-/// triple around the host-owned
-/// [`crate::component_meta_caches::MemberShapeCacheDb`]. The contract:
+/// triple around the host-owned per-member slot of
+/// [`crate::component_meta_caches::ShapeCacheDb`] (indexed by
+/// [`crate::component_meta_caches::ShapeSubject::SemanticNode`] via
+/// `ShapeCacheKey::semantic_node_whole`). The contract:
 ///
 ///  1. **Peek first.** Warm hits return the cached
 ///     [`crate::project_semantic_dispatch::raise::MaterializedTypeExpr`]

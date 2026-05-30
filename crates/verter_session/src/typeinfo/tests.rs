@@ -218,7 +218,7 @@ fn list_file_symbols_5kloc_under_50ms() {
     );
     assert!(
         elapsed.as_millis() < 50,
-        "list_file_symbols(5KLOC) took {} ms — must be < 50 ms (§1.1)",
+        "list_file_symbols(5KLOC) took {} ms — must be < 50 ms (perf contract)",
         elapsed.as_millis()
     );
 }
@@ -239,10 +239,10 @@ export type Outer = Inner;
 "#,
     );
 
-    // First resolve `Outer` in Identity mode. Per §5.2, Identity
-    // does NOT unwrap aliases — the contract is "do not unwrap +
-    // do not expand". Compare against the Navigate /
-    // Expanded results to discriminate.
+    // First resolve `Outer` in Identity mode. Identity does NOT
+    // unwrap aliases — the contract is "do not unwrap + do not
+    // expand". Compare against the Navigate / Expanded results to
+    // discriminate.
     let (id_node, record) = host.resolve_named_symbol_with_audit(
         "/aliases.ts",
         "Outer",
@@ -414,7 +414,8 @@ export type Wrap<T> = { wrapped: T };
         _ => panic!(),
     };
     // Audit payload's query_mode reflects the host's default
-    // selection — Navigate for generic carriers per Claude P1-19 / P1-11.
+    // selection — Navigate for generic carriers (the default-mode
+    // policy in the resolve-named-symbol contract).
     assert_eq!(
         payload.query_mode,
         verter_audit::ProjectionModeTag::Navigate,

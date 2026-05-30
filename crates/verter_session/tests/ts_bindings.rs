@@ -52,6 +52,26 @@ fn normalize_lf(s: &str) -> String {
     s.replace("\r\n", "\n")
 }
 
+/// Strip trailing whitespace from every line. `ts-rs` emits
+/// `field: Type, ` with a trailing space before the newline; the
+/// committed file is post-processed to strip that whitespace so
+/// `git diff --check` stays clean. The sync gate normalises both
+/// the committed baseline and the freshly regenerated content
+/// through this helper so they compare equivalently regardless of
+/// the trailing-space idiosyncrasy.
+fn strip_trailing_whitespace(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut first = true;
+    for line in s.split('\n') {
+        if !first {
+            out.push('\n');
+        }
+        out.push_str(line.trim_end());
+        first = false;
+    }
+    out
+}
+
 #[test]
 fn audit_ts_bindings_are_in_sync() {
     use ts_rs::TS;
@@ -80,11 +100,14 @@ fn audit_ts_bindings_are_in_sync() {
     let root = workspace_root();
     let committed_path = root.join("packages/types/audit.generated.ts");
     // Capture the git-committed baseline BEFORE refreshing.
-    let committed = normalize_lf(
+    // Strip trailing whitespace per-line so a ts-rs-emitted trailing
+    // space (which the committed file does not carry — post-processed
+    // away) does not surface as a spurious diff.
+    let committed = strip_trailing_whitespace(&normalize_lf(
         &read_git_committed_baseline(&committed_path)
             .or_else(|| fs::read_to_string(&committed_path).ok())
             .unwrap_or_default(),
-    );
+    ));
 
     // Regenerate into a tempdir. `export_all(&Config::new().with_out_dir(...))`
     // explicitly disregards `TS_RS_EXPORT_DIR` (per ts-rs docs) and
@@ -136,18 +159,24 @@ fn audit_ts_bindings_are_in_sync() {
     let generated_path = tempdir.path().join("audit.generated.ts");
     let generated_raw = fs::read_to_string(&generated_path)
         .unwrap_or_else(|e| panic!("read regenerated `{generated_path:?}`: {e}"));
-    let generated = normalize_lf(&generated_raw);
+    // Strip trailing whitespace so the on-disk refresh AND the
+    // sync-gate compare stay clean (ts-rs emits a trailing space
+    // before every newline; the committed file is post-processed
+    // to strip them).
+    let generated_clean = strip_trailing_whitespace(&normalize_lf(&generated_raw));
+    let generated = generated_clean.clone();
 
     // Always refresh the on-disk file (or the
     // `VERTER_TS_BINDINGS_DUMP` override). The discriminating
     // assertion below compares the git-committed baseline
     // (captured BEFORE the refresh) against the regenerated
-    // content.
+    // content. The on-disk file gets the whitespace-stripped
+    // variant so `git diff --check` stays clean.
     let refresh_target = std::env::var("VERTER_TS_BINDINGS_DUMP")
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| committed_path.to_string_lossy().into_owned());
-    std::fs::write(&refresh_target, &generated_raw)
+    std::fs::write(&refresh_target, &generated_clean)
         .unwrap_or_else(|e| panic!("refresh `{refresh_target}`: {e}"));
 
     if committed != generated {

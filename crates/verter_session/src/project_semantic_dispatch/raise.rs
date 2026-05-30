@@ -685,7 +685,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Top-down demand-driven graph reducer (codex-hybrid,
     /// codex-hybrid spec — stack-safe).
     ///
-    /// Replaces the pre-Block-6.i bottom-up topological reducer. The
+    /// Replaces the legacy bottom-up topological reducer. The
     /// pre-walk visited the ENTIRE reachable subgraph and then reduced
     /// every visited node — that meant `keyof T` / `{ [K in S]: V }`
     /// inside non-selected conditional branches, generic arguments, or

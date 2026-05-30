@@ -1,11 +1,11 @@
 // @ai-generated - 12-level deep-chain fixture for mode_boundary_invariants
-// tests. Mirrors the codex audit shape from
-// `benchmarks/tsgo-audit/large-fixture/src/large-types.ts` (where the codex
-// run observed `recursion_limit_reached=true` at 500 levels). The synthetic
-// shape pins per-level Pick<parent>, payload value union, and an outer
-// `LargeKeys_N = keyof LargeRecord_N` alias. Resolving `LargeKeys_11`
-// (the terminal alias) must only need the SHALLOW member names of
-// `LargeRecord_11`, NOT a full walk of the dependent chain.
+// tests. Mirrors the tsgo-audit benchmark shape from
+// `benchmarks/tsgo-audit/large-fixture/src/large-types.ts` (where the
+// benchmark run observed `recursion_limit_reached=true` at 500 levels).
+// The synthetic shape pins per-level Pick<parent>, payload value union,
+// and an outer `LargeKeys_N = keyof LargeRecord_N` alias. Resolving
+// `LargeKeys_11` (the terminal alias) must only need the SHALLOW member
+// names of `LargeRecord_11`, NOT a full walk of the dependent chain.
 //
 // TS7 emission verified against tsgo 7.0.0-dev.20260523.1:
 //   type LargeKeys_11 = keyof LargeRecord_11

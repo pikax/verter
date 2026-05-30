@@ -6,8 +6,7 @@
 //! the resolved semantic-graph node id.
 //!
 //! See [`super::types::EvaluateTypeExpressionRequest`] for the
-//! request shape and §5.3 of the typeinfo plan for the scratch URI
-//! contract:
+//! request shape. The scratch URI contract is:
 //!
 //! ```text
 //! verter://typeinfo/<sha256(scope_canonical || "\0"
@@ -57,14 +56,14 @@ impl VerterHost {
     /// the resolved semantic-graph node id alongside the audit
     /// record.
     ///
-    /// **Scratch URI** (per §5.3): a sha256 of
+    /// **Scratch URI**: a sha256 of
     /// `scope_canonical || \0 || expression || \0 || serialize(extra_imports)`,
     /// truncated to 16 bytes (32 hex chars), prefixed with
     /// `verter://typeinfo/`, and suffixed `.ts`. Two scopes with the
     /// same expression produce different URIs — `scope_canonical` is
     /// hashed explicitly.
     ///
-    /// **Cache discipline** (per §5.3):
+    /// **Cache discipline**:
     /// - `cacheable: true` — first call synthesises + upserts +
     ///   resolves; subsequent calls with the same URI return the
     ///   cached `node_id` directly (the audit record still emits, with
@@ -395,7 +394,8 @@ fn materialize_through_aliases(
     current
 }
 
-/// Compute the scratch URI per §5.3.
+/// Compute the scratch URI for the evaluate-type-expression
+/// substrate.
 ///
 /// Hash inputs: `scope_canonical || \0 || expression || \0 ||
 /// serialize(extra_imports)`. The serialised form for imports is a

@@ -9,7 +9,7 @@
 //! registration → TLS observer install → dispatch.execute →
 //! payload snapshot → finalise.
 //!
-//! Public API per §5.2 of the typeinfo plan:
+//! Public API surface (the resolve-named-symbol contract):
 //!
 //! ```ignore
 //! pub fn resolve_named_symbol_with_audit(
@@ -23,7 +23,7 @@
 //! pub fn resolve_named_symbol(...)  -> Option<SemanticNodeId>;
 //! ```
 //!
-//! Default-mode policy (Claude P1-19, P1-11):
+//! Default-mode policy:
 //! - Generic carrier (declaration-site type parameters) → `Navigate`.
 //! - Non-generic decl → `Expanded`.
 //! - Identity returns the alias node verbatim (no unwrap).
@@ -32,8 +32,8 @@
 //! [`verter_type_expr::TypeExpr`]s; the host
 //! method lowers them through
 //! [`crate::project_semantic_dispatch::ProjectSemanticDispatch::lower_type_expr_in_scope_with_mode`]
-//! per §5.2 ("type_args are lowered to `SemanticNodeId`s inside the
-//! host method").
+//! per the resolve-named-symbol contract — type_args are lowered to
+//! `SemanticNodeId`s inside the host method before dispatch.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -54,7 +54,7 @@ use crate::semantic_query::{
 };
 use crate::VerterHost;
 
-/// Sentinel that flags the caller wants the host's default mode (per §5.2).
+/// Sentinel that flags the caller wants the host's default mode.
 /// Distinct from the `ProjectionMode` enum so callers can opt out
 /// explicitly without our defaulting their `Navigate` argument.
 ///
@@ -67,9 +67,9 @@ impl VerterHost {
     /// instantiating with `type_args`, returning the resolved node and
     /// the request's audit record.
     ///
-    /// `mode = None` selects the host's default per §5.2 (Navigate
-    /// for generic carriers, Expanded otherwise). `Some(mode)`
-    /// overrides the default.
+    /// `mode = None` selects the host's default (Navigate for
+    /// generic carriers, Expanded otherwise). `Some(mode)` overrides
+    /// the default.
     ///
     /// Always emits exactly one [`RequestAuditRecord`] when the
     /// audit-config consumer filter accepts `RequestKind::TypeResolution`;
@@ -253,7 +253,9 @@ fn resolve_named_symbol_inner(
         })
         .unwrap_or(false);
 
-    // Default-mode selection per §5.2 + Claude P1-19 / P1-11.
+    // Default-mode selection: generic carriers default to Navigate
+    // so the declaration stays unexpanded; non-generic declarations
+    // default to Expanded so callers receive the full projection.
     let effective_mode = match requested_mode {
         Some(mode) => mode,
         None => {
@@ -265,8 +267,8 @@ fn resolve_named_symbol_inner(
         }
     };
 
-    // Lower type_args in the call-scope. Per §5.2, args are lowered
-    // in `Navigate` mode regardless of the terminal mode — the args
+    // Lower type_args in the call-scope. Args are lowered in
+    // `Navigate` mode regardless of the terminal mode — the args
     // themselves are a context inherited by the instantiation, not
     // the body that is being projected.
     let mut lowered_args: Vec<SemanticNodeId> = Vec::with_capacity(type_args.len());
@@ -314,7 +316,7 @@ fn resolve_named_symbol_inner(
     // generation produce the same identity and therefore the same
     // memo key.
     //
-    // §5.2 alias-unwrap policy:
+    // Alias-unwrap policy:
     // - `Identity`: dispatch with `body_mode: Identity`, return the
     //   resolved alias-shell verbatim (do NOT unwrap).
     // - `Navigate` / `Expanded` / `Shallow`: dispatch with the

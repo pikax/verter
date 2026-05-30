@@ -96,6 +96,15 @@ pub const EXPECTED_EXPORT_ROUTE_RESOLVED_PLAIN: &str =
 pub const EXPECTED_COMPILE_MODE_DOWNGRADE: &str =
     "CompileModeDowngrade(Content -> Stateless, reasons=[HasMacroTypeDeps])";
 
+pub const EXPECTED_TYPEINFO_GRAPH_PUBLISHED: &str =
+    "TypeInfoGraphPublished(typeinfo_graph_session, ResolveSymbol, nodes=5, roots=1, closure=OneLevel)";
+
+pub const EXPECTED_TYPEINFO_GRAPH_DEGRADED: &str =
+    "TypeInfoGraphDegraded(typeinfo_graph_session, ProjectPath, reason=BudgetExceededNodes, nodes=3)";
+
+pub const EXPECTED_TYPEINFO_GRAPH_CACHE_HIT: &str =
+    "TypeInfoGraphCacheHit(typeinfo_graph_session, EvaluateExpression)";
+
 // ──────────────────────────────────────────────────────────────────
 // Fixture constructors — exactly one canonical instance per variant.
 // The DISPLAY_SNAPSHOTS table pairs each fixture with its expected
@@ -433,6 +442,32 @@ pub fn fixture_compile_mode_downgrade() -> Event {
     }
 }
 
+pub fn fixture_typeinfo_graph_published() -> Event {
+    Event::TypeInfoGraphPublished {
+        layer: Arc::from("typeinfo_graph_session"),
+        operation: verter_audit::payloads::GraphOperationTag::ResolveSymbol,
+        snapshot_node_count: 5,
+        roots_count: 1,
+        closure: verter_audit::payloads::GraphClosurePolicyTag::OneLevel,
+    }
+}
+
+pub fn fixture_typeinfo_graph_degraded() -> Event {
+    Event::TypeInfoGraphDegraded {
+        layer: Arc::from("typeinfo_graph_session"),
+        operation: verter_audit::payloads::GraphOperationTag::ProjectPath,
+        reason: verter_audit::payloads::TypeInfoDegradationReasonTag::BudgetExceededNodes,
+        snapshot_node_count: 3,
+    }
+}
+
+pub fn fixture_typeinfo_graph_cache_hit() -> Event {
+    Event::TypeInfoGraphCacheHit {
+        layer: Arc::from("typeinfo_graph_session"),
+        operation: verter_audit::payloads::GraphOperationTag::EvaluateExpression,
+    }
+}
+
 /// Pair each fixture with its expected Display string. The
 /// `structured_event_display_snapshot_byte_exact_for_every_variant`
 /// test iterates this table, and the companion `all_variants_covered`
@@ -558,6 +593,18 @@ pub fn all_snapshots() -> Vec<(Event, &'static str)> {
             fixture_compile_mode_downgrade(),
             EXPECTED_COMPILE_MODE_DOWNGRADE,
         ),
+        (
+            fixture_typeinfo_graph_published(),
+            EXPECTED_TYPEINFO_GRAPH_PUBLISHED,
+        ),
+        (
+            fixture_typeinfo_graph_degraded(),
+            EXPECTED_TYPEINFO_GRAPH_DEGRADED,
+        ),
+        (
+            fixture_typeinfo_graph_cache_hit(),
+            EXPECTED_TYPEINFO_GRAPH_CACHE_HIT,
+        ),
     ]
 }
 
@@ -617,6 +664,9 @@ mod tests {
             | Event::FactValidationSummary { .. }
             | Event::ExportRouteResolved { .. }
             | Event::CompileModeDowngrade { .. }
+            | Event::TypeInfoGraphPublished { .. }
+            | Event::TypeInfoGraphDegraded { .. }
+            | Event::TypeInfoGraphCacheHit { .. }
             | Event::Custom { .. } => (),
         };
 
@@ -655,6 +705,9 @@ mod tests {
             "FactValidationSummary",
             "ExportRouteResolved",
             "CompileModeDowngrade",
+            "TypeInfoGraphPublished",
+            "TypeInfoGraphDegraded",
+            "TypeInfoGraphCacheHit",
         ];
         let covered: Vec<&'static str> = all_snapshots()
             .iter()
@@ -696,6 +749,9 @@ mod tests {
                 Event::FactValidationSummary { .. } => "FactValidationSummary",
                 Event::ExportRouteResolved { .. } => "ExportRouteResolved",
                 Event::CompileModeDowngrade { .. } => "CompileModeDowngrade",
+                Event::TypeInfoGraphPublished { .. } => "TypeInfoGraphPublished",
+                Event::TypeInfoGraphDegraded { .. } => "TypeInfoGraphDegraded",
+                Event::TypeInfoGraphCacheHit { .. } => "TypeInfoGraphCacheHit",
             })
             .collect();
         for v in expected_variants.iter() {

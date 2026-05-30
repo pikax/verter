@@ -146,7 +146,7 @@ fn cache_invalidation_basic_selected_leaf_edit_flips_published_surface() {
 /// reached by the owner: warm reads must reuse the original published
 /// `Surface`, perform zero VFS reads, and incur zero RouteDb misses.
 #[test]
-#[ignore = "typeinfo currently fails to attach a request footprint on this resolver path after the block-6.i AX-WIP audit-passive-observer refactor (commit b0798e28); the contract is that editing an unreferenced barrel sibling must NOT invalidate any cache participant reached by the owner — warm reads must reuse the original published `Surface`, perform zero VFS reads, and incur zero RouteDb misses with the footprint still attached. Keep as the future unselected-sibling-isolation contract once AX-WIP closes Rule-5 leak."]
+#[ignore = "typeinfo currently fails to attach a request footprint on this resolver path under the audit-passive-observer footprint-attachment pipeline; the contract is that editing an unreferenced barrel sibling must NOT invalidate any cache participant reached by the owner — warm reads must reuse the original published `Surface`, perform zero VFS reads, and incur zero RouteDb misses with the footprint still attached. Keep as the future unselected-sibling-isolation contract once the footprint-attachment pipeline is wired into this resolver path."]
 fn cache_invalidation_unselected_leaf_edit_keeps_warm_cache() {
     let host = make_host_with_footprint();
     install_basic_fixture(&host, SELECTED_BASIC_V1_SRC, UNUSED_BASIC_V1_SRC);
@@ -227,7 +227,7 @@ fn assert_route_surface_is_leaf_b(expr: &TypeExpr) {
 /// — the V2 result must reflect the new leaf and the V2 footprint must
 /// include the new leaf canonical.
 #[test]
-#[ignore = "typeinfo currently fails to attach a request footprint on this resolver path after the block-6.i AX-WIP audit-passive-observer refactor (commit b0798e28); the contract is that editing a barrel re-export target must invalidate the route fact for (owner, \"Item\") — the V2 result must reflect the new leaf and the V2 footprint must include the new leaf canonical. Keep as the future barrel-route-redirect contract once AX-WIP closes Rule-5 leak."]
+#[ignore = "typeinfo currently fails to attach a request footprint on this resolver path under the audit-passive-observer footprint-attachment pipeline; the contract is that editing a barrel re-export target must invalidate the route fact for (owner, \"Item\") — the V2 result must reflect the new leaf and the V2 footprint must include the new leaf canonical. Keep as the future barrel-route-redirect contract once the footprint-attachment pipeline is wired into this resolver path."]
 fn cache_invalidation_barrel_edit_redirects_route_to_new_leaf() {
     let host = make_host_with_footprint();
     install_route_fixture(&host, BARREL_ROUTE_V1_SRC);
@@ -249,7 +249,7 @@ fn cache_invalidation_barrel_edit_redirects_route_to_new_leaf() {
 /// out of the V2 footprint entirely — the redirected barrel no longer
 /// routes to it. This is the path-precise invalidation guarantee.
 #[test]
-#[ignore = "typeinfo currently fails to attach a request footprint on this resolver path after the block-6.i AX-WIP audit-passive-observer refactor (commit b0798e28); the strict promise is that leaf_a drops out of the V2 footprint entirely — the redirected barrel no longer routes to it (path-precise invalidation guarantee). Keep as the future barrel-route-drop contract once AX-WIP closes Rule-5 leak."]
+#[ignore = "typeinfo currently fails to attach a request footprint on this resolver path under the audit-passive-observer footprint-attachment pipeline; the strict promise is that leaf_a drops out of the V2 footprint entirely — the redirected barrel no longer routes to it (path-precise invalidation guarantee). Keep as the future barrel-route-drop contract once the footprint-attachment pipeline is wired into this resolver path."]
 fn cache_invalidation_barrel_edit_excludes_prior_leaf_from_v2_footprint() {
     let host = make_host_with_footprint();
     install_route_fixture(&host, BARREL_ROUTE_V1_SRC);

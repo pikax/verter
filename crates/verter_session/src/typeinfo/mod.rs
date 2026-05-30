@@ -6,7 +6,8 @@
 //! to downstream consumers (the `@verter/typeinfo` TS package, MCP
 //! tools, IDE integrations).
 //!
-//! Public methods (per §5 of the typeinfo plan):
+//! Public methods (the published surface of the typeinfo
+//! substrate):
 //!
 //! 1. [`crate::VerterHost::list_file_symbols`] — shallow read; no
 //!    audit.
@@ -40,6 +41,7 @@
 pub mod adapters;
 pub mod evaluate_type_expression;
 pub mod raise;
+pub mod request_validation;
 pub mod resolve_named_symbol;
 pub(crate) mod scratch_cache;
 pub mod shallow_surface;

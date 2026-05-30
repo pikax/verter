@@ -127,6 +127,11 @@ fn render_text(out: &mut impl Write, dir: &Path, payload: &BundlerBatchPayload) 
         "    bundler_batch:     {}",
         payload.bundler_batch_count
     );
+    let _ = writeln!(
+        out,
+        "    typeinfo_graph:    {}",
+        payload.typeinfo_graph_count
+    );
     let _ = writeln!(out, "    custom:            {}", payload.custom_count);
     let _ = writeln!(out, "  slowest {}:", payload.slowest_5.len());
     for (idx, slow) in payload.slowest_5.iter().enumerate() {
@@ -157,5 +162,6 @@ pub(crate) fn kind_label(kind: &RequestKind) -> String {
         RequestKind::Mcp { tool } => format!("Mcp({tool})"),
         RequestKind::BundlerBatch { kind } => format!("BundlerBatch({kind:?})"),
         RequestKind::Custom { name } => format!("Custom({name})"),
+        RequestKind::TypeInfoGraph => "TypeInfoGraph".to_string(),
     }
 }

@@ -46,6 +46,8 @@ pub struct BundlerBatchPayload {
     pub bundler_batch_count: u32,
     /// Records with `kind == RequestKind::Custom { .. }`.
     pub custom_count: u32,
+    /// Records with `kind == RequestKind::TypeInfoGraph`.
+    pub typeinfo_graph_count: u32,
     /// Sum of `RequestTimingAudit::total_ms` across the batch.
     pub total_duration_ms: f64,
     /// Sum of `RequestMemoryAudit::bytes_parsed` across the batch.

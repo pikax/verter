@@ -53,6 +53,9 @@ use crate::payloads::tags::{
     AdmissionRefusalReason, AugmentationTargetKindTag, CompileCacheModeTag, DowngradeReasonTag,
     FactKeyKindTag, FactLaneTag, FileArtifactCacheAction,
 };
+use crate::payloads::typeinfo_graph::{
+    GraphClosurePolicyTag, GraphOperationTag, TypeInfoDegradationReasonTag,
+};
 use crate::record::{u64_as_decimal_string, Hash16};
 
 /// Why a cold-compute result was admitted as non-cacheable instead of
@@ -542,6 +545,49 @@ pub enum StructuredAuditEvent {
         /// keeps only the first.
         reasons: Vec<DowngradeReasonTag>,
     },
+    /// A typeinfo graph publication completed and admitted a clean
+    /// snapshot into the typeinfo result cache.
+    ///
+    /// Emitted exactly once per cold-publish; warm hits go through
+    /// `TypeInfoGraphCacheHit` instead, which keeps the structured-event
+    /// bus free of per-hit traffic.
+    TypeInfoGraphPublished {
+        /// Static identifier for the publication layer (e.g.
+        /// `"typeinfo_graph_session"`). Interned at producer-side so
+        /// the audit substrate stays `Send + Sync + Deserialize`.
+        layer: Arc<str>,
+        /// Which graph operation produced the payload.
+        operation: GraphOperationTag,
+        /// Total nodes in the published snapshot.
+        snapshot_node_count: u32,
+        /// Number of declared roots in the snapshot.
+        roots_count: u32,
+        /// Closure policy class the publication ran under.
+        closure: GraphClosurePolicyTag,
+    },
+    /// A typeinfo graph publication completed but the response was
+    /// admitted as degraded — at least one node ended at a non-exact
+    /// status, or the request failed validation before semantic
+    /// execution. Carries the closed reason classification.
+    TypeInfoGraphDegraded {
+        /// Static identifier for the publication layer.
+        layer: Arc<str>,
+        /// Which graph operation produced the payload.
+        operation: GraphOperationTag,
+        /// Closed reason classification for the degradation.
+        reason: TypeInfoDegradationReasonTag,
+        /// Total nodes in the published (degraded) snapshot.
+        snapshot_node_count: u32,
+    },
+    /// A typeinfo graph request was satisfied from the warm result
+    /// cache. The structured payload stays minimal — counters live on
+    /// the audit payload, not on every per-hit event.
+    TypeInfoGraphCacheHit {
+        /// Static identifier for the cache layer that served the hit.
+        layer: Arc<str>,
+        /// Which graph operation the hit attributed to.
+        operation: GraphOperationTag,
+    },
     /// Escape hatch for ad-hoc events. Every construction site MUST
     /// carry a `// Custom justified: <reason>` comment.
     Custom {
@@ -792,6 +838,28 @@ impl std::fmt::Display for StructuredAuditEvent {
                 f,
                 "CompileModeDowngrade({requested:?} -> {actual:?}, reasons={reasons:?})"
             ),
+            Self::TypeInfoGraphPublished {
+                layer,
+                operation,
+                snapshot_node_count,
+                roots_count,
+                closure,
+            } => write!(
+                f,
+                "TypeInfoGraphPublished({layer}, {operation:?}, nodes={snapshot_node_count}, roots={roots_count}, closure={closure:?})"
+            ),
+            Self::TypeInfoGraphDegraded {
+                layer,
+                operation,
+                reason,
+                snapshot_node_count,
+            } => write!(
+                f,
+                "TypeInfoGraphDegraded({layer}, {operation:?}, reason={reason:?}, nodes={snapshot_node_count})"
+            ),
+            Self::TypeInfoGraphCacheHit { layer, operation } => {
+                write!(f, "TypeInfoGraphCacheHit({layer}, {operation:?})")
+            }
             Self::Custom { name, detail } => write!(f, "Custom({name}, {detail})"),
         }
     }

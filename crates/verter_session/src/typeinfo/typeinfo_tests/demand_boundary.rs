@@ -3,7 +3,7 @@
 use super::support::*;
 
 #[test]
-#[ignore = "typeinfo currently fails to attach a request footprint on this resolver path after the block-6.i AX-WIP audit-passive-observer refactor (commit b0798e28); the contract is that barrel resolution must not load unrequested re-exports — only the requested leaf appears in the declared dependency footprint. Keep as the future demand-bounded-barrel contract once AX-WIP closes Rule-5 leak."]
+#[ignore = "typeinfo currently fails to attach a request footprint on this resolver path under the audit-passive-observer footprint-attachment pipeline; the contract is that barrel resolution must not load unrequested re-exports — only the requested leaf appears in the declared dependency footprint. Keep as the future demand-bounded-barrel contract once the footprint-attachment pipeline is wired into this resolver path."]
 fn demand_boundary_barrel_resolution_does_not_load_unrequested_reexport() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/fixtures/demand-needed.ts", DEMAND_NEEDED);

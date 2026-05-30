@@ -14,7 +14,9 @@ import "verter/v1/component_meta.proto";
 // ComponentUsage / TemplateRefMeta / PublicInstanceMeta / FallthroughSurface
 // already defined there.
 //
-// Backing types and bridge-error envelope follow plan §2.1.8 + §3.3.2.
+// Backing types and bridge-error envelope follow the selective
+// component-meta contract — see the component-meta architecture
+// docs for the request-shape and error-envelope rules.
 //
 // The actual implementation of the selective surface APIs lives in
 // crates/verter_session/ (Tier 1B); this file is the pinned wire schema.

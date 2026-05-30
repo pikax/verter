@@ -63,6 +63,7 @@ fn build_record(
             RequestKindPayload::BundlerBatch(BundlerBatchPayload::default())
         }
         RequestKind::Custom { .. } => RequestKindPayload::None,
+        RequestKind::TypeInfoGraph => RequestKindPayload::TypeInfoGraph(Default::default()),
     };
     let mut record = RequestAuditRecord {
         request_id,
@@ -85,19 +86,21 @@ fn build_record(
     record
 }
 
-/// Build a 50-record corpus with a known per-kind partition,
+/// Build a 53-record corpus with a known per-kind partition,
 /// monotonically increasing `total_ms`, and predictable `from_cache`
-/// distribution.
-fn known_50_records() -> Vec<(Instant, RequestAuditRecord)> {
+/// distribution. The partition explicitly includes
+/// `TypeInfoGraph` records so per-kind counters cover every closed
+/// `RequestKind` variant (no kind silently zero in the fixture).
+fn known_53_records() -> Vec<(Instant, RequestAuditRecord)> {
     let now = Instant::now();
-    let mut out: Vec<(Instant, RequestAuditRecord)> = Vec::with_capacity(50);
+    let mut out: Vec<(Instant, RequestAuditRecord)> = Vec::with_capacity(53);
 
-    // Kind partition (totals to 50):
+    // Kind partition (totals to 53):
     // 12 ComponentMeta, 8 Compile (Ide), 8 TypeResolution,
     //  6 SemanticAnalysis, 5 Workspace (ResolverWalk), 4 Lsp (Hover),
     //  3 Mcp (custom tool), 2 BundlerBatch (Vite),
-    //  2 Custom (free-form name).
-    let mut kinds: Vec<RequestKind> = Vec::with_capacity(50);
+    //  3 TypeInfoGraph, 2 Custom (free-form name).
+    let mut kinds: Vec<RequestKind> = Vec::with_capacity(53);
     let make_workspace = || RequestKind::Workspace {
         op: WorkspaceOp::ResolverWalk {
             specifier: "vue".into(),
@@ -126,12 +129,13 @@ fn known_50_records() -> Vec<(Instant, RequestAuditRecord)> {
     kinds.extend(std::iter::repeat_with(make_lsp).take(4));
     kinds.extend(std::iter::repeat_with(make_mcp).take(3));
     kinds.extend(std::iter::repeat_with(make_bundler).take(2));
+    kinds.extend(std::iter::repeat_n(RequestKind::TypeInfoGraph, 3));
     kinds.extend(std::iter::repeat_with(make_custom).take(2));
-    assert_eq!(kinds.len(), 50, "fixture must produce exactly 50 records");
+    assert_eq!(kinds.len(), 53, "fixture must produce exactly 53 records");
     for (i, kind) in kinds.into_iter().enumerate() {
         let request_id = (i as u64) + 1;
         // Monotonically increasing total_ms so the slowest-5 list is
-        // deterministic — entries 46..=50 should win.
+        // deterministic — the last five entries win.
         let total_ms = (request_id as f64) * 1.25;
         // Cache hit roughly every 3rd record — gives a known ratio.
         let from_cache = request_id.is_multiple_of(3);
@@ -141,15 +145,15 @@ fn known_50_records() -> Vec<(Instant, RequestAuditRecord)> {
 }
 
 #[test]
-fn aggregator_summarizes_50_records_total_count_and_per_kind_partition() {
+fn aggregator_summarizes_53_records_total_count_and_per_kind_partition() {
     let source = VecRecordSource {
-        entries: known_50_records(),
+        entries: known_53_records(),
     };
     let aggregator = BatchAuditAggregator::new(&source, BundlerKindTag::Vite);
     let payload = aggregator.summarize(None);
 
     assert_eq!(payload.kind, BundlerKindTag::Vite);
-    assert_eq!(payload.total_records, 50, "every record must be folded in");
+    assert_eq!(payload.total_records, 53, "every record must be folded in");
     assert_eq!(payload.component_meta_count, 12);
     assert_eq!(payload.compile_count, 8);
     assert_eq!(payload.type_resolution_count, 8);
@@ -158,6 +162,7 @@ fn aggregator_summarizes_50_records_total_count_and_per_kind_partition() {
     assert_eq!(payload.lsp_count, 4);
     assert_eq!(payload.mcp_count, 3);
     assert_eq!(payload.bundler_batch_count, 2);
+    assert_eq!(payload.typeinfo_graph_count, 3);
     assert_eq!(payload.custom_count, 2);
 
     let kind_sum = payload.component_meta_count
@@ -168,6 +173,7 @@ fn aggregator_summarizes_50_records_total_count_and_per_kind_partition() {
         + payload.lsp_count
         + payload.mcp_count
         + payload.bundler_batch_count
+        + payload.typeinfo_graph_count
         + payload.custom_count;
     assert_eq!(
         kind_sum, payload.total_records,
@@ -179,7 +185,7 @@ fn aggregator_summarizes_50_records_total_count_and_per_kind_partition() {
 #[test]
 fn aggregator_slowest_5_is_exactly_five_descending_by_duration_ms() {
     let source = VecRecordSource {
-        entries: known_50_records(),
+        entries: known_53_records(),
     };
     let aggregator = BatchAuditAggregator::new(&source, BundlerKindTag::Vite);
     let payload = aggregator.summarize(None);
@@ -191,9 +197,9 @@ fn aggregator_slowest_5_is_exactly_five_descending_by_duration_ms() {
          strictly more records than the cap"
     );
 
-    // Records 46..=50 carry the largest total_ms (ascending fixture).
+    // Records 49..=53 carry the largest total_ms (ascending fixture).
     let actual_request_ids: Vec<u64> = payload.slowest_5.iter().map(|s| s.request_id).collect();
-    let expected_request_ids: Vec<u64> = (46..=50).rev().collect();
+    let expected_request_ids: Vec<u64> = (49..=53).rev().collect();
     assert_eq!(
         actual_request_ids, expected_request_ids,
         "slowest_5 must be ordered descending by duration_ms — top entry is the slowest"
@@ -213,13 +219,13 @@ fn aggregator_slowest_5_is_exactly_five_descending_by_duration_ms() {
 #[test]
 fn aggregator_aggregates_total_duration_and_from_cache_count() {
     let source = VecRecordSource {
-        entries: known_50_records(),
+        entries: known_53_records(),
     };
     let aggregator = BatchAuditAggregator::new(&source, BundlerKindTag::Vite);
     let payload = aggregator.summarize(None);
 
-    // Sum of `i * 1.25` for i=1..=50.
-    let expected_total_ms: f64 = (1..=50u64).map(|i| (i as f64) * 1.25).sum();
+    // Sum of `i * 1.25` for i=1..=53.
+    let expected_total_ms: f64 = (1..=53u64).map(|i| (i as f64) * 1.25).sum();
     assert!(
         (payload.total_duration_ms - expected_total_ms).abs() < 1e-9,
         "total_duration_ms must equal the sum of every record's total_ms — got {} vs expected {}",
@@ -227,13 +233,13 @@ fn aggregator_aggregates_total_duration_and_from_cache_count() {
         expected_total_ms
     );
 
-    // bytes_parsed is 1024 per record × 50 records.
-    assert_eq!(payload.total_bytes_parsed, 50 * 1024);
+    // bytes_parsed is 1024 per record × 53 records.
+    assert_eq!(payload.total_bytes_parsed, 53 * 1024);
 
-    // 50 / 3 = 16 records with from_cache (ids 3, 6, 9, ..., 48).
-    let expected_from_cache = (1..=50u64).filter(|i| i.is_multiple_of(3)).count() as u32;
+    // 53 / 3 = 17 records with from_cache (ids 3, 6, 9, ..., 51).
+    let expected_from_cache = (1..=53u64).filter(|i| i.is_multiple_of(3)).count() as u32;
     assert_eq!(payload.from_cache_count, expected_from_cache);
-    let expected_rate = expected_from_cache as f32 / 50.0;
+    let expected_rate = expected_from_cache as f32 / 53.0;
     assert!((payload.cache_hit_rate - expected_rate).abs() < f32::EPSILON);
 }
 
@@ -255,6 +261,7 @@ fn aggregator_empty_source_yields_zeroed_payload_no_division_by_zero() {
     assert_eq!(payload.lsp_count, 0);
     assert_eq!(payload.mcp_count, 0);
     assert_eq!(payload.bundler_batch_count, 0);
+    assert_eq!(payload.typeinfo_graph_count, 0);
     assert_eq!(payload.custom_count, 0);
     assert_eq!(payload.total_duration_ms, 0.0);
     assert_eq!(payload.total_bytes_parsed, 0);

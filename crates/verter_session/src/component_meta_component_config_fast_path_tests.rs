@@ -227,8 +227,8 @@ export type Button = ComponentConfig<typeof theme, AppConfig, 'variants'>
     // advanced.)
     //
     // Path-precise: the AppConfig file DOES declare the interface,
-    // so the producer declined (per its Block-1.H contract — the
-    // producer only proves no-override for files WITHOUT
+    // so the producer declined (per its no-override-proof contract —
+    // the producer only proves no-override for files WITHOUT
     // interface AppConfig). The substrate-correctness assertion
     // here is the counter delta + the producer's deterministic
     // decline.

@@ -2895,10 +2895,10 @@ defineProps<{
     // Codex-hybrid spec: an EXPLICITLY-published
     // parameterised reference (`searchTool: Tool<...>` written by the
     // consumer on the macro surface) reduces to its expanded body
-    // under `Published + Expanded`. The codex-hybrid retired the
-    // AX-WIP projector-side name predicate that previously kept this
-    // node as a carrier `Ref` — carrier-stop is now the dispatch
-    // demand context, and `Instantiate` always reduces when reachable
+    // under `Published + Expanded`. The dispatch retired the
+    // projector-side name predicate that previously kept this node as
+    // a carrier `Ref` — carrier-stop is now the dispatch demand
+    // context, and `Instantiate` always reduces when reachable
     // through the publication pipeline.
     //
     // Either shape is structurally valid: a `Ref` (an unreduced

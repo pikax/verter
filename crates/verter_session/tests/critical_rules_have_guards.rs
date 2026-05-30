@@ -246,6 +246,30 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "Typeinfo Wire Contract",
+        &[
+            // (1) Closed-enum discipline + proto/TS oneof parity —
+            // every variant in the proto schema has a matching TS
+            // descriptor and the cardinality matches the documented
+            // baselines.
+            "typeinfo_graph_taxonomy",
+            // (2) Wire-compat: byte-equal TS freshness against the
+            // canonical `buf generate` + `oxfmt` output. Drift —
+            // schema edit without regen, hand-edit, formatter
+            // mismatch — surfaces as a named diff.
+            "typeinfo_proto_ts_freshness",
+            // (3) Audit envelope parity: every `RequestKind`
+            // variant has a matching `RequestKindPayload` arm; the
+            // `TypeInfoGraph` substrate is wired end-to-end.
+            "request_kind_payload_parity",
+            // (4) Request validation runs before semantic
+            // execution: closed-set schema-version gate +
+            // exhaustive per-variant structured-expression
+            // coverage.
+            "typeinfo_request_validation",
+        ],
+    ),
+    (
         "Stub Prevention",
         &[
             "macro_impacting_constructs_fail_lowering_not_silent_skip",

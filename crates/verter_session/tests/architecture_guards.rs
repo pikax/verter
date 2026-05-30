@@ -4295,10 +4295,44 @@ mod foundations_guards {
             // half (H19).
             "cache-runtime overhaul",
             "runtime cutover",
+            // Orchestrator codenames — `AX-WIP`. Project-management
+            // vocabulary emitted by the orchestrator harness and never
+            // appearing in legitimate final-state prose. The companion
+            // `codex audit` / `codex finding` / `codex observed`
+            // family is matched case-insensitively (with optional
+            // hyphenation) by a dedicated scan below so capitalisation
+            // and hyphen variants all trip — see the
+            // `case_insensitive_codex_vocabulary` block.
+            "AX-WIP",
         ];
         for needle in FIXED_NEEDLES {
             if line.contains(needle) {
                 return true;
+            }
+        }
+        // Case-insensitive `codex` vocabulary scan with separator
+        // tolerance. The companion phrases `codex audit`,
+        // `codex finding`, and `codex observed` describe a review
+        // verdict, not a substrate; substantive descriptions should
+        // reference the substrate (e.g. `audit-passive-observer
+        // pipeline`) or the observed behaviour (e.g. `observed
+        // divergence from tsgo`) directly. Capitalisation
+        // (`Codex audit`) and hyphenation (`codex-observed`,
+        // `codex-audit`, `codex-finding`) variants all trip the
+        // scan — they are the same project-management marker.
+        {
+            // Normalise: lowercase + collapse `-` to space so a single
+            // pass catches every capitalisation/separator variant.
+            let normalised: String = line
+                .to_ascii_lowercase()
+                .chars()
+                .map(|c| if c == '-' { ' ' } else { c })
+                .collect();
+            const CODEX_VOCAB: &[&str] = &["codex audit", "codex finding", "codex observed"];
+            for needle in CODEX_VOCAB {
+                if normalised.contains(needle) {
+                    return true;
+                }
             }
         }
         // `plan §` / `Plan §` — explicit reference to a plan section.
@@ -4448,11 +4482,13 @@ mod foundations_guards {
         // Case-insensitive on the noun, because both `Block 5` and
         // `block 5` appear in orchestrator comments. The leading
         // word boundary is implicit: the prefix is `block ` /
-        // `Block `, which is preceded either by start-of-line or
-        // by a non-word byte in every observed violation, and the
-        // ordinary noun `block` followed by a digit is already
-        // archaeology (a sentence does not start "block 5 ...").
-        for prefix in ["block ", "Block "] {
+        // `Block ` / `block-` / `Block-`, which is preceded either
+        // by start-of-line or by a non-word byte in every observed
+        // violation; the ordinary noun `block` followed by a digit is
+        // already archaeology (a sentence does not start
+        // "block 5 ..." or "block-5 ..."). The hyphenated form
+        // catches per-block code-names like `block-6.i`.
+        for prefix in ["block ", "Block ", "block-", "Block-"] {
             let mut search_from = 0usize;
             while let Some(rel) = line[search_from..].find(prefix) {
                 let abs = search_from + rel;
@@ -4996,6 +5032,33 @@ mod foundations_guards {
             "// block 5: rehome the compile cache",
             "// cache-runtime overhaul wiring",
             "// runtime cutover landing step",
+            // Hyphenated block markers (e.g. `block-6.i`,
+            // `Block-12.a`) — orchestrator per-block code-names.
+            "// the block-6.i AX-WIP audit-passive-observer refactor",
+            "// Block-12.a substrate cutover",
+            // Orchestrator codenames added in H19 — `AX-WIP` plus the
+            // case-insensitive + hyphenation-tolerant `codex` vocabulary
+            // family (`codex audit`, `codex finding`, `codex observed`,
+            // and their `Codex …` / `codex-…` variants). Every
+            // capitalisation and separator must trip the predicate.
+            "// after AX-WIP closes the Rule-5 leak",
+            "// (codex finding: keyspace enumeration cannot proceed)",
+            "// see codex audit on the 500-level fixture",
+            // Title-case `Codex audit` — the lowercase-only fixed
+            // needle missed this; the case-insensitive scan catches it.
+            "// Codex audit observation: chain-walk on the 500-level fixture",
+            // Hyphenated variants — `codex-observed`, `codex-audit`,
+            // `codex-finding`. The normalisation step collapses `-`
+            // to space before the substring check.
+            "// the codex-observed body-materialisation hazard",
+            "// codex-audit probe on the 500-level fixture",
+            "// (codex-finding: keyspace enumeration)",
+            // Title-case + hyphenation combined.
+            "// see Codex-Audit on the 500-level fixture",
+            // Bare `codex observed` (no hyphen) — completes the
+            // observed/audit/finding triple in the case-insensitive
+            // scan.
+            "// codex observed divergence from tsgo",
         ];
         for line in cases {
             assert!(
@@ -5074,10 +5137,16 @@ mod foundations_guards {
             "// Surround the literal with quotes.",                // `round` in `Surround`
             "// round trip without digits.",
             // `Codex ` prose that is NOT a consult marker: missing
-            // the ordinal + `consult` suffix.
+            // the ordinal + `consult` suffix, and not adjacent to the
+            // `audit` / `finding` / `observed` triple matched by the
+            // case-insensitive scan.
             "// Codex agent dispatched in parallel.",
             "// Codex 4 retries before falling back.", // no ordinal suffix
             "// Codex 4th retry succeeded.",           // ordinal but no `consult`
+            // `codex` adjacent to a different word that is NOT the
+            // audit/finding/observed triple must not trip the scan.
+            "// codex-agent retried twice before falling back.",
+            "// the codex review came back green.",
             // `Cluster` prose that is NOT a single-letter marker:
             // followed by a multi-letter token, the cluster is a
             // legitimate concept name rather than the orchestrator
@@ -6670,39 +6739,104 @@ mod w5f_test_archaeology {
                 .any(|c| c.as_os_str().to_str() == Some("tests"))
     }
 
-    /// Walks `crates/*/src/` and returns each archaeology line as
+    /// Walks `crates/*/src/` plus every `crates/*/tests/*_data/`
+    /// directory and returns each archaeology line as
     /// `"<rel>:<line_no>"`. Empty result == invariant satisfied.
+    ///
+    /// Two scan roots:
+    ///
+    /// 1. `crates/*/src/` for test files that live inside the
+    ///    production source tree (`*_tests.rs`, `tests.rs`, anything
+    ///    under a `tests/` subdirectory). `is_test_file` filters these
+    ///    from the production sources around them.
+    ///
+    /// 2. Every `crates/*/tests/*_data/` directory (e.g.
+    ///    `tests/manifest_data/`) — these hold auto-generated row
+    ///    tables or fixture data that consumer tests include via
+    ///    `include!`. Archaeology leaks into these files when the
+    ///    SOURCE that the generator reads carries archaeology
+    ///    vocabulary (e.g. an `#[ignore = "block-N.x ..."]` reason);
+    ///    a regenerator run then propagates it verbatim. The narrow
+    ///    `_data/` suffix scopes the scan to generated test data and
+    ///    avoids the rest of `tests/` (which intentionally exercises
+    ///    archaeology fixtures in other guards).
     pub(super) fn collect_test_archaeology_violations() -> Vec<String> {
         let workspace = workspace_root();
         let mut violations = Vec::<String>::new();
         for crate_entry in std::fs::read_dir(workspace.join("crates")).expect("read crates/") {
             let crate_dir = crate_entry.expect("crate dir entry").path();
             let src = crate_dir.join("src");
-            if !src.is_dir() {
-                continue;
+            if src.is_dir() {
+                for entry in WalkDir::new(&src) {
+                    let entry = entry.expect("walkdir entry");
+                    if !entry.file_type().is_file() {
+                        continue;
+                    }
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                        continue;
+                    }
+                    if !is_test_file(path) {
+                        continue;
+                    }
+                    let rel = path
+                        .strip_prefix(&workspace)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    let src_text =
+                        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+                    for (line_no, line) in src_text.lines().enumerate() {
+                        if super::foundations_guards::line_has_phase_archaeology(line) {
+                            violations.push(format!("{rel}:{}", line_no + 1));
+                        }
+                    }
+                }
             }
-            for entry in WalkDir::new(&src) {
-                let entry = entry.expect("walkdir entry");
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                    continue;
-                }
-                if !is_test_file(path) {
-                    continue;
-                }
-                let rel = path
-                    .strip_prefix(&workspace)
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                let src_text =
-                    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
-                for (line_no, line) in src_text.lines().enumerate() {
-                    if super::foundations_guards::line_has_phase_archaeology(line) {
-                        violations.push(format!("{rel}:{}", line_no + 1));
+            let tests = crate_dir.join("tests");
+            if tests.is_dir() {
+                let test_entries = match std::fs::read_dir(&tests) {
+                    Ok(it) => it,
+                    Err(_) => continue,
+                };
+                for sub in test_entries.flatten() {
+                    let sub_path = sub.path();
+                    if !sub_path.is_dir() {
+                        continue;
+                    }
+                    let sub_name = sub_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default();
+                    // Restrict the test-tree scan to `*_data/`
+                    // subdirectories (e.g. `manifest_data/`,
+                    // `fixture_data/`). Other `tests/` siblings
+                    // intentionally house archaeology fixtures used
+                    // by other guards.
+                    if !sub_name.ends_with("_data") {
+                        continue;
+                    }
+                    for entry in WalkDir::new(&sub_path) {
+                        let entry = entry.expect("walkdir entry");
+                        if !entry.file_type().is_file() {
+                            continue;
+                        }
+                        let path = entry.path();
+                        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                            continue;
+                        }
+                        let rel = path
+                            .strip_prefix(&workspace)
+                            .unwrap()
+                            .to_string_lossy()
+                            .replace('\\', "/");
+                        let src_text = std::fs::read_to_string(path)
+                            .unwrap_or_else(|e| panic!("read {rel}: {e}"));
+                        for (line_no, line) in src_text.lines().enumerate() {
+                            if super::foundations_guards::line_has_phase_archaeology(line) {
+                                violations.push(format!("{rel}:{}", line_no + 1));
+                            }
+                        }
                     }
                 }
             }
@@ -8224,6 +8358,23 @@ fn every_consumer_has_production_call_site() {
              `AuditRecordsStore`. Adding an in-tree record producer (for example, a future \
              host-driven bundler-summary publisher) requires removing this exemption in the \
              same change.",
+        ),
+        // The typeinfo graph audit envelope is the contract surface that
+        // typeinfo `_with_audit` entry-points populate. The substrate
+        // (`RequestKind::TypeInfoGraph`, `RequestKindPayload::TypeInfoGraph`,
+        // `TypeInfoGraphPayload`, `StructuredAuditEvent::TypeInfoGraphPublished`
+        // / `TypeInfoGraphDegraded` / `TypeInfoGraphCacheHit`) lands as the
+        // contract layer; the production producers
+        // (`resolve_symbol_graph_with_audit` and the other typeinfo
+        // graph entry-points) land in the subsequent typeinfo substrate
+        // phase and remove this exemption in the same change that wires
+        // the producers.
+        (
+            "TypeInfoGraph",
+            "typeinfo graph wire-contract substrate landed without producers; the typeinfo \
+             session entry-points (`resolve_symbol_graph_with_audit` and siblings) wire the \
+             producers in the typeinfo runtime phase and remove this exemption in the same \
+             change.",
         ),
     ];
 
@@ -10987,13 +11138,15 @@ mod content_pinned_artifact_read_guards {
 }
 
 // ===========================================================================
-// Block 6.d — per-member graph-native materialiser cache wire-up guard.
+// Per-member graph-native materialiser cache wire-up guard.
 //
-// `surface_member_to_expanded_field` MUST peek
-// `MemberShapeCacheDb` BEFORE calling `raise_node_to_type_expr`. The
-// guard pins the contract so a future refactor cannot accidentally
-// swap the peek-before-raise wire-up for a raise-then-reduce wrapper
-// (which would re-introduce the +52% regression Block 6.c surfaced).
+// `surface_member_to_expanded_field` MUST peek the per-member slot of
+// `ShapeCacheDb` (indexed by `ShapeSubject::SemanticNode` via
+// `ShapeCacheKey::semantic_node_whole`) BEFORE calling
+// `raise_node_to_type_expr`. The guard pins the contract so a future
+// refactor cannot accidentally swap the peek-before-raise wire-up for
+// a raise-then-reduce wrapper (which would re-introduce the per-member
+// regression characterised when this contract was first locked down).
 //
 // Discriminating property: the source-grep for the helper call name
 // (`member_shape_peek_or_compute`) must occur BEFORE any
@@ -12633,7 +12786,7 @@ mod single_resolution_engine_guards {
     const READ_SURFACE_MEMBERS_DEF_ALLOWLIST: &[(&str, u32, &str)] = &[
         (
             "crates/verter_session/src/meta_resolve/projectors/mod.rs",
-            418,
+            419,
             "fn read_surface_members(",
         ),
         (

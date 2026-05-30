@@ -92,6 +92,7 @@ fn make_record(
         RequestKind::Mcp { .. } => RequestKindPayload::Mcp(McpToolPayload::default()),
         RequestKind::BundlerBatch { .. } => RequestKindPayload::BundlerBatch(Default::default()),
         RequestKind::Custom { .. } => RequestKindPayload::None,
+        RequestKind::TypeInfoGraph => RequestKindPayload::TypeInfoGraph(Default::default()),
     };
     let mut record = RequestAuditRecord {
         request_id,

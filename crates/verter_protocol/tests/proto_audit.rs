@@ -1,8 +1,8 @@
-//! Tier 0 Step 0.7 (D100 corrected): the selective component-meta proto
-//! schema is the canonical wire schema for the Tier 1B selective public
-//! API. This audit verifies the `.proto` file is present, parseable as
-//! UTF-8, and contains the message and enum definitions the migration
-//! plan §2.1.8 names.
+//! The selective component-meta proto schema is the canonical wire
+//! schema for the Tier 1B selective public API. This audit verifies
+//! the `.proto` file is present, parseable as UTF-8, and contains
+//! every message and enum the selective component-meta contract
+//! requires.
 //!
 //! D100 r8 fixed an error in r7's plan that named a Rust-derive scheme;
 //! the repo's actual pattern is `.proto` IDL files compiled via
@@ -26,18 +26,17 @@ fn selective_proto_body() -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e))
 }
 
-/// Discriminating (Tier 0 §2.2): the selective component-meta proto
-/// schema must be present at the path the migration plan §2.1.8 pins,
-/// and must declare the message and enum types the schema names.
+/// Discriminating: the selective component-meta proto schema must
+/// be present at the documented path and must declare the message
+/// and enum types the selective surface contract names.
 ///
-/// FAIL-pre evidence: removing the file or any required type declaration
-/// fails this test with the missing literal in the error message.
-/// PASS-post evidence: orchestrator commit `0cf2d765` committed the
-/// schema with all required types.
+/// FAIL-pre evidence: removing the file or any required type
+/// declaration fails this test with the missing literal in the
+/// error message.
 #[test]
 fn selective_api_proto_definitions_present_with_required_fields() {
     let body = selective_proto_body();
-    // Required messages (per §2.1.8 + §3.3.2).
+    // Required messages per the selective component-meta contract.
     for required in [
         "message TypeHandle",
         "message TypeQueryPath",
@@ -76,10 +75,11 @@ fn selective_api_proto_definitions_present_with_required_fields() {
     );
 }
 
-/// Discriminating: the BridgeError oneof must enumerate the three error
-/// kinds D114 named (DepthExceeded / StaleAtFrontier / FileNotFound).
-/// Without all three the bridge cannot signal the typed error envelope
-/// the plan §2.1.8 + D114 mandate.
+/// Discriminating: the BridgeError oneof must enumerate the three
+/// error kinds the selective component-meta bridge defines
+/// (DepthExceeded / StaleAtFrontier / FileNotFound). Without all
+/// three the bridge cannot signal the typed error envelope the
+/// selective surface contract mandates.
 #[test]
 fn selective_api_bridge_error_oneof_has_three_kinds() {
     let body = selective_proto_body();

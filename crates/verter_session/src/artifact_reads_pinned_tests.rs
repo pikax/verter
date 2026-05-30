@@ -25,7 +25,7 @@
 //! a synthetic STALE `IndexedReady` (doctored `whole_hash` +
 //! `route_hash` + `import_route_hash`) is planted into
 //! `FileArtifactStore` while the scheduler's authoritative content
-//! hash stays at the real value — the lingering-stale post-Block-2
+//! hash stays at the real value — the lingering-stale store-entry
 //! scenario. The test then asserts the pinned read and the two derived
 //! fact oracles all reject the stale artifact. A pre-fix `get_any`
 //! tree returns the planted stale hashes and the assertions FAIL.

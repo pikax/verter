@@ -7,17 +7,17 @@
 //! single scratch file. Cache is bypassed when the request sets
 //! `cacheable = false`.
 //!
-//! Capacity defaults to 64 (per §5.3); evictions are LRU by access
-//! time. Backing store is a `Mutex<…>` so concurrent calls
-//! serialise on the metadata only — actual evaluation work sits
-//! outside the lock.
+//! Capacity defaults to 64; evictions are LRU by access time.
+//! Backing store is a `Mutex<…>` so concurrent calls serialise on
+//! the metadata only — actual evaluation work sits outside the
+//! lock.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::semantic_query::SemanticNodeId;
 
-/// Default cache capacity per §5.3 ("LRU eviction at default 64").
+/// Default cache capacity. Entries evict LRU above this bound.
 pub const DEFAULT_CAPACITY: usize = 64;
 
 /// One cache entry — pairs a scratch URI with its resolved semantic

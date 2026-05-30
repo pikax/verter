@@ -46,8 +46,7 @@
 //! | `PreparedMemberDb`         | `component_meta_caches.rs`      |
 //! | `PreparedTargetDb`         | `component_meta_caches.rs`      |
 //! | `RoutedExprSurfaceDb`      | `component_meta_caches.rs`      |
-//! | `MaterializeMemoDb`        | `component_meta_caches.rs`      |
-//! | `MemberShapeCacheDb`       | `component_meta_caches.rs`      |
+//! | `ShapeCacheDb`             | `component_meta_caches.rs`      |
 //! | `MaterializeStructureDb`   | `component_meta_caches.rs`      |
 //!
 //! `RefCycleResultDb` (`component_meta_caches.rs`) is intentionally NOT

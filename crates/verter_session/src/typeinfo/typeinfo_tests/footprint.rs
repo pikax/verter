@@ -4,7 +4,7 @@
 use super::support::*;
 
 #[test]
-#[ignore = "typeinfo currently fails to attach a request footprint after the block-6.i AX-WIP audit-passive-observer refactor (commit b0798e28); the contract is that every audited typeinfo request must produce a footprint when footprint_capture=true on HostConfig. Keep as the future footprint-attachment-on-named-symbol contract once AX-WIP closes Rule-5 leak."]
+#[ignore = "typeinfo currently fails to attach a request footprint under the audit-passive-observer footprint-attachment pipeline; the contract is that every audited typeinfo request must produce a footprint when footprint_capture=true on HostConfig. Keep as the future footprint-attachment-on-named-symbol contract once the footprint-attachment pipeline is wired into this resolver path."]
 fn typeinfo_footprint_is_attached_for_named_symbol_request() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/fixtures/component-types.ts", COMPONENT_TYPES);

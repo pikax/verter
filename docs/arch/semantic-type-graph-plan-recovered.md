@@ -50,7 +50,7 @@ If the graph cannot answer these, no projection can. Heuristic recovery — name
 - **`verter_audit`** owns: `RequestAuditRecord`, `RequestKind`, `RequestKindPayload`, `StructuredAuditEvent`, `AuditObserver`. Every new audit variant in this plan lands here. The existing `verter_audit::origin_graph::OriginEdgeKind` (which includes `SharedLoadReuse`) is the wire/audit mirror of the semantic taxonomy; see §2.15 for the reconciliation rule.
 - **`verter_semantic`** owns: typed IR (`TypeExpr`, analyses, lowering, the type solver arena).
 - **`verter_session`** owns: type-resolution orchestration, semantic query memoisation (`SemanticGraphStore`, `ProjectSemanticDispatch::execute`), `ProjectTypeStore`, all caches in the project-global cache architecture, the new `CompletionFence` publication adapter (added in Phase 0b/1 at `crates/verter_session/src/typeinfo/completion_fence.rs`; see §0.6), `HostAuditRuntime`, `ResolvedDeclSlotIdentity` / `VersionedDeclIdentity`, the fallthrough / root inheritance resolver, the relation engine memo, every new `SemanticQueryKey` variant introduced for declaration merging / module augmentation / ambient namespaces / overload sets / enums / flow narrowing / contextual typing.
-- **`verter_protocol`** owns: transport-facing DTOs that cross FFI / WASM boundaries. The wire schemas for the typeinfo graph payload, the framework surface payload, and audit-record extensions are all defined here as `prost`-compatible Rust structs derived from `proto/verter/v1/*.proto`. `verter_protocol` gains a `ts-rs` dependency for DTO export (see §0.6).
+- **`verter_protocol`** owns: transport-facing DTOs that cross FFI / WASM boundaries. The wire schemas for the typeinfo graph payload, the framework surface payload, and audit-record extensions are all defined here as `prost`-compatible Rust structs derived from `proto/verter/v1/*.proto`. The corresponding TypeScript surface is generated from the same `.proto` files through the existing protobuf path under `packages/proto/src/gen/verter/v1/` (which already produces `component_meta_pb.ts` and `selective_component_meta_pb.ts`); typeinfo graph wire DTOs add `typeinfo_pb.ts` to the same generator. `ts-rs` is NOT used on wire-side typeinfo DTOs — that derive is reserved for the audit envelope under `crates/verter_audit` (see §0.6).
 - **`verter_ffi`** owns: the thin adapter layer between the native runtime and NAPI / WASM.
 - **`@verter/typeinfo`** owns: public TypeScript graph DTOs (generated via `ts_rs` from `verter_protocol`), decode helpers, generic projection packages (Zod, JSON Schema, Storybook controls, docs, display text), the `legacy TypeDescriptor` projection.
 - **`@verter/component-meta`** owns: the Vue framework-surface adapter — Vue macro extraction, surface discovery (props, events, slots, models, exposed, fallthrough), Vue-specific projections. It is a consumer of `@verter/typeinfo`, never a parallel semantic implementation.
@@ -151,7 +151,7 @@ impl CompletionFence {
 
 Behavior:
 
-1. Collect every touched dependency fact through `ResolverContext::with_fact_tracer(|| { ... })`, finalised via `crate::compile_fact_emission::finalise_signature_or_empty(fact_read_set)` into a `ReadSetSignature.facts`.
+1. Collect every touched dependency fact through `ResolverContext::with_fact_tracer(|| { ... })`, finalised via `FactReadSet::finalise() -> FactReadSetFinalise` and lifted into a `crate::cache_runtime::SignatureAdmission` via `SignatureAdmission::from_finalise(finalise)`; the cache-admission contract distinguishes `Ok(facts)` (lift to `ReadSetSignature::new(facts)`) from `Overflow` (route through the non-cacheable arm).
 2. Revalidate the recorded `ReadSetSignature.facts` against the live `StoreView` immediately before publish (the `Reval` callback).
 3. On conflict, retry at most `MAX_INFLIGHT_RETRIES = 3` times.
 4. On exhaustion, return `TypeInfoRequestError::UnstableState { attempts: 3 }` (the caller surfaces this through the `Opaque(QueryErrorDto::UnstableState { attempts: 3 })` graph node). Never warm a torn provisional result.
@@ -1525,8 +1525,8 @@ Guard: `popover_request_cache_walkthrough` in `tests/typeinfo_graph_cache_walkth
 ```
 proto/verter/v1/typeinfo.proto
     │
-    ├── prost (build.rs) ─► verter_protocol::typeinfo::generated::*
-    ├── ts-rs (annotation) ─► packages/typeinfo/src/generated/graph.ts
+    ├── prost-build (build.rs) ─► verter_protocol::verter::v1::*  (generated Rust)
+    ├── protobuf-ts toolchain    ─► packages/proto/src/gen/verter/v1/typeinfo_pb.ts  (generated TypeScript)
     └── manual NAPI / WASM bridge ─► verter_ffi::typeinfo::*
 ```
 
@@ -1988,9 +1988,9 @@ Phase 0a fails CI if any new CRITICAL section is missing its registry entry — 
 
 **Changes:**
 
-1. Add `crates/verter_protocol/Cargo.toml` dependency `ts-rs = "10"` with the `serde-compat` feature. Add `[[test]] name = "ts_export"` target wiring per the existing convention in `verter_audit`.
-2. Add `proto/verter/v1/typeinfo.proto` full rewrite per §3.0 (new envelope, all `TypeNode` variants in the `oneof`, `StructuredTypeExpression`, reserved field numbers for the deleted `EvaluateTypeExpressionRequestDto` fields 1-5).
-3. Add `crates/verter_protocol/src/typeinfo/graph.rs` — Rust DTOs derived from the proto via `prost`; every DTO carries `#[ts(export, export_to = "graph.generated.ts")]`.
+1. Extend the existing protobuf build pipeline so the new typeinfo graph wire DTOs compile alongside the existing `component_meta.proto` / `selective_component_meta.proto` / `typeinfo.proto` sources. The wire surface is protobuf-authoritative; no `ts-rs` derive is added to `verter_protocol`. TypeScript bindings are produced from the same `.proto` files under `packages/proto/src/gen/verter/v1/` through the existing protobuf-ts pipeline (identical to how `component_meta_pb.ts` is generated today).
+2. Extend `proto/verter/v1/typeinfo.proto` with the graph wire contracts per §3.0 (new envelope, all `TypeNode` variants in the `oneof`, `StructuredTypeExpression`, reserved field numbers for the deleted `EvaluateTypeExpressionRequestDto` fields 1-5). Preserve the existing import/symbol DTOs (`ImportSpecDto`, `NamedImportDto`, `DefaultImportDto`, `NamedBindingDto`, `NamespaceImportDto`, `SymbolEntryDto`, `SymbolEntryListDto`) re-homed alongside the new schema so current NAPI/WASM callers do not break.
+3. Add the typed Rust DTO surface in `crates/verter_protocol/src/typeinfo/` (`graph.rs`, `structured_expression.rs`, `framework.rs`, `request_error.rs`, `audited_result.rs`). The Rust API re-exports the generated `prost` types and adds typed convenience constructors where the proto's structural shape is unergonomic. No `#[ts(export, ...)]` derives appear on these wire DTOs.
 4. Add `crates/verter_protocol/src/typeinfo/framework.rs` — `FrameworkSurfacePayload`, closed `FrameworkTag`, closed `FrameworkSurfaceKind`, `FrameworkSurfaceMember`.
 5. Add `crates/verter_protocol/src/typeinfo/structured_expression.rs` — `StructuredTypeExpression` Rust DTO.
 6. Add `crates/verter_protocol/src/typeinfo/request_error.rs` — `TypeInfoRequestError` typed enum.
@@ -2561,11 +2561,11 @@ impl TypeInfoSession {
 
         // 2. Compute under fact tracer. `get_or_compute` returns an enum
         //    distinguishing the three outcome paths.
-        let outcome: GetOrComputeOutcome<Arc<TypeInfoGraphPayload>> =
+        let (outcome, fact_read_set): (GetOrComputeOutcome<Arc<TypeInfoGraphPayload>>, FactReadSet) =
             self.resolver_context().with_fact_tracer(|| {
                 self.type_info_graph_db.get_or_compute(slot_key, &request)
             });
-        let signature = finalise_signature_or_empty(self.resolver_context().take_fact_read_set());
+        let admission = SignatureAdmission::from_finalise(fact_read_set.finalise());
 
         // 3. Three audit branches — only cold publish emits a structured event.
         match outcome {
@@ -2706,7 +2706,7 @@ This section enumerates every existing codebase artifact touched by the plan, wi
 | `crates/verter_protocol/src/graph/schema/*` + `crates/verter_protocol/src/graph/mod.rs` re-exports | DELETE | 0b/1 | superseded by `verter_protocol::typeinfo::graph::*`. |
 | `crates/verter_protocol/src/component_meta.rs` GraphBuilder call sites (lines ~38, 69, 222, 243, 261, 290, 309, 332, 349, 373, 388, 402, 421+) | MIGRATE | 0b/1 | rewritten to consume `verter_protocol::typeinfo::graph::TypeNode`. The component-meta payload's `TypeGraph` proto message preserves its outer identity; only the node-shape lowering is rewritten in the same diff. |
 | `crates/verter_protocol/proto/verter/v1/typeinfo.proto` (94 lines, current schema) | DELETE+REPLACE | 0a | replaced by §3.0 full rewrite. Field numbers 1-5 of `EvaluateTypeExpressionRequestDto` permanently reserved. `ImportSpecDto`, `NamedImportDto`, `DefaultImportDto`, `NamedBindingDto`, `NamespaceImportDto`, `SymbolEntryDto`, `SymbolEntryListDto` PRESERVED (re-homed into the new schema). |
-| `crates/verter_protocol/Cargo.toml` deps | EXTEND | 0a | add `ts-rs = "10"` with `serde-compat` feature. |
+| `crates/verter_protocol/Cargo.toml` deps | UNCHANGED | 0a | `verter_protocol` keeps its existing `prost` / `prost-build` / `protoc-bin-vendored` deps. The wire surface is protobuf-authoritative; `ts-rs` derives are NOT added on wire DTOs (the audit envelope's `ts-rs` lives in `verter_audit`). TypeScript bindings flow from `proto/verter/v1/*.proto` through the existing protobuf-ts pipeline under `packages/proto`. |
 
 ### 0.5.2 verter_session — typeinfo internals
 
@@ -2744,7 +2744,7 @@ This section enumerates every existing codebase artifact touched by the plan, wi
 | Artifact | Disposition | Landing phase | Notes |
 |---|---|---|---|
 | `packages/typeinfo/src/session.ts` (legacy) | DELETE+REPLACE | 2 | new session implementation at the same path. |
-| `packages/typeinfo/src/types.ts` (legacy DTO surface) | DELETE | 2 | replaced by `packages/typeinfo/src/generated/graph.ts` (ts-rs output). |
+| `packages/typeinfo/src/types.ts` (legacy DTO surface) | DELETE | 2 | replaced by generated TypeScript at `packages/proto/src/gen/verter/v1/typeinfo_pb.ts`, sourced from `crates/verter_protocol/proto/verter/v1/typeinfo.proto` via the existing protobuf path (the same path that already generates `component_meta_pb.ts` and `selective_component_meta_pb.ts`). The wire DTOs are protobuf-authoritative; `ts-rs` is NOT used for typeinfo wire DTOs (it is reserved for the audit envelope under `crates/verter_audit`). |
 | `packages/typeinfo/src/descriptor-to-native.ts` | DELETE | 4 | consumers migrate to the `toTypeDescriptor` projection. |
 | `packages/typeinfo/src/native-to-descriptor.ts` | DELETE | 4 | same. |
 | `packages/typeinfo/src/native-type-expr.ts` | DELETE | 2 | replaced by `TypeInfoGraphPayload`. |
@@ -2780,10 +2780,10 @@ The plan refers to types and functions whose names must match the actual codebas
 |---|---|---|
 | `CompletionFence::publish_with_retry` | `CompletionFence::publish_with_retry` (NEW in Phase 0b/1) at `crates/verter_session/src/typeinfo/completion_fence.rs` — wraps the existing `InflightTable` substrate; consumes the existing `MAX_INFLIGHT_RETRIES = 3` constant. No second retry constant is introduced. The plan-revision-3 path `crates/verter_session/src/host_resolve/completion_fence.rs` does NOT exist; the adapter lands at the new path. | `crates/verter_session/src/typeinfo/completion_fence.rs` (NEW) |
 | `MAX_INFLIGHT_RETRIES` | `MAX_INFLIGHT_RETRIES: usize = 3` constant (existing) | `crates/verter_session/src/semantic_query_memo/inflight.rs:226` |
-| `ResolverContext::fact_read_set.snapshot()` | `ResolverContext::with_fact_tracer(|| ...) -> (T, FactReadSet)` then `crate::compile_fact_emission::finalise_signature_or_empty(fact_read_set) -> ReadSetSignature` | `crates/verter_session/src/resolver_core/resolver_context.rs:1265` |
+| `ResolverContext::fact_read_set.snapshot()` | `ResolverContext::with_fact_tracer(|| ...) -> (T, FactReadSet)` then `FactReadSet::finalise() -> FactReadSetFinalise`, lifted into a cache admission via `crate::cache_runtime::SignatureAdmission::from_finalise(finalise)` and into a path-precise read signature via `crate::fact_signature_helpers::ReadSetSignature::new(facts)` | `crates/verter_session/src/resolver_core/resolver_context.rs`, `crates/verter_session/src/resolver_core/fact_read_set.rs:171`, `crates/verter_session/src/cache_runtime/node.rs:95` |
 | `validate_fact_signature_with_self_roots` | `crate::fact_signature_helpers::validate_fact_signature_with_self_roots` | existing helper at `crates/verter_session/src/fact_signature_helpers.rs` |
 | `SemanticGraphStore::execute_cooperative` | `ProjectSemanticDispatch::execute` (the project-wide dispatch entrypoint) | `crates/verter_session/src/semantic_query_memo/*` |
-| `cooperative_admit_with_post_publish` | `crate::cooperative_admission::cooperative_admit_with_post_publish` | `crates/verter_session/src/cooperative_admission.rs` |
+| `cooperative_admit_with_post_publish` | `crate::cache_runtime::singleflight::cooperative_admit_with_post_publish` | `crates/verter_session/src/cache_runtime/singleflight.rs:852` |
 | `BoundedCandidateMap` | `verter_session::bounded_query_retention::BoundedCandidateMap` | existing |
 | `GlobalRetentionBudget` | `verter_session::bounded_query_retention::GlobalRetentionBudget` | existing |
 | `OriginEdgeKind` (semantic side, 9 variants) | `verter_session::semantic_query::OriginEdgeKind` | `crates/verter_session/src/semantic_query.rs:826` |
@@ -2791,18 +2791,18 @@ The plan refers to types and functions whose names must match the actual codebas
 | `QueryError` (producer side) | `verter_session::semantic_query::QueryError` (variants: `Miss`, `UnsupportedIntrinsic`, `BudgetExceeded(BudgetExceededFailure)`, `UnstableState`, `AliasCycle`, `RecursiveRef`, `Other(Arc<str>)`, `DeclPlaceholder { canonical_id, name, whole_hash }`) | `crates/verter_session/src/semantic_query.rs:991` |
 | `BudgetExceededFailure` | existing type with fields `{ domain: BudgetDomain, limit: usize, actual: u64, context: String }` — there is NO `detail_name` field. The plan-revision-3 reference to `failure.detail_name` was incorrect; the lossless lowering uses `failure.context`. | `crates/verter_session/src/resolver_core/shallow_file_state.rs:225` |
 | `BudgetDomain` | existing enum, 6 variants (`LocalClosure`, `Frontier`, `BuilderExpansion`, `SolverResolveSteps`, `SolverArenaNodes`, `SolverInstantiationDepth`) | `crates/verter_session/src/resolver_core/shallow_file_state.rs:238` |
-| `cooperative_admit_with_post_publish` real arity | 10 args: `(map, inflight, key, validate, compute, project, revalidate_after_compute, removal_cleanup, post_publish, publish_fence: Option<&parking_lot::RwLock<()>>)` returning `Option<V>` | `crates/verter_session/src/cooperative_admission.rs:896` |
+| `cooperative_admit_with_post_publish` real arity | 10 args: `(map, inflight, key, validate, compute, project, revalidate_after_compute, removal_cleanup, post_publish, publish_fence: Option<&parking_lot::RwLock<()>>)` returning `Option<V>` | `crates/verter_session/src/cache_runtime/singleflight.rs:852` |
 | `wave_3_entry_points_propagate_tls` | a function (line 7641) inside an existing file, NOT a separate file at `tests/wave_3_entry_points_propagate_tls.rs` | `crates/verter_session/tests/architecture_guards.rs:7641` |
 | `CRITICAL_RULE_GUARDS` | `const CRITICAL_RULE_GUARDS: &[(&str, &[&str])]` | `crates/verter_session/tests/critical_rules_have_guards.rs:78` |
 | Meta-guard `every_critical_rule_in_docs_has_registered_guard` | existing | `crates/verter_session/tests/critical_rules_have_guards.rs:368` |
 | `IntrinsicRegistry::lookup` | existing | per CLAUDE.md |
 | `FileArtifactStore::augmentation_index` | existing inverse-lookup keyed by `AugmentationTargetKey` | per CLAUDE.md |
-| `MemberShapeCacheDb` | existing | per CLAUDE.md |
+| `MemberShapeCacheDb` | retired; replaced by `ShapeCacheDb` — the per-member graph-native materialiser cache is now a slot inside `ShapeCacheDb` indexed by `ShapeSubject::SemanticNode` and built via `ShapeCacheKey::semantic_node_whole(scope, semantic_node_id, mode)`. `ProjectTypeStore` owns the unified `shape_cache_db: ShapeCacheDb`. The static guard at `crates/verter_session/tests/block_6i_static_guards.rs::shape_cache_db_replaces_split_caches` asserts `pub struct MemberShapeCacheDb` MUST NOT exist anywhere in the tree. | `crates/verter_session/src/component_meta_caches.rs` (`pub struct ShapeCacheDb`, `pub enum ShapeSubject`, `ShapeCacheKey::semantic_node_whole`) |
 | `MemberSemanticFactStore`, `MemberDisplayFactStore` | existing | per CLAUDE.md |
 | `with_fact_tracer` helper | `ResolverContext::with_fact_tracer<F, R>(&self, f: F) -> (R, FactReadSet)` | `crates/verter_session/src/resolver_core/resolver_context.rs:1265` |
-| `finalise_signature_or_empty` | `crate::compile_fact_emission::finalise_signature_or_empty(fact_read_set) -> ReadSetSignature` | `crates/verter_session/src/compile_fact_emission.rs` |
+| `finalise_signature_or_empty` | retired (it collapsed Overflow into Empty, which is a correctness-class defect); replaced by the explicit two-step `FactReadSet::finalise() -> FactReadSetFinalise` (`Ok(facts)` / `Overflow`) plus `crate::cache_runtime::SignatureAdmission::from_finalise(finalise)` for cache admission (Overflow routes through the non-cacheable arm, distinct from Empty). The `compile_fact_emission` module retains the helper-side surface; cache producers use `SignatureAdmission::from_finalise`. Compile-cache producers go through `crate::compile_fact_emission` directly. | `crates/verter_session/src/resolver_core/fact_read_set.rs:171`, `crates/verter_session/src/cache_runtime/node.rs:95`, `crates/verter_session/src/compile_fact_emission.rs` |
 | `ReadSetSignature` | existing — carries `facts: ...` field | `crates/verter_session/src/`... |
-| `host_resolve/virtual_file_pipeline.rs` reference pattern (`with_fact_tracer` + `finalise_signature_or_empty`) | the canonical usage pattern other entry-points follow | line 773 of that file |
+| `host_resolve/virtual_file_pipeline.rs` reference pattern (`with_fact_tracer` + `SignatureAdmission::from_finalise(fact_read_set.finalise())`) | the canonical usage pattern other entry-points follow | `crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:1066` |
 | `RetentionGate` | existing on every project-scoped query DB | per CLAUDE.md |
 | `HostAuditRuntime` | existing | per CLAUDE.md |
 | `RequestAuditRecord` | existing | per `/audit-infrastructure` skill |
@@ -2882,7 +2882,7 @@ pub enum GetOrComputeOutcome<V> {
 
 Cold path calls `self.completion_fence.publish_with_retry(build, revalidate)` (the struct field is `completion_fence: CompletionFence`, NOT `publication_fence`). The cooperative substrate routes through `cooperative_admit_with_post_publish` with `ComputeAdmission::Cacheable | WarmHit | ReturnOnly { value, error } | Failed`. Degraded recovery uses store-backed `degraded_store.peek_exact_only_partial(&key, request, &error)` (defined in §4.1.2). No `AtomicU8 cold_outcome_flag`, no `last_degraded_error()`, no `degraded_partial_from_fence` helper.
 
-The fact-signature path in §10.1: `let (outcome, fact_read_set) = ctx.with_fact_tracer(|| db.get_or_compute(slot_key, &request)); let signature = ReadSetSignature::new(finalise_signature_or_empty(fact_read_set));`. Per `crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:773`.
+The fact-signature path in §10.1: `let (outcome, fact_read_set) = ctx.with_fact_tracer(|| db.get_or_compute(slot_key, &request)); let admission = SignatureAdmission::from_finalise(fact_read_set.finalise());`. Per `crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:1066`.
 
 ### A.4 TypeInfoRequestError — Unified Closed Union
 

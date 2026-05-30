@@ -98,6 +98,7 @@ pub(crate) fn kind_matches_wasm(filter: &str, kind: &RequestKind) -> bool {
             | ("Mcp", RequestKind::Mcp { .. })
             | ("BundlerBatch", RequestKind::BundlerBatch { .. })
             | ("Custom", RequestKind::Custom { .. })
+            | ("TypeInfoGraph", RequestKind::TypeInfoGraph)
     )
 }
 

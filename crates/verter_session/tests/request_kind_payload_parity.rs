@@ -5,6 +5,7 @@
 //! before it can even run; a wrong-payload pairing surfaces as the
 //! `assert_eq!` mismatch.
 
+use verter_audit::payloads::TypeInfoGraphPayload;
 use verter_audit::{
     BundlerBatchPayload, BundlerKindTag, CompilePayload, CompileTargetTag, ComponentMetaPayload,
     LspMethodTag, LspRequestPayload, McpToolPayload, RequestAuditRecord, RequestKind,
@@ -85,6 +86,10 @@ fn every_request_kind_variant_constructs_a_record_with_matching_payload_variant(
             },
             RequestKindPayload::None,
         ),
+        (
+            RequestKind::TypeInfoGraph,
+            RequestKindPayload::TypeInfoGraph(TypeInfoGraphPayload::default()),
+        ),
     ];
 
     for (kind, payload) in cases {
@@ -103,6 +108,7 @@ fn every_request_kind_variant_constructs_a_record_with_matching_payload_variant(
             (RequestKind::Mcp { .. }, RequestKindPayload::Mcp(_)) => {}
             (RequestKind::BundlerBatch { .. }, RequestKindPayload::BundlerBatch(_)) => {}
             (RequestKind::Custom { .. }, RequestKindPayload::None) => {}
+            (RequestKind::TypeInfoGraph, RequestKindPayload::TypeInfoGraph(_)) => {}
             (k, p) => panic!(
                 "request_kind_payload_parity: kind/payload mismatch — kind={:?} \
                  paired with {:?}; expected the matching payload variant",
@@ -137,4 +143,12 @@ fn typed_payload_accessors_return_some_only_for_matching_kinds() {
     );
     assert!(lsp.lsp_payload().is_some());
     assert!(lsp.component_meta_payload().is_none());
+
+    let typeinfo = empty_envelope(
+        RequestKind::TypeInfoGraph,
+        RequestKindPayload::TypeInfoGraph(TypeInfoGraphPayload::default()),
+    );
+    assert!(typeinfo.typeinfo_graph_payload().is_some());
+    assert!(typeinfo.component_meta_payload().is_none());
+    assert!(typeinfo.compile_payload().is_none());
 }

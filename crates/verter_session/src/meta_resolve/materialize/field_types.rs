@@ -412,9 +412,11 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
 /// (which dispatches per shape through `execute_cooperative`). NOT
 /// path-precise: the iterative reducer pushes children before reducing
 /// parents, so the full subgraph of `member_value` is visited.
-/// Path-precision is provided at a higher layer by the per-member
-/// `MemberShapeCacheDb` amortising sibling reuse, not by the reducer
-/// itself.
+/// Path-precision is provided at a higher layer by the per-member slot
+/// of [`crate::component_meta_caches::ShapeCacheDb`] (indexed by
+/// [`crate::component_meta_caches::ShapeSubject::SemanticNode`] via
+/// `ShapeCacheKey::semantic_node_whole`), which amortises sibling reuse,
+/// not by the reducer itself.
 ///
 /// # Returns
 ///

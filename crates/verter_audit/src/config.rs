@@ -283,6 +283,8 @@ pub enum KindBit {
     BundlerBatch = 7,
     /// `RequestKind::Custom`.
     Custom = 8,
+    /// `RequestKind::TypeInfoGraph`.
+    TypeInfoGraph = 9,
 }
 
 impl KindBit {
@@ -299,6 +301,7 @@ impl KindBit {
             RequestKind::Mcp { .. } => Self::Mcp,
             RequestKind::BundlerBatch { .. } => Self::BundlerBatch,
             RequestKind::Custom { .. } => Self::Custom,
+            RequestKind::TypeInfoGraph => Self::TypeInfoGraph,
         }
     }
 }

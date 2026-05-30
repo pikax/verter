@@ -1400,7 +1400,7 @@ pub(crate) fn component_meta_registry_indexed_ref_penalty(
 ///
 /// **Cursor contract** (per the G1 + G2 path-precision gates): when the
 /// cursor is at a whole-surface node (`is_whole_surface()`), descent
-/// is unbounded — preserves pre-Block-6.i behaviour. When the cursor
+/// is unbounded — preserves pre-path-precision behaviour. When the cursor
 /// carries a narrowed filter (Pick → `Include`, Omit → `Exclude`,
 /// or an explicit `ProjectionNode::children` map):
 ///
@@ -1543,7 +1543,7 @@ pub(crate) fn collect_component_meta_registry_refs(
                         // refs entirely — that sibling is OUTSIDE
                         // the published surface the consumer walks.
                         // Whole-surface cursors admit every key so
-                        // pre-Block-6.i top-level callers see no
+                        // pre-path-precision top-level callers see no
                         // behaviour change.
                         if !cursor.admits_key(prop.name.as_str()) {
                             continue;
@@ -1675,7 +1675,7 @@ pub(crate) fn collect_component_meta_registry_refs(
             //
             // - Whole-surface (no narrowing): walk all four (check +
             //   extends + true_type + false_type). Preserves
-            //   pre-Block-6.i top-level callers' refs and audit
+            //   pre-path-precision top-level callers' refs and audit
             //   behaviour.
             // - Narrowed (Include/Exclude/explicit-children at this
             //   hop): the cursor enumerates a value-surface; the
@@ -1744,7 +1744,7 @@ pub(crate) fn collect_component_meta_registry_refs(
             // when only specific keys are requested.
             //
             // - Whole-surface: walk source + value (+ name_type).
-            //   Preserves pre-Block-6.i refs.
+            //   Preserves pre-path-precision refs.
             // - Narrowed: walk only `value` — the published-value
             //   surface produced by `{ [K in keyof T]: V }` for the
             //   requested keys is `V`; the mapped-source `T` itself

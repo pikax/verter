@@ -147,8 +147,8 @@ pub enum SymbolKind {
 /// semantic-graph node id.
 ///
 /// The scratch URI is derived from a sha256 of `(scope_canonical,
-/// expression, serialised(extra_imports))` per §5.3 — two scopes
-/// evaluating the same expression always get distinct URIs.
+/// expression, serialised(extra_imports))` — two scopes evaluating
+/// the same expression always get distinct URIs.
 #[derive(Debug, Clone)]
 pub struct EvaluateTypeExpressionRequest {
     /// Canonical id of the file the expression evaluates against. The
@@ -225,7 +225,7 @@ pub enum NamedImport {
 
 /// Type-arguments slice accepted by the public `resolve_named_symbol`
 /// host methods. Aliased to a slice of [`TypeExpr`] for clarity at the
-/// call site — the lowering happens inside the host method per §5.2.
+/// call site — the lowering happens inside the host method.
 pub type TypeArgList<'a> = &'a [Arc<TypeExpr>];
 
 // ---------------------------------------------------------------------------

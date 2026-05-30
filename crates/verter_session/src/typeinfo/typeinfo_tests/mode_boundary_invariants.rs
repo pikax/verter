@@ -1,9 +1,11 @@
 //! @ai-generated - Mode-boundary invariant regression tests sourced from
-//! the codex audit on `benchmarks/tsgo-audit/large-fixture/src/large-types.ts`
-//! (`LargeKeys_499`, 500-level dependent chain). The codex run observed
-//! `recursion_limit_reached=true`, `hops=2503`, `expansions=1002`, and
-//! `depth_high_water=501` for a query that semantically only needs the
-//! 4 shallow member names of `LargeRecord_499`.
+//! the tsgo-audit fixture
+//! `benchmarks/tsgo-audit/large-fixture/src/large-types.ts`
+//! (`LargeKeys_499`, 500-level dependent chain). The benchmark run
+//! observed `recursion_limit_reached=true`, `hops=2503`,
+//! `expansions=1002`, and `depth_high_water=501` for a query that
+//! semantically only needs the 4 shallow member names of
+//! `LargeRecord_499`.
 //!
 //! Each test here pins ONE mode-boundary contract from the type-resolution
 //! SKILL (`/Users/carlosrodrigues/Documents/dev/verter/.claude/skills/type-resolution/SKILL.md`):
@@ -128,12 +130,12 @@ fn type_resolution_payload(
 // SKILL contract: `Expanded` `keyof T` on an object literal/interface
 // only needs the SHALLOW member name surface of T — the resolver must
 // NOT recurse into `parent`/`payload` member bodies just to enumerate
-// the outer keyspace. Codex audit at 500 levels: `recursion_limit_reached=true`,
-// hops=2503, expansions=1002, depth=501.
+// the outer keyspace. Tsgo-audit benchmark probe at 500 levels:
+// `recursion_limit_reached=true`, hops=2503, expansions=1002, depth=501.
 //
 // TS7 emission: `keyof LargeRecord_11` = `"id" | "tag" | "parent" | "payload"`.
 #[test]
-#[ignore = "verter currently returns `Unknown { raw: \"semanticMiss\" }` for `Expanded(LargeKeys_11)` at the 12-level scale (payload: hops=3, expansions=1, depth=1) — the resolver aborts before producing the keyspace. The codex audit on the 500-level fixture showed a different failure mode at scale: hops=2503, expansions=1002, depth=501, recursion_limit_reached=true. Both modes violate the /type-resolution SKILL.md contract: Expanded `keyof T` on an object literal/interface must emit the literal-union of T's member names. The correct implementation only needs T's SHALLOW member-name surface — member bodies (`parent: Pick<LargeRecord_N-1, ...>`, `payload: { value: LargeValue_N-1 }`) must not enter the keyspace enumeration. Suspect call sites for the at-scale chain-walk regression: enumerate.rs:169 and evaluate.rs:176 (`DeclPlaceholder -> Instantiate { body_mode: Expanded }` shortcut) plus lower.rs:596 (object lowering propagates caller mode). Keep as the future keyof-bounded-on-deep-chain contract."]
+#[ignore = "verter currently returns `Unknown { raw: \"semanticMiss\" }` for `Expanded(LargeKeys_11)` at the 12-level scale (payload: hops=3, expansions=1, depth=1) — the resolver aborts before producing the keyspace. The tsgo-audit probe on the 500-level fixture showed a different failure mode at scale: hops=2503, expansions=1002, depth=501, recursion_limit_reached=true. Both modes violate the /type-resolution SKILL.md contract: Expanded `keyof T` on an object literal/interface must emit the literal-union of T's member names. The correct implementation only needs T's SHALLOW member-name surface — member bodies (`parent: Pick<LargeRecord_N-1, ...>`, `payload: { value: LargeValue_N-1 }`) must not enter the keyspace enumeration. Suspect call sites for the at-scale chain-walk regression: enumerate.rs:169 and evaluate.rs:176 (`DeclPlaceholder -> Instantiate { body_mode: Expanded }` shortcut) plus lower.rs:596 (object lowering propagates caller mode). Keep as the future keyof-bounded-on-deep-chain contract."]
 fn mode_boundary_keyof_deep_chain_is_bounded_in_expanded() {
     let host = make_host_with_footprint();
     upsert_chain(&host);
@@ -148,8 +150,9 @@ fn mode_boundary_keyof_deep_chain_is_bounded_in_expanded() {
     // wrong key set.
     assert_literal_union(&expr, &["id", "tag", "parent", "payload"]);
 
-    // Boundedness: secondary discriminator against the codex-observed
-    // chain-walk regression. Bound calibration: a correct implementation
+    // Boundedness: secondary discriminator against the chain-walk
+    // regression observed under the tsgo-audit probe. Bound calibration:
+    // a correct implementation
     // needs T's shallow surface (~5 allocations) + keyspace projection
     // (~5 allocations) = ~10 expansions, depth ~3-5. Bug behavior at the
     // 12-level scale would be ~2 allocations per level = ~24 expansions
@@ -184,11 +187,11 @@ fn mode_boundary_keyof_deep_chain_is_bounded_in_expanded() {
 // must NOT read the alias body, must NOT walk the dependent chain, and
 // must NOT enumerate the keyspace.
 //
-// Codex audit observation: `resolveSymbolWithAudit(..., "identity")` on
-// `LargeKeys_499` returned the concrete `"even" | "id" | "parent" |
-// "payload" | "tag"` union after 2503 hops and depth 501.
+// tsgo-audit benchmark probe observation: `resolveSymbolWithAudit(...,
+// "identity")` on `LargeKeys_499` returned the concrete `"even" | "id"
+// | "parent" | "payload" | "tag"` union after 2503 hops and depth 501.
 #[test]
-#[ignore = "verter currently returns `Unknown { raw: \"semanticMiss\" }` for `resolveSymbolWithAudit(file, \"LargeKeys_11\", null, Identity)` instead of the alias declaration identity. The /type-resolution SKILL.md contract is that `Identity(X)` returns X's declaration identity (a `Ref { name: \"LargeKeys_11\" }` or `RecursiveRef`), NOT X's body and NOT a semantic miss. At small chain scale the resolver's miss happens to avoid the codex-observed body-materialisation hazard (hops=2503, depth=501 at 500 levels), but a miss is not a substitute for the contracted identity shape — clients that wire dependency edges from Identity get no signal. Keep as the future identity-mode-returns-alias-decl-identity contract."]
+#[ignore = "verter currently returns `Unknown { raw: \"semanticMiss\" }` for `resolveSymbolWithAudit(file, \"LargeKeys_11\", null, Identity)` instead of the alias declaration identity. The /type-resolution SKILL.md contract is that `Identity(X)` returns X's declaration identity (a `Ref { name: \"LargeKeys_11\" }` or `RecursiveRef`), NOT X's body and NOT a semantic miss. At small chain scale the resolver's miss happens to avoid the body-materialisation hazard observed by the tsgo-audit probe (hops=2503, depth=501 at 500 levels), but a miss is not a substitute for the contracted identity shape — clients that wire dependency edges from Identity get no signal. Keep as the future identity-mode-returns-alias-decl-identity contract."]
 fn mode_boundary_identity_does_not_materialize_alias_body() {
     let host = make_host_with_footprint();
     upsert_chain(&host);
@@ -252,8 +255,9 @@ fn mode_boundary_identity_does_not_materialize_alias_body() {
 // member names plus lazy per-member refs — not recursive member-body
 // expansion.
 //
-// Codex audit observation: `shallow` on `LargeKeys_499` behaved like
-// `expanded`: concrete key union, hops=2503, expansions=1002, depth=501.
+// tsgo-audit benchmark probe observation: `shallow` on `LargeKeys_499`
+// behaved like `expanded`: concrete key union, hops=2503,
+// expansions=1002, depth=501.
 //
 // This test probes `LargeRecord_11` (the interface, not the keyof
 // alias) so the contract is concretely visible: members `id`, `tag`,
@@ -262,7 +266,7 @@ fn mode_boundary_identity_does_not_materialize_alias_body() {
 // (`LargeValue_10 | "value_11"`) must remain SHALLOW — not full
 // 12-level dependent-chain expansions.
 #[test]
-#[ignore = "verter currently treats Shallow mode as Expanded for the `parent` member — it materialises `parent: Pick<LargeRecord_10, \"id\" | \"tag\">` into the full `{ id: 10, tag: \"tag_10\" }` Object shape (probe at 12-level scale: expansions=23, depth=12, hops=47; codex audit on 500-level fixture: hops=2503, expansions=1002, depth=501). The /type-resolution SKILL.md contract is that Shallow exposes ONE shell level — member names plus per-member reference nodes, no recursive member-body expansion. For an interface member typed as `Pick<...>` (an operator carrier), the per-member shell must remain a Ref / unevaluated operator, NOT a fully reduced Object. Suspect call site: lower.rs:596 (`build_instantiate` advertises one shell level but the object lowering path lowers every property value with the caller's current mode). Keep as the future shallow-mode-bounded-object-lowering contract."]
+#[ignore = "verter currently treats Shallow mode as Expanded for the `parent` member — it materialises `parent: Pick<LargeRecord_10, \"id\" | \"tag\">` into the full `{ id: 10, tag: \"tag_10\" }` Object shape (probe at 12-level scale: expansions=23, depth=12, hops=47; tsgo-audit probe on 500-level fixture: hops=2503, expansions=1002, depth=501). The /type-resolution SKILL.md contract is that Shallow exposes ONE shell level — member names plus per-member reference nodes, no recursive member-body expansion. For an interface member typed as `Pick<...>` (an operator carrier), the per-member shell must remain a Ref / unevaluated operator, NOT a fully reduced Object. Suspect call site: lower.rs:596 (`build_instantiate` advertises one shell level but the object lowering path lowers every property value with the caller's current mode). Keep as the future shallow-mode-bounded-object-lowering contract."]
 fn mode_boundary_shallow_does_not_expand_member_bodies() {
     let host = make_host_with_footprint();
     upsert_chain(&host);
@@ -325,14 +329,14 @@ fn mode_boundary_shallow_does_not_expand_member_bodies() {
 // unresolved `Ref { name: "Foo" }` shell. The terminal leaf's body
 // (`type Foo = { b: 1 }`) must surface at the principal consumer.
 //
-// Codex finding: principal `WantedType = Foo & { a: 1 }` currently
-// resolves to `object{a:1} & ref:Foo` (unresolved Ref); tsgo emits
-// `Foo & { a: 1; }` (where Foo's body is structurally `{ b: 1 }`).
+// Observed divergence from tsgo: principal `WantedType = Foo & { a: 1 }`
+// currently resolves to `object{a:1} & ref:Foo` (unresolved Ref); tsgo
+// emits `Foo & { a: 1; }` (where Foo's body is structurally `{ b: 1 }`).
 //
 // TS7 emission verified via IsExactly probe:
 //   IsExactly<WantedType, { b: 1 } & { a: 1 }> = true
 #[test]
-#[ignore = "verter currently leaves `Foo` as an unresolved `Ref { name: \"Foo\" }` after a 7-hop `export { Foo } from \"./next\"` re-export chain that culminates in `export * from \"./barrel\"` then `export { Foo } from \"./leaf\"` (codex finding: produces `object{a:1} & ref:Foo` where tsgo emits `Foo & { a: 1 }` with `Foo = { b: 1 }`). The /type-resolution SKILL.md contract is that typed re-exports must transit through every intermediate hop without leaving unresolved Ref shells. Keep as the future reexport-chain-resolves-imported-alias contract."]
+#[ignore = "verter currently leaves `Foo` as an unresolved `Ref { name: \"Foo\" }` after a 7-hop `export { Foo } from \"./next\"` re-export chain that culminates in `export * from \"./barrel\"` then `export { Foo } from \"./leaf\"` (observed divergence from tsgo: produces `object{a:1} & ref:Foo` where tsgo emits `Foo & { a: 1 }` with `Foo = { b: 1 }`). The /type-resolution SKILL.md contract is that typed re-exports must transit through every intermediate hop without leaving unresolved Ref shells. Keep as the future reexport-chain-resolves-imported-alias contract."]
 fn mode_boundary_reexport_chain_resolves_imported_alias() {
     let host = make_host_with_footprint();
     upsert_reexport_chain(&host);
@@ -438,13 +442,14 @@ fn mode_boundary_reexport_chain_resolves_imported_alias() {
 // enumeration must follow the re-export chain to the terminal body —
 // not stop at an unresolved Ref.
 //
-// Codex finding: `WantedKeys = keyof WantedType` currently returns
-// `unknown` (because `Foo` was unresolved); TS7 emits `"a" | "b"`.
+// Observed divergence from tsgo: `WantedKeys = keyof WantedType`
+// currently returns `unknown` (because `Foo` was unresolved); TS7
+// emits `"a" | "b"`.
 //
 // TS7 emission verified via IsExactly probe:
 //   IsExactly<WantedKeys, "a" | "b"> = true
 #[test]
-#[ignore = "verter currently returns `unknown` for `keyof WantedType` where `WantedType = Foo & { a: 1 }` and `Foo` is reached via a 7-hop re-export chain (codex finding: keyspace enumeration cannot proceed past the unresolved `Ref { name: \"Foo\" }`). The /type-resolution SKILL.md contract is that `keyof (A & B)` enumerates the union of keys from both arms after fully resolving each arm — re-export chains must transit cleanly to the terminal body. Keep as the future keyof-across-reexport-chain contract."]
+#[ignore = "verter currently returns `unknown` for `keyof WantedType` where `WantedType = Foo & { a: 1 }` and `Foo` is reached via a 7-hop re-export chain (observed divergence from tsgo: keyspace enumeration cannot proceed past the unresolved `Ref { name: \"Foo\" }`). The /type-resolution SKILL.md contract is that `keyof (A & B)` enumerates the union of keys from both arms after fully resolving each arm — re-export chains must transit cleanly to the terminal body. Keep as the future keyof-across-reexport-chain contract."]
 fn mode_boundary_keyof_across_reexport_chain_resolves_all_keys() {
     let host = make_host_with_footprint();
     upsert_reexport_chain(&host);

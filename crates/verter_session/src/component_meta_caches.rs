@@ -3479,7 +3479,8 @@ fn ref_cycle_read_set(
 ///
 /// The ComponentConfig theme-variant fast-path resolver (a future
 /// re-introduction of the retired rescue cascade) and the
-/// Block-1.H Track-2.5 deferred test both reach this producer.
+/// app-config no-override deferred-proof test both reach this
+/// producer.
 pub(crate) fn app_config_no_override_proof_get_or_compute(
     ctx: &dyn crate::resolver_core::ResolverContext,
     key: &crate::app_config_proof_db::AppConfigNoOverrideProofKey,

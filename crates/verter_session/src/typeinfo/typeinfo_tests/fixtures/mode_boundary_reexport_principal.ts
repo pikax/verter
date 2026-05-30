@@ -1,6 +1,7 @@
 // @ai-generated - principal consumer of the 6-hop re-export chain.
 // Imports `Foo` whose final definition (`{ b: 1 }`) lives 7 hops away in
-// `mode_boundary_reexport_leaf.ts`. Mirrors the codex audit chain shape.
+// `mode_boundary_reexport_leaf.ts`. Mirrors the tsgo-audit benchmark
+// re-export-chain shape.
 //
 // TS7 emission verified against tsgo 7.0.0-dev.20260523.1:
 //   type WantedType = Foo & { a: 1 }

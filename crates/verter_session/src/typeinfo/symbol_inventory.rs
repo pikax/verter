@@ -6,7 +6,8 @@
 //! consumer-visible [`super::types::SymbolEntry`] DTO. No type
 //! evaluation, no expansion, no dispatch entry — the call is bounded
 //! by the size of the shallow inventory and is safe to call without
-//! audit instrumentation per §17.1.1 ("no audit; pure shallow read").
+//! audit instrumentation — this entry-point is a pure shallow read
+//! and adds no instrumentation overhead.
 //!
 //! The host method is the substrate that the
 //! `@verter/typeinfo` package's `listFileSymbols(file)` call lowers
@@ -45,7 +46,7 @@ impl VerterHost {
     /// span — the discriminator that lets a caller resolve the value
     /// side is the [`SymbolKind`] returned for the value entry.
     ///
-    /// **Performance contract** (§1.1): < 50 ms on a 5 KLOC TS file.
+    /// **Performance contract**: < 50 ms on a 5 KLOC TS file.
     /// The implementation copies every shallow symbol once and
     /// performs O(N) hash lookups against the analysis snapshot's
     /// declaration-entry list; both are bounded by the size of the

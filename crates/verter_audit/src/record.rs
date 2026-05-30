@@ -11,7 +11,8 @@ use crate::memory::RequestMemoryAudit;
 use crate::payloads::tags::{BundlerKindTag, CompileTargetTag, LspMethodTag};
 use crate::payloads::{
     BundlerBatchPayload, CompilePayload, ComponentMetaPayload, LspRequestPayload, McpToolPayload,
-    SemanticAnalysisPayload, TypeResolutionPayload, WorkspaceOp, WorkspacePayload,
+    SemanticAnalysisPayload, TypeInfoGraphPayload, TypeResolutionPayload, WorkspaceOp,
+    WorkspacePayload,
 };
 use crate::scheduler::SchedulerAudit;
 use crate::store::RequestStoreAudit;
@@ -255,6 +256,15 @@ impl RequestAuditRecord {
             _ => None,
         }
     }
+
+    /// Borrow the record's typeinfo graph payload, if any.
+    #[must_use]
+    pub fn typeinfo_graph_payload(&self) -> Option<&TypeInfoGraphPayload> {
+        match &self.kind_payload {
+            RequestKindPayload::TypeInfoGraph(p) => Some(p),
+            _ => None,
+        }
+    }
 }
 
 /// Discriminant naming the producer surface that emitted the record.
@@ -307,6 +317,12 @@ pub enum RequestKind {
         /// Free-form name describing the custom kind.
         name: String,
     },
+    /// Typeinfo graph request — every public typeinfo entry-point on
+    /// the host opens a record with this kind and populates
+    /// [`RequestKindPayload::TypeInfoGraph`] with the
+    /// [`TypeInfoGraphPayload`] aggregating counters from the response
+    /// snapshot.
+    TypeInfoGraph,
 }
 
 impl RequestKind {
@@ -330,6 +346,7 @@ impl RequestKind {
                 | ("Mcp", RequestKind::Mcp { .. })
                 | ("BundlerBatch", RequestKind::BundlerBatch { .. })
                 | ("Custom", RequestKind::Custom { .. })
+                | ("TypeInfoGraph", RequestKind::TypeInfoGraph)
         )
     }
 }
@@ -364,6 +381,10 @@ pub enum RequestKindPayload {
     Mcp(McpToolPayload),
     /// Bundler batch summary.
     BundlerBatch(BundlerBatchPayload),
+    /// Typeinfo graph response payload — paired with
+    /// [`RequestKind::TypeInfoGraph`]. Carries aggregated counters
+    /// from the graph snapshot the request produced.
+    TypeInfoGraph(TypeInfoGraphPayload),
 }
 
 /// Phase-specific audit data threaded through TLS by the request

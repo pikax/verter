@@ -1133,7 +1133,7 @@ future_catalog_contract!(
 );
 
 #[test]
-#[ignore = "typeinfo currently fails to attach a request footprint on this declared-callback resolver path after the block-6.i AX-WIP audit-passive-observer refactor (commit b0798e28); the contract is that an unknown-typed declared callback result stays opaque as `unknown` with the warm cross-file dependency footprint attached. Keep as the future HO09 declared-callback-opaque contract once AX-WIP closes Rule-5 leak."]
+#[ignore = "typeinfo currently fails to attach a request footprint on this declared-callback resolver path under the audit-passive-observer footprint-attachment pipeline; the contract is that an unknown-typed declared callback result stays opaque as `unknown` with the warm cross-file dependency footprint attached. Keep as the future HO09 declared-callback-opaque contract once the footprint-attachment pipeline is wired into this resolver path."]
 fn flow_return_ho09_keeps_unknown_declared_callback_result_opaque() {
     assert_catalog_alias_warm("HO09", |expr| {
         assert_primitive(expr, PrimitiveName::Unknown)
@@ -1441,7 +1441,7 @@ future_cross_contract!(
 );
 
 #[test]
-#[ignore = "typeinfo currently fails to attach a request footprint on this cross-file resolver path after the block-6.i AX-WIP audit-passive-observer refactor (commit b0798e28); the contract is that imported value-function returns expand to their published `{ mode: \"dark\" }` literal surface with the cross-file dependency footprint attached. Keep as the future XF02 cross-file value-function expansion contract once AX-WIP closes Rule-5 leak."]
+#[ignore = "typeinfo currently fails to attach a request footprint on this cross-file resolver path under the audit-passive-observer footprint-attachment pipeline; the contract is that imported value-function returns expand to their published `{ mode: \"dark\" }` literal surface with the cross-file dependency footprint attached. Keep as the future XF02 cross-file value-function expansion contract once the footprint-attachment pipeline is wired into this resolver path."]
 fn flow_return_xf02_expands_imported_value_function_return() {
     assert_cross_alias_warm(
         "XF02",
@@ -1474,7 +1474,7 @@ future_cross_contract!(
 );
 
 #[test]
-#[ignore = "typeinfo currently fails to attach a request footprint on this barrel-imported resolver path after the block-6.i AX-WIP audit-passive-observer refactor (commit b0798e28); the contract is that barrel-imported value-function returns expand to their published `{ id: \"x\" }` literal surface with the cross-file dependency footprint attached. Keep as the future XF04 cross-file barrel-imported expansion contract once AX-WIP closes Rule-5 leak."]
+#[ignore = "typeinfo currently fails to attach a request footprint on this barrel-imported resolver path under the audit-passive-observer footprint-attachment pipeline; the contract is that barrel-imported value-function returns expand to their published `{ id: \"x\" }` literal surface with the cross-file dependency footprint attached. Keep as the future XF04 cross-file barrel-imported expansion contract once the footprint-attachment pipeline is wired into this resolver path."]
 fn flow_return_xf04_expands_barrel_imported_value_function_return() {
     assert_cross_alias_warm(
         "XF04",
@@ -1513,7 +1513,7 @@ fn flow_return_xf04_records_barrel_route_before_selected_leaf() {
 }
 
 #[test]
-#[ignore = "typeinfo currently fails to attach a request footprint on this namespace-import resolver path after the block-6.i AX-WIP audit-passive-observer refactor (commit b0798e28); the contract is that namespace-import value calls resolve to their published `{ ok: true }` literal surface with the cross-file dependency footprint attached. Keep as the future XF05 cross-file namespace-import contract once AX-WIP closes Rule-5 leak."]
+#[ignore = "typeinfo currently fails to attach a request footprint on this namespace-import resolver path under the audit-passive-observer footprint-attachment pipeline; the contract is that namespace-import value calls resolve to their published `{ ok: true }` literal surface with the cross-file dependency footprint attached. Keep as the future XF05 cross-file namespace-import contract once the footprint-attachment pipeline is wired into this resolver path."]
 fn flow_return_xf05_resolves_namespace_import_value_call() {
     assert_cross_alias_warm(
         "XF05",
@@ -1532,7 +1532,7 @@ fn flow_return_xf05_resolves_namespace_import_value_call() {
 }
 
 #[test]
-#[ignore = "typeinfo currently fails to attach a request footprint on this value/type-separated namespace path after the block-6.i AX-WIP audit-passive-observer refactor (commit b0798e28); the contract is that the value namespace stays separate from the type namespace, resolving to `{ valueOnly: true }` with the cross-file dependency footprint attached. Keep as the future XF06 value-type-namespace separation contract once AX-WIP closes Rule-5 leak."]
+#[ignore = "typeinfo currently fails to attach a request footprint on this value/type-separated namespace path under the audit-passive-observer footprint-attachment pipeline; the contract is that the value namespace stays separate from the type namespace, resolving to `{ valueOnly: true }` with the cross-file dependency footprint attached. Keep as the future XF06 value-type-namespace separation contract once the footprint-attachment pipeline is wired into this resolver path."]
 fn flow_return_xf06_keeps_value_type_namespace_separate() {
     assert_cross_alias_warm(
         "XF06",
@@ -1581,7 +1581,7 @@ future_cross_contract!(
 );
 
 #[test]
-#[ignore = "typeinfo currently fails to attach a request footprint on the cross-file recursive resolver path after the block-6.i AX-WIP audit-passive-observer refactor (commit b0798e28); the contract is that cross-file recursive return cycles terminate with a `number | string` union projection and the cross-file dependency footprint attached. Keep as the future XF09 cross-file recursive-return termination contract once AX-WIP closes Rule-5 leak."]
+#[ignore = "typeinfo currently fails to attach a request footprint on the cross-file recursive resolver path under the audit-passive-observer footprint-attachment pipeline; the contract is that cross-file recursive return cycles terminate with a `number | string` union projection and the cross-file dependency footprint attached. Keep as the future XF09 cross-file recursive-return termination contract once the footprint-attachment pipeline is wired into this resolver path."]
 fn flow_return_xf09_terminates_cross_file_recursive_returns() {
     assert_cross_alias_warm(
         "XF09",
