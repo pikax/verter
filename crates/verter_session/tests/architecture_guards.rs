@@ -938,7 +938,13 @@ fn root_surface_bridges_carry_no_prepared_decl_fallback() {
         // `fn ` (or EOF). Robust enough to isolate the bridge body without a
         // brace parser; both bridges are short and contain no nested `fn `.
         let after_sig = &src[sig_start + signature.len()..];
-        let body_end = after_sig.find("\nfn ").unwrap_or(after_sig.len());
+        // Body slice = from this signature to the function's closing brace at
+        // column 0 (`\n}`). Both bridges are short and brace-balanced with a
+        // single top-level `}`; slicing to the first column-0 `}` isolates the
+        // body without a brace parser and without leaking into the following
+        // `pub(crate) fn project_prepared_type_surface_*` (which legitimately
+        // references `cached_prepared_root_surface`).
+        let body_end = after_sig.find("\n}").unwrap_or(after_sig.len());
         let body = &after_sig[..body_end];
         assert!(
             !body.contains("cached_prepared_root_surface"),
