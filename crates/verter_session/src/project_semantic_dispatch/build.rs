@@ -681,9 +681,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 decl_name: Arc::from("default"),
             },
             args: Arc::from(Vec::new().into_boxed_slice()),
-            context: crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                ProjectionMode::Navigate,
-            ),
+            context:
+                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                    ProjectionMode::Navigate,
+                ),
         }) {
             QueryResult::Value(node) | QueryResult::Recursive(node) => node,
             // A `.vue` whose synthesized instance shape could not be produced

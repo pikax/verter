@@ -250,7 +250,9 @@ fn instantiate_vue_default_node(
         context: ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
     }) {
         QueryResult::Value(node) | QueryResult::Recursive(node) => node,
-        QueryResult::Error(e) => panic!("Instantiate(.vue default) for {canonical_id} errored: {e:?}"),
+        QueryResult::Error(e) => {
+            panic!("Instantiate(.vue default) for {canonical_id} errored: {e:?}")
+        }
     }
 }
 
@@ -883,7 +885,11 @@ defineProps<{ self: InstanceType<typeof Self>; marker: number }>();
 /// what keeps the `(canonical, "default")` frame ACTIVE while the instance
 /// shape's members lower — the precondition for the `push_instantiate_active`
 /// guard to fire on a self-cyclic `InstanceType<typeof Self>` member.
-fn project_vue_default_path_eager(host: &VerterHost, canonical_id: &str, path: &[&str]) -> TypeExpr {
+fn project_vue_default_path_eager(
+    host: &VerterHost,
+    canonical_id: &str,
+    path: &[&str],
+) -> TypeExpr {
     let store_view = host.resolver_store_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
