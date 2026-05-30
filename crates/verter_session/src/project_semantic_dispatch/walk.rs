@@ -498,6 +498,23 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         self.context.provenance
     }
 
+    /// Effective surface provenance for a carrier-unwrap dispatch in the
+    /// shallow-surface worklist (Stage 4-pre Gap 3).
+    ///
+    /// When a `Frame::Visit` carries a `provenance_override` (set when the
+    /// walker crossed a TRANSPARENT carrier — an identity-utility `Alias`
+    /// such as `NoInfer<T>`, or any alias-target indirection — whose own
+    /// body has no declared members), that override wins so members reached
+    /// THROUGH the carrier are NOT stamped `MacroTypeArgOwnBody`. Otherwise
+    /// the walker's constructing context provenance applies.
+    #[inline]
+    fn effective_provenance(
+        &self,
+        provenance_override: Option<crate::semantic_query::SurfaceProvenanceContext>,
+    ) -> crate::semantic_query::SurfaceProvenanceContext {
+        provenance_override.unwrap_or_else(|| self.provenance())
+    }
+
     fn graph(&self) -> &Arc<SemanticGraphStore> {
         self.dispatch.graph()
     }
@@ -1996,6 +2013,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             target: BufferTarget::Root,
             member_role_override: None,
             heritage_overlay_body: false,
+            // Root seed: no transparent-carrier downgrade yet. The walk's
+            // constructing context provenance (`self.provenance()`) applies
+            // until a transparent carrier is crossed.
+            provenance_override: None,
         });
 
         while let Some(frame) = work.pop() {
@@ -2022,6 +2043,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     target,
                     member_role_override,
                     heritage_overlay_body,
+                    provenance_override,
                 } => {
                     tracing::trace!(
                         target: "verter::dispatch::walk",
@@ -2050,6 +2072,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         target,
                         member_role_override,
                         heritage_overlay_body,
+                        provenance_override,
                         &mut work,
                         &mut intersection_buffers,
                         &mut union_buffers,
@@ -2064,6 +2087,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     kind,
                     member_role_override,
                     heritage_overlay,
+                    provenance_override,
                 } => {
                     if arm_index >= arms.len() {
                         // No more arms — the queued FlushIntersection /
@@ -2094,6 +2118,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             kind,
                             member_role_override,
                             heritage_overlay,
+                            provenance_override,
                         });
                     }
                     // Per-arm role override (codex BINDING design): a
@@ -2115,6 +2140,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         target,
                         member_role_override: arm_role_override,
                         heritage_overlay_body: false,
+                        // Arm descent inherits the parent's transparent-carrier
+                        // downgrade (Gap 3): a union/intersection nested under a
+                        // crossed transparent carrier keeps the structural
+                        // provenance for its members.
+                        provenance_override,
                     });
                 }
                 Frame::FlushIntersection {
@@ -2186,6 +2216,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         target: BufferTarget,
         member_role_override: Option<crate::semantic_query::MemberMergeRole>,
         heritage_overlay_body: bool,
+        provenance_override: Option<crate::semantic_query::SurfaceProvenanceContext>,
         work: &mut Vec<Frame>,
         intersection_buffers: &mut rustc_hash::FxHashMap<usize, Vec<Option<ShallowSurface>>>,
         union_buffers: &mut rustc_hash::FxHashMap<usize, Vec<Option<ShallowSurface>>>,
@@ -2253,6 +2284,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         // descent stamp reference arms `Heritage`.
                         member_role_override,
                         heritage_overlay: heritage_overlay_body,
+                        provenance_override,
                     });
                 }
             }
@@ -2275,6 +2307,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         kind: ArmKind::Union,
                         member_role_override,
                         heritage_overlay: false,
+                        provenance_override,
                     });
                 }
             }
@@ -2301,7 +2334,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     context: crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
                     )
-                    .with_provenance(self.provenance()),
+                    .with_provenance(self.effective_provenance(provenance_override)),
                 }) {
                     QueryResult::Value(body) => {
                         // Continue the walk into the materialised body. If the
@@ -2322,6 +2355,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             target,
                             member_role_override,
                             heritage_overlay_body,
+                            provenance_override,
                         });
                     }
                     QueryResult::Recursive(_) => {
@@ -2374,13 +2408,20 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // = true`. A bare `structural_transit_with_mode(Navigate)`
                 // here drops the provenance and the macro-T-root own-body
                 // members all report `false`.
+                //
+                // Stage 4-pre Gap 3: when this DeclPlaceholder was reached
+                // THROUGH a transparent carrier (an identity-utility `Alias`
+                // such as `NoInfer<Base>`), `provenance_override` is
+                // `Some(Structural)` and `effective_provenance` downgrades the
+                // unwrap so `Base`'s own-body members are NOT mis-stamped as
+                // the macro type argument's own body.
                 match self.dispatch.execute(SemanticQueryKey::Instantiate {
                     base: identity.clone(),
                     args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                     context: crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
                     )
-                    .with_provenance(self.provenance()),
+                    .with_provenance(self.effective_provenance(provenance_override)),
                 }) {
                     QueryResult::Value(body) => {
                         // Interface/class declaration body → heritage overlay
@@ -2398,6 +2439,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             target,
                             member_role_override,
                             heritage_overlay_body,
+                            provenance_override,
                         });
                     }
                     QueryResult::Recursive(_) => {
@@ -2491,6 +2533,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         kind: ArmKind::Union,
                         member_role_override,
                         heritage_overlay: false,
+                        provenance_override,
                     });
                 }
             }
@@ -2524,11 +2567,30 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // Follow the alias, preserving the role override + heritage
                 // flag so an identity-alias wrapper of a heritage carrier /
                 // interface body keeps its role classification.
+                //
+                // Stage 4-pre Gap 3 — TRANSPARENT-carrier provenance downgrade.
+                // An `Alias` node is a transparent carrier: it is produced by an
+                // identity utility (`NoInfer<T>` interns `Alias(T)`) or by an
+                // alias-target indirection. Its own body has NO declared
+                // members — the members live on the alias TARGET. A member
+                // reached only THROUGH this carrier is therefore NOT the macro
+                // type argument's own-body member, so the macro-T own-body
+                // provenance must NOT propagate past the alias. Downgrade to
+                // `Structural` for the target walk (and keep any already-active
+                // downgrade). A DIRECT object-alias macro argument
+                // (`type P = { x }`) does NOT reach here as the own-body
+                // source: its members are stamped at the
+                // `DeclPlaceholder → Instantiate → Object` overlay
+                // (`overlay_macro_type_arg_own_body`) before any `Alias` node,
+                // so this downgrade does not regress it.
                 work.push(Frame::Visit {
                     node: target_id,
                     target,
                     member_role_override,
                     heritage_overlay_body,
+                    provenance_override: Some(
+                        crate::semantic_query::SurfaceProvenanceContext::Structural,
+                    ),
                 });
             }
             SemanticNodeData::DeclRef { identity } => {
@@ -2559,11 +2621,15 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             // `Heritage` override flowing into the resolved
                             // declaration's body (cross-file / same-file
                             // heritage members surface as `Heritage`).
+                            // Gap 3: thread any active transparent-carrier
+                            // downgrade so a `DeclRef` reached through a
+                            // transparent alias keeps the structural provenance.
                             work.push(Frame::Visit {
                                 node: resolved,
                                 target,
                                 member_role_override,
                                 heritage_overlay_body,
+                                provenance_override,
                             });
                         }
                     }
@@ -2976,6 +3042,20 @@ enum Frame {
         /// `Object` arm keeps its lowered `OwnBody` role. Only meaningful for
         /// the immediate decl-body Intersection; sub-visits default to false.
         heritage_overlay_body: bool,
+        /// Surface-provenance override (Stage 4-pre Gap 3): when `Some`, the
+        /// carrier-unwrap dispatches (Alias-target Instantiate via
+        /// DeclPlaceholder / InstantiationRef) below this node use this
+        /// provenance INSTEAD of the walker's `self.provenance()`. Set to
+        /// `Some(Structural)` when the walker crosses a TRANSPARENT carrier
+        /// (an `Alias` produced by an identity utility such as `NoInfer<T>`,
+        /// or any alias-target indirection) whose own body has no declared
+        /// members: a member reached only THROUGH such a carrier is NOT the
+        /// macro type argument's own-body member, so it must not inherit
+        /// `MacroTypeArgOwnBody`. Propagates verbatim through subsequent
+        /// carrier hops so the downgrade sticks all the way to the Object.
+        /// `None` ⇒ use `self.provenance()` (the macro-root / structural
+        /// context the walk was constructed under).
+        provenance_override: Option<crate::semantic_query::SurfaceProvenanceContext>,
     },
     /// Iterator frame for an Intersection / Union arm list. Pops at
     /// each step, pushes a `Visit` for the current arm and a fresh
@@ -2994,6 +3074,10 @@ enum Frame {
         /// body: REFERENCE-carrier arms get `Some(Heritage)`, own `Object`
         /// arms keep their lowered role.
         heritage_overlay: bool,
+        /// Surface-provenance override (Stage 4-pre Gap 3) propagated to each
+        /// arm's `Visit`. `None` for ordinary intersections / unions; carries
+        /// the transparent-carrier downgrade through arm descents.
+        provenance_override: Option<crate::semantic_query::SurfaceProvenanceContext>,
     },
     FlushIntersection {
         buffer_id: usize,

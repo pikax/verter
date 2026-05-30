@@ -10134,6 +10134,169 @@ defineEmits<Emits>()
     );
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Stage 4-pre Gap 3 — alias-reached-member provenance (dispatch path).
+//
+// A member reached ONLY through a transparent alias / instantiation shell
+// (`NoInfer<Base>`, a utility identity wrapper) whose own body has no
+// declared members is NOT `declared_in_macro_type_arg`. The bit applies
+// only to members directly written in the macro type-argument's own object
+// body (or a directly-referenced declaration's own body when that decl IS
+// the macro argument).
+//
+// These assert the DISPATCH/projector surface directly via
+// `evaluate_types().props` (the `project_props` → shared-resolver path that
+// stamps `declared_in_macro_type_arg` from the dispatch surface member),
+// NOT the materializer-fed `define_props` mirror.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Gap 3 discriminating: `defineProps<NoInfer<Base>>()` — `Base`'s members
+/// are reached THROUGH the transparent `NoInfer` identity carrier, so the
+/// dispatch surface MUST stamp `declared_in_macro_type_arg = false`.
+///
+/// PRE-FIX the dispatch propagated `MacroTypeArgOwnBody` through the
+/// `Alias(Base)` carrier and stamped Base's members `true`. POST-FIX the
+/// transparent-carrier crossing downgrades provenance to `Structural`.
+#[test]
+fn dispatch_no_infer_alias_member_provenance_is_false() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base.ts",
+            r#"export interface Base {
+  label?: string
+  count?: number
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Base } from './base'
+defineProps<NoInfer<Base>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session
+        .evaluate_types("/src/App.vue")
+        .expect("evaluate_types must resolve")
+        .expect("some evaluated types");
+
+    // Sanity: the members are present (the NoInfer identity carrier
+    // resolved through to Base) — discriminates "dropped/never" from the
+    // provenance question.
+    let label = evaluated
+        .props
+        .iter()
+        .find(|p| p.name == "label")
+        .expect("NoInfer<Base> must publish `label` through the dispatch surface");
+    let count = evaluated
+        .props
+        .iter()
+        .find(|p| p.name == "count")
+        .expect("NoInfer<Base> must publish `count` through the dispatch surface");
+
+    assert!(
+        !label.declared_in_macro_type_arg && !count.declared_in_macro_type_arg,
+        "Gap 3 — members reached THROUGH the transparent `NoInfer<Base>` carrier \
+         MUST carry `declared_in_macro_type_arg == false` on the dispatch surface \
+         (the carrier's own body has no declared members). Got label={}, count={}",
+        label.declared_in_macro_type_arg,
+        count.declared_in_macro_type_arg,
+    );
+}
+
+/// Gap 3 discriminating (alias-shell): `export type Props = NoInfer<Base>;
+/// defineProps<Props>()` — the macro arg is a named alias whose body is the
+/// `NoInfer<Base>` instantiation (no direct own-body members). All members
+/// are reached through the transparent alias + NoInfer hops → `false`.
+#[test]
+fn dispatch_no_infer_alias_shell_member_provenance_is_false() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base.ts",
+            r#"export interface Base {
+  label?: string
+  count?: number
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Base } from './base'
+export type Props = NoInfer<Base>
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session
+        .evaluate_types("/src/App.vue")
+        .expect("evaluate_types must resolve")
+        .expect("some evaluated types");
+    let stamped_true: Vec<&str> = evaluated
+        .props
+        .iter()
+        .filter(|p| p.declared_in_macro_type_arg)
+        .map(|p| p.name.as_str())
+        .collect();
+    assert!(
+        stamped_true.is_empty(),
+        "Gap 3 — alias-shell `NoInfer<Base>` members are reached through the \
+         transparent alias + NoInfer carriers (the alias `Props`'s own body has \
+         NO direct members), so NONE may carry `declared_in_macro_type_arg == \
+         true` on the dispatch surface. Mis-stamped: {stamped_true:?}",
+    );
+}
+
+/// Gap 3 GUARD (must stay correct): a DIRECTLY-referenced object alias that
+/// IS the macro argument keeps `declared_in_macro_type_arg = true` for its
+/// own-body members. The transparent-carrier downgrade MUST NOT regress
+/// this — a direct object alias is NOT a transparent identity carrier.
+#[test]
+fn dispatch_direct_object_alias_member_provenance_stays_true() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+type DirectProps = { title: string; count?: number }
+defineProps<DirectProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session
+        .evaluate_types("/src/App.vue")
+        .expect("evaluate_types must resolve")
+        .expect("some evaluated types");
+    let title = evaluated
+        .props
+        .iter()
+        .find(|p| p.name == "title")
+        .expect("direct alias must publish `title`");
+    assert!(
+        title.declared_in_macro_type_arg,
+        "Gap 3 GUARD — a DIRECT object alias that IS the macro argument keeps its \
+         own-body members `declared_in_macro_type_arg == true` (it is not a \
+         transparent identity carrier). The downgrade MUST NOT regress this. Got \
+         title.declared_in_macro_type_arg=false",
+    );
+}
+
 mod node_predicates_tests {
     use super::make_project;
     use crate::meta_resolve::{
