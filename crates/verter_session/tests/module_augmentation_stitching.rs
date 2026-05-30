@@ -27,7 +27,7 @@ use verter_semantic::facts::registry::{InternedGlobPattern, InternedSpecifier};
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::{
     AugmentationTargetKey, AugmentationTargetKind, FileArtifactKey, FileArtifactStore,
-    FileArtifacts, ProjectIdentity,
+    FileArtifacts, ProjectIdentity, LEGACY_PARSER_VERSION,
 };
 use verter_session::project_type_store::IndexedReady;
 use verter_session::resolver_core::shallow_file_state::ShallowFileState;
@@ -116,7 +116,7 @@ fn insert_artifact_from_fixture(
         canonical: Arc::from(canonical),
         content_hash,
         parse_env_hash: [0u8; 16],
-        parser_version: 1,
+        parser_version: LEGACY_PARSER_VERSION,
     };
     store.insert_artifacts(key.clone(), artifacts);
     key
@@ -144,7 +144,7 @@ fn insert_artifact_with_raw_source(
         canonical: Arc::from(canonical),
         content_hash,
         parse_env_hash: [0u8; 16],
-        parser_version: 1,
+        parser_version: LEGACY_PARSER_VERSION,
     };
     store.insert_artifacts(key.clone(), artifacts);
     key
