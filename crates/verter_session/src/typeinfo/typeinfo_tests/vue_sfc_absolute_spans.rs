@@ -470,9 +470,10 @@ fn vue_eval_source_is_position_preserving_same_length_and_blanked_markup() {
         "eval source must not contain a `</script>` close tag"
     );
 
-    // The inter-block gap (`</script>\n<script setup ...>`) between block 1 and
-    // block 2 must carry at least one line terminator so the two blocks parse as
-    // separate statements (the injected/preserved newline policy).
+    // The inter-block gap (`</script>\n<script setup ...>`) between the first
+    // and second script blocks must carry at least one line terminator so the
+    // two blocks parse as separate statements (the injected/preserved newline
+    // policy).
     let block1_close = raw.find("</script>").expect("first </script> present");
     let block2_open = raw[block1_close..]
         .find("<script setup")
