@@ -736,6 +736,124 @@ fn p2a_aliased_union_define_props_enumerates_both_arms() {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// 7. Open-conditional props root — `defineProps<Props<T>>()` where
+//    `type Props<T> = T extends 'a' ? { a?: string } : { b?: string }`
+//    and `T` is the component's UNBOUND generic param. The check
+//    (`T extends 'a'`) cannot be decided (T is open), so the macro
+//    object-surface MUST enumerate BOTH branches' members — every member
+//    that ANY branch could contribute — each OPTIONAL (present only when
+//    the unresolved check selects that branch). This is the macro
+//    object-surface union convention applied to an OPEN conditional root.
+//
+//    Discrimination: the open-conditional empty-path Shallow contract
+//    returns an EMPTY surface (branch selection is impossible). Under the
+//    macro object-surface demand, the Fix-A arm distributes both branches
+//    through `merge_union_surfaces_for_macro`. Pre-fix the define_props
+//    surface is EMPTY (both `a` and `b` missing); post-fix both `a` and
+//    `b` are present AND optional. (Contrast test 3, which covers the
+//    EMITS open conditional via the separate emits branch-merge path —
+//    props travel through the shallow walker, which is the path Fix A
+//    repairs.)
+// ─────────────────────────────────────────────────────────────────────
+
+const OPEN_CONDITIONAL_PROPS_VUE: &str = r#"<script setup lang="ts" generic="T extends 'a' | 'b'">
+type Props<T> = T extends 'a' ? { a?: string } : { b?: string };
+defineProps<Props<T>>();
+</script>
+<template><div></div></template>
+"#;
+
+#[test]
+fn open_conditional_props_root_enumerates_both_branches() {
+    use verter_semantic::analysis::AnalyzedMacroKind;
+    use verter_session::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
+
+    let host = harness::build_hermetic_host_with_lib(
+        &[("/OpenConditionalProps.vue", OPEN_CONDITIONAL_PROPS_VUE)],
+        &[("lib.es5.d.ts", harness::STUB_LIB_ES5)],
+    );
+
+    // (a) Direct `vue_macro_dtos` (FullMetadata) — the macro object
+    // surface enumerates BOTH conditional branches' members.
+    let dtos = host.vue_macro_dtos(&VueMacroSurfaceRequest {
+        owner_canonical: std::sync::Arc::from("/OpenConditionalProps.vue"),
+        macro_index: 0,
+        macro_kind: AnalyzedMacroKind::DefineProps,
+        root_identity: [0u8; 16],
+        level: TypeInfoQueryLevel::FullMetadata,
+    });
+    let dto_names: Vec<&str> = dtos.props.iter().map(|p| p.name.as_str()).collect();
+    for required in ["a", "b"] {
+        assert!(
+            dto_names.contains(&required),
+            "open-conditional macro props root \
+             `defineProps<Props<T>>()` (where `Props<T> = T extends 'a' ? \
+             {{ a? }} : {{ b? }}`) MUST enumerate BOTH branches' members; \
+             branch member `{required}` is missing. The OPEN conditional under \
+             a macro object surface distributes both branches through \
+             `merge_union_surfaces_for_macro` — an empty surface means the \
+             Fix-A macro-object-surface arm regressed back to the empty \
+             `OpenConditional` contract. Got: {dto_names:?}"
+        );
+    }
+    // Each branch member is present in exactly ONE branch ⇒ optional on
+    // the merged macro surface (`declaring_arms < arm_count`).
+    for required in ["a", "b"] {
+        let prop = dtos
+            .props
+            .iter()
+            .find(|p| p.name == required)
+            .unwrap_or_else(|| panic!("prop `{required}` must be present"));
+        assert!(
+            prop.is_optional,
+            "open-conditional branch member `{required}` is present in \
+             only ONE of the two branches, so it MUST be OPTIONAL on the merged \
+             macro object surface. Got is_optional={}",
+            prop.is_optional
+        );
+    }
+
+    // (b) End-to-end: the `evaluate_types().define_props` mirror reads the
+    // same both-branches-enumerated surface.
+    let evaluated = host
+        .evaluate_types("/OpenConditionalProps.vue")
+        .expect("evaluate_types must resolve");
+    let define_names = define_props_member_names(&evaluated);
+    for required in ["a", "b"] {
+        assert!(
+            define_names.iter().any(|n| n == required),
+            "the define_props mirror MUST carry open-conditional branch \
+             member `{required}`. Got: {define_names:?}"
+        );
+    }
+
+    // (c) Final component meta must agree — both branch props published,
+    // both optional.
+    let meta = host
+        .get_component_meta("/OpenConditionalProps.vue")
+        .expect("get_component_meta must resolve");
+    let prop_names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    for required in ["a", "b"] {
+        assert!(
+            prop_names.contains(&required),
+            "final meta MUST carry open-conditional branch prop \
+             `{required}`. Got: {prop_names:?}"
+        );
+        let prop = meta
+            .props
+            .iter()
+            .find(|p| p.name == required)
+            .expect("prop present");
+        assert!(
+            !prop.required,
+            "open-conditional branch prop `{required}` MUST be \
+             optional (required=false) on the final meta. Got required={}",
+            prop.required
+        );
+    }
+}
+
 // The JSX intrinsic projection regression test lives in-crate
 // (`meta_resolve_tests.rs::reexported_intrinsic_shape_resolves_via_dispatch_only`)
 // because it must call the `pub(crate)`

@@ -2510,7 +2510,43 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     Some(SemanticNodeData::TypeParam { .. } | SemanticNodeData::Infer { .. })
                 );
                 drop(check_data);
-                if is_open {
+                if is_open && self.context.is_macro_object_surface() {
+                    // Open conditional UNDER a Vue macro object surface
+                    // (`defineProps<Props<T>>()` where `Props<T>` is an
+                    // open conditional). The macro object-surface contract
+                    // enumerates the UNION of BOTH branches' members — a
+                    // consumer reading the macro surface must see every
+                    // member that ANY branch could contribute, each OPTIONAL
+                    // (it is present only when the unresolved check selects
+                    // that branch). This mirrors the closed-conditional
+                    // distribution below, but is taken for the OPEN case
+                    // only when the demand axis is a macro object surface;
+                    // the ordinary `Published(Shallow)` contract keeps the
+                    // empty + `OpenConditional` behaviour (the `else if`
+                    // arm). `merge_union_surfaces_for_macro` marks each
+                    // member absent from at least one branch as optional, so
+                    // the two disjoint branch member sets both surface as
+                    // optional automatically.
+                    let buffer_id = *next_buffer_id;
+                    *next_buffer_id += 1;
+                    union_buffers.insert(buffer_id, vec![None; 2]);
+                    work.push(Frame::FlushUnion {
+                        buffer_id,
+                        parent_target: target,
+                        union_node: cur,
+                    });
+                    let arms: Arc<[SemanticNodeId]> =
+                        Arc::from(vec![true_branch, false_branch].into_boxed_slice());
+                    work.push(Frame::VisitArmAt {
+                        arms,
+                        arm_index: 0,
+                        buffer_id,
+                        kind: ArmKind::Union,
+                        member_role_override,
+                        heritage_overlay: false,
+                        provenance_override,
+                    });
+                } else if is_open {
                     self.walker_diagnostics
                         .push(ShallowDiagnostic::OpenConditional { node: cur });
                     self.contribute_surface(
