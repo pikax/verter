@@ -920,41 +920,175 @@ fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
 /// guard scopes to the two ROOT-surface bridge bodies, not the whole file.)
 #[test]
 fn root_surface_bridges_carry_no_prepared_decl_fallback() {
+    use syn::visit::Visit;
+    use syn::{Expr, ExprCall, ExprMethodCall, Item, ItemFn};
+
     const BRIDGE_FNS: [&str; 2] = [
-        "fn project_type_surface_expr_via_host_threaded",
-        "fn project_type_surface_shape_via_host_threaded",
+        "project_type_surface_expr_via_host_threaded",
+        "project_type_surface_shape_via_host_threaded",
     ];
+    // The ONLY method calls a bridge body may make. `dispatch_projected_surface`
+    // is the sole root-surface authority (asserted to appear exactly once);
+    // `projection_op_budget_exhausted` is the cooperative budget guard. Any
+    // OTHER method call (`.or_else(...)`, `engine.cached_prepared_root_surface(...)`,
+    // an `engine.<other>()` rescue, …) is a structural deviation and FAILS.
+    const ALLOWED_METHOD_CALLS: [&str; 2] =
+        ["dispatch_projected_surface", "projection_op_budget_exhausted"];
+    // The ONLY free-function / variant-constructor calls a bridge body may
+    // make: the two thin surface→shape/expr converters, plus the std enum
+    // constructors (`Some` / `Ok` / `Err`) that wrap the converter result.
+    // Variant constructors are structurally inert — they cannot hide a rescue —
+    // so they are approved. Any OTHER free-fn call (including a local helper
+    // introduced to hide a `cached_prepared_root_surface` rescue behind an
+    // indirection) is a structural deviation and FAILS.
+    const ALLOWED_FREE_CALLS: [&str; 5] = [
+        "projected_surface_to_type_expr",
+        "projected_surface_to_expanded_shape",
+        "Some",
+        "Ok",
+        "Err",
+    ];
+    const FORBIDDEN_TOKEN: &str = "cached_prepared_root_surface";
 
     let src = read_workspace_file("crates/verter_session/src/meta_resolve/dispatch_helpers.rs");
+    let file = syn::parse_file(&src).expect("parse dispatch_helpers.rs");
 
-    for signature in BRIDGE_FNS {
-        let sig_start = src.find(signature).unwrap_or_else(|| {
+    // Index every free `fn` in the file by name so a body's one-level local
+    // callees can be inspected (approach (b): a helper reachable from a bridge
+    // body must not itself reference the forbidden rescue).
+    let mut free_fns: std::collections::HashMap<String, &ItemFn> =
+        std::collections::HashMap::new();
+    for item in &file.items {
+        if let Item::Fn(f) = item {
+            free_fns.insert(f.sig.ident.to_string(), f);
+        }
+    }
+
+    /// Collects every method-call name, free-function-call name, and any
+    /// path segment equal to a forbidden token, within one fn body.
+    struct CallCollector {
+        method_calls: Vec<String>,
+        free_calls: Vec<String>,
+        forbidden_hits: usize,
+    }
+    impl<'ast> Visit<'ast> for CallCollector {
+        fn visit_expr_method_call(&mut self, mc: &'ast ExprMethodCall) {
+            self.method_calls.push(mc.method.to_string());
+            syn::visit::visit_expr_method_call(self, mc);
+        }
+        fn visit_expr_call(&mut self, call: &'ast ExprCall) {
+            // Record the terminal path segment of a free / associated call
+            // (`foo(...)`, `module::foo(...)`, `Type::assoc(...)`).
+            if let Expr::Path(p) = call.func.as_ref() {
+                if let Some(last) = p.path.segments.last() {
+                    self.free_calls.push(last.ident.to_string());
+                }
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+        fn visit_path_segment(&mut self, seg: &'ast syn::PathSegment) {
+            if seg.ident == FORBIDDEN_TOKEN {
+                self.forbidden_hits += 1;
+            }
+            syn::visit::visit_path_segment(self, seg);
+        }
+    }
+
+    for bridge_name in BRIDGE_FNS {
+        let bridge = free_fns.get(bridge_name).unwrap_or_else(|| {
             panic!(
-                "bridge fn `{signature}` not found in dispatch_helpers.rs — \
+                "bridge fn `{bridge_name}` not found in dispatch_helpers.rs — \
                  the guard's anchor moved"
             )
         });
-        // Body slice = from this signature to the start of the NEXT top-level
-        // `fn ` (or EOF). Robust enough to isolate the bridge body without a
-        // brace parser; both bridges are short and contain no nested `fn `.
-        let after_sig = &src[sig_start + signature.len()..];
-        // Body slice = from this signature to the function's closing brace at
-        // column 0 (`\n}`). Both bridges are short and brace-balanced with a
-        // single top-level `}`; slicing to the first column-0 `}` isolates the
-        // body without a brace parser and without leaking into the following
-        // `pub(crate) fn project_prepared_type_surface_*` (which legitimately
-        // references `cached_prepared_root_surface`).
-        let body_end = after_sig.find("\n}").unwrap_or(after_sig.len());
-        let body = &after_sig[..body_end];
-        assert!(
-            !body.contains("cached_prepared_root_surface"),
-            "Stage 4-disp: `{signature}` must resolve the root surface through \
-             dispatch ALONE — it must NOT reference `cached_prepared_root_surface` \
-             (the prepared-decl root-surface rescue was removed). Re-introducing \
-             a `.or_else(cached_prepared_root_surface)` fallback behind dispatch \
-             is forbidden; fix any compound-root composition gap in the shared \
-             walker (the merge / heritage / Omit functions) instead."
+
+        let mut collector = CallCollector {
+            method_calls: Vec::new(),
+            free_calls: Vec::new(),
+            forbidden_hits: 0,
+        };
+        collector.visit_block(&bridge.block);
+
+        // (1) The forbidden rescue must not appear anywhere in the body.
+        assert_eq!(
+            collector.forbidden_hits, 0,
+            "Stage 4-disp: `{bridge_name}` references `{FORBIDDEN_TOKEN}` — the \
+             prepared-decl root-surface rescue was removed and must stay dead. \
+             Fix any compound-root composition gap in the shared walker (the \
+             merge / heritage / Omit functions), NOT by re-adding the rescue."
         );
+
+        // (2) Exactly one `dispatch_projected_surface` call — dispatch is the
+        //     sole root-surface authority. Zero would mean the bridge stopped
+        //     resolving through dispatch; more than one is an unexpected shape.
+        let dispatch_calls = collector
+            .method_calls
+            .iter()
+            .filter(|m| m.as_str() == "dispatch_projected_surface")
+            .count();
+        assert_eq!(
+            dispatch_calls, 1,
+            "Stage 4-disp: `{bridge_name}` must call `dispatch_projected_surface` \
+             EXACTLY once (the sole root-surface authority); found \
+             {dispatch_calls}. Method calls observed: {:?}",
+            collector.method_calls
+        );
+
+        // (3) STRUCTURAL no-evasion gate: every method call in the body must be
+        //     on the approved list. A `.or_else(...)` fallback (direct OR behind
+        //     a helper), a re-added `engine.cached_prepared_root_surface(...)`,
+        //     or any other engine-method rescue introduces a non-approved
+        //     method call here and FAILS — closing the indirection evasion the
+        //     prior literal-only scan allowed.
+        for method in &collector.method_calls {
+            assert!(
+                ALLOWED_METHOD_CALLS.contains(&method.as_str()),
+                "Stage 4-disp: `{bridge_name}` makes a non-approved method call \
+                 `.{method}(...)`. The bridge body must resolve the root surface \
+                 through `dispatch_projected_surface` ALONE — no `.or_else(...)` \
+                 fallback, no `cached_prepared_root_surface` rescue, no other \
+                 engine-method escape hatch. Approved: {ALLOWED_METHOD_CALLS:?}."
+            );
+        }
+
+        // (4) STRUCTURAL no-evasion gate: every free / associated function call
+        //     must be on the approved converter list. A helper-indirection
+        //     evasion (`fn h(){ cached_prepared_root_surface } ;
+        //     dispatch_projected_surface(...).or_else(|| h(...))`, or a
+        //     `let s = h(...)?;` form) introduces a non-approved free call here
+        //     and FAILS even if the helper avoids `.or_else`.
+        for call in &collector.free_calls {
+            assert!(
+                ALLOWED_FREE_CALLS.contains(&call.as_str()),
+                "Stage 4-disp: `{bridge_name}` calls non-approved free function \
+                 `{call}(...)`. The bridge body must call ONLY \
+                 `dispatch_projected_surface` (method) + a surface converter \
+                 ({ALLOWED_FREE_CALLS:?}); routing through any other helper can \
+                 hide a `cached_prepared_root_surface` rescue. Inline the work \
+                 or fix the shared walker instead."
+            );
+
+            // (b) Defense in depth: even an approved-named call is re-checked,
+            //     and any LOCAL helper reachable from the body must not itself
+            //     reference the forbidden rescue. (The approved converters are
+            //     not local fns here, so this loop is normally a no-op; it
+            //     future-proofs against an approved-list entry that later
+            //     becomes a local fn.)
+            if let Some(helper) = free_fns.get(call) {
+                let mut helper_collector = CallCollector {
+                    method_calls: Vec::new(),
+                    free_calls: Vec::new(),
+                    forbidden_hits: 0,
+                };
+                helper_collector.visit_block(&helper.block);
+                assert_eq!(
+                    helper_collector.forbidden_hits, 0,
+                    "Stage 4-disp: `{bridge_name}` calls local helper `{call}`, \
+                     whose body references `{FORBIDDEN_TOKEN}` — the rescue cannot \
+                     be re-introduced through a one-level helper indirection."
+                );
+            }
+        }
     }
 }
 
