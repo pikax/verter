@@ -673,30 +673,6 @@ fn catch_analysis_panic<T: Default>(
     }
 }
 
-pub(crate) fn collect_sfc_script_content(
-    parsed: &ParsedSfc,
-    source: &str,
-) -> (String, Vec<(u32, u32)>) {
-    let mut combined_content = String::new();
-    let mut block_ranges: Vec<(u32, u32)> = Vec::new();
-
-    for script in [parsed.script(), parsed.script_setup()]
-        .into_iter()
-        .flatten()
-    {
-        if let Some(span) = script.content {
-            let content = &source[span.start as usize..span.end as usize];
-            if !combined_content.is_empty() {
-                combined_content.push('\n');
-            }
-            block_ranges.push((span.start, span.end - span.start));
-            combined_content.push_str(content);
-        }
-    }
-
-    (combined_content, block_ranges)
-}
-
 pub(crate) fn sfc_script_source_type(parsed: &ParsedSfc, source: &str) -> SourceType {
     let lang = [parsed.script(), parsed.script_setup()]
         .into_iter()
@@ -713,13 +689,17 @@ pub(crate) fn sfc_script_source_type(parsed: &ParsedSfc, source: &str) -> Source
     }
 }
 
-/// Build script analysis from an already-parsed SFC. Concatenates script block
-/// contents and runs OXC analysis with catch_unwind for panic safety.
-/// Shared by `parse_vue_snapshot()` (eager) and `build_script_analysis_from_parsed()`.
+/// Build script analysis from an already-parsed SFC.
 ///
-/// After OXC analysis, adjusts all span fields from script-content-relative offsets
-/// to SFC-absolute byte offsets so downstream consumers (LSP features) can use them
-/// directly with `LineIndex::offset_to_position()`.
+/// Runs OXC analysis over the **position-preserving** script source
+/// ([`crate::host_resolve::extract_vue_script_content`]) — script content at
+/// its raw SFC byte offsets, non-script bytes whitespace-blanked — so every
+/// span the analyzer produces (including each `AnalyzedMacro.parsed_type_argument`
+/// internal `TypeExpr` span) is SFC-absolute by construction. No post-analysis
+/// offset translation is required; downstream consumers use the spans directly
+/// with `LineIndex::offset_to_position()`.
+///
+/// Shared by `parse_vue_snapshot()` (eager) and `build_script_analysis_from_parsed()`.
 fn build_script_analysis_from_parsed_with_diagnostic(
     parsed: &ParsedSfc,
     source: &str,
@@ -727,23 +707,21 @@ fn build_script_analysis_from_parsed_with_diagnostic(
     verter_semantic::analysis::ScriptAnalysisSnapshot,
     Option<HostDiagnostic>,
 ) {
-    let (combined_content, block_ranges) = collect_sfc_script_content(parsed, source);
-    if combined_content.is_empty() {
+    let Some(script_source) = crate::host_resolve::extract_vue_script_content(source, Some(parsed))
+    else {
         return (
             verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
             None,
         );
-    }
+    };
     let source_type = sfc_script_source_type(parsed, source);
     let alloc = Allocator::new();
-    let (mut analysis, diag) = catch_analysis_panic(
+    catch_analysis_panic(
         "script analysis",
         std::panic::AssertUnwindSafe(|| {
-            verter_semantic::analysis::build_script_analysis(&combined_content, source_type, &alloc)
+            verter_semantic::analysis::build_script_analysis(&script_source, source_type, &alloc)
         }),
-    );
-    adjust_analysis_spans(&mut analysis, &block_ranges);
-    (analysis, diag)
+    )
 }
 
 fn build_export_signatures_from_parsed_with_diagnostic(
@@ -753,185 +731,19 @@ fn build_export_signatures_from_parsed_with_diagnostic(
     Vec<verter_semantic::analysis::ExportSignature>,
     Option<HostDiagnostic>,
 ) {
-    let (combined_content, block_ranges) = collect_sfc_script_content(parsed, source);
-    if combined_content.is_empty() {
+    let Some(script_source) = crate::host_resolve::extract_vue_script_content(source, Some(parsed))
+    else {
         return (Vec::new(), None);
-    }
+    };
 
     let source_type = sfc_script_source_type(parsed, source);
     let alloc = Allocator::new();
-    let (mut export_signatures, diag) = catch_analysis_panic(
+    catch_analysis_panic(
         "export signature analysis",
         std::panic::AssertUnwindSafe(|| {
-            verter_semantic::analysis::build_export_signatures(
-                &combined_content,
-                source_type,
-                &alloc,
-            )
+            verter_semantic::analysis::build_export_signatures(&script_source, source_type, &alloc)
         }),
-    );
-    adjust_export_signature_spans(&mut export_signatures, &block_ranges);
-    (export_signatures, diag)
-}
-
-/// Map a byte offset in the concatenated script content to the SFC-absolute offset.
-///
-/// The concatenated content is built as: `block0_content + "\n" + block1_content + ...`
-/// Each block's `(sfc_start, length)` is tracked in `block_ranges`.
-fn combined_offset_to_sfc(offset: u32, block_ranges: &[(u32, u32)]) -> u32 {
-    let mut cursor = 0u32;
-    for &(sfc_start, len) in block_ranges {
-        if offset < cursor + len {
-            return sfc_start + (offset - cursor);
-        }
-        cursor += len + 1; // +1 for the '\n' separator between blocks
-    }
-    // Fallback: offset past all blocks (shouldn't happen with valid spans)
-    offset
-}
-
-/// Adjust all span fields in a `ScriptAnalysisSnapshot` from script-content-relative
-/// to SFC-absolute byte offsets.
-pub(crate) fn adjust_analysis_spans(
-    analysis: &mut verter_semantic::analysis::ScriptAnalysisSnapshot,
-    block_ranges: &[(u32, u32)],
-) {
-    if block_ranges.is_empty() {
-        return;
-    }
-    // Single block with start=0 means no adjustment needed (non-SFC .ts file)
-    if block_ranges.len() == 1 && block_ranges[0].0 == 0 {
-        return;
-    }
-
-    let map = |offset: u32| combined_offset_to_sfc(offset, block_ranges);
-
-    for import in &mut analysis.imports {
-        import.span.start = map(import.span.start);
-        import.span.end = map(import.span.end);
-        for binding in &mut import.bindings {
-            binding.span.start = map(binding.span.start);
-            binding.span.end = map(binding.span.end);
-        }
-    }
-    for reference in &mut analysis.module_references {
-        reference.span.start = map(reference.span.start);
-        reference.span.end = map(reference.span.end);
-        reference.expr_span.start = map(reference.expr_span.start);
-        reference.expr_span.end = map(reference.expr_span.end);
-    }
-    for binding in &mut analysis.bindings {
-        binding.span.start = map(binding.span.start);
-        binding.span.end = map(binding.span.end);
-    }
-    for mac in &mut analysis.macros {
-        mac.span.start = map(mac.span.start);
-        mac.span.end = map(mac.span.end);
-        for pf in &mut mac.prop_fields {
-            pf.span.start = map(pf.span.start);
-            pf.span.end = map(pf.span.end);
-        }
-        for ef in &mut mac.emit_fields {
-            ef.span.start = map(ef.span.start);
-            ef.span.end = map(ef.span.end);
-        }
-        for sf in &mut mac.slot_fields {
-            sf.span.start = map(sf.span.start);
-            sf.span.end = map(sf.span.end);
-        }
-        for xf in &mut mac.expose_fields {
-            xf.span.start = map(xf.span.start);
-            xf.span.end = map(xf.span.end);
-        }
-    }
-    for call in &mut analysis.vue_api_calls {
-        call.span.start = map(call.span.start);
-        call.span.end = map(call.span.end);
-        for param in &mut call.callback_params {
-            param.span.start = map(param.span.start);
-            param.span.end = map(param.span.end);
-        }
-    }
-    for call in &mut analysis.dom_query_calls {
-        call.span.start = map(call.span.start);
-        call.span.end = map(call.span.end);
-        call.arg_span.start = map(call.arg_span.start);
-        call.arg_span.end = map(call.arg_span.end);
-    }
-    for manip in &mut analysis.css_var_manipulations {
-        manip.span.start = map(manip.span.start);
-        manip.span.end = map(manip.span.end);
-    }
-    if let Some(ref mut offset) = analysis.first_await_offset {
-        *offset = map(*offset);
-    }
-    if let Some(ref mut opts) = analysis.options_api {
-        opts.object_span.start = map(opts.object_span.start);
-        opts.object_span.end = map(opts.object_span.end);
-        for p in &mut opts.props {
-            p.span.start = map(p.span.start);
-            p.span.end = map(p.span.end);
-        }
-        for e in &mut opts.emits {
-            e.span.start = map(e.span.start);
-            e.span.end = map(e.span.end);
-        }
-        for f in &mut opts.data_fields {
-            f.span.start = map(f.span.start);
-            f.span.end = map(f.span.end);
-        }
-        for f in &mut opts.computed_fields {
-            f.span.start = map(f.span.start);
-            f.span.end = map(f.span.end);
-        }
-        for f in &mut opts.methods {
-            f.span.start = map(f.span.start);
-            f.span.end = map(f.span.end);
-        }
-        for f in &mut opts.expose {
-            f.span.start = map(f.span.start);
-            f.span.end = map(f.span.end);
-        }
-        for f in &mut opts.provide_keys {
-            f.span.start = map(f.span.start);
-            f.span.end = map(f.span.end);
-        }
-        for f in &mut opts.inject_keys {
-            f.span.start = map(f.span.start);
-            f.span.end = map(f.span.end);
-        }
-        for c in &mut opts.components {
-            c.span.start = map(c.span.start);
-            c.span.end = map(c.span.end);
-        }
-    }
-    for nested in &mut analysis.nested_macro_calls {
-        nested.span.start = map(nested.span.start);
-        nested.span.end = map(nested.span.end);
-    }
-}
-
-pub(crate) fn adjust_export_signature_spans(
-    export_signatures: &mut [verter_semantic::analysis::ExportSignature],
-    block_ranges: &[(u32, u32)],
-) {
-    if block_ranges.is_empty() {
-        return;
-    }
-    if block_ranges.len() == 1 && block_ranges[0].0 == 0 {
-        return;
-    }
-
-    let map = |offset: u32| combined_offset_to_sfc(offset, block_ranges);
-
-    for sig in export_signatures {
-        sig.span.start = map(sig.span.start);
-        sig.span.end = map(sig.span.end);
-        if let Some(local_span) = sig.local_span.as_mut() {
-            local_span.start = map(local_span.start);
-            local_span.end = map(local_span.end);
-        }
-    }
+    )
 }
 
 /// Compute script analysis on demand from SFC source. Used by get_analysis()
@@ -1586,32 +1398,6 @@ const isOpen = computed(() => props.visible)
     // ═══════════════════════════════════════════════════════════
     // Script span SFC-absolute adjustment
     // ═══════════════════════════════════════════════════════════
-
-    /// @ai-generated - combined_offset_to_sfc: single block maps offset correctly
-    #[test]
-    fn combined_offset_to_sfc_single_block() {
-        // Script content starts at SFC offset 45, length 30
-        let blocks = [(45u32, 30u32)];
-        assert_eq!(combined_offset_to_sfc(0, &blocks), 45);
-        assert_eq!(combined_offset_to_sfc(7, &blocks), 52);
-        assert_eq!(combined_offset_to_sfc(29, &blocks), 74);
-    }
-
-    /// @ai-generated - combined_offset_to_sfc: dual blocks map offsets correctly
-    #[test]
-    fn combined_offset_to_sfc_dual_blocks() {
-        // <script> content at SFC offset 10, length 20
-        // <script setup> content at SFC offset 60, length 30
-        // combined_content = source[10..30] + "\n" + source[60..90]
-        let blocks = [(10u32, 20u32), (60u32, 30u32)];
-        // Offset in first block
-        assert_eq!(combined_offset_to_sfc(0, &blocks), 10);
-        assert_eq!(combined_offset_to_sfc(19, &blocks), 29);
-        // Offset in second block (after the \n separator at position 20)
-        assert_eq!(combined_offset_to_sfc(21, &blocks), 60);
-        assert_eq!(combined_offset_to_sfc(30, &blocks), 69);
-        assert_eq!(combined_offset_to_sfc(50, &blocks), 89);
-    }
 
     /// @ai-generated - Script binding spans become SFC-absolute after parsing
     #[test]

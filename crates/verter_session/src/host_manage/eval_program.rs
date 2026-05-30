@@ -109,6 +109,14 @@ impl VerterHost {
         }
     }
 
+    /// Central caller for the `IndexedReady.eval_source` body.
+    ///
+    /// For a `.vue` SFC this returns the **position-preserving** script-only
+    /// source (script content at its raw SFC byte offsets, non-script bytes
+    /// whitespace-blanked) so every OXC-produced span — eval-env decls,
+    /// external-type analysis, member/signature spans — is SFC-absolute by
+    /// construction. For a non-SFC file the source is returned unchanged (its
+    /// offsets are already file-absolute).
     pub(crate) fn build_eval_script_source(
         source: &str,
         cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
