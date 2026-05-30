@@ -475,6 +475,18 @@ defineProps<EmptyProps>();
 <template><div></div></template>
 "#;
 
+const AUTHORITY_EXPOSE_VUE: &str = r#"<script setup lang="ts">
+defineExpose({ focus: () => {} });
+</script>
+<template><div></div></template>
+"#;
+
+const AUTHORITY_OPTIONS_VUE: &str = r#"<script setup lang="ts">
+defineOptions({ name: 'Widget', inheritAttrs: false });
+</script>
+<template><div></div></template>
+"#;
+
 #[test]
 fn owner_local_macro_root_authority_uses_typeinfo_surface() {
     // Props/model/slots and emits surfaces (property + call-signature)
@@ -501,23 +513,22 @@ fn owner_local_macro_root_authority_uses_typeinfo_surface() {
         );
     }
 
-    // slots — non-empty surface.
+    // slots — non-empty surface. Owner-local slots resolve their
+    // binding shape through the graph-native slot-binding path (NOT the
+    // define_slots mirror, which the materializer only fills from
+    // resolved-macro entries). The gate's effect is observable as a
+    // published slot on the final meta.
     {
         let host = harness::build_hermetic_host_with_lib(
             &[("/AuthoritySlots.vue", AUTHORITY_SLOTS_VUE)],
             &[("lib.es5.d.ts", harness::STUB_LIB_ES5)],
         );
-        let evaluated = host.evaluate_types("/AuthoritySlots.vue").unwrap();
-        let slot_names: Vec<String> = evaluated
-            .define_slots
-            .iter()
-            .flat_map(|entry| entry.result.value.properties.iter())
-            .map(|p| p.name.clone())
-            .collect();
+        let meta = host.get_component_meta("/AuthoritySlots.vue").unwrap();
+        let slot_names: Vec<&str> = meta.slots.iter().map(|s| s.name.as_str()).collect();
         assert!(
-            slot_names.iter().any(|n| n == "default"),
-            "Stage 4a — owner-local slots root MUST expose a non-empty dispatch \
-             surface (gate=true). Got define_slots: {slot_names:?}"
+            slot_names.contains(&"default"),
+            "Stage 4a — owner-local slots root MUST expose a non-empty surface \
+             (gate=true) and publish the `default` slot. Got slots: {slot_names:?}"
         );
     }
 
@@ -576,63 +587,50 @@ fn owner_local_macro_root_authority_uses_typeinfo_surface() {
              dispatch surface (gate=false). Got define_props: {names:?}"
         );
     }
-}
 
-// ─────────────────────────────────────────────────────────────────────
-// 6. JSX intrinsic projection regression — after the prepared-surface
-//    fallbacks become dispatch-only, an imported-namespace prop surface
-//    that the registry deepens must still publish its members through
-//    dispatch (no walker rescue).
-// ─────────────────────────────────────────────────────────────────────
-
-const INTRINSIC_NS_TS: &str = r#"
-export namespace Forms {
-  export interface FieldProps {
-    name: string;
-    required: boolean;
-  }
-}
-"#;
-
-const INTRINSIC_NS_VUE: &str = r#"<script setup lang="ts">
-import { Forms } from './intrinsic_ns';
-defineProps<Forms.FieldProps>();
-</script>
-<template><div></div></template>
-"#;
-
-#[test]
-fn dispatch_only_namespace_member_props_define_shape() {
-    let host = harness::build_hermetic_host_with_lib(
-        &[
-            ("/intrinsic_ns.ts", INTRINSIC_NS_TS),
-            ("/IntrinsicNs.vue", INTRINSIC_NS_VUE),
-        ],
-        &[("lib.es5.d.ts", harness::STUB_LIB_ES5)],
-    );
-
-    let evaluated = host
-        .evaluate_types("/IntrinsicNs.vue")
-        .expect("evaluate_types must resolve");
-    let names = define_props_member_names(&evaluated);
-    for required in ["name", "required"] {
+    // expose — the macro-root authority gate returns false for
+    // defineExpose. A component with ONLY defineExpose publishes no
+    // props/events from it.
+    {
+        let host = harness::build_hermetic_host_with_lib(
+            &[("/AuthorityExpose.vue", AUTHORITY_EXPOSE_VUE)],
+            &[("lib.es5.d.ts", harness::STUB_LIB_ES5)],
+        );
+        let meta = host.get_component_meta("/AuthorityExpose.vue").unwrap();
         assert!(
-            names.iter().any(|n| n == required),
-            "Stage 4a — namespace-member props `Forms.FieldProps` MUST publish \
-             member `{required}` through the dispatch surface after the prepared \
-             fallback is removed. Got: {names:?}"
+            meta.props.is_empty() && meta.events.is_empty(),
+            "Stage 4a — the macro-root authority gate returns FALSE for \
+             defineExpose; no props/events may be published from it. Got \
+             props={:?} events={:?}",
+            meta.props.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            meta.events.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
         );
     }
 
-    let meta = host
-        .get_component_meta("/IntrinsicNs.vue")
-        .expect("get_component_meta must resolve");
-    let prop_names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
-    for required in ["name", "required"] {
+    // options — the macro-root authority gate returns false for
+    // defineOptions.
+    {
+        let host = harness::build_hermetic_host_with_lib(
+            &[("/AuthorityOptions.vue", AUTHORITY_OPTIONS_VUE)],
+            &[("lib.es5.d.ts", harness::STUB_LIB_ES5)],
+        );
+        let meta = host.get_component_meta("/AuthorityOptions.vue").unwrap();
         assert!(
-            prop_names.contains(&required),
-            "Stage 4a — final meta MUST carry namespace-member prop `{required}`. \
-             Got: {prop_names:?}"
+            meta.props.is_empty() && meta.events.is_empty(),
+            "Stage 4a — the macro-root authority gate returns FALSE for \
+             defineOptions; no props/events may be published from it. Got \
+             props={:?} events={:?}",
+            meta.props.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            meta.events.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
         );
     }
 }
+
+// The JSX intrinsic projection regression test lives in-crate
+// (`meta_resolve_tests.rs::stage4a_namespace_qualified_global_resolves_via_dispatch_only`)
+// because it must call the `pub(crate)`
+// `project_type_surface_expr_via_host_threaded` bridge directly — that
+// bridge is the one whose `cached_prepared_root_surface` fallback Stage
+// 4a removes, and the JSX-intrinsic consumer
+// (`host_manage/intrinsic_projection.rs`) resolves the
+// namespace-qualified `JSX.IntrinsicElements` global through it.

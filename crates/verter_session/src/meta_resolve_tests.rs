@@ -3812,6 +3812,86 @@ defineProps<Types.Props>()
     );
 }
 
+/// Stage 4a — JSX intrinsic projection regression.
+///
+/// The JSX-intrinsic consumer (`host_manage/intrinsic_projection.rs`)
+/// resolves the intrinsic attribute shapes (`HTMLAttributes`, the
+/// per-tag bodies, and the re-exported `JSX.IntrinsicElements` surface)
+/// through [`project_type_surface_expr_via_host_threaded`]. Stage 4a
+/// removes that bridge's `.or_else(cached_prepared_root_surface)` walker
+/// fallback, so the intrinsic-shape symbol MUST resolve through the
+/// dispatch surface alone.
+///
+/// Discrimination: a re-exported intrinsic attribute interface
+/// (`HTMLAttributes`, modelled on Vue's `vue/jsx-runtime` shape, reached
+/// through a barrel re-export — the "re-exported intrinsic shape" the
+/// Stage-4 verdict names) is projected through the bridge by its plain
+/// symbol name; the projected surface MUST carry the declared attribute
+/// members. At HEAD the walker fallback could rescue a prepared-decl
+/// surface here; post-removal the dispatch path is the sole resolver and
+/// this test fires loudly if dispatch cannot resolve the re-exported
+/// intrinsic shape. The fix for any miss is in dispatch/typeinfo surface
+/// reading — never a restored walker fallback.
+#[test]
+fn stage4a_reexported_intrinsic_shape_resolves_via_dispatch_only() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/jsx_dom.ts",
+            r#"
+export interface HTMLAttributes {
+  id?: string
+  class?: string
+  role?: string
+}
+"#,
+        )
+        .unwrap();
+    // Barrel re-export — the JSX-intrinsic consumer reaches the attribute
+    // shape through `vue/jsx`'s re-export chain, so the bridge must
+    // resolve a re-exported symbol (not just an owner-local one) via
+    // dispatch.
+    project
+        .upsert_base(
+            "/jsx_runtime.ts",
+            r#"export type { HTMLAttributes } from './jsx_dom'
+"#,
+        )
+        .unwrap();
+    let _ = project
+        .host()
+        .ensure_indexed_ready("/jsx_dom.ts")
+        .expect("jsx dom should seed module facts");
+    let _ = project
+        .host()
+        .ensure_indexed_ready("/jsx_runtime.ts")
+        .expect("jsx runtime barrel should seed module facts");
+
+    let _store_view = project.host().resolver_store_view();
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(project.host());
+    let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
+        &mut query_engine,
+        "/jsx_runtime.ts",
+        "HTMLAttributes",
+    )
+    .expect(
+        "Stage 4a — the re-exported intrinsic attribute shape `HTMLAttributes` \
+         MUST resolve through the dispatch surface (the JSX-intrinsic consumer \
+         resolves intrinsic shapes through this bridge). If this returns None \
+         after the walker fallback removal, the fix is in dispatch/typeinfo \
+         re-export surface reading — NOT a restored walker fallback.",
+    );
+    let projected_debug = format!("{projected:?}");
+    assert!(
+        projected_debug.contains("id")
+            && projected_debug.contains("class")
+            && projected_debug.contains("role"),
+        "Stage 4a — the projected re-exported `HTMLAttributes` surface MUST \
+         enumerate the declared attribute members (`id` / `class` / `role`) \
+         through dispatch. Got: {projected_debug}"
+    );
+}
+
 #[test]
 fn imported_typeof_member_paths_reach_final_component_meta() {
     let project = make_project();
