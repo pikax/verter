@@ -866,11 +866,18 @@ fn typeof_construct_return_is_produced_by_instantiate_vue_default() {
 //           `$props.self` raises to `TypeExpr::RecursiveRef`.
 //
 //           DISCRIMINATING: this test FAILS (and is what proves the guard is
-//           reached) if `push_instantiate_active` is neutralized to always admit —
-//           the re-entry then recurses past the guard instead of short-circuiting.
-//           Verified by temporarily returning `true` unconditionally from
-//           `push_instantiate_active` (see the report): the eager self-cycle then
-//           does NOT terminate at the sentinel.
+//           reached) if `push_instantiate_active` is neutralized to always admit.
+//           With the guard disabled the re-entry does NOT short-circuit on the
+//           `Instantiate` same-key sentinel (the inner dispatch carries the
+//           DIFFERENT `StructuralTransit(Navigate)` context key, so that sentinel
+//           never fires). Instead the inner `TypeOf{Self/default}` re-entry hits
+//           the `TypeOf` memo's in-flight sentinel, which yields `Opaque(Miss)` —
+//           a NON-`Instantiate` sentinel, so the terminal raises to a Miss-derived
+//           shape rather than `TypeExpr::RecursiveRef`. The active-instantiation
+//           guard is therefore the ONLY path that produces the `RecursiveRef`
+//           sentinel here. Verified by temporarily returning `true` unconditionally
+//           from `push_instantiate_active` (see the report): the eager self-cycle
+//           then does NOT raise to `RecursiveRef`.
 // ---------------------------------------------------------------------------
 
 const SELF_VUE: &str = r#"<script setup lang="ts">

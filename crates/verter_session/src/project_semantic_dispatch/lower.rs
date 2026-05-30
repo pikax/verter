@@ -1283,7 +1283,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // dispatch. The path walker materialises `T[K]` via
             // `ProjectPath` semantics.
             TypeExpr::IndexedAccess { object, index } => {
-                use crate::semantic_query::{IndexKey, ProjectionMode};
+                use crate::semantic_query::IndexKey;
                 let obj_id = self.shallow_lower_type_expr_with_context(
                     object,
                     env,
@@ -1383,10 +1383,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         scope.clone(),
                     )
                 } else {
+                    // Path-precision rule: the literal `T[K]` single-hop
+                    // is the TERMINAL projection of this indexed access,
+                    // so it runs in the CALLER's mode (not a hardcoded
+                    // `Navigate`). The `object` lowered above is the
+                    // intermediate base — `shallow_lower_type_expr_*` is
+                    // already a shallow producer (no eager member
+                    // expansion), so a chained inner `A['a']` hop enters
+                    // this arm with its own caller mode and stays
+                    // shallow/Navigate when it is itself an intermediate.
+                    // A structural-transit caller keeps transit/Navigate
+                    // via its own `reduction_context.mode`.
                     match self.execute(SemanticQueryKey::IndexedAccess {
                         base: obj_id,
                         index: index_key,
-                        mode: ProjectionMode::Navigate,
+                        mode: reduction_context.mode,
                     }) {
                         QueryResult::Value(id) => id,
                         _ => self.opaque(QueryError::Miss),
