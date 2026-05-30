@@ -626,6 +626,98 @@ fn owner_local_macro_root_authority_uses_typeinfo_surface() {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// 6. P2a — aliased-union DTO. `type UnionAlias = Fixed | Bubble;
+//    defineProps<UnionAlias>()`. The macro-object DTO surface MUST
+//    enumerate the UNION of object-arm members (every member present in
+//    ANY arm is part of the component macro surface — the Vue macro
+//    convention), NOT the TS property-access INTERSECTION of common
+//    members.
+//
+//    Discrimination: branch-only members (`width` on `Fixed`, `offset`
+//    on `Bubble`) appear ONLY under the `MacroObjectSurface` demand. The
+//    pre-P2a `published(Shallow)` demand synthesises the intersection and
+//    drops both branch-only members, keeping only the common `tag`. The
+//    fix is in `resolve_vue_macro_surface`'s `terminal_context`
+//    (`macro_object_surface` instead of `published`).
+// ─────────────────────────────────────────────────────────────────────
+
+const ALIASED_UNION_PROPS_VUE: &str = r#"<script setup lang="ts">
+type Fixed = { tag: 'fixed'; width: number };
+type Bubble = { tag: 'bubble'; offset: number };
+type UnionAlias = Fixed | Bubble;
+defineProps<UnionAlias>();
+</script>
+<template><div></div></template>
+"#;
+
+#[test]
+fn p2a_aliased_union_define_props_enumerates_both_arms() {
+    use verter_session::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
+    use verter_semantic::analysis::AnalyzedMacroKind;
+
+    let host = harness::build_hermetic_host_with_lib(
+        &[("/AliasedUnionProps.vue", ALIASED_UNION_PROPS_VUE)],
+        &[("lib.es5.d.ts", harness::STUB_LIB_ES5)],
+    );
+
+    // (a) Direct `vue_macro_dtos` (FullMetadata) — the exact P2a surface.
+    let dtos = host.vue_macro_dtos(&VueMacroSurfaceRequest {
+        owner_canonical: std::sync::Arc::from("/AliasedUnionProps.vue"),
+        macro_index: 0,
+        macro_kind: AnalyzedMacroKind::DefineProps,
+        root_identity: [0u8; 16],
+        level: TypeInfoQueryLevel::FullMetadata,
+    });
+    let dto_names: Vec<&str> = dtos.props.iter().map(|p| p.name.as_str()).collect();
+    // The common member is always present (it is in both arms).
+    assert!(
+        dto_names.contains(&"tag"),
+        "the macro-object DTO surface MUST carry the common member `tag`. \
+         Got: {dto_names:?}"
+    );
+    // Branch-only members survive ONLY under the union-arm enumeration
+    // (`MacroObjectSurface`). Under ordinary `Published(Shallow)`
+    // intersection, BOTH drop — that is the aliased-union bug this test
+    // discriminates.
+    for branch_only in ["width", "offset"] {
+        assert!(
+            dto_names.contains(&branch_only),
+            "the macro-object DTO surface MUST enumerate the UNION of \
+             object-arm members; branch-only member `{branch_only}` is missing. \
+             Ordinary `Published(Shallow)` synthesises the property-access \
+             INTERSECTION and drops it — the P2a `macro_object_surface` demand \
+             enumerates the arms. Got: {dto_names:?}"
+        );
+    }
+
+    // (b) End-to-end: the `evaluate_types().define_props` mirror reads the
+    // same now-union-enumerated DTO surface.
+    let evaluated = host
+        .evaluate_types("/AliasedUnionProps.vue")
+        .expect("evaluate_types must resolve");
+    let define_names = define_props_member_names(&evaluated);
+    for required in ["tag", "width", "offset"] {
+        assert!(
+            define_names.iter().any(|n| n == required),
+            "the define_props mirror MUST carry union-arm member \
+             `{required}` from the macro-object DTO surface. Got: {define_names:?}"
+        );
+    }
+
+    // Final component meta must agree — every union-arm prop is published.
+    let meta = host
+        .get_component_meta("/AliasedUnionProps.vue")
+        .expect("get_component_meta must resolve");
+    let prop_names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    for required in ["tag", "width", "offset"] {
+        assert!(
+            prop_names.contains(&required),
+            "final meta MUST carry union-arm prop `{required}`. Got: {prop_names:?}"
+        );
+    }
+}
+
 // The JSX intrinsic projection regression test lives in-crate
 // (`meta_resolve_tests.rs::reexported_intrinsic_shape_resolves_via_dispatch_only`)
 // because it must call the `pub(crate)`
