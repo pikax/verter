@@ -7266,7 +7266,19 @@ withDefaults(defineProps<Props>(), {
     prop_names.sort_unstable();
     assert_eq!(
         prop_names,
-        vec!["editor", "layout", "options", "pluginKey"],
+        // P2a: `vue_macro_dtos` synthesises the macro-object surface under the
+        // Vue `MacroObjectSurface` demand, which enumerates the UNION of the
+        // `Props = (BaseProps & Partial<Omit<BubbleMenuPluginProps,'editor'>> &
+        // {layout:'bubble'}) | (… FloatingMenuPluginProps …)` arms. `shouldShow`
+        // is a `BubbleMenuPluginProps` arm member, so it is part of the macro
+        // surface (a member present in ANY arm is a published prop — the Vue
+        // convention), alongside the pre-seeded authoritative `editor` /
+        // `layout` / `pluginKey` / `options`. Pre-P2a the ordinary
+        // `Published(Shallow)` synthesis produced only the property-access
+        // INTERSECTION and dropped `shouldShow`. The end-to-end union behaviour
+        // is locked by
+        // `meta_tests::get_component_meta_editor_toolbar_union_keeps_base_and_plugin_props`.
+        vec!["editor", "layout", "options", "pluginKey", "shouldShow"],
         "synthesized defineProps shape should reuse the authoritative populated expanded surface, got {prop_names:?}"
     );
 }
