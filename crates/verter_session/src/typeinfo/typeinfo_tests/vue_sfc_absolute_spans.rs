@@ -273,6 +273,43 @@ fn dual_block_member_spans_slice_raw_from_both_blocks() {
     );
 }
 
+/// Raise a surface member's value node to its `TypeExpr` through the SAME
+/// shared structural raiser the production normalizer uses
+/// (`adapters::vue::surface::raise_member_value`: store view + completion
+/// overlay + `ProjectSemanticDispatch::raise_node_to_type_expr`). The member's
+/// `value` is a shallow `SemanticNodeId`; for a function-like slot member it
+/// raises to `TypeExpr::Function`.
+fn raise_member_value(
+    host: &VerterHost,
+    member: &TypeInfoSurfaceMember,
+) -> verter_type_expr::TypeExpr {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    let store_view = host.resolver_store_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    dispatch
+        .raise_node_to_type_expr(member.value)
+        .expect("slot member value must raise to a TypeExpr")
+}
+
+/// The NUMERIC return-type-annotation span of a function-like slot member.
+///
+/// This reaches the span the slot DTO discards: `slots_from_typeinfo_surface`
+/// slices `func.spans.return_type` into the display `return_type` String and
+/// then drops it (the published `AnalyzedSlotField.span` is a placeholder
+/// `Span::default()`). Mirrors `slot_callable_param_and_return`, which reads
+/// `func.spans.return_type` off the raised `TypeExpr::Function`.
+fn slot_return_type_span(host: &VerterHost, member: &TypeInfoSurfaceMember) -> verter_span::Span {
+    match raise_member_value(host, member) {
+        verter_type_expr::TypeExpr::Function(func) => func
+            .spans
+            .return_type
+            .expect("the slot function must carry a return-type annotation span"),
+        other => panic!("slot member `default` must raise to a Function; got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // (3) Slot-return span: a `defineSlots` slot whose function returns `VNode[]`
 //     has its return-type span slice the RAW source to `VNode[]`.
@@ -320,14 +357,32 @@ fn defineslots_return_span_slices_raw_to_vnode_array() {
         "slot return type must be sliced from the SFC-absolute return span in raw source"
     );
 
-    // DISCRIMINATING: prove the `VNode[]` text lives AFTER the template in the
-    // SFC — a compact-relative span could not produce this exact slice.
-    let template_end = raw.find("</template>").expect("template present");
-    let vnode_off = raw.find("VNode[]").expect("VNode[] present in raw");
+    // DISCRIMINATING (numeric span — the display String alone does NOT
+    // discriminate). The slot DTO's display `return_type` String `"VNode[]"` is
+    // SELF-CONSISTENT across the coordinate change: a compact eval source sliced
+    // by a compact-relative span still yields the text `"VNode[]"`, so asserting
+    // the String cannot FAIL against the pre-fix tree. The NUMERIC return-type
+    // span DIVERGES — a compact offset vs the SFC-absolute offset of `VNode[]`.
+    // Reach it through the raised `default` Function member (the slot DTO
+    // discards `func.spans.return_type` after slicing the display String).
+    let default_member = member(&macro_surface.surface, "default");
+    let return_type_span = slot_return_type_span(&host, default_member);
+
+    let vnode_off = raw.find("VNode[]").expect("VNode[] present in raw") as u32;
+    assert_eq!(
+        return_type_span.start, vnode_off,
+        "slot return-type span must be the SFC-ABSOLUTE offset of `VNode[]` ({vnode_off}), not a \
+         compact offset ({}); a compact eval source makes this span a small compact offset that \
+         no longer equals the raw `.find` position",
+        return_type_span.start
+    );
+    let template_end = raw.find("</template>").expect("template present") as u32;
     assert!(
-        vnode_off > template_end,
-        "`VNode[]` is after the template block; a slice that produced it from raw proves the \
-         span was SFC-absolute"
+        return_type_span.start > template_end,
+        "the slot return-type span ({}) must land AFTER the template block (ends at {}); a span \
+         before it proves a compact/eval-relative offset",
+        return_type_span.start,
+        template_end
     );
 }
 
@@ -430,6 +485,9 @@ fn vue_eval_source_is_position_preserving_same_length_and_blanked_markup() {
 
     // Script-content ranges: every byte of each known script block's content
     // must be IDENTICAL in eval and raw (script preserved at raw offsets).
+    // Collect the ranges so the complete-blanking invariant below can assert
+    // EVERY byte OUTSIDE all script content is blanked / a line terminator.
+    let mut script_ranges: Vec<std::ops::Range<usize>> = Vec::new();
     for needle in [
         "export interface Base {\n  baseField: number;\n}",
         "interface Props extends Base {\n  ownField: string;\n}\ndefineProps<Props>();",
@@ -443,6 +501,27 @@ fn vue_eval_source_is_position_preserving_same_length_and_blanked_markup() {
             &raw_b[start..end],
             "script content range [{start}, {end}) must be byte-identical in eval and raw"
         );
+        script_ranges.push(start..end);
+    }
+
+    // COMPLETE blanking invariant: EVERY byte that is NOT inside a script-content
+    // range must be a blank (` `) or a PRESERVED line terminator (`\r` / `\n`).
+    // This proves the eval source never carries the `<script>` open tags, their
+    // attributes (`lang="ts"`), the trailing `</script>` / `</template>` close
+    // tags, or any other inter-block markup byte — not merely the `<template>`
+    // region. A compact producer (shorter, or one that copies markup bytes
+    // through) FAILS here: a markup byte survives at some non-script offset.
+    for i in 0..raw.len() {
+        let in_script = script_ranges.iter().any(|r| r.contains(&i));
+        if !in_script {
+            assert!(
+                matches!(eval_b[i], b' ' | b'\n' | b'\r'),
+                "non-script byte at offset {i} must be blanked or a preserved line terminator; \
+                 got {:?} (raw byte {:?})",
+                eval_b[i] as char,
+                raw_b[i] as char
+            );
+        }
     }
 
     // Markup region: the leading `<template>...</template>` block has NO script
