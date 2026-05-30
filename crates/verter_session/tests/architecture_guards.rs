@@ -842,12 +842,13 @@ fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
         let callsite_count = count_callsites(&src, class_b_callsite_patterns);
         if rel == BRIDGE_FILE_REL {
             bridge_file_seen = true;
-            // The bridge file is the single allowed home. The
-            // current 5l implementation composes surviving
-            // pub(crate) helpers (`dispatch_projected_surface` +
-            // `cached_prepared_root_surface`) instead of calling the
-            // deleted Class B engine methods, so callsite_count is
-            // 0 today. The test does NOT require non-zero here —
+            // The bridge file is the single allowed home. The bridge
+            // bodies compose surviving pub(crate) helpers (the
+            // root-surface bridges resolve through `dispatch_projected_surface`
+            // ALONE after Stage 4-disp; the explicit prepared-surface
+            // callers still use `cached_prepared_root_surface`) instead of
+            // calling the deleted Class B engine methods, so callsite_count
+            // is 0 today. The test does NOT require non-zero here —
             // the discriminating signal is "zero outside, allowed
             // inside" — so a future bridge body that re-uses the
             // legacy engine names would still pass this guard
@@ -902,6 +903,53 @@ fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
          be ZERO (the JSX.IntrinsicElements site migrated through the \
          bridge helper); found {host_manage_b}"
     );
+}
+
+/// The two root-surface bridges
+/// (`project_type_surface_expr_via_host_threaded` /
+/// `project_type_surface_shape_via_host_threaded`) resolve a root symbol's
+/// surface through the shared dispatch surface projector ALONE. Stage 4-disp
+/// removed their prepared-decl root-surface rescue
+/// (`.or_else(cached_prepared_root_surface)`) — dispatch composes Object /
+/// Alias roots directly and compound roots from the decl anchor through the
+/// shared empty-path Shallow walker. This guard asserts the rescue stays
+/// absent: neither bridge body may reference `cached_prepared_root_surface`.
+///
+/// (The prepared-decl helper itself survives for explicit prepared-surface
+/// callers — `project_prepared_type_surface_*_via_host_threaded` — so this
+/// guard scopes to the two ROOT-surface bridge bodies, not the whole file.)
+#[test]
+fn root_surface_bridges_carry_no_prepared_decl_fallback() {
+    const BRIDGE_FNS: [&str; 2] = [
+        "fn project_type_surface_expr_via_host_threaded",
+        "fn project_type_surface_shape_via_host_threaded",
+    ];
+
+    let src = read_workspace_file("crates/verter_session/src/meta_resolve/dispatch_helpers.rs");
+
+    for signature in BRIDGE_FNS {
+        let sig_start = src.find(signature).unwrap_or_else(|| {
+            panic!(
+                "bridge fn `{signature}` not found in dispatch_helpers.rs — \
+                 the guard's anchor moved"
+            )
+        });
+        // Body slice = from this signature to the start of the NEXT top-level
+        // `fn ` (or EOF). Robust enough to isolate the bridge body without a
+        // brace parser; both bridges are short and contain no nested `fn `.
+        let after_sig = &src[sig_start + signature.len()..];
+        let body_end = after_sig.find("\nfn ").unwrap_or(after_sig.len());
+        let body = &after_sig[..body_end];
+        assert!(
+            !body.contains("cached_prepared_root_surface"),
+            "Stage 4-disp: `{signature}` must resolve the root surface through \
+             dispatch ALONE — it must NOT reference `cached_prepared_root_surface` \
+             (the prepared-decl root-surface rescue was removed). Re-introducing \
+             a `.or_else(cached_prepared_root_surface)` fallback behind dispatch \
+             is forbidden; fix any compound-root composition gap in the shared \
+             walker (the merge / heritage / Omit functions) instead."
+        );
+    }
 }
 
 // ===========================================================================

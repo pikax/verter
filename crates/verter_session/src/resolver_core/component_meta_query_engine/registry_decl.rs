@@ -727,21 +727,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.prepared_type_decl_query_count
     }
 
-    /// Number of times the root-surface bridge
-    /// (`project_type_surface_expr_via_host_threaded` /
-    /// `project_type_surface_shape_via_host_threaded`) reached its
-    /// prepared-decl fallback shim since the active
-    /// [`super::disable_prepared_root_surface_fallback_for_tests`] guard
-    /// was constructed. Tests assert `== 0` to prove the dispatch surface
-    /// projector was AUTHORITATIVE for the queried compound root (no
-    /// prepared-decl rescue needed). Thread-local backed, so it is
-    /// independent of the engine instance.
-    #[cfg(any(test, debug_assertions))]
-    #[allow(dead_code)]
-    pub(crate) fn debug_prepared_root_surface_projection_count(&self) -> usize {
-        super::prepared_root_surface_bridge_fallback_reaches()
-    }
-
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn debug_prepared_shared_surface_hit_count(&self) -> usize {

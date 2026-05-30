@@ -7,7 +7,6 @@
 //! engine-impl methods as `pub(super)` from sibling modules so the
 //! tests resolve symmetrically regardless of which sibling
 //! `impl<'a> ComponentMetaQueryEngine<'a>` block defined the method.
-use super::disable_prepared_root_surface_fallback_for_tests;
 use super::forbid_direct_pick_routed_expr_slow_lane_for_tests;
 use super::forbid_structural_slow_lane_for_tests;
 use super::ComponentMetaQueryEngine;
@@ -4486,20 +4485,18 @@ fn projected_member_declaration_origin_points_at_cross_file_declaration() {
 // ── Stage 4-disp: dispatch-authoritative compound-root surfaces ─────
 //
 // These tests drive the REAL root-surface bridge
-// (`project_type_surface_expr_via_host_threaded`) with the prepared-decl
-// rescue DISABLED via `disable_prepared_root_surface_fallback_for_tests`.
-// They prove the dispatch surface projector
-// (`projected_surface_from_semantic_node`) composes a COMPLETE shallow
-// surface for `Union` / `Intersection` (heritage) / `InstantiationRef`
-// roots — without the prepared-decl walker fallback.
+// (`project_type_surface_expr_via_host_threaded`). After Stage 4-disp the
+// bridge carries NO prepared-decl root-surface rescue — dispatch is the
+// sole root-surface authority — so each test proves the dispatch surface
+// composition (`dispatch_projected_surface`, which composes compound roots
+// from the decl anchor through the shared empty-path Shallow walker)
+// produces a COMPLETE shallow surface for `Union` / `Intersection`
+// (heritage) / `InstantiationRef` roots.
 //
-// Discrimination: before the surface.rs compound-root arms exist, the
-// projector returns `None` for these roots, the bridge reaches the
-// (disabled) fallback and returns `None`, and the `.expect` panics —
-// the test FAILS. After the arms route the root through
-// `ProjectPath{[], MacroObjectSurface(Shallow)}`, the bridge produces the
-// complete surface and `debug_prepared_root_surface_projection_count()`
-// stays `0` (dispatch was authoritative).
+// Discrimination: with no fallback present, if dispatch fails to compose
+// the compound root the bridge returns `None` and the `.expect` panics —
+// the test FAILS. The member presence/absence assertions further pin the
+// composed surface to the exact expected member set.
 
 /// Collect property + method member names from a projected object surface
 /// `TypeExpr`. Panics if `expr` is not an `Object` so a mis-shaped
@@ -4566,14 +4563,13 @@ export type UnionAlias<T = ArmA> = ArmA | ArmB
     let _store_view = host.resolver_store_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
-    let _fallback_guard = disable_prepared_root_surface_fallback_for_tests();
     let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
         &mut query_engine,
         "/src/App.vue",
         "UnionAlias",
     )
     .expect(
-        "dispatch must compose the union-alias root surface without the prepared-decl fallback",
+        "dispatch must compose the union-alias root surface (no prepared-decl fallback exists)",
     );
 
     let names = projected_object_member_names(&projected);
@@ -4588,11 +4584,6 @@ export type UnionAlias<T = ArmA> = ArmA | ArmB
     assert!(
         names.iter().any(|name| name == "onlyB"),
         "union surface keeps ArmB's branch-only member (union-of-members, not common-member-only); got {names:?}",
-    );
-    assert_eq!(
-        query_engine.debug_prepared_root_surface_projection_count(),
-        0,
-        "the union-alias root surface must be dispatch-authoritative — the prepared-decl bridge fallback must NOT be reached",
     );
 }
 
@@ -4650,14 +4641,13 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
     let _store_view = host.resolver_store_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
-    let _fallback_guard = disable_prepared_root_surface_fallback_for_tests();
     let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
         &mut query_engine,
         "/src/App.vue",
         "ColorModeSelectProps",
     )
     .expect(
-        "dispatch must compose the generic Omit-heritage root surface without the prepared-decl fallback",
+        "dispatch must compose the generic Omit-heritage root surface (no prepared-decl fallback exists)",
     );
 
     let names = projected_object_member_names(&projected);
@@ -4670,11 +4660,6 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
     assert!(
         !names.iter().any(|name| name == "items"),
         "Omit<SelectMenuProps, 'items'> must drop `items` from the surface; got {names:?}",
-    );
-    assert_eq!(
-        query_engine.debug_prepared_root_surface_projection_count(),
-        0,
-        "the Omit-heritage root surface must be dispatch-authoritative — the prepared-decl bridge fallback must NOT be reached",
     );
 }
 
@@ -4715,14 +4700,13 @@ export interface Derived extends ButtonProps {
     let _store_view = host.resolver_store_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
-    let _fallback_guard = disable_prepared_root_surface_fallback_for_tests();
     let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
         &mut query_engine,
         "/src/App.vue",
         "Derived",
     )
     .expect(
-        "dispatch must compose the ordinary heritage root surface without the prepared-decl fallback",
+        "dispatch must compose the ordinary heritage root surface (no prepared-decl fallback exists)",
     );
 
     let names = projected_object_member_names(&projected);
@@ -4733,10 +4717,5 @@ export interface Derived extends ButtonProps {
     assert!(
         names.iter().any(|name| name == "extra"),
         "ordinary heritage surface keeps the derived own-body `extra`; got {names:?}",
-    );
-    assert_eq!(
-        query_engine.debug_prepared_root_surface_projection_count(),
-        0,
-        "the ordinary heritage root surface must be dispatch-authoritative — the prepared-decl bridge fallback must NOT be reached",
     );
 }

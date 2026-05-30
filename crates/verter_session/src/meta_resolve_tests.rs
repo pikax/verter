@@ -1,8 +1,5 @@
 use super::*;
 use crate::meta::MetaProject;
-use crate::resolver_core::component_meta_query_engine::{
-    disable_prepared_root_surface_fallback_for_tests, prepared_root_surface_bridge_fallback_reaches,
-};
 use crate::resolver_core::ComponentMetaRequestHost;
 use crate::types::{HostConfig, ProjectionMode};
 use crate::VerterHost;
@@ -3875,10 +3872,9 @@ export interface HTMLAttributes {
 
     let _store_view = project.host().resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(project.host());
-    // Disable the prepared-decl root-surface bridge rescue so this proves the
-    // re-exported intrinsic shape is resolved by the DISPATCH surface ALONE —
-    // not masked by the fallback (which Stage-4 commit 4 removes).
-    let _fallback_guard = disable_prepared_root_surface_fallback_for_tests();
+    // After Stage 4-disp the bridge carries NO prepared-decl root-surface
+    // rescue, so this proves the re-exported intrinsic shape is resolved by
+    // the DISPATCH surface ALONE.
     let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
         &mut query_engine,
         "/jsx_runtime.ts",
@@ -3900,24 +3896,17 @@ export interface HTMLAttributes {
          enumerate the declared attribute members (`id` / `class` / `role`) \
          through dispatch. Got: {projected_debug}"
     );
-    assert_eq!(
-        prepared_root_surface_bridge_fallback_reaches(),
-        0,
-        "the re-exported intrinsic shape must be dispatch-authoritative — the \
-         prepared-decl bridge fallback must NOT be reached",
-    );
 }
 
 /// Registry-materialization caller rail: the registry decl materializer
 /// projects a root symbol through `project_type_surface_expr_via_host_threaded`
-/// (the SAME root-surface bridge Stage-4 commit 4 strips the fallback from).
-/// A CROSS-FILE generic `Omit`-heritage interface (the
-/// `DashboardSidebarCollapseProps extends Omit<ButtonProps, Keys>` shape) is
-/// the hard case: its dispatch root is an Intersection whose generic-Omit
-/// carrier arm can collapse to `Opaque(Miss)` under the root
-/// `Published(Expanded)` instantiation. With the prepared-decl rescue
-/// DISABLED this proves the registry rail resolves the compound root through
-/// the dispatch surface alone (composed from the decl anchor).
+/// (a root-surface bridge that, after Stage 4-disp, carries NO prepared-decl
+/// rescue). A CROSS-FILE generic `Omit`-heritage interface
+/// (`ButtonProps extends Omit<LinkProps, 'href'>`) is the hard case: its
+/// dispatch root is an Intersection whose generic-Omit carrier arm can
+/// collapse to `Opaque(Miss)` under the root `Published(Expanded)`
+/// instantiation, so this proves the registry rail resolves the compound
+/// root through the dispatch surface alone (composed from the decl anchor).
 #[test]
 fn registry_materialization_compound_omit_heritage_is_dispatch_authoritative() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
@@ -3958,7 +3947,6 @@ export interface ButtonProps extends Omit<LinkProps, 'href'> {
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(&host);
 
-    let _fallback_guard = disable_prepared_root_surface_fallback_for_tests();
     let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
         &mut query_engine,
         "/src/types.ts",
@@ -3967,7 +3955,7 @@ export interface ButtonProps extends Omit<LinkProps, 'href'> {
     .expect(
         "the registry rail must materialize the compound Omit-heritage \
          `ButtonProps` through the dispatch surface alone (composed from the \
-         decl anchor) — NOT via a restored prepared-decl fallback",
+         decl anchor); no prepared-decl root-surface fallback exists",
     );
 
     let TypeExpr::Object(object) = &projected else {
@@ -3991,21 +3979,15 @@ export interface ButtonProps extends Omit<LinkProps, 'href'> {
         !names.contains(&"href"),
         "Omit<LinkProps, 'href'> must drop `href` from the inherited surface; got {names:?}",
     );
-    assert_eq!(
-        prepared_root_surface_bridge_fallback_reaches(),
-        0,
-        "the registry compound-root materialization must be dispatch-authoritative — \
-         the prepared-decl bridge fallback must NOT be reached",
-    );
 }
 
 /// Slot-deepening caller rail: `defineSlots<T>` lowers its slot surface
 /// through `project_type_surface_shape_via_host_threaded` (the second
-/// root-surface bridge Stage-4 commit 4 strips the fallback from). A slot
-/// type that is a compound intersection of an imported mapped/record slot
-/// branch and a named-slot literal is the hard case. With the prepared-decl
-/// rescue DISABLED this proves the slot rail composes the compound slot
-/// surface through dispatch alone, so `default` survives to final meta.
+/// root-surface bridge that, after Stage 4-disp, carries NO prepared-decl
+/// rescue). A slot type that is a compound intersection of an imported
+/// mapped/record slot branch and a named-slot literal is the hard case;
+/// this proves the slot rail composes the compound slot surface through
+/// dispatch alone, so `default` survives to final meta.
 #[test]
 fn slot_deepening_compound_surface_is_dispatch_authoritative() {
     let project = make_project();
@@ -4032,23 +4014,16 @@ defineSlots<ComponentSlots>()
         )
         .unwrap();
 
-    let _fallback_guard = disable_prepared_root_surface_fallback_for_tests();
     let meta = project
         .host()
         .get_component_meta("/App.vue")
-        .expect("should return component meta with the slot bridge fallback disabled");
+        .expect("should return component meta (no prepared-decl root-surface fallback exists)");
 
     let slot_names: Vec<&str> = meta.slots.iter().map(|slot| slot.name.as_str()).collect();
     assert!(
         slot_names.contains(&"default"),
         "the named-slot branch of the compound imported slot type must survive \
          to final meta through the dispatch slot surface alone: {slot_names:?}",
-    );
-    assert_eq!(
-        prepared_root_surface_bridge_fallback_reaches(),
-        0,
-        "the compound slot surface must be dispatch-authoritative — the \
-         prepared-decl bridge fallback must NOT be reached",
     );
 }
 
