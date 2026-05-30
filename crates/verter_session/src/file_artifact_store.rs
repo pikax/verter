@@ -208,7 +208,13 @@ impl FileArtifactKey {
 /// Parser version for legacy-shape inserts. Bumps invalidate every
 /// entry the legacy surface inserted under
 /// [`FileArtifactKey::legacy`].
-pub const LEGACY_PARSER_VERSION: u32 = 1;
+///
+/// Bumped 1 → 2: `.vue` `eval_source` became position-preserving (script
+/// content at raw SFC byte offsets, non-script bytes blanked), so every
+/// post-parse artifact's spans are SFC-absolute rather than compact-relative.
+/// The bump evicts any pre-existing compact-layout artifact so a stale entry
+/// cannot serve eval-relative spans after the change.
+pub const LEGACY_PARSER_VERSION: u32 = 2;
 
 /// `parse_env_hash` sentinel used by the canonical-keyed legacy surface
 /// before later stages plumb the real env hash through every call site.

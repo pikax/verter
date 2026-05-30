@@ -119,10 +119,6 @@ export type {
   NativeResolvedMacroMeta,
   NativeResolvedTypeDeclaration,
   NativeResolvedNativeProp,
-  NativeResolvedPropField,
-  NativeResolvedEmitField,
-  NativeResolvedSlotField,
-  NativeResolvedSlotBinding,
   NativeResolvedJsdocBlock,
   NativeResolvedJsdocTag,
   // Native leaf types for consumers that destructure NativeComponentMetaResult

@@ -229,8 +229,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 SemanticNodeData::IndexedAccess { object, index } => {
-                    let object = self
-                        .evaluate_deferred_semantic_node_with_context(*object, reduction_context);
+                    // Path-precision rule: the deferred `T[K]` shell is
+                    // a single indexed-access hop whose OBJECT is the
+                    // intermediate base and whose projection of `K` is
+                    // the TERMINAL segment. The object recursion demotes
+                    // to `Navigate` so the intermediate surface stays
+                    // shallow (its sibling members — `$emit` / `$slots` /
+                    // unrelated props — are NOT eagerly expanded when the
+                    // caller demanded `Expanded`), while the terminal
+                    // single-hop projection runs in the CALLER's mode so
+                    // a demanded `Expanded` terminal resolves its carrier.
+                    let object = self.evaluate_deferred_semantic_node_with_context(
+                        *object,
+                        reduction_context.with_mode(ProjectionMode::Navigate),
+                    );
                     let index = match index {
                         IndexKey::String(text) => IndexKey::String(Arc::clone(text)),
                         IndexKey::Number(number) => IndexKey::Number(*number),
@@ -239,7 +251,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     match self.execute(SemanticQueryKey::IndexedAccess {
                         base: object,
                         index,
-                        mode: ProjectionMode::Navigate,
+                        mode: reduction_context.mode,
                     }) {
                         QueryResult::Value(id) => id,
                         _ => break self.opaque(QueryError::Miss),

@@ -40,6 +40,34 @@ use crate::host_manage::component_meta_request_impl::{
     ResolvedMacroMeta, ResolvedTypeRegistryMeta,
 };
 
+/// Resolve a `.vue` macro's normalized component-meta DTOs through the shared
+/// typeinfo Vue surface path (`VerterHost::vue_macro_dtos`, FullMetadata) — the
+/// SOLE props/emits/slots authority.
+///
+/// `owner_canonical` is the SFC the macro CALL lives in; `macro_index` indexes
+/// that SFC's `FileAnalysisSnapshot::macros`. The host-cached, request-validated
+/// `vue_macro_dtos` re-derives `whole_hash` + `macro_kind` from the live
+/// snapshot, so `root_identity` here is only a hint (the real key is validated
+/// inside). The returned bundle populates exactly the field matching
+/// `macro_kind` (`props` for `DefineProps` / `DefineModel`, `emits` for
+/// `DefineEmits`, `slots` for `DefineSlots`); the others stay empty.
+pub(crate) fn typeinfo_macro_dtos(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    owner_canonical: &str,
+    macro_index: usize,
+    macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
+) -> std::sync::Arc<crate::typeinfo::adapters::vue::store::VueMacroDtos> {
+    let host = ctx.host_for_fact_tracer_install();
+    let root_identity = ctx.get_whole_hash(owner_canonical).unwrap_or([0u8; 16]);
+    host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
+        owner_canonical: std::sync::Arc::from(owner_canonical),
+        macro_index,
+        macro_kind,
+        root_identity,
+        level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+    })
+}
+
 /// Emit `MemberEdgeProvenance::PublishedField` origin edges for the
 /// macro-shape that the orchestrator has just admitted onto the
 /// user-visible surface (`evaluated_types.define_props` /
@@ -331,6 +359,7 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                 } else if let Some((shape, source)) =
                     synthesize_define_props_shape_from_known_surface_with_authority(
                         query_engine.ctx,
+                        owner_canonical,
                         macro_index,
                         snapshot,
                         resolved_macros,
@@ -369,6 +398,7 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                 } else if !define_props_has_direct_local_root(mac)
                     && define_props_fields_fast_path_allowed(
                         query_engine.ctx,
+                        owner_canonical,
                         mac,
                         macro_index,
                         resolved_macros,
@@ -378,6 +408,7 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                     if let Some((shape, source)) =
                         synthesize_define_props_shape_from_known_surface_with_authority(
                             query_engine.ctx,
+                            owner_canonical,
                             macro_index,
                             snapshot,
                             resolved_macros,
@@ -608,6 +639,7 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                 } else if let Some((shape, source)) =
                     synthesize_define_emits_shape_from_known_surface(
                         query_engine.ctx,
+                        owner_canonical,
                         macro_index,
                         snapshot,
                         resolved_macros,
@@ -738,6 +770,7 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                 if !define_slots_needs_projection_rescue {
                     if let Some((shape, source)) = synthesize_define_slots_shape_from_known_surface(
                         query_engine.ctx,
+                        owner_canonical,
                         macro_index,
                         resolved_macros,
                     ) {
@@ -956,6 +989,7 @@ impl MacroShapeSource {
 
 pub(crate) fn define_props_fields_fast_path_allowed(
     ctx: &dyn crate::resolver_core::ResolverContext,
+    owner_canonical: &str,
     mac: &AnalyzedMacro,
     macro_index: usize,
     resolved_macros: &[ResolvedMacroMeta],
@@ -978,16 +1012,24 @@ pub(crate) fn define_props_fields_fast_path_allowed(
         _ => return false,
     }
 
-    // Presence-gate the candidate surfaces through the
-    // `ResolvedMacroSurface` enum (eager arm returns `.props`
-    // verbatim, so this is bit-identical to the pre-migration
-    // `!resolved.props.is_empty()` filter).
+    // Presence-gate through the typeinfo Vue surface (`vue_macro_dtos`,
+    // FullMetadata) — the sole props authority. The member set is keyed on
+    // `(owner, macro_index, DefineProps)`, identical for every `resolved_macros`
+    // entry at this index, so it is resolved ONCE and hoisted. An empty props
+    // surface fails the presence gate exactly as the eager
+    // `!resolved.props.is_empty()` filter did.
+    let props = typeinfo_macro_dtos(
+        ctx,
+        owner_canonical,
+        macro_index,
+        verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+    );
+    if props.props.is_empty() {
+        return false;
+    }
     let mut macro_surfaces = resolved_macros.iter().filter(|resolved| {
         resolved.macro_index == macro_index
             && resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps
-            && !crate::resolver_core::ResolvedMacroSurface::from_eager_meta(resolved)
-                .prop_members(ctx)
-                .is_empty()
     });
     let Some(first_surface) = macro_surfaces.next() else {
         return false;
@@ -1072,6 +1114,7 @@ pub(crate) fn define_props_known_surface_shortcut_allowed(
 
 pub(crate) fn synthesize_define_props_shape_from_known_surface_with_authority(
     ctx: &dyn crate::resolver_core::ResolverContext,
+    owner_canonical: &str,
     macro_index: usize,
     snapshot: &FileAnalysisSnapshot,
     resolved_macros: &[ResolvedMacroMeta],
@@ -1090,13 +1133,22 @@ pub(crate) fn synthesize_define_props_shape_from_known_surface_with_authority(
 
     let mac = snapshot.macros.get(macro_index)?;
     let allow_known_surface_shortcuts = !define_props_has_direct_local_root(mac);
-    // Read the matching macro's prop member set through the
-    // `ResolvedMacroSurface` enum rather than the direct `.props`
-    // field. The eager arm returns `ResolvedMacroMeta.props` verbatim
-    // so this gate is bit-identical to the pre-migration
-    // `!resolved.props.is_empty()` filter; the surface seam is what
-    // lets the lazy-imported arm reconstruct the member set on demand.
+    // Gate the known-surface shortcut on the matching macro having a non-empty
+    // prop member set, read from the typeinfo Vue surface (`vue_macro_dtos`,
+    // FullMetadata) — the sole props authority.
     let resolved_macro = if allow_known_surface_shortcuts {
+        // The prop member set is the typeinfo Vue surface (`vue_macro_dtos`,
+        // FullMetadata) -- the sole props authority -- keyed on
+        // `(owner, macro_index, DefineProps)`, identical for every matching
+        // `resolved_macros` entry. The `resolved_macros` filter still gates on
+        // authority (`surface_is_authoritative`) and `type_references`
+        // membership; the members come from typeinfo, not the eager rail.
+        let props = typeinfo_macro_dtos(
+            ctx,
+            owner_canonical,
+            macro_index,
+            verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+        );
         let mut macro_surfaces = resolved_macros
             .iter()
             .filter(|resolved| {
@@ -1105,11 +1157,8 @@ pub(crate) fn synthesize_define_props_shape_from_known_surface_with_authority(
                         == verter_semantic::analysis::AnalyzedMacroKind::DefineProps
                     && (!require_authoritative_surface || resolved.surface_is_authoritative)
             })
-            .filter_map(|resolved| {
-                let members = crate::resolver_core::ResolvedMacroSurface::from_eager_meta(resolved)
-                    .prop_members(ctx);
-                (!members.is_empty()).then_some((resolved, members))
-            });
+            .filter(|_resolved| !props.props.is_empty())
+            .map(|resolved| (resolved, props.props.clone()));
         let first = macro_surfaces.next();
         if macro_surfaces.next().is_none()
             && first.as_ref().is_some_and(|(resolved, _)| {
@@ -1346,6 +1395,7 @@ pub(crate) fn reuse_expanded_define_emits_shape(
 
 pub(crate) fn synthesize_define_emits_shape_from_known_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
+    owner_canonical: &str,
     macro_index: usize,
     snapshot: &FileAnalysisSnapshot,
     resolved_macros: &[ResolvedMacroMeta],
@@ -1392,24 +1442,28 @@ pub(crate) fn synthesize_define_emits_shape_from_known_surface(
         ));
     }
 
-    // Read the matching macro's emit member set through the
-    // `ResolvedMacroSurface` enum. The eager arm returns
-    // `ResolvedMacroMeta.emits` verbatim, so this gate is bit-identical
-    // to the pre-migration `!resolved.emits.is_empty()` filter. The
-    // lazy-imported arm reconstructs the emit set — including
-    // call-signature event names extracted from the resolved surface's
-    // call signatures (NOT from `keyof`).
+    // Gate on the matching macro having a non-empty emit member set, read from
+    // the typeinfo Vue surface — including call-signature event names extracted
+    // from the surface's call signatures (NOT from `keyof`).
+    // The emit member set is the typeinfo Vue surface (`vue_macro_dtos`,
+    // FullMetadata) -- the sole emits authority, including call-signature event
+    // extraction + payload first-param strip -- keyed on
+    // `(owner, macro_index, DefineEmits)`, identical for every matching
+    // `resolved_macros` entry.
+    let emits = typeinfo_macro_dtos(
+        ctx,
+        owner_canonical,
+        macro_index,
+        verter_semantic::analysis::AnalyzedMacroKind::DefineEmits,
+    );
     let mut matching_macros = resolved_macros
         .iter()
         .filter(|resolved| {
             resolved.macro_index == macro_index
                 && resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits
         })
-        .filter_map(|resolved| {
-            let emits = crate::resolver_core::ResolvedMacroSurface::from_eager_meta(resolved)
-                .emit_members(ctx);
-            (!emits.is_empty()).then_some(emits)
-        });
+        .filter(|_resolved| !emits.emits.is_empty())
+        .map(|_resolved| emits.emits.clone());
     let resolved_macro = matching_macros.next();
     if matching_macros.next().is_some() {
         return None;
@@ -1488,6 +1542,7 @@ pub(crate) fn synthesize_define_emits_shape_from_known_surface(
 
 pub(crate) fn synthesize_define_slots_shape_from_known_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
+    owner_canonical: &str,
     macro_index: usize,
     resolved_macros: &[ResolvedMacroMeta],
 ) -> Option<(ShapeResult, MacroShapeSource)> {
@@ -1495,24 +1550,28 @@ pub(crate) fn synthesize_define_slots_shape_from_known_surface(
         ExpandedObjectShape, ExpandedProperty, ExpansionResult,
     };
 
-    // Read the matching macro's slot member set through the
-    // `ResolvedMacroSurface` enum. The eager arm returns
-    // `ResolvedMacroMeta.slots` verbatim, so this gate is bit-identical
-    // to the pre-migration `!resolved.slots.is_empty()` filter. The
-    // lazy-imported arm reconstructs the slot set — filtering
-    // non-function members and extracting bindings / return shape from
-    // function-like members.
+    // Gate on the matching macro having a non-empty slot member set, read from
+    // the typeinfo Vue surface — filtering non-function members and extracting
+    // bindings / return shape from function-like members.
+    // The slot member set is the typeinfo Vue surface (`vue_macro_dtos`,
+    // FullMetadata) -- the sole slots authority (function-like members +
+    // first-param binding extraction) -- keyed on
+    // `(owner, macro_index, DefineSlots)`, identical for every matching
+    // `resolved_macros` entry.
+    let slots = typeinfo_macro_dtos(
+        ctx,
+        owner_canonical,
+        macro_index,
+        verter_semantic::analysis::AnalyzedMacroKind::DefineSlots,
+    );
     let mut matching_macros = resolved_macros
         .iter()
         .filter(|resolved| {
             resolved.macro_index == macro_index
                 && resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots
         })
-        .filter_map(|resolved| {
-            let slots = crate::resolver_core::ResolvedMacroSurface::from_eager_meta(resolved)
-                .slot_members(ctx);
-            (!slots.is_empty()).then_some(slots)
-        });
+        .filter(|_resolved| !slots.slots.is_empty())
+        .map(|_resolved| slots.slots.clone());
     let resolved_slots = matching_macros.next()?;
     if matching_macros.next().is_some() {
         return None;

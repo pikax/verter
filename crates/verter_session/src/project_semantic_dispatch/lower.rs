@@ -1283,7 +1283,32 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // dispatch. The path walker materialises `T[K]` via
             // `ProjectPath` semantics.
             TypeExpr::IndexedAccess { object, index } => {
-                use crate::semantic_query::{IndexKey, ProjectionMode};
+                use crate::semantic_query::IndexKey;
+                // Path-precision rule (mirrors `evaluate.rs`): in a NESTED
+                // `A['a']['b']`, the OUTER `['b']` access has an `object`
+                // operand that is ITSELF a `TypeExpr::IndexedAccess`
+                // (`A['a']`) — an INTERMEDIATE hop. That intermediate
+                // operand reduction demotes to `ProjectionMode::Navigate`
+                // so its sibling members are NOT eagerly expanded when the
+                // caller demanded `Expanded`; only the consumed TERMINAL
+                // segment (`['b']`) runs in the caller's mode (the
+                // eager-projection arm below).
+                //
+                // When the `object` operand is NOT itself an indexed access
+                // (a `Ref` / generic instantiation / inline object — e.g.
+                // `ComponentSurface<T>['status']`), THIS access is the
+                // single consumed terminal hop, so the object base keeps
+                // the caller's mode. Demoting it unconditionally would lower
+                // the base to a shallow carrier, flip the `should_defer`
+                // shape gate below to a deferred shell, and leave a demanded
+                // `Expanded` single-hop terminal unreduced.
+                let object_is_intermediate_indexed_access =
+                    matches!(object.as_ref(), TypeExpr::IndexedAccess { .. });
+                let object_context = if object_is_intermediate_indexed_access {
+                    reduction_context.with_mode(ProjectionMode::Navigate)
+                } else {
+                    reduction_context
+                };
                 let obj_id = self.shallow_lower_type_expr_with_context(
                     object,
                     env,
@@ -1292,7 +1317,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope_payload,
                     shadowing,
                     substitutions,
-                    reduction_context,
+                    object_context,
                 );
                 // Try to reduce literal-string / literal-number indices
                 // to a `PathSegment::Index` — fall back to TypeNode for
@@ -1383,10 +1408,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         scope.clone(),
                     )
                 } else {
+                    // Path-precision rule: the literal `T[K]` single-hop
+                    // is the TERMINAL projection of THIS indexed access,
+                    // so it runs in the CALLER's mode (not a hardcoded
+                    // `Navigate`). When `object` was itself an indexed
+                    // access (an intermediate hop), it was lowered in
+                    // `Navigate` above so its sibling members never expand;
+                    // a non-indexed-access base kept the caller's mode so a
+                    // demanded `Expanded` single-hop terminal still reduces.
+                    // A structural-transit caller keeps transit/Navigate via
+                    // its own `reduction_context.mode`.
                     match self.execute(SemanticQueryKey::IndexedAccess {
                         base: obj_id,
                         index: index_key,
-                        mode: ProjectionMode::Navigate,
+                        mode: reduction_context.mode,
                     }) {
                         QueryResult::Value(id) => id,
                         _ => self.opaque(QueryError::Miss),

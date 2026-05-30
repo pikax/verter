@@ -148,15 +148,17 @@ impl VerterHost {
         };
 
         // Enrich each member with its leading-JSDoc spans, sliced from the
-        // member's DECLARATION file's cache-owned source (`IndexedReady`'s
-        // retained `eval_source`). `build` is a pure graph projection that holds
-        // no source, so this source-touching step lives at the host layer. An
-        // inherited member's JSDoc is read from its origin (heritage base) file
-        // via the member's `declaration_origin` — see
-        // `TypeInfoSurface::with_member_jsdoc_spans`.
+        // member's DECLARATION file's cache-owned RAW source
+        // (`IndexedReady.raw_source`). Member/signature spans are SFC-absolute
+        // (the eval source is position-preserving), so the JSDoc anchor offset
+        // and the slice source share the raw-file coordinate system. `build` is
+        // a pure graph projection that holds no source, so this source-touching
+        // step lives at the host layer. An inherited member's JSDoc is read from
+        // its origin (heritage base) file via the member's `declaration_origin`
+        // — see `TypeInfoSurface::with_member_jsdoc_spans`.
         Some(surface.with_member_jsdoc_spans(|canonical| {
             self.ensure_indexed_ready(canonical)
-                .map(|indexed| Arc::clone(&indexed.eval_source))
+                .map(|indexed| Arc::clone(&indexed.raw_source))
         }))
     }
 }

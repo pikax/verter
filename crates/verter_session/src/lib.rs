@@ -203,8 +203,6 @@ pub mod host_resolve_type_audit;
 mod host_semantic;
 #[cfg(test)]
 pub(crate) mod host_test_audit;
-#[cfg(test)]
-mod host_test_seed;
 mod host_upsert;
 mod host_views;
 mod host_workspace_audit;
@@ -313,31 +311,6 @@ pub mod test_only {
             }
         }
     }
-
-    /// Typed-IR bridge probe + eager macro-surface probe. Lets the
-    /// hermetic integration tests in
-    /// `tests/imported_macro_surface_bridge.rs` and
-    /// `tests/stage2b1_macro_authority_equivalence.rs` exercise the
-    /// bridge's projection accessors and the eager/lazy macro-authority
-    /// equivalence against a `&VerterHost` without exposing the
-    /// `pub(crate)` `ResolverContext` trait to the public API.
-    /// Production code MUST NOT consume this module —
-    /// `tests/architecture_guards.rs` enforces.
-    ///
-    /// The body lives in `src/test_only_imported_macro_surface.rs`
-    /// (attached via `#[path]`) so the crate root stays under its line
-    /// ceiling (`tests/no_lib_rs_growth.rs`).
-    ///
-    /// `#[cfg(any(test, debug_assertions))]`-gated to match the gate
-    /// on the upstream `with_bare_host_ctx_for_test` helper this probe
-    /// consumes: a `pub mod` of a body that imports cfg-gated symbols
-    /// is an unresolved-import error in `cargo build --release` where
-    /// `debug_assertions` is off. Same invariant as the
-    /// `CompileForceOverflowGuard` re-export in
-    /// `host_resolve/mod.rs`.
-    #[cfg(any(test, debug_assertions))]
-    #[path = "../test_only_imported_macro_surface.rs"]
-    pub mod imported_macro_surface;
 }
 pub mod meta_resolve;
 #[cfg(test)]

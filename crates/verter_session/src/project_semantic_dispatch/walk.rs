@@ -446,6 +446,18 @@ pub(super) struct PathWalker<'a, 'b> {
     /// nested Instantiate dispatch produced a fatal `QueryError`. The
     /// memo refuses insertion when this is true.
     pub(super) cache_suppress: bool,
+    /// `true` when this walk projects a NON-EMPTY path (the caller
+    /// requested `base[seg..]`), as opposed to an EMPTY whole-surface
+    /// projection (`ProjectPath(base, [])`). Set once in [`Self::walk`].
+    ///
+    /// The path-precision rule distinguishes the two terminal cases: a
+    /// non-empty path's terminal value is a PROJECTED segment result, so
+    /// under `Expanded` it resolves a carrier (`DeclRef` /
+    /// `InstantiationRef`) UNDER the caller's mode. The empty whole-
+    /// surface projection KEEPS the carrier-preserving behaviour of
+    /// [`Self::expand_empty_path_terminal`] (the slot-binding indexed-
+    /// access preservation policy at the empty-path terminal expander).
+    original_path_non_empty: bool,
 }
 
 impl<'a, 'b> PathWalker<'a, 'b> {
@@ -463,6 +475,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             intermediate_nodes: Vec::new(),
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
+            original_path_non_empty: false,
         }
     }
 
@@ -524,6 +537,12 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     /// graph size (finite, interned). No stack recursion on arm descent.
     /// No depth cap.
     pub(super) fn walk(&mut self, base: SemanticNodeId, path: &[PathSegment]) -> SemanticNodeId {
+        // Record whether this is a non-empty projected path vs an empty
+        // whole-surface projection — the terminal expansion of a
+        // non-empty path resolves a `DeclRef` / `InstantiationRef`
+        // terminal under the caller's mode (path-precision), whereas the
+        // empty whole-surface projection stays carrier-preserving.
+        self.original_path_non_empty = !path.is_empty();
         let initial_path: Arc<[PathSegment]> = Arc::from(path.to_vec().into_boxed_slice());
         let mut frames: Vec<WalkFrame> = vec![WalkFrame::Step {
             node: base,
@@ -798,10 +817,22 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     current = resolved;
                 }
                 SemanticNodeData::IndexedAccess { object, index: ix } => {
+                    // Path-precision rule (mirrors the `InstantiationRef`
+                    // intermediate-hop demotion above and `evaluate.rs`):
+                    // this arm only runs inside `while index < path.len()`,
+                    // so a path segment is ALWAYS still pending — the
+                    // deferred `T[K]` shell is an INTERMEDIATE hop whose
+                    // resolved surface the next segment walks. Re-dispatch
+                    // it in `Navigate` so the intermediate stays shallow
+                    // (its sibling members are NOT eagerly expanded when
+                    // the caller demanded `Expanded`). Only the consumed
+                    // TERMINAL segment runs in the caller's mode — that is
+                    // handled after the loop by
+                    // `resolve_expanded_terminal_carrier`.
                     let resolved = match self.dispatch.execute(SemanticQueryKey::IndexedAccess {
                         base: *object,
                         index: ix.clone(),
-                        mode: self.mode(),
+                        mode: ProjectionMode::Navigate,
                     }) {
                         QueryResult::Value(id) => id,
                         _ => {
@@ -1450,11 +1481,89 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         // Identity / Navigate / Skeleton retain their bare carriers —
         // those modes' contracts promise no terminal-surface synthesis.
         if matches!(self.mode(), ProjectionMode::Expanded) {
+            // Path-precision: when this is a NON-EMPTY projected path,
+            // the terminal value is a projected segment result. A
+            // terminal `DeclRef` / `InstantiationRef` carrier
+            // (e.g. `$props` projected to `DeclRef(Props)`) resolves
+            // UNDER the caller's `Expanded` mode so the demanded
+            // terminal projection expands. The EMPTY whole-surface
+            // projection keeps the carrier-preserving behaviour of
+            // `expand_empty_path_terminal` below (the slot-binding
+            // indexed-access preservation policy) and is NOT pre-
+            // resolved here.
+            if self.original_path_non_empty {
+                current = self.resolve_expanded_terminal_carrier(current);
+            }
             current = self.expand_empty_path_terminal(current);
         } else if matches!(self.mode(), ProjectionMode::Shallow) {
             current = self.expand_empty_path_shallow_terminal_surface(current);
         }
         results.push(current);
+    }
+
+    /// Resolve a NON-EMPTY-path terminal carrier under `Expanded`.
+    ///
+    /// Path-precision rule: the terminal segment of a non-empty path
+    /// runs in the caller's mode. When the projected terminal is a
+    /// `DeclRef` / `InstantiationRef` carrier and the caller demanded
+    /// `Expanded`, resolve the carrier ONE level (declaration resolution
+    /// / instantiation under `published(Expanded)`) so the subsequent
+    /// `expand_empty_path_terminal` can materialise the Object surface.
+    ///
+    /// This mirrors the in-loop `DeclRef` / `InstantiationRef` arms
+    /// (`advance_step`), which only fire while a segment is still pending
+    /// (an INTERMEDIATE hop). The terminal carrier is reached after the
+    /// last segment is consumed, so the loop has already exited; this
+    /// applies the SAME resolution to the terminal under the caller's
+    /// mode. Non-carrier terminals (Object, Union, Intersection, …) are
+    /// returned unchanged and flow into `expand_empty_path_terminal`.
+    fn resolve_expanded_terminal_carrier(&mut self, node: SemanticNodeId) -> SemanticNodeId {
+        let data = match self.graph().node_data(node) {
+            Some(data) => data,
+            None => return node,
+        };
+        match &*data {
+            SemanticNodeData::DeclRef { identity } => {
+                let scope = ScopeId {
+                    canonical_id: Arc::clone(&identity.canonical_id),
+                    local_scope: None,
+                };
+                let name = Arc::clone(&identity.decl_name);
+                drop(data);
+                match self
+                    .dispatch
+                    .execute(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                        scope,
+                        name,
+                    })) {
+                    QueryResult::Value(id) => id,
+                    // A recursive / errored terminal carrier keeps the
+                    // carrier (no expansion) — the published surface stays
+                    // the bare `DeclRef` per the shallow-by-default rule
+                    // when resolution cannot complete.
+                    QueryResult::Recursive(_) | QueryResult::Error(_) => node,
+                }
+            }
+            SemanticNodeData::InstantiationRef { base, args } => {
+                let identity = base.clone();
+                let args_clone = Arc::clone(args);
+                drop(data);
+                match self.dispatch.execute(SemanticQueryKey::Instantiate {
+                    base: identity.to_decl_key(),
+                    args: args_clone,
+                    context: crate::semantic_query::ProjectionReductionContext::published(
+                        self.mode(),
+                    ),
+                }) {
+                    QueryResult::Value(id) => id,
+                    QueryResult::Recursive(_) | QueryResult::Error(_) => node,
+                }
+            }
+            _ => {
+                drop(data);
+                node
+            }
+        }
     }
 
     /// Combine the top `arm_count` entries from `results` into the

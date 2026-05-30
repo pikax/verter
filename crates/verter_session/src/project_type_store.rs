@@ -134,9 +134,12 @@ pub struct IndexedReady {
     pub route_hash: Option<Hash16>,
     /// Raw file source as-read. Shared immutable handle across consumers.
     pub raw_source: Arc<str>,
-    /// SFC-extracted `<script>` content used as the body of the eval
-    /// environment. For non-SFC files this equals the script slice of the
-    /// raw source.
+    /// Script source used as the body of the eval environment. For a `.vue`
+    /// SFC this is **position-preserving**: the same length as `raw_source`
+    /// with each `<script>` block's content copied to its raw SFC byte range
+    /// and every non-script byte whitespace-blanked (original CR/LF preserved),
+    /// so every OXC-produced span is SFC-absolute by construction. For a
+    /// non-SFC file this equals the raw source verbatim.
     pub eval_source: Arc<str>,
     /// Cached parsed SFC payload when the canonical file is a Vue SFC.
     /// Other file kinds carry `None`.
@@ -493,9 +496,11 @@ pub struct RouteOwnedShallowEntry {
     pub project_generation: u64,
     /// Raw file source as-read.
     pub raw_source: Arc<str>,
-    /// SFC-extracted `<script>` content used as the body of the eval
-    /// environment. For non-SFC files this equals the script slice of
-    /// the raw source.
+    /// Script source used as the body of the eval environment. For a `.vue`
+    /// SFC this is **position-preserving** (same length as `raw_source`,
+    /// script content at raw SFC byte offsets, non-script bytes blanked), so
+    /// every OXC-produced span is SFC-absolute. For a non-SFC file this equals
+    /// the raw source verbatim.
     pub eval_source: Arc<str>,
     /// Cached parsed SFC payload when the canonical file is a Vue SFC.
     pub cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,

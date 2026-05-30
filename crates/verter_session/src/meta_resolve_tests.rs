@@ -26,34 +26,86 @@ fn provenance(project: &MetaProject) -> crate::types::MetaProvenanceSnapshot {
     project.host().provenance().snapshot()
 }
 
-fn prop_names_from_resolved(state: &ResolvedComponentMetaState) -> Vec<String> {
+/// Resolve the typeinfo macro-surface DTOs for the `resolved_macros` entries
+/// matching `kind`, mirroring the production `component_meta_resolved_macros`
+/// path: the published props/emits/slots surface is owned SOLELY by the
+/// typeinfo macro-surface authority (`vue_macro_dtos`), keyed on the admitted
+/// macro index; `resolved_macros` supplies only the index + kind. Entries are
+/// deduplicated by macro index (multiple `ResolvedMacroMeta` per index are
+/// gating/provenance facts, not distinct field authorities).
+fn macro_dtos_for_kind(
+    host: &VerterHost,
+    owner: &str,
+    state: &ResolvedComponentMetaState,
+    kind: verter_semantic::analysis::AnalyzedMacroKind,
+) -> Vec<std::sync::Arc<crate::typeinfo::adapters::vue::store::VueMacroDtos>> {
+    let mut seen = rustc_hash::FxHashSet::default();
     state
         .resolved_macros
         .iter()
-        .filter(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
-        .flat_map(|m| m.props.iter())
-        .map(|p| p.name.clone())
+        .filter(|m| m.macro_kind == kind)
+        .filter(|m| seen.insert(m.macro_index))
+        .map(|m| {
+            host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
+                owner_canonical: std::sync::Arc::from(owner),
+                macro_index: m.macro_index,
+                macro_kind: m.macro_kind,
+                root_identity: host.current_or_read_whole_hash(owner).unwrap_or([0u8; 16]),
+                level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+            })
+        })
         .collect()
 }
 
-fn emit_names_from_resolved(state: &ResolvedComponentMetaState) -> Vec<String> {
-    state
-        .resolved_macros
-        .iter()
-        .filter(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits)
-        .flat_map(|m| m.emits.iter())
-        .map(|e| e.name.clone())
-        .collect()
+fn prop_names_from_resolved(
+    host: &VerterHost,
+    owner: &str,
+    state: &ResolvedComponentMetaState,
+) -> Vec<String> {
+    macro_dtos_for_kind(
+        host,
+        owner,
+        state,
+        verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+    )
+    .iter()
+    .flat_map(|dtos| dtos.props.iter())
+    .map(|p| p.name.clone())
+    .collect()
 }
 
-fn slot_names_from_resolved(state: &ResolvedComponentMetaState) -> Vec<String> {
-    state
-        .resolved_macros
-        .iter()
-        .filter(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
-        .flat_map(|m| m.slots.iter())
-        .map(|s| s.name.clone())
-        .collect()
+fn emit_names_from_resolved(
+    host: &VerterHost,
+    owner: &str,
+    state: &ResolvedComponentMetaState,
+) -> Vec<String> {
+    macro_dtos_for_kind(
+        host,
+        owner,
+        state,
+        verter_semantic::analysis::AnalyzedMacroKind::DefineEmits,
+    )
+    .iter()
+    .flat_map(|dtos| dtos.emits.iter())
+    .map(|e| e.name.clone())
+    .collect()
+}
+
+fn slot_names_from_resolved(
+    host: &VerterHost,
+    owner: &str,
+    state: &ResolvedComponentMetaState,
+) -> Vec<String> {
+    macro_dtos_for_kind(
+        host,
+        owner,
+        state,
+        verter_semantic::analysis::AnalyzedMacroKind::DefineSlots,
+    )
+    .iter()
+    .flat_map(|dtos| dtos.slots.iter())
+    .map(|s| s.name.clone())
+    .collect()
 }
 
 fn clear_legacy_cached_resolved_state(
@@ -149,16 +201,14 @@ fn imported_registry_seed_refresh_keeps_symbolic_imported_surfaces_refreshable()
 }
 
 #[test]
-fn append_component_meta_registry_entries_seeds_explicit_object_surface_for_imported_props() {
-    // Discriminating invariant: the direct imported macro root must
-    // seed the initial registry with an explicit object surface
-    // (driven by the `imported_elements` graph). An optimization to
-    // skip the imported-registry refresh (gated on
-    // `imported_declaration_surface_is_authoritative`) would require
-    // the source-text declaration body to be retained without
-    // heritage markers; the graph-only resolver does not retain
-    // declaration text, so that optimization does not engage and the
-    // seeding half is the surviving discriminator.
+fn append_component_meta_registry_entries_seeds_shallow_ref_for_imported_props() {
+    // Discriminating invariant (shallow-by-default): the direct imported macro
+    // root seeds the registry with a SHALLOW `TypeExpr::Ref { name }` — NOT an
+    // eagerly-materialised object surface. Consumers re-resolve the named root
+    // through the registry on demand; the typeinfo / evaluated path is the
+    // single shape authority. A regression that eagerly inlined the imported
+    // declaration body at seed time would surface an `Object` here and FAIL this
+    // assertion, so the shallow-Ref seed is the surviving discriminator.
     let project = make_project();
     project
         .upsert_base("/src/types.ts", "export interface Props { label: string }")
@@ -194,9 +244,29 @@ defineProps<Props>()
         .iter()
         .find(|entry| entry.name == "Props")
         .expect("the direct imported macro root should seed the initial registry");
+    match &props_entry.type_expr {
+        verter_type_expr::TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            assert_eq!(
+                name.as_ref(),
+                "Props",
+                "the shallow seed Ref names the root"
+            );
+            assert!(
+                type_arguments.is_empty(),
+                "the direct imported root seed carries no type arguments"
+            );
+        }
+        other => panic!(
+            "the direct imported seed should be a shallow Ref (shallow-by-default), got {other:?}"
+        ),
+    }
+    // Negative: it must NOT be an eagerly-materialised object surface.
     assert!(
-        matches!(props_entry.type_expr, verter_type_expr::TypeExpr::Object(_),),
-        "the initial direct imported seed should already hold an explicit object surface"
+        !matches!(props_entry.type_expr, verter_type_expr::TypeExpr::Object(_)),
+        "the seed must stay shallow — an eager object surface violates shallow-by-default"
     );
 }
 
@@ -619,19 +689,18 @@ defineProps<Props>()
 
     assert_eq!(state.mode, ProjectionMode::Identity);
 
-    // `ProjectionMode::Identity`: resolved_macros should carry identity info but NOT expanded props
+    // `ProjectionMode::Identity`: resolved_macros should carry identity info but
+    // NOT trigger expansion. The published props/emits/slots surface is owned by
+    // the typeinfo path (`vue_macro_dtos`), which is mode-INDEPENDENT, so "no
+    // expanded props" is no longer expressible as an empty macro-surface; the
+    // mode gate is owned by `evaluated_types` / `resolved_type_registry` below.
     assert!(
         !state.resolved_macros.is_empty(),
         "`ProjectionMode::Identity` should still identify macro type deps"
     );
-    let prop_names = prop_names_from_resolved(&state);
-    assert!(
-        prop_names.is_empty(),
-        "`ProjectionMode::Identity` must NOT materialize expanded prop shapes, got: {:?}",
-        prop_names
-    );
 
-    // `ProjectionMode::Identity`: no evaluated types
+    // `ProjectionMode::Identity`: no evaluated types (the cross-file shape
+    // materialiser runs only in `Expanded`).
     assert!(
         state.evaluated_types.is_none(),
         "`ProjectionMode::Identity` must NOT compute evaluated types"
@@ -671,8 +740,9 @@ defineProps<Props>()
 
     assert_eq!(state.mode, ProjectionMode::Expanded);
 
-    // `ProjectionMode::Expanded`: materialized props
-    let prop_names = prop_names_from_resolved(&state);
+    // `ProjectionMode::Expanded`: materialized props (sourced from the typeinfo
+    // macro-surface authority, the SOLE props/emits/slots owner).
+    let prop_names = prop_names_from_resolved(project.host(), "/App.vue", &state);
     assert!(
         prop_names.contains(&"a".to_string()),
         "`ProjectionMode::Expanded` should materialize prop 'a', got: {:?}",
@@ -736,14 +806,24 @@ defineProps<Props>()
         .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("`ProjectionMode::Expanded` should return result");
 
-    // Type entry must NOT satisfy Expanded
+    // The two modes produce DISTINCT resolved-meta states: the mode gate is the
+    // cross-file shape materialiser, observable via `evaluated_types` (the
+    // typeinfo macro-surface DTOs are mode-independent, so the published
+    // props/emits/slots surface cannot distinguish the modes — only the
+    // expansion side-effects can).
+    assert_eq!(type_state.mode, ProjectionMode::Identity);
+    assert_eq!(expanded_state.mode, ProjectionMode::Expanded);
     assert!(
-        prop_names_from_resolved(&type_state).is_empty(),
-        "`ProjectionMode::Identity` result must have no expanded props"
+        type_state.evaluated_types.is_none(),
+        "`ProjectionMode::Identity` result must NOT materialize evaluated types"
     );
     assert!(
-        !prop_names_from_resolved(&expanded_state).is_empty(),
-        "`ProjectionMode::Expanded` result must have expanded props"
+        expanded_state.evaluated_types.is_some(),
+        "`ProjectionMode::Expanded` result MUST materialize evaluated types"
+    );
+    assert!(
+        type_state.resolved_type_registry.is_empty(),
+        "`ProjectionMode::Identity` result must NOT populate the type registry"
     );
 }
 
@@ -881,8 +961,11 @@ defineProps<Props>()
 
     project.host().provenance().reset();
 
-    // `ProjectionMode::Identity` should NOT perform the expensive external type traversal
-    let type_state = project
+    // `ProjectionMode::Identity` should NOT perform the expensive external type
+    // traversal. We keep the result only to assert the traversal side-effects
+    // below; the mode gate is the provenance counters, not the (mode-independent)
+    // published macro surface.
+    let _type_state = project
         .host()
         .resolve_component_meta("/App.vue", ProjectionMode::Identity)
         .expect("`ProjectionMode::Identity` should return result");
@@ -904,12 +987,14 @@ defineProps<Props>()
         .expect("`ProjectionMode::Expanded` should return result");
 
     let p2 = provenance(&project);
+    // The Identity gate is enforced by the traversal-side-effect assertions
+    // above (Identity triggers ZERO external-type traversal) — a real,
+    // non-tautological signal. The published props surface is owned by the
+    // mode-independent typeinfo path, so we assert it materialises in Expanded
+    // rather than using it as an Identity-emptiness proxy.
     assert!(
-        prop_names_from_resolved(&type_state).is_empty(),
-        "`ProjectionMode::Identity` result must not include expanded props"
-    );
-    assert!(
-        prop_names_from_resolved(&expanded_state).contains(&"a".to_string()),
+        prop_names_from_resolved(project.host(), "/App.vue", &expanded_state)
+            .contains(&"a".to_string()),
         "`ProjectionMode::Expanded` should materialize imported props"
     );
     assert!(
@@ -959,7 +1044,7 @@ defineProps<Props>()
         .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("`ProjectionMode::Expanded` should return result");
 
-    let prop_names = prop_names_from_resolved(&state);
+    let prop_names = prop_names_from_resolved(project.host(), "/App.vue", &state);
     assert!(
         prop_names.contains(&"label".to_string()),
         "imported props should flow through shared resolver: {:?}",
@@ -998,7 +1083,7 @@ defineProps<Props>()
     let provenance = provenance(&project);
 
     assert!(
-        prop_names_from_resolved(&state).contains(&"a".to_string()),
+        prop_names_from_resolved(project.host(), "/App.vue", &state).contains(&"a".to_string()),
         "`ProjectionMode::Expanded` should still materialize imported props"
     );
     assert_eq!(
@@ -1063,7 +1148,7 @@ defineProps<Props>()
         .find(|m| m.type_name == "Props")
         .expect("resolved class macro should be present");
 
-    let prop_names = prop_names_from_resolved(&state);
+    let prop_names = prop_names_from_resolved(project.host(), "/App.vue", &state);
     // The shared resolver should include public inherited base-class members
     // while still hiding protected/private fields.
     assert!(
@@ -1169,7 +1254,7 @@ defineProps<Props>()
         .iter()
         .find(|m| m.type_name == "Props")
         .expect("resolved interface macro should be present");
-    let prop_names = prop_names_from_resolved(&state);
+    let prop_names = prop_names_from_resolved(project.host(), "/App.vue", &state);
     assert!(
         prop_names.contains(&"from_base".to_string()),
         "interface should inherit public class members through the shared resolver: {:?}",
@@ -1220,7 +1305,7 @@ defineEmits<Events>()
         .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("`ProjectionMode::Expanded` should return result");
 
-    let emit_names = emit_names_from_resolved(&state);
+    let emit_names = emit_names_from_resolved(project.host(), "/App.vue", &state);
     assert!(
         emit_names.contains(&"change".to_string()),
         "imported emits should flow through shared resolver: {:?}",
@@ -1253,7 +1338,7 @@ defineSlots<Slots>()
         .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("`ProjectionMode::Expanded` should return result");
 
-    let slot_names = slot_names_from_resolved(&state);
+    let slot_names = slot_names_from_resolved(project.host(), "/App.vue", &state);
     assert!(
         slot_names.contains(&"default".to_string()),
         "imported slots should flow through shared resolver: {:?}",
@@ -1498,7 +1583,7 @@ defineProps<Props>()
         .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("barrel resolution should work through shared resolver");
 
-    let prop_names = prop_names_from_resolved(&state);
+    let prop_names = prop_names_from_resolved(project.host(), "/App.vue", &state);
     assert!(
         prop_names.contains(&"a".to_string()),
         "barrel-re-exported prop should be resolved: {:?}",
@@ -1534,7 +1619,7 @@ defineProps<Bar>()
         .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("alias barrel resolution should work through shared resolver");
 
-    let prop_names = prop_names_from_resolved(&state);
+    let prop_names = prop_names_from_resolved(project.host(), "/App.vue", &state);
     assert!(
         prop_names.contains(&"aliased".to_string()),
         "alias import + local export should resolve the original declaration: {:?}",
@@ -1573,7 +1658,7 @@ defineProps<Bar>()
         .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("plain alias barrel resolution should work through shared resolver");
 
-    let prop_names = prop_names_from_resolved(&state);
+    let prop_names = prop_names_from_resolved(project.host(), "/App.vue", &state);
     assert!(
         prop_names.contains(&"aliased_plain".to_string()),
         "plain import alias + local export should resolve the original declaration: {:?}",
@@ -1617,7 +1702,7 @@ defineProps<Props>()
         .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("default import alias barrel resolution should work through shared resolver");
 
-    let prop_names = prop_names_from_resolved(&state);
+    let prop_names = prop_names_from_resolved(project.host(), "/App.vue", &state);
     assert!(
         prop_names.contains(&"label".to_string()),
         "default import + local export should resolve the underlying class declaration: {:?}",
@@ -1835,27 +1920,19 @@ defineProps<Props>()
         .expect("second resolve should succeed after owner-only change");
     let after_second = project.host().resolver_runtime().counter_snapshot();
 
-    let first_props: Vec<_> = first.resolved_macros[0]
-        .props
-        .iter()
-        .map(|prop| prop.name.as_str())
-        .collect();
-    let second_props: Vec<_> = second.resolved_macros[0]
-        .props
-        .iter()
-        .map(|prop| prop.name.as_str())
-        .collect();
+    let first_props = prop_names_from_resolved(project.host(), "/App.vue", &first);
+    let second_props = prop_names_from_resolved(project.host(), "/App.vue", &second);
 
     assert!(
-        first_props.contains(&"label"),
+        first_props.contains(&"label".to_string()),
         "first resolve should include the imported prop"
     );
     assert!(
-        second_props.contains(&"label"),
+        second_props.contains(&"label".to_string()),
         "second resolve should still include the imported prop"
     );
     assert!(
-        !second_props.contains(&"missing"),
+        !second_props.contains(&"missing".to_string()),
         "owner-only recompute must not fabricate unrelated props"
     );
     assert!(
@@ -3917,10 +3994,26 @@ const emitB = defineEmits<Events>()
         vec![0, 1],
         "resolved macro identity should follow the raw macro order"
     );
+    // Each macro index materializes its own emit payload through the SOLE
+    // typeinfo macro-surface authority (keyed on the distinct macro index).
     assert!(
-        emit_macros
-            .iter()
-            .all(|m| m.emits.iter().any(|emit| emit.name == "save")),
+        emit_macros.iter().all(|m| {
+            project
+                .host()
+                .vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
+                    owner_canonical: std::sync::Arc::from("/App.vue"),
+                    macro_index: m.macro_index,
+                    macro_kind: m.macro_kind,
+                    root_identity: project
+                        .host()
+                        .current_or_read_whole_hash("/App.vue")
+                        .unwrap_or([0u8; 16]),
+                    level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+                })
+                .emits
+                .iter()
+                .any(|emit| emit.name == "save")
+        }),
         "each macro should materialize its imported emit payload through the shared path"
     );
 }
@@ -4027,11 +4120,11 @@ defineProps<LibProps>()
         .resolve_component_meta("/project/App.vue", ProjectionMode::Expanded)
         .expect("package declaration entrypoint should resolve");
 
-    let prop_names = prop_names_from_resolved(&state);
+    let prop_names = prop_names_from_resolved(project.host(), "/project/App.vue", &state);
     assert!(
         prop_names.contains(&"x".to_string()),
         "resolver should materialize imported props from declaration entrypoints: {:?}",
-        state.resolved_macros
+        prop_names
     );
 }
 
@@ -4089,11 +4182,11 @@ defineProps<LibProps>()
         .resolve_component_meta("/project/App.vue", ProjectionMode::Expanded)
         .expect("package declaration alias reexport should resolve");
 
-    let prop_names = prop_names_from_resolved(&state);
+    let prop_names = prop_names_from_resolved(project.host(), "/project/App.vue", &state);
     assert!(
         prop_names.contains(&"y".to_string()),
         "resolver should follow import alias reexports through declaration entrypoints: {:?}",
-        state.resolved_macros
+        prop_names
     );
 }
 
@@ -4227,15 +4320,18 @@ defineProps<Props>()
         )
         .unwrap();
 
-    // Query through session — should NOT reuse stale base cache
-    let (_analysis, session_state) = session
+    // Query through session — should NOT reuse stale base cache. The overlay
+    // view is observed through the PUBLISHED component-meta surface (the public
+    // session output), which is the overlay-aware authority; the session host's
+    // own `vue_macro_dtos` reads the base view, so we assert the published props.
+    let (analysis, _session_state) = session
         .get_component_meta_with_resolution("/App.vue")
         .unwrap()
         .expect("session resolver query should return a result");
-    let overlay_props: Vec<&str> = session_state
-        .resolved_macros
+    let overlay_props: Vec<&str> = analysis
+        .props
         .iter()
-        .flat_map(|resolved| resolved.props.iter().map(|prop| prop.name.as_str()))
+        .map(|prop| prop.name.as_str())
         .collect();
     assert!(
         overlay_props.contains(&"overlay_prop"),
@@ -4339,7 +4435,7 @@ defineProps<Props>()
         .expect("should return result");
 
     // Assert+: props should be resolved correctly from the type alias
-    let prop_names = prop_names_from_resolved(&state);
+    let prop_names = prop_names_from_resolved(project.host(), "/App.vue", &state);
     assert!(
         prop_names.contains(&"a".to_string()),
         "should resolve 'a': {:?}",
@@ -4546,7 +4642,7 @@ defineProps<Props>()
         .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("should return result");
 
-    let prop_names = prop_names_from_resolved(&state);
+    let prop_names = prop_names_from_resolved(project.host(), "/App.vue", &state);
     // Assert+: public members should be included
     assert!(
         prop_names.contains(&"label".to_string()),
@@ -4726,6 +4822,7 @@ fn define_props_macro_shape_reuses_expanded_fields_directly() {
     let (shape, source) = crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
         synthesize_define_props_shape_from_known_surface_with_authority(
             ctx,
+            "/test.vue",
             0,
             &snapshot,
             &[],
@@ -4778,6 +4875,36 @@ fn define_props_macro_shape_reuses_expanded_fields_directly() {
 
 #[test]
 fn define_props_macro_shape_prefers_resolved_macro_when_expanded_fields_are_incomplete() {
+    // Real SFC: `defineProps<Props>()` where `Props extends Pick<BaseProps,
+    // 'id' | 'label'>` adds `own`. The producer sources its prop
+    // member set from the typeinfo Vue surface (`vue_macro_dtos`), NOT a
+    // synthetic `ResolvedMacroMeta.props`, so the SFC + its `BaseProps` carrier
+    // must be REAL for the typeinfo path to resolve `[id, label, own]`.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base.ts",
+            "export interface BaseProps { id: string; label?: string; extra: number }",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { BaseProps } from './base'
+interface Props extends Pick<BaseProps, 'id' | 'label'> { own?: boolean }
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    assert!(host.ensure_loaded("/src/App.vue"));
+
+    // Synthetic snapshot + resolved-macro carry ONLY the gating facts the
+    // producer still reads from `ResolvedMacroMeta` (the matched `type_name`,
+    // `surface_is_authoritative`). The member SET is resolved from the real
+    // SFC's typeinfo surface, keyed on `(owner, macro_index=0, DefineProps)`.
     let snapshot = crate::types::FileAnalysisSnapshot {
         macros: vec![verter_semantic::analysis::types::AnalyzedMacro {
             kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
@@ -4819,51 +4946,11 @@ fn define_props_macro_shape_prefers_resolved_macro_when_expanded_fields_are_inco
             ),
         },
         native_props: Vec::new(),
-        props: vec![
-            verter_semantic::analysis::AnalyzedPropField {
-                name: "id".to_string(),
-                type_annotation: Some("string".to_string()),
-                is_optional: false,
-                span: verter_span::Span::new(0, 0),
-                description: None,
-                tags: Vec::new(),
-                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-                resolution_error: None,
-                type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
-                type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-                declared_in_macro_type_arg: false,
-            },
-            verter_semantic::analysis::AnalyzedPropField {
-                name: "label".to_string(),
-                type_annotation: Some("string".to_string()),
-                is_optional: true,
-                span: verter_span::Span::new(0, 0),
-                description: None,
-                tags: Vec::new(),
-                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-                resolution_error: None,
-                type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
-                type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-                declared_in_macro_type_arg: false,
-            },
-            verter_semantic::analysis::AnalyzedPropField {
-                name: "own".to_string(),
-                type_annotation: Some("boolean".to_string()),
-                is_optional: true,
-                span: verter_span::Span::new(0, 0),
-                description: None,
-                tags: Vec::new(),
-                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-                resolution_error: None,
-                type_expr: Some(TypeExpr::Primitive(PrimitiveName::Boolean)),
-                type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-                declared_in_macro_type_arg: false,
-            },
-        ],
-        emits: Vec::new(),
-        slots: Vec::new(),
         jsdoc: None,
     }];
+    // Expanded fields are INCOMPLETE — only `own` resolved — so the producer
+    // must fall back to the wider typeinfo `resolved_macro` surface
+    // (`[id, label, own]`) rather than truncating to `[own]`.
     let evaluated = verter_semantic::analysis::type_expand::ExpandedComponentTypes {
         props: vec![verter_semantic::analysis::type_expand::ExpandedField {
             name: "own".to_string(),
@@ -4885,10 +4972,10 @@ fn define_props_macro_shape_prefers_resolved_macro_when_expanded_fields_are_inco
         type_arguments: Vec::new().into(),
     };
 
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let (shape, source) = crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+    let (shape, source) = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         synthesize_define_props_shape_from_known_surface_with_authority(
             ctx,
+            "/src/App.vue",
             0,
             &snapshot,
             &resolved_macros,
@@ -4898,17 +4985,19 @@ fn define_props_macro_shape_prefers_resolved_macro_when_expanded_fields_are_inco
         )
     })
     .expect("defineProps should merge the wider resolved macro surface when expanded fields are incomplete");
-    let prop_names: Vec<&str> = shape
+    let mut prop_names: Vec<&str> = shape
         .value
         .properties
         .iter()
         .map(|property| property.name.as_str())
         .collect();
+    prop_names.sort_unstable();
 
     assert_eq!(
         prop_names,
         vec!["id", "label", "own"],
-        "resolved macro fallback should keep inherited imported props instead of truncating to the local evaluated field set"
+        "resolved macro fallback should keep inherited imported props (id, label via Pick<BaseProps>) \
+         instead of truncating to the local evaluated field set"
     );
     assert!(
         matches!(source, MacroShapeSource::ResolvedMacro),
@@ -4942,7 +5031,7 @@ fn define_props_fields_fast_path_allows_direct_object_literals() {
     let host = VerterHost::new_standalone(HostConfig::default());
     assert!(
         crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
-            define_props_fields_fast_path_allowed(ctx, &mac, 0, &[], Some(&lowered))
+            define_props_fields_fast_path_allowed(ctx, "/test.vue", &mac, 0, &[], Some(&lowered))
         }),
         "direct object literals should keep using the fields fast path"
     );
@@ -5003,21 +5092,6 @@ fn define_props_fields_fast_path_rejects_complex_heritage_refs() {
             ),
         },
         native_props: Vec::new(),
-        props: vec![verter_semantic::analysis::AnalyzedPropField {
-            name: "to".to_string(),
-            type_annotation: Some("string".to_string()),
-            is_optional: true,
-            span: verter_span::Span::new(0, 0),
-            description: None,
-            tags: Vec::new(),
-            resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-            resolution_error: None,
-            type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
-            type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-            declared_in_macro_type_arg: false,
-        }],
-        emits: Vec::new(),
-        slots: Vec::new(),
         jsdoc: None,
     }];
     let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("LinkProps", None);
@@ -5027,6 +5101,7 @@ fn define_props_fields_fast_path_rejects_complex_heritage_refs() {
         !crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
             define_props_fields_fast_path_allowed(
                 ctx,
+                "/test.vue",
                 &snapshot.macros[0],
                 0,
                 &resolved_macros,
@@ -5078,21 +5153,6 @@ fn define_props_fields_fast_path_rejects_multi_surface_macro_candidates() {
                 text: Some("interface LinkProps { to?: string }".to_string()),
             },
             native_props: Vec::new(),
-            props: vec![verter_semantic::analysis::AnalyzedPropField {
-                name: "to".to_string(),
-                type_annotation: Some("string".to_string()),
-                is_optional: true,
-                span: verter_span::Span::new(0, 0),
-                description: None,
-                tags: Vec::new(),
-                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-                resolution_error: None,
-                type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
-                type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-                declared_in_macro_type_arg: false,
-            }],
-            emits: Vec::new(),
-            slots: Vec::new(),
             jsdoc: None,
         },
         ResolvedMacroMeta {
@@ -5111,21 +5171,6 @@ fn define_props_fields_fast_path_rejects_multi_surface_macro_candidates() {
                 text: Some("interface ButtonHTMLAttributes { autofocus?: boolean }".to_string()),
             },
             native_props: Vec::new(),
-            props: vec![verter_semantic::analysis::AnalyzedPropField {
-                name: "autofocus".to_string(),
-                type_annotation: Some("boolean".to_string()),
-                is_optional: true,
-                span: verter_span::Span::new(0, 0),
-                description: None,
-                tags: Vec::new(),
-                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-                resolution_error: None,
-                type_expr: Some(TypeExpr::Primitive(PrimitiveName::Boolean)),
-                type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-                declared_in_macro_type_arg: false,
-            }],
-            emits: Vec::new(),
-            slots: Vec::new(),
             jsdoc: None,
         },
     ];
@@ -5134,7 +5179,7 @@ fn define_props_fields_fast_path_rejects_multi_surface_macro_candidates() {
     let host = VerterHost::new_standalone(HostConfig::default());
     assert!(
         !crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
-            define_props_fields_fast_path_allowed(ctx, &mac, 0, &resolved_macros, Some(&lowered))
+            define_props_fields_fast_path_allowed(ctx, "/test.vue", &mac, 0, &resolved_macros, Some(&lowered))
         }),
         "a defineProps macro with multiple resolved surfaces should not collapse to a single fields-only shape"
     );
@@ -5367,9 +5412,6 @@ defineProps<Props>()
             ),
         },
         native_props: Vec::new(),
-        props: Vec::new(),
-        emits: Vec::new(),
-        slots: Vec::new(),
         jsdoc: None,
     }];
     let mut evaluated_types = verter_semantic::analysis::type_expand::ExpandedComponentTypes {
@@ -5544,36 +5586,6 @@ defineModel<boolean>('open')
             ),
         },
         native_props: Vec::new(),
-        props: vec![
-            verter_semantic::analysis::AnalyzedPropField {
-                name: "title".to_string(),
-                type_annotation: Some("string".to_string()),
-                is_optional: false,
-                span: verter_span::Span::new(0, 0),
-                description: None,
-                tags: Vec::new(),
-                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-                resolution_error: None,
-                type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
-                type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-                declared_in_macro_type_arg: false,
-            },
-            verter_semantic::analysis::AnalyzedPropField {
-                name: "count".to_string(),
-                type_annotation: Some("number".to_string()),
-                is_optional: true,
-                span: verter_span::Span::new(0, 0),
-                description: None,
-                tags: Vec::new(),
-                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-                resolution_error: None,
-                type_expr: Some(TypeExpr::Primitive(PrimitiveName::Number)),
-                type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-                declared_in_macro_type_arg: false,
-            },
-        ],
-        emits: Vec::new(),
-        slots: Vec::new(),
         jsdoc: None,
     }];
     let mut evaluated_types = verter_semantic::analysis::type_expand::ExpandedComponentTypes {
@@ -5957,8 +5969,18 @@ defineExpose({ exposed })
         .iter()
         .find(|entry| entry.type_name == "Props")
         .expect("fallthrough-expanded state should still materialize the props surface");
+    let fallthrough_props_dtos =
+        host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
+            owner_canonical: std::sync::Arc::from("/src/App.vue"),
+            macro_index: fallthrough_props.macro_index,
+            macro_kind: fallthrough_props.macro_kind,
+            root_identity: host
+                .current_or_read_whole_hash("/src/App.vue")
+                .unwrap_or([0u8; 16]),
+            level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+        });
     assert!(
-        fallthrough_props
+        fallthrough_props_dtos
             .props
             .iter()
             .any(|prop| prop.name == "label"),
@@ -6063,8 +6085,18 @@ defineEmits<Emits>()
         .iter()
         .find(|entry| entry.type_name == "Props")
         .expect("fallthrough state should still materialize the imported props surface");
+    let fallthrough_props_dtos =
+        host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
+            owner_canonical: std::sync::Arc::from("/src/App.vue"),
+            macro_index: fallthrough_props.macro_index,
+            macro_kind: fallthrough_props.macro_kind,
+            root_identity: host
+                .current_or_read_whole_hash("/src/App.vue")
+                .unwrap_or([0u8; 16]),
+            level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+        });
     assert!(
-        fallthrough_props
+        fallthrough_props_dtos
             .props
             .iter()
             .any(|prop| prop.name == "label"),
@@ -6141,6 +6173,8 @@ defineEmits<Emits>()
     );
 
     let resolved_macros = crate::resolver_core::component_meta_resolved_macros(
+        host,
+        "/src/Child.vue",
         fallthrough.snapshot.macros.as_ref(),
         &fallthrough.resolved_macros,
     );
@@ -6246,6 +6280,8 @@ defineEmits<Emits>()
     );
 
     let resolved_macros = crate::resolver_core::component_meta_resolved_macros(
+        host,
+        "/src/Child.vue",
         fallthrough.snapshot.macros.as_ref(),
         &fallthrough.resolved_macros,
     );
@@ -6349,28 +6385,6 @@ defineEmits<Emits>()
             ),
         },
         native_props: Vec::new(),
-        props: Vec::new(),
-        emits: vec![
-            verter_semantic::analysis::AnalyzedEmitField {
-                name: "save".to_string(),
-                span: verter_span::Span::new(0, 0),
-                payload_type: Some("[id: number]".to_string()),
-                description: None,
-                tags: Vec::new(),
-                payload_expr: Some(TypeExpr::Unknown { raw: "[id: number]".to_string() }),
-                payload_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-            },
-            verter_semantic::analysis::AnalyzedEmitField {
-                name: "update:open".to_string(),
-                span: verter_span::Span::new(0, 0),
-                payload_type: Some("[value: boolean]".to_string()),
-                description: None,
-                tags: Vec::new(),
-                payload_expr: Some(TypeExpr::Unknown { raw: "[value: boolean]".to_string() }),
-                payload_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-            },
-        ],
-        slots: Vec::new(),
         jsdoc: None,
     }];
     let mut evaluated_types = verter_semantic::analysis::type_expand::ExpandedComponentTypes {
@@ -6823,19 +6837,6 @@ defineEmits<Emits>()
                 ),
             },
             native_props: Vec::new(),
-            props: Vec::new(),
-            emits: vec![verter_semantic::analysis::AnalyzedEmitField {
-                name: "save".to_string(),
-                span: verter_span::Span::new(0, 0),
-                payload_type: Some("[id: number]".to_string()),
-                description: None,
-                tags: Vec::new(),
-                payload_expr: Some(TypeExpr::Unknown {
-                    raw: "[id: number]".to_string(),
-                }),
-                payload_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-            }],
-            slots: Vec::new(),
             jsdoc: None,
         },
         ResolvedMacroMeta {
@@ -6857,19 +6858,6 @@ defineEmits<Emits>()
                 ),
             },
             native_props: Vec::new(),
-            props: Vec::new(),
-            emits: vec![verter_semantic::analysis::AnalyzedEmitField {
-                name: "update:open".to_string(),
-                span: verter_span::Span::new(0, 0),
-                payload_type: Some("[value: boolean]".to_string()),
-                description: None,
-                tags: Vec::new(),
-                payload_expr: Some(TypeExpr::Unknown {
-                    raw: "[value: boolean]".to_string(),
-                }),
-                payload_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-            }],
-            slots: Vec::new(),
             jsdoc: None,
         },
     ];
@@ -7003,44 +6991,6 @@ defineSlots<Slots>()
             ),
         },
         native_props: Vec::new(),
-        props: Vec::new(),
-        emits: Vec::new(),
-        slots: vec![
-            verter_semantic::analysis::AnalyzedSlotField {
-                name: "default".to_string(),
-                is_required: false,
-                span: verter_span::Span::new(0, 0),
-                bindings: vec![verter_semantic::analysis::AnalyzedSlotFieldBinding {
-                    name: "ui".to_string(),
-                    type_annotation: Some("string".to_string()),
-                    span: verter_span::Span::new(0, 0),
-                    binding_expr: Some(TypeExpr::Unknown { raw: "string".to_string() }),
-                    binding_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-                }],
-                return_type: Some("any".to_string()),
-                description: None,
-                tags: Vec::new(),
-                return_expr: Some(TypeExpr::Unknown { raw: "any".to_string() }),
-                return_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-            },
-            verter_semantic::analysis::AnalyzedSlotField {
-                name: "item".to_string(),
-                is_required: false,
-                span: verter_span::Span::new(0, 0),
-                bindings: vec![verter_semantic::analysis::AnalyzedSlotFieldBinding {
-                    name: "index".to_string(),
-                    type_annotation: Some("number".to_string()),
-                    span: verter_span::Span::new(0, 0),
-                    binding_expr: Some(TypeExpr::Unknown { raw: "number".to_string() }),
-                    binding_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-                }],
-                return_type: Some("any".to_string()),
-                description: None,
-                tags: Vec::new(),
-                return_expr: Some(TypeExpr::Unknown { raw: "any".to_string() }),
-                return_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-            },
-        ],
         jsdoc: None,
     }];
     let mut evaluated_types =
@@ -7127,6 +7077,17 @@ withDefaults(defineProps<Props>(), {
         )
         .unwrap();
 
+    // Synthetic snapshot carries the gating facts only (`type_references`); the
+    // real SFC above is what `vue_macro_dtos` resolves the typeinfo surface
+    // from. For a UNION-typed `Props` the typeinfo surface is the COMMON members
+    // (`editor`, `layout`) — the TS-correct shallow reading of `A | B`. The full
+    // per-branch FLATTENING (`pluginKey`, `options`) is the EXPANSION's job and
+    // arrives via `evaluated_types.props`; the production union-flattening is
+    // covered end-to-end by
+    // `meta_tests::get_component_meta_editor_toolbar_union_keeps_base_and_plugin_props`.
+    // This test asserts the producer REUSES a populated authoritative expanded
+    // surface directly (the `use_all_expanded_props` Fields path) rather than
+    // truncating it.
     let snapshot = FileAnalysisSnapshot {
         macros: vec![verter_semantic::analysis::AnalyzedMacro {
             kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
@@ -7167,87 +7128,27 @@ withDefaults(defineProps<Props>(), {
             ),
         },
         native_props: Vec::new(),
-        props: vec![
-            verter_semantic::analysis::AnalyzedPropField {
-                name: "editor".to_string(),
-                type_annotation: Some("Editor".to_string()),
-                is_optional: false,
-                span: verter_span::Span::new(0, 0),
-                description: None,
-                tags: Vec::new(),
-                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-                resolution_error: None,
-                type_expr: Some(TypeExpr::Unknown { raw: "Editor".to_string() }),
-                type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-                declared_in_macro_type_arg: false,
-            },
-            verter_semantic::analysis::AnalyzedPropField {
-                name: "layout".to_string(),
-                type_annotation: Some("'fixed' | 'bubble' | 'floating'".to_string()),
-                is_optional: true,
-                span: verter_span::Span::new(0, 0),
-                description: None,
-                tags: Vec::new(),
-                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-                resolution_error: None,
-                type_expr: Some(TypeExpr::Unknown { raw: "'fixed' | 'bubble' | 'floating'".to_string() }),
-                type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-                declared_in_macro_type_arg: false,
-            },
-            verter_semantic::analysis::AnalyzedPropField {
-                name: "pluginKey".to_string(),
-                type_annotation: Some("string".to_string()),
-                is_optional: true,
-                span: verter_span::Span::new(0, 0),
-                description: None,
-                tags: Vec::new(),
-                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-                resolution_error: None,
-                type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
-                type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-                declared_in_macro_type_arg: false,
-            },
-            verter_semantic::analysis::AnalyzedPropField {
-                name: "options".to_string(),
-                type_annotation: Some(
-                    "{ strategy?: 'absolute' | 'fixed'; onShow?: () => void }".to_string(),
-                ),
-                is_optional: true,
-                span: verter_span::Span::new(0, 0),
-                description: None,
-                tags: Vec::new(),
-                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-                resolution_error: None,
-                type_expr: Some(TypeExpr::Unknown { raw: "{ strategy?: 'absolute' | 'fixed'; onShow?: () => void }".to_string() }),
-                type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-                declared_in_macro_type_arg: false,
-            },
-        ],
-        emits: Vec::new(),
-        slots: Vec::new(),
         jsdoc: None,
     }];
 
+    // The expansion has ALREADY produced the flattened per-branch surface (the
+    // production pipeline runs expansion before `produce_macro_object_shapes`).
+    let make_field =
+        |name: &str, optional: bool| verter_semantic::analysis::type_expand::ExpandedField {
+            name: name.to_string(),
+            r#type: verter_type_expr::TypeExpr::primitive(verter_type_expr::PrimitiveName::Unknown),
+            raw_type: None,
+            optional,
+            exactness: verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete,
+            execution_status:
+                verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
+            diagnostics: Vec::new(),
+            shallow_type_expr: None,
+            shallow_type_expr_scope: None,
+            declared_in_macro_type_arg: false,
+        };
+
     let host = project.host();
-    let resolved_prop_names: Vec<&str> = resolved_macros[0]
-        .props
-        .iter()
-        .map(|prop| prop.name.as_str())
-        .collect();
-
-    assert!(
-        resolved_macros[0].surface_is_authoritative,
-        "projected local defineProps surfaces should be marked authoritative"
-    );
-    assert!(
-        resolved_prop_names.contains(&"editor")
-            && resolved_prop_names.contains(&"layout")
-            && resolved_prop_names.contains(&"pluginKey")
-            && resolved_prop_names.contains(&"options"),
-        "resolved macro surface should already contain the projected defineProps members, got {resolved_prop_names:?}"
-    );
-
-    let _store_view = host.resolver_store_view();
     let facts = host
         .ensure_indexed_ready("/src/App.vue")
         .expect("app facts should be present");
@@ -7255,6 +7156,12 @@ withDefaults(defineProps<Props>(), {
         VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let mut evaluated_types = verter_semantic::analysis::type_expand::ExpandedComponentTypes {
+        props: vec![
+            make_field("editor", false),
+            make_field("layout", true),
+            make_field("pluginKey", true),
+            make_field("options", true),
+        ],
         ..Default::default()
     };
 
@@ -7270,28 +7177,22 @@ withDefaults(defineProps<Props>(), {
     );
 
     assert_eq!(
-        0u32,
-        0,
-        "authoritative projected defineProps surfaces should be reused directly instead of triggering a second solve"
-    );
-    assert_eq!(
         evaluated_types.define_props.len(),
         1,
         "authoritative projected defineProps surfaces should still synthesize a macro object shape"
     );
-    let prop_names: Vec<&str> = evaluated_types.define_props[0]
+    let mut prop_names: Vec<&str> = evaluated_types.define_props[0]
         .result
         .value
         .properties
         .iter()
         .map(|property| property.name.as_str())
         .collect();
-    assert!(
-        prop_names.contains(&"editor")
-            && prop_names.contains(&"layout")
-            && prop_names.contains(&"pluginKey")
-            && prop_names.contains(&"options"),
-        "synthesized defineProps shape should preserve the authoritative projected surface, got {prop_names:?}"
+    prop_names.sort_unstable();
+    assert_eq!(
+        prop_names,
+        vec!["editor", "layout", "options", "pluginKey"],
+        "synthesized defineProps shape should reuse the authoritative populated expanded surface, got {prop_names:?}"
     );
 }
 
@@ -8760,7 +8661,7 @@ defineProps<TreeNode>()
     );
 
     // Assert+: props should be TreeNode's fields (label, children)
-    let prop_names = prop_names_from_resolved(&state);
+    let prop_names = prop_names_from_resolved(host, "/src/Tree.vue", &state);
     assert!(
         prop_names.contains(&"label".to_string()),
         "label prop should be present: {:?}",
@@ -10007,14 +9908,14 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 
 /// Producer-chain invariant: when `defineEmits<Emits>()` consumes a local
 /// interface `Emits` that `extends ExternalEmits<T>` from a package, the
-/// `AnalyzedEmitField` produced via the prepared-shape path
-/// (`project_macro_surfaces_from_expanded_shape` →
-/// `projected_emit_fields_from_shape`) must carry the typed call-signature
-/// payload on `payload_expr` (`Tuple` of post-event-name params with the
-/// generic `T` substituted), and `payload_expr_scope` must hold the owner
-/// SFC's canonical id. Without the typed form, downstream consumers fall
-/// back to re-parsing the display `payload_type` text — the Typed-IR-Only
-/// Resolver Rule (CLAUDE.md) forbids that.
+/// `AnalyzedEmitField` produced through the typeinfo emit normalizer must carry
+/// the typed call-signature payload on `payload_expr` (`Tuple` of post-event-name
+/// params with the generic `T` substituted), and `payload_expr_scope` anchors to
+/// the call signature's DECLARING file (the package `.d.ts` where
+/// `(e, payload: T): void` is written) — the SFC-supplied generic argument lives
+/// in the typed `payload_expr` element types, not in the scope. Without the typed
+/// form, downstream consumers fall back to re-parsing the display `payload_type`
+/// text — the Typed-IR-Only Resolver Rule (CLAUDE.md) forbids that.
 #[test]
 fn resolved_macro_emits_carry_payload_expr_for_cross_file_interface_extends() {
     let project = make_project();
@@ -10074,14 +9975,26 @@ defineEmits<Emits>()
         })
         .expect("defineEmits<Emits> should produce a resolved macro meta entry");
 
-    let emit = define_emits
+    // The published emit surface (incl. the typed `payload_expr`) is owned by
+    // the SOLE typeinfo macro-surface authority, keyed on the macro index.
+    let define_emits_dtos = host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
+        owner_canonical: std::sync::Arc::from("/src/App.vue"),
+        macro_index: define_emits.macro_index,
+        macro_kind: define_emits.macro_kind,
+        root_identity: host
+            .current_or_read_whole_hash("/src/App.vue")
+            .unwrap_or([0u8; 16]),
+        level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+    });
+
+    let emit = define_emits_dtos
         .emits
         .iter()
         .find(|emit| emit.name == "update:modelValue")
         .unwrap_or_else(|| {
             panic!(
                 "update:modelValue emit should be present on resolved define-emits, got {:?}",
-                define_emits
+                define_emits_dtos
                     .emits
                     .iter()
                     .map(|emit| emit.name.as_str())
@@ -10100,8 +10013,11 @@ defineEmits<Emits>()
 
     assert_eq!(
         payload_expr_scope.as_str(),
-        "/src/App.vue",
-        "payload_expr_scope should anchor to the owner SFC",
+        "/node_modules/reka-ui/index.d.ts",
+        "payload_expr_scope anchors to the call signature's DECLARING file (where \
+         `(e, payload: T): void` is written); the SFC-supplied generic argument \
+         (`string | number`) is encoded in the typed `payload_expr` Tuple's \
+         element types, NOT by re-anchoring the signature's scope to the SFC",
     );
 
     let verter_type_expr::TypeExpr::Tuple { elements, .. } = payload_expr else {

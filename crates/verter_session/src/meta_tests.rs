@@ -68,6 +68,38 @@ fn prop_names(snapshot: &crate::types::FileAnalysisSnapshot) -> Vec<String> {
         .collect()
 }
 
+/// Resolved-macro prop names sourced from the SOLE typeinfo macro-surface
+/// authority (`vue_macro_dtos`, FullMetadata), keyed on each DefineProps macro
+/// index (deduped, mirroring the production producer). The resolved-state
+/// `ResolvedMacroMeta` no longer carries the published props/emits/slots
+/// surface; it supplies only the macro index + kind for provenance.
+fn resolved_macro_prop_names(
+    host: &VerterHost,
+    owner: &str,
+    state: &crate::meta_resolve::ResolvedComponentMetaState,
+) -> Vec<String> {
+    let mut seen = rustc_hash::FxHashSet::default();
+    state
+        .resolved_macros
+        .iter()
+        .filter(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .filter(|m| seen.insert(m.macro_index))
+        .flat_map(|m| {
+            host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
+                owner_canonical: std::sync::Arc::from(owner),
+                macro_index: m.macro_index,
+                macro_kind: m.macro_kind,
+                root_identity: host.current_or_read_whole_hash(owner).unwrap_or([0u8; 16]),
+                level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+            })
+            .props
+            .iter()
+            .map(|p| p.name.clone())
+            .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 fn evaluated_prop_type<'a>(types: &'a ExpandedComponentTypes, name: &str) -> &'a TypeExpr {
     &types
         .props
@@ -5880,8 +5912,8 @@ defineProps<Props>()
         "`ProjectionMode::Expanded` should resolve cross-file macro types on second call"
     );
     assert_eq!(
-        first.resolved_macros[0].props.len(),
-        second.resolved_macros[0].props.len(),
+        resolved_macro_prop_names(project.host(), "/App.vue", &first).len(),
+        resolved_macro_prop_names(project.host(), "/App.vue", &second).len(),
         "repeated calls should produce the same resolved prop count"
     );
 
@@ -5991,13 +6023,9 @@ defineProps<Props>()
         !first.resolved_macros.is_empty(),
         "`ProjectionMode::Expanded` should resolve cross-file macro types"
     );
-    let first_prop_names: Vec<&str> = first.resolved_macros[0]
-        .props
-        .iter()
-        .map(|p| p.name.as_str())
-        .collect();
+    let first_prop_names = resolved_macro_prop_names(project.host(), "/src/App.vue", &first);
     assert!(
-        first_prop_names.contains(&"a") && first_prop_names.contains(&"b"),
+        first_prop_names.contains(&"a".to_string()) && first_prop_names.contains(&"b".to_string()),
         "first call should resolve props a and b, got: {:?}",
         first_prop_names
     );
@@ -6020,15 +6048,11 @@ defineProps<Props>()
         !second.resolved_macros.is_empty(),
         "should still have resolved macros after dep change"
     );
-    let second_prop_names: Vec<&str> = second.resolved_macros[0]
-        .props
-        .iter()
-        .map(|p| p.name.as_str())
-        .collect();
+    let second_prop_names = resolved_macro_prop_names(project.host(), "/src/App.vue", &second);
 
     // Assert+: result includes the new prop 'c'
     assert!(
-        second_prop_names.contains(&"c"),
+        second_prop_names.contains(&"c".to_string()),
         "dependency change should produce updated props including 'c', got: {:?}",
         second_prop_names
     );
@@ -8708,51 +8732,54 @@ defineSlots<ButtonSlots>()
         "requested member-path materialization should not publish transitive nested helper refs",
     );
 
+    // Shallow-by-default registry contract: imported helper aliases are
+    // published as a bare `Ref { name }` in the resolved type registry, NOT
+    // an eagerly-materialized object. The deep slot-binding correctness is
+    // asserted on the PUBLISHED surface below.
     let button_slots = resolved
         .resolved_type_registry
         .iter()
         .find(|entry| entry.name == "ButtonSlots")
         .expect("ButtonSlots should be published in the resolved type registry");
-    let TypeExpr::Object(button_slots_shape) = &button_slots.type_expr else {
-        panic!(
-            "ButtonSlots should materialize as an object, got {:?}",
-            button_slots.type_expr
-        );
-    };
-    let default_method = button_slots_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Method(method) if method.name == "default" => Some(&method.function),
-            ObjectMember::Property(property) if property.name == "default" => match &property.ty {
-                TypeExpr::Function(function) => Some(function.as_ref()),
-                _ => None,
-            },
-            _ => None,
-        })
-        .expect("ButtonSlots should keep the default slot callable signature");
-    let props_param = default_method
-        .parameters
-        .first()
-        .expect("default slot method should keep its props parameter");
-    let TypeExpr::Object(props_shape) = &props_param.ty else {
-        panic!(
-            "slot props should materialize as an object, got {:?}",
-            props_param.ty
-        );
-    };
-    let ui_prop = props_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
-            _ => None,
-        })
-        .expect("default slot props should keep a ui member");
     assert!(
-        matches!(ui_prop, TypeExpr::IndexedAccess { .. }),
-        "requested member-path materialization should keep nested slot helpers on the requested route, got {:?}",
-        ui_prop
+        matches!(&button_slots.type_expr, TypeExpr::Ref { name, .. } if name.as_ref() == "ButtonSlots"),
+        "imported registry helper should stay a shallow Ref (shallow-by-default), got {:?}",
+        button_slots.type_expr
+    );
+    assert!(
+        !matches!(&button_slots.type_expr, TypeExpr::Object(_)),
+        "registry entry must NOT eagerly materialize to an object, got {:?}",
+        button_slots.type_expr
+    );
+
+    // Published-surface contract (path-precise materialization): the default
+    // slot's `ui` binding stays symbolic on the requested member path
+    // `Button['ui']` — the nested `DeepProps` callable-parameter helper is
+    // never widened into the binding.
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let default_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "default")
+        .expect("default slot should be extracted");
+    let ui_binding = default_slot
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "ui")
+        .expect("default slot should expose the ui binding");
+    assert_eq!(
+        ui_binding.raw_type.as_deref(),
+        Some("Button['ui']"),
+        "nested slot helpers must stay on the requested member path, got {:?}",
+        ui_binding.raw_type
+    );
+    assert!(
+        matches!(&ui_binding.type_expr, TypeExpr::IndexedAccess { .. }),
+        "default slot ui binding must stay a symbolic IndexedAccess, got {:?}",
+        ui_binding.type_expr
     );
 }
 
@@ -8809,51 +8836,54 @@ defineSlots<ButtonSlots>()
         "function-valued registry members should not publish transitive callable parameter helpers",
     );
 
+    // Shallow-by-default registry contract: the imported `ButtonSlots` helper
+    // stays a bare `Ref { name }` in the registry. Its function-valued member
+    // (`default(props: { ui: Button['ui'] })`) carries a callable-parameter
+    // helper that must NOT be eagerly inlined — the deep binding correctness is
+    // asserted on the published surface below.
     let button_slots = resolved
         .resolved_type_registry
         .iter()
         .find(|entry| entry.name == "ButtonSlots")
         .expect("ButtonSlots should be published in the resolved type registry");
-    let TypeExpr::Object(button_slots_shape) = &button_slots.type_expr else {
-        panic!(
-            "ButtonSlots should materialize as an object, got {:?}",
-            button_slots.type_expr
-        );
-    };
-    let default_method = button_slots_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Method(method) if method.name == "default" => Some(&method.function),
-            ObjectMember::Property(property) if property.name == "default" => match &property.ty {
-                TypeExpr::Function(function) => Some(function.as_ref()),
-                _ => None,
-            },
-            _ => None,
-        })
-        .expect("ButtonSlots should keep the default slot callable signature");
-    let props_param = default_method
-        .parameters
-        .first()
-        .expect("default slot method should keep its props parameter");
-    let TypeExpr::Object(props_shape) = &props_param.ty else {
-        panic!(
-            "slot props should materialize as an object, got {:?}",
-            props_param.ty
-        );
-    };
-    let ui_prop = props_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
-            _ => None,
-        })
-        .expect("default slot props should keep a ui member");
     assert!(
-        matches!(ui_prop, TypeExpr::IndexedAccess { .. }),
-        "function-valued projected members should keep imported member-path helpers symbolic, got {:?}",
-        ui_prop
+        matches!(&button_slots.type_expr, TypeExpr::Ref { name, .. } if name.as_ref() == "ButtonSlots"),
+        "imported registry helper should stay a shallow Ref (shallow-by-default), got {:?}",
+        button_slots.type_expr
+    );
+    assert!(
+        !matches!(&button_slots.type_expr, TypeExpr::Object(_)),
+        "registry entry must NOT eagerly materialize the function-valued member, got {:?}",
+        button_slots.type_expr
+    );
+
+    // Published-surface contract: the default slot's `ui` binding stays
+    // symbolic on the requested member path `Button['ui']`; the function-valued
+    // projected member never widens the imported member-path helper.
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let default_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "default")
+        .expect("default slot should be extracted");
+    let ui_binding = default_slot
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "ui")
+        .expect("default slot should expose the ui binding");
+    assert_eq!(
+        ui_binding.raw_type.as_deref(),
+        Some("Button['ui']"),
+        "function-valued projected members must keep the helper on the requested member path, got {:?}",
+        ui_binding.raw_type
+    );
+    assert!(
+        matches!(&ui_binding.type_expr, TypeExpr::IndexedAccess { .. }),
+        "default slot ui binding must stay a symbolic IndexedAccess, got {:?}",
+        ui_binding.type_expr
     );
 }
 
@@ -11991,15 +12021,28 @@ defineProps<ChildProps>()
         .iter()
         .find(|meta| meta.type_name == "ButtonProps")
         .expect("should resolve ButtonProps");
+    let button_dtos =
+        project
+            .host()
+            .vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
+                owner_canonical: std::sync::Arc::from("/src/App.vue"),
+                macro_index: button.macro_index,
+                macro_kind: button.macro_kind,
+                root_identity: project
+                    .host()
+                    .current_or_read_whole_hash("/src/App.vue")
+                    .unwrap_or([0u8; 16]),
+                level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+            });
     assert!(
-        button.props.iter().any(|prop| prop.name == "loading"),
+        button_dtos.props.iter().any(|prop| prop.name == "loading"),
         "resolved ButtonProps should include inherited props, got: {:?}",
-        button.props
+        button_dtos.props
     );
     assert!(
-        button.props.iter().any(|prop| prop.name == "label"),
+        button_dtos.props.iter().any(|prop| prop.name == "label"),
         "resolved ButtonProps should include button props, got: {:?}",
-        button.props
+        button_dtos.props
     );
 }
 
@@ -12205,7 +12248,7 @@ defineSlots<{
 }
 
 #[test]
-fn imported_slot_binding_indexed_access_helpers_resolve_to_concrete_members() {
+fn imported_slot_binding_indexed_access_stays_symbolic_member_path() {
     let project = make_project();
     project
         .upsert_base(
@@ -12270,53 +12313,54 @@ defineSlots<ButtonSlots>()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("should resolve component meta state");
 
+    // Shallow-by-default registry contract: the imported `ButtonSlots` helper
+    // stays a bare `Ref { name }` in the registry. The indexed-access slot
+    // binding (`ui: Button['ui']`) resolves PATH-PRECISELY on the published
+    // surface below — only the requested `ui` member path, never the whole
+    // `Button` shape, enters the published binding.
     let button_slots = resolved
         .resolved_type_registry
         .iter()
         .find(|entry| entry.name == "ButtonSlots")
         .expect("ButtonSlots should be published in the resolved type registry");
-    let TypeExpr::Object(button_slots_shape) = &button_slots.type_expr else {
-        panic!(
-            "ButtonSlots should materialize as an object, got {:?}",
-            button_slots.type_expr
-        );
-    };
-    // `default` is stored as a Method, not a Property
-    let default_method = button_slots_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Method(method) if method.name == "default" => Some(&method.function),
-            ObjectMember::Property(property) if property.name == "default" => match &property.ty {
-                TypeExpr::Function(function) => Some(function.as_ref()),
-                _ => None,
-            },
-            _ => None,
-        })
-        .expect("ButtonSlots should keep the default slot callable signature");
-    let Some(props_param) = default_method.parameters.first() else {
-        panic!("default slot method should keep its props parameter");
-    };
-    let TypeExpr::Object(props_shape) = &props_param.ty else {
-        panic!(
-            "slot props should materialize as an object, got {:?}",
-            props_param.ty
-        );
-    };
-    // Imported slot param helpers now stay symbolic in the registry; the
-    // public slot binding contract still points at the requested member path.
-    let ui_prop = props_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
-            _ => None,
-        })
-        .expect("default slot props should keep a ui member");
     assert!(
-        matches!(ui_prop, TypeExpr::IndexedAccess { .. }),
-        "slot props ui should stay on the requested member path instead of widening eagerly, got {:?}",
-        ui_prop
+        matches!(&button_slots.type_expr, TypeExpr::Ref { name, .. } if name.as_ref() == "ButtonSlots"),
+        "imported registry helper should stay a shallow Ref (shallow-by-default), got {:?}",
+        button_slots.type_expr
+    );
+    assert!(
+        !matches!(&button_slots.type_expr, TypeExpr::Object(_)),
+        "registry entry must NOT eagerly materialize to an object, got {:?}",
+        button_slots.type_expr
+    );
+
+    // Published-surface contract: the default slot's `ui` binding resolves to
+    // the requested member path `Button['ui']` — symbolic IndexedAccess, NOT
+    // an eagerly-widened object of the whole `Button` shape.
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let default_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "default")
+        .expect("default slot should be extracted");
+    let ui_binding = default_slot
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "ui")
+        .expect("default slot should expose the ui binding");
+    assert_eq!(
+        ui_binding.raw_type.as_deref(),
+        Some("Button['ui']"),
+        "indexed-access slot binding must stay on the requested member path, got {:?}",
+        ui_binding.raw_type
+    );
+    assert!(
+        matches!(&ui_binding.type_expr, TypeExpr::IndexedAccess { .. }),
+        "default slot ui binding must stay a symbolic IndexedAccess, got {:?}",
+        ui_binding.type_expr
     );
 }
 
@@ -12386,50 +12430,23 @@ defineSlots<ButtonSlots>()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("should resolve component meta state");
 
+    // Shallow-by-default registry contract: the imported `ButtonSlots` helper
+    // stays a bare `Ref { name }` in the registry; the deep slot-binding
+    // correctness is asserted on the published surface below.
     let button_slots = resolved
         .resolved_type_registry
         .iter()
         .find(|entry| entry.name == "ButtonSlots")
         .expect("ButtonSlots should be published in the resolved type registry");
-    let TypeExpr::Object(button_slots_shape) = &button_slots.type_expr else {
-        panic!(
-            "ButtonSlots should materialize as an object, got {:?}",
-            button_slots.type_expr
-        );
-    };
-    let default_method = button_slots_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Method(method) if method.name == "default" => Some(&method.function),
-            ObjectMember::Property(property) if property.name == "default" => match &property.ty {
-                TypeExpr::Function(function) => Some(function.as_ref()),
-                _ => None,
-            },
-            _ => None,
-        })
-        .expect("ButtonSlots should keep the default slot callable signature");
-    let Some(props_param) = default_method.parameters.first() else {
-        panic!("default slot method should keep its props parameter");
-    };
-    let TypeExpr::Object(props_shape) = &props_param.ty else {
-        panic!(
-            "slot props should materialize as an object, got {:?}",
-            props_param.ty
-        );
-    };
-    let ui_prop = props_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
-            _ => None,
-        })
-        .expect("default slot props should keep a ui member");
     assert!(
-        matches!(ui_prop, TypeExpr::IndexedAccess { .. }),
-        "imported slot callable params should keep indexed member-path helpers symbolic, got {:?}",
-        ui_prop
+        matches!(&button_slots.type_expr, TypeExpr::Ref { name, .. } if name.as_ref() == "ButtonSlots"),
+        "imported registry helper should stay a shallow Ref (shallow-by-default), got {:?}",
+        button_slots.type_expr
+    );
+    assert!(
+        !matches!(&button_slots.type_expr, TypeExpr::Object(_)),
+        "registry entry must NOT eagerly materialize to an object, got {:?}",
+        button_slots.type_expr
     );
 
     let meta = project
@@ -12520,34 +12537,30 @@ defineSlots<MenuSlots>()
         !registry_names.contains("DynamicSlots") && !registry_names.contains("MergeTypes"),
         "imported utility helpers should stay off the published registry, got {registry_names:?}"
     );
+    // Shallow-by-default registry contract: the imported `MenuSlots` helper —
+    // whose body is an intersection mixing explicit slot members with imported
+    // utility helpers (`DynamicSlots<MergeTypes<T>>`) — stays a bare
+    // `Ref { name }` in the registry. The explicit slot members are asserted on
+    // the published surface below.
     let menu_slots = resolved
         .resolved_type_registry
         .iter()
         .find(|entry| entry.name == "MenuSlots")
         .expect("MenuSlots should be published in the resolved type registry");
-    let TypeExpr::Object(menu_slots_shape) = &menu_slots.type_expr else {
-        panic!(
-            "imported slot helpers should still expose their explicit slot members, got {:?}",
-            menu_slots.type_expr
-        );
-    };
     assert!(
-        menu_slots_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "default")
-                || matches!(member, ObjectMember::Method(method) if method.name == "default"),
-        ),
-        "MenuSlots should keep the explicit default slot member, got {:?}",
+        matches!(&menu_slots.type_expr, TypeExpr::Ref { name, .. } if name.as_ref() == "MenuSlots"),
+        "imported intersection slot helper should stay a shallow Ref (shallow-by-default), got {:?}",
         menu_slots.type_expr
     );
     assert!(
-        menu_slots_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "item")
-                || matches!(member, ObjectMember::Method(method) if method.name == "item"),
-        ),
-        "MenuSlots should keep the explicit item slot member, got {:?}",
+        !matches!(&menu_slots.type_expr, TypeExpr::Object(_)),
+        "registry entry must NOT eagerly materialize the intersection surface, got {:?}",
         menu_slots.type_expr
     );
 
+    // Published-surface contract: the explicit `default` and `item` slot
+    // members survive on the published surface; the imported utility helpers
+    // (`DynamicSlots` / `MergeTypes`) stay off the registry (asserted above).
     let meta = project
         .host()
         .get_component_meta("/src/App.vue")
@@ -19542,5 +19555,398 @@ defineProps<{ data: Foo }>()
          miss — the rooted ProjectGeneration fact no longer matches \
          the live project generation. A warm hit here means the \
          project-shape dependency was dropped at the dispatch bridge."
+    );
+}
+
+// ===========================================================================
+// FIX 3 — restored discriminating coverage for behaviours the deleted
+// equivalence harnesses owned, now driven through the typeinfo / Vue
+// macro-surface publication path.
+// ===========================================================================
+
+/// FIX 3 #1 — an inherited METHOD-STYLE slot's JSDoc `description` survives
+/// through cross-file heritage onto the published slot surface. Sibling slot
+/// tests assert names / bindings / returns but not the inherited slot
+/// description; this fills that gap.
+///
+/// Discriminating: the `header` slot is declared (as a method signature with a
+/// leading JSDoc block) ONLY on the imported base `BaseSlots`; the component's
+/// own `MySlots` adds `footer`. The published `header` slot's description must
+/// be the base's JSDoc text — a resolver that dropped inherited-slot JSDoc, or
+/// failed to follow the cross-file heritage, would leave it `None`.
+#[test]
+fn inherited_method_style_slot_jsdoc_description_propagates_through_heritage() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base-slots.ts",
+            r#"export interface BaseSlots {
+  /** The header slot, rendered above the content. */
+  header(props: { title: string }): any
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { BaseSlots } from './base-slots'
+
+interface MySlots extends BaseSlots {
+  /** The footer slot. */
+  footer(props: {}): any
+}
+
+defineSlots<MySlots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+
+    let header = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "header")
+        .expect("inherited method-style header slot should be published");
+    assert_eq!(
+        header.description.as_deref(),
+        Some("The header slot, rendered above the content."),
+        "inherited method-style slot must carry its base-declared JSDoc description",
+    );
+    // Negative guard: a resolver that mis-attributed the OWN footer slot's
+    // description onto header would surface the wrong text.
+    assert_ne!(
+        header.description.as_deref(),
+        Some("The footer slot."),
+        "header slot must not pick up the own footer slot's description",
+    );
+
+    // The own footer slot keeps its own description (sanity that heritage merge
+    // did not clobber own-body JSDoc).
+    let footer = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "footer")
+        .expect("own footer slot should be published");
+    assert_eq!(footer.description.as_deref(), Some("The footer slot."));
+}
+
+/// FIX 3 #2a — ALIAS-CHAIN cross-file heritage through the Vue macro surface:
+/// `defineProps<ChildProps>` where `ChildProps extends MiddleAlias` and
+/// `MiddleAlias = BaseProps` (a one-hop alias of an imported interface). The
+/// published props must include the base members reached through the alias hop.
+///
+/// Discriminating: `base` is declared only on `BaseProps`, reached via the
+/// `MiddleAlias = BaseProps` alias; a resolver that failed to follow the alias
+/// hop in heritage would drop it. The EXACT-SET assertion plus the `decoy`
+/// negative (a sibling interface in the SAME file that the heritage chain never
+/// touches) fail if heritage leaks unrelated declarations into the surface.
+#[test]
+fn cross_file_alias_chain_heritage_through_macro_surface() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base.ts",
+            r#"export interface BaseProps {
+  base?: string
+}
+
+export type MiddleAlias = BaseProps
+
+// A sibling interface in the SAME file the heritage chain never reaches. A
+// resolver that over-collected file-level declarations would leak `decoy`.
+export interface UnrelatedProps {
+  decoy?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { MiddleAlias } from './base'
+
+interface ChildProps extends MiddleAlias {
+  own?: number
+}
+
+defineProps<ChildProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let prop_names: BTreeSet<_> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    assert!(
+        prop_names.contains("own"),
+        "own member should be published, got {prop_names:?}",
+    );
+    assert!(
+        prop_names.contains("base"),
+        "alias-chain heritage must surface the base member reached through `MiddleAlias = BaseProps`, got {prop_names:?}",
+    );
+    // NEGATIVE: the unrelated sibling interface's member must NOT leak.
+    assert!(
+        !prop_names.contains("decoy"),
+        "alias-chain heritage must NOT leak the unrelated `UnrelatedProps.decoy` member, got {prop_names:?}",
+    );
+    // EXACT surface: exactly the own member plus the alias-reached base member.
+    assert_eq!(
+        prop_names,
+        BTreeSet::from(["own", "base"]),
+        "alias-chain heritage surface must be EXACTLY {{own, base}}, got {prop_names:?}",
+    );
+}
+
+/// FIX 3 #2b — TWO-LEVEL cross-file heritage through the Vue macro surface:
+/// `GrandchildProps extends ChildProps` (file B) `extends BaseProps` (file A),
+/// each declared in a different file. The published props must include members
+/// from all three levels.
+///
+/// Discriminating: `base` (file A), `mid` (file B), `own` (SFC) must ALL be
+/// present — a resolver that stopped after one heritage hop would drop `base`.
+/// The EXACT-SET assertion plus the `decoy` negative (a sibling interface in
+/// file B that the chain never extends) fail if heritage leaks unrelated
+/// declarations into the surface.
+#[test]
+fn two_level_cross_file_heritage_through_macro_surface() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base.ts",
+            r#"export interface BaseProps {
+  base?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/child.ts",
+            r#"import type { BaseProps } from './base'
+
+export interface ChildProps extends BaseProps {
+  mid?: boolean
+}
+
+// A sibling interface in file B that no level of the chain extends. A resolver
+// that over-collected file-level declarations would leak `decoy`.
+export interface UnrelatedChild {
+  decoy?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { ChildProps } from './child'
+
+interface GrandchildProps extends ChildProps {
+  own?: number
+}
+
+defineProps<GrandchildProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let prop_names: BTreeSet<_> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    assert!(
+        prop_names.contains("own") && prop_names.contains("mid") && prop_names.contains("base"),
+        "two-level cross-file heritage must surface members from all three levels (own/mid/base), got {prop_names:?}",
+    );
+    // NEGATIVE: the unrelated sibling interface's member must NOT leak.
+    assert!(
+        !prop_names.contains("decoy"),
+        "two-level heritage must NOT leak the unrelated `UnrelatedChild.decoy` member, got {prop_names:?}",
+    );
+    // EXACT surface: exactly the three heritage-chain members.
+    assert_eq!(
+        prop_names,
+        BTreeSet::from(["own", "mid", "base"]),
+        "two-level heritage surface must be EXACTLY {{own, mid, base}}, got {prop_names:?}",
+    );
+}
+
+/// FIX 3 #3 — `defineProps<NoInfer<Base>>()` THROUGH macro-surface publication.
+/// `NoInfer<T>` is an identity wrapper (it only affects inference, not the
+/// resolved type); the published props must be exactly the members of the
+/// imported `Base` surface.
+///
+/// Discriminating: `label`/`count` come from `Base` wrapped in `NoInfer`; a
+/// resolver that failed to unwrap `NoInfer` (or treated it as opaque) would
+/// drop the props or collapse them to `never`.
+#[test]
+fn define_props_no_infer_base_through_macro_surface() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base.ts",
+            r#"export interface Base {
+  label?: string
+  count?: number
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Base } from './base'
+
+defineProps<NoInfer<Base>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let label = meta
+        .props
+        .iter()
+        .find(|p| p.name == "label")
+        .expect("NoInfer<Base> must publish the `label` prop through the macro surface");
+    assert!(
+        !matches!(label.type_expr, TypeExpr::Primitive(PrimitiveName::Never)),
+        "NoInfer<Base> prop must keep its resolved type, not collapse to never, got {:?}",
+        label.type_expr
+    );
+    let prop_names: BTreeSet<_> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    assert!(
+        prop_names.contains("label") && prop_names.contains("count"),
+        "NoInfer<Base> must publish the Base members unchanged (identity wrapper), got {prop_names:?}",
+    );
+}
+
+/// FIX 3 #3 (alias-shell) — `export type Props = NoInfer<Base>; defineProps<Props>()`
+/// THROUGH macro-surface publication. This is the harder shape than the direct
+/// `defineProps<NoInfer<Base>>()` case above: the macro type argument is a NAMED
+/// alias whose body is the `NoInfer` identity wrapper around the imported
+/// `Base`. The transparent alias + `NoInfer` wrappers must resolve to `Base`'s
+/// own body, so the published surface is EXACTLY `Base`'s members.
+///
+/// Discriminating, typeinfo-native (asserts the full published shape, not just
+/// presence):
+/// - member names AND order are exactly `[label, count]` (Base's declared order);
+/// - both are optional (`required == false`) — the `?` survives the wrappers;
+/// - the typed forms are the concrete `string` / `number` primitives (NOT
+///   `never`, NOT a `Ref`/opaque) — a resolver treating `NoInfer` as opaque or
+///   failing the alias hop would collapse or drop them;
+/// - `declared_in_macro_type_arg == false` for BOTH — own-body provenance is
+///   the WRITTEN macro type-argument declaration's DIRECT `member_index`
+///   members (`build.rs::overlay_macro_type_arg_own_body`, which reads only
+///   direct Object members and skips Ref/instantiation arms). The written
+///   macro-arg here is the alias `Props`, whose body is the `NoInfer<Base>`
+///   instantiation — it has NO direct own-body members; `label`/`count` are
+///   reached by resolving the transparent alias + `NoInfer` hops to `Base`, so
+///   they carry own-body `false` (the inverse value would mean a resolver
+///   mis-stamped alias-reached members as the alias's own body).
+#[test]
+fn define_props_no_infer_base_alias_shell_through_macro_surface() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base.ts",
+            r#"export interface Base {
+  label?: string
+  count?: number
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Base } from './base'
+
+export type Props = NoInfer<Base>
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+
+    // Names AND order: exactly `[label, count]` (Base's declared order),
+    // preserved through the alias + NoInfer wrappers.
+    let ordered_names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(
+        ordered_names,
+        vec!["label", "count"],
+        "alias-shell NoInfer<Base> must publish exactly Base's members in declared order, got {ordered_names:?}",
+    );
+
+    let label = meta
+        .props
+        .iter()
+        .find(|p| p.name == "label")
+        .expect("alias-shell NoInfer<Base> must publish the `label` prop");
+    let count = meta
+        .props
+        .iter()
+        .find(|p| p.name == "count")
+        .expect("alias-shell NoInfer<Base> must publish the `count` prop");
+
+    // Optionality: the `?` survives the alias + NoInfer wrappers (NOT required).
+    assert!(
+        !label.required && !count.required,
+        "alias-shell NoInfer<Base> props must stay optional (required == false), got label.required={}, count.required={}",
+        label.required,
+        count.required,
+    );
+
+    // Typed form: concrete primitives, NOT collapsed to `never` / left as an
+    // opaque `Ref` — the alias + NoInfer wrappers resolved through to Base.
+    assert!(
+        matches!(label.type_expr, TypeExpr::Primitive(PrimitiveName::String)),
+        "alias-shell `label` must keep its `string` primitive type, got {:?}",
+        label.type_expr,
+    );
+    assert!(
+        matches!(count.type_expr, TypeExpr::Primitive(PrimitiveName::Number)),
+        "alias-shell `count` must keep its `number` primitive type, got {:?}",
+        count.type_expr,
+    );
+
+    // Provenance: own-body is the WRITTEN macro type-arg declaration's direct
+    // `member_index` members. The written macro-arg is the alias `Props`, whose
+    // body is the `NoInfer<Base>` instantiation — NO direct own-body members.
+    // `label`/`count` are reached through the transparent alias + NoInfer hops
+    // to `Base`, so `declared_in_macro_type_arg` is false for both. The inverse
+    // value would mean a resolver mis-stamped alias-reached members as the
+    // alias's own body.
+    assert!(
+        !label.declared_in_macro_type_arg && !count.declared_in_macro_type_arg,
+        "alias-shell NoInfer<Base> members are reached through the alias, NOT the macro type arg's own body (declared_in_macro_type_arg == false), got label={}, count={}",
+        label.declared_in_macro_type_arg,
+        count.declared_in_macro_type_arg,
     );
 }

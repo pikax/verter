@@ -223,6 +223,8 @@ impl VerterHost {
         let fallthrough_fact_versions = resolved.fact_versions.clone();
 
         let resolved_macros = resolver_component_meta_resolved_macros(
+            self,
+            canonical_id,
             resolved.snapshot.macros.as_ref(),
             &resolved.resolved_macros,
         );

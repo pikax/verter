@@ -145,9 +145,23 @@ pub fn build_eval_env(program: &Program<'_>, source: &str) -> EvalEnv {
                 }
                 ExportDefaultDeclarationKind::ClassDeclaration(cls) => {
                     extract_class(cls, source, &mut env);
+                    // `export default class Props { … }` exports the class under
+                    // the `default` export name (the named identifier is NOT a
+                    // separate export — see ShallowFileState's default-export
+                    // contract), but `extract_class` keys the instance shape under
+                    // the declared name `Props`. A barrel that reaches this file
+                    // resolves the `(canonical, "default")` route, so the class
+                    // body must also be reachable under `default`. Alias the
+                    // declared-name type symbol into a `default` entry (same body,
+                    // same params) so the prepared-decl lookup at the resolved
+                    // default route hydrates the class.
+                    if let Some(name) = class_or_function_default_name(&cls.id) {
+                        alias_default_export_type_symbol(&mut env, &name);
+                    }
                 }
                 ExportDefaultDeclarationKind::TSInterfaceDeclaration(iface) => {
                     extract_interface(iface, source, &mut env);
+                    alias_default_export_type_symbol(&mut env, iface.id.name.as_str());
                 }
                 other => {
                     if let Some(expr) = other.as_expression() {
@@ -411,6 +425,39 @@ fn qualified_module_name(prefix: Option<&str>, id: &TSModuleDeclarationName<'_>)
 
 fn qualified_name(prefix: &str, name: &str) -> String {
     format!("{prefix}.{name}")
+}
+
+/// The declared name of a default-exported class/function declaration,
+/// when it carries one (`export default class Props` → `Some("Props")`;
+/// an anonymous `export default class {}` → `None`).
+fn class_or_function_default_name(
+    id: &Option<oxc_ast::ast::BindingIdentifier<'_>>,
+) -> Option<String> {
+    id.as_ref().map(|id| id.name.to_string())
+}
+
+/// Mirror a default-exported named type symbol (`export default class Props` /
+/// `export default interface Foo`) under the `default` export name. The default
+/// export route resolves to `(canonical, "default")`, so the prepared-decl
+/// lookup must find the declaration body there as well as under its declared
+/// name. The cloned [`TypeDeclInfo`] carries the SAME body / params (only the
+/// `name` key changes to `default`); it is a no-op when the declared symbol was
+/// not registered (e.g. an empty class body produced no type symbol).
+fn alias_default_export_type_symbol(env: &mut EvalEnv, declared_name: &str) {
+    if env.type_symbols.contains_key("default") {
+        return;
+    }
+    let Some(decl) = env.type_symbols.get(declared_name) else {
+        return;
+    };
+    let aliased = TypeDeclInfo {
+        name: "default".to_string(),
+        declaration_id: 0,
+        kind: decl.kind,
+        type_parameters: decl.type_parameters.clone(),
+        body: decl.body.clone(),
+    };
+    env.add_type(aliased);
 }
 
 fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {

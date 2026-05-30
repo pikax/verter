@@ -797,12 +797,6 @@ pub struct FfiResolvedMacroMeta {
     pub declaration: FfiResolvedTypeDeclaration,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub native_props: Vec<FfiResolvedNativeProp>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub props: Vec<FfiResolvedPropField>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub emits: Vec<FfiResolvedEmitField>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub slots: Vec<FfiResolvedSlotField>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jsdoc: Option<FfiResolvedJsdocBlock>,
 }
@@ -830,54 +824,6 @@ pub struct FfiResolvedNativeProp {
     pub visibility: String,
     pub span_start: u32,
     pub span_end: u32,
-}
-
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct FfiResolvedPropField {
-    pub name: String,
-    pub is_optional: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub type_annotation: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<FfiJsdocTag>,
-}
-
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct FfiResolvedEmitField {
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub payload_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<FfiJsdocTag>,
-}
-
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct FfiResolvedSlotField {
-    pub name: String,
-    pub is_required: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub bindings: Vec<FfiResolvedSlotBinding>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub return_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<FfiJsdocTag>,
-}
-
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct FfiResolvedSlotBinding {
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub type_annotation: Option<String>,
 }
 
 #[derive(Serialize, Clone)]

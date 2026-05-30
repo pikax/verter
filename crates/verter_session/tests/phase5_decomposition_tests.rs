@@ -569,6 +569,91 @@ fn evaluate_type_expression_for_vue_default_export_matches_props() {
     );
 }
 
+/// REGRESSION (bounded path-precision contract): the SAME terminal
+/// indexed-access expression `InstanceType<typeof default>['$props']`,
+/// evaluated in `Navigate` mode against the `.vue` scope, keeps the
+/// projected `$props` terminal SHALLOW — a carrier
+/// (`DeclRef` / `Ref` / `InstantiationRef` / `Alias`), NOT the eagerly
+/// expanded `{count, message}` Object.
+///
+/// Discriminating pair with
+/// `evaluate_type_expression_for_vue_default_export_matches_props`
+/// (which runs the IDENTICAL expression in `Expanded` and DOES expand
+/// `$props` to `{count, message}`). The two tests pin the load-bearing
+/// invariant of this fix: the indexed-access terminal projection runs
+/// in the CALLER's mode, not a hardcoded mode.
+///
+/// This test FAILS if the deferred indexed-access terminal projection
+/// (`evaluate.rs`) / the literal eager projection (`lower.rs`) is
+/// hardcoded to `Expanded` (an over-correction of the original
+/// hardcoded-`Navigate` bug): a Navigate caller would then wrongly
+/// expand `$props`. It also FAILS if the object recursion is run in
+/// the caller's mode AND that leaks expansion onto the terminal.
+/// Together with the `Expanded` test it proves the terminal mode
+/// strictly tracks the caller.
+#[test]
+fn evaluate_indexed_access_terminal_in_navigate_stays_shallow() {
+    use verter_session::semantic_query::{ProjectionMode, SemanticNodeData};
+    use verter_session::typeinfo::types::EvaluateTypeExpressionRequest;
+
+    let host = build_host(&[
+        ("/workspace/src/types.ts", SHARED_TYPES_TS),
+        ("/workspace/src/Comp.vue", SHARED_VUE),
+    ]);
+
+    // IDENTICAL expression to the F2 `Expanded` test, but the caller
+    // requests `Navigate`. Path-precision: the terminal `['$props']`
+    // segment runs in the caller's mode — Navigate keeps it shallow.
+    let req = EvaluateTypeExpressionRequest {
+        scope: "/workspace/src/Comp.vue".to_string(),
+        expression: "InstanceType<typeof default>['$props']".to_string(),
+        extra_imports: Vec::new(),
+        mode: ProjectionMode::Navigate,
+        cacheable: false,
+    };
+    let (node, _record) = host.evaluate_type_expression_with_audit(req);
+    let node = node.expect(
+        "evaluate_type_expression must resolve \
+         `InstanceType<typeof default>['$props']` in Navigate against \
+         the .vue scope",
+    );
+
+    let store = host.project_type_store().semantic_graph();
+    let data = store
+        .node_data(node)
+        .expect("evaluated `$props` terminal must be interned");
+
+    // Bounded contract: a Navigate terminal stays a SHALLOW carrier.
+    // An Object here would mean the terminal projection expanded under
+    // Navigate — i.e. the terminal mode no longer tracks the caller.
+    assert!(
+        !matches!(data.as_ref(), SemanticNodeData::Object(_)),
+        "Navigate-mode `InstanceType<typeof default>['$props']` must \
+         stay shallow (a DeclRef/Ref/InstantiationRef/Alias carrier), \
+         NOT an eagerly expanded Object; got {:?}",
+        data.as_ref()
+    );
+    // Positive shape check: the shallow carrier is one of the expected
+    // carrier variants (discriminating — not merely "not Object",
+    // which a Primitive/Unknown miss would also satisfy). The F2 test
+    // shows the Expanded carrier resolves to `Props`, so the Navigate
+    // carrier is the `DeclRef(Props)` / placeholder that precedes it.
+    assert!(
+        matches!(
+            data.as_ref(),
+            SemanticNodeData::DeclRef { .. }
+                | SemanticNodeData::InstantiationRef { .. }
+                | SemanticNodeData::Alias(_)
+                | SemanticNodeData::Opaque(
+                    verter_session::semantic_query::QueryError::DeclPlaceholder { .. }
+                )
+        ),
+        "Navigate `$props` terminal must stay a declaration/\
+         instantiation carrier; got {:?}",
+        data.as_ref()
+    );
+}
+
 // ──────────────────────────────────────────────────────────────────
 // exactly one audit record per request
 // ──────────────────────────────────────────────────────────────────

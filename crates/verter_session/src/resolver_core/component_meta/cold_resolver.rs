@@ -13,9 +13,8 @@ use super::direct_macro::{
     macro_has_authoritative_owner_surface, macro_has_direct_local_type_root,
     should_ignore_external_macro_type, should_seed_direct_macro_registry_entry,
 };
-use super::projected_type_expr::projected_macro_surfaces_to_type_expr;
 use super::{
-    enrich_projected_jsdoc, macro_kind_needed_for_fallthrough, placeholder_type_declaration,
+    macro_kind_needed_for_fallthrough, placeholder_type_declaration,
     skip_macro_declaration_metadata_for_purpose, ComponentMetaEvalOutputs,
     ComponentMetaResolutionPurpose, ComponentMetaResolverHost, ResolvedComponentMetaParts,
     ResolvedMacroMeta, ResolvedTypeRegistryMeta,
@@ -217,9 +216,6 @@ where
                 surface_is_authoritative: false,
                 declaration,
                 native_props: Vec::new(),
-                props: Vec::new(),
-                emits: Vec::new(),
-                slots: Vec::new(),
                 jsdoc,
             });
             continue;
@@ -234,9 +230,6 @@ where
                 surface_is_authoritative: false,
                 declaration,
                 native_props: Vec::new(),
-                props: Vec::new(),
-                emits: Vec::new(),
-                slots: Vec::new(),
                 jsdoc,
             });
             continue;
@@ -257,28 +250,16 @@ where
                 )
             });
         if let Some(elements) = imported_elements {
-            // graph-native projection. The resolver's
-            // `host.resolve_macro_elements` returns the prop/emit/slot
-            // surface graph-natively; `project_macro_surfaces(None, ...)`
-            // preserves the core data extraction. Per-member JSDoc is
-            // ancillary text; we recover it post-projection via
-            // `enrich_projected_jsdoc`, which routes through the
-            // host-owned `host.resolve_jsdoc_block` (the same
-            // shared resolver path the declaration-level JSDoc uses).
-            let mut projected = project_macro_surfaces(None, dep.macro_kind, &elements);
-            if !skip_declaration_metadata {
-                enrich_projected_jsdoc(
-                    host,
-                    &declaration,
-                    &elements,
-                    dep.macro_kind,
-                    &mut projected,
-                    expanded,
-                    &mut tracked_deps,
-                    &mut cache,
-                    &mut visiting,
-                );
-            }
+            // Project the native-only surface (`native_props`) from the
+            // resolved `ResolvedElements`. The published props/emits/slots
+            // surface is NOT projected here — it is owned by the typeinfo
+            // macro-surface path (`vue_macro_dtos`), which
+            // `component_meta_resolved_macros` consults at the session
+            // boundary. The registry root is seeded SHALLOW
+            // (`TypeExpr::named`): consumers re-resolve the named root on
+            // demand through the shared resolver (shallow-by-default), and
+            // the typeinfo/evaluated path is the single shape authority.
+            let projected = project_macro_surfaces(None, dep.macro_kind, &elements);
             let package_backed_dep = host.workspace_is_package_backed(dep_canonical.as_str())
                 || host.workspace_is_package_backed(declaration.canonical_source.as_str());
             if is_direct_macro_type_reference(macros, dep, None)
@@ -286,17 +267,9 @@ where
                 && should_seed_direct_macro_registry_entry(&declaration)
                 && seen_registry_names.insert(dep.type_name.clone())
             {
-                let has_seed_surface = !projected.props.is_empty()
-                    || !projected.emits.is_empty()
-                    || !projected.slots.is_empty()
-                    || !projected.native_props.is_empty();
                 resolved_type_registry.push(ResolvedTypeAnalysis {
                     name: dep.type_name.clone(),
-                    type_expr: if has_seed_surface {
-                        projected_macro_surfaces_to_type_expr(dep.macro_kind, &projected)
-                    } else {
-                        TypeExpr::named(dep.type_name.clone())
-                    },
+                    type_expr: TypeExpr::named(dep.type_name.clone()),
                     type_expansion: None,
                 });
                 resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
@@ -327,9 +300,6 @@ where
                     surface_is_authoritative: imported_surface_is_authoritative,
                     declaration,
                     native_props: projected.native_props,
-                    props: projected.props,
-                    emits: projected.emits,
-                    slots: projected.slots,
                     jsdoc,
                 });
             }
@@ -368,25 +338,15 @@ where
                     declaration: declaration.clone(),
                 });
             }
-            let (
-                surface_props,
-                surface_emits,
-                surface_slots,
-                surface_native_props,
-                surface_authoritative,
-            ) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), false);
             if !projectable_owner_local || keep_direct_imported_vue_macro {
                 resolved_macros.push(ResolvedMacroMeta {
                     macro_index,
                     macro_kind: dep.macro_kind,
                     type_name: dep.type_name.clone(),
                     import_source: dep.import_source.clone(),
-                    surface_is_authoritative: surface_authoritative,
+                    surface_is_authoritative: false,
                     declaration,
-                    native_props: surface_native_props,
-                    props: surface_props,
-                    emits: surface_emits,
-                    slots: surface_slots,
+                    native_props: Vec::new(),
                     jsdoc,
                 });
             }
@@ -422,16 +382,12 @@ where
                         | AnalyzedMacroKind::DefineEmits
                 );
 
-            // the legacy first-pass text-projection
-            // over each `mac.resolved_local_types[i].expanded` string
-            // is deleted. The graph-native second pass below
-            // (`host.resolve_owner_local_macro_surface`) produces the
-            // authoritative surface for both purely-local and
-            // imported-heritage macros. The registry-seeding side
-            // effect (which the first pass's outer loop also
-            // performed) survives below — registry seeds are now
-            // published once per direct-local resolved-type via the
-            // graph metadata.
+            // Seed the direct macro-local root into the registry. The
+            // owner-local authority entry (pushed below, gated on
+            // `host.owner_local_macro_root_has_surface`) marks the macro as
+            // owner-local-authoritative for the materialiser; the published
+            // props/emits/slots surface itself is sourced from the typeinfo
+            // path keyed on macro_index.
             for (resolved_index, resolved) in mac.resolved_local_types.iter().enumerate() {
                 if !is_direct_local_macro_type_reference(
                     mac,
@@ -480,20 +436,16 @@ where
                 }
             }
 
-            // Graph-native authoritative projection. Runs for any
-            // macro whose owner-local prepared surface
-            // (`projectable_owner_local`) is non-empty — this covers:
+            // Owner-local authoritative entry. Pushes a `ResolvedMacroMeta`
+            // (gated on `owner_local_macro_root_has_surface`) for any macro
+            // whose owner-local prepared surface (`projectable_owner_local`) is
+            // non-empty — this covers:
             //   - imported-heritage macros (`prepared_surface_will_handle`):
-            //     the full prepared projection REPLACES the same-file
-            //     source-text entry, resolving cross-file extends
-            //     chains like `Omit<ExternalType, K>`.
-            //   - purely-local macros (no cross-file deps): the
-            //     prepared projection is the only surface producer
-            //  after deleted the text-projection
-            //     first pass.
-            //   - DefineEmits with no imported deps under fallthrough
-            //     scope: separate carve-out for the emits inheritance
-            //     path.
+            //     `interface Props extends Omit<ExternalType, K>` resolves its
+            //     cross-file heritage through the typeinfo surface.
+            //   - purely-local macros (no cross-file deps).
+            //   - DefineEmits with no imported deps under fallthrough scope:
+            //     the emits inheritance carve-out.
             if prepared_surface_will_handle
                 || (projectable_owner_local && !macro_has_imported_type_deps)
                 || (mac.kind == AnalyzedMacroKind::DefineEmits
@@ -505,39 +457,29 @@ where
                     .into_iter()
                     .flatten()
                 {
-                    let Some(projected) = host.resolve_owner_local_macro_surface(
+                    // Gate on the owner-local root having a non-empty prepared
+                    // surface (folds the prior emptiness check that inspected
+                    // the projected props/emits/slots). The published
+                    // props/emits/slots surface itself is owned by the typeinfo
+                    // path; here we only decide whether to push an
+                    // authoritative entry for this root.
+                    if !host.owner_local_macro_root_has_surface(
                         owner_canonical,
                         root_name,
                         mac.kind,
-                    ) else {
-                        continue;
-                    };
-
-                    if projected.props.is_empty()
-                        && projected.emits.is_empty()
-                        && projected.slots.is_empty()
-                        && projected.native_props.is_empty()
-                    {
+                    ) {
                         continue;
                     }
 
-                    // When the prepared surface handles a DefineProps with
-                    // imported heritage, replace the existing source-text
-                    // entry (which only has same-file members) with the full
-                    // prepared surface.  Downstream synthesis expects exactly
-                    // one entry per macro_index+type_name, so we must not add
-                    // a second entry.
-                    if prepared_surface_will_handle {
-                        if let Some(existing) = resolved_macros.iter_mut().find(|meta| {
-                            meta.macro_index == macro_index && meta.type_name == *root_name
-                        }) {
-                            existing.native_props = projected.native_props;
-                            existing.props = projected.props;
-                            existing.emits = projected.emits;
-                            existing.slots = projected.slots;
-                            continue;
-                        }
-                    } else if resolved_macros
+                    // An entry for this (macro_index, root) already exists (the
+                    // imported arm pushed it). The published surface comes from
+                    // the typeinfo path keyed on macro_index, so there is
+                    // nothing to replace — keep the existing entry (which
+                    // carries the imported declaration's `native_props`) and
+                    // skip. Otherwise push the authoritative owner-local entry
+                    // (`native_props` is empty — owner-local roots have no
+                    // class-member visibility surface).
+                    if resolved_macros
                         .iter()
                         .any(|meta| meta.macro_index == macro_index && meta.type_name == *root_name)
                     {
@@ -568,10 +510,7 @@ where
                         import_source: String::new(),
                         surface_is_authoritative: true,
                         declaration,
-                        native_props: projected.native_props,
-                        props: projected.props,
-                        emits: projected.emits,
-                        slots: projected.slots,
+                        native_props: Vec::new(),
                         jsdoc,
                     });
                 }

@@ -342,7 +342,39 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let empty_env = FxHashMap::default();
         let mut substitutions = Vec::new();
-        let node_id = if let Some(ty_ann) = prepared.type_annotation.as_ref() {
+        // CONVERGENCE (scope-bounded to a synthesized `.vue`/typeinfo-scratch
+        // `default` ONLY): when the resolved value root is EXACTLY the
+        // synthesized `.vue` public-instance `default` — `root_identity`'s symbol
+        // is `default` AND the resolved canonical's shallow `default` value
+        // symbol carries the `is_synthesised_vue_default` provenance flag — the
+        // construct-signature RETURN must be produced by the keyed
+        // `Instantiate(.vue default)` query, not by re-lowering the synthesized
+        // default's `function_signature.return_type` here. This keeps `typeof
+        // Foo` / `InstanceType<typeof Foo>` (Foo a `.vue`) on the SAME semantic
+        // identity + recursion guard the bare-`Ref` `.vue` route uses. NOTHING
+        // else changes: non-`.vue` `typeof`, userland `.vue` defaults, ordinary
+        // `.ts`/`.tsx` constructors/classes/functions/enums/object-literals, and
+        // generic `InstanceType<T>` all fall through to the unchanged chain
+        // below.
+        let synthesised_default: Option<crate::semantic_query::HashValue> =
+            if root_identity.symbol_name == "default" {
+                self.ctx
+                    .ensure_indexed_ready(root_identity.canonical_id.as_str())
+                    .and_then(|indexed| {
+                        indexed
+                            .shallow_state
+                            .value_symbol("default")
+                            .filter(|sym| sym.is_synthesised_vue_default)
+                            .map(|_| indexed.whole_hash)
+                    })
+            } else {
+                None
+            };
+        let node_id = if let Some(_resolved_default_whole_hash) = synthesised_default {
+            let resolved_default_canonical: Arc<str> =
+                Arc::from(root_identity.canonical_id.as_str());
+            self.build_synthesized_vue_default_construct_object(&resolved_default_canonical, &scope)
+        } else if let Some(ty_ann) = prepared.type_annotation.as_ref() {
             self.shallow_lower_type_expr(
                 ty_ann,
                 &empty_env,
@@ -427,6 +459,261 @@ impl<'a> ProjectSemanticDispatch<'a> {
             signature,
         ))
         .with_observed_self_roots([(Arc::clone(&value_root.scope.canonical_id), observed_hash)])
+    }
+
+    /// Build a `.vue` SFC's synthesized `default` PUBLIC INSTANCE surface for
+    /// `Instantiate{ .vue, "default", [] }`.
+    ///
+    /// The `.vue`'s `IndexedReady` carries a synthesized `default` VALUE symbol
+    /// (`resolver_core::vue_default_synth`) whose construct-signature return type
+    /// IS the instance object `{ $props, $emit, $slots }`. This lowers that
+    /// instance object through the SHARED lowering pipeline (no second resolver)
+    /// in the `.vue`'s scope, returning a normal
+    /// [`SemanticNodeData::Object`]`(SurfaceView)` so `ProjectPath` / walkers
+    /// navigate `$props` / `$emit` / `$slots`.
+    ///
+    /// Returns `None` when the canonical carries no synthesized `default` with an
+    /// instance shape (a `.vue` with no type-based macros), letting
+    /// `build_instantiate` fall through to its ordinary `resolve_prepared_type_decl`
+    /// miss handling.
+    ///
+    /// Termination is by QUERY IDENTITY, not a depth bound. A circular `.vue`
+    /// import is bounded by one of THREE outcomes depending on HOW the cycle
+    /// re-enters this identity — do not over-claim that every cycle reaches the
+    /// active-instantiation guard:
+    ///
+    /// - **lazy bare-`Ref` / mutual cross-file cycle** (the COMMON shape — e.g.
+    ///   `defineProps<{ peer: Other }>()` with a reciprocal `E ↔ F`): the inner
+    ///   cyclic reference lowers in `Navigate` to a shallow `DeclRef` carrier
+    ///   (`Ref { name: "default" }`) instead of re-dispatching `Instantiate`, and
+    ///   each `Instantiate(.vue default)` side completes and pops before the next
+    ///   is demanded — so the SAME `(decl_canonical, "default")` frame is NEVER
+    ///   active at the back-edge. The result is a bounded SHALLOW `Object`, NOT a
+    ///   `RecursiveRef`. This branch's `push_instantiate_active` is paired
+    ///   correctly but is not the bound for this shape.
+    /// - **memo same-key `Instantiate` sentinel** (`semantic_query_memo`): when a
+    ///   re-entry dispatches the SAME `Instantiate{ .vue default, [], context }`
+    ///   KEY (identical context) that is already in flight, the memo's same-key
+    ///   recursion sentinel returns `Opaque(RecursiveRef)`.
+    /// - **`push_instantiate_active` / `is_instantiate_active` guard** (below):
+    ///   when the instance shape re-references this same `(decl_canonical,
+    ///   "default")` identity EAGERLY while this frame is still on the stack — the
+    ///   `InstanceType<typeof Self>` same-file self-cycle projected
+    ///   `Published(Expanded)`, where `typeof Self` routes through
+    ///   `build_synthesized_vue_default_construct_object` back into
+    ///   `Instantiate(.vue default)` under a DIFFERENT context key (so the memo
+    ///   sentinel does not fire) — the active-instantiation guard short-circuits
+    ///   to `Opaque(RecursiveRef)` before recursing.
+    ///
+    /// None of the three is a depth bound.
+    fn build_vue_default_instance(
+        &self,
+        decl_canonical: &Arc<str>,
+        decl_whole_hash: crate::semantic_query::HashValue,
+        scope: &NodeScopeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<crate::project_semantic_dispatch::walk::QueryBuildOutput> {
+        // The synthesized `default` value symbol's construct-signature return
+        // type is the instance object. Read it ONCE from the observed
+        // `IndexedReady` (the same artifact that roots the memo entry below).
+        let indexed = self.ctx.ensure_indexed_ready(decl_canonical.as_ref())?;
+        let default_symbol = indexed.shallow_state.value_symbol("default")?;
+        // PROVENANCE gate (prefer-direct-structural-facts-over-heuristics): only
+        // the SYNTHESIZED `.vue` public-instance `default` symbol drives this
+        // branch. A USERLAND `export default` in a `.vue`'s `<script>` (synthesis
+        // skipped, userland default present) carries `is_synthesised_vue_default
+        // == false` — even when its value type superficially looks like an
+        // instance (`(): { $props: ... } => ...`) — so it falls through to the
+        // ordinary prepared-decl path instead of being mistreated as the public
+        // instance.
+        if !default_symbol.is_synthesised_vue_default {
+            return None;
+        }
+        let instance_shape: TypeExpr = default_symbol
+            .function_signature
+            .as_ref()?
+            .return_type
+            .as_ref()?
+            .clone();
+        let observed_hash = indexed.whole_hash;
+
+        // Body-lowering context for the `.vue` scope — mirrors the prepared-decl
+        // path's scope-payload + shadowing capture so a synthesized instance
+        // member that REFERENCES an imported `.vue` (`InstanceType<typeof Foo>`)
+        // resolves through the SAME bare-name / import resolution every decl body
+        // uses.
+        let scope_payload = self
+            .ctx
+            .prepared_decl_bundle(decl_canonical.as_ref())
+            .map(|bundle| {
+                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                    &bundle,
+                )
+            });
+        let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+            scope_payload.as_ref(),
+        );
+        let env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
+        let name_resolution: FxHashMap<String, ResolvedRootIdentity> = FxHashMap::default();
+        let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+
+        // Query-identity recursion control: push `(decl_canonical, "default")`
+        // before lowering. A circular `.vue` import whose instance shape
+        // transitively re-references this same identity sees the active entry in
+        // `shallow_lower_type_expr` and emits `Opaque(RecursiveRef)` at the
+        // back-edge — bounded, no hang.
+        let active_identity: super::InstantiateIdentity =
+            (Arc::clone(decl_canonical), Arc::from("default"));
+        let pushed = self.push_instantiate_active(active_identity);
+        if !pushed {
+            return Some(
+                (
+                    QueryResult::Value(self.opaque(QueryError::RecursiveRef {
+                        name: Arc::from("default"),
+                    })),
+                    empty_signature(),
+                )
+                    .into(),
+            );
+        }
+
+        // Lower the instance object through the shared pipeline. An inline
+        // `ObjectExpr` lowers directly to `SemanticNodeData::Object(SurfaceView)`,
+        // so the result is a normal object the walkers navigate.
+        let result = self.shallow_lower_type_expr_with_context(
+            &instance_shape,
+            &env,
+            scope,
+            &name_resolution,
+            scope_payload.as_ref(),
+            &shadowing,
+            &mut substitutions,
+            context,
+        );
+        self.pop_instantiate_active();
+
+        // Origin edge + dep signature, mirroring `build_instantiate`'s shell. The
+        // instance object is synthesized from the `.vue`'s macro type arguments,
+        // so the result depends on the `.vue`'s content version — root the memo
+        // entry on `(decl_canonical, observed_hash)`.
+        self.graph().record_instantiate();
+        let fence = self.dep_signature_for(decl_canonical, observed_hash);
+        let base = self
+            .graph()
+            .intern_node_with_scope(SemanticNodeData::Opaque(QueryError::Miss), scope.clone());
+        self.graph().record_origin_edge(
+            result,
+            OriginEdgeKind::Instantiate,
+            Arc::from(vec![base].into_boxed_slice()),
+            OriginMeta::None,
+            Arc::clone(&fence),
+        );
+        for (param_name, arg_id) in substitutions {
+            self.graph().record_origin_edge(
+                result,
+                OriginEdgeKind::SubstituteTypeParam,
+                Arc::from(vec![arg_id].into_boxed_slice()),
+                OriginMeta::SubstitutedParam(param_name),
+                Arc::clone(&fence),
+            );
+        }
+
+        // `decl_whole_hash` (carried by the `Instantiate` key's `DeclIdentity`)
+        // and `observed_hash` (the artifact just read) agree under a stable
+        // content generation; root on the observed hash, which is the basis the
+        // instance shape was actually read from.
+        let _ = decl_whole_hash;
+        Some(
+            crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                QueryResult::Value(result),
+                fence,
+            ))
+            .with_observed_self_roots([(Arc::clone(decl_canonical), observed_hash)]),
+        )
+    }
+
+    /// `build_typeof` convergence for a synthesized `.vue`/typeinfo-scratch
+    /// `default`: build the constructor-like value type (an Object carrying a
+    /// single construct signature) whose construct-signature RETURN node is
+    /// produced by the keyed `Instantiate{ .vue, "default", [] }` query — NOT by
+    /// directly re-lowering the synthesized default's
+    /// `function_signature.return_type`.
+    ///
+    /// `typeof Foo` (Foo a synthesized `.vue` default) and `InstanceType<typeof
+    /// Foo>` therefore share ONE semantic identity for the instance shape: the
+    /// `.vue default` instance object. `InstanceType` stays generic — it extracts
+    /// this construct signature's return as usual — so there is no second
+    /// `.vue`-aware production site to diverge in cache identity or recursion.
+    /// Cyclic `InstanceType<typeof …>` re-entry on this shared identity is
+    /// bounded by the `Instantiate(.vue default)` recursion machinery: a same-key
+    /// in-flight re-entry hits the memo's same-key sentinel, and an EAGER
+    /// re-entry of the SAME `(canonical, "default")` identity while the outer
+    /// frame is still active (the `InstanceType<typeof Self>` self-cycle under
+    /// `Published(Expanded)`) hits `push_instantiate_active` — both yielding
+    /// `Opaque(RecursiveRef)`. (The lazy bare-`Ref` MUTUAL route is bounded
+    /// differently — a shallow `DeclRef` carrier, not `RecursiveRef`; see
+    /// [`Self::build_vue_default_instance`].)
+    ///
+    /// The synthesized default's construct signature takes no parameters and no
+    /// type parameters (`vue_default_synth`), so the `Function` node is composed
+    /// directly with an empty parameter list and the instance node as its return
+    /// — faithful to what the ordinary lowering of that empty-param construct
+    /// signature would intern, but with the return rooted on the shared query.
+    fn build_synthesized_vue_default_construct_object(
+        &self,
+        resolved_default_canonical: &Arc<str>,
+        scope: &NodeScopeId,
+    ) -> SemanticNodeId {
+        // The instance shape is the keyed `Instantiate(.vue default)` result —
+        // the SOLE semantic identity for the `.vue`'s public instance. Navigate /
+        // structural-transit keeps the instance members shallow (the consumer
+        // drives any deeper projection), matching `resolve_vue_public_type`'s
+        // own intermediate-hop demand.
+        let instance_return = match self.execute(SemanticQueryKey::Instantiate {
+            base: crate::semantic_query::DeclKey {
+                canonical_id: Arc::clone(resolved_default_canonical),
+                decl_name: Arc::from("default"),
+            },
+            args: Arc::from(Vec::new().into_boxed_slice()),
+            context:
+                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                    ProjectionMode::Navigate,
+                ),
+        }) {
+            QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+            // A `.vue` whose synthesized instance shape could not be produced
+            // (e.g. mid-flight recursion supersession) yields the opaque miss as
+            // the construct return — the value type stays a well-formed
+            // constructor object, the instance is just unresolved.
+            QueryResult::Error(err) => self.opaque(err),
+        };
+
+        // Construct signature `new (): <instance>`: empty params + empty type
+        // params (the synthesized default takes neither), no source spans.
+        let ctor_fn = self.graph().intern_node_with_scope(
+            SemanticNodeData::Function {
+                params: Arc::from(Vec::new().into_boxed_slice()),
+                return_type: instance_return,
+                type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+                signature_span: None,
+                return_type_span: None,
+            },
+            scope.clone(),
+        );
+
+        // Constructor-like value type: an Object carrying exactly that one
+        // construct signature — the same shape `typeof <class>` produces, so
+        // `InstanceType<typeof Foo>` extracts the construct return generically.
+        let view = SurfaceView {
+            members: Arc::from(Vec::new().into_boxed_slice()),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(vec![ctor_fn].into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        };
+        self.graph()
+            .intern_node_with_scope(SemanticNodeData::Object(view), scope.clone())
     }
 
     /// Generic instantiation.
@@ -542,6 +829,53 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .intern_node_with_scope(SemanticNodeData::Opaque(QueryError::Miss), scope.clone());
 
         let adapter = SessionDispatchHost::new(self.ctx);
+
+        // 1b. `.vue` synthesized `default` public-instance dispatch.
+        //
+        // A `.vue` SFC has no userland `default` TYPE declaration — its public
+        // component type is the SYNTHESIZED instance object
+        // `{ $props, $emit, $slots }` carried as the construct-signature return
+        // type of a synthesized `default` VALUE symbol
+        // (`resolver_core::vue_default_synth`). `Instantiate{ .vue, "default", [] }`
+        // is the SOLE semantic identity for that public instance — the public
+        // API (`resolve_vue_public_type`) and a `.vue`-importing-`.vue` reference
+        // (`Ref("Foo")` → `DeclRef{Foo.vue, "default"}` → `Instantiate`) BOTH
+        // route here, so there is exactly one query identity and one resolver.
+        //
+        // Without this branch the query would fall through to
+        // `resolve_prepared_type_decl` below (a `.vue` has no prepared `default`
+        // TYPE decl) and miss. The branch is gated on the STRUCTURAL PROVENANCE
+        // flag `is_synthesised_vue_default` of the resolved `default` value
+        // symbol (NOT the file-classifier `is_synthesis_candidate`), so a
+        // userland `export default` — in a `.ts` file OR in a `.vue`'s
+        // `<script>` block — is never hijacked even when its value type looks
+        // instance-shaped. It requires `args.is_empty()` (the synthesized
+        // default takes no type arguments).
+        //
+        // Termination is by query identity (NO depth bound): the memo's
+        // same-key `Instantiate` recursion sentinel (`mod.rs`) returns
+        // `Opaque(RecursiveRef)` for a circular `A.vue ↔ B.vue` import, and the
+        // `push_instantiate_active`/`pop` discipline below catches same-identity
+        // re-entry while the instance shape is lowering.
+        if decl_name.as_ref() == "default"
+            && args.is_empty()
+            && self
+                .ctx
+                .ensure_indexed_ready(decl_canonical.as_ref())
+                .and_then(|indexed| {
+                    indexed
+                        .shallow_state
+                        .value_symbol("default")
+                        .map(|sym| sym.is_synthesised_vue_default)
+                })
+                .unwrap_or(false)
+        {
+            if let Some(output) =
+                self.build_vue_default_instance(decl_canonical, decl_whole_hash, &scope, context)
+            {
+                return output;
+            }
+        }
 
         // 2. Built-in utility dispatch.
         // A utility name (Partial, Pick, ReturnType, etc.) that the user
@@ -1177,34 +1511,107 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// carrier in `Navigate` / `Skeleton`, which the deferred evaluator
     /// deliberately does NOT unwrap (it would over-evaluate symbolic
     /// IndexedAccess hops — see `evaluate.rs`). For those carrier sources we
-    /// read the one-level surface through the shared carrier-complete
-    /// reader [`Self::surface_view_from_base_node`] (Structural provenance —
-    /// a Pick/Omit source is never the macro-T own body) and synthesize a
-    /// `SurfaceView` from it. The carrier reader does not surface
-    /// construct/index signatures, so a carrier-sourced `Omit` drops those
-    /// (the cross-file heritage sources that exercise this path are plain
-    /// interfaces / classes without them); the resolved-`Object` fast path
-    /// above keeps them for every non-carrier source.
+    /// read the one-level surface through the shared empty-path `Shallow`
+    /// reader [`Self::resolve_typeinfo_surface_view`], which routes through the
+    /// SOLE query-time resolver and returns the core [`SurfaceView`]
+    /// PRESERVING call / construct / index signatures + keyspace. The `Omit`
+    /// arm then carries those signatures through (TS semantics: `Omit<T, K>`
+    /// filters property names only), where the old `MacroSurfaceView` reader
+    /// silently dropped construct / index signatures for a carrier-sourced
+    /// `Omit`.
     fn object_filter_source_surface(&self, source_resolved: SemanticNodeId) -> Option<SurfaceView> {
         match self.graph().node_data(source_resolved).as_deref() {
             Some(SemanticNodeData::Object(view)) => Some(view.clone()),
             Some(SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. }) => {
-                let macro_view = self.surface_view_from_base_node(
+                // A Pick/Omit source is never the macro-T own body — read it
+                // under the structural `published(Shallow)` context.
+                self.resolve_typeinfo_surface_view(
                     source_resolved,
-                    crate::semantic_query::SurfaceProvenanceContext::Structural,
-                )?;
-                Some(SurfaceView {
-                    members: Arc::from(macro_view.members.into_boxed_slice()),
-                    call_signatures: Arc::from(macro_view.call_signatures.into_boxed_slice()),
-                    construct_signatures: Arc::from(
-                        Vec::<SemanticNodeId>::new().into_boxed_slice(),
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Shallow,
                     ),
-                    index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
-                    keyspace: None,
-                    has_index_signature: false,
-                })
+                )
             }
             _ => None,
+        }
+    }
+
+    /// Drop the call/construct signatures whose Vue emit event NAME (the first
+    /// parameter's string-literal type — or each literal of a union first
+    /// parameter) is in `omit_set`. A signature whose first parameter is not a
+    /// string literal, or whose event name is not omitted, is kept verbatim.
+    ///
+    /// This is the call-signature analogue of property-name `Omit`: a Vue emit
+    /// interface declares each event as a call signature `(e: 'name', …): void`,
+    /// so omitting `'name'` must remove that signature. The event-name read uses
+    /// the SAME first-parameter-literal rule the emit normalizer
+    /// (`emits_from_typeinfo_surface`) uses, so the two agree on which signatures
+    /// represent which events.
+    fn filter_omitted_event_signatures(
+        &self,
+        signatures: &[SemanticNodeId],
+        omit_set: &FxHashSet<&str>,
+    ) -> Arc<[SemanticNodeId]> {
+        let kept: Vec<SemanticNodeId> = signatures
+            .iter()
+            .filter(|sig| {
+                // Keep the signature unless EVERY event name it declares is
+                // omitted (a single signature can declare a union of event
+                // names; only drop it when all are omitted, mirroring how the
+                // normalizer would surface the surviving names).
+                match self.call_signature_event_names(**sig) {
+                    Some(names) if !names.is_empty() => {
+                        !names.iter().all(|name| omit_set.contains(name.as_ref()))
+                    }
+                    // No string-literal event name → not an omittable emit
+                    // signature; keep it (general TS `Omit` leaves it intact).
+                    _ => true,
+                }
+            })
+            .copied()
+            .collect();
+        Arc::from(kept.into_boxed_slice())
+    }
+
+    /// The Vue emit event name(s) a call/construct signature declares — its
+    /// first parameter's string-literal type, or each literal of a union first
+    /// parameter. `None` when the node is not a `Function`, has no parameters,
+    /// or the first parameter is not a string-literal (union). Mirrors the
+    /// first-parameter event-name rule in `emits_from_typeinfo_surface`.
+    fn call_signature_event_names(&self, sig: SemanticNodeId) -> Option<Vec<Arc<str>>> {
+        let data = self.graph().node_data(sig)?;
+        let SemanticNodeData::Function { params, .. } = data.as_ref() else {
+            return None;
+        };
+        let first = params.first()?;
+        let mut names = Vec::new();
+        self.collect_string_literal_names(first.ty, &mut names);
+        if names.is_empty() {
+            None
+        } else {
+            Some(names)
+        }
+    }
+
+    /// Push the string-literal value(s) carried by `node` into `out` — the node
+    /// itself when it is a `Literal(String)`, or each `Literal(String)` arm when
+    /// it is a `Union`. A `Union` arm that is not a string literal is skipped
+    /// (the surrounding event-name rule only recognises string literals).
+    fn collect_string_literal_names(&self, node: SemanticNodeId, out: &mut Vec<Arc<str>>) {
+        let resolved = self.evaluate_deferred_semantic_node(node);
+        let Some(data) = self.graph().node_data(resolved) else {
+            return;
+        };
+        match data.as_ref() {
+            SemanticNodeData::Literal(LiteralValue::String(name)) => {
+                out.push(Arc::from(name.as_str()))
+            }
+            SemanticNodeData::Union(members) => {
+                for member in members.iter() {
+                    self.collect_string_literal_names(*member, out);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1669,13 +2076,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .filter(|m| !omit_set.contains(m.name.as_ref()))
                     .cloned()
                     .collect();
+                // `Omit<T, K>` over a property surface leaves call/construct
+                // signatures intact (TS mapped-type semantics touch only named
+                // properties). For a Vue EMIT interface the events are call
+                // signatures whose first parameter is a string-literal event
+                // NAME, so omitting an event name must drop the matching call
+                // signature(s) — the call-sig event name is the conceptual key.
+                // A signature whose first parameter is NOT a string literal in
+                // `omit_set` (any non-emit call signature) is unaffected.
+                let kept_call_signatures =
+                    self.filter_omitted_event_signatures(&surface.call_signatures, &omit_set);
+                let kept_construct_signatures =
+                    self.filter_omitted_event_signatures(&surface.construct_signatures, &omit_set);
                 let result_surface = SurfaceView {
                     members: Arc::from(kept.into_boxed_slice()),
-                    // Omit preserves source signatures (TS semantics):
-                    // `Omit<T, K>` only filters property names, leaving
-                    // call/construct/index signatures intact.
-                    call_signatures: Arc::clone(&surface.call_signatures),
-                    construct_signatures: Arc::clone(&surface.construct_signatures),
+                    call_signatures: kept_call_signatures,
+                    construct_signatures: kept_construct_signatures,
                     index_signatures: Arc::clone(&surface.index_signatures),
                     keyspace: surface.keyspace,
                     has_index_signature: surface.has_index_signature,

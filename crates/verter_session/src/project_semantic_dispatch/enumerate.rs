@@ -14,40 +14,8 @@ use rustc_hash::FxHashSet;
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
     HashValue, LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
-    SurfaceMember,
 };
 use verter_semantic::facts::registry::{FactKey, InternedName, SymbolSpace};
-
-/// One-level surface view of an imported macro target's resolved root,
-/// reduced to the two fields the macro-shape interpretation consumes:
-/// the named members (with their TS member metadata) and the call
-/// signatures.
-///
-/// This is the typed-IR equivalent of the eager OXC
-/// `ResolvedElements` member surface. Both the `defineProps` /
-/// `defineEmits` / `defineSlots` shape producers and the slot-binding
-/// graph read members and call signatures off this view rather than
-/// re-deriving them from `keyof`-level names.
-///
-/// Constructed by
-/// [`ProjectSemanticDispatch::surface_view_from_base_node`], which owns
-/// the declaration-placeholder unwrap and the `A & B` Intersection
-/// accumulation (member union, call-signature concatenation) so the
-/// bridge does not re-implement either.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct MacroSurfaceView {
-    /// Named members of the surface, in declaration order. Carries the
-    /// full `SurfaceMember` metadata (`optional`, `is_method`,
-    /// `declared_in_macro_type_arg`, the value node) so the lazy macro
-    /// interpretation reconstructs `AnalyzedPropField` /
-    /// `AnalyzedSlotField` records bit-equivalently to the eager rail.
-    pub(crate) members: Vec<SurfaceMember>,
-    /// Call signatures of the surface, in declaration order. Each id is
-    /// a `Function`-shaped node whose first parameter is the event-name
-    /// literal — the `defineEmits` call-signature event extractor walks
-    /// these.
-    pub(crate) call_signatures: Vec<SemanticNodeId>,
-}
 
 /// Worklist frame for the iterative `key_names_from_base_node`
 /// driver. `Expand` advances one node; `Combine*` reduces the top N
@@ -69,14 +37,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// all-or-nothing `?` here would lose enumerable keys from `A`
     /// when `B` is unresolvable in `keyof (A & B)`.
     ///
-    /// `pub(crate)` (not `pub(super)`) so the `component_meta`
-    /// typed-IR bridge
-    /// ([`crate::resolver_core::ImportedMacroSurface::enumerate_member_names`])
-    /// reuses this single shared `keyof`-level enumerator rather than
-    /// forking a second member-name walker. The bridge passes the
-    /// `ResolveDecl` root node it already holds; this enumerator owns
-    /// the declaration-placeholder unwrap + Intersection/Union
-    /// accumulation so the bridge does not re-implement either.
+    /// `pub(crate)` (not `pub(super)`) so the `keyof` reduction in
+    /// [`crate::project_semantic_dispatch::build`] reuses this single
+    /// shared `keyof`-level enumerator rather than forking a second
+    /// member-name walker. Callers pass the `ResolveDecl` root node they
+    /// already hold; this enumerator owns the declaration-placeholder
+    /// unwrap + Intersection/Union accumulation so they do not
+    /// re-implement either.
     pub(crate) fn key_names_from_base_node(&self, base: SemanticNodeId) -> Option<Vec<Arc<str>>> {
         let mut work: Vec<KeyNamesFrame> = Vec::new();
         let mut results: Vec<Option<Vec<Arc<str>>>> = Vec::new();
@@ -254,432 +221,54 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Resolve a base node to its one-level [`MacroSurfaceView`] —
-    /// named members + call signatures — carrying the caller's
-    /// surface provenance (codex BINDING design).
+    /// Resolve a base node to its one-level core [`SurfaceView`] —
+    /// members + call / construct / index signatures + keyspace — via the
+    /// empty-path `Shallow` `ProjectPath` synthesiser.
     ///
-    /// This is the surface-level sibling of
-    /// [`Self::key_names_from_base_node`]: where the key-name enumerator
-    /// returns member NAMES only, this returns the full
-    /// [`SurfaceMember`] records plus the surface's call signatures, so
-    /// the lazy macro-shape interpretation can read member optionality /
-    /// `declared_in_macro_type_arg` and extract `defineEmits`
-    /// call-signature event names without a second walk.
+    /// This is the SINGLE shared surface reader for the macro-shape and
+    /// object-filter paths: it routes through the SOLE query-time type
+    /// resolver (`SemanticQueryKey::ProjectPath { path: [] }`, the canonical
+    /// "expand the whole surface" shape) and returns the resolver's own
+    /// terminal `SemanticNodeData::Object(view)` verbatim. Because it reads
+    /// the core [`SurfaceView`] (not the lossy `MacroSurfaceView`) it PRESERVES
+    /// construct signatures, index signatures, the keyspace, and the
+    /// `has_index_signature` flag — the cross-file `Omit<Base, K>` carrier path
+    /// that the old reader silently dropped.
     ///
-    /// `provenance` threads the macro-type-argument own-body entry
-    /// context into the DeclPlaceholder unwrap below: when
-    /// `MacroTypeArgOwnBody` the unwrapped declaration's OWN-body members
-    /// surface with `declared_in_macro_type_arg = true`; heritage /
-    /// utility / member-value lowering stay `false` (the lowering edge
-    /// downgrades them). `Structural` is the no-op default that the
-    /// emits / slots readers pass — `declared_in_macro_type_arg` is a
-    /// props-axis concern.
+    /// `context.mode` MUST be [`ProjectionMode::Shallow`] so member values stay
+    /// reference-style (one-level surface, no recursive expansion). The
+    /// empty-path Shallow synthesiser already owns the declaration-placeholder
+    /// unwrap, the `A & B` Intersection own-body-shadows-heritage merge, the
+    /// union-common-member synthesis, and the cross-file `DeclRef` /
+    /// `InstantiationRef` carrier resolution — so this helper carries none of
+    /// that logic itself.
     ///
-    /// Composition (mirrors the enumerator):
-    ///
-    /// - `Object(view)` → return the view's members + call signatures
-    ///   directly. The members already carry the provenance bit stamped
-    ///   at lowering time (the DeclPlaceholder unwrap below interns the
-    ///   instantiated body under the provenance-bearing context).
-    /// - `Intersection(arms)` → accumulate the union of every
-    ///   **resolvable** arm's members under TS derived-member precedence:
-    ///   own-body members (`declared_in_macro_type_arg == true`) shadow
-    ///   heritage members of the same name (a two-pass merge — own-body
-    ///   first, then heritage fills unclaimed names — because the heritage
-    ///   fold orders the base arm BEFORE the own-body arm yet the derived
-    ///   member must win). Within each provenance class, first-writer-wins
-    ///   preserves the genuine `A & B` author-intersection arm order. Call
-    ///   signatures from every arm are concatenated. Returns `None` only
-    ///   when no arm is resolvable.
-    /// - `Alias(target)` → an identity / utility alias shell
-    ///   (`NoInfer<T>`, and any other `build_instantiate` arm that
-    ///   interns a pass-through [`SemanticNodeData::Alias`]). The alias
-    ///   is structurally transparent — `NoInfer<Base>` IS `Base` — so the
-    ///   reader follows `target` and reads its surface, propagating the
-    ///   caller's `provenance` UNCHANGED. An identity alias of the macro-T
-    ///   root therefore surfaces its own-body members with the same
-    ///   `declared_in_macro_type_arg` the un-aliased root would (the
-    ///   eager same-file rail propagates provenance through the identity
-    ///   utilities it handles — `Partial` / `Required` in
-    ///   `verter_semantic::analysis::macros::resolve_type_to_prop_fields`
-    ///   — rather than downgrading; only the TRANSFORMATIVE utilities
-    ///   (`Omit` / `Pick`) reshape the surface and downgrade).
-    /// - `DeclPlaceholder` → `Instantiate` the bare declaration body
-    ///   under `Published(Skeleton)` carrying the provenance, then read
-    ///   the unwrapped surface (see [`Self::surface_view_from_decl_identity`]
-    ///   for the Skeleton-not-Expanded coupling).
-    /// - `DeclRef` → resolve through `ResolveDecl` ("aliases follow") to
-    ///   the declaration's `DeclPlaceholder`, then recurse. This is the
-    ///   cross-file heritage carrier arm: `extends Base` where `Base` is
-    ///   imported lowers to a `DeclRef` in `Navigate` / `Skeleton`.
-    /// - `InstantiationRef` → `Instantiate` under the reader's `Skeleton`
-    ///   demand (carrying the captured generic args + the caller's
-    ///   provenance), then recurse. The cross-file generic heritage carrier
-    ///   arm: `extends Base<T>`.
-    /// - `Union(arms)` → the TS-correct shallow surface of a union-typed
-    ///   macro payload is its COMMON members: a key published only when it
-    ///   is present in EVERY arm (mirroring `key_names_from_base_node`'s
-    ///   `CombineUnion` key intersection), typed as the union of the
-    ///   per-arm member value types. A disjoint union has no common keys →
-    ///   empty surface (still correct); an overlapping union surfaces only
-    ///   the shared members. Union-arm members are reached THROUGH the
-    ///   union, not written at the macro-T root, so they recurse
-    ///   STRUCTURALLY (the synthesized common member is `false`).
-    /// - Everything else (primitives, deferred shells, literals, type
-    ///   params, …) → `None`. They have no single member surface a macro
-    ///   payload reads.
-    ///
-    /// The walk is depth-bounded by the declaration graph: it expands a
-    /// placeholder at most one `Instantiate` deep and recurses only
-    /// through Alias / Intersection / Union arms, never through member
-    /// value bodies (a member's value type is projected lazily by the
-    /// caller via
-    /// [`crate::resolver_core::ImportedMacroSurface::project_named_member`]).
-    pub(crate) fn surface_view_from_base_node(
+    /// Returns `None` when the projection errors or the terminal is not an
+    /// `Object` surface (a primitive / unresolvable carrier has no one-level
+    /// member surface).
+    pub(crate) fn resolve_typeinfo_surface_view(
         &self,
         base: SemanticNodeId,
-        provenance: crate::semantic_query::SurfaceProvenanceContext,
-    ) -> Option<MacroSurfaceView> {
-        // Read the raw node and dispatch per shape. We deliberately do
-        // NOT pre-evaluate via `evaluate_deferred_semantic_node_with_context`
-        // (codex BINDING design): the `Published(Expanded)` evaluator
-        // EAGERLY MERGES an intersection body into a single Object,
-        // re-resolving any carrier (`Ref`) arm under the top-level
-        // provenance — which would re-stamp a heritage `extends Base` arm
-        // `declared_in_macro_type_arg = true`. Instead, the
-        // `DeclPlaceholder` arm below instantiates the macro-T root in
-        // `Skeleton` (NOT `Expanded`) under the caller's provenance (so
-        // `build_instantiate`'s per-arm body lowering bakes own-body Object
-        // arms `true` and heritage `Ref` arms structural), and the
-        // `Intersection` arm merges the already-lowered arms with STRUCTURAL
-        // recursion — preserving each arm's baked provenance without
-        // re-stamping carriers.
-        //
-        // CARRIER-COMPLETE: a CROSS-FILE heritage `Ref` lowers
-        // lazily to a `DeclRef` / `InstantiationRef` carrier in
-        // `Navigate` / `Skeleton`. The dedicated carrier arms below resolve
-        // those (DeclRef → ResolveDecl → DeclPlaceholder → recurse;
-        // InstantiationRef → Skeleton Instantiate → recurse) so the
-        // inherited members surface. A same-file heritage `Ref` is already
-        // a `DeclPlaceholder` after the root Skeleton-instantiate of an
-        // inline interface body, so both same-file and cross-file heritage
-        // converge on the `DeclPlaceholder` reader without an eager Expand.
-        let resolved = base;
-        let data = self.graph().node_data(resolved)?;
-        match data.as_ref() {
-            SemanticNodeData::Object(view) => Some(MacroSurfaceView {
-                members: view.members.to_vec(),
-                call_signatures: view.call_signatures.to_vec(),
-            }),
-            // Identity / utility alias shell (`NoInfer<T>` and any other
-            // `build_instantiate` arm that interns a pass-through Alias).
-            // Structurally transparent: follow `target` and read its
-            // surface, propagating the caller's provenance UNCHANGED so an
-            // identity alias of the macro-T root keeps its own-body
-            // members' `declared_in_macro_type_arg`. Without this arm the
-            // alias fell through to the catch-all `None`, which
-            // `ImportedMacroSurface::resolve_surface_view` turns into an
-            // EMPTY macro surface — `defineProps<NoInfer<Base>>()` and
-            // `type Props = NoInfer<Base>` would lose every member.
-            SemanticNodeData::Alias(target) => {
-                let target = *target;
-                drop(data);
-                self.surface_view_from_base_node(target, provenance)
-            }
-            SemanticNodeData::Intersection(arms) => {
-                let arms = Arc::clone(arms);
-                drop(data);
-                // Resolve each arm's surface (STRUCTURAL provenance: each
-                // arm's own-body-vs-heritage provenance was already decided
-                // when `build_instantiate` lowered the declaration body
-                // per-arm — own-body Object arms baked `true`, reference /
-                // heritage arms `false`. Re-applying the caller's macro
-                // provenance would wrongly re-stamp heritage members `true`).
-                let mut any_resolvable = false;
-                let mut arm_views: Vec<MacroSurfaceView> = Vec::with_capacity(arms.len());
-                for arm in arms.iter() {
-                    if let Some(arm_view) = self.surface_view_from_base_node(
-                        *arm,
-                        crate::semantic_query::SurfaceProvenanceContext::Structural,
-                    ) {
-                        any_resolvable = true;
-                        arm_views.push(arm_view);
-                    }
-                }
-                if !any_resolvable {
-                    return None;
-                }
-                // Member precedence (TS derived-member shadowing). A
-                // declaration's OWN body (`interface Props extends Base {
-                // dup: string }`) folds to `Intersection([Base,
-                // OwnObject])` — heritage arm FIRST, own-body arm LAST — but
-                // TS semantics make the DERIVED member shadow the inherited
-                // one (`Props['dup']` is `string`, not `number` and not
-                // `string & number`). A naive arm-order first-writer-wins
-                // would keep the heritage `dup` (wrong). So we merge in TWO
-                // passes keyed on the baked provenance: own-body members
-                // (`declared_in_macro_type_arg == true`) win first, then
-                // heritage members fill names not already claimed. Within
-                // each provenance class first-writer-wins preserves the
-                // genuine `A & B` author-intersection arm order (all arms
-                // structural-false → second pass keeps left-to-right order).
-                let mut merged = MacroSurfaceView::default();
-                let mut seen: FxHashSet<Arc<str>> = FxHashSet::default();
-                for own_body_pass in [true, false] {
-                    for arm_view in &arm_views {
-                        for member in &arm_view.members {
-                            if member.declared_in_macro_type_arg != own_body_pass {
-                                continue;
-                            }
-                            if seen.insert(Arc::clone(&member.name)) {
-                                merged.members.push(member.clone());
-                            }
-                        }
-                    }
-                }
-                for arm_view in arm_views {
-                    merged.call_signatures.extend(arm_view.call_signatures);
-                }
-                Some(merged)
-            }
-            SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder {
-                canonical_id,
-                name,
-                whole_hash,
-            }) => {
-                let identity = crate::semantic_query::DeclIdentity {
-                    canonical_id: Arc::clone(canonical_id),
-                    whole_hash: *whole_hash,
-                    decl_name: Arc::clone(name),
-                };
-                drop(data);
-                self.surface_view_from_decl_identity(identity, resolved, provenance)
-            }
-            // Lazy declaration-reference carrier (`Navigate` / `Skeleton`
-            // lowering of a bare `TypeExpr::Ref`). A cross-file heritage
-            // arm (`extends Base` where `Base` is imported) lowers to a
-            // `DeclRef` in the carrier-preserving modes; the Intersection
-            // recursion above reaches it here. Resolve it through
-            // `ResolveDecl` (the same "aliases follow" unwrap the walker
-            // performs) to the declaration's `DeclPlaceholder`, then read
-            // that surface — WITHOUT eagerly expanding (the
-            // `surface_view_from_decl_identity` helper instantiates in
-            // `Skeleton`, never `Expanded`, so the slot-binding eagerness
-            // guard `enrich_does_not_eagerly_instantiate_carrier` stays at
-            // zero synthesis-attributable `Expanded` Instantiate calls).
-            SemanticNodeData::DeclRef { identity } => {
-                let scope = crate::semantic_query::ScopeId {
-                    canonical_id: Arc::clone(&identity.canonical_id),
-                    local_scope: None,
-                };
-                let name = Arc::clone(&identity.decl_name);
-                drop(data);
-                match self.execute(crate::semantic_query::SemanticQueryKey::ResolveDecl(
-                    crate::semantic_query::ResolveDeclKey { scope, name },
-                )) {
-                    crate::semantic_query::QueryResult::Value(decl) if decl != resolved => {
-                        self.surface_view_from_base_node(decl, provenance)
-                    }
-                    _ => None,
-                }
-            }
-            // Lazy generic-application carrier (`Navigate` / `Skeleton`
-            // lowering of a `TypeExpr::Ref` with type arguments). A
-            // cross-file generic heritage arm (`extends Base<string>`)
-            // lowers to an `InstantiationRef`. Instantiate it under the
-            // surface reader's `Skeleton` demand carrying the caller's
-            // provenance, then read the instantiated body's surface. The
-            // `args` are the captured generic arguments, so the substituted
-            // member types surface (generic substitution is semantic
-            // meaning). Like the `DeclRef` arm this never asks for the
-            // `Expanded` body mode.
-            SemanticNodeData::InstantiationRef { base, args } => {
-                let base = base.clone();
-                let args = Arc::clone(args);
-                drop(data);
-                match self.execute(crate::semantic_query::SemanticQueryKey::Instantiate {
-                    base: base.to_decl_key(),
-                    args,
-                    context: crate::semantic_query::ProjectionReductionContext::published(
-                        crate::semantic_query::ProjectionMode::Skeleton,
-                    )
-                    .with_provenance(provenance),
-                }) {
-                    crate::semantic_query::QueryResult::Value(instantiated)
-                        if instantiated != resolved =>
-                    {
-                        self.surface_view_from_base_node(instantiated, provenance)
-                    }
-                    _ => None,
-                }
-            }
-            // Union-typed macro payload: the TS-correct shallow surface is
-            // the COMMON members — a key present in EVERY arm, typed as the
-            // union of the per-arm member value types. Mirrors
-            // `key_names_from_base_node`'s `CombineUnion` key intersection,
-            // but synthesizes full members (value/optional/readonly) so the
-            // macro interpretation reads types, not just names. A disjoint
-            // union → no common keys → empty surface (the documented
-            // common-members-only contract); an overlapping union → the
-            // shared members only. Union-arm members are reached THROUGH the
-            // union (not written at the macro-T root), so each arm recurses
-            // STRUCTURALLY and the synthesized common member is `false`.
-            SemanticNodeData::Union(arms) => {
-                let arms = Arc::clone(arms);
-                drop(data);
-                self.union_common_member_surface(&arms)
-            }
-            // Primitives, deferred shells, literals, type params, … have no
-            // single member surface a macro payload reads.
-            _ => None,
-        }
-    }
-
-    /// Instantiate a declaration identity in `Skeleton` mode and read its
-    /// one-level surface (the `DeclPlaceholder` / `DeclRef` carrier path of
-    /// [`Self::surface_view_from_base_node`]).
-    ///
-    /// **Skeleton, never Expanded (the eagerness-guard coupling).** The macro-surface
-    /// reader drives every carrier unwrap in a shallow / carrier-preserving
-    /// mode: an `extends Base` heritage arm folds into an
-    /// `Intersection([Object{own}, DeclRef{Base}])` whose `DeclRef` arm is
-    /// resolved by the `DeclRef` match arm above — itself routing back here
-    /// — so the inherited members surface WITHOUT the reader ever asking
-    /// `build_instantiate` for the `Expanded` body mode. This keeps the
-    /// synthesis-attributable `Expanded` Instantiate count at zero (the
-    /// slot-binding eagerness guard `enrich_does_not_eagerly_instantiate_carrier`).
-    ///
-    /// `Skeleton` (vs `Navigate`) preserves carrier shells for unbound
-    /// generic helpers so a `Conditional` heritage body does not collapse
-    /// to `never`; for the common heritage / intersection / object surface
-    /// the two modes lower identically (both carrier-preserving on `Ref`).
-    /// The caller's `provenance` flows onto the instantiate so the
-    /// declaration's OWN-body members keep `declared_in_macro_type_arg`
-    /// while heritage `Ref` arms decay to structural inside
-    /// `lower_decl_body_with_provenance`.
-    fn surface_view_from_decl_identity(
-        &self,
-        identity: crate::semantic_query::DeclIdentity,
-        resolved: SemanticNodeId,
-        provenance: crate::semantic_query::SurfaceProvenanceContext,
-    ) -> Option<MacroSurfaceView> {
-        match self.execute(crate::semantic_query::SemanticQueryKey::Instantiate {
-            base: identity.to_decl_key(),
-            args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            context: crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Skeleton,
-            )
-            .with_provenance(provenance),
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<crate::semantic_query::SurfaceView> {
+        debug_assert_eq!(
+            context.mode,
+            crate::semantic_query::ProjectionMode::Shallow,
+            "resolve_typeinfo_surface_view synthesises a one-level surface; mode must be Shallow"
+        );
+        let terminal = match self.execute(crate::semantic_query::SemanticQueryKey::ProjectPath {
+            base,
+            path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+            context,
         }) {
-            crate::semantic_query::QueryResult::Value(instantiated) if instantiated != resolved => {
-                self.surface_view_from_base_node(instantiated, provenance)
-            }
+            crate::semantic_query::QueryResult::Value(node)
+            | crate::semantic_query::QueryResult::Recursive(node) => node,
+            crate::semantic_query::QueryResult::Error(_) => return None,
+        };
+        match self.graph().node_data(terminal).as_deref() {
+            Some(SemanticNodeData::Object(view)) => Some(view.clone()),
             _ => None,
         }
-    }
-
-    /// Synthesize the common-member surface of a union's arms (the
-    /// `SemanticNodeData::Union` case of [`Self::surface_view_from_base_node`]).
-    ///
-    /// A member is published iff it is present (by name) in EVERY
-    /// **resolvable** arm; its value type is the union of the per-arm
-    /// member value nodes. This is the TS-correct shallow reading of a
-    /// union-typed payload: `(A | B)['k']` is well-typed only when `k`
-    /// exists in both `A` and `B`, and its type is `A['k'] | B['k']`.
-    ///
-    /// - Disjoint union (no shared key) → empty `MacroSurfaceView` (NOT
-    ///   `None`: the union resolved, it simply has no common members —
-    ///   distinct from an unresolvable carrier).
-    /// - Any arm with no readable surface (a deferred carrier, a
-    ///   primitive, …) makes the whole result `None`: a union whose arm
-    ///   cannot be read has an unknown common-member set, so the reader
-    ///   must not publish a partial intersection.
-    /// - Member flags: optional iff optional in ANY arm (the union value
-    ///   admits the optional case); readonly iff readonly in ALL arms (a
-    ///   union property is writable only when writable in every arm);
-    ///   `is_method` / `declared_in_macro_type_arg` are `false` on the
-    ///   synthesized member (it carries a union value, not a literal
-    ///   method, and is reached through the union rather than the macro-T
-    ///   own body).
-    /// - Call signatures: a union has no single call surface, so the
-    ///   synthesized view carries none.
-    fn union_common_member_surface(&self, arms: &[SemanticNodeId]) -> Option<MacroSurfaceView> {
-        if arms.is_empty() {
-            return Some(MacroSurfaceView::default());
-        }
-        // Read each arm's surface structurally (union-arm members are not
-        // the macro-T own body). One unreadable arm → unknown common set.
-        let arm_views: Vec<MacroSurfaceView> = arms
-            .iter()
-            .map(|arm| {
-                self.surface_view_from_base_node(
-                    *arm,
-                    crate::semantic_query::SurfaceProvenanceContext::Structural,
-                )
-            })
-            .collect::<Option<Vec<_>>>()?;
-
-        // Keys common to ALL arms, in the first arm's declaration order.
-        let first = &arm_views[0];
-        let mut members: Vec<SurfaceMember> = Vec::new();
-        for first_member in &first.members {
-            // Collect this member's value node from every arm; skip the
-            // key entirely if any arm lacks it (not a common member).
-            let mut per_arm_values: Vec<SemanticNodeId> = Vec::with_capacity(arm_views.len());
-            let mut optional_in_any = false;
-            let mut readonly_in_all = true;
-            let mut present_in_all = true;
-            for arm_view in &arm_views {
-                match arm_view
-                    .members
-                    .iter()
-                    .find(|m| m.name == first_member.name)
-                {
-                    Some(arm_member) => {
-                        per_arm_values.push(arm_member.value);
-                        optional_in_any |= arm_member.optional;
-                        readonly_in_all &= arm_member.readonly;
-                    }
-                    None => {
-                        present_in_all = false;
-                        break;
-                    }
-                }
-            }
-            if !present_in_all {
-                continue;
-            }
-            // Value type = union of the per-arm member values. A single
-            // shared value node stays as-is (no singleton union wrapper).
-            let value = if per_arm_values.len() == 1 {
-                per_arm_values[0]
-            } else {
-                self.graph().intern_node(SemanticNodeData::Union(Arc::from(
-                    per_arm_values.into_boxed_slice(),
-                )))
-            };
-            members.push(SurfaceMember {
-                name: Arc::clone(&first_member.name),
-                value,
-                optional: optional_in_any,
-                readonly: readonly_in_all,
-                is_method: false,
-                declared_in_macro_type_arg: false,
-                // A synthesized union common member is reached THROUGH the
-                // union, not the macro-T own body or a heritage overlay —
-                // `Authored` (it never shadows / is shadowed).
-                merge_role: crate::semantic_query::MemberMergeRole::Authored,
-                // Union common-member: present in every arm, no single source
-                // declaration site — genuinely synthetic. No spans and no
-                // single declaration file (a multi-origin fact).
-                spans: verter_type_expr::MemberSpans::default(),
-                declaration_origin: None,
-            });
-        }
-        Some(MacroSurfaceView {
-            members,
-            call_signatures: Vec::new(),
-        })
     }
 
     pub(super) fn key_names_from_keyspace_node(
@@ -706,6 +295,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             SemanticNodeData::Primitive(PrimitiveKind::Never) => Some(Vec::new()),
             SemanticNodeData::KeyOf { base } => self.key_names_from_base_node(*base),
+            // Unresolved alias carrier on the key-domain enumeration path. The
+            // deferred-shell evaluator deliberately leaves `DeclRef` /
+            // `InstantiationRef` carriers symbolic (so intermediate
+            // indexed-access hops keep `Foo['k']` symbolic), but key-domain
+            // enumeration IS the macro-shape enumeration path where the alias
+            // MUST resolve to its declared key set — e.g. an `Omit<T, Keys>`
+            // whose `Keys` is a cross-file `type Keys = 'a' | 'b'` alias (a
+            // barrel-reexported keys alias). Resolve the carrier to its body
+            // through the shared dispatch (`Instantiate`) and recurse. This is
+            // path-precise (the demanded key set), not a breadth walk.
+            SemanticNodeData::DeclRef { identity } => {
+                let instantiated =
+                    match self.execute(crate::semantic_query::SemanticQueryKey::Instantiate {
+                        base: identity.to_decl_key(),
+                        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                        context: crate::semantic_query::ProjectionReductionContext::published(
+                            crate::semantic_query::ProjectionMode::Expanded,
+                        ),
+                    }) {
+                        crate::semantic_query::QueryResult::Value(id) => id,
+                        _ => return self.key_names_from_base_node(resolved),
+                    };
+                if instantiated == resolved {
+                    return self.key_names_from_base_node(resolved);
+                }
+                self.key_names_from_keyspace_node(instantiated)
+            }
+            SemanticNodeData::InstantiationRef { base, args } => {
+                let instantiated =
+                    match self.execute(crate::semantic_query::SemanticQueryKey::Instantiate {
+                        base: base.to_decl_key(),
+                        args: Arc::clone(args),
+                        context: crate::semantic_query::ProjectionReductionContext::published(
+                            crate::semantic_query::ProjectionMode::Expanded,
+                        ),
+                    }) {
+                        crate::semantic_query::QueryResult::Value(id) => id,
+                        _ => return self.key_names_from_base_node(resolved),
+                    };
+                if instantiated == resolved {
+                    return self.key_names_from_base_node(resolved);
+                }
+                self.key_names_from_keyspace_node(instantiated)
+            }
             _ => self.key_names_from_base_node(resolved),
         }
     }

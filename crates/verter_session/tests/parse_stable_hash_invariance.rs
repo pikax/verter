@@ -73,6 +73,7 @@ fn build_indexed(
                 function_signature: None,
                 object_shape: None,
                 enum_members: None,
+                is_synthesised_vue_default: false,
             },
         );
     }

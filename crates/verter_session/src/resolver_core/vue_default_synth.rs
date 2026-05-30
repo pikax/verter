@@ -135,6 +135,10 @@ pub fn synthesise_vue_default_value_symbol(macros: &[AnalyzedMacro]) -> Option<S
         }),
         object_shape: None,
         enum_members: None,
+        // PROVENANCE: this is the SOLE construction site of the synthesized
+        // `.vue` public-instance `default` symbol. The flag is the direct
+        // consumer proof the synthesized-default consumers gate on.
+        is_synthesised_vue_default: true,
     })
 }
 
@@ -150,6 +154,16 @@ const TYPEINFO_SCRATCH_URI_PREFIX: &str = "verter://typeinfo/";
 /// that happen to call something locally named `defineProps` do
 /// NOT qualify; only the two known producers of SFC-style macros
 /// flow through this seam.
+///
+/// This is INJECTION-ELIGIBILITY ONLY: it bounds which canonicals
+/// [`inject_vue_default_into_shallow_state`] is allowed to fabricate a
+/// synthesized `default` on. It is NOT a consumer proof — downstream
+/// consumers prove a resolved `default` IS the synthesized public instance via
+/// the direct structural fact
+/// [`ShallowValueSymbol::is_synthesised_vue_default`](super::shallow_file_state::ShallowValueSymbol::is_synthesised_vue_default),
+/// so a `.vue` carrying a USERLAND `export default` (eligible here, but synthesis
+/// skipped because the userland default already exists) is never mistreated as
+/// the synthesized public instance.
 fn is_synthesis_candidate(canonical_id: &str) -> bool {
     canonical_id.ends_with(".vue") || canonical_id.starts_with(TYPEINFO_SCRATCH_URI_PREFIX)
 }

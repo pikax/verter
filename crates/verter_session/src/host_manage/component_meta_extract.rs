@@ -1005,16 +1005,15 @@ fn collect_jsdoc_descriptions_from_root(
         {
             continue;
         }
-        let Some((raw_source, cached_parse, _)) =
-            host.current_eval_state(current_canonical.as_str())
-        else {
+        // Cache-owned shallow analysis — the barrel re-export targets ride on the
+        // file's `ShallowFileState` (populated once per `(canonical, whole_hash)`
+        // through the shared host ensure-path). No fresh OXC parse.
+        let Some(shallow) = host.shallow_file_state(current_canonical.as_str()) else {
             continue;
         };
-        let eval_source =
-            VerterHost::build_eval_script_source(&raw_source, cached_parse.as_deref());
         let candidates =
-            crate::resolver_core::surface_projector::find_type_import_sources_in_source(
-                eval_source.as_ref(),
+            crate::resolver_core::surface_projector::find_type_import_sources_in_analysis(
+                shallow.analysis.as_ref(),
                 current_name.as_str(),
             );
         if candidates.is_empty() {
@@ -1078,13 +1077,14 @@ fn follow_heritage_type_imports(
     if !host.is_evalable(defining_canonical) && !host.ensure_loaded(defining_canonical) {
         return;
     }
-    let Some((raw_source, cached_parse, _)) = host.current_eval_state(defining_canonical) else {
+    // Cache-owned shallow analysis — the heritage import edges ride on the file's
+    // `ShallowFileState`. No fresh OXC parse.
+    let Some(shallow) = host.shallow_file_state(defining_canonical) else {
         return;
     };
-    let eval_source = VerterHost::build_eval_script_source(&raw_source, cached_parse.as_deref());
     let heritage_imports =
-        crate::resolver_core::surface_projector::find_heritage_type_imports_in_source(
-            eval_source.as_ref(),
+        crate::resolver_core::surface_projector::find_heritage_type_imports_in_analysis(
+            shallow.analysis.as_ref(),
             type_name,
         );
     for (import_specifier, imported_name) in heritage_imports {
@@ -1152,10 +1152,43 @@ fn resolve_relative_type_specifier(
     None
 }
 
-/// Resolve `exported_name` from `dep_canonical` as DefineProps and collect
-/// JSDoc descriptions/tags into `jsdoc_by_name`. Uses the host-cached parsed
-/// program and host-cached external type analysis — never reparses raw
-/// source. Returns true if the type was found and projected successfully.
+/// Slice a [`crate::typeinfo::surface::CanonicalSpan`] from its file's
+/// cache-owned `IndexedReady` RAW source, memoising the per-file source read in
+/// `sources`. [`CanonicalSpan`](crate::typeinfo::surface::CanonicalSpan)
+/// offsets are SFC-absolute (the eval source is position-preserving), so the
+/// slice indexes `raw_source` directly. Returns `None` if the file is not
+/// loaded or the span is out-of-range. The single source-touching primitive for
+/// typeinfo JSDoc slicing — no fresh parse.
+fn slice_canonical_span_cached(
+    host: &VerterHost,
+    sources: &mut rustc_hash::FxHashMap<Arc<str>, Option<Arc<str>>>,
+    cspan: &crate::typeinfo::surface::CanonicalSpan,
+) -> Option<String> {
+    let source = sources
+        .entry(Arc::clone(&cspan.file))
+        .or_insert_with(|| {
+            host.ensure_indexed_ready(cspan.file.as_ref())
+                .map(|indexed| Arc::clone(&indexed.raw_source))
+        })
+        .clone()?;
+    let start = cspan.span.start as usize;
+    let end = cspan.span.end as usize;
+    source.get(start..end).map(|s| s.to_string())
+}
+
+/// Resolve `exported_name` from `dep_canonical` to its one-level typeinfo
+/// surface and collect each member's JSDoc description/tags into
+/// `jsdoc_by_name`. Returns `true` if the declaration resolved.
+///
+/// **Typed-IR-Only / no-reparse:** the JSDoc rides on the typeinfo surface's
+/// per-member span set (`jsdoc_description_span` / `jsdoc_tag_spans`), which the
+/// shared empty-path `Shallow` resolver stamps from each member's
+/// DECLARATION-origin file (so an inherited member's JSDoc is sliced from the
+/// heritage base's file, even across a multi-level cross-file `extends` chain).
+/// Replaces the retired `project_imported_macro_surfaces` OXC reparse loop (a
+/// hang source: it allocated a fresh OXC arena and reparsed the dependency on
+/// every call). Source slices come from the cache-owned `IndexedReady`
+/// `raw_source` (SFC-absolute spans), never a fresh parse.
 fn try_project_jsdoc_descriptions(
     host: &VerterHost,
     dep_canonical: &str,
@@ -1168,20 +1201,47 @@ fn try_project_jsdoc_descriptions(
         ),
     >,
 ) -> bool {
-    use verter_semantic::analysis::AnalyzedMacroKind;
+    use verter_semantic::analysis::types::JsdocTag;
 
-    let Some(projected) = host.project_imported_macro_surfaces(
-        dep_canonical,
-        exported_name,
-        AnalyzedMacroKind::DefineProps,
-    ) else {
+    let Some(surface) = host.resolve_shallow_surface(dep_canonical, exported_name) else {
         return false;
     };
-    for prop in projected.props {
-        if prop.description.is_some() || !prop.tags.is_empty() {
+
+    // Cache one cache-owned source read per declaration file across members.
+    let mut sources: rustc_hash::FxHashMap<Arc<str>, Option<Arc<str>>> =
+        rustc_hash::FxHashMap::default();
+
+    use crate::typeinfo::adapters::vue::surface::normalize_jsdoc_body;
+    for member in surface.members.iter() {
+        let description = member
+            .jsdoc_description_span
+            .as_ref()
+            .and_then(|cs| slice_canonical_span_cached(host, &mut sources, cs))
+            .map(|text| normalize_jsdoc_body(&text))
+            .filter(|text| !text.is_empty());
+        let tags: Vec<JsdocTag> = member
+            .jsdoc_tag_spans
+            .iter()
+            .filter_map(|tag| {
+                let name = slice_canonical_span_cached(host, &mut sources, &tag.name_span)?
+                    .trim()
+                    .to_string();
+                if name.is_empty() {
+                    return None;
+                }
+                let text = tag
+                    .text_span
+                    .as_ref()
+                    .and_then(|cs| slice_canonical_span_cached(host, &mut sources, cs))
+                    .map(|t| normalize_jsdoc_body(&t))
+                    .filter(|t| !t.is_empty());
+                Some(JsdocTag { name, text })
+            })
+            .collect();
+        if description.is_some() || !tags.is_empty() {
             jsdoc_by_name
-                .entry(prop.name)
-                .or_insert((prop.description, prop.tags));
+                .entry(member.name.as_ref().to_string())
+                .or_insert((description, tags));
         }
     }
     true
@@ -1447,6 +1507,8 @@ pub(crate) fn extract_component_meta_from_resolved(
 ) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
     let resolved_macros = resolver_component_meta_resolved_macros(
+        host,
+        canonical.as_str(),
         resolved.snapshot.macros.as_ref(),
         &resolved.resolved_macros,
     );
@@ -1527,6 +1589,8 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
 ) {
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
     let resolved_macros = resolver_component_meta_resolved_macros(
+        host,
+        canonical.as_str(),
         resolved.snapshot.macros.as_ref(),
         &resolved.resolved_macros,
     );

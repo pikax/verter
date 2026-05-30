@@ -292,6 +292,23 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "dependent_eviction",
     "run_dependent_cascade",
     "register_facts_for_new_content_without_eviction",
+    // U3c eager macro-surface cutover: the eager/lazy macro-surface bridge +
+    // its readers are DELETED. Production resolves props/emits/slots through the
+    // typeinfo Vue surface (`VerterHost::vue_macro_dtos`). Re-introducing any of
+    // these names at a production site would revive the deleted eager rail or
+    // its lossy reader.
+    "ImportedMacroSurface",
+    "ImportedDeclarationIdentity",
+    "EagerResolvedMacro",
+    "ResolvedMacroSurface",
+    "from_eager_meta",
+    "MacroSurfaceView",
+    "surface_view_from_base_node",
+    "surface_view_from_decl_identity",
+    "union_common_member_surface",
+    "member_display_jsdoc",
+    "declaring_decl_span",
+    "project_imported_macro_surfaces",
 ];
 
 /// File names whose presence at the head of the path should make us

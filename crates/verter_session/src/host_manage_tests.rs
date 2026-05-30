@@ -4087,6 +4087,99 @@ fn resolved_macro_by_type<'a>(
         .unwrap_or_else(|| panic!("missing resolved macro for {type_name}"))
 }
 
+/// Resolve the typeinfo macro-surface DTOs for a resolved macro entry. The
+/// published props/emits/slots surface is owned SOLELY by the typeinfo
+/// macro-surface authority (`vue_macro_dtos`), keyed on the admitted macro
+/// index; `ResolvedMacroMeta` supplies only the index + kind for provenance.
+fn macro_dtos_for_resolved(
+    host: &VerterHost,
+    owner: &str,
+    resolved: &crate::meta_resolve::ResolvedMacroMeta,
+) -> std::sync::Arc<crate::typeinfo::adapters::vue::store::VueMacroDtos> {
+    host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
+        owner_canonical: std::sync::Arc::from(owner),
+        macro_index: resolved.macro_index,
+        macro_kind: resolved.macro_kind,
+        root_identity: host.current_or_read_whole_hash(owner).unwrap_or([0u8; 16]),
+        level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+    })
+}
+
+/// Typeinfo macro-surface DTOs for the macro matching `type_name`.
+fn macro_dtos_by_type(
+    host: &VerterHost,
+    owner: &str,
+    state: &crate::meta_resolve::ResolvedComponentMetaState,
+    type_name: &str,
+) -> std::sync::Arc<crate::typeinfo::adapters::vue::store::VueMacroDtos> {
+    macro_dtos_for_resolved(host, owner, resolved_macro_by_type(state, type_name))
+}
+
+/// Typeinfo macro-surface DTO bundles for every resolved macro of `kind`
+/// (deduped by macro index, mirroring the production producer).
+fn dtos_for_kind(
+    host: &VerterHost,
+    owner: &str,
+    state: &crate::meta_resolve::ResolvedComponentMetaState,
+    kind: verter_semantic::analysis::AnalyzedMacroKind,
+) -> Vec<std::sync::Arc<crate::typeinfo::adapters::vue::store::VueMacroDtos>> {
+    let mut seen = rustc_hash::FxHashSet::default();
+    state
+        .resolved_macros
+        .iter()
+        .filter(|m| m.macro_kind == kind)
+        .filter(|m| seen.insert(m.macro_index))
+        .map(|m| macro_dtos_for_resolved(host, owner, m))
+        .collect()
+}
+
+/// Aggregate prop/emit/slot names for every resolved macro of `kind` (deduped
+/// by macro index, mirroring the production producer).
+fn names_for_kind(
+    host: &VerterHost,
+    owner: &str,
+    state: &crate::meta_resolve::ResolvedComponentMetaState,
+    kind: verter_semantic::analysis::AnalyzedMacroKind,
+    pick: fn(&crate::typeinfo::adapters::vue::store::VueMacroDtos) -> Vec<String>,
+) -> Vec<String> {
+    let mut seen = rustc_hash::FxHashSet::default();
+    state
+        .resolved_macros
+        .iter()
+        .filter(|m| m.macro_kind == kind)
+        .filter(|m| seen.insert(m.macro_index))
+        .flat_map(|m| pick(&macro_dtos_for_resolved(host, owner, m)))
+        .collect()
+}
+
+fn hm_prop_names(
+    host: &VerterHost,
+    owner: &str,
+    state: &crate::meta_resolve::ResolvedComponentMetaState,
+) -> Vec<String> {
+    names_for_kind(
+        host,
+        owner,
+        state,
+        verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+        |d| d.props.iter().map(|p| p.name.clone()).collect(),
+    )
+}
+
+fn hm_slot_names(
+    host: &VerterHost,
+    owner: &str,
+    state: &crate::meta_resolve::ResolvedComponentMetaState,
+) -> Vec<String> {
+    names_for_kind(
+        host,
+        owner,
+        state,
+        verter_semantic::analysis::AnalyzedMacroKind::DefineSlots,
+        |d| d.slots.iter().map(|s| s.name.clone()).collect(),
+    )
+}
+
 #[test]
 fn resolve_imported_type_from_ts_dep() {
     let host = make_host();
@@ -4107,12 +4200,8 @@ defineProps<ButtonProps>()
     );
 
     let state = resolve_expanded_state(&host, "/Button.vue");
-    let resolved = resolved_macro_by_type(&state, "ButtonProps");
-    let props: Vec<&str> = resolved
-        .props
-        .iter()
-        .map(|prop| prop.name.as_str())
-        .collect();
+    let dtos = macro_dtos_by_type(&host, "/Button.vue", &state, "ButtonProps");
+    let props: Vec<&str> = dtos.props.iter().map(|prop| prop.name.as_str()).collect();
 
     assert!(
         props.contains(&"label"),
@@ -4159,11 +4248,8 @@ fn resolve_imported_type_from_vue_dep() {
 
     let state = resolve_expanded_state(&host, "/Comp.vue");
     let resolved = resolved_macro_by_type(&state, "Props");
-    let props: Vec<&str> = resolved
-        .props
-        .iter()
-        .map(|prop| prop.name.as_str())
-        .collect();
+    let dtos = macro_dtos_for_resolved(&host, "/Comp.vue", resolved);
+    let props: Vec<&str> = dtos.props.iter().map(|prop| prop.name.as_str()).collect();
     assert!(
         props.contains(&"label"),
         "expanded props should contain 'label', got: {:?}",
@@ -4196,12 +4282,8 @@ fn resolve_imported_type_from_dual_script_vue_dep() {
     );
 
     let state = resolve_expanded_state(&host, "/Comp.vue");
-    let resolved = resolved_macro_by_type(&state, "DualProps");
-    let props: Vec<&str> = resolved
-        .props
-        .iter()
-        .map(|prop| prop.name.as_str())
-        .collect();
+    let dtos = macro_dtos_by_type(&host, "/Comp.vue", &state, "DualProps");
+    let props: Vec<&str> = dtos.props.iter().map(|prop| prop.name.as_str()).collect();
     assert!(
         props.contains(&"title"),
         "expanded props should contain 'title' from companion script, got: {:?}",
@@ -4234,11 +4316,8 @@ fn resolve_imported_type_from_vue_dep_without_vue_suffix_uses_file_kind() {
 
     let state = resolve_expanded_state(&host, "/Comp.vue");
     let resolved = resolved_macro_by_type(&state, "Props");
-    let props: Vec<&str> = resolved
-        .props
-        .iter()
-        .map(|prop| prop.name.as_str())
-        .collect();
+    let dtos = macro_dtos_for_resolved(&host, "/Comp.vue", resolved);
+    let props: Vec<&str> = dtos.props.iter().map(|prop| prop.name.as_str()).collect();
     assert!(
         props.contains(&"label"),
         "expanded props should contain 'label', got: {:?}",
@@ -4291,12 +4370,8 @@ fn resolve_component_meta_uses_workspace_type_resolution_for_package_declaration
     );
 
     let state = resolve_expanded_state(&host, "/workspace/src/Consumer.vue");
-    let resolved = resolved_macro_by_type(&state, "FancyProps");
-    let props: Vec<&str> = resolved
-        .props
-        .iter()
-        .map(|prop| prop.name.as_str())
-        .collect();
+    let dtos = macro_dtos_by_type(&host, "/workspace/src/Consumer.vue", &state, "FancyProps");
+    let props: Vec<&str> = dtos.props.iter().map(|prop| prop.name.as_str()).collect();
     assert!(
         props.contains(&"open"),
         "expanded props should contain fields from the package declaration entrypoint, got: {:?}",
@@ -4330,15 +4405,9 @@ defineProps<Props>()
     let state = host
         .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
         .expect("should return resolved state");
-    let props: Vec<&str> = state
-        .resolved_macros
-        .iter()
-        .filter(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
-        .flat_map(|m| m.props.iter())
-        .map(|p| p.name.as_str())
-        .collect();
+    let props = hm_prop_names(&host, "/src/Comp.vue", &state);
     assert!(
-        props.contains(&"label"),
+        props.contains(&"label".to_string()),
         "props should include 'label': {:?}",
         props
     );
@@ -4375,14 +4444,17 @@ defineProps<A & B>()
     let state = host
         .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
         .expect("should return resolved state");
-    let names: Vec<&str> = state
-        .resolved_macros
-        .iter()
-        .flat_map(|m| m.props.iter())
-        .map(|p| p.name.as_str())
-        .collect();
-    assert!(names.contains(&"x"), "should have 'x' from A: {:?}", names);
-    assert!(names.contains(&"y"), "should have 'y' from B: {:?}", names);
+    let names = hm_prop_names(&host, "/src/Comp.vue", &state);
+    assert!(
+        names.contains(&"x".to_string()),
+        "should have 'x' from A: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"y".to_string()),
+        "should have 'y' from B: {:?}",
+        names
+    );
 }
 
 /// resolve_component_meta(Expanded) wraps call-signature emit payloads in brackets
@@ -4407,12 +4479,13 @@ defineEmits<Events>()
     let state = host
         .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
         .expect("should return resolved state");
-    let emits: Vec<_> = state
-        .resolved_macros
-        .iter()
-        .filter(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits)
-        .flat_map(|m| m.emits.iter())
-        .collect();
+    let emit_dtos = dtos_for_kind(
+        &host,
+        "/src/Comp.vue",
+        &state,
+        verter_semantic::analysis::AnalyzedMacroKind::DefineEmits,
+    );
+    let emits: Vec<_> = emit_dtos.iter().flat_map(|d| d.emits.iter()).collect();
     let change = emits.iter().find(|e| e.name == "change");
     assert!(change.is_some(), "should have 'change' emit");
     let payload = change.unwrap().payload_type.as_deref().unwrap_or("");
@@ -4444,12 +4517,13 @@ defineSlots<Slots>()
     let state = host
         .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
         .expect("should return resolved state");
-    let slots: Vec<_> = state
-        .resolved_macros
-        .iter()
-        .filter(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
-        .flat_map(|m| m.slots.iter())
-        .collect();
+    let slot_dtos = dtos_for_kind(
+        &host,
+        "/src/Comp.vue",
+        &state,
+        verter_semantic::analysis::AnalyzedMacroKind::DefineSlots,
+    );
+    let slots: Vec<_> = slot_dtos.iter().flat_map(|d| d.slots.iter()).collect();
     let default_slot = slots.iter().find(|s| s.name == "default");
     assert!(default_slot.is_some(), "should have 'default' slot");
     let bindings = &default_slot.unwrap().bindings;
@@ -4489,20 +4563,14 @@ defineSlots<Slots>()
     let state = host
         .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
         .expect("should return resolved state");
-    let slot_names: Vec<&str> = state
-        .resolved_macros
-        .iter()
-        .filter(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
-        .flat_map(|m| m.slots.iter())
-        .map(|s| s.name.as_str())
-        .collect();
+    let slot_names = hm_slot_names(&host, "/src/Comp.vue", &state);
     assert!(
-        slot_names.contains(&"default"),
+        slot_names.contains(&"default".to_string()),
         "should have 'default': {:?}",
         slot_names
     );
     assert!(
-        slot_names.contains(&"header"),
+        slot_names.contains(&"header".to_string()),
         "should have 'header': {:?}",
         slot_names
     );
@@ -4531,25 +4599,20 @@ defineProps<Props>()
     let state = host
         .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
         .expect("should return resolved state");
-    let prop_names: Vec<&str> = state
-        .resolved_macros
-        .iter()
-        .flat_map(|m| m.props.iter())
-        .map(|p| p.name.as_str())
-        .collect();
+    let prop_names = hm_prop_names(&host, "/src/Comp.vue", &state);
     assert!(
-        prop_names.contains(&"name"),
+        prop_names.contains(&"name".to_string()),
         "should have 'name': {:?}",
         prop_names
     );
     assert!(
-        prop_names.contains(&"status"),
+        prop_names.contains(&"status".to_string()),
         "should have 'status': {:?}",
         prop_names
     );
     // Negative: props should not contain 'Status' as a prop (it's a type, not a prop)
     assert!(
-        !prop_names.contains(&"Status"),
+        !prop_names.contains(&"Status".to_string()),
         "Status is a type, not a prop"
     );
 }
@@ -4576,12 +4639,13 @@ defineSlots<Slots>()
     let state = host
         .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
         .expect("should return resolved state");
-    let slots: Vec<_> = state
-        .resolved_macros
-        .iter()
-        .filter(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
-        .flat_map(|m| m.slots.iter())
-        .collect();
+    let slot_dtos = dtos_for_kind(
+        &host,
+        "/src/Comp.vue",
+        &state,
+        verter_semantic::analysis::AnalyzedMacroKind::DefineSlots,
+    );
+    let slots: Vec<_> = slot_dtos.iter().flat_map(|d| d.slots.iter()).collect();
 
     let default_slot = slots.iter().find(|s| s.name == "default").unwrap();
     assert_eq!(
@@ -8740,12 +8804,10 @@ export interface UnusedProps {
         .resolve_component_meta("/src/Consumer.vue", crate::types::ProjectionMode::Expanded)
         .expect("expanded component meta should resolve");
 
-    let prop_names: std::collections::BTreeSet<_> = resolved
-        .resolved_macros
-        .iter()
-        .flat_map(|resolved_macro| resolved_macro.props.iter())
-        .map(|field| field.name.as_str())
-        .collect();
+    let prop_names: std::collections::BTreeSet<String> =
+        hm_prop_names(&host, "/src/Consumer.vue", &resolved)
+            .into_iter()
+            .collect();
     assert!(
         prop_names.contains("label") && prop_names.contains("href"),
         "nested barrel alias should still resolve reached props, got {prop_names:?}",
@@ -9682,20 +9744,14 @@ defineProps<ImportedProps>()
     let state = host
         .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
         .expect("should return resolved state");
-    let props: Vec<&str> = state
-        .resolved_macros
-        .iter()
-        .filter(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
-        .flat_map(|m| m.props.iter())
-        .map(|p| p.name.as_str())
-        .collect();
+    let props = hm_prop_names(&host, "/src/Comp.vue", &state);
     assert!(
-        props.contains(&"label"),
+        props.contains(&"label".to_string()),
         "component-meta should resolve 'label' prop via bundle dep_edges path: {:?}",
         props
     );
     assert!(
-        props.contains(&"count"),
+        props.contains(&"count".to_string()),
         "component-meta should resolve 'count' prop via bundle dep_edges path: {:?}",
         props
     );

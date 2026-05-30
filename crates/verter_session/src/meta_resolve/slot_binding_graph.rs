@@ -746,6 +746,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
 
     publish_merged_bindings(
         ctx.ctx,
+        owner_canonical,
         &dispatch,
         &graph_native_bindings,
         resolved_macros,
@@ -972,6 +973,7 @@ pub(crate) fn compute_bindings_via_graph(
 
 pub(crate) fn publish_merged_bindings(
     ctx: &dyn ResolverContext,
+    owner_canonical: &str,
     dispatch: &ProjectSemanticDispatch<'_>,
     graph_native: &[GraphNativeBindingEntry],
     resolved_macros: &[ResolvedMacroMeta],
@@ -979,16 +981,22 @@ pub(crate) fn publish_merged_bindings(
     existing_names: &mut FxHashSet<String>,
 ) {
     // Materialise each `defineSlots` macro's slot member set through the
-    // `ResolvedMacroSurface` enum (eager arm returns `.slots` verbatim,
-    // so this is bit-identical to the pre-migration direct `.slots`
-    // read; the lazy-imported arm reconstructs function-like slot
-    // members with their bindings). The owned vector outlives the
-    // borrowed `parser_index` below.
+    // typeinfo Vue surface (`vue_macro_dtos`, FullMetadata) -- the sole slots
+    // authority (function-like members + first-param binding extraction).
+    // Keyed on `(owner, resolved.macro_index, DefineSlots)`. The owned vector
+    // outlives the borrowed `parser_index` below.
     let slot_field_sets: Vec<Vec<verter_semantic::analysis::AnalyzedSlotField>> = resolved_macros
         .iter()
         .filter(|r| r.macro_kind == AnalyzedMacroKind::DefineSlots)
         .map(|resolved| {
-            crate::resolver_core::ResolvedMacroSurface::from_eager_meta(resolved).slot_members(ctx)
+            crate::meta_resolve::materialize::macro_shapes::typeinfo_macro_dtos(
+                ctx,
+                owner_canonical,
+                resolved.macro_index,
+                AnalyzedMacroKind::DefineSlots,
+            )
+            .slots
+            .clone()
         })
         .collect();
 

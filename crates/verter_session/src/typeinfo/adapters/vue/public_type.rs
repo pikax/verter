@@ -9,23 +9,29 @@
 //! value symbol whose construct-signature return type IS the instance object.
 //!
 //! This module projects that synthesized instance object into the span-rich
-//! [`TypeInfoSurface`] **through the shared typeinfo surface path** (the same
-//! lowering + empty-path `Shallow` projection `resolve_shallow_surface` uses) —
-//! so a `.vue`'s public type resolves through typeinfo WITHOUT any
+//! [`TypeInfoSurface`] **through the shared typeinfo surface path** — it
+//! dispatches the first-class `SemanticQueryKey::Instantiate{ .vue, "default", [] }`
+//! query (whose `build_instantiate` branch lowers the synthesized instance
+//! object to an `Object` surface) then runs the empty-path `Shallow`
+//! projection — so a `.vue`'s public type resolves through typeinfo WITHOUT any
 //! component-meta call. This is the [`TypeInfoQueryLevel::PublicType`] level.
 //!
-//! Scope: this builds the DIRECT `.vue` public type (the one-level
-//! `{ $props, $emit, $slots }` instance surface). Recursive `.vue`-import
-//! expansion — a `.vue` whose public surface embeds another imported `.vue`
-//! component's surface — is a separate, later concern and is not performed
-//! here.
+//! `Instantiate{ .vue, "default", [] }` is the SOLE semantic identity for a
+//! `.vue`'s public instance: a `.vue`-importing-`.vue` reference
+//! (`Ref("Foo")` → `DeclRef{Foo.vue, "default"}` → `Instantiate`) resolves
+//! through the SAME keyed query, so recursive `.vue`-import expansion — a
+//! `.vue` whose public surface embeds another imported `.vue` component's
+//! surface — flows through this one shared resolver. Termination is by query
+//! identity (the memo's same-key recursion sentinel + the
+//! `push_instantiate_active` discipline), so a circular `A.vue ↔ B.vue` import
+//! cannot hang.
 
 use std::sync::Arc;
 
-use verter_type_expr::TypeExpr;
-
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{ProjectionMode, ProjectionReductionContext};
+use crate::semantic_query::{
+    ProjectionMode, ProjectionReductionContext, QueryResult, SemanticQueryApi, SemanticQueryKey,
+};
 use crate::typeinfo::surface::TypeInfoSurface;
 use crate::typeinfo::types::TypeInfoQueryLevel;
 use crate::VerterHost;
@@ -58,41 +64,61 @@ impl VerterHost {
         );
         let _ = level;
 
-        // The synthesized `default` value symbol's construct-signature return
-        // type is the instance object `{ $props, $emit, $slots }`
-        // (`vue_default_synth::synthesise_vue_default_value_symbol`). It is
-        // injected into the SFC's `ShallowFileState` during the `IndexedReady`
-        // build (`prepared_decl::ensure_indexed_ready`), so we materialize that
-        // artifact (idempotent — warm hits reuse it) and read its
-        // shallow-state's `default`. Reading `shallow_file_state` cold could
-        // fall through to a route-owned / artifact-only shallow state that has
-        // NOT had the Vue default injected. A non-`.vue` / macro-less file has
-        // no such symbol and yields `None`.
+        // The `.vue`'s synthesized public instance is the first-class semantic
+        // query `Instantiate{ DeclIdentity(canonical, whole_hash, "default"), [] }`
+        // (`build_instantiate`'s `.vue default` branch lowers the synthesized
+        // `{ $props, $emit, $slots }` instance object to an `Object` surface).
+        // This is the SAME keyed identity a `.vue`-importing-`.vue` reference
+        // resolves through (`Ref("Foo")` → `DeclRef{Foo.vue, "default"}` →
+        // `Instantiate`), so the public API and import recursion share ONE
+        // semantic identity — there is no second resolver and no unkeyed
+        // direct-lowering route.
+        //
+        // Materialize the `.vue`'s `IndexedReady` first (idempotent — warm hits
+        // reuse it) to observe the live `whole_hash`. Gate on the SYNTHESIZED
+        // `default` instance symbol's STRUCTURAL PROVENANCE flag BEFORE
+        // dispatching so a plain `.ts` file (no synthesized `default`), a `.vue`
+        // with no type-based macros, or a `.vue` carrying a USERLAND
+        // `export default` (synthesis skipped) returns `None` here — the public
+        // API stays honest about which canonicals have a synthesized public
+        // component type, matching the `build_instantiate` branch's own
+        // `is_synthesised_vue_default` gate.
         let indexed = self.ensure_indexed_ready(canonical_id)?;
         let default_symbol = indexed.shallow_state.value_symbol("default")?;
-        let instance_shape: &TypeExpr = default_symbol
+        if !default_symbol.is_synthesised_vue_default {
+            return None;
+        }
+        // The synthesized default carries a construct-signature return type (the
+        // instance object); its absence means no public instance surface.
+        default_symbol
             .function_signature
             .as_ref()?
             .return_type
             .as_ref()?;
+        let _whole_hash = indexed.whole_hash;
 
-        // Lower the synthesized instance object through the shared lowering
-        // dispatch in the SFC's scope, then project the one-level surface via
-        // the same empty-path `Shallow` synthesiser the named-declaration
-        // accessor uses. The instance object is an inline `TSTypeLiteral`-shaped
-        // `ObjectExpr`; `Navigate` lowering keeps member values shallow
-        // (shallow-by-default), and the publication terminal walks it under
-        // `Published(Shallow)`.
         let store_view = self.resolver_store_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
 
-        let base = dispatch.lower_type_expr_in_scope_with_mode(
-            canonical_id,
-            instance_shape,
-            ProjectionMode::Navigate,
-        )?;
+        // Intermediate-hop demand: the keyed query lowers the instance object in
+        // `structural_transit(Navigate)` so member values stay shallow
+        // (shallow-by-default). The empty-path `Shallow` terminal below
+        // synthesises the one-level surface under publication demand.
+        let base = match dispatch.execute(SemanticQueryKey::Instantiate {
+            base: crate::semantic_query::DeclKey {
+                canonical_id: Arc::from(canonical_id),
+                decl_name: Arc::from("default"),
+            },
+            args: Arc::from(Vec::new().into_boxed_slice()),
+            context: ProjectionReductionContext::structural_transit_with_mode(
+                ProjectionMode::Navigate,
+            ),
+        }) {
+            QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+            QueryResult::Error(_) => return None,
+        };
 
         // The public component type is a plain structural object
         // (`{ $props, $emit, $slots }`) — no macro own-body provenance applies

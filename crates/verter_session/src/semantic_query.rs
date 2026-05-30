@@ -864,6 +864,23 @@ impl ProjectionReductionContext {
         }
     }
 
+    /// Return a copy with the projection `mode` replaced (demand +
+    /// provenance + merge_role preserved). Used by the indexed-access
+    /// deferred-shell evaluator to demote an INTERMEDIATE object hop to
+    /// [`ProjectionMode::Navigate`] while the terminal single-hop
+    /// projection runs in the caller's mode — the path-precision rule
+    /// "intermediate hops run in Navigate, the terminal hop runs in the
+    /// caller's mode" applied to the `T[K]` reduction.
+    #[must_use]
+    pub const fn with_mode(self, mode: ProjectionMode) -> Self {
+        Self {
+            mode,
+            demand: self.demand,
+            provenance: self.provenance,
+            merge_role: self.merge_role,
+        }
+    }
+
     /// Return a copy with the surface provenance replaced by `provenance`
     /// (mode + demand + merge_role preserved). Used by the path walker's
     /// `DeclPlaceholder` expansion to carry the caller's provenance onto

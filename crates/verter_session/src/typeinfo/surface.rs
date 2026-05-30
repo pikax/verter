@@ -42,9 +42,10 @@ use crate::semantic_query_memo::SemanticGraphStore;
 /// identity; a surface member's origin can be a DIFFERENT file from the
 /// declaration that referenced it (an inherited member originates in its
 /// heritage base's file), so the span MUST carry the canonical file id. The
-/// offsets are in that file's source coordinate system (the SFC-extracted
-/// `<script>` content for `.vue`, the raw source otherwise) — the same
-/// coordinates the OXC lowering stamped.
+/// offsets are FILE-ABSOLUTE (SFC-absolute for `.vue`): a `.vue` file's eval
+/// source is position-preserving — script content sits at its raw SFC byte
+/// offsets — so the OXC lowering stamps every span in the raw-file coordinate
+/// system, the same coordinates a raw-`.vue` consumer slices.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CanonicalSpan {
     /// Canonical file id the span's offsets index into.
@@ -167,6 +168,17 @@ pub struct TypeInfoSurfaceSignature {
     pub parameter_spans: Arc<[Option<CanonicalSpan>]>,
     /// Span of the return-type annotation, when present.
     pub return_type_span: Option<CanonicalSpan>,
+    /// Span of the signature's leading JSDoc DESCRIPTION, sliced from the
+    /// signature's DECLARATION file. `None` when the signature has no leading
+    /// JSDoc or no recorded signature span to anchor the search. A
+    /// call-signature emit (`(e: 'change', v: T): void`) carries its JSDoc here
+    /// — the event's `description` is read from this span (symmetric with a
+    /// property-style emit member's [`TypeInfoSurfaceMember::jsdoc_description_span`]).
+    pub jsdoc_description_span: Option<CanonicalSpan>,
+    /// Spans of the signature's leading JSDoc TAGS (`@deprecated`, `@param`, …),
+    /// in declaration order. Empty when the signature has no leading JSDoc or no
+    /// tags. Each entry carries the tag name + text spans (never owned `String`).
+    pub jsdoc_tag_spans: Arc<[JsdocTagSpan]>,
 }
 
 /// One index signature (`[k: K]: V` / `readonly [k: K]: V`) on a
@@ -265,15 +277,15 @@ impl TypeInfoSurface {
         }
     }
 
-    /// Enrich each member with its leading-JSDoc DESCRIPTION + TAG spans, sliced
-    /// from the member's DECLARATION file.
+    /// Enrich each member AND each call / construct signature with its
+    /// leading-JSDoc DESCRIPTION + TAG spans, sliced from the declaring file.
     ///
     /// `build` is a pure graph projection that holds no source, so JSDoc spans
     /// (which require locating the leading `/** */` block in the declaring file)
     /// are populated HERE, at the host accessor layer that can read the source.
     /// `source_for(canonical)` returns the cache-owned source of a canonical
-    /// file (the host passes `IndexedReady.eval_source`), or `None` when it is
-    /// unavailable.
+    /// file (the host passes `IndexedReady.raw_source`, against which member /
+    /// signature spans are SFC-absolute), or `None` when it is unavailable.
     ///
     /// Each member's JSDoc is located via its DECLARATION origin
     /// ([`SurfaceMemberOrigin::canonical_file`], which U1 made survive
@@ -337,8 +349,64 @@ impl TypeInfoSurface {
             })
             .collect();
 
+        // Enrich each call / construct SIGNATURE with its leading-JSDoc spans,
+        // anchored at the signature's own span in its declaration file — so a
+        // call-signature emit (`(e: 'change', v: T): void`) carries the JSDoc
+        // that documents the event, symmetric with a property-style member. An
+        // inherited cross-file signature's JSDoc is read from the heritage
+        // base's file (the signature's spans index into THAT file).
+        let mut enrich_signature = |sig: &TypeInfoSurfaceSignature| -> TypeInfoSurfaceSignature {
+            let enriched = (|| {
+                let anchor = sig.signature_span.as_ref()?;
+                let file = anchor.file.as_ref();
+                let source = sources
+                    .entry(Arc::clone(&anchor.file))
+                    .or_insert_with(|| source_for(file))
+                    .clone()?;
+                let spans = verter_semantic::analysis::jsdoc::jsdoc_block_spans_at_offset(
+                    source.as_ref(),
+                    anchor.span.start,
+                )?;
+                let description_span = spans
+                    .description
+                    .map(|span| CanonicalSpan::new(Arc::clone(&anchor.file), span));
+                let tag_spans: Vec<JsdocTagSpan> = spans
+                    .tags
+                    .into_iter()
+                    .map(|tag| JsdocTagSpan {
+                        name_span: CanonicalSpan::new(Arc::clone(&anchor.file), tag.name),
+                        text_span: tag
+                            .text
+                            .map(|span| CanonicalSpan::new(Arc::clone(&anchor.file), span)),
+                    })
+                    .collect();
+                Some((description_span, tag_spans))
+            })();
+
+            match enriched {
+                Some((description_span, tag_spans)) => TypeInfoSurfaceSignature {
+                    jsdoc_description_span: description_span,
+                    jsdoc_tag_spans: Arc::from(tag_spans.into_boxed_slice()),
+                    ..sig.clone()
+                },
+                None => sig.clone(),
+            }
+        };
+        let call_signatures: Vec<TypeInfoSurfaceSignature> = self
+            .call_signatures
+            .iter()
+            .map(&mut enrich_signature)
+            .collect();
+        let construct_signatures: Vec<TypeInfoSurfaceSignature> = self
+            .construct_signatures
+            .iter()
+            .map(&mut enrich_signature)
+            .collect();
+
         Self {
             members: Arc::from(members.into_boxed_slice()),
+            call_signatures: Arc::from(call_signatures.into_boxed_slice()),
+            construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
             ..self
         }
     }
@@ -426,6 +494,13 @@ fn build_signature(graph: &SemanticGraphStore, node: SemanticNodeId) -> TypeInfo
         signature_span,
         parameter_spans: Arc::from(parameter_spans.into_boxed_slice()),
         return_type_span,
+        // JSDoc spans require the declaring file's source to locate the leading
+        // comment block, which the pure graph projection does NOT hold. The host
+        // accessor enriches these after `build` via
+        // `TypeInfoSurface::with_member_jsdoc_spans`. A pure-graph build leaves
+        // them empty — never a "not implemented" placeholder.
+        jsdoc_description_span: None,
+        jsdoc_tag_spans: Arc::from(Vec::new().into_boxed_slice()),
     }
 }
 
