@@ -1550,17 +1550,30 @@ fn is_whole_surface_published(ctx: ProjectionReductionContext) -> bool {
 /// a generic instantiation like `Pick<Foo, 'a'>` materialises its
 /// body and the indexed access can pick `'a'` out of it.
 ///
-/// Under any `Published` parent → inherit the parent's mode so the
-/// object operand reduces with the same demand. Under
-/// `StructuralTransit` parent → `StructuralTransit` (the transit walk
-/// observes the object structurally without materialising it).
+/// Under any `Published` parent → demote the object operand to
+/// [`ProjectionMode::Navigate`] (demand + provenance + merge_role
+/// preserved). The object operand is the INTERMEDIATE hop of the
+/// indexed-access path (`Root['a']` in `Root['a']['b']`): it must be
+/// navigated (followed through aliases / generic bodies so the outer
+/// `IndexedAccess` dispatch can look up the index) but NOT expanded.
+/// Only the OUTER `IndexedAccess` dispatch keeps the caller's mode, so
+/// the terminal consumed segment is the sole one that expands. This is
+/// the path-precision rule "intermediate hops run in Navigate, the
+/// terminal hop runs in the caller's mode" applied to the
+/// raise/materialize reducer. Inheriting the parent's mode here would
+/// over-expand the intermediate object (e.g. materialise the sibling
+/// members of `Root['a']` that the path never selects) — the
+/// shallow-by-default violation this demotion fixes.
+///
+/// Under `StructuralTransit` parent → `StructuralTransit` (the transit
+/// walk observes the object structurally without materialising it).
 #[allow(dead_code)] // wired by push_demand_children + reduce_one IndexedAccess.
 #[inline]
 fn indexed_access_object_context(
     parent_context: ProjectionReductionContext,
 ) -> ProjectionReductionContext {
     if matches!(parent_context.demand, ReductionDemand::Published) {
-        parent_context
+        parent_context.with_mode(ProjectionMode::Navigate)
     } else {
         ProjectionReductionContext::structural_transit()
     }
