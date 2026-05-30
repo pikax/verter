@@ -6,14 +6,26 @@
 //! whole_hash, "default"), args: [] }` query — the SAME keyed identity both
 //! [`crate::VerterHost::resolve_vue_public_type`] (the public API) and a
 //! `.vue`-importing-`.vue` reference resolve through. There is NO second resolver
-//! and NO depth bound: termination is by query identity (the memo's
-//! same-key recursion sentinel returns `Opaque(RecursiveRef)` and the
-//! `push_instantiate_active` discipline catches same-identity re-entry during
-//! body lowering), so a CIRCULAR `A.vue ↔ B.vue` import cannot hang.
+//! and NO depth bound: termination is by query identity. Two distinct
+//! back-edge mechanisms keep a CIRCULAR `A.vue ↔ B.vue` import from hanging,
+//! and they bound DIFFERENTLY — do not conflate them:
+//!
+//! - **lazy bare-`Ref` / mutual route** (e.g. `defineProps<{ peer: B }>()` with a
+//!   reciprocal `E ↔ F`): each `Instantiate(.vue default)` side completes and
+//!   pops before the next is demanded, and the inner cyclic reference lowers in
+//!   `Navigate` to a shallow `DeclRef` carrier (`Ref { name: "default" }`)
+//!   instead of re-dispatching. The back-edge is a bounded SHALLOW `Object`, NOT
+//!   `RecursiveRef`. This is the common cross-file cycle shape.
+//! - **eager same-key re-entry** (`InstanceType<typeof Self>` projected
+//!   `Published(Expanded)`): the outer `Instantiate(Self, default)` frame is
+//!   STILL active when `typeof Self` re-enters the SAME `(Self, default)`
+//!   identity, so `push_instantiate_active` returns `false` and the back-edge is
+//!   `Opaque(RecursiveRef)`.
 //!
 //! These tests are discriminating: they exercise the chain `C → B → A`, prove
-//! the circular `A ↔ B` import terminates, and read an imported component's
-//! `$props` through the keyed query.
+//! both cycle shapes terminate (shallow bound for the mutual route, the active
+//! guard for the eager self-cycle), and read an imported component's `$props`
+//! through the keyed query.
 
 use std::sync::Arc;
 
@@ -21,8 +33,8 @@ use verter_type_expr::{PrimitiveName, TypeExpr};
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    DeclIdentity, PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult,
-    SemanticNodeData, SemanticQueryApi, SemanticQueryKey,
+    DeclIdentity, PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, ScopeId,
+    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, ValueRootKey,
 };
 use crate::typeinfo::types::TypeInfoQueryLevel;
 use crate::types::{FileKind, HostConfig, UpsertRequest};
@@ -213,6 +225,85 @@ fn project_vue_default_path(host: &VerterHost, canonical_id: &str, path: &[&str]
     dispatch
         .raise_node_to_type_expr(terminal)
         .unwrap_or_else(|| panic!("terminal of {path:?} for {canonical_id} must raise to TypeExpr"))
+}
+
+/// The raw node `Instantiate{ .vue, "default", [] }` (Navigate /
+/// structural-transit) resolves to — the synthesized public instance object.
+/// Dispatched on the SUPPLIED `dispatch` so the returned `SemanticNodeId` is
+/// comparable to other queries run on the same graph.
+fn instantiate_vue_default_node(
+    host: &VerterHost,
+    dispatch: &ProjectSemanticDispatch<'_>,
+    canonical_id: &str,
+) -> SemanticNodeId {
+    let whole_hash = host
+        .ensure_indexed_ready(canonical_id)
+        .expect("indexed ready")
+        .whole_hash;
+    match dispatch.execute(SemanticQueryKey::Instantiate {
+        base: DeclIdentity {
+            canonical_id: Arc::from(canonical_id),
+            whole_hash,
+            decl_name: Arc::from("default"),
+        },
+        args: Arc::from(Vec::new().into_boxed_slice()),
+        context: ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+    }) {
+        QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+        QueryResult::Error(e) => panic!("Instantiate(.vue default) for {canonical_id} errored: {e:?}"),
+    }
+}
+
+/// The construct-signature RETURN node of `typeof default` for a synthesized
+/// `.vue` `default` (`TypeOf{ value_root: (canonical, "default") }`). The result
+/// of `build_typeof` is a constructor-like Object carrying exactly one construct
+/// signature; this digs out that signature's `Function.return_type` node — the
+/// node `InstanceType<typeof default>` ultimately extracts. Dispatched on the
+/// SUPPLIED `dispatch` so the returned `SemanticNodeId` is comparable.
+fn typeof_default_construct_return_node(
+    host: &VerterHost,
+    host_ctx: &crate::resolver_core::HostResolverContext<'_>,
+    dispatch: &ProjectSemanticDispatch<'_>,
+    canonical_id: &str,
+) -> SemanticNodeId {
+    use crate::resolver_core::ResolverContext;
+    let _ = host;
+    let typeof_node = match dispatch.execute(SemanticQueryKey::TypeOf {
+        value_root: ValueRootKey {
+            scope: ScopeId {
+                canonical_id: Arc::from(canonical_id),
+                local_scope: None,
+            },
+            name: Arc::from("default"),
+        },
+    }) {
+        QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+        QueryResult::Error(e) => panic!("TypeOf(default) for {canonical_id} errored: {e:?}"),
+    };
+    let graph = host_ctx.project_type_store().semantic_graph();
+    let SemanticNodeData::Object(view) = graph
+        .node_data(typeof_node)
+        .as_deref()
+        .cloned()
+        .unwrap_or_else(|| panic!("TypeOf(default) for {canonical_id} must be an Object surface"))
+    else {
+        panic!("TypeOf(default) for {canonical_id} must be a constructor-like Object surface");
+    };
+    assert_eq!(
+        view.construct_signatures.len(),
+        1,
+        "the synthesized .vue default's typeof carries exactly one construct signature"
+    );
+    let ctor_fn = view.construct_signatures[0];
+    let SemanticNodeData::Function { return_type, .. } = graph
+        .node_data(ctor_fn)
+        .as_deref()
+        .cloned()
+        .unwrap_or_else(|| panic!("construct signature of {canonical_id} must be a Function node"))
+    else {
+        panic!("construct signature of {canonical_id} must be a Function node");
+    };
+    return_type
 }
 
 const A_VUE: &str = r#"<script setup lang="ts">
@@ -473,5 +564,394 @@ defineProps<{ peer: InstanceType<typeof A>; b: string }>();
     assert_eq!(
         vue_default_object_members(&host, B),
         vec!["$props".to_string()]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (conv-1) DEEP CHAIN through `InstanceType<typeof Import>` members. Projecting
+//          the EXPANDED path `C.$props.child.$props.child.$props.a` must land on
+//          the `number` primitive declared at the deepest link — each `child`
+//          hop is an `InstanceType<typeof B>` / `InstanceType<typeof A>` whose
+//          construct return is the imported `.vue`'s synthesized instance object.
+//
+//          NEGATIVE: a WRONG terminal member on that path resolves to an opaque
+//          miss (raised `TypeExpr::Unknown`), NOT a broad object / `any`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn vue_chain_expanded_path_reaches_number_terminal() {
+    const A: &str = "/w/A.vue";
+    const B: &str = "/w/B.vue";
+    const C: &str = "/w/C.vue";
+    let b_vue = r#"<script setup lang="ts">
+import A from './A.vue';
+defineProps<{ child: InstanceType<typeof A> }>();
+</script>
+"#;
+    let c_vue = r#"<script setup lang="ts">
+import B from './B.vue';
+defineProps<{ child: InstanceType<typeof B> }>();
+</script>
+"#;
+    let host = make_host_with_files(&[(A, A_VUE), (B, b_vue), (C, c_vue)]);
+
+    // C.$props.child : InstanceType<typeof B>  → B instance
+    //   .$props.child : InstanceType<typeof A> → A instance
+    //     .$props.a   : number
+    let terminal = project_vue_default_path(
+        &host,
+        C,
+        &["$props", "child", "$props", "child", "$props", "a"],
+    );
+    assert_eq!(
+        terminal,
+        TypeExpr::Primitive(PrimitiveName::Number),
+        "the deep chain terminal C.$props.child.$props.child.$props.a is number"
+    );
+
+    // Negative: a member that does not exist on A's props is an opaque miss, not
+    // a broad object or `any`/`unknown`-as-success.
+    let miss = project_vue_default_path(
+        &host,
+        C,
+        &["$props", "child", "$props", "child", "$props", "nope"],
+    );
+    assert!(
+        matches!(miss, TypeExpr::Unknown { .. }),
+        "a wrong terminal member must be an opaque miss, got {miss:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (conv-2) CYCLE through `InstanceType<typeof Import>`. With `A ↔ B` mutually
+//          importing and embedding the other's instance as `peer`:
+//          - the CONCRETE first hop `A.$props.peer.$props.b` resolves to the
+//            `string` declared on B's props (one real hop into the cycle), and
+//          - the bounded back-edge `A.$props.peer.$props.peer` resolves to the
+//            recursive sentinel (`TypeExpr::RecursiveRef`) — NOT a miss, NOT a
+//            hang. Termination is by query identity (the `Instantiate(.vue
+//            default)` memo + `push_instantiate_active` guard the convergence
+//            routes `typeof`/`InstanceType` through).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn vue_cycle_expanded_path_concrete_hop_and_bounded_back_edge() {
+    const A: &str = "/w/CycA2.vue";
+    const B: &str = "/w/CycB2.vue";
+    let a_vue = r#"<script setup lang="ts">
+import B from './CycB2.vue';
+defineProps<{ peer: InstanceType<typeof B>; a: number }>();
+</script>
+"#;
+    let b_vue = r#"<script setup lang="ts">
+import A from './CycA2.vue';
+defineProps<{ peer: InstanceType<typeof A>; b: string }>();
+</script>
+"#;
+    let host = make_host_with_files(&[(A, a_vue), (B, b_vue)]);
+
+    // One concrete hop into the cycle: A.$props.peer is B's instance; B.$props.b
+    // is string.
+    let concrete = project_vue_default_path(&host, A, &["$props", "peer", "$props", "b"]);
+    assert_eq!(
+        concrete,
+        TypeExpr::Primitive(PrimitiveName::String),
+        "A.$props.peer.$props.b is the string declared on B's props"
+    );
+
+    // The back-edge re-enters the SAME `.vue default` identity — bounded to the
+    // recursive sentinel, never an infinite expansion. The mere completion of
+    // this call is the no-hang proof.
+    let back_edge = project_vue_default_path(&host, A, &["$props", "peer", "$props", "peer"]);
+    assert!(
+        matches!(back_edge, TypeExpr::RecursiveRef { .. }),
+        "the cyclic back-edge must be the recursive sentinel, got {back_edge:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (conv-3) BARE-`Ref` `.vue`-as-type. `defineProps<{ peer: B }>()` references the
+//          imported `.vue` component DIRECTLY as a type (not via
+//          `InstanceType<typeof B>`). The bare `Ref("B")` lowers to a `.vue`
+//          default carrier and EXPANDED projection drives the `Instantiate(.vue
+//          default)` branch, so a chain resolves and a MUTUAL cycle bounds
+//          SHALLOW.
+//
+//          IMPORTANT — this LAZY bare-`Ref` mutual route does NOT reach the
+//          `push_instantiate_active` guard: each `Instantiate(.vue default)`
+//          frame completes and pops before the next side is demanded, and the
+//          inner cyclic `peer` lowers in `Navigate` to a `DeclRef` carrier
+//          rather than re-dispatching `Instantiate`. The back-edge is therefore
+//          a shallow `Object` whose inner `peer` is the bare `Ref { default }`
+//          carrier — NOT `RecursiveRef`. (The `push_instantiate_active`
+//          short-circuit to `RecursiveRef` is exercised instead by the EAGER
+//          same-key self-cycle in `instance_type_self_cycle_hits_active_guard`,
+//          where the outer `Published(Expanded)` frame is still active when
+//          `typeof Self` re-enters the SAME `(Self, default)` identity.)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn vue_bare_ref_chain_and_cycle_resolve() {
+    // Chain: D imports A as a bare type.
+    const A: &str = "/w/A.vue";
+    const D: &str = "/w/D.vue";
+    let d_vue = r#"<script setup lang="ts">
+import A from './A.vue';
+defineProps<{ child: A }>();
+</script>
+"#;
+    let host = make_host_with_files(&[(A, A_VUE), (D, d_vue)]);
+    // D.$props.child is A's instance; .$props.a is number.
+    let terminal = project_vue_default_path(&host, D, &["$props", "child", "$props", "a"]);
+    assert_eq!(
+        terminal,
+        TypeExpr::Primitive(PrimitiveName::Number),
+        "bare-Ref chain D.$props.child.$props.a is number"
+    );
+
+    // Cycle via bare Ref: E ↔ F mutually reference each other as bare types.
+    const E: &str = "/w/BareE.vue";
+    const F: &str = "/w/BareF.vue";
+    let e_vue = r#"<script setup lang="ts">
+import F from './BareF.vue';
+defineProps<{ peer: F; e: number }>();
+</script>
+"#;
+    let f_vue = r#"<script setup lang="ts">
+import E from './BareE.vue';
+defineProps<{ peer: E; f: string }>();
+</script>
+"#;
+    let host = make_host_with_files(&[(E, e_vue), (F, f_vue)]);
+    // One concrete hop: E.$props.peer is F's instance; F.$props.f is string.
+    let concrete = project_vue_default_path(&host, E, &["$props", "peer", "$props", "f"]);
+    assert_eq!(
+        concrete,
+        TypeExpr::Primitive(PrimitiveName::String),
+        "bare-Ref cycle concrete hop E.$props.peer.$props.f is string"
+    );
+    // The back-edge is bounded SHALLOW — NOT the recursive sentinel. The lazy
+    // bare-`Ref` mutual route never re-enters the SAME `(E, default)` frame while
+    // it is active: each `Instantiate(.vue default)` side completes and pops
+    // before the next side is demanded (the inner `peer` lowers in `Navigate` to
+    // a `DeclRef` carrier, so `push_instantiate_active` is never reached at the
+    // terminal). The back-edge is therefore E's shallow instance object whose
+    // inner cyclic `peer` is left as the bare `Ref { name: "default" }` carrier.
+    let back_edge = project_vue_default_path(&host, E, &["$props", "peer", "$props", "peer"]);
+
+    let TypeExpr::Object(instance) = &back_edge else {
+        panic!("bare-Ref cyclic back-edge must be E's shallow instance object, got {back_edge:?}");
+    };
+    let props = instance
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            verter_type_expr::ObjectMember::Property(prop) if prop.name == "$props" => {
+                Some(&prop.ty)
+            }
+            _ => None,
+        })
+        .expect("E shallow instance must carry $props");
+
+    let TypeExpr::Object(props_obj) = props else {
+        panic!("E.$props must be an object, got {props:?}");
+    };
+
+    let e = props_obj
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            verter_type_expr::ObjectMember::Property(prop) if prop.name == "e" => Some(&prop.ty),
+            _ => None,
+        })
+        .expect("E.$props.e must exist");
+    assert_eq!(*e, TypeExpr::Primitive(PrimitiveName::Number));
+
+    let peer = props_obj
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            verter_type_expr::ObjectMember::Property(prop) if prop.name == "peer" => Some(&prop.ty),
+            _ => None,
+        })
+        .expect("E.$props.peer must exist");
+    assert!(
+        matches!(peer, TypeExpr::Ref { name, type_arguments }
+            if name.as_ref() == "default" && type_arguments.is_empty()),
+        "bare-Ref cycle must stop shallow at inner peer Ref(default), got {peer:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (conv-4) CONVERGENCE DISCRIMINATOR — provenance, not bare node identity. The
+//          construct-signature RETURN node of `TypeOf(A.vue default)` (the node
+//          `InstanceType<typeof A>` extracts) MUST be PRODUCED BY the keyed
+//          `Instantiate{ A.vue default, [] }` query, i.e. it carries an
+//          `OriginEdgeKind::Instantiate` provenance edge.
+//
+//          Why provenance and not `SemanticNodeId` equality: semantic nodes are
+//          structurally interned, so a directly-lowered `{ $props, $emit }`
+//          object and the `Instantiate(.vue default)` object can intern to the
+//          SAME id even when produced by different paths — node identity does
+//          NOT discriminate the convergence. The `Instantiate` ORIGIN EDGE does:
+//          `build_vue_default_instance` stamps it, the pre-convergence direct
+//          `build_typeof` lowering of `function_signature.return_type` does NOT.
+//          This test dispatches ONLY `TypeOf` (never `Instantiate` directly), so
+//          the edge can only appear if `build_typeof` itself routed through
+//          `Instantiate(.vue default)`. It FAILS against the pre-convergence
+//          tree (no Instantiate edge on the typeof construct return) and PASSES
+//          post-convergence. A second assertion pins the post-convergence node
+//          identity to `Instantiate(.vue default)` as the strongest form.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn typeof_construct_return_is_produced_by_instantiate_vue_default() {
+    use crate::resolver_core::ResolverContext;
+    use crate::semantic_query::OriginEdgeKind;
+
+    const A: &str = "/w/A.vue";
+    let host = make_host_with_files(&[(A, A_VUE)]);
+
+    let store_view = host.resolver_store_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+
+    // ONLY TypeOf is dispatched here — so an Instantiate provenance edge on the
+    // construct return can ONLY have come from build_typeof routing through it.
+    let typeof_return = typeof_default_construct_return_node(&host, &host_ctx, &dispatch, A);
+    let graph = host_ctx.project_type_store().semantic_graph();
+    let has_instantiate_origin = graph
+        .origins(typeof_return)
+        .into_iter()
+        .any(|(kind, _)| kind == OriginEdgeKind::Instantiate);
+    assert!(
+        has_instantiate_origin,
+        "TypeOf(.vue default)'s construct return must be PRODUCED BY \
+         Instantiate(.vue default) (carry an Instantiate origin edge), not \
+         directly re-lowered in build_typeof"
+    );
+
+    // Strongest form: once converged, the construct return IS the same node the
+    // keyed `Instantiate(.vue default)` query resolves to.
+    let instantiate_node = instantiate_vue_default_node(&host, &dispatch, A);
+    assert_eq!(
+        typeof_return, instantiate_node,
+        "the construct return of TypeOf(.vue default) is the Instantiate(.vue default) node"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (guard-1) ACTIVE-INSTANTIATION-GUARD DISCRIMINATOR — `push_instantiate_active`.
+//           A SELF-cyclic `.vue` (`Self.vue` references its OWN instance as
+//           `InstanceType<typeof Self>`) projected EAGERLY under
+//           `Published(Expanded)` is the case that ACTUALLY exercises the
+//           `push_instantiate_active` / `is_instantiate_active` guard — the
+//           mutual bare-`Ref` fixture (conv-3) does NOT (it bounds shallow via a
+//           `Navigate` `DeclRef` carrier).
+//
+//           Mechanism: dispatching `Instantiate(Self, default, Published(Expanded))`
+//           directly pushes `(Self, "default")` and lowers Self's instance shape
+//           eagerly. The `self` member `InstanceType<typeof Self>` is lowered in
+//           Expanded mode (NOT the Navigate carrier path), so `typeof Self`
+//           routes through `build_synthesized_vue_default_construct_object`,
+//           which re-issues `Instantiate(Self, default, StructuralTransit(Navigate))`.
+//           That is a DIFFERENT context key from the outer `Published(Expanded)`
+//           one, so the memo's same-key sentinel does NOT fire — instead the
+//           re-entry calls `push_instantiate_active((Self, "default"))`, finds the
+//           SAME identity already active (the outer frame has not popped), returns
+//           `false`, and short-circuits to `Opaque(RecursiveRef)`. So
+//           `$props.self` raises to `TypeExpr::RecursiveRef`.
+//
+//           DISCRIMINATING: this test FAILS (and is what proves the guard is
+//           reached) if `push_instantiate_active` is neutralized to always admit —
+//           the re-entry then recurses past the guard instead of short-circuiting.
+//           Verified by temporarily returning `true` unconditionally from
+//           `push_instantiate_active` (see the report): the eager self-cycle then
+//           does NOT terminate at the sentinel.
+// ---------------------------------------------------------------------------
+
+const SELF_VUE: &str = r#"<script setup lang="ts">
+import Self from './Self.vue';
+defineProps<{ self: InstanceType<typeof Self>; marker: number }>();
+</script>
+"#;
+
+/// Project an EXPANDED member `path` rooted at a `Published(Expanded)`
+/// `Instantiate(.vue default)` of `canonical_id` (NOT the `Navigate` base
+/// [`project_vue_default_path`] uses). The EAGER `Published(Expanded)` base is
+/// what keeps the `(canonical, "default")` frame ACTIVE while the instance
+/// shape's members lower — the precondition for the `push_instantiate_active`
+/// guard to fire on a self-cyclic `InstanceType<typeof Self>` member.
+fn project_vue_default_path_eager(host: &VerterHost, canonical_id: &str, path: &[&str]) -> TypeExpr {
+    let store_view = host.resolver_store_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+
+    let whole_hash = host
+        .ensure_indexed_ready(canonical_id)
+        .expect("indexed ready")
+        .whole_hash;
+    // EAGER base: `Published(Expanded)` (NOT structural-transit/Navigate), so the
+    // body of the instance shape is lowered while `(canonical, "default")` is on
+    // the active-instantiation stack.
+    let base = match dispatch.execute(SemanticQueryKey::Instantiate {
+        base: DeclIdentity {
+            canonical_id: Arc::from(canonical_id),
+            whole_hash,
+            decl_name: Arc::from("default"),
+        },
+        args: Arc::from(Vec::new().into_boxed_slice()),
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    }) {
+        QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+        QueryResult::Error(e) => {
+            panic!("eager Instantiate(.vue default) base for {canonical_id} errored: {e:?}")
+        }
+    };
+    let segments: Arc<[PathSegment]> = path
+        .iter()
+        .map(|s| PathSegment::Member(Arc::from(*s)))
+        .collect::<Vec<_>>()
+        .into();
+    let terminal = match dispatch.execute(SemanticQueryKey::ProjectPath {
+        base,
+        path: segments,
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    }) {
+        QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+        QueryResult::Error(e) => {
+            panic!("ProjectPath {path:?} for {canonical_id} errored: {e:?}")
+        }
+    };
+    dispatch
+        .raise_node_to_type_expr(terminal)
+        .unwrap_or_else(|| panic!("terminal of {path:?} for {canonical_id} must raise to TypeExpr"))
+}
+
+#[test]
+fn instance_type_self_cycle_hits_active_guard() {
+    const SELF: &str = "/w/Self.vue";
+    let host = make_host_with_files(&[(SELF, SELF_VUE)]);
+
+    // Concrete sibling member proves the instance shape lowered (the path
+    // machinery and the eager base both work): `$props.marker` is `number`.
+    assert_eq!(
+        project_vue_default_path_eager(&host, SELF, &["$props", "marker"]),
+        TypeExpr::Primitive(PrimitiveName::Number),
+        "Self.$props.marker is the number declared alongside the self-cyclic member"
+    );
+
+    // The self-cyclic member: `$props.self` is `InstanceType<typeof Self>`. Under
+    // the EAGER `Published(Expanded)` base the `(Self, default)` frame is still
+    // active when `typeof Self` re-enters the SAME identity, so
+    // `push_instantiate_active` short-circuits to the recursive sentinel. The mere
+    // completion of this call is the no-hang proof.
+    let self_member = project_vue_default_path_eager(&host, SELF, &["$props", "self"]);
+    assert!(
+        matches!(self_member, TypeExpr::RecursiveRef { .. }),
+        "the active-instantiation guard must bound the eager self-cycle to the \
+         recursive sentinel, got {self_member:?}"
     );
 }
