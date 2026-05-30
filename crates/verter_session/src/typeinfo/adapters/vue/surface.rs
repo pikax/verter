@@ -555,7 +555,11 @@ fn signature_jsdoc_from_spans(
     host: &VerterHost,
     sig: &crate::typeinfo::surface::TypeInfoSurfaceSignature,
 ) -> (Option<String>, Vec<JsdocTag>) {
-    jsdoc_from_spans(host, sig.jsdoc_description_span.as_ref(), &sig.jsdoc_tag_spans)
+    jsdoc_from_spans(
+        host,
+        sig.jsdoc_description_span.as_ref(),
+        &sig.jsdoc_tag_spans,
+    )
 }
 
 /// Raise a member's value node to a [`TypeExpr`] through the shared structural
@@ -831,7 +835,11 @@ pub fn emits_from_typeinfo_surface(
 /// - Anything else → `None` (the member is not a slot).
 fn slot_callable_param_and_return(
     value: &TypeExpr,
-) -> Option<(Option<TypeExpr>, Option<TypeExpr>, Option<verter_span::Span>)> {
+) -> Option<(
+    Option<TypeExpr>,
+    Option<TypeExpr>,
+    Option<verter_span::Span>,
+)> {
     match value {
         TypeExpr::Function(func) => Some((
             func.parameters.first().map(|p| p.ty.clone()),
@@ -909,8 +917,7 @@ pub fn slots_from_typeinfo_surface(
             // A slot member is function-like: a single `Function`, or an
             // `Intersection` of functions (`(SlotA & SlotB)['default']`). A
             // non-callable member is not a slot.
-            let (first_param, return_expr, return_span) =
-                slot_callable_param_and_return(&value)?;
+            let (first_param, return_expr, return_span) = slot_callable_param_and_return(&value)?;
             let scope = macro_surface.member_expr_scope(host, member);
             let bindings = first_param
                 .as_ref()

@@ -434,9 +434,9 @@ fn vue_eval_source_is_position_preserving_same_length_and_blanked_markup() {
         "export interface Base {\n  baseField: number;\n}",
         "interface Props extends Base {\n  ownField: string;\n}\ndefineProps<Props>();",
     ] {
-        let start = raw.find(needle).unwrap_or_else(|| {
-            panic!("script content {needle:?} must be present in raw source")
-        });
+        let start = raw
+            .find(needle)
+            .unwrap_or_else(|| panic!("script content {needle:?} must be present in raw source"));
         let end = start + needle.len();
         assert_eq!(
             &eval_b[start..end],
@@ -449,7 +449,8 @@ fn vue_eval_source_is_position_preserving_same_length_and_blanked_markup() {
     // bytes, so in eval source every byte there must be a space or a preserved
     // line terminator — NEVER an original markup byte like `<` or `t`.
     let template_start = raw.find("<template>").expect("template present");
-    let template_end = raw.find("</template>").expect("template close present") + "</template>".len();
+    let template_end =
+        raw.find("</template>").expect("template close present") + "</template>".len();
     for i in template_start..template_end {
         let eb = eval_b[i];
         assert!(
