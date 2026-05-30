@@ -27,7 +27,7 @@
 //! call-signature event surfaces; empty roots false; expose/options
 //! false.
 
-#![allow(clippy::too_many_lines)]
+#![allow(clippy::too_many_lines, dead_code, unused_imports)]
 
 #[path = "component_meta_audit/harness.rs"]
 mod harness;
