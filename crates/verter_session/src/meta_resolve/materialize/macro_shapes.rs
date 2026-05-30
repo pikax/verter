@@ -161,6 +161,68 @@ fn record_published_field_edges_for_macro_shape(
     }
 }
 
+/// Synthesize a macro object shape from the shared macro-object Shallow
+/// surface — the Vue macro convention that enumerates the UNION of a
+/// compound root's member contributions.
+///
+/// This routes through the SAME dispatch primitives the props/emits/slots
+/// projector pipeline and `vue_macro_dtos` use
+/// ([`resolve_macro_payload`](crate::meta_resolve::projectors::resolve_macro_payload)
+/// + [`resolve_payload_surface`](crate::meta_resolve::projectors::resolve_payload_surface)),
+/// so the materialised shape collides path-independently with the dispatch
+/// surface in the shared content-addressed cache.
+///
+/// It is the materialiser's bridge for a macro payload root whose surface
+/// the ordinary `produce_one_macro_object_shape` projection cannot
+/// enumerate WITHOUT the macro-object union rule — concretely an OPEN
+/// `Conditional` props root (`defineProps<Props<T>>()` where
+/// `Props<T> = T extends 'a' ? { a? } : { b? }`). The macro-object Shallow
+/// surface distributes both conditional branches' members (each optional)
+/// via `merge_union_surfaces_for_macro`; the legacy `Published(Shallow)` /
+/// `Published(Expanded)` carrier projection used by
+/// `produce_one_macro_object_shape` keeps the open conditional empty (no
+/// branch-merge exists for props the way `PayloadSurfaceScope::EmitClassMacroObject`
+/// branch-merges emits).
+///
+/// Returns `None` when the surface cannot be resolved or carries no
+/// members (a genuinely empty macro surface stays empty — the caller falls
+/// through to its other producers).
+fn synthesize_macro_object_surface_shape(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    owner_canonical: &str,
+    macro_index: usize,
+    mac: &AnalyzedMacro,
+    macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
+    expansion_kind: verter_semantic::analysis::component_meta::MacroExpansionKind,
+) -> Option<ShapeResult> {
+    let owner = crate::meta_resolve::projectors::build_owner_decl_identity(ctx, owner_canonical);
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    let mut discard_diag = Vec::new();
+    let payload_node = crate::meta_resolve::projectors::resolve_macro_payload(
+        &dispatch,
+        &owner,
+        owner_canonical,
+        macro_index,
+        mac,
+        macro_kind,
+        expansion_kind.clone(),
+        &mut discard_diag,
+    )?;
+    let surface_node = crate::meta_resolve::projectors::resolve_payload_surface(
+        &dispatch,
+        payload_node,
+        macro_index,
+        expansion_kind,
+        crate::meta_resolve::projectors::macro_payload_surface_provenance(macro_kind),
+        &mut discard_diag,
+    )?;
+    let surface =
+        crate::resolver_core::projected_surface_from_semantic_node(ctx, surface_node)?;
+    let shape = crate::resolver_core::projected_surface_to_expanded_shape(&surface);
+    (!shape.properties.is_empty() || !shape.call_signatures.is_empty())
+        .then(|| verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape))
+}
+
 /// Sole-authority producer for type-based macro object shapes.
 ///
 /// This is the ONE place that produces `define_props`, `define_emits`, and
@@ -624,6 +686,65 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                                 },
                             );
                         }
+                    }
+                }
+                // Macro-object-surface fallback for a props payload whose
+                // legacy producers above yielded NOTHING. The empty-path
+                // `Published(Shallow)` / `Published(Expanded)` projections
+                // those producers use cannot enumerate an OPEN conditional
+                // props root (`defineProps<Props<T>>()` where
+                // `Props<T> = T extends 'a' ? { a? } : { b? }` and `T` is
+                // unbound) — there is no props branch-merge the way
+                // `PayloadSurfaceScope::EmitClassMacroObject` branch-merges
+                // emits, so the open conditional contributes an empty
+                // carrier surface. The shared macro-object Shallow surface
+                // (the SAME dispatch surface `vue_macro_dtos` reads) DOES
+                // enumerate both branches' members, each optional, via
+                // `merge_union_surfaces_for_macro`.
+                //
+                // Gated on the legacy producers having published nothing for
+                // this `macro_index`, so it is a pure ADDITION that cannot
+                // regress any non-empty shape the legacy producers already
+                // built. A genuinely empty / unresolvable macro surface
+                // stays empty (`synthesize_macro_object_surface_shape`
+                // returns `None`).
+                if !evaluated_types
+                    .define_props
+                    .iter()
+                    .any(|entry| entry.macro_index == macro_index)
+                {
+                    if let Some(shape) = synthesize_macro_object_surface_shape(
+                        query_engine.ctx,
+                        owner_canonical,
+                        macro_index,
+                        mac,
+                        verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+                        verter_semantic::analysis::component_meta::MacroExpansionKind::DefineProps,
+                    ) {
+                        projection_hits += 1;
+                        let count = shape.value.properties.len();
+                        component_meta_trace_custom!(
+                            "macro_object_shape",
+                            format!(
+                                "owner={} macro_index={} kind=define_props source=macro_object_surface props={}",
+                                owner_canonical, macro_index, count,
+                            ),
+                        );
+                        record_published_field_edges_for_macro_shape(
+                            query_engine.ctx,
+                            owner_canonical,
+                            macro_index,
+                            mac,
+                            verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+                            verter_semantic::analysis::component_meta::MacroExpansionKind::DefineProps,
+                            &shape,
+                        );
+                        evaluated_types.define_props.push(
+                            verter_semantic::analysis::type_expand::ExpandedMacroProps {
+                                macro_index,
+                                result: shape,
+                            },
+                        );
                     }
                 }
                 define_props_index += 1;
