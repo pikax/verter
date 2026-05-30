@@ -77,9 +77,11 @@ pub(crate) mod slots;
 // new consumers wire in.
 #[allow(unused_imports)]
 pub(crate) use macro_payload_substrate::{
-    resolve_macro_payload_diagnostic_probe, resolve_payload_surface_with_scope, MemberValueRole,
-    PayloadSurfaceScope,
+    resolve_emit_payload_to_conditional_root, resolve_macro_payload_diagnostic_probe,
+    resolve_payload_surface_with_scope, MemberValueRole, PayloadSurfaceScope,
 };
+#[cfg(test)]
+pub(crate) use macro_payload_substrate::EMIT_CARRIER_WALK_FUSE;
 
 pub(crate) use emits::project_emits;
 pub(crate) use exposed::project_exposed;

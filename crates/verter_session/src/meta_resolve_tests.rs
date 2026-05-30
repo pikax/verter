@@ -10469,6 +10469,221 @@ defineEmits<ConditionalEmits>()
     }
 }
 
+// Carrier walk terminates by visited-node IDENTITY, not by a depth cap:
+// a legitimate alias chain LONGER than the retired depth-8 bound must
+// still reach its terminal Conditional emit so the branch-merge fires.
+//
+// `defineEmits<EmitChain0>()` where `EmitChain0 -> EmitChain1 -> ... ->
+// EmitChain11 -> (Mode extends 'editor' ? EditorEmits : ViewerEmits)` is
+// a 12-hop alias chain to the Conditional root. Under the retired
+// `depth > 8` cap the carrier walk returned `None` at hop 9 — BEFORE
+// reaching the Conditional — so the inherited emit set collapsed and the
+// branch-merge silently lost both events. Identity-bounded termination
+// follows every distinct hop (no node repeats), reaches the Conditional,
+// and enumerates BOTH branches' events.
+//
+// Driven directly through `resolve_payload_surface_with_scope` (the
+// EmitClassMacroObject branch-merge entry) with the Navigate-lowered
+// carrier for the chain head — the same shape the macro projector hands
+// the branch-merge. This is discriminating: it FAILS against the
+// depth-8-capped tree (events missing) and PASSES against the
+// identity-bounded tree.
+// ─────────────────────────────────────────────────────────────────────
+#[test]
+fn dispatch_long_alias_chain_to_conditional_emits_branch_merge() {
+    use crate::meta_resolve::projectors::{resolve_payload_surface_with_scope, PayloadSurfaceScope};
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{ProjectionMode, SemanticNodeData};
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts" generic="Mode extends 'editor' | 'viewer'">
+type EditorEmits = { itemEdited: [id: number] }
+type ViewerEmits = { itemViewed: [id: number] }
+type EmitChain11 = Mode extends 'editor' ? EditorEmits : ViewerEmits
+type EmitChain10 = EmitChain11
+type EmitChain9 = EmitChain10
+type EmitChain8 = EmitChain9
+type EmitChain7 = EmitChain8
+type EmitChain6 = EmitChain7
+type EmitChain5 = EmitChain6
+type EmitChain4 = EmitChain5
+type EmitChain3 = EmitChain4
+type EmitChain2 = EmitChain3
+type EmitChain1 = EmitChain2
+type EmitChain0 = EmitChain1
+defineEmits<EmitChain0>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let _ = session.evaluate_types("/src/App.vue").unwrap();
+    let host = project.host();
+
+    let scope = "/src/App.vue";
+    let dispatch = ProjectSemanticDispatch::new(host);
+
+    // The macro projector resolves `defineEmits<EmitChain0>()`'s type
+    // argument in Navigate mode → a terminal `DeclRef` carrier for the
+    // NAMED alias chain head (NOT the `Conditional`). Lower the chain head
+    // the same way to obtain that carrier payload node.
+    let chain_head_ref = TypeExpr::Ref {
+        name: std::sync::Arc::from("EmitChain0"),
+        type_arguments: std::sync::Arc::from(Vec::<TypeExpr>::new().into_boxed_slice()),
+    };
+    let payload_node = dispatch
+        .lower_type_expr_in_scope_with_mode(scope, &chain_head_ref, ProjectionMode::Navigate)
+        .expect("EmitChain0 must lower to a Navigate carrier node");
+
+    // Precondition: the chain head is a carrier (NOT a bare Conditional),
+    // and the chain is longer than the retired depth-8 bound (12 hops to
+    // the Conditional root).
+    assert!(
+        !matches!(
+            crate::project_semantic_dispatch::node_data_for(host, payload_node).as_deref(),
+            Some(SemanticNodeData::Conditional { .. })
+        ),
+        "fixture precondition: the Navigate-lowered chain head must be a \
+         CARRIER (DeclRef/DeclPlaceholder), not a bare Conditional"
+    );
+
+    let mut diag_sink = Vec::new();
+    let surface = resolve_payload_surface_with_scope(
+        &dispatch,
+        payload_node,
+        0,
+        verter_semantic::analysis::component_meta::MacroExpansionKind::DefineEmits,
+        PayloadSurfaceScope::EmitClassMacroObject,
+        &mut diag_sink,
+    );
+    let surface = surface.expect(
+        "long-chain branch-merge must follow the >8-hop DeclRef carrier chain \
+         to the Conditional root — identity-bounded termination reaches it; the \
+         retired depth-8 cap returned None before hop 12 and lost the merge",
+    );
+    let members = crate::meta_resolve::projectors::read_surface_members(host, surface);
+    let event_names: Vec<String> = members.iter().map(|m| m.name.to_string()).collect();
+
+    for required in ["itemEdited", "itemViewed"] {
+        assert!(
+            event_names.iter().any(|n| n == required),
+            "long-chain branch-merge MUST merge BOTH branches of the undecided \
+             NAMED conditional emit at the END of a 12-hop alias chain. Event \
+             `{required}` is missing — a depth-8 cap truncates the walk before \
+             the Conditional. Got events: {event_names:?}"
+        );
+    }
+}
+
+// Carrier walk terminates a 2-node alias CYCLE by visited-node identity,
+// on the FIRST re-entry — NOT by exhausting the pathological fuse.
+//
+// `type CycA = CycB; type CycB = CycA` used as the emit payload has no
+// Conditional root, so the carrier walk must return `None`. The retired
+// `depth > 8` cap only terminated this cycle by bouncing CycA<->CycB nine
+// times until the bound tripped; the `*resolved != node` filter caught
+// only 1-cycles, never this 2-cycle. Visited-node identity catches the
+// cycle the instant CycA is re-entered (the third call), independent of
+// the fuse.
+//
+// Discriminating proof of identity (not depth): the walk re-enters CycA
+// after visiting exactly {CycA, CycB}, so `visited.len() == 2` and
+// termination occurs at re-entry depth 2 — three orders of magnitude
+// below `EMIT_CARRIER_WALK_FUSE` (1024). If termination depended on the
+// fuse the cycle would bounce up to 1024 hops before returning; instead
+// it returns immediately with a 2-element visited set.
+// ─────────────────────────────────────────────────────────────────────
+#[test]
+fn dispatch_mutual_alias_cycle_emits_terminates_by_identity() {
+    use crate::meta_resolve::projectors::{
+        resolve_emit_payload_to_conditional_root, EMIT_CARRIER_WALK_FUSE,
+    };
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{ProjectionMode, SemanticNodeData, SemanticNodeId};
+
+    // Seed the cyclic aliases through the SHALLOW indexing path
+    // (`ensure_indexed_ready`) rather than full SFC evaluation. The
+    // carrier walk only needs the prepared type-decl bodies for CycA/CycB
+    // to exist; full `defineEmits<CycA>()` evaluation of a mutual alias
+    // cycle is a SEPARATE upstream concern and is out of scope here — this
+    // test isolates the carrier walk's own cycle termination.
+    let ws = verter_workspace::MemoryWorkspace::new(verter_workspace::MemoryOptions::default());
+    ws.inject_file(
+        "/src/cyclic.ts".to_string(),
+        std::sync::Arc::from("export type CycA = CycB\nexport type CycB = CycA\n"),
+    );
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        std::sync::Arc::new(ws),
+    );
+    let _seeded = host
+        .ensure_indexed_ready("/src/cyclic.ts")
+        .expect("cyclic alias module must shallow-index");
+
+    let scope = "/src/cyclic.ts";
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    // Navigate-lower the cyclic alias head to its DeclRef carrier — the
+    // shape the macro projector hands the carrier walk. Navigate produces
+    // a TERMINAL carrier without recursing into the cyclic body, so this
+    // lowering does not itself diverge.
+    let cyc_ref = TypeExpr::Ref {
+        name: std::sync::Arc::from("CycA"),
+        type_arguments: std::sync::Arc::from(Vec::<TypeExpr>::new().into_boxed_slice()),
+    };
+    let payload_node = dispatch
+        .lower_type_expr_in_scope_with_mode(scope, &cyc_ref, ProjectionMode::Navigate)
+        .expect("CycA must lower to a Navigate carrier node");
+
+    // Precondition: the cyclic head is a carrier, not a Conditional.
+    assert!(
+        !matches!(
+            crate::project_semantic_dispatch::node_data_for(&host, payload_node).as_deref(),
+            Some(SemanticNodeData::Conditional { .. })
+        ),
+        "fixture precondition: CycA must Navigate-lower to a CARRIER, not a \
+         bare Conditional"
+    );
+
+    // Drive the carrier walk DIRECTLY so the termination mechanism is
+    // observable. A mutual alias cycle has no Conditional root → `None`.
+    let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+    let result = resolve_emit_payload_to_conditional_root(&dispatch, payload_node, 0, &mut visited);
+
+    assert!(
+        result.is_none(),
+        "a mutual 2-node alias cycle (type CycA = CycB; type CycB = CycA) used \
+         as an emit payload has no Conditional root — the carrier walk MUST \
+         return None, got {result:?}"
+    );
+
+    // IDENTITY, not the fuse: the walk re-entered CycA after visiting
+    // exactly {CycA, CycB}. Termination happened at re-entry depth 2, far
+    // below the pathological fuse — proof the cycle is caught by node
+    // identity on the first repeat, not by exhausting the depth bound.
+    assert_eq!(
+        visited.len(),
+        2,
+        "the carrier walk must visit exactly the two cycle nodes (CycA, CycB) \
+         then terminate on the FIRST re-entry of CycA — visited set: \
+         {visited:?}"
+    );
+    assert!(
+        visited.len() < EMIT_CARRIER_WALK_FUSE,
+        "cycle termination must occur far below the pathological fuse \
+         ({EMIT_CARRIER_WALK_FUSE}); identity termination visited only \
+         {} node(s)",
+        visited.len()
+    );
+}
+
 mod node_predicates_tests {
     use super::make_project;
     use crate::meta_resolve::{

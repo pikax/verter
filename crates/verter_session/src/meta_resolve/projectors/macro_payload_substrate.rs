@@ -234,7 +234,7 @@ pub(crate) enum PayloadSurfaceScope {
 ///
 /// Resolve an emit macro payload node to its underlying `Conditional`
 /// root, walking through `DeclRef` carriers for named conditional
-/// aliases (Stage 4-pre Gap 4).
+/// aliases.
 ///
 /// `resolve_macro_payload` lowers in `Navigate` mode, so
 /// `defineEmits<ConditionalEmits>()` (where
@@ -243,17 +243,45 @@ pub(crate) enum PayloadSurfaceScope {
 /// branch-merge needs. This helper reaches the alias body and recurses
 /// through chained aliases until it finds a `Conditional` (returns
 /// `Some`) or a non-`Conditional`/non-carrier node (returns `None`).
-/// Bounded at depth 8 — generous for real alias chains, tight enough to
-/// fail loudly on pathological graphs. The branch-merge only fires for
-/// the undecided-conditional emit-inheritance carve-out, so a `None`
-/// here correctly routes the (decided / object / union) payload to the
-/// default single-dispatch surface.
-fn resolve_emit_payload_to_conditional_root(
+///
+/// **Termination is by visited-node identity, not by a depth bound.**
+/// `visited` accumulates every `SemanticNodeId` the walk has entered;
+/// the first re-entry of a node is a cycle (`type A = B; type B = A`
+/// used as an emit payload, or any longer alias loop) and returns
+/// `None` immediately — a cyclic emit alias has no conditional root, so
+/// `None` is the correct degraded answer. Because the walk terminates on
+/// identity, a legitimate alias chain of arbitrary length still reaches
+/// its terminal `Conditional` (each distinct hop is a fresh node). This
+/// mirrors the `PathWalker::visited_nodes` rail in
+/// [`crate::project_semantic_dispatch::walk`]: the set grows only on
+/// genuine re-entry, so a linear chain costs O(n) inserts.
+///
+/// `depth` / [`EMIT_CARRIER_WALK_FUSE`] is a pure pathological fuse, NOT
+/// the cyclic-termination mechanism — it caps a degenerate graph that
+/// somehow produces a fresh node on every hop without ever cycling. It
+/// is set far above any real alias-chain length so it never truncates a
+/// legitimate chain.
+///
+/// The branch-merge only fires for the undecided-conditional
+/// emit-inheritance carve-out, so a `None` here correctly routes the
+/// (decided / object / union / cyclic) payload to the default
+/// single-dispatch surface.
+pub(crate) fn resolve_emit_payload_to_conditional_root(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
-    depth: u8,
+    depth: u16,
+    visited: &mut rustc_hash::FxHashSet<SemanticNodeId>,
 ) -> Option<SemanticNodeId> {
-    if depth > 8 {
+    // Pure pathological fuse — see [`EMIT_CARRIER_WALK_FUSE`]. The cycle
+    // detection below is the real termination authority; this guards only
+    // a degenerate non-cyclic graph that never re-enters a node.
+    if depth as usize > EMIT_CARRIER_WALK_FUSE {
+        return None;
+    }
+    // Cycle detection by node identity. The first re-entry of `node` is a
+    // genuine alias loop (caught on the FIRST repeat, regardless of the
+    // fuse) — return the degraded `None` for a cyclic emit alias.
+    if !visited.insert(node) {
         return None;
     }
     match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node).as_deref() {
@@ -265,29 +293,38 @@ fn resolve_emit_payload_to_conditional_root(
         // materialised by `ResolveDecl`), so reach the body by lowering
         // the prepared declaration's body `TypeExpr` directly — the same
         // mechanism the structural `named_decl_body` walker used.
-        Some(SemanticNodeData::DeclRef { identity }) => lower_decl_body_to_node(
-            dispatch,
-            &identity.canonical_id,
-            &identity.decl_name,
-        )
-        .filter(|resolved| *resolved != node)
-        .and_then(|resolved| {
-            resolve_emit_payload_to_conditional_root(dispatch, resolved, depth + 1)
-        }),
+        Some(SemanticNodeData::DeclRef { identity }) => {
+            lower_decl_body_to_node(dispatch, &identity.canonical_id, &identity.decl_name)
+                .and_then(|resolved| {
+                    resolve_emit_payload_to_conditional_root(
+                        dispatch,
+                        resolved,
+                        depth + 1,
+                        visited,
+                    )
+                })
+        }
         // A `DeclPlaceholder` deferral (e.g. surfaced by an upstream
         // `ResolveDecl`). Reach its body the same way.
         Some(SemanticNodeData::Opaque(
             crate::semantic_query::QueryError::DeclPlaceholder {
                 canonical_id, name, ..
             },
-        )) => lower_decl_body_to_node(dispatch, canonical_id, name)
-            .filter(|resolved| *resolved != node)
-            .and_then(|resolved| {
-                resolve_emit_payload_to_conditional_root(dispatch, resolved, depth + 1)
-            }),
+        )) => lower_decl_body_to_node(dispatch, canonical_id, name).and_then(|resolved| {
+            resolve_emit_payload_to_conditional_root(dispatch, resolved, depth + 1, visited)
+        }),
         _ => None,
     }
 }
+
+/// Pathological-graph fuse for [`resolve_emit_payload_to_conditional_root`].
+///
+/// The carrier walk terminates on visited-node identity (a cycle is
+/// caught on the first re-entry). This fuse only bounds a degenerate
+/// graph that produces a fresh node on every hop without ever cycling —
+/// it is set far above any plausible real alias-chain depth so it never
+/// truncates a legitimate chain.
+pub(crate) const EMIT_CARRIER_WALK_FUSE: usize = 1024;
 
 /// Lower a named declaration's prepared body `TypeExpr` to a semantic
 /// node in `Navigate` mode (terminal carriers preserved). Returns the
@@ -340,11 +377,15 @@ pub(crate) fn resolve_payload_surface_with_scope(
     // `resolve_macro_payload` lowers in `Navigate` mode, so a named
     // conditional alias surfaces as a terminal `DeclRef` here, not the
     // `Conditional`. The carrier walk follows DeclRef/DeclPlaceholder
-    // carriers to the conditional root (Stage 4-pre Gap 4). The walk is
+    // carriers to the conditional root, terminating on visited-node
+    // identity (a cyclic alias loop returns `None`). The walk is
     // non-invasive (it reads already-interned `SemanticNodeData` and
     // lowers prepared bodies in Navigate); the branch dispatches below
     // emit the dep-signature.
-    let conditional_node = resolve_emit_payload_to_conditional_root(dispatch, payload_node, 0);
+    let mut carrier_visited: rustc_hash::FxHashSet<SemanticNodeId> =
+        rustc_hash::FxHashSet::default();
+    let conditional_node =
+        resolve_emit_payload_to_conditional_root(dispatch, payload_node, 0, &mut carrier_visited);
 
     let Some(conditional_node) = conditional_node else {
         // No Conditional reachable — branch-merge is inapplicable.
