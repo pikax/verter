@@ -1521,8 +1521,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 drop(data);
                 match self
                     .dispatch
-                    .execute(SemanticQueryKey::ResolveDecl(ResolveDeclKey { scope, name }))
-                {
+                    .execute(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                        scope,
+                        name,
+                    })) {
                     QueryResult::Value(id) => id,
                     // A recursive / errored terminal carrier keeps the
                     // carrier (no expansion) — the published surface stays
