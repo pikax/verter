@@ -17,6 +17,13 @@
 //! the patterns described below; post-Stage-5c, at least one site
 //! is routed through the new types and the rest are tracked here
 //! for future stages.
+//!
+//! Site #3 (the walker routed-expr engine's whole_hash read) is now
+//! RETIRED: the `component_meta_query_engine/routed_expr.rs` engine was
+//! deleted with the walker cluster, and the surviving dispatch
+//! routed-expr path does not track file versions via whole_hash. Its
+//! guard asserts the retired state (deleted file absent + dispatch
+//! method whole_hash-free) rather than a relocated read.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -106,31 +113,87 @@ fn whole_hash_read_site_2_route_db_surface_hash_inventoried() {
     );
 }
 
-/// Read site #3 — `routed_expr.rs:1542`. Inside the routed-expr
-/// engine, file-version tracking reads `whole_hash` via the typed
-/// path-cache.
+/// Read site #3 — RETIRED. The legacy site read `whole_hash` for
+/// file-version tracking inside the walker routed-expr engine
+/// (`component_meta_query_engine/routed_expr.rs`). That engine and its
+/// whole_hash read are DELETED with the walker cluster: macro/route
+/// surfaces now resolve through the DISPATCH routed-expr path
+/// (`registry_decl.rs::dispatch_routed_expr_surface_expr`, which routes
+/// through `dispatch_projected_surface` / `dispatch_root_instantiated`
+/// / the semantic-query substrate). That dispatch path does NOT do
+/// file-version tracking via a `whole_hash` read — the surviving
+/// whole_hash reads in `registry_decl.rs` belong to the prepared-decl
+/// bundle / decl-identity machinery inventoried by sites #1/#4/#5, not
+/// the routed-expr surface path.
 ///
-/// **Documented Stage-5c+ state**: "Reads `content_hash_for(canonical)`
-/// from `SessionView` directly." Stage 5 already migrated this
-/// site through Sub-task B's view-aware substrate, so this test
-/// just verifies the call pattern exists.
+/// **Discriminating retired-state guard**:
+/// 1. the deleted `routed_expr.rs` engine file MUST NOT exist, and
+/// 2. the surviving dispatch routed-expr method MUST exist and its body
+///    MUST be free of any `whole_hash` / `get_whole_hash` /
+///    `content_hash_for` read.
+///
+/// Reintroducing the deleted engine, or adding a whole_hash read into
+/// the dispatch routed-expr method, flips this guard RED.
 #[test]
-fn whole_hash_read_site_3_routed_expr_via_view_or_ctx_inventoried() {
-    let path = workspace_root()
+fn whole_hash_read_site_3_routed_expr_retired() {
+    // (1) The walker routed-expr engine file is DELETED.
+    let deleted = workspace_root()
         .join("crates/verter_session/src/resolver_core/component_meta_query_engine/routed_expr.rs");
-    let source = read_source_file(&path);
-
-    // The Stage-5c+ form: route through `self.ctx.get_whole_hash`
-    // (which Stage 5 makes view-aware via `SessionView`).
-    let has_ctx_routing = source.contains("get_whole_hash(scope_canonical_id)")
-        || source.contains("get_whole_hash(canonical_id)")
-        || source.contains(".whole_hash(scope_canonical_id)")
-        || source.contains(".content_hash_for(");
-
     assert!(
-        has_ctx_routing,
-        "routed_expr.rs must route whole_hash reads through SessionView/ResolverContext (inventory site #3)"
+        !deleted.exists(),
+        "the walker routed-expr engine `routed_expr.rs` is retired and MUST NOT exist — \
+         macro/route surfaces resolve through `dispatch_routed_expr_surface_expr` (site #3 \
+         is retired, not relocated)"
     );
+
+    // (2) The surviving dispatch routed-expr method exists and does NOT
+    // read whole_hash for routing.
+    let path = workspace_root()
+        .join("crates/verter_session/src/resolver_core/component_meta_query_engine/registry_decl.rs");
+    let source = read_source_file(&path);
+    let body = extract_fn_body(&source, "pub(crate) fn dispatch_routed_expr_surface_expr(");
+    for forbidden in ["whole_hash", "get_whole_hash", "content_hash_for"] {
+        assert!(
+            !body.contains(forbidden),
+            "the dispatch routed-expr method `dispatch_routed_expr_surface_expr` MUST NOT \
+             read `{forbidden}` — the routed-expr surface path resolves through the dispatch \
+             / semantic-query substrate, not via file-version whole_hash tracking. \
+             Reintroducing a whole_hash read here resurrects the retired routed-expr engine's \
+             file-version coupling. Body:\n{body}"
+        );
+    }
+}
+
+/// Extract the brace-balanced body (from the first `{` after `needle`
+/// to its matching `}`) of the function whose signature begins at
+/// `needle`. The scanned method is a dispatch router that embeds no
+/// `{`/`}` inside string/char literals, so plain depth counting is
+/// sufficient.
+fn extract_fn_body<'a>(src: &'a str, needle: &str) -> &'a str {
+    let start = src
+        .find(needle)
+        .unwrap_or_else(|| panic!("expected `{needle}` in source"));
+    let after = &src[start..];
+    let open = after
+        .find('{')
+        .unwrap_or_else(|| panic!("expected an opening brace for `{needle}`"));
+    let bytes = after.as_bytes();
+    let mut depth = 0usize;
+    let mut idx = open;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &after[open..=idx];
+                }
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    panic!("expected a brace-balanced body for `{needle}`");
 }
 
 /// Read site #4 — `NodeScopeId::File { whole_hash }`. Today the
