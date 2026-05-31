@@ -19,7 +19,7 @@ use verter_type_expr::{FunctionParam, ObjectMember, PrimitiveName, TypeExpr};
 use crate::types::FileKind;
 use crate::{HostConfig, UpsertRequest, VerterHost};
 
-use super::materialize::slot_field_function_type_expr;
+use super::projectors::define_shapes::slot_field_function_type_expr;
 
 // ---------------------------------------------------------------------------
 // Test 1 — `slot_field_function_type_expr` direct typed construction.

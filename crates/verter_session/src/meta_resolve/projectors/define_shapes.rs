@@ -360,7 +360,7 @@ fn dto_request(
 /// (`AnalyzedSlotFieldBinding.binding_expr` and `AnalyzedSlotField.return_expr`).
 /// No source-text reparse. Empty-bindings slots produce `() => RT` (no `props`
 /// parameter).
-fn slot_field_function_type_expr(
+pub(crate) fn slot_field_function_type_expr(
     slot: &verter_semantic::analysis::AnalyzedSlotField,
 ) -> verter_type_expr::TypeExpr {
     use verter_type_expr::{

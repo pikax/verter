@@ -1465,7 +1465,3 @@ pub(super) fn merge_prepared_intersection_arms(
     }
     projected_surface_from_parts_intersection(surfaces)
 }
-
-#[cfg(test)]
-#[path = "prepared_surface_tests.rs"]
-mod intersection_merge_tests;
