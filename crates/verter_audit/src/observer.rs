@@ -451,6 +451,24 @@ pub fn install_observer(observer: Arc<dyn AuditObserver>) -> ObserverGuard {
     ObserverGuard { prev }
 }
 
+/// Clear the calling thread's observer slot and capture the prior
+/// value for restoration on drop. The empty-slot mirror of
+/// [`install_observer`].
+///
+/// Used by the scheduler's cooperative inline-execute path when the
+/// dispatched job has no `winner_ctx`: the inline branch runs on the
+/// CALLING worker's thread, so without a clear of the substrate
+/// observer slot the outer request's `AuditObserver` would still be
+/// visible to lower crates emitting through [`current_observer`],
+/// and the inner stage's events would be misattributed to the outer
+/// request. Stack-safe — drop restores whatever value the slot held
+/// before the clear.
+#[must_use]
+pub fn clear_observer() -> ObserverGuard {
+    let prev = CURRENT_OBSERVER.with(|slot| slot.replace(None));
+    ObserverGuard { prev }
+}
+
 /// RAII guard returned by [`install_observer`] (and by
 /// [`crate::noop::install_noop_observer`]). Restores the previous
 /// observer on drop.

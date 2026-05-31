@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "Async file scheduler for Verter — per-file staging, priority queue, declarative blockers"
+description = "Async file scheduler for Verter — driver-owned DAG with typed identity admission, dependency gating, and per-class capacity accounting"
 publish = false
 
 [features]

@@ -29,17 +29,14 @@ pub enum Submission {
         /// `on_dedup_joiner` callbacks when this request joins.
         request_context: Option<crate::request_context::OpaqueRequestContext>,
     },
-    /// A stage completed for a file.
+    /// A stage completed for a file. The driver advances the file's
+    /// pipeline (admit Analysis after Source, admit Artifact after
+    /// Analysis when dep gates clear) and propagates the completion
+    /// onto the DAG so dependent waiter edges resolve.
     StageComplete {
         file_id: String,
         generation: u64,
         task_kind: TaskKind,
-    },
-    /// A blocker resolved — check if dependents can proceed.
-    BlockerResolved {
-        file_id: String,
-        generation: u64,
-        completed_stage: TaskKind,
     },
 }
 

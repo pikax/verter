@@ -24,7 +24,7 @@
 //!    separate accessor that downcasts to the concrete session type).
 
 use std::cell::RefCell;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Discriminator for cache-event hooks routed through
 /// [`RequestContextLike::record_cache_event`]. The session-side
@@ -53,6 +53,57 @@ pub enum CacheEventKind {
 pub trait TlsUninstall: Send {
     /// Consume the handle and restore the previous TLS value.
     fn uninstall(self: Box<Self>);
+}
+
+/// Type of the host-registered "clear all TLS slots planted by an
+/// install" hook. When invoked, the hook clears every TLS slot that
+/// the host's [`RequestContextLike::install_tls`] would have planted,
+/// and returns an RAII handle whose `uninstall` restores all prior
+/// values. Used by the cooperative inline-execute path when the
+/// dispatched job has no `winner_ctx`: clearing must be symmetric
+/// with the install path so the inline branch never observes the
+/// outer request's TLS in any slot.
+///
+/// The scheduler cannot reach into `verter_session` directly (the
+/// crate cycle runs the other way), so the session registers its
+/// concrete clear at process startup via [`register_clear_tls_hook`].
+pub type ClearTlsHook = fn() -> Box<dyn TlsUninstall + Send>;
+
+static CLEAR_TLS_HOOK: OnceLock<ClearTlsHook> = OnceLock::new();
+
+/// Register the host's concrete "clear all install_tls slots" hook.
+/// Called once at process startup by the session crate. Returns
+/// `Err(existing)` if a hook has already been registered.
+///
+/// This is the substrate-level counterpart to
+/// [`RequestContextLike::install_tls`]. `install_tls` plants every
+/// TLS slot the host owns (scheduler opaque, session request
+/// context, audit observer); the hook here clears every one of them
+/// symmetrically. Without the hook the inline-execute None-winner_ctx
+/// path would only clear the scheduler's opaque slot and the outer
+/// request's session + audit TLS would bleed into the inner stage.
+pub fn register_clear_tls_hook(hook: ClearTlsHook) -> Result<(), ClearTlsHook> {
+    CLEAR_TLS_HOOK.set(hook)
+}
+
+/// Invoke the registered "clear all install_tls slots" hook, returning
+/// its RAII handle. Falls back to a no-op handle if no hook is
+/// registered — the scheduler-side opaque clear is the minimum
+/// guarantee; the session-side audit + request-context clears require
+/// the host to have wired its hook (any binary that ever installs a
+/// session-level context via `RequestContextGuard::install` is
+/// expected to register the hook at startup).
+pub(crate) fn invoke_clear_tls_hook() -> Box<dyn TlsUninstall + Send> {
+    match CLEAR_TLS_HOOK.get() {
+        Some(hook) => hook(),
+        None => {
+            struct NoopUninstall;
+            impl TlsUninstall for NoopUninstall {
+                fn uninstall(self: Box<Self>) {}
+            }
+            Box::new(NoopUninstall)
+        }
+    }
 }
 
 /// Session-owned request context surfaced to the scheduler as an opaque
@@ -111,6 +162,39 @@ impl std::fmt::Debug for OpaqueRequestContext {
     }
 }
 
+impl OpaqueRequestContext {
+    /// Test-only constructor producing an opaque context tagged by
+    /// `request_id`. The returned context's TLS install is a no-op
+    /// (the underlying impl never installs anything), and its
+    /// `on_dedup_joiner` / `record_cache_event` callbacks are
+    /// no-ops. Used by tests that need to assert which submitter's
+    /// context survived a dedup join.
+    #[cfg(test)]
+    pub(crate) fn test_only(request_id: u64) -> Self {
+        struct TestOnlyCtx {
+            id: u64,
+        }
+        impl RequestContextLike for TestOnlyCtx {
+            fn request_id(&self) -> u64 {
+                self.id
+            }
+            fn capture_enabled(&self) -> bool {
+                false
+            }
+            fn on_dedup_joiner(&self, _c: Arc<str>, _w: u64, _a: bool) {}
+            fn record_cache_event(&self, _event: CacheEventKind) {}
+            fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
+                struct NoopUninstall;
+                impl TlsUninstall for NoopUninstall {
+                    fn uninstall(self: Box<Self>) {}
+                }
+                Box::new(NoopUninstall)
+            }
+        }
+        OpaqueRequestContext(Arc::new(TestOnlyCtx { id: request_id }) as Arc<dyn RequestContextLike>)
+    }
+}
+
 thread_local! {
     /// Worker-thread TLS slot. Populated by [`OpaqueContextGuard::install`]
     /// around each stage-closure, cleared by the guard's `Drop`. `replace`
@@ -165,6 +249,29 @@ impl OpaqueContextGuard {
         let prev = CURRENT_OPAQUE_CONTEXT.with(|slot| slot.replace(Some(ctx)));
         Self { prev }
     }
+
+    /// Clear the worker's opaque TLS slot and capture the prior
+    /// value for restoration on drop. The empty-slot mirror of
+    /// [`Self::install`].
+    ///
+    /// Pool-spawn paths run inside an outer `install_tls` guard
+    /// whose `Drop` resets the slot — sequential jobs on the same
+    /// pool worker observe `None` between jobs, so no explicit
+    /// clear is needed there. (Pool workers are persistent threads
+    /// reused across jobs, not fresh threads — what protects them
+    /// is the install guard's RAII Drop, not thread freshness.)
+    ///
+    /// Inline-execute paths run ON the calling worker's thread
+    /// without a fresh `install_tls`, so when `winner_ctx == None`
+    /// the outer stage's TLS would bleed into the inner stage.
+    /// The inline-execute clear arm explicitly resets the scheduler
+    /// opaque slot for the duration of inline execution; the
+    /// session request context and audit observer slots are
+    /// cleared in concert via [`AllSlotsClearGuard::clear_all`].
+    pub fn clear() -> Self {
+        let prev = CURRENT_OPAQUE_CONTEXT.with(|slot| slot.replace(None));
+        Self { prev }
+    }
 }
 
 impl Drop for OpaqueContextGuard {
@@ -174,6 +281,69 @@ impl Drop for OpaqueContextGuard {
         CURRENT_OPAQUE_CONTEXT.with(|slot| {
             slot.replace(prev);
         });
+    }
+}
+
+/// RAII handle that clears EVERY TLS slot a `RequestContextLike::install_tls`
+/// would have planted (scheduler opaque, session request context, audit
+/// observer) and restores them all on drop. Used by the cooperative
+/// inline-execute path when the dispatched job has no `winner_ctx`.
+///
+/// The handle is two-part: an in-crate clear of the scheduler's opaque
+/// slot, plus the host's registered cross-crate clear (session +
+/// audit). Both restore in field-declaration order on drop.
+///
+/// Field ORDER is load-bearing — Rust drops struct fields in
+/// declaration order, so `cross_crate` is declared FIRST to make
+/// it drop FIRST. The drop sequence is therefore:
+///   1. `cross_crate.drop()` — restores session + audit slots.
+///   2. `opaque.drop()`      — restores scheduler opaque slot.
+///
+/// This is the reverse of
+/// `verter_session::request_context::RequestContextGuard::install`
+/// (which plants `opaque` first then `audit_observer`), so the
+/// install/clear pair un-stacks in matching directions.
+pub struct AllSlotsClearGuard {
+    // Drops FIRST (declaration-order drop) — restores session
+    // request-context + accumulator + audit observer.
+    #[allow(dead_code)]
+    cross_crate: Box<dyn TlsUninstall + Send>,
+    // Drops LAST — restores scheduler opaque slot.
+    #[allow(dead_code)]
+    opaque: OpaqueContextGuard,
+}
+
+impl AllSlotsClearGuard {
+    /// Clear every TLS slot the host's install path plants and return
+    /// the RAII handle. The handle restores all prior values on drop.
+    ///
+    /// Always clears the scheduler-side opaque slot directly. Cross-
+    /// crate slots (session request context, audit observer) are
+    /// cleared via the host-registered hook installed by the session
+    /// crate at startup via [`register_clear_tls_hook`]. Binaries
+    /// that never install a session-level context observe a no-op
+    /// cross-crate hook — the scheduler-only clear is the minimum
+    /// guarantee.
+    pub fn clear_all() -> Self {
+        let opaque = OpaqueContextGuard::clear();
+        let cross_crate = invoke_clear_tls_hook();
+        Self {
+            cross_crate,
+            opaque,
+        }
+    }
+}
+
+impl Drop for AllSlotsClearGuard {
+    fn drop(&mut self) {
+        // Drop body is empty by design — Rust's field-declaration-
+        // order drop is the load-bearing sequence:
+        //   1. `cross_crate` drops first (declared first) →
+        //      restores session + audit slots.
+        //   2. `opaque` drops last → restores scheduler opaque slot.
+        // The struct comment documents the rationale; touching field
+        // order without re-reading that contract is the regression
+        // class this layout guards against.
     }
 }
 

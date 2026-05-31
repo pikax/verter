@@ -33,6 +33,14 @@ impl IoPool {
                 std::thread::Builder::new()
                     .name(format!("verter-io-{i}"))
                     .spawn(move || {
+                        // Mark this thread as an I/O worker so
+                        // cooperative-pump callers reached via the
+                        // session-side `wait_or_drive` entry can
+                        // detect that they are running inside the
+                        // scheduler's owned pool.
+                        let _ = crate::caller_kind::CallerKind::set(
+                            crate::caller_kind::CallerKind::IoWorker,
+                        );
                         while let Ok(task) = rx.recv() {
                             task();
                         }

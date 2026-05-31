@@ -4624,6 +4624,14 @@ mod foundations_guards {
             "crates/verter_parser/src/utils/oxc/vue/script/usage.rs",
             "crates/verter_protocol/src/component_meta.rs",
             "crates/verter_scheduler/src/scheduler.rs",
+            // Cooperative-pump cutover added the caller-aware
+            // `next_ready_for_pump` overload alongside the legacy
+            // `next_ready`; both must live next to the dispatch /
+            // capacity / blocker bookkeeping they consume so the
+            // readiness invariants stay co-located. Splitting the
+            // typed-identity DAG into capacity / readiness / blocker
+            // modules is the eventual cleanup.
+            "crates/verter_scheduler/src/dag.rs",
             "crates/verter_semantic/src/analysis/build.rs",
             "crates/verter_semantic/src/analysis/component_meta.rs",
             "crates/verter_semantic/src/analysis/html_intrinsics_data.rs",

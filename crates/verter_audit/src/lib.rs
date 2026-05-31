@@ -79,7 +79,7 @@ pub use footprint::{
 };
 pub use memory::{current_process_rss, RequestMemoryAudit};
 pub use noop::{install_noop_observer, NoOpObserver, NoOpObserverGuard};
-pub use observer::{current_observer, AuditEvent, AuditObserver};
+pub use observer::{clear_observer, current_observer, AuditEvent, AuditObserver};
 pub use origin_graph::{
     ConditionalBranch, DerivationEdgeRaw, DerivationEdgeRecord, DerivationSubgraph,
     DispatchKeyKind, EdgeId, MaterializationScopeAudit, MaterializationSubject,

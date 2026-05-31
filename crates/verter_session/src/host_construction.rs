@@ -61,6 +61,13 @@ impl VerterHost {
         workspace: Arc<dyn verter_workspace::WorkspaceAccess>,
         scheduler_config: verter_scheduler::scheduler::SchedulerConfig,
     ) -> Self {
+        // Register the session-side "clear all install_tls slots"
+        // hook with the scheduler's substrate registry. Idempotent
+        // across hosts; the scheduler crate uses a `OnceLock` and
+        // silently observes that the hook is already registered on
+        // subsequent host constructions.
+        crate::request_context::install_clear_tls_hook();
+
         // Thread the host's configured `resolve_extensions` into the
         // workspace at construction so reverse-dep stem stripping
         // honours the host policy from the start.

@@ -1724,6 +1724,93 @@ impl TlsUninstall for GuardUninstaller {
     }
 }
 
+/// RAII guard that clears the session-side TLS slots
+/// (`CURRENT_REQUEST_CONTEXT` and `CURRENT_ACCUMULATOR`) plus the
+/// `verter_audit` substrate's `current_observer()` slot, restoring
+/// every prior value on drop. The empty-slot mirror of
+/// [`RequestContextGuard::install`] for the substrate + session
+/// slots; the scheduler-side opaque slot is cleared by the
+/// scheduler's `OpaqueContextGuard::clear`.
+///
+/// Returned via the registered `ClearTlsHook` and held inside the
+/// scheduler's `AllSlotsClearGuard` so the cooperative inline-execute
+/// path can clear ALL of the install_tls slots symmetrically when
+/// the dispatched job has no `winner_ctx`.
+struct SessionAndAuditClearGuard {
+    prev_context: Option<Arc<RequestContext>>,
+    prev_accumulator: Option<Arc<RequestFootprintAccumulator>>,
+    // Drops after the two session slots, restoring the audit observer
+    // last so the substrate's slot empties first (mirrors the install
+    // direction in `RequestContextGuard::install`).
+    _audit_observer_guard: verter_audit::observer::ObserverGuard,
+}
+
+impl SessionAndAuditClearGuard {
+    fn clear_all() -> Self {
+        // Clear the session-side slots; capture prior values for
+        // restoration.
+        let prev_context = CURRENT_REQUEST_CONTEXT.with(|c| c.replace(None));
+        let prev_accumulator = CURRENT_ACCUMULATOR.with(|c| c.replace(None));
+        // Clear the audit observer substrate slot.
+        let audit_observer_guard = verter_audit::observer::clear_observer();
+        Self {
+            prev_context,
+            prev_accumulator,
+            _audit_observer_guard: audit_observer_guard,
+        }
+    }
+}
+
+impl Drop for SessionAndAuditClearGuard {
+    fn drop(&mut self) {
+        let prev_ctx = self.prev_context.take();
+        let prev_acc = self.prev_accumulator.take();
+        CURRENT_ACCUMULATOR.with(|c| {
+            c.replace(prev_acc);
+        });
+        CURRENT_REQUEST_CONTEXT.with(|c| {
+            c.replace(prev_ctx);
+        });
+        // `_audit_observer_guard` drops after the two session slots
+        // (field-order drop), restoring the audit observer last.
+    }
+}
+
+impl TlsUninstall for SessionAndAuditClearGuard {
+    fn uninstall(self: Box<Self>) {
+        // Guard drops via Self's Drop when the box drops.
+    }
+}
+
+/// Concrete `ClearTlsHook` for the scheduler's substrate-level
+/// registry. Returns a boxed `SessionAndAuditClearGuard` whose
+/// `Drop` restores the session and audit substrate TLS slots.
+///
+/// Used by the cooperative inline-execute None-winner_ctx path:
+/// the scheduler invokes the registered hook to clear every TLS
+/// slot the session's install_tls would have planted, and stores
+/// the returned handle so drop restores all of them.
+fn clear_session_and_audit_tls_hook() -> Box<dyn TlsUninstall + Send> {
+    Box::new(SessionAndAuditClearGuard::clear_all())
+}
+
+/// Register the session-side cross-crate "clear TLS" hook with the
+/// scheduler's substrate. Idempotent — repeat calls observe that the
+/// hook is already registered and silently no-op (handy for test
+/// crates that set the host up multiple times).
+///
+/// Called by the host (`VerterHost::new` / equivalent) at startup so
+/// the scheduler's cooperative inline-execute path can clear ALL
+/// install_tls slots symmetrically when no `winner_ctx` is supplied
+/// — without the hook only the scheduler-side opaque slot would
+/// clear, and the outer request's session + audit TLS would bleed
+/// into the inner stage.
+pub fn install_clear_tls_hook() {
+    let _ = verter_scheduler::request_context::register_clear_tls_hook(
+        clear_session_and_audit_tls_hook,
+    );
+}
+
 /// Return a clone of the currently installed `RequestContext`, or
 /// `None` when no context is installed. Takes a short borrow, clones
 /// the Arc, releases the borrow before the clone escapes — no
@@ -1883,5 +1970,72 @@ mod tests {
         // Access again to confirm TLS remains usable after the push.
         let again = current_accumulator().expect("still present");
         assert!(Arc::ptr_eq(&held, &again));
+    }
+
+    /// The session-registered "clear all install_tls slots" hook
+    /// bridges the scheduler-side inline-execute None-`winner_ctx`
+    /// clear path to the session + audit substrate TLS, keeping
+    /// every install_tls slot in lock-step on Drop. While the
+    /// scheduler-side `AllSlotsClearGuard` is held the hook must
+    /// zero `CURRENT_REQUEST_CONTEXT`, `CURRENT_ACCUMULATOR`, and
+    /// `verter_audit::current_observer()`; on Drop it must restore
+    /// all three.
+    ///
+    /// The scheduler's per-crate `OpaqueContextGuard::clear` covers
+    /// the scheduler opaque slot directly. The session and audit
+    /// slots live in `verter_session` / `verter_audit` respectively
+    /// and require this registered cross-crate hook to fire — the
+    /// scheduler crate has no direct dependency on either crate.
+    ///
+    /// Discriminator: without the hook (or with the hook returning
+    /// a no-op guard), `current_request_context().is_some()` and
+    /// `verter_audit::current_observer().is_some()` would still
+    /// hold INSIDE the `AllSlotsClearGuard` scope — the test
+    /// asserts both are None.
+    #[test]
+    fn install_clear_tls_hook_clears_session_and_audit_slots_during_all_slots_clear_guard() {
+        // Register the hook (idempotent — a previous test or host
+        // construction may have already done so).
+        install_clear_tls_hook();
+
+        let ctx = make_ctx(42, true);
+        let g = RequestContextGuard::install(Arc::clone(&ctx));
+        assert!(
+            current_request_context().is_some(),
+            "outer install must populate session TLS",
+        );
+        assert!(
+            verter_audit::current_observer().is_some(),
+            "outer install must populate audit substrate TLS",
+        );
+
+        {
+            // Clear-all guard: every install_tls slot must be empty
+            // for the lifetime of this scope.
+            let _clear = verter_scheduler::request_context::AllSlotsClearGuard::clear_all();
+            assert!(
+                current_request_context().is_none(),
+                "AllSlotsClearGuard must clear session request-context TLS",
+            );
+            assert!(
+                current_accumulator().is_none(),
+                "AllSlotsClearGuard must clear session accumulator TLS",
+            );
+            assert!(
+                verter_audit::current_observer().is_none(),
+                "AllSlotsClearGuard must clear audit observer substrate TLS",
+            );
+        }
+
+        // Drop restores all three slots.
+        assert!(
+            current_request_context().is_some(),
+            "drop must restore session request-context TLS",
+        );
+        assert!(
+            verter_audit::current_observer().is_some(),
+            "drop must restore audit observer substrate TLS",
+        );
+        drop(g);
     }
 }

@@ -27,7 +27,9 @@ pub enum SchedulerJobKind {
 /// Internal work discriminant. Artifact carries `profile_hash` so IDE and SSR
 /// jobs for the same file/generation never alias in dedup, cancellation, or wakeups.
 ///
-/// Used in JobIndex keys: `(file_id, generation, TaskKind)`.
+/// Adapted into the DAG's typed identity at admission time via
+/// `WorkNodeIdentity::{FileStage, Artifact}` — there is no flat
+/// `(file_id, generation, TaskKind)` queue key in the final state.
 #[derive(Clone, Copy, Eq, PartialEq, Hash, Debug)]
 pub enum TaskKind {
     /// Load and parse file content.

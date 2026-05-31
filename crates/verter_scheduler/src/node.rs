@@ -1,4 +1,4 @@
-//! Per-file node: ArcSwap snapshots, generation counter, pending requests.
+//! Per-file node: ArcSwap snapshots and generation counter.
 //!
 //! Each [`FileNode`] holds the current stage snapshots for a single file.
 //! Snapshots are immutable once committed (Arc-wrapped). Replacement is
@@ -7,16 +7,18 @@
 //! ```text
 //! source.generation ≥ analysis.generation ≥ artifact.generation
 //! ```
+//!
+//! Request-group bookkeeping (caller senders, dedup, priority
+//! inheritance, completion fan-out) lives on the [`SchedulerDag`] —
+//! the single readiness authority. This node only owns the per-file
+//! snapshot triple, the generation counter, and the per-profile
+//! artifact slots.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use parking_lot::Mutex;
-
-use crate::job::{CompletionSender, CompletionState, RequestResult};
-use crate::stage::{Priority, TargetStage, TaskKind};
 
 /// Opaque host-specific data stored inside snapshots.
 ///
@@ -177,6 +179,10 @@ pub enum FileKind {
 
 /// Per-file state node. All snapshots are immutable + Arc-wrapped.
 /// Replacement is atomic via ArcSwap.
+///
+/// Request-group bookkeeping is OWNED BY THE DAG, not the node. The
+/// node carries only the snapshot triple, the generation counter, the
+/// per-profile artifact slots, and the per-file overlay source buffer.
 pub struct FileNode {
     /// Canonical file identifier.
     pub canonical_id: String,
@@ -194,8 +200,6 @@ pub struct FileNode {
     /// Generation-scoped pending source buffer. Set during admission for
     /// source-providing requests. The Source job reads from this slot.
     pub(crate) pending_source: ArcSwap<Option<(u64, Arc<str>)>>,
-    /// Per-file pending request groups.
-    pub(crate) pending_requests: PendingRequests,
 }
 
 impl FileNode {
@@ -209,7 +213,6 @@ impl FileNode {
             analysis: ArcSwap::new(Arc::new(None)),
             artifacts: DashMap::new(),
             pending_source: ArcSwap::new(Arc::new(None)),
-            pending_requests: PendingRequests::new(),
         }
     }
 
@@ -281,274 +284,9 @@ impl FileNode {
     }
 }
 
-// ── Pending Requests ──
-
-/// Per-file pending request storage.
-pub struct PendingRequests {
-    inner: Mutex<Vec<PendingRequestGroup>>,
-}
-
-impl Default for PendingRequests {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PendingRequests {
-    pub fn new() -> Self {
-        Self {
-            inner: Mutex::new(Vec::new()),
-        }
-    }
-
-    /// Register a sender for a request. If a matching group exists (same
-    /// generation + target), the sender is added to it and a priority upgrade
-    /// is returned if the new priority is higher. Otherwise, a new group is
-    /// created and the arriving request's context is stored as the winner's.
-    ///
-    /// `request_context` is the arriving request's optional session-side
-    /// context. On dedup (existing group) the winner's stored context is
-    /// called back via `on_dedup_joiner(canonical_id, winner_id, winner_audited)`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn register(
-        &self,
-        generation: u64,
-        target: TargetStage,
-        priority: Priority,
-        sender: CompletionSender<RequestResult>,
-        request_context: Option<crate::request_context::OpaqueRequestContext>,
-        canonical_id: &Arc<str>,
-    ) -> Option<Priority> {
-        let mut groups = self.inner.lock();
-        // Try to find an existing group
-        for group in groups.iter_mut() {
-            if group.generation == generation && group.target == target {
-                // Invoke the joiner's on_dedup_joiner with the winner's
-                // context details BEFORE we alter the group — the joiner's
-                // session-side code records a SharedLoadReuseRecord keyed
-                // by (canonical, winner_id, winner_audited).
-                if let Some(joiner_ctx) = request_context.as_ref() {
-                    let (winner_id, winner_audited) =
-                        group.winner_context_info().unwrap_or((0, false));
-                    joiner_ctx.0.on_dedup_joiner(
-                        Arc::clone(canonical_id),
-                        winner_id,
-                        winner_audited,
-                    );
-                }
-                return group.add_sender(sender, priority);
-            }
-        }
-        // Create new group — arriving request becomes the winner and its
-        // context (if any) is stored for future joiners.
-        groups.push(PendingRequestGroup {
-            generation,
-            target,
-            priority,
-            senders: vec![sender],
-            winner_context: request_context,
-        });
-        None
-    }
-
-    /// Signal all groups matching the given generation and completed task kind.
-    ///
-    /// - Groups whose target is satisfied → signal `Ready(result)` and remove.
-    /// - Groups with older generation → signal `Superseded` and remove.
-    /// - Groups with target not yet reached → leave in place.
-    ///
-    /// Returns the number of groups signaled.
-    pub fn signal_stage_complete(
-        &self,
-        generation: u64,
-        completed: &TaskKind,
-        result: &RequestResult,
-    ) -> usize {
-        let mut groups = self.inner.lock();
-        let mut signaled = 0;
-        groups.retain_mut(|group| {
-            if group.generation < generation {
-                // Stale generation — superseded
-                group.signal_all(CompletionState::Superseded);
-                signaled += 1;
-                false
-            } else if group.generation == generation && group.target.is_satisfied_by(completed) {
-                // Target reached — signal ready
-                group.signal_all(CompletionState::Ready(result.clone()));
-                signaled += 1;
-                false
-            } else {
-                true // keep — target not yet reached or future generation
-            }
-        });
-        signaled
-    }
-
-    /// Signal all pending groups with `Superseded` for generations older than `current_gen`.
-    pub fn supersede_old_generations(&self, current_gen: u64) -> usize {
-        let mut groups = self.inner.lock();
-        let mut count = 0;
-        groups.retain_mut(|group| {
-            if group.generation < current_gen {
-                group.signal_all(CompletionState::Superseded);
-                count += 1;
-                false
-            } else {
-                true
-            }
-        });
-        count
-    }
-
-    /// Signal all pending groups at a generation with `Failed`.
-    pub fn signal_failed(&self, generation: u64, error: crate::job::SchedulerError) {
-        let mut groups = self.inner.lock();
-        groups.retain_mut(|group| {
-            if group.generation == generation {
-                group.signal_all(CompletionState::Failed(error.clone()));
-                false
-            } else {
-                true
-            }
-        });
-    }
-
-    /// Signal only pending groups whose target matches the failed stage.
-    ///
-    /// Used for Artifact failures: only the specific profile that failed is
-    /// signaled; other profiles at the same generation remain pending.
-    pub fn signal_failed_for_stage(
-        &self,
-        generation: u64,
-        failed_stage: &TaskKind,
-        error: crate::job::SchedulerError,
-    ) {
-        let mut groups = self.inner.lock();
-        groups.retain_mut(|group| {
-            if group.generation == generation && group.target.is_satisfied_by(failed_stage) {
-                group.signal_all(CompletionState::Failed(error.clone()));
-                false
-            } else {
-                true
-            }
-        });
-    }
-
-    /// Signal all pending groups with `Shutdown`. Used during scheduler drop.
-    pub fn signal_shutdown(&self) {
-        let mut groups = self.inner.lock();
-        for group in groups.drain(..) {
-            for sender in group.senders {
-                sender.send(CompletionState::Shutdown);
-            }
-        }
-    }
-
-    /// Get the highest priority among all pending request groups at a generation.
-    /// Used by the driver to preserve priority across stage transitions.
-    pub fn highest_priority_for_generation(&self, generation: u64) -> Option<Priority> {
-        let groups = self.inner.lock();
-        groups
-            .iter()
-            .filter(|g| g.generation == generation)
-            .map(|g| g.priority)
-            .min() // min ordinal = highest priority
-    }
-
-    /// Get pending artifact profile hashes and their priorities for a generation.
-    /// Used by the driver after Analysis completes to enqueue Artifact jobs.
-    pub fn get_pending_artifact_profiles(&self, generation: u64) -> Vec<(u64, Priority)> {
-        let groups = self.inner.lock();
-        groups
-            .iter()
-            .filter_map(|group| {
-                if group.generation == generation {
-                    if let TargetStage::Artifact { profile_hash } = &group.target {
-                        return Some((*profile_hash, group.priority));
-                    }
-                }
-                None
-            })
-            .collect()
-    }
-
-    /// Number of pending groups (for testing/diagnostics).
-    pub fn pending_count(&self) -> usize {
-        self.inner.lock().len()
-    }
-
-    /// Returns a clone of any pending group's winner context at
-    /// `generation`. Used by the scheduler's dispatch loop to install
-    /// the request context into worker TLS around the stage closure.
-    ///
-    /// A single job (e.g., `Source` at generation `g`) may serve
-    /// multiple target groups (`Source`, `Analysis`, `Artifact{..}` at
-    /// `g`); any of those groups' winner contexts is a valid telemetry
-    /// attribution for the work. The first group found with a non-None
-    /// `winner_context` is returned.
-    pub fn winner_context_at_generation(
-        &self,
-        generation: u64,
-    ) -> Option<crate::request_context::OpaqueRequestContext> {
-        let groups = self.inner.lock();
-        groups
-            .iter()
-            .filter(|g| g.generation == generation)
-            .find_map(|g| g.winner_context.clone())
-    }
-}
-
-/// Groups all callers waiting for the same `(generation, target)`.
-struct PendingRequestGroup {
-    generation: u64,
-    target: TargetStage,
-    priority: Priority,
-    senders: Vec<CompletionSender<RequestResult>>,
-    /// The first-arrived request's optional session-side context. Stored
-    /// so joiners can route `on_dedup_joiner(winner_id, winner_audited)`
-    /// callbacks even after the winner's registration returns.
-    winner_context: Option<crate::request_context::OpaqueRequestContext>,
-}
-
-impl PendingRequestGroup {
-    /// Add another caller's sender to this group.
-    /// Returns a priority upgrade if the new caller has higher priority.
-    fn add_sender(
-        &mut self,
-        sender: CompletionSender<RequestResult>,
-        priority: Priority,
-    ) -> Option<Priority> {
-        self.senders.push(sender);
-        let old = self.priority;
-        self.priority = std::cmp::min(self.priority, priority);
-        if self.priority < old {
-            Some(self.priority)
-        } else {
-            None
-        }
-    }
-
-    /// Return `(winner_request_id, winner_audited)` for the stored
-    /// winner context, or `None` if the winner registered without a
-    /// context (non-audited caller).
-    fn winner_context_info(&self) -> Option<(u64, bool)> {
-        self.winner_context
-            .as_ref()
-            .map(|c| (c.0.request_id(), c.0.capture_enabled()))
-    }
-
-    /// Signal all callers in this group.
-    fn signal_all(&mut self, state: CompletionState<RequestResult>) {
-        for sender in self.senders.drain(..) {
-            sender.send(state.clone());
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::job::completion_pair;
 
     #[test]
     fn file_node_generation_monotonic() {
@@ -661,191 +399,5 @@ mod tests {
 
         // But last_known_good still returns it
         assert!(node.last_known_good_artifact(ph).is_some());
-    }
-
-    fn test_canonical() -> Arc<str> {
-        Arc::from("/test.vue")
-    }
-
-    #[test]
-    fn pending_requests_register_and_signal() {
-        let pending = PendingRequests::new();
-        let (handle, sender) = completion_pair::<RequestResult>();
-
-        // Register a request for Analysis at gen 1
-        let upgrade = pending.register(
-            1,
-            TargetStage::Analysis,
-            Priority::Interactive,
-            sender,
-            None,
-            &test_canonical(),
-        );
-        assert!(upgrade.is_none()); // first registration, no upgrade
-        assert_eq!(pending.pending_count(), 1);
-
-        // Signal stage complete for Analysis at gen 1
-        let result = RequestResult::Analysis(Arc::new(AnalysisSnapshot::new_empty(1)));
-        let count = pending.signal_stage_complete(1, &TaskKind::Analysis, &result);
-        assert_eq!(count, 1);
-        assert_eq!(pending.pending_count(), 0);
-
-        // Handle should be resolved
-        let state = handle.try_get().unwrap();
-        assert!(state.is_ready());
-    }
-
-    #[test]
-    fn pending_requests_dedup_group() {
-        let pending = PendingRequests::new();
-        let (h1, s1) = completion_pair::<RequestResult>();
-        let (h2, s2) = completion_pair::<RequestResult>();
-
-        // Two callers for the same (gen, target)
-        pending.register(
-            1,
-            TargetStage::Analysis,
-            Priority::Background,
-            s1,
-            None,
-            &test_canonical(),
-        );
-        let upgrade = pending.register(
-            1,
-            TargetStage::Analysis,
-            Priority::Critical,
-            s2,
-            None,
-            &test_canonical(),
-        );
-
-        // Should be grouped — only 1 pending group
-        assert_eq!(pending.pending_count(), 1);
-        // Priority upgrade from Background to Critical
-        assert_eq!(upgrade, Some(Priority::Critical));
-
-        // Signal — both handles resolve
-        let result = RequestResult::Analysis(Arc::new(AnalysisSnapshot::new_empty(1)));
-        pending.signal_stage_complete(1, &TaskKind::Analysis, &result);
-
-        assert!(h1.try_get().unwrap().is_ready());
-        assert!(h2.try_get().unwrap().is_ready());
-    }
-
-    #[test]
-    fn pending_requests_supersede_old_generations() {
-        let pending = PendingRequests::new();
-        let (h_old, s_old) = completion_pair::<RequestResult>();
-        let (h_new, s_new) = completion_pair::<RequestResult>();
-
-        pending.register(
-            1,
-            TargetStage::Analysis,
-            Priority::Interactive,
-            s_old,
-            None,
-            &test_canonical(),
-        );
-        pending.register(
-            2,
-            TargetStage::Analysis,
-            Priority::Interactive,
-            s_new,
-            None,
-            &test_canonical(),
-        );
-        assert_eq!(pending.pending_count(), 2);
-
-        // Supersede gen < 2
-        let count = pending.supersede_old_generations(2);
-        assert_eq!(count, 1);
-        assert_eq!(pending.pending_count(), 1);
-
-        // Old handle is Superseded
-        match h_old.try_get().unwrap() {
-            CompletionState::Superseded => {}
-            other => panic!("expected Superseded, got {:?}", other),
-        }
-
-        // New handle still pending
-        assert!(!h_new.is_resolved());
-    }
-
-    #[test]
-    fn pending_requests_shutdown() {
-        let pending = PendingRequests::new();
-        let (h1, s1) = completion_pair::<RequestResult>();
-        let (h2, s2) = completion_pair::<RequestResult>();
-
-        pending.register(
-            1,
-            TargetStage::Source,
-            Priority::Background,
-            s1,
-            None,
-            &test_canonical(),
-        );
-        pending.register(
-            2,
-            TargetStage::Analysis,
-            Priority::Critical,
-            s2,
-            None,
-            &test_canonical(),
-        );
-
-        pending.signal_shutdown();
-        assert_eq!(pending.pending_count(), 0);
-
-        match h1.try_get().unwrap() {
-            CompletionState::Shutdown => {}
-            other => panic!("expected Shutdown, got {:?}", other),
-        }
-        match h2.try_get().unwrap() {
-            CompletionState::Shutdown => {}
-            other => panic!("expected Shutdown, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn pending_requests_target_not_yet_reached_stays() {
-        let pending = PendingRequests::new();
-        let (handle, sender) = completion_pair::<RequestResult>();
-
-        // Register for Artifact target
-        pending.register(
-            1,
-            TargetStage::Artifact { profile_hash: 42 },
-            Priority::Interactive,
-            sender,
-            None,
-            &test_canonical(),
-        );
-
-        // Signal Source complete — should NOT satisfy Artifact target
-        let result = RequestResult::Source(Arc::new(SourceSnapshot::new_empty(Arc::from("x"), 1)));
-        let count = pending.signal_stage_complete(1, &TaskKind::Source, &result);
-        assert_eq!(count, 0);
-        assert_eq!(pending.pending_count(), 1);
-        assert!(!handle.is_resolved());
-
-        // Signal Analysis complete — still not enough for Artifact
-        let result = RequestResult::Analysis(Arc::new(AnalysisSnapshot::new_empty(1)));
-        let count = pending.signal_stage_complete(1, &TaskKind::Analysis, &result);
-        assert_eq!(count, 0);
-        assert_eq!(pending.pending_count(), 1);
-        assert!(!handle.is_resolved());
-
-        // Signal Artifact complete — now satisfied
-        let result = RequestResult::Artifact(Arc::new(ArtifactSnapshot {
-            generation: 1,
-            profile_hash: 42,
-            data: Arc::new(EmptyData),
-        }));
-        let count =
-            pending.signal_stage_complete(1, &TaskKind::Artifact { profile_hash: 42 }, &result);
-        assert_eq!(count, 1);
-        assert_eq!(pending.pending_count(), 0);
-        assert!(handle.is_resolved());
     }
 }
