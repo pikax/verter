@@ -66,15 +66,48 @@ const CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING: u64 = 0;
 /// `<=` heuristic): a higher value means new eager expansion crept in; a lower
 /// value means the residual owner expansion changed and the gate is re-derived.
 ///
-/// Re-derived 3 -> 4: the path-precise `Pick`/`Omit` key-domain alias-carrier
-/// resolution added in `enumerate.rs::key_names_from_keyspace_node` resolves the
-/// barrel-cycle `Omit<…, Keys>` alias carrier to its declared body through the
-/// shared dispatch (one additional `Instantiate`) so the utility no longer
-/// collapses to `Opaque(Miss)` and drops inherited members. This is the
-/// canonical-owner residual path — NOT eager imported-macro-surface
-/// materialisation: `synthesis_expanded_instantiate_calls` (the eager-path
-/// signal) stays 0, asserted above.
-const CHAT_MESSAGES_EXPANDED_INSTANTIATE_VALUE: u64 = 4;
+/// Re-derived 4 -> 3: the Stage 4a atomic reroute deleted the eager
+/// macro-object materialiser from the production resolution path
+/// (`compute_component_meta_state_inner` no longer calls
+/// `produce_macro_object_shapes_for_purpose`; `define_props`/`define_emits`/
+/// `define_slots` are now owned by `projectors::define_shapes`). The
+/// materialiser ran a DUPLICATE eager `Instantiate { body_mode: Expanded }` of
+/// the macro root (`produce_one_macro_object_shape` → the registry/projection
+/// pre-pass) over the SAME `(base, args, context)` the projector path already
+/// resolves once through `ResolveMacroPayload` / the empty-path Shallow walker.
+/// Removing the materialiser removed exactly that one duplicate eager
+/// instantiate — the count drops by exactly 1.
+///
+/// 7-point re-derivation proof (discharged before lowering the constant):
+///  1. member identity corpus-wide: the full component-meta suite
+///     (`meta_tests` + `meta_resolve_tests` + `component_meta_query_engine`
+///     tests, ~820 tests) passes — every member-identity / dedup assertion
+///     holds against the rerouted path.
+///  2. props / events / slots / slot-bindings / resolved-type dumps unchanged:
+///     the same suite asserts the published props / emits / slots / slot_bindings
+///     / registry shapes; all green post-reroute.
+///  3. dep / fact signatures unchanged or intentionally equivalent: the
+///     dep-signature counters re-homed onto the shared dispatch fan-in still
+///     report > 0 (`audit_counter_*`), and the warm-invalidation oracle
+///     (`component_meta_warm_invalidation_oracle_tests`) confirms carrier facts
+///     flow + a carrier edit invalidates the warm result.
+///  4. no lost inherited members: cross-file heritage / `Omit` / `Pick`
+///     inheritance tests (incl. `cross_file_omit_heritage_carrier_*`,
+///     `imported_mapped_slots_*`) pass — the canonical-owner residual path
+///     (the surviving 3 Expanded instantiates) still resolves inherited
+///     members.
+///  5. no overlay / base aliasing: the overlay-isolation test
+///     (`overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base`)
+///     proves overlay/base key on distinct hashes with no leak.
+///  6. `synthesis_expanded_instantiate_calls == 0`: asserted directly above
+///     (the eager-path signal stays 0 — the removed instantiate was NOT
+///     synthesis-attributed; it was the materialiser pre-pass).
+///  7. trace proves the same duplicate `(base, args, context)` was removed: the
+///     count moved from 4 to exactly 3 AT the materialiser-call deletion (no
+///     other change moved it), and the materialiser's pre-pass instantiated the
+///     macro root under the SAME identity the projector path resolves — the
+///     removed instantiate is that duplicate, not a distinct resolution.
+const CHAT_MESSAGES_EXPANDED_INSTANTIATE_VALUE: u64 = 3;
 
 /// The declared-dependency ROOTS the audited ChatMessages resolve is allowed to
 /// touch — the SFC's own RELATIVE import targets plus the owner. Every
