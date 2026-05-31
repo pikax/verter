@@ -15,64 +15,16 @@
 use rustc_hash::FxHashSet;
 use verter_type_expr::TypeExpr;
 
-use super::helpers::{projected_surface_member_names, strip_parens_expr};
-use super::{instantiate_local_generic_ref_via_engine, ComponentMetaQueryEngine};
+use super::helpers::{is_builtin_name, projected_surface_member_names, strip_parens_expr};
+use super::{
+    instantiate_local_generic_ref_via_engine, ComponentMetaQueryEngine, PreparedProjectionContext,
+};
 
 impl<'a> ComponentMetaQueryEngine<'a> {
-    pub(super) fn prepared_string_literal_keys(
-        &mut self,
-        scope_canonical_id: &str,
-        prepared: &verter_semantic::analysis::type_solver::PreparedTypeDecl,
-        expr: &TypeExpr,
-        active: &mut FxHashSet<(String, String)>,
-    ) -> Option<Vec<String>> {
-        use verter_type_expr::{LiteralValue, TypeExpr};
-
-        match expr {
-            TypeExpr::Literal(LiteralValue::String(value)) => Some(vec![value.clone()]),
-            TypeExpr::Union(types) => {
-                let mut keys = Vec::with_capacity(types.len());
-                for ty in types.iter() {
-                    keys.extend(self.prepared_string_literal_keys(
-                        scope_canonical_id,
-                        prepared,
-                        ty,
-                        active,
-                    )?);
-                }
-                Some(keys)
-            }
-            TypeExpr::Parenthesized(inner) => {
-                self.prepared_string_literal_keys(scope_canonical_id, prepared, inner, active)
-            }
-            TypeExpr::Ref {
-                name,
-                type_arguments,
-            } if type_arguments.is_empty() => {
-                let (target_canonical_id, target_symbol_name) =
-                    self.resolve_prepared_surface_target(scope_canonical_id, prepared, name)?;
-                let visit_key = (target_canonical_id.clone(), target_symbol_name.clone());
-                if !active.insert(visit_key.clone()) {
-                    return None;
-                }
-                let resolved = self
-                    .prepared_type_decl(&target_canonical_id, &target_symbol_name)
-                    .and_then(|target_prepared| {
-                        self.prepared_string_literal_keys(
-                            &target_canonical_id,
-                            target_prepared.as_ref(),
-                            &target_prepared.body,
-                            active,
-                        )
-                    });
-                active.remove(&visit_key);
-                resolved
-            }
-            _ => None,
-        }
-    }
-
-    #[allow(dead_code)]
+    /// Enumerate the literal string keys named by a `Pick`/`Omit`
+    /// `keys` type argument (used by [`Self::project_direct_utility_surface_shape`]).
+    /// Resolves `Ref` / `KeyOf` / indexed-access key sources through the
+    /// dispatch-backed leaf stabiliser ([`Self::solve_or_project_prepared_member_leaf_expr`]).
     pub(super) fn enumerate_route_literal_keys(
         &mut self,
         resolution_scope_canonical_id: &str,
@@ -87,7 +39,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         )
     }
 
-    #[allow(dead_code)]
     fn enumerate_route_literal_keys_inner(
         &mut self,
         resolution_scope_canonical_id: &str,
@@ -221,19 +172,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    /// **Deletion target.** This walker is scheduled for removal — the
-    /// architectural target is `PathWalker` (in
-    /// `project_semantic_dispatch/walk.rs`) as the only path-precise
-    /// walker. The walker remains in service of member-route resolution
-    /// and projection-rescue helpers (`expr_needs_projection_rescue`,
-    /// `compare_type_expr_improvement`,
-    /// `select_imported_materialization_scope`, and the cycle-detection
-    /// migration helper `lowered_root_reaches_transitive_cycle`). Once
-    /// those callers migrate to the dispatch path, this walker and its
-    /// 13 internal call sites should be deleted in the same change
-    /// (per CLAUDE.md "Legacy Code Deletion" — no shims).
+    /// Enumerate the literal keys of a `keyof X['member']` route source
+    /// for `Pick`/`Omit` key resolution. Resolves the member's surface
+    /// through the dispatch-backed leaf stabiliser
+    /// ([`Self::solve_or_project_prepared_member_leaf_expr`]) and walks
+    /// conditional / intersection / union arms, accumulating enumerable
+    /// keys. Used by [`Self::enumerate_route_literal_keys_inner`].
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    #[allow(dead_code)] // deletion target — see doc comment above
     fn enumerate_member_surface_keys_via_route(
         &mut self,
         resolution_scope_canonical_id: &str,
@@ -762,4 +707,416 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             _ => None,
         }
     }
+    // ---- moved from routed_expr.rs: solve_or_project_prepared_member_leaf_expr ----
+    #[allow(dead_code)]
+    pub(super) fn solve_or_project_prepared_member_leaf_expr(
+        &mut self,
+        resolution_scope_canonical_id: &str,
+        active_scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> Option<TypeExpr> {
+        let context = PreparedProjectionContext {
+            decl_scope: resolution_scope_canonical_id.to_string(),
+            arg_scope: active_scope_canonical_id.to_string(),
+            chain_scopes: self.projection_chain_scopes.clone(),
+        };
+        self.solve_or_project_leaf_expr_with_context(&context, expr)
+    }
+
+    // ---- moved from routed_expr.rs: solve_or_project_leaf_expr_with_context ----
+    /// Per-TypeExpr-shape scope dispatch for the prepared-member-path
+    /// projection.
+    ///
+    /// Earlier logic tried `active_scope` first and then fell back to
+    /// `resolution_scope` only when the expression referenced a prepared
+    /// symbol in that scope. That gate missed transitive helper refs
+    /// (e.g., `ComponentUI<typeof theme>` where `ComponentUI` lives in a
+    /// type-file reached via the prepared decl's import chain, not the
+    /// decl's immediate symbol map).
+    ///
+    /// The current implementation uses a
+    /// `PreparedProjectionContext { decl_scope, arg_scope }`:
+    /// - bare `Ref { name, type_arguments: [] }`: try `decl_scope` first
+    ///   (helper-body-internal reference), fall back to `arg_scope`.
+    /// - `TypeOf(value_ref)`: always resolve in `arg_scope` (caller-
+    ///   scoped value symbol table).
+    /// - `Ref { name, type_arguments }`: resolve the NAME in `decl_scope`
+    ///   so helper aliases lower against their own declaration site;
+    ///   lower `type_arguments` in `arg_scope` so caller-scoped
+    ///   `typeof theme` / explicit type arguments stay resolvable.
+    ///   After both halves resolve, re-run
+    ///   `solve_or_project_leaf_expr_until_stable` in `decl_scope` to
+    ///   bridge the instantiation.
+    /// - compound shapes (`IndexedAccess`, `Conditional`, `Mapped`,
+    ///   `KeyOf`, etc.): fall back to the two-scope retry path (active
+    ///   first, resolution fallback). The compound shapes don't need
+    ///   per-sub-expression scope splitting because their sub-
+    ///   expressions are already `TypeExpr` leaves that round-trip
+    ///   through this function.
+    #[allow(dead_code)]
+    fn solve_or_project_leaf_expr_with_context(
+        &mut self,
+        context: &PreparedProjectionContext,
+        expr: &TypeExpr,
+    ) -> Option<TypeExpr> {
+        let decl_scope = context.decl_scope.clone();
+        let arg_scope = context.arg_scope.clone();
+        let chain_scopes = context.chain_scopes.clone();
+
+        if decl_scope == arg_scope {
+            return self.solve_or_project_leaf_expr_until_stable(&arg_scope, expr);
+        }
+
+        match expr {
+            TypeExpr::Ref {
+                name: _,
+                type_arguments,
+            } if type_arguments.is_empty() => {
+                // Bare `Ref { name, [] }`: helper-body-internal reference.
+                // Try decl_scope first; fall back to arg_scope.
+                if let Some(result) =
+                    self.solve_or_project_leaf_expr_until_stable(&decl_scope, expr)
+                {
+                    if &result != expr {
+                        return Some(result);
+                    }
+                }
+                self.solve_or_project_leaf_expr_until_stable(&arg_scope, expr)
+            }
+            TypeExpr::TypeOf(_) => {
+                // `typeof value_ref`: caller-scoped first (the most
+                // common case is `Foo['x']` where `Foo` is a value
+                // imported into the calling SFC). Some
+                // helper-aliased patterns reference values that are
+                // visible in OUTER helper scopes â€” e.g.,
+                // `type Button = ComponentConfig<typeof theme>`
+                // declared in `button-types.ts`, where `theme` is
+                // visible there, but by the time the projection
+                // recurses into `ComponentConfig`'s body in
+                // `types.ts`, neither `decl_scope=types.ts` nor
+                // `arg_scope=ImportedSlotButton.vue` can resolve
+                // `theme`. The `chain_scopes` carry the outer
+                // declaration scopes through the recursion so
+                // the value reference can find its visible scope.
+                let arg_first = self.solve_or_project_leaf_expr_until_stable(&arg_scope, expr);
+                if let Some(ref result) = arg_first {
+                    if result != expr {
+                        return arg_first;
+                    }
+                }
+                if let Some(decl_result) =
+                    self.solve_or_project_leaf_expr_until_stable(&decl_scope, expr)
+                {
+                    if &decl_result != expr {
+                        return Some(decl_result);
+                    }
+                }
+                for chain_scope in &chain_scopes {
+                    if chain_scope == &decl_scope || chain_scope == &arg_scope {
+                        continue;
+                    }
+                    if let Some(chain_result) =
+                        self.solve_or_project_leaf_expr_until_stable(chain_scope, expr)
+                    {
+                        if &chain_result != expr {
+                            return Some(chain_result);
+                        }
+                    }
+                }
+                arg_first
+            }
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => {
+                // `Ref { name, [args..] }`: helper instantiation. Resolve
+                // the name in decl_scope (so the helper's declaration
+                // registry is consulted), and lower type_arguments in
+                // arg_scope (so caller-side `typeof`, locally-declared
+                // types, etc. stay resolvable). The simplest way to
+                // plumb both is to try decl_scope first â€” the helper's
+                // body will instantiate against its own declaration-
+                // site symbol table. If decl_scope resolves the helper
+                // (non-trivially), return the decl_scope projection.
+                // Otherwise fall back to arg_scope where the ref name
+                // may be reachable via direct import.
+                let decl_first = self.solve_or_project_leaf_expr_until_stable(&decl_scope, expr);
+                if let Some(ref result) = decl_first {
+                    if result != expr {
+                        return decl_first;
+                    }
+                }
+                let arg_result = self.solve_or_project_leaf_expr_until_stable(&arg_scope, expr);
+                if let Some(ref result) = arg_result {
+                    if result != expr {
+                        return arg_result;
+                    }
+                }
+                // Split-scope projection. When the ref's name belongs
+                // to one scope (e.g. `ComponentUI` declared in
+                // `types.ts`) and its type_arguments reference values
+                // from another scope (e.g. `typeof theme` visible
+                // only in `button-types.ts`), pre-resolve each
+                // `TypeOf(value)` argument in any chain scope where
+                // the value is visible, then re-try the projection
+                // with the resolved arguments substituted.
+                if !chain_scopes.is_empty() {
+                    let mut resolved_args: Vec<TypeExpr> = Vec::with_capacity(type_arguments.len());
+                    let mut any_argument_resolved = false;
+                    for arg in type_arguments.iter() {
+                        let mut resolved = arg.clone();
+                        if matches!(arg, TypeExpr::TypeOf(_)) {
+                            for chain_scope in &chain_scopes {
+                                if chain_scope == &decl_scope || chain_scope == &arg_scope {
+                                    continue;
+                                }
+                                if let Some(chain_arg) =
+                                    self.solve_or_project_leaf_expr_until_stable(chain_scope, arg)
+                                {
+                                    if &chain_arg != arg {
+                                        resolved = chain_arg;
+                                        any_argument_resolved = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        resolved_args.push(resolved);
+                    }
+                    if any_argument_resolved {
+                        let resolved_expr = TypeExpr::Ref {
+                            name: name.clone(),
+                            type_arguments: std::sync::Arc::from(resolved_args),
+                        };
+                        if let Some(result) = self
+                            .solve_or_project_leaf_expr_until_stable(&decl_scope, &resolved_expr)
+                        {
+                            return Some(result);
+                        }
+                        if let Some(result) =
+                            self.solve_or_project_leaf_expr_until_stable(&arg_scope, &resolved_expr)
+                        {
+                            return Some(result);
+                        }
+                    }
+                }
+                arg_result.or(decl_first)
+            }
+            _ => {
+                // Compound shapes (IndexedAccess, Conditional, Mapped,
+                // KeyOf, Intersection, Union, Parenthesized, etc.)
+                // preserve the pre-C11b two-scope retry. Inner
+                // sub-expressions come back through this function so
+                // per-shape dispatch still applies transitively.
+                let active_result = self.solve_or_project_leaf_expr_until_stable(&arg_scope, expr);
+                if !self.expr_references_prepared_scope_symbol(&decl_scope, expr) {
+                    return active_result;
+                }
+                self.solve_or_project_leaf_expr_until_stable(&decl_scope, expr)
+                    .or(active_result)
+            }
+        }
+    }
+
+    // ---- moved from routed_expr.rs: solve_or_project_leaf_expr_until_stable ----
+    #[allow(dead_code)]
+    fn solve_or_project_leaf_expr_until_stable(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> Option<TypeExpr> {
+        let mut current = expr.clone();
+        let mut last = None;
+        for _ in 0..3 {
+            // dispatch the lower+project tail and the
+            // expr-surface bridge from `meta_resolve` instead of the
+            // deprecated engine methods. The bridges share the engine's
+            // cycle-protection helpers so behavior matches the legacy
+            // method path.
+            let next = crate::meta_resolve::lower_and_project_to_expanded_via_host_threaded(
+                self,
+                scope_canonical_id,
+                &current,
+            )
+            .or_else(|| {
+                // Leak-close-2 â€” Expanded base + Expanded
+                // terminal, Published. The fixpoint loop is the
+                // engine method's "stabilise leaf via expanded"
+                // pattern; reducing either dimension below Expanded
+                // breaks fixpoint convergence for imported alias
+                // helpers like `Button['ui']` where the Navigate
+                // carrier would freeze a generic InstantiationRef at
+                // the empty-path terminal (see AX-WIP comment on
+                // `lower_and_project_to_expanded_via_host_threaded`
+                // for the documented constraint). Per the consult's
+                // "Keep Expanded" hint, this callsite preserves the
+                // legacy behaviour while the helper signature itself
+                // becomes mode-explicit.
+                crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
+                    self,
+                    scope_canonical_id,
+                    &current,
+                    crate::semantic_query::ProjectionMode::Expanded,
+                    crate::semantic_query::ProjectionMode::Expanded,
+                    crate::semantic_query::ReductionDemand::Published,
+                )
+            });
+            let Some(next) = next else {
+                return last;
+            };
+            if next == current {
+                return Some(next);
+            }
+            last = Some(next.clone());
+            current = next;
+        }
+        last
+    }
+
+    // ---- moved from routed_expr.rs: expr_references_prepared_scope_symbol ----
+    #[allow(dead_code)]
+    fn expr_references_prepared_scope_symbol(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> bool {
+        use verter_type_expr::ObjectMember;
+
+        match expr {
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => {
+                (!is_builtin_name(name.as_ref())
+                    && self
+                        .prepared_type_decl(scope_canonical_id, name.as_ref())
+                        .is_some())
+                    || type_arguments.iter().any(|arg| {
+                        self.expr_references_prepared_scope_symbol(scope_canonical_id, arg)
+                    })
+            }
+            TypeExpr::Parenthesized(inner)
+            | TypeExpr::Array { element: inner, .. }
+            | TypeExpr::KeyOf(inner)
+            | TypeExpr::Rest(inner) => {
+                self.expr_references_prepared_scope_symbol(scope_canonical_id, inner)
+            }
+            TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
+                self.expr_references_prepared_scope_symbol(scope_canonical_id, &element.ty)
+            }),
+            TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
+                .iter()
+                .any(|ty| self.expr_references_prepared_scope_symbol(scope_canonical_id, ty)),
+            TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
+                ObjectMember::Property(property) => {
+                    self.expr_references_prepared_scope_symbol(scope_canonical_id, &property.ty)
+                }
+                ObjectMember::Method(method) => {
+                    method.function.parameters.iter().any(|param| {
+                        self.expr_references_prepared_scope_symbol(scope_canonical_id, &param.ty)
+                    }) || method
+                        .function
+                        .return_type
+                        .as_deref()
+                        .is_some_and(|return_type| {
+                            self.expr_references_prepared_scope_symbol(
+                                scope_canonical_id,
+                                return_type,
+                            )
+                        })
+                }
+                ObjectMember::IndexSignature(signature) => {
+                    self.expr_references_prepared_scope_symbol(
+                        scope_canonical_id,
+                        &signature.key_type,
+                    ) || self.expr_references_prepared_scope_symbol(
+                        scope_canonical_id,
+                        &signature.value_type,
+                    )
+                }
+                ObjectMember::CallSignature(function)
+                | ObjectMember::ConstructSignature(function) => {
+                    function.parameters.iter().any(|param| {
+                        self.expr_references_prepared_scope_symbol(scope_canonical_id, &param.ty)
+                    }) || function.return_type.as_deref().is_some_and(|return_type| {
+                        self.expr_references_prepared_scope_symbol(scope_canonical_id, return_type)
+                    })
+                }
+            }),
+            TypeExpr::Function(function) => {
+                function.parameters.iter().any(|param| {
+                    self.expr_references_prepared_scope_symbol(scope_canonical_id, &param.ty)
+                }) || function.return_type.as_deref().is_some_and(|return_type| {
+                    self.expr_references_prepared_scope_symbol(scope_canonical_id, return_type)
+                })
+            }
+            TypeExpr::IndexedAccess { object, index } => {
+                self.expr_references_prepared_scope_symbol(scope_canonical_id, object)
+                    || self.expr_references_prepared_scope_symbol(scope_canonical_id, index)
+            }
+            TypeExpr::Conditional {
+                check,
+                extends,
+                true_type,
+                false_type,
+            } => {
+                self.expr_references_prepared_scope_symbol(scope_canonical_id, check)
+                    || self.expr_references_prepared_scope_symbol(scope_canonical_id, extends)
+                    || self.expr_references_prepared_scope_symbol(scope_canonical_id, true_type)
+                    || self.expr_references_prepared_scope_symbol(scope_canonical_id, false_type)
+            }
+            TypeExpr::Mapped {
+                source,
+                value,
+                name_type,
+                ..
+            } => {
+                self.expr_references_prepared_scope_symbol(scope_canonical_id, source)
+                    || self.expr_references_prepared_scope_symbol(scope_canonical_id, value)
+                    || name_type.as_deref().is_some_and(|name_type| {
+                        self.expr_references_prepared_scope_symbol(scope_canonical_id, name_type)
+                    })
+            }
+            TypeExpr::TemplateLiteral { expressions, .. } => expressions
+                .iter()
+                .any(|expr| self.expr_references_prepared_scope_symbol(scope_canonical_id, expr)),
+            TypeExpr::TypeParameter(type_parameter) => {
+                type_parameter
+                    .constraint
+                    .as_deref()
+                    .is_some_and(|constraint| {
+                        self.expr_references_prepared_scope_symbol(scope_canonical_id, constraint)
+                    })
+                    || type_parameter.default.as_deref().is_some_and(|default| {
+                        self.expr_references_prepared_scope_symbol(scope_canonical_id, default)
+                    })
+            }
+            TypeExpr::RecursiveRef {
+                type_arguments,
+                conditional_context,
+                ..
+            } => {
+                type_arguments
+                    .iter()
+                    .any(|arg| self.expr_references_prepared_scope_symbol(scope_canonical_id, arg))
+                    || conditional_context.iter().any(|frame| {
+                        self.expr_references_prepared_scope_symbol(scope_canonical_id, &frame.check)
+                            || self.expr_references_prepared_scope_symbol(
+                                scope_canonical_id,
+                                &frame.extends,
+                            )
+                    })
+            }
+            TypeExpr::Primitive(_)
+            | TypeExpr::Literal(_)
+            | TypeExpr::TypeOf(_)
+            | TypeExpr::Infer { .. }
+            // Synthetic carriers reference no prepared scope symbol â€”
+            // their identity is intrinsic to the scope itself, not a
+            // declaration name within it.
+            | TypeExpr::SyntheticSlotBinding(_)
+            | TypeExpr::Unknown { .. } => false,
+        }
+    }
+
 }

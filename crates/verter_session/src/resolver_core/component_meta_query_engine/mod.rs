@@ -106,10 +106,8 @@ use crate::semantic_query::SemanticNodeId;
 // existing public-API symbols so external `crate::resolver_core::component_meta_query_engine::<name>`
 // paths remain stable.
 mod helpers;
-mod prepared_surface;
 mod registry_decl;
 mod route_keys;
-mod routed_expr;
 mod shallow_preserve;
 mod surface;
 
@@ -1366,26 +1364,6 @@ impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
 
 fn empty_semantic_args() -> std::sync::Arc<[SemanticNodeId]> {
     std::sync::Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice())
-}
-
-/// Engine-internal helper: dispatch the single-member projection through
-/// the SOLE query-time resolver. Used by `project_routed_expr_surface_expr`
-/// and friends.
-///
-/// There is NO prepared-decl-walker fallback: the macro-object materialiser
-/// and its prepared-member rescue path are retired, so a dispatch miss is an
-/// authoritative miss (`None`). Any member the route demands resolves through
-/// `dispatch_projected_member` (the five-mode dispatch) or it does not resolve.
-fn dispatch_member_for_root_symbol(
-    engine: &mut ComponentMetaQueryEngine<'_>,
-    scope_canonical_id: &str,
-    symbol_name: &str,
-    member_name: &str,
-) -> Option<ProjectedMember> {
-    if engine.projection_op_budget_exhausted() {
-        return None;
-    }
-    engine.dispatch_projected_member(scope_canonical_id, symbol_name, member_name)
 }
 
 /// Engine-internal substitution helper that mirrors the
