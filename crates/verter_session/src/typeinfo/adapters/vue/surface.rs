@@ -198,13 +198,40 @@ impl VerterHost {
         &self,
         request: &VueMacroSurfaceRequest,
     ) -> Option<VueMacroSurface> {
+        // Base-view entry point (tests, the host-method `vue_macro_dtos`
+        // wrapper). Builds a bare `HostResolverContext` over the base host view
+        // and routes the single resolution core through it. Overlay-bearing
+        // production callers MUST use `resolve_vue_macro_surface_with_ctx` with
+        // their active session context so the surface reads overlay content.
+        let store_view = self.resolver_store_view();
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
+        self.resolve_vue_macro_surface_with_ctx(&host_ctx, request)
+    }
+
+    /// Context-bound resolution core for [`Self::resolve_vue_macro_surface`].
+    ///
+    /// Every view-sensitive read — the owner SFC's `IndexedReady`, the type
+    /// argument lowering, the cross-file carrier projection, the carrier-file
+    /// JSDoc source — flows through `ctx`, so an overlay session
+    /// ([`crate::resolver_core::session_resolver_context::SessionResolverContext`])
+    /// resolves the macro surface against its overlay content rather than the
+    /// base host view. The dispatcher is `ctx.dispatch()` (the sealed
+    /// `ProjectSemanticDispatch::new(ctx)`), keeping the surface inside the
+    /// single resolution engine.
+    #[must_use]
+    pub(crate) fn resolve_vue_macro_surface_with_ctx(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        request: &VueMacroSurfaceRequest,
+    ) -> Option<VueMacroSurface> {
         debug_assert_eq!(
             request.level,
             TypeInfoQueryLevel::FullMetadata,
             "resolve_vue_macro_surface serves the FullMetadata level"
         );
 
-        let indexed = self.ensure_indexed_ready(request.owner_canonical.as_ref())?;
+        let indexed = ctx.ensure_indexed_ready(request.owner_canonical.as_ref())?;
         let mac = indexed.snapshot.macros.get(request.macro_index)?;
         if !mac.is_type_based {
             return None;
@@ -258,10 +285,10 @@ impl VerterHost {
             ),
         };
 
-        let store_view = self.resolver_store_view();
-        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
-        let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+        // Dispatch is bound to the active `ctx`: an overlay session threads its
+        // session view through every dispatch-tier read, so the type-argument
+        // lowering and cross-file carrier projection below read overlay content.
+        let dispatch = ctx.dispatch();
 
         // Lower the macro type argument in the SFC scope. `Navigate` /
         // structural-transit lowering keeps member values shallow; the
@@ -274,7 +301,7 @@ impl VerterHost {
         )?;
 
         let surface =
-            self.project_shallow_surface_from_base(&host_ctx, &dispatch, base, terminal_context)?;
+            self.project_shallow_surface_from_base(ctx, &dispatch, base, terminal_context)?;
 
         Some(VueMacroSurface {
             surface,
@@ -303,119 +330,16 @@ impl VerterHost {
     /// not re-attempt the cold resolution.
     #[must_use]
     pub fn vue_macro_dtos(&self, request: &VueMacroSurfaceRequest) -> Arc<VueMacroDtos> {
-        // Load the CURRENT `IndexedReady` BEFORE touching the cache. The
-        // request's `root_identity` (a `whole_hash` hint) and `macro_kind` are
-        // caller-supplied and may be STALE (a `whole_hash` captured before an
-        // edit) or WRONG (a kind that disagrees with the snapshot's macro at
-        // this index). Deriving both from the authoritative snapshot here means
-        // a stale `root_identity` can never read an old entry (the live
-        // `whole_hash` keys a fresh slot) and a wrong `macro_kind` can never
-        // read or poison the sibling kind's entry (the derived kind keys the
-        // slot and drives the normalizer dispatch).
-        let Some(indexed) = self.ensure_indexed_ready(request.owner_canonical.as_ref()) else {
-            // SFC not loaded — no surface, no cache entry. Returning the default
-            // bundle WITHOUT publishing (we have no validated key) keeps the
-            // cache free of entries keyed on an unvalidated identity.
-            return Arc::new(VueMacroDtos::default());
-        };
-        let Some(mac) = indexed.snapshot.macros.get(request.macro_index) else {
-            return Arc::new(VueMacroDtos::default());
-        };
-        let whole_hash = indexed.whole_hash;
-        let macro_kind = mac.kind;
-
-        let key = VueMacroDtoKey::new(
-            Arc::clone(&request.owner_canonical),
-            whole_hash,
-            request.macro_index,
-            macro_kind,
-            request.level,
-        );
-        // Warm read: the content-addressed key covers the SFC's OWN content,
-        // but the resolved DTOs read CROSS-FILE carrier types. Validate the
-        // recorded fact signature + project generation against the live view
-        // so a carrier edit (which leaves the SFC's `whole_hash` unchanged)
-        // invalidates the entry lazily.
+        // Base-view entry point (tests + the materialiser's `typeinfo_macro_dtos`
+        // helper, until the materialiser is retired). Routes the single DTO
+        // resolution core through a bare `HostResolverContext` over the base
+        // host view. Overlay-bearing production callers
+        // (`component_meta_resolved_macros`) MUST call `vue_macro_dtos_with_ctx`
+        // with their active session context so the surface reads overlay content.
         let store_view = self.resolver_store_view();
-        let generation = self.project_type_store().current_project_generation();
-        if let Some(cached) =
-            self.vue_shallow_metadata_store()
-                .get_with_view(&key, &store_view, generation)
-        {
-            // Bubble the cached entry's cross-file carrier fact signature into
-            // any active outer fact tracer. An outer component-meta cold trace
-            // (e.g. `component_meta_resolved_macros` consuming these DTOs)
-            // inherits the DTO's carrier facts on this warm hit; without the
-            // bubble a prewarmed DTO would under-key the outer cache entry (a
-            // carrier edit that invalidates this DTO entry must also invalidate
-            // the component-meta entry that read it). Cold misses bubble
-            // automatically: the `install_fact_tracer` scope below nests under
-            // the outer tracer and `observe_fan_out` reaches every active cell.
-            cached.read_set_signature.bubble_via_tls();
-            return std::sync::Arc::clone(&cached.dtos);
-        }
-
-        // Resolve the surface through a request carrying the VALIDATED identity
-        // (live `whole_hash`) and the AUTHORITATIVE kind, so the surface
-        // resolution + normalizer dispatch never trust the caller's hint. The
-        // whole cold resolution runs under an installed fact tracer so the
-        // CROSS-FILE carrier facts it reads are captured into the entry's
-        // `ReadSetSignature` (the warm-read invalidation rail above).
-        let validated_request = VueMacroSurfaceRequest {
-            owner_canonical: Arc::clone(&request.owner_canonical),
-            macro_index: request.macro_index,
-            macro_kind,
-            root_identity: whole_hash,
-            level: request.level,
-        };
-        let (dtos, finalise) = crate::fact_signature_helpers::install_fact_tracer(self, || {
-            match self.resolve_vue_macro_surface(&validated_request) {
-                Some(macro_surface) => match macro_kind {
-                    AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::DefineModel => {
-                        VueMacroDtos {
-                            props: props_from_typeinfo_surface(self, &macro_surface),
-                            ..VueMacroDtos::default()
-                        }
-                    }
-                    AnalyzedMacroKind::DefineEmits => VueMacroDtos {
-                        emits: emits_from_typeinfo_surface(self, &macro_surface),
-                        ..VueMacroDtos::default()
-                    },
-                    AnalyzedMacroKind::DefineSlots => VueMacroDtos {
-                        slots: slots_from_typeinfo_surface(self, &macro_surface),
-                        ..VueMacroDtos::default()
-                    },
-                    // `WithDefaults` is not a props-surface source on this path:
-                    // the outer `withDefaults` macro carries no type argument (it
-                    // is not `is_type_based`), so `resolve_vue_macro_surface`
-                    // returns `None` for it and this arm is unreachable. The
-                    // props come from the SEPARATELY-routed inner `DefineProps`
-                    // macro. Options / expose are separate subsystems. None of
-                    // these contribute a DTO bundle.
-                    AnalyzedMacroKind::WithDefaults
-                    | AnalyzedMacroKind::DefineOptions
-                    | AnalyzedMacroKind::DefineExpose => VueMacroDtos::default(),
-                },
-                None => VueMacroDtos::default(),
-            }
-        });
-
-        match finalise {
-            crate::resolver_core::FactReadSetFinalise::Ok(facts) => {
-                let entry = crate::typeinfo::adapters::vue::store::VueMacroDtosEntry {
-                    dtos: std::sync::Arc::new(dtos),
-                    read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(facts),
-                    validated_at_generation: generation,
-                };
-                std::sync::Arc::clone(&self.vue_shallow_metadata_store().insert(key, entry).dtos)
-            }
-            // Tracer overflowed: the DTOs are valid but cannot be admitted
-            // safely (the observation set was truncated, so warm-read
-            // validation could falsely pass against a changed carrier). Return
-            // the freshly-computed bundle WITHOUT caching — a repeat request
-            // recomputes, never serves an under-validated entry.
-            crate::resolver_core::FactReadSetFinalise::Overflow => std::sync::Arc::new(dtos),
-        }
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
+        vue_macro_dtos_with_ctx(&host_ctx, request)
     }
 
     /// Navigate a `TypeExpr` to its one-level object [`TypeInfoSurface`] through
@@ -584,6 +508,147 @@ fn raise_member_value(host: &VerterHost, member: &TypeInfoSurfaceMember) -> Opti
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     dispatch.raise_node_to_type_expr(member.value)
+}
+
+/// Resolve a `.vue` macro's NORMALIZED component-meta DTOs
+/// ([`VueMacroDtos`]) through the active [`crate::resolver_core::ResolverContext`].
+///
+/// This is the SINGLE DTO resolution core: it materializes the macro surface
+/// ONCE per `(canonical, content, macro, level)` (resolving the surface through
+/// `ctx` and running the appropriate normalizer), publishes the immutable owned
+/// DTO bundle into the host-owned
+/// [`crate::typeinfo::adapters::vue::store::VueShallowMetadataStore`], and
+/// serves subsequent calls from the content-addressed cache.
+///
+/// EVERY view-sensitive step flows through `ctx`:
+/// - the owner SFC's `IndexedReady` ([`ctx.ensure_indexed_ready`]) — so an
+///   overlay session keys on its OVERLAY `whole_hash`, never the base hash, and
+///   a base session can never read or poison an overlay entry (or vice-versa);
+/// - the cold surface resolution
+///   ([`crate::VerterHost::resolve_vue_macro_surface_with_ctx`], whose dispatch
+///   is `ctx.dispatch()`) — so the type-argument lowering and cross-file
+///   carrier projection read overlay content;
+/// - warm validation ([`ctx.store_view`]) — so a carrier edit (which leaves the
+///   SFC's own `whole_hash` unchanged) invalidates the entry lazily against the
+///   SAME view the surface was resolved under.
+///
+/// The DTO bundle is generation-independent (owned `TypeExpr` + scope +
+/// `String`), so caching it across requests is safe. Returns an empty (default)
+/// bundle when the macro surface cannot be resolved.
+///
+/// [`ctx.ensure_indexed_ready`]: crate::resolver_core::ResolverContext::ensure_indexed_ready
+/// [`ctx.dispatch()`]: crate::resolver_core::ResolverContext::dispatch
+/// [`ctx.store_view`]: crate::resolver_core::ResolverContext::store_view
+#[must_use]
+pub(crate) fn vue_macro_dtos_with_ctx(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    request: &VueMacroSurfaceRequest,
+) -> Arc<VueMacroDtos> {
+    let host = ctx.host_for_fact_tracer_install();
+
+    // Load the CURRENT (overlay-aware) `IndexedReady` BEFORE touching the
+    // cache. The request's `root_identity` (a `whole_hash` hint) and
+    // `macro_kind` are caller-supplied and may be STALE or WRONG; deriving both
+    // from the authoritative `ctx`-resolved snapshot here means a stale
+    // `root_identity` can never read an old entry (the live `whole_hash` keys a
+    // fresh slot) and a wrong `macro_kind` can never read or poison the sibling
+    // kind's entry.
+    let Some(indexed) = ctx.ensure_indexed_ready(request.owner_canonical.as_ref()) else {
+        // SFC not loaded — no surface, no cache entry. Returning the default
+        // bundle WITHOUT publishing (we have no validated key) keeps the cache
+        // free of entries keyed on an unvalidated identity.
+        return Arc::new(VueMacroDtos::default());
+    };
+    let Some(mac) = indexed.snapshot.macros.get(request.macro_index) else {
+        return Arc::new(VueMacroDtos::default());
+    };
+    let whole_hash = indexed.whole_hash;
+    let macro_kind = mac.kind;
+
+    let key = VueMacroDtoKey::new(
+        Arc::clone(&request.owner_canonical),
+        whole_hash,
+        request.macro_index,
+        macro_kind,
+        request.level,
+    );
+    // Warm read against the SAME `ctx` view the surface resolves under. The
+    // content-addressed key covers the SFC's OWN content, but the resolved DTOs
+    // read CROSS-FILE carrier types; validating the recorded fact signature +
+    // project generation against the live view invalidates the entry lazily on
+    // a carrier edit.
+    let generation = ctx.project_type_store().current_project_generation();
+    if let Some(cached) =
+        host.vue_shallow_metadata_store()
+            .get_with_view(&key, ctx.store_view(), generation)
+    {
+        // Bubble the cached entry's cross-file carrier fact signature into any
+        // active outer fact tracer so an outer component-meta cold trace
+        // inherits the DTO's carrier facts on this warm hit (a carrier edit that
+        // invalidates this DTO entry must also invalidate the component-meta
+        // entry that read it).
+        cached.read_set_signature.bubble_via_tls();
+        return std::sync::Arc::clone(&cached.dtos);
+    }
+
+    // Resolve the surface through a request carrying the VALIDATED identity
+    // (live `whole_hash`) and the AUTHORITATIVE kind, so the surface resolution
+    // + normalizer dispatch never trust the caller's hint. The whole cold
+    // resolution runs under an installed fact tracer so the CROSS-FILE carrier
+    // facts it reads are captured into the entry's `ReadSetSignature`.
+    let validated_request = VueMacroSurfaceRequest {
+        owner_canonical: Arc::clone(&request.owner_canonical),
+        macro_index: request.macro_index,
+        macro_kind,
+        root_identity: whole_hash,
+        level: request.level,
+    };
+    let (dtos, finalise) = crate::fact_signature_helpers::install_fact_tracer(host, || {
+        match host.resolve_vue_macro_surface_with_ctx(ctx, &validated_request) {
+            Some(macro_surface) => match macro_kind {
+                AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::DefineModel => VueMacroDtos {
+                    props: props_from_typeinfo_surface(host, &macro_surface),
+                    ..VueMacroDtos::default()
+                },
+                AnalyzedMacroKind::DefineEmits => VueMacroDtos {
+                    emits: emits_from_typeinfo_surface(host, &macro_surface),
+                    ..VueMacroDtos::default()
+                },
+                AnalyzedMacroKind::DefineSlots => VueMacroDtos {
+                    slots: slots_from_typeinfo_surface(host, &macro_surface),
+                    ..VueMacroDtos::default()
+                },
+                // `WithDefaults` is not a props-surface source on this path: the
+                // outer `withDefaults` macro carries no type argument (it is not
+                // `is_type_based`), so `resolve_vue_macro_surface_with_ctx`
+                // returns `None` for it and this arm is unreachable. The props
+                // come from the SEPARATELY-routed inner `DefineProps` macro.
+                // Options / expose are separate subsystems. None of these
+                // contribute a DTO bundle.
+                AnalyzedMacroKind::WithDefaults
+                | AnalyzedMacroKind::DefineOptions
+                | AnalyzedMacroKind::DefineExpose => VueMacroDtos::default(),
+            },
+            None => VueMacroDtos::default(),
+        }
+    });
+
+    match finalise {
+        crate::resolver_core::FactReadSetFinalise::Ok(facts) => {
+            let entry = crate::typeinfo::adapters::vue::store::VueMacroDtosEntry {
+                dtos: std::sync::Arc::new(dtos),
+                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(facts),
+                validated_at_generation: generation,
+            };
+            std::sync::Arc::clone(&host.vue_shallow_metadata_store().insert(key, entry).dtos)
+        }
+        // Tracer overflowed: the DTOs are valid but cannot be admitted safely
+        // (the observation set was truncated, so warm-read validation could
+        // falsely pass against a changed carrier). Return the freshly-computed
+        // bundle WITHOUT caching — a repeat request recomputes, never serves an
+        // under-validated entry.
+        crate::resolver_core::FactReadSetFinalise::Overflow => std::sync::Arc::new(dtos),
+    }
 }
 
 /// Normalize a `.vue` props macro surface into the published

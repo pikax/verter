@@ -11971,3 +11971,121 @@ defineProps<{ a: LocalLeaf; b: FromPkg }>()
         );
     }
 }
+
+/// Overlay/base prop isolation through context-aware `vue_macro_dtos`.
+///
+/// `vue_macro_dtos_with_ctx(ctx, …)` resolves the macro surface through the
+/// active `ResolverContext`. An overlay session that adds `overlay_prop` to the
+/// SFC's own `interface Props { a }` MUST see `[a, overlay_prop]` — the surface
+/// is resolved against the OVERLAY `IndexedReady`, not the base host view. A
+/// base-view read MUST see only `[a]`, and the overlay surface MUST NOT leak
+/// into the base read (the two key on distinct `whole_hash`es).
+///
+/// Discrimination: a `vue_macro_dtos_with_ctx` that ignores `ctx` and reads the
+/// base host view (the pre-step-2 `vue_macro_dtos` behaviour) returns `[a]` for
+/// the overlay session too, failing the `overlay_prop` assertion. Verified by
+/// mutation (binding the cold path to a base `HostResolverContext` drops
+/// `overlay_prop`).
+#[test]
+fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
+    use crate::resolver_core::ResolverContext;
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    }));
+
+    const SFC: &str = "/Comp.vue";
+    let base_src = "<script setup lang=\"ts\">\n\
+         interface Props { a: string }\n\
+         defineProps<Props>()\n\
+         </script>";
+    let _ = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: None,
+            input_id: SFC.to_string(),
+            source: Arc::from(base_src),
+            file_kind: crate::FileKind::VueSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+
+    // Locate the `defineProps` macro index from the authoritative snapshot.
+    let indexed = host
+        .ensure_indexed_ready(SFC)
+        .expect("SFC must index ready");
+    let define_props_index = indexed
+        .snapshot
+        .macros
+        .iter()
+        .position(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .expect("the SFC declares a defineProps macro");
+
+    let request_for = |root_identity: [u8; 16]| crate::typeinfo::types::VueMacroSurfaceRequest {
+        owner_canonical: std::sync::Arc::from(SFC),
+        macro_index: define_props_index,
+        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+        root_identity,
+        level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+    };
+    let prop_names =
+        |dtos: &crate::typeinfo::adapters::vue::store::VueMacroDtos| -> Vec<String> {
+            dtos.props.iter().map(|p| p.name.clone()).collect()
+        };
+
+    // Base-view read (no overlay): only the base prop `a`.
+    let base_dtos =
+        host.vue_macro_dtos(&request_for(host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16])));
+    assert_eq!(
+        prop_names(&base_dtos),
+        vec!["a".to_string()],
+        "base-view defineProps surface must be exactly [a]"
+    );
+
+    // Overlay session: overlay the SFC adding `overlay_prop` to `Props`.
+    let overlay_src = "<script setup lang=\"ts\">\n\
+         interface Props { a: string; overlay_prop: number }\n\
+         defineProps<Props>()\n\
+         </script>";
+    let mut overlays: rustc_hash::FxHashMap<String, Arc<str>> = rustc_hash::FxHashMap::default();
+    overlays.insert(SFC.to_string(), Arc::from(overlay_src));
+    let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
+    let store_view = host.resolver_store_view().with_session_overlay(&host, &view);
+    let session_ctx = crate::resolver_core::SessionResolverContext::new(
+        &host,
+        &view,
+        &store_view,
+        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
+
+    // The overlay session's own whole-hash hint (resolved through the session
+    // ctx) keys the overlay DTO slot; the core re-derives + validates it.
+    let overlay_hash = ResolverContext::get_whole_hash(&session_ctx, SFC).unwrap_or([0u8; 16]);
+    let overlay_dtos = crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(
+        &session_ctx,
+        &request_for(overlay_hash),
+    );
+    let overlay_props = prop_names(&overlay_dtos);
+    assert!(
+        overlay_props.contains(&"a".to_string()),
+        "overlay defineProps surface keeps the base prop `a`: {overlay_props:?}"
+    );
+    assert!(
+        overlay_props.contains(&"overlay_prop".to_string()),
+        "overlay defineProps surface MUST include the overlay-added `overlay_prop` \
+         — the surface is resolved against the overlay IndexedReady, not the base \
+         host view: {overlay_props:?}"
+    );
+
+    // No leak: a fresh base-view read still sees only `[a]`. The overlay surface
+    // was keyed on a distinct `whole_hash`, so the base slot is untouched.
+    let base_dtos_after =
+        host.vue_macro_dtos(&request_for(host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16])));
+    assert_eq!(
+        prop_names(&base_dtos_after),
+        vec!["a".to_string()],
+        "the overlay session's `overlay_prop` must NOT leak into the base-view \
+         defineProps surface: {:?}",
+        prop_names(&base_dtos_after)
+    );
+}

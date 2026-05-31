@@ -16,7 +16,6 @@
 use std::sync::Arc;
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
     ProjectionMode, ProjectionReductionContext, QueryResult, ResolveDeclKey, ScopeId,
     SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
@@ -117,7 +116,7 @@ impl VerterHost {
     /// surface is one-level (member values stay reference-style).
     pub(crate) fn project_shallow_surface_from_base(
         &self,
-        host_ctx: &crate::resolver_core::HostResolverContext<'_>,
+        ctx: &dyn crate::resolver_core::ResolverContext,
         dispatch: &ProjectSemanticDispatch<'_>,
         base: SemanticNodeId,
         context: ProjectionReductionContext,
@@ -141,7 +140,7 @@ impl VerterHost {
             QueryResult::Error(_) => return None,
         };
 
-        let graph = host_ctx.project_type_store().semantic_graph();
+        let graph = ctx.project_type_store().semantic_graph();
         let surface = match graph.node_data(terminal).as_deref() {
             Some(SemanticNodeData::Object(view)) => TypeInfoSurface::build(graph, view),
             _ => return None,
@@ -155,9 +154,11 @@ impl VerterHost {
         // a pure graph projection that holds no source, so this source-touching
         // step lives at the host layer. An inherited member's JSDoc is read from
         // its origin (heritage base) file via the member's `declaration_origin`
-        // — see `TypeInfoSurface::with_member_jsdoc_spans`.
+        // — see `TypeInfoSurface::with_member_jsdoc_spans`. The carrier-file
+        // raw source is read through the SAME `ctx` the surface was projected
+        // under, so an overlay session reads its overlay raw source.
         Some(surface.with_member_jsdoc_spans(|canonical| {
-            self.ensure_indexed_ready(canonical)
+            ctx.ensure_indexed_ready(canonical)
                 .map(|indexed| Arc::clone(&indexed.raw_source))
         }))
     }
