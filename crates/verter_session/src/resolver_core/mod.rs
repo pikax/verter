@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 pub(crate) mod ambient_resolve;
 pub(crate) mod bare_name_resolve;
-pub(crate) mod cache_keys;
 pub(crate) mod component_meta;
 pub mod component_meta_query_engine;
 pub mod component_meta_registry;
@@ -77,7 +76,7 @@ pub use component_meta::{
 pub use component_meta_query_engine::ComponentMetaQueryEngine;
 pub(crate) use component_meta_query_engine::{
     projected_surface_from_semantic_node, projected_surface_to_expanded_shape,
-    projected_surface_to_type_expr, type_expr_contains_semantic_miss, type_expr_has_any_object_arm,
+    projected_surface_to_type_expr, type_expr_contains_semantic_miss,
     type_expr_is_expanded_surface,
 };
 pub use component_meta_request::{run_component_meta_request, ComponentMetaRequestHost};

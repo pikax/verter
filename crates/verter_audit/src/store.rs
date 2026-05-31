@@ -72,9 +72,13 @@ pub struct CacheLayerBreakdown {
     /// underlying cache is the unified `ShapeCacheDb` keyed by
     /// `ShapeCacheKey::semantic_node_whole(scope, member_id, mode)`.
     pub member_shape_cache: CacheLayerHitMiss,
-    /// `PreparedSurfaceDb` — prepared-surface cache.
+    /// Always-zero counter for the removed prepared-surface walker DB.
+    /// Retained under the legacy name to preserve audit-harness JSON
+    /// schema compatibility.
     pub prepared_surface: CacheLayerHitMiss,
-    /// `PreparedMemberDb` — prepared-member cache.
+    /// Always-zero counter for the removed prepared-member walker DB.
+    /// Retained under the legacy name to preserve audit-harness JSON
+    /// schema compatibility.
     pub prepared_member: CacheLayerHitMiss,
 }
 

@@ -408,10 +408,10 @@ impl VerterHost {
     /// `host_resolve_tests::resolve_prepared_decl_target_*` cases
     /// included via the `#[cfg(test)] #[path] mod host_resolve_tests`
     /// declaration at the bottom of this file. The dispatch path no
-    /// longer calls this helper directly (subsumed by the cooperative
-    /// `PreparedTargetDb` / barrel-chain pipeline), so the helper is
-    /// gated `#[cfg(test)]` to keep the non-test dead-code surface
-    /// minimal while preserving the regression-test contract.
+    /// longer calls this helper directly (subsumed by the dispatch
+    /// route projection over the barrel-chain shallow route), so the
+    /// helper is gated `#[cfg(test)]` to keep the non-test dead-code
+    /// surface minimal while preserving the regression-test contract.
     #[cfg(test)]
     pub(crate) fn resolve_prepared_decl_target(
         &self,

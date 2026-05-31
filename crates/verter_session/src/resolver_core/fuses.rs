@@ -18,8 +18,6 @@ pub struct FuseBudgets {
     pub member_surface_recursion_depth: usize,
     /// Maximum projection ops per request.
     pub projection_op_count: usize,
-    /// Maximum structural slow-lane entries per request.
-    pub structural_slow_lane_entry_count: usize,
     /// Maximum union branches per member before collapsing.
     pub union_member_explosion: usize,
 }
@@ -32,7 +30,6 @@ impl Default for FuseBudgets {
             registry_deepening_fanout: 300,
             member_surface_recursion_depth: 10,
             projection_op_count: 2000,
-            structural_slow_lane_entry_count: 50,
             union_member_explosion: 100,
         }
     }
@@ -70,7 +67,6 @@ pub struct FuseState {
     pub registry_names_enqueued: usize,
     pub current_member_recursion_depth: usize,
     pub projection_ops_executed: usize,
-    pub structural_entries_solved: usize,
     pub union_members_processed: usize,
     pub trips: Vec<FuseTrip>,
 }
@@ -163,19 +159,6 @@ impl FuseState {
         false
     }
 
-    pub fn check_structural_slow_lane(&mut self, budgets: &FuseBudgets) -> bool {
-        self.structural_entries_solved += 1;
-        if self.structural_entries_solved > budgets.structural_slow_lane_entry_count {
-            self.trips.push(FuseTrip::new(
-                "structural_slow_lane_entry_count",
-                budgets.structural_slow_lane_entry_count,
-                self.structural_entries_solved,
-            ));
-            return true;
-        }
-        false
-    }
-
     pub fn check_union_member_explosion(&mut self, budgets: &FuseBudgets) -> bool {
         self.union_members_processed += 1;
         if self.union_members_processed > budgets.union_member_explosion {
@@ -207,7 +190,6 @@ mod tests {
         assert_eq!(budgets.registry_deepening_fanout, 300);
         assert_eq!(budgets.member_surface_recursion_depth, 10);
         assert_eq!(budgets.projection_op_count, 2000);
-        assert_eq!(budgets.structural_slow_lane_entry_count, 50);
         assert_eq!(budgets.union_member_explosion, 100);
     }
 

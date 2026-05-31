@@ -1194,11 +1194,13 @@ query-identity slots — listed for inventory completeness):**
 |---|---|---|
 | `DeclarationLookupDb` | `ComponentMetaResultDb` | declaration lookup for owner resolution |
 | `OwnerCollectionDb` | `ComponentMetaResultDb` | owner-set assembly for fallthrough propagation |
-| `PreparedTargetDb` | `ComponentMetaResultDb` | prepared-target intersection cache |
 | `ShapeCacheDb` | `ComponentMetaResultDb` | per-shape skeleton cache |
-| `PreparedSurfaceDb` | `ComponentMetaResultDb` | prepared-surface intersection cache |
-| `PreparedMemberDb` | `ComponentMetaResultDb` | prepared-member projection cache |
-| `RoutedExprSurfaceDb` | `ComponentMetaResultDb` | routed `TypeExpr` surface (compat fallback) |
+
+> Retired-history note: the prepared-surface walker cluster
+> (`PreparedTargetDb`, `PreparedSurfaceDb`, `PreparedMemberDb`,
+> `RoutedExprSurfaceDb`) was deleted with the materializer/walker
+> subgraph. `define_*` and route surfaces now resolve through the
+> dispatch projectors; these DB types and their entries no longer exist.
 
 **Caches RETIRED in Block 8 (subsumed by direct `ProjectTypeStore` ownership):**
 

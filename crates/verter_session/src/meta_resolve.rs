@@ -23,7 +23,7 @@
 // of this shell — bare-name references in tests need the imports in
 // scope here.
 #[cfg(test)]
-use crate::types::{FileAnalysisSnapshot, ProjectionMode};
+use crate::types::ProjectionMode;
 
 pub(crate) const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 
@@ -77,19 +77,13 @@ pub(crate) use dispatch_helpers::{
     project_expr_class_a_via_dispatch_threaded, project_expr_surface_expr_via_host_threaded,
     project_expr_surface_shape_via_host_threaded, project_type_surface_expr_via_host_threaded,
 };
-// Test-only re-exports — exercised by parity tests for the
-// dispatch-route-helper coverage matrix. The prepared-decl surface
-// projector is no longer a PRODUCTION re-export here: the owner-local
-// macro-root entry points were retargeted to the shared dispatch surface
-// projector (`project_expr_surface_shape_via_host_threaded`), so the
-// prepared walker survives only for its own materialiser-module callers
-// (which import it directly from `dispatch_helpers`) and these parity tests.
+// Test-only re-export — exercised by the kept dispatch-route-helper
+// coverage tests (`project_route_surface_expr_pick_*` in the engine
+// tests + the routed-surface classification fixture). This is the
+// surviving routed-surface bridge; it routes through the dispatch
+// keeper `dispatch_routed_expr_surface_expr`.
 #[cfg(test)]
-pub(crate) use dispatch_helpers::{
-    project_prepared_type_surface_expr_via_host_threaded,
-    project_prepared_type_surface_shape_via_host_threaded,
-    project_route_surface_expr_via_host_threaded,
-};
+pub(crate) use dispatch_helpers::project_route_surface_expr_via_host_threaded;
 pub(crate) use graph_predicates::{
     build_keys_union_node, component_meta_ref_resolves_to_package_node,
     extract_route_root_identity_node, ref_root_reaches_transitive_cycle_node,
@@ -128,23 +122,6 @@ pub(crate) use macro_member_walk::{
 pub(crate) use materialize::{
     collect_type_expr_ref_names, lowered_preserve_package_backed_symbolic_refs,
     materialize_component_meta_type_expr_until_stable,
-};
-// Test-only re-export — `meta_resolve_tests.rs` exercises this helper
-// via `super::*` glob to characterise the BFS cycle-guard's effect on
-// the macro-shape produce stage. Production callers consume the helper
-// directly from `meta_resolve::materialize::macro_shapes`.
-#[cfg(test)]
-pub(crate) use materialize::expr_needs_projection_rescue;
-// Test-only re-exports — exercised by `meta_resolve_tests.rs` via
-// `super::*` glob import from the `meta_resolve_tests` child mod
-// (`#[path = "meta_resolve_tests.rs"] mod meta_resolve_tests;` at the
-// bottom of this file). The symbols are bare-name in the test bodies;
-// removing the re-export breaks compilation of those tests.
-#[cfg(test)]
-pub(crate) use materialize::{
-    define_props_fields_fast_path_allowed, has_prop_shape_surface, produce_macro_object_shapes,
-    produce_one_macro_object_shape, registry_entry_to_expanded_shape,
-    synthesize_define_props_shape_from_known_surface_with_authority, MacroShapeSource,
 };
 pub(crate) use origin_graph::build_origin_graph;
 pub(crate) use registry_materialize::{

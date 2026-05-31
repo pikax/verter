@@ -60,15 +60,11 @@ mod vue_script_extract;
 pub(crate) use frontier_adapter::HostFrontierAdapter;
 #[allow(unused_imports)]
 pub(crate) use frontier_helpers::RouteOwnedShallowStateSnapshot;
-#[cfg(not(test))]
-#[allow(unused_imports)]
-pub(crate) use test_guards::assert_import_route_shadow_allowed;
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use test_guards::{
-    assert_import_route_shadow_allowed, forbid_import_route_shadow_for_tests,
-    forbid_route_frontier_for_tests, import_route_shadow_forbidden_for_current_thread,
-    route_frontier_forbidden_for_current_thread, ImportRouteShadowGuard, RouteFrontierGuard,
+    forbid_route_frontier_for_tests, route_frontier_forbidden_for_current_thread,
+    RouteFrontierGuard,
 };
 pub(crate) use vue_script_extract::{extract_vue_script_content, template_converter_inputs};
 

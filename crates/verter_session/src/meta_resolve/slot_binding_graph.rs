@@ -1097,6 +1097,42 @@ pub(crate) fn compute_bindings_via_graph(
     out
 }
 
+/// Resolve a `.vue` macro's normalized component-meta DTOs through the shared
+/// typeinfo Vue surface path (`vue_macro_dtos_with_ctx`, FullMetadata) — the
+/// SOLE props/emits/slots authority.
+///
+/// `owner_canonical` is the SFC the macro CALL lives in; `macro_index` indexes
+/// that SFC's `FileAnalysisSnapshot::macros`. The host-cached, request-validated
+/// surface path re-derives `whole_hash` + `macro_kind` from the live (overlay-
+/// aware) snapshot, so `root_identity` here is only a hint (the real key is
+/// validated inside). The returned bundle populates exactly the field matching
+/// `macro_kind` (`props` for `DefineProps` / `DefineModel`, `emits` for
+/// `DefineEmits`, `slots` for `DefineSlots`); the others stay empty.
+///
+/// EVERY view-sensitive read flows through `ctx`: routing through
+/// `vue_macro_dtos_with_ctx` (NOT the base-view `VerterHost::vue_macro_dtos`)
+/// means an overlay session resolves the macro surface against its OVERLAY
+/// content — a `publish_merged_bindings` slot read in an overlay session no
+/// longer leaks the base host's slot bindings.
+fn typeinfo_macro_dtos(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    owner_canonical: &str,
+    macro_index: usize,
+    macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
+) -> std::sync::Arc<crate::typeinfo::adapters::vue::store::VueMacroDtos> {
+    let root_identity = ctx.get_whole_hash(owner_canonical).unwrap_or([0u8; 16]);
+    crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(
+        ctx,
+        &crate::typeinfo::types::VueMacroSurfaceRequest {
+            owner_canonical: std::sync::Arc::from(owner_canonical),
+            macro_index,
+            macro_kind,
+            root_identity,
+            level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+        },
+    )
+}
+
 pub(crate) fn publish_merged_bindings(
     ctx: &dyn ResolverContext,
     owner_canonical: &str,
@@ -1115,7 +1151,7 @@ pub(crate) fn publish_merged_bindings(
         .iter()
         .filter(|r| r.macro_kind == AnalyzedMacroKind::DefineSlots)
         .map(|resolved| {
-            crate::meta_resolve::materialize::macro_shapes::typeinfo_macro_dtos(
+            typeinfo_macro_dtos(
                 ctx,
                 owner_canonical,
                 resolved.macro_index,

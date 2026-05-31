@@ -22,17 +22,14 @@
 //!    arm. Realistic corpus shapes (`AuthForm.vue` / `Form.vue` /
 //!    `Table.vue` from the nuxt-ui bench corpus) drive the cases.
 //!
-//! 2. **`intersection_merge_tests::merge_prepared_intersection_arms_*`**
-//!    in `resolver_core/component_meta_query_engine/prepared_surface.rs`
-//!    — discriminating tests that exercise the pure
-//!    `merge_prepared_intersection_arms` helper directly with
-//!    synthesised `PreparedSurfaceProjection` inputs, bypassing the
-//!    component-meta pipeline's rescue paths entirely. Reverting the
-//!    helper's `// Skip` arm on `Unsupported` to a hard
-//!    `return PreparedSurfaceProjection::Unsupported;` makes the
-//!    `..._skips_unsupported_arm_when_sibling_resolves` and
-//!    `..._treats_empty_arm_as_resolved` tests fail with precise
-//!    diffs.
+//! 2. **`intersection_keeps_class_a_*` / `intersection_keeps_class_b_*`**
+//!    in this file — dispatch-level discriminating tests that exercise
+//!    intersection-arm merging through the live `get_component_meta`
+//!    path. The pure-helper unit module
+//!    (`intersection_merge_tests::merge_prepared_intersection_arms_*`)
+//!    was retired together with `prepared_surface.rs`; these live
+//!    dispatch tests are now the discriminating coverage for the
+//!    non-fatal-unsupported merge.
 //!
 //! 3. **Analyzer-side `declared_in_macro_type_arg` contract** —
 //!    `inline_literal_..._for_on_event_shadow_of_declared_emit`
@@ -390,16 +387,14 @@ defineEmits<{ submit: [event: Event] }>()
 // (analyzer-side intersection branch, cold-resolver, parser-side
 // utility-heritage handler) collectively cover the synthetic shape
 // even when the prepared-surface intersection short-circuit is
-// reverted. The unit-level discriminating coverage now lives in
-// `crates/verter_session/src/resolver_core/component_meta_query_engine/prepared_surface.rs`
-// under `intersection_merge_tests::merge_prepared_intersection_arms_*`,
-// which exercises the pure `merge_prepared_intersection_arms` helper
-// directly with synthesised `PreparedSurfaceProjection` inputs.
-// Reverting the helper's `// Skip` arm to the pre-fix
-// `return PreparedSurfaceProjection::Unsupported;` makes those unit
-// tests fail with precise diffs — see
-// `bench-evidence/r20fix2-f4-red-discrimination.txt` for the RED
-// output observed during R20-fix2 verification.
+// reverted. The pure-helper unit module that previously held the
+// discriminating coverage (`merge_prepared_intersection_arms` and its
+// `intersection_merge_tests::merge_prepared_intersection_arms_*` tests)
+// was retired together with `prepared_surface.rs`. The discriminating
+// coverage for the non-fatal-unsupported merge now lives in the
+// dispatch-level `intersection_keeps_class_a_*` /
+// `intersection_keeps_class_b_*` tests above, which drive the merge
+// through the live `get_component_meta` path.
 
 /// R21-F1 c3 discriminating test for the `defineModel` projector
 /// path. `defineModel<T>()` synthesizes the model member at the

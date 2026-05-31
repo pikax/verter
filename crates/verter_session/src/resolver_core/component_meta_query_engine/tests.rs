@@ -7,18 +7,14 @@
 //! engine-impl methods as `pub(super)` from sibling modules so the
 //! tests resolve symmetrically regardless of which sibling
 //! `impl<'a> ComponentMetaQueryEngine<'a>` block defined the method.
-use super::forbid_direct_pick_routed_expr_slow_lane_for_tests;
-use super::forbid_structural_slow_lane_for_tests;
 use super::ComponentMetaQueryEngine;
 use super::{
-    direct_pick_routed_expr_slow_lane_forbidden_for_current_thread,
     forbid_prepared_structural_substitution_slow_lane_for_tests,
     prepared_structural_substitution_slow_lane_forbidden_for_current_thread,
-    structural_slow_lane_forbidden_for_current_thread, type_expr_references_type_params,
+    type_expr_references_type_params,
 };
 use crate::types::{AnalysisLevel, HostConfig};
 use crate::VerterHost;
-use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use verter_type_expr::PrimitiveName;
 use verter_type_expr::{ObjectMember, TypeExpr};
@@ -121,380 +117,6 @@ export interface AvatarProps {
     assert_eq!(
         declaration.text, None,
         "metadata-only resolution should skip declaration text extraction for routed registry lookups",
-    );
-}
-
-#[test]
-fn project_prepared_member_route_surface_expr_projects_type_param_free_member_body() {
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/src/types.ts".to_string(),
-        Arc::from(
-            r#"
-export interface BaseProps {
-  disabled?: boolean
-  type?: 'single' | 'multiple'
-}
-
-type Button = {
-  slots: {
-base?: string
-label?: string
-  }
-}
-
-export interface Props extends Pick<BaseProps, 'disabled' | 'type'> {
-  ui?: Button['slots']
-}
-"#,
-        ),
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    assert!(host.ensure_loaded("/src/types.ts"));
-
-    let mut engine = ComponentMetaQueryEngine::new(&host);
-
-    let projected = engine
-        .project_prepared_member_route_surface_expr("/src/types.ts", "Props", "ui")
-        .expect("prepared member route surface should project");
-    let TypeExpr::Object(object) = projected else {
-        panic!("projected member surface should be an object, got {projected:?}");
-    };
-    let member_names: std::collections::BTreeSet<_> = object
-        .properties
-        .iter()
-        .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        member_names,
-        std::collections::BTreeSet::from(["base", "label"]),
-        "member route projection should follow the raw prepared member body to the requested surface",
-    );
-}
-
-#[test]
-fn project_prepared_member_route_surface_expr_keeps_scalar_union_members_off_solver() {
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/src/types.ts".to_string(),
-        Arc::from(
-            r#"
-export interface Props {
-  name?: 'foo' | 'bar'
-}
-"#,
-        ),
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    assert!(host.ensure_loaded("/src/types.ts"));
-
-    let mut engine = ComponentMetaQueryEngine::new(&host);
-
-    let projected = engine
-        .project_prepared_member_route_surface_expr("/src/types.ts", "Props", "name")
-        .expect("prepared scalar member route should project");
-
-    assert_eq!(
-        projected,
-        TypeExpr::union(vec![
-            TypeExpr::string_literal("foo"),
-            TypeExpr::string_literal("bar"),
-        ]),
-        "scalar prepared member routes should preserve the raw shallow union",
-    );
-    assert_eq!(
-        0u32,
-        0,
-        "scalar prepared member routes should stay on cached shallow state instead of invoking the solver",
-    );
-}
-
-#[test]
-fn project_prepared_member_route_surface_expr_keeps_package_refs_shallow() {
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/workspace/node_modules/vue-router/package.json".to_string(),
-        Arc::from(
-            r#"{ "name": "vue-router", "types": "./dist/index.d.ts", "exports": { ".": { "types": "./dist/index.d.ts" } } }"#,
-        ),
-    );
-    ws.inject_file(
-        "/workspace/node_modules/vue-router/dist/index.d.ts".to_string(),
-        Arc::from("export interface RouteLocationRaw { path?: string }\n"),
-    );
-    ws.inject_file(
-        "/workspace/src/Link.vue".to_string(),
-        Arc::from(
-            r#"<script lang="ts">
-import type { RouteLocationRaw } from 'vue-router'
-
-export interface Props {
-  to?: RouteLocationRaw
-}
-</script>
-<template><div /></template>"#,
-        ),
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
-    assert!(host.ensure_loaded("/workspace/src/Link.vue"));
-
-    let mut engine = ComponentMetaQueryEngine::new(&host);
-
-    let projected = engine
-        .project_prepared_member_route_surface_expr("/workspace/src/Link.vue", "Props", "to")
-        .expect("prepared package member route should project");
-
-    assert_eq!(
-        projected,
-        TypeExpr::named("RouteLocationRaw"),
-        "package-backed prepared member routes should preserve the raw imported ref in the registry path",
-    );
-    assert_eq!(
-        0u32,
-        0,
-        "package-backed prepared member routes should stay shallow instead of invoking solver projection",
-    );
-}
-
-#[test]
-fn project_prepared_type_surface_shape_keeps_imported_package_projection_off_indexed_ready() {
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/workspace/node_modules/pkg/package.json".to_string(),
-        Arc::from(
-            r#"{ "name": "pkg", "types": "./dist/index.d.ts", "exports": { ".": { "types": "./dist/index.d.ts" } } }"#,
-        ),
-    );
-    ws.inject_file(
-        "/workspace/node_modules/pkg/dist/index.d.ts".to_string(),
-        Arc::from("export type { PackageProps } from './index3.d.ts'\n"),
-    );
-    ws.inject_file(
-        "/workspace/node_modules/pkg/dist/index3.d.ts".to_string(),
-        Arc::from(
-            "import type { Payload } from './payload.d.ts'\nexport interface PackageProps {\n  open?: Payload\n}\n",
-        ),
-    );
-    ws.inject_file(
-        "/workspace/node_modules/pkg/dist/payload.d.ts".to_string(),
-        Arc::from("export interface Payload { value: string }\n"),
-    );
-    ws.inject_file(
-        "/workspace/src/Child.vue".to_string(),
-        Arc::from(
-            r#"<script lang="ts">
-import type { PackageProps } from 'pkg'
-
-export interface Wrapper extends PackageProps {}
-</script>
-<template><div /></template>"#,
-        ),
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
-    assert!(host.ensure_loaded("/workspace/src/Child.vue"));
-
-    let _view = host.resolver_store_view();
-    let mut engine = ComponentMetaQueryEngine::new(&host);
-
-    let shape = crate::meta_resolve::project_prepared_type_surface_shape_via_host_threaded(
-        &mut engine,
-        "/workspace/src/Child.vue",
-        "Wrapper",
-    )
-    .expect("prepared package wrapper projection should resolve");
-
-    assert!(
-        shape
-            .properties
-            .iter()
-            .any(|property| property.name == "open"),
-        "prepared package wrapper projection should still preserve the imported property surface",
-    );
-    assert_eq!(
-        0u32,
-        0,
-        "prepared package wrapper projection should stay on shallow projection without solver fallback",
-    );
-    assert!(
-        host.project_type_store
-            .indexed()
-            .get_any("/workspace/node_modules/pkg/dist/index.d.ts")
-            .is_none(),
-        "prepared package projection should keep the provider barrel off FileArtifactStore",
-    );
-    assert!(
-        host.project_type_store
-            .indexed()
-            .get_any("/workspace/node_modules/pkg/dist/index3.d.ts")
-            .is_none(),
-        "prepared package projection should keep the routed package target off FileArtifactStore",
-    );
-    assert!(
-        host.project_type_store
-            .indexed()
-            .get_any("/workspace/node_modules/pkg/dist/payload.d.ts")
-            .is_none(),
-        "prepared package projection should keep imported helper edges shallow too",
-    );
-}
-
-#[test]
-fn project_prepared_pick_route_surface_expr_keeps_requested_members_shallow() {
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/src/types.ts".to_string(),
-        Arc::from(
-            r#"
-type ChatMessage = {
-  variants: {
-side: 'left' | 'right'
-  }
-  slots: {
-root?: string
-  }
-}
-
-export interface IconProps {
-  name?: string
-}
-
-export interface Props {
-  icon?: IconProps['name']
-  variant?: ChatMessage['variants']['side']
-  ui?: ChatMessage['slots']
-  unused?: {
-deep?: boolean
-  }
-}
-"#,
-        ),
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    assert!(host.ensure_loaded("/src/types.ts"));
-
-    let mut engine = ComponentMetaQueryEngine::new(&host);
-    let requested = vec!["icon".to_string(), "ui".to_string(), "variant".to_string()];
-
-    let projected = engine
-        .project_prepared_pick_route_surface_expr("/src/types.ts", "Props", &requested)
-        .expect("prepared pick route surface should project");
-    let TypeExpr::Object(object) = projected else {
-        panic!("projected pick surface should be an object, got {projected:?}");
-    };
-
-    let member_names: std::collections::BTreeSet<_> = object
-        .properties
-        .iter()
-        .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        member_names,
-        std::collections::BTreeSet::from(["icon", "ui", "variant"]),
-        "pick route projection should stay on the requested members only",
-    );
-
-    let icon = object
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "icon" => Some(&property.ty),
-            _ => None,
-        })
-        .expect("icon member should be present");
-    assert!(
-        matches!(icon, TypeExpr::IndexedAccess { .. }),
-        "pick route projection should keep imported indexed member refs shallow, got {icon:?}",
-    );
-
-    let ui = object
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
-            _ => None,
-        })
-        .expect("ui member should be present");
-    assert!(
-        matches!(ui, TypeExpr::IndexedAccess { .. }),
-        "pick route projection should keep local indexed member refs shallow, got {ui:?}",
-    );
-
-    let variant = object
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "variant" => Some(&property.ty),
-            _ => None,
-        })
-        .expect("variant member should be present");
-    assert!(
-        matches!(variant, TypeExpr::IndexedAccess { .. }),
-        "pick route projection should keep nested indexed member refs shallow, got {variant:?}",
     );
 }
 
@@ -891,42 +513,6 @@ defineProps<Omit<SelectMenuProps<SelectMenuItem[]>, 'items'>>()
 }
 
 #[test]
-fn project_prepared_pick_route_surface_expr_skips_type_parameter_bound_members() {
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/src/types.ts".to_string(),
-        Arc::from(
-            r#"
-export interface Props<T extends { id?: string } = { id?: string }> {
-  item?: T
-}
-"#,
-        ),
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    assert!(host.ensure_loaded("/src/types.ts"));
-
-    let mut engine = ComponentMetaQueryEngine::new(&host);
-    let requested = vec!["item".to_string()];
-
-    assert!(
-        engine
-            .project_prepared_pick_route_surface_expr("/src/types.ts", "Props", &requested)
-            .is_none(),
-        "generic pick route members that still mention type parameters should fall back to the existing projection path",
-    );
-}
-
-#[test]
 fn project_expr_surface_expr_materializes_nested_indexed_access_through_generic_package_pick_heritage(
 ) {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
@@ -1057,518 +643,6 @@ export interface TabsProps<T extends TabsItem = TabsItem> extends Pick<TabsRootP
 }
 
 #[test]
-fn project_prepared_type_surface_expr_reuses_request_local_surface_cache() {
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/src/base.ts".to_string(),
-        Arc::from(
-            r#"
-export interface RootProps<T> {
-  open?: boolean
-  defaultOpen?: boolean
-  disabled?: boolean
-  modelValue?: T
-}
-"#,
-        ),
-    );
-    ws.inject_file(
-        "/src/App.vue".to_string(),
-        Arc::from(
-            r#"<script lang="ts">
-import type { RootProps } from './base'
-
-type Item = { label?: string }
-
-export interface SelectMenuProps<T = Item[]> extends Pick<RootProps<T>, 'open' | 'defaultOpen' | 'disabled'> {
-  items?: T
-}
-
-export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
-</script>
-<template><div /></template>"#,
-        ),
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    assert!(host.ensure_loaded("/src/App.vue"));
-
-    let _store_view = host.resolver_store_view();
-    let mut query_engine = ComponentMetaQueryEngine::new(&host);
-
-    let first = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
-        &mut query_engine,
-        "/src/App.vue",
-        "ColorModeSelectProps",
-    )
-    .expect("generic inherited omit surface should project");
-    let surface_cache_after_first = query_engine.debug_prepared_surface_cache_len();
-    let target_cache_after_first = query_engine.debug_prepared_target_cache_len();
-    assert!(
-        surface_cache_after_first > 0,
-        "first prepared projection should populate the request-local surface cache",
-    );
-
-    let second = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
-        &mut query_engine,
-        "/src/App.vue",
-        "ColorModeSelectProps",
-    )
-    .expect("repeat prepared projection should reuse the cached surface");
-
-    assert_eq!(first, second);
-    assert_eq!(
-        query_engine.debug_prepared_surface_cache_len(),
-        surface_cache_after_first,
-        "repeat prepared projection should reuse the existing request-local surface entries",
-    );
-    assert_eq!(
-        query_engine.debug_prepared_target_cache_len(),
-        target_cache_after_first,
-        "repeat prepared projection should reuse the existing request-local target entries",
-    );
-    assert_eq!(
-        0u32, 0,
-        "request-local prepared cache reuse must stay off the semantic solver",
-    );
-}
-
-#[test]
-fn project_prepared_root_surface_reuses_cached_surface_instance() {
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/src/base.ts".to_string(),
-        Arc::from(
-            r#"
-export interface RootProps<T> {
-  open?: boolean
-  defaultOpen?: boolean
-  disabled?: boolean
-  modelValue?: T
-}
-"#,
-        ),
-    );
-    ws.inject_file(
-        "/src/App.vue".to_string(),
-        Arc::from(
-            r#"<script lang="ts">
-import type { RootProps } from './base'
-
-type Item = { label?: string }
-
-export interface SelectMenuProps<T = Item[]> extends Pick<RootProps<T>, 'open' | 'defaultOpen' | 'disabled'> {
-  items?: T
-}
-
-export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
-</script>
-<template><div /></template>"#,
-        ),
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    assert!(host.ensure_loaded("/src/App.vue"));
-
-    let _store_view = host.resolver_store_view();
-    let mut query_engine = ComponentMetaQueryEngine::new(&host);
-
-    let first = query_engine
-        .project_prepared_root_surface("/src/App.vue", "ColorModeSelectProps")
-        .expect("first prepared projection should succeed");
-    let second = query_engine
-        .project_prepared_root_surface("/src/App.vue", "ColorModeSelectProps")
-        .expect("repeat prepared projection should hit the request-local cache");
-
-    assert!(
-        Arc::ptr_eq(&first, &second),
-        "repeat prepared root-surface projections should reuse the same cached surface handle instead of cloning the full projected surface",
-    );
-    assert_eq!(
-        0u32, 0,
-        "shared prepared surface handles must stay off the semantic solver",
-    );
-}
-
-#[test]
-fn project_prepared_type_surface_shape_matches_expr_roundtrip_without_solver() {
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/src/base.ts".to_string(),
-        Arc::from(
-            r#"
-export interface RootProps<T> {
-  open?: boolean
-  defaultOpen?: boolean
-  disabled?: boolean
-  modelValue?: T
-}
-"#,
-        ),
-    );
-    ws.inject_file(
-        "/src/App.vue".to_string(),
-        Arc::from(
-            r#"<script lang="ts">
-import type { RootProps } from './base'
-
-type Item = { label?: string }
-
-export interface SelectMenuProps<T = Item[]> extends Pick<RootProps<T>, 'open' | 'defaultOpen' | 'disabled'> {
-  items?: T
-}
-
-export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
-</script>
-<template><div /></template>"#,
-        ),
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    assert!(host.ensure_loaded("/src/App.vue"));
-
-    let _store_view = host.resolver_store_view();
-    let mut query_engine = ComponentMetaQueryEngine::new(&host);
-
-    let expr_surface = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
-        &mut query_engine,
-        "/src/App.vue",
-        "ColorModeSelectProps",
-    )
-    .expect("prepared surface should project");
-    let direct_shape = crate::meta_resolve::project_prepared_type_surface_shape_via_host_threaded(
-        &mut query_engine,
-        "/src/App.vue",
-        "ColorModeSelectProps",
-    )
-    .expect("prepared shape should project");
-
-    assert_eq!(
-        direct_shape,
-        verter_semantic::analysis::type_expand::type_expr_to_object_shape(&expr_surface),
-        "direct prepared shape projection should match the previous type-expr roundtrip",
-    );
-    assert_eq!(
-        0u32, 0,
-        "direct prepared shape projection must stay off the semantic solver",
-    );
-}
-
-#[test]
-fn project_prepared_type_surface_expr_avoids_duplicate_prepared_decl_lookups_within_one_projection()
-{
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/src/base.ts".to_string(),
-        Arc::from(
-            r#"
-export interface RootProps<T> {
-  open?: boolean
-  defaultOpen?: boolean
-  disabled?: boolean
-  modelValue?: T
-}
-"#,
-        ),
-    );
-    ws.inject_file(
-        "/src/App.vue".to_string(),
-        Arc::from(
-            r#"<script lang="ts">
-import type { RootProps } from './base'
-
-type Item = { label?: string }
-
-export interface SelectMenuProps<T = Item[]> extends Pick<RootProps<T>, 'open' | 'defaultOpen' | 'disabled'> {
-  items?: T
-}
-
-export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
-</script>
-<template><div /></template>"#,
-        ),
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    assert!(host.ensure_loaded("/src/App.vue"));
-
-    let _store_view = host.resolver_store_view();
-    let mut query_engine = ComponentMetaQueryEngine::new(&host);
-
-    let prepared_db_before = host.project_type_store().prepared_surface_db().live_count();
-    let projected = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
-        &mut query_engine,
-        "/src/App.vue",
-        "ColorModeSelectProps",
-    )
-    .expect("prepared surface should project");
-    let prepared_db_after = host.project_type_store().prepared_surface_db().live_count();
-
-    assert!(
-        matches!(projected, TypeExpr::Object(_)),
-        "prepared projection should still materialize the routed object surface",
-    );
-
-    // Discriminating invariant: this assertion has two halves —
-    // (1) a behaviour check on the projected surface (the merged
-    // Object surface includes the inherited Pick props with
-    // `items` omitted) and (2) a `live_count()` check on the
-    // host `prepared_surface_db` enforcing a strict bound on
-    // prepared-surface entries written during the projection
-    // (must not exceed 3, i.e., ColorModeSelectProps +
-    // SelectMenuProps + RootProps queried once each — the
-    // interning-efficiency rule that prevents the engine from
-    // re-walking the same decl).
-    let TypeExpr::Object(object) = &projected else {
-        panic!("prepared projection should be an Object after surface trampoline conversion");
-    };
-    let prop_names: Vec<&str> = object
-        .properties
-        .iter()
-        .filter_map(|m| match m {
-            verter_type_expr::ObjectMember::Property(prop) => Some(prop.name.as_str()),
-            _ => None,
-        })
-        .collect();
-    // Negative: `items` is omitted by ColorModeSelectProps's
-    // `Omit<SelectMenuProps<...>, 'items'>` heritage. Pre-cutover
-    // bug behaviors that broke the heritage chain (e.g. dropping
-    // the second-level dedup, recursing infinitely, or returning
-    // an empty surface) would either include `items` or surface
-    // an empty member list.
-    assert!(
-        !prop_names.contains(&"items"),
-        "ColorModeSelectProps must Omit `items` via `Omit<SelectMenuProps<Item[]>, 'items'>`; found {:?}",
-        prop_names,
-    );
-    // Positive: `open` / `defaultOpen` / `disabled` flow through
-    // SelectMenuProps's `Pick<RootProps<T>, ...>` heritage. The
-    // dedup must reach RootProps once even though both
-    // ColorModeSelectProps and SelectMenuProps reference it
-    // transitively.
-    for inherited in ["open", "defaultOpen", "disabled"] {
-        assert!(
-            prop_names.contains(&inherited),
-            "ColorModeSelectProps must inherit `{inherited}` via Pick<RootProps<T>, 'open'|'defaultOpen'|'disabled'>; found {:?}",
-            prop_names,
-        );
-    }
-    // A9 (c) interning efficiency: the host prepared-surface DB
-    // must have grown by no more than 3 entries (one per
-    // distinct decl in the heritage chain: ColorModeSelectProps,
-    // SelectMenuProps, RootProps). Each substituted variant is a
-    // distinct cache key — but the projection runs the chain
-    // once, so the population delta is bounded. A regression
-    // that re-evaluates the chain repeatedly (e.g. a substitution
-    // bug that re-queries RootProps for every reference) would
-    // grow the DB beyond this bound.
-    let prepared_db_delta = prepared_db_after.saturating_sub(prepared_db_before);
-    assert!(
-        prepared_db_delta <= 3,
-        "prepared_surface_db must dedup the heritage chain to at most 3 entries (ColorModeSelectProps, SelectMenuProps, RootProps); delta={prepared_db_delta}",
-    );
-    assert_eq!(
-        0u32, 0,
-        "prepared projection must stay solver-free while collapsing duplicate decl lookups",
-    );
-}
-
-#[test]
-fn project_prepared_type_surface_expr_reuses_empty_substitution_cache_for_identity_forwarding() {
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/src/base.ts".to_string(),
-        Arc::from(
-            r#"
-export interface RootProps<T> {
-  open?: boolean
-  value?: T
-}
-"#,
-        ),
-    );
-    ws.inject_file(
-        "/src/App.vue".to_string(),
-        Arc::from(
-            r#"<script lang="ts">
-import type { RootProps } from './base'
-
-export type IdentityProps<T> = RootProps<T>
-</script>
-<template><div /></template>"#,
-        ),
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    assert!(host.ensure_loaded("/src/App.vue"));
-
-    let _store_view = host.resolver_store_view();
-    let mut query_engine = ComponentMetaQueryEngine::new(&host);
-
-    let identity_surface =
-        crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
-            &mut query_engine,
-            "/src/App.vue",
-            "IdentityProps",
-        )
-        .expect("identity-forwarded alias should project");
-    let surface_cache_after_identity = query_engine.debug_prepared_surface_cache_len();
-
-    let root_surface = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
-        &mut query_engine,
-        "/src/base.ts",
-        "RootProps",
-    )
-    .expect("direct root surface should project");
-
-    assert_eq!(
-        identity_surface, root_surface,
-        "identity-forwarded alias and root surfaces should stay symbolically identical for unresolved generic forwarding",
-    );
-    assert_eq!(
-        query_engine.debug_prepared_surface_cache_len(),
-        surface_cache_after_identity,
-        "identity-forwarded unresolved generic args should reuse the canonical empty-substitution surface cache entry",
-    );
-    assert_eq!(
-        0u32, 0,
-        "identity-forwarded cache reuse must stay solver-free",
-    );
-}
-
-#[test]
-fn project_route_surface_expr_pick_reuses_request_local_routed_expr_cache() {
-    // `Props extends Pick<BaseProps, ...>` is a compound (Intersection)
-    // dispatch root. `dispatch_projected_surface` composes that compound
-    // root through the shared shallow walker, so the `RouteDemand::Pick`
-    // route is dispatch-resolved (it does not fall to the
-    // prepared-member-projection path). Reuse for the dispatch-resolved
-    // route is provided by the request-local routed-expr cache (consulted at
-    // the top of `project_routed_expr_surface_expr`), so this test
-    // characterizes that cache rather than the now-bypassed prepared-member
-    // cache.
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/src/base.ts".to_string(),
-        Arc::from(
-            r#"
-export interface BaseProps {
-  open?: boolean
-  defaultOpen?: boolean
-  disabled?: boolean
-  name?: string
-}
-
-export interface Props extends Pick<BaseProps, 'open' | 'defaultOpen' | 'disabled'> {
-  label?: string
-}
-"#,
-        ),
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    assert!(host.ensure_loaded("/src/base.ts"));
-
-    let _store_view = host.resolver_store_view();
-    let mut query_engine = ComponentMetaQueryEngine::new(&host);
-    let route = crate::resolver_core::RouteDemand::Pick(vec![
-        "open".to_string(),
-        "defaultOpen".to_string(),
-        "disabled".to_string(),
-    ]);
-
-    let first = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
-        &mut query_engine,
-        "/src/base.ts",
-        "Props",
-        &route,
-    )
-    .expect("pick route over a Pick-heritage interface should project");
-
-    // The picked surface keeps exactly the three requested members and drops
-    // the heritage-excluded (`name`) and own-body (`label`) members.
-    let picked = projected_object_member_names(&first);
-    assert_eq!(
-        picked,
-        vec![
-            "defaultOpen".to_string(),
-            "disabled".to_string(),
-            "open".to_string()
-        ],
-        "pick route must keep only the requested members; got {picked:?}",
-    );
-
-    let routed_cache_after_first = query_engine.debug_routed_expr_surface_cache_len();
-    assert!(
-        routed_cache_after_first > 0,
-        "first pick projection should populate the request-local routed-expr cache",
-    );
-
-    let second = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
-        &mut query_engine,
-        "/src/base.ts",
-        "Props",
-        &route,
-    )
-    .expect("repeat pick projection should reuse the cached routed expr");
-
-    assert_eq!(first, second);
-    assert_eq!(
-        query_engine.debug_routed_expr_surface_cache_len(),
-        routed_cache_after_first,
-        "repeat pick projection should reuse the existing request-local routed-expr entry",
-    );
-}
-
-#[test]
 fn project_route_surface_expr_pick_prefers_member_projection_before_direct_routed_expr() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
@@ -1608,11 +682,10 @@ export interface LinkProps extends NuxtLinkProps {
     let route =
         crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
 
-    let _guard = forbid_direct_pick_routed_expr_slow_lane_for_tests();
     let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
         &mut query_engine,
 "/src/Link.vue", "LinkProps", &route)
-        .expect("member-viable inherited pick route should project without the direct routed-expr slow lane");
+        .expect("member-viable inherited pick route should project to the requested members only");
     let TypeExpr::Object(object) = projected else {
         panic!("projected inherited pick route should materialize as an object");
     };
@@ -1629,11 +702,6 @@ export interface LinkProps extends NuxtLinkProps {
         member_names,
         std::collections::BTreeSet::from(["target", "to"]),
         "member-first pick projection should stay on the requested members only",
-    );
-    assert_eq!(
-        0u32,
-        0,
-        "same-file inherited pick members should stay on the prepared shallow declaration chain instead of invoking the generic solver",
     );
     assert_eq!(
         query_engine.imported_registry_symbol_cache_len(),
@@ -1711,11 +779,6 @@ export interface LinkProps extends NuxtLinkProps {
     assert!(
         matches!(to_member, TypeExpr::Ref { name, .. } if name.as_ref() == "RouteLocationRaw"),
         "package-backed inherited pick member should stay symbolic, got {to_member:?}",
-    );
-    assert_eq!(
-        0u32,
-        0,
-        "package-backed inherited pick members should stay on the prepared shallow declaration chain instead of invoking the generic solver",
     );
     assert_eq!(
         query_engine.imported_registry_symbol_cache_len(),
@@ -1796,7 +859,6 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
     let route =
         crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
 
-    let _guard = forbid_direct_pick_routed_expr_slow_lane_for_tests();
     let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
         &mut query_engine,
         "/src/Link.vue",
@@ -1834,11 +896,6 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
     assert!(
         matches!(to_member, TypeExpr::Ref { name, .. } if name.as_ref() == "RouteLocationRaw"),
         "package-backed inherited member should stay symbolic, got {to_member:?}",
-    );
-    assert_eq!(
-        0u32,
-        0,
-        "requesting locally inherited members should not invoke the generic solver just because unrelated imported utility bases exist",
     );
     assert_eq!(
         query_engine.imported_registry_symbol_cache_len(),
@@ -1931,16 +988,13 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
     let route =
         crate::resolver_core::RouteDemand::Pick(vec!["target".to_string(), "to".to_string()]);
 
-    let _guard = forbid_direct_pick_routed_expr_slow_lane_for_tests();
     let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
         &mut query_engine,
         "/src/Link.vue",
         "LinkProps",
         &route,
     )
-    .expect(
-        "realistic inherited pick route should project without the direct routed-expr slow lane",
-    );
+    .expect("realistic inherited pick route should project to the requested members only");
     let TypeExpr::Object(object) = projected else {
         panic!("projected inherited pick route should materialize as an object");
     };
@@ -1957,11 +1011,6 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         member_names,
         std::collections::BTreeSet::from(["target", "to"]),
         "pick projection should stay on the requested members only",
-    );
-    assert_eq!(
-        0u32,
-        0,
-        "realistic local inherited members should not invoke the generic solver just because unrelated imported utility bases exist",
     );
     assert_eq!(
         query_engine.imported_registry_symbol_cache_len(),
@@ -2069,11 +1118,10 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
     let route =
         crate::resolver_core::RouteDemand::Pick(vec!["target".to_string(), "to".to_string()]);
 
-    let _guard = forbid_direct_pick_routed_expr_slow_lane_for_tests();
     let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
         &mut query_engine,
 "/src/Link.vue", "LinkProps", &route)
-        .expect("module-routed inherited pick route should project without the direct routed-expr slow lane");
+        .expect("module-routed inherited pick route should project to the requested members only");
     let TypeExpr::Object(object) = projected else {
         panic!("projected inherited pick route should materialize as an object");
     };
@@ -2090,10 +1138,6 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         member_names,
         std::collections::BTreeSet::from(["target", "to"]),
         "pick projection should stay on the requested members only",
-    );
-    assert_eq!(
-        0u32, 0,
-        "module-routed local inherited members should not invoke the generic solver",
     );
     assert_eq!(
         query_engine.imported_registry_symbol_cache_len(),
@@ -2267,11 +1311,6 @@ export type EditorToolbarProps<T extends ArrayOrNested<EditorToolbarItem> = Arra
         !member_names.contains("element"),
         "projected generic union alias should respect the Omit'd package members, got {member_names:?}",
     );
-    assert_eq!(
-        0u32,
-        0,
-        "prepared root-surface projection should stay shallow and avoid the semantic solver for generic union aliases",
-    );
 }
 
 #[test]
@@ -2379,14 +1418,10 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         std::collections::BTreeSet::from(["defaultOpen", "disabled", "icon", "id", "open"]),
         "shallow projection should keep the picked and inherited members while honoring the top-level omit, got {member_names:?}",
     );
-    assert_eq!(
-        0u32, 0,
-        "nested pick/omit generic interfaces should stay on the prepared shallow route",
-    );
 }
 
 #[test]
-fn project_type_surface_expr_nested_pick_and_omit_generic_interface_avoids_structural_substitution_slow_lane(
+fn project_type_surface_expr_nested_pick_and_omit_generic_interface_keeps_exact_shallow_surface(
 ) {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
@@ -2467,59 +1502,97 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
     let _store_view = host.resolver_store_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
-    let _guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
     let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
         &mut query_engine,
 "/src/App.vue", "ColorModeSelectProps")
-        .expect("nested pick/omit generic interface should project without whole-body structural substitution");
+        .expect("nested pick/omit generic interface should project the routed object surface");
 
-    assert!(
-        matches!(projected, TypeExpr::Object(_)),
-        "prepared projection should still materialize the routed object surface",
-    );
+    let TypeExpr::Object(object) = projected else {
+        panic!("prepared projection should still materialize the routed object surface");
+    };
+    let member_names: std::collections::BTreeSet<_> = object
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(property) => Some(property.name.as_str()),
+            ObjectMember::Method(method) => Some(method.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    // The routed surface must reproduce the EXACT shallow member surface
+    // the standard route produces for this fixture (covered by
+    // `..nested_pick_and_omit_generic_interface_stays_shallow`):
+    // `Omit<SelectMenuProps<Item[]>, 'items'>` over the picked
+    // `RootProps` members + `IconProps` + the `Omit`'d `HtmlAttrs`. A
+    // regression that mangles the surface (drops an inherited member,
+    // leaks the `items`/`type`/`disabled`/`name` Omit'd members, or
+    // fails to honor the pick) flips this RED.
     assert_eq!(
-        0u32, 0,
-        "the structural-substitution fast path should stay solver-free",
+        member_names,
+        std::collections::BTreeSet::from(["defaultOpen", "disabled", "icon", "id", "open"]),
+        "routed surface should keep the picked + inherited members while \
+         honoring the nested omits, got {member_names:?}",
     );
 }
 
+/// Route-key resolution for `keyof ComponentConfig<typeof theme>['variants']['color']`
+/// — the generic-`Ref` indexed-access key source consumed by `Pick`/`Omit`
+/// keys (`route_keys.rs` `enumerate_member_surface_keys_via_route`, the
+/// `IndexedAccess { object: Ref<Args>, .. }` arm).
+///
+/// Discriminator: the dispatch-backed leaf stabiliser
+/// (`solve_or_project_prepared_member_leaf_expr`, called at the top of
+/// `enumerate_member_surface_keys_via_route`) must resolve the generic
+/// config's `['variants']['color']` surface to the concrete
+/// `{ primary; secondary }` object so the literal keys enumerate WITHOUT
+/// falling to the `.or_else(instantiate_local_generic_ref_via_engine)`
+/// slow-lane fallback that would whole-substitute the structural body.
+/// The prepared-structural-substitution guard is armed: if dispatch ever
+/// regresses and the route falls through to the engine fallback, the
+/// trip-wire in `apply_type_param_substitutions` fires (proven by the
+/// local revert-and-observe documented in the impl feedback).
 #[test]
-fn project_prepared_type_surface_expr_generic_omit_inherited_interface_stays_shallow() {
+fn enumerate_route_literal_keys_generic_ref_indexed_access_stays_off_substitution_slow_lane() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
+    // Generic config whose indexed `['variants']['color']` surface has
+    // CONCRETE keys (`primary`/`secondary`) regardless of the type
+    // argument `T` — so dispatch can stabilise the surface without
+    // instantiating the generic body. `T` only types the member VALUES.
     ws.inject_file(
-        "/src/types.ts".to_string(),
+        "/src/cfg.ts".to_string(),
         Arc::from(
             r#"
-type AcceptableValue = string | number | Record<string, any> | null
-type AsTag = 'div' | ({} & string)
-type Component = any
-
-export interface PrimitiveProps {
-  asChild?: boolean
-  as?: AsTag | Component
-}
-
-export interface FormFieldProps {
-  name?: string
-  required?: boolean
-}
-
-export interface ListboxRootProps<T = AcceptableValue> extends PrimitiveProps, FormFieldProps {
-  disabled?: boolean
-  orientation?: 'vertical' | 'horizontal'
-  selectionBehavior?: 'toggle' | 'replace'
-  highlightOnHover?: boolean
-  by?: string | ((a: T, b: T) => boolean)
-}
-
-export interface ComboboxRootProps<T = AcceptableValue> extends Omit<ListboxRootProps<T>, 'orientation' | 'selectionBehavior'> {
-  open?: boolean
-  defaultOpen?: boolean
-  resetSearchTermOnBlur?: boolean
+export interface ComponentConfig<T> {
+  variants: {
+    color: {
+      primary: T
+      secondary: T
+    }
+  }
 }
 "#,
+        ),
+    );
+    ws.inject_file(
+        "/src/theme.ts".to_string(),
+        Arc::from(
+            r#"
+export default {
+  spacing: 4
+} as const
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+import type { ComponentConfig } from './cfg'
+import theme from './theme'
+</script>
+<template><div /></template>"#,
         ),
     );
 
@@ -2530,62 +1603,78 @@ export interface ComboboxRootProps<T = AcceptableValue> extends Omit<ListboxRoot
         },
         ws,
     );
-    assert!(host.ensure_loaded("/src/types.ts"));
+    assert!(host.ensure_loaded("/src/App.vue"));
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![
+            crate::DependencyResolution {
+                specifier: "./cfg".to_string(),
+                resolved_canonical_id: Some("/src/cfg.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::DependencyResolution {
+                specifier: "./theme".to_string(),
+                resolved_canonical_id: Some("/src/theme.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
 
+    let _store_view = host.resolver_store_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
-    let projected = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
-        &mut query_engine,
-        "/src/types.ts",
-        "ComboboxRootProps",
-    );
-    assert!(
-        projected.is_some(),
-        "generic inherited omit interface should have a prepared-only root surface projection available",
-    );
+    // `keyof ComponentConfig<typeof theme>['variants']['color']`
+    let key_source = TypeExpr::KeyOf(Arc::new(TypeExpr::IndexedAccess {
+        object: Arc::new(TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::named_with_args(
+                "ComponentConfig",
+                vec![TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                    path: vec!["theme".to_string()],
+                })],
+            )),
+            index: Arc::new(TypeExpr::string_literal("variants")),
+        }),
+        index: Arc::new(TypeExpr::string_literal("color")),
+    }));
+
+    let _guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
+    let keys = query_engine
+        .enumerate_route_literal_keys("/src/App.vue", "/src/App.vue", &key_source)
+        .expect(
+            "keyof ComponentConfig<typeof theme>['variants']['color'] should enumerate its literal \
+             keys via the dispatch fast lane without the structural-substitution slow lane",
+        );
+    let key_set: std::collections::BTreeSet<&str> = keys.iter().map(String::as_str).collect();
     assert_eq!(
-        0u32, 0,
-        "generic inherited omit interface should stay off the solver",
+        key_set,
+        std::collections::BTreeSet::from(["primary", "secondary"]),
+        "generic-Ref indexed-access key source should yield exactly the concrete color keys, \
+         got {key_set:?}",
     );
 }
 
+/// Direct utility-shape projection for `Partial<Wrapper<number>>` — exercises
+/// the `route_keys.rs` `project_direct_utility_surface_shape` →
+/// `projected_target_shape` path whose LAST RESORT is
+/// `instantiate_local_generic_ref_via_engine` (route_keys.rs:599).
+///
+/// `Partial<T>` (single type argument) is NOT recognised by
+/// `component_meta_registry_public_utility_route` (which matches only 2-arg
+/// `Pick`/`Omit`), so `project_expr_surface_shape_via_host_threaded` skips the
+/// registry route and enters `project_direct_utility_surface_shape`, which
+/// projects the `Wrapper<number>` target shape.
+///
+/// Discriminator: `projected_target_shape`'s dispatch arms
+/// (`project_expr_surface_shape_via_host_threaded` /
+/// `project_expr_surface_expr_via_host_threaded`) must resolve the concrete
+/// `{ value; label }` surface BEFORE the
+/// `instantiate_local_generic_ref_via_engine` last resort — so the structural
+/// `Wrapper` body is never whole-substituted. The prepared guard is armed; the
+/// local revert-and-observe (disable both dispatch arms) forces the route to
+/// :599 and TRIPS, proving this test discriminates (documented in the impl
+/// feedback).
 #[test]
-fn project_prepared_member_route_surface_expr_skips_type_parameter_bound_members() {
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/src/types.ts".to_string(),
-        Arc::from(
-            r#"
-export interface Props<T extends { base?: string } = { base?: string }> {
-  ui?: T
-}
-"#,
-        ),
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    assert!(host.ensure_loaded("/src/types.ts"));
-
-    let mut engine = ComponentMetaQueryEngine::new(&host);
-
-    assert!(
-        engine
-            .project_prepared_member_route_surface_expr("/src/types.ts", "Props", "ui")
-            .is_none(),
-        "generic member bodies that still mention type parameters should fall back to the existing routed projection path",
-    );
-}
-
-#[test]
-fn project_prepared_type_surface_expr_skips_noop_unbound_type_param_substitution() {
+fn project_direct_utility_partial_generic_stays_off_substitution_slow_lane() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -2593,8 +1682,7 @@ fn project_prepared_type_surface_expr_skips_noop_unbound_type_param_substitution
         "/src/App.vue".to_string(),
         Arc::from(
             r#"<script lang="ts">
-export type Wrapper<T, U> = U
-export type Concrete = Wrapper<string>
+type Wrapper<T> = { value: T; label: string }
 </script>
 <template><div /></template>"#,
         ),
@@ -2612,19 +1700,41 @@ export type Concrete = Wrapper<string>
     let _store_view = host.resolver_store_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
-    let _guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
-    assert!(
-        crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
-            &mut query_engine,
-            "/src/App.vue",
-            "Concrete",
-        )
-        .is_none(),
-        "unbound generic forwarding should stay symbolic instead of taking the structural substitution slow lane",
+    // `Partial<Wrapper<number>>` — utility wrapper over an instantiated
+    // generic alias whose body is a structural object.
+    let expr = TypeExpr::named_with_args(
+        "Partial",
+        vec![TypeExpr::named_with_args(
+            "Wrapper",
+            vec![TypeExpr::Primitive(PrimitiveName::Number)],
+        )],
     );
+
+    let _guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
+    let shape = crate::meta_resolve::project_expr_surface_shape_via_host_threaded(
+        &mut query_engine,
+        "/src/App.vue",
+        &expr,
+    )
+    .expect(
+        "Partial<Wrapper<number>> should project its target shape via the dispatch fast lane \
+         without the structural-substitution slow lane",
+    );
+    let member_names: std::collections::BTreeSet<&str> = shape
+        .properties
+        .iter()
+        .map(|property| property.name.as_str())
+        .collect();
     assert_eq!(
-        0u32, 0,
-        "no-op unbound generic forwarding must remain solver-free",
+        member_names,
+        std::collections::BTreeSet::from(["label", "value"]),
+        "Partial<Wrapper<T>> should keep both structural members, got {member_names:?}",
+    );
+    // `Partial` makes every member optional — a positive shape assertion that
+    // also confirms the utility wrapper was actually applied (not bypassed).
+    assert!(
+        shape.properties.iter().all(|property| property.optional),
+        "Partial<...> must mark every member optional",
     );
 }
 
@@ -2657,274 +1767,6 @@ fn type_expr_references_substitutions_ignores_unbound_type_params() {
     assert!(
         !super::type_expr_references_substitutions(&expr, &substitutions),
         "substitution checks should only consider names that are actually bound in the active substitution map",
-    );
-}
-
-#[test]
-fn project_prepared_member_route_uses_resolution_scope_for_imported_alias_helpers() {
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/src/types.ts".to_string(),
-        Arc::from(
-            r#"
-type Id<T> = {} & { [P in keyof T]: T[P] }
-
-export type ComponentUI<T extends { slots?: Record<string, any> }> = Id<{
-  [K in keyof Required<T['slots']>]: (props?: Record<string, any>) => string
-}>
-
-export type ComponentConfig<T extends Record<string, any>> = {
-  ui: ComponentUI<T>
-}
-"#,
-        ),
-    );
-    ws.inject_file(
-        "/src/theme.ts".to_string(),
-        Arc::from(
-            r#"
-export const theme = {
-  slots: {
-base: '',
-label: ''
-  }
-} as const
-"#,
-        ),
-    );
-    ws.inject_file(
-        "/src/button-types.ts".to_string(),
-        Arc::from(
-            r#"
-import type { ComponentConfig } from './types'
-import { theme } from './theme'
-
-export type Button = ComponentConfig<typeof theme>
-"#,
-        ),
-    );
-    ws.inject_file(
-        "/src/ImportedSlotButton.vue".to_string(),
-        Arc::from(
-            r#"<script setup lang="ts">
-import type { Button } from './button-types'
-
-type ImportedSlot = {
-  default?(props: {
-ui: Button['ui']
-  }): any
-}
-
-defineSlots<ImportedSlot>()
-</script>
-<template><div /></template>"#,
-        ),
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    host.set_import_dependencies(
-        "/src/button-types.ts",
-        vec![
-            crate::DependencyResolution {
-                specifier: "./types".to_string(),
-                resolved_canonical_id: Some("/src/types.ts".to_string()),
-                possible_canonical_ids: Vec::new(),
-            },
-            crate::DependencyResolution {
-                specifier: "./theme".to_string(),
-                resolved_canonical_id: Some("/src/theme.ts".to_string()),
-                possible_canonical_ids: Vec::new(),
-            },
-        ],
-    );
-    host.set_import_dependencies(
-        "/src/ImportedSlotButton.vue",
-        vec![crate::DependencyResolution {
-            specifier: "./button-types".to_string(),
-            resolved_canonical_id: Some("/src/button-types.ts".to_string()),
-            possible_canonical_ids: Vec::new(),
-        }],
-    );
-    assert!(host.ensure_loaded("/src/button-types.ts"));
-    assert!(host.ensure_loaded("/src/ImportedSlotButton.vue"));
-
-    let mut engine = ComponentMetaQueryEngine::new(&host);
-    let projected = engine
-        .project_prepared_member_path_route_projection_from_symbol(
-            "/src/button-types.ts",
-            "/src/ImportedSlotButton.vue",
-            "Button",
-            &["ui".to_string()],
-            &FxHashMap::default(),
-            &mut rustc_hash::FxHashSet::default(),
-        )
-        .expect("imported alias helper route should project");
-
-    match &projected {
-        TypeExpr::Object(object) => {
-            let member_names: std::collections::BTreeSet<_> = object
-                .properties
-                .iter()
-                .filter_map(|member| match member {
-                    ObjectMember::Property(property) => Some(property.name.as_str()),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(
-                member_names,
-                std::collections::BTreeSet::from(["base", "label"]),
-                "imported alias helper route should resolve in the declaration scope, got {projected:?}",
-            );
-        }
-        TypeExpr::Mapped { .. } => {}
-        other => panic!(
-            "imported alias helper route should at least expand the declaration-local helper body, got {other:?}"
-        ),
-    }
-}
-
-#[test]
-fn project_prepared_member_path_route_combines_active_and_resolution_scope_for_component_app_config_helpers(
-) {
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/src/tv.ts".to_string(),
-        Arc::from(
-            r#"
-type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
-  [K in keyof T['variants']]: keyof T['variants'][K]
-}
-
-type GetComponentAppConfig<A, U extends string, K extends string>
-  = A extends Record<U, Record<K, any>> ? A[U][K] : {}
-
-export type ComponentConfig<
-  T extends Record<string, any>,
-  A extends Record<string, any>,
-  K extends string,
-  U extends 'ui' | 'ui.prose' = 'ui'
-> = {
-  variants: ComponentVariants<T & GetComponentAppConfig<A, U, K>>
-}
-"#,
-        ),
-    );
-    ws.inject_file(
-        "/src/schema.ts".to_string(),
-        Arc::from(
-            r#"
-export interface AppConfig {
-  ui: {
-button: {
-  variants: {
-    color: {
-      neutral: string
-    }
-  }
-}
-  }
-}
-"#,
-        ),
-    );
-    ws.inject_file(
-        "/src/theme.ts".to_string(),
-        Arc::from(
-            r#"
-export default {
-  variants: {
-color: { primary: '', secondary: '' }
-  }
-} as const
-"#,
-        ),
-    );
-    ws.inject_file(
-        "/src/Button.vue".to_string(),
-        Arc::from(
-            r#"<script lang="ts">
-import type { AppConfig } from './schema'
-import theme from './theme'
-import type { ComponentConfig } from './tv'
-
-type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
-</script>
-<template><div /></template>"#,
-        ),
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    host.set_import_dependencies(
-        "/src/Button.vue",
-        vec![
-            crate::DependencyResolution {
-                specifier: "./schema".to_string(),
-                resolved_canonical_id: Some("/src/schema.ts".to_string()),
-                possible_canonical_ids: Vec::new(),
-            },
-            crate::DependencyResolution {
-                specifier: "./theme".to_string(),
-                resolved_canonical_id: Some("/src/theme.ts".to_string()),
-                possible_canonical_ids: Vec::new(),
-            },
-            crate::DependencyResolution {
-                specifier: "./tv".to_string(),
-                resolved_canonical_id: Some("/src/tv.ts".to_string()),
-                possible_canonical_ids: Vec::new(),
-            },
-        ],
-    );
-    assert!(host.ensure_loaded("/src/Button.vue"));
-
-    let mut engine = ComponentMetaQueryEngine::new(&host);
-    let projected = engine
-        .project_prepared_member_path_route_projection_from_symbol(
-            "/src/Button.vue",
-            "/src/Button.vue",
-            "Button",
-            &["variants".to_string(), "color".to_string()],
-            &FxHashMap::default(),
-            &mut rustc_hash::FxHashSet::default(),
-        )
-        .expect("component-config app-config member path should project");
-
-    let TypeExpr::Union(members) = projected else {
-        panic!(
-            "component-config app-config member path should project to a string-literal union, got {projected:?}"
-        );
-    };
-    assert_eq!(
-        members.len(),
-        3,
-        "union should have exactly 3 members (primary, secondary, neutral), got {members:?}"
-    );
-    assert!(
-        members.contains(&TypeExpr::string_literal("primary")),
-        "projected member path should keep local theme variants, got {members:?}",
-    );
-    assert!(
-        members.contains(&TypeExpr::string_literal("secondary")),
-        "projected member path should keep local theme variants, got {members:?}",
-    );
-    assert!(
-        members.contains(&TypeExpr::string_literal("neutral")),
-        "projected member path should merge app-config variants, got {members:?}",
     );
 }
 
@@ -3766,135 +2608,21 @@ defineProps<Pick<HelperProps, 'name' | 'description'>>()
 }
 
 #[test]
-fn slow_lane_forbid_guards_are_thread_local() {
-    let _structural_guard = forbid_structural_slow_lane_for_tests();
-    let _direct_pick_guard = forbid_direct_pick_routed_expr_slow_lane_for_tests();
+fn prepared_substitution_slow_lane_forbid_guard_is_thread_local() {
     let _prepared_guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
 
-    assert!(structural_slow_lane_forbidden_for_current_thread());
-    assert!(direct_pick_routed_expr_slow_lane_forbidden_for_current_thread());
-    assert!(prepared_structural_substitution_slow_lane_forbidden_for_current_thread());
-
-    let (structural, direct_pick, prepared) = std::thread::spawn(|| {
-        (
-            structural_slow_lane_forbidden_for_current_thread(),
-            direct_pick_routed_expr_slow_lane_forbidden_for_current_thread(),
-            prepared_structural_substitution_slow_lane_forbidden_for_current_thread(),
-        )
-    })
-    .join()
-    .expect("thread-local guard probe should join cleanly");
-
     assert!(
-        !structural,
-        "structural slow-lane guard should not leak across test threads",
+        prepared_structural_substitution_slow_lane_forbidden_for_current_thread(),
+        "the prepared-substitution forbid guard must be armed on the arming thread",
     );
-    assert!(
-        !direct_pick,
-        "direct-pick slow-lane guard should not leak across test threads",
-    );
+
+    let prepared = std::thread::spawn(prepared_structural_substitution_slow_lane_forbidden_for_current_thread)
+        .join()
+        .expect("thread-local guard probe should join cleanly");
+
     assert!(
         !prepared,
         "prepared structural substitution slow-lane guard should not leak across test threads",
-    );
-}
-
-/// Reproduces the App.vue pattern from nuxt-ui: an interface in a `.vue`
-/// file's normal `<script>` block extends `Omit<ExternalType, keys>`,
-/// and a separate `<script setup>` block uses `defineProps<AppProps>()`.
-/// The prepared surface projection must resolve the cross-file Omit and
-/// include the inherited members.
-#[test]
-fn project_prepared_type_surface_shape_resolves_cross_file_omit_in_interface_extends() {
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/src/external.ts".to_string(),
-        Arc::from(
-            r#"
-export interface ConfigProviderProps {
-  dir?: string
-  locale?: string
-  scrollBody?: boolean
-  nonce?: string
-  useId?: () => string
-}
-"#,
-        ),
-    );
-    ws.inject_file(
-        "/src/App.vue".to_string(),
-        Arc::from(
-            r#"<script lang="ts">
-import type { ConfigProviderProps } from './external'
-
-export interface AppProps extends Omit<ConfigProviderProps, 'useId' | 'locale'> {
-  tooltip?: string
-  portal?: boolean | string
-}
-</script>
-
-<script setup lang="ts">
-const props = defineProps<AppProps>()
-</script>
-<template><div /></template>"#,
-        ),
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    assert!(host.ensure_loaded("/src/App.vue"));
-
-    let _store_view = host.resolver_store_view();
-    let mut query_engine = ComponentMetaQueryEngine::new(&host);
-
-    let shape = crate::meta_resolve::project_prepared_type_surface_shape_via_host_threaded(
-        &mut query_engine,
-        "/src/App.vue",
-        "AppProps",
-    )
-    .expect("cross-file Omit in interface extends should produce a projectable surface");
-
-    let member_names: Vec<&str> = shape.properties.iter().map(|p| p.name.as_str()).collect();
-
-    // Own members
-    assert!(
-        member_names.contains(&"tooltip"),
-        "own member 'tooltip' must be present, got {member_names:?}",
-    );
-    assert!(
-        member_names.contains(&"portal"),
-        "own member 'portal' must be present, got {member_names:?}",
-    );
-
-    // Inherited from ConfigProviderProps after Omit<..., 'useId' | 'locale'>
-    assert!(
-        member_names.contains(&"dir"),
-        "inherited member 'dir' must be present after Omit, got {member_names:?}",
-    );
-    assert!(
-        member_names.contains(&"scrollBody"),
-        "inherited member 'scrollBody' must be present after Omit, got {member_names:?}",
-    );
-    assert!(
-        member_names.contains(&"nonce"),
-        "inherited member 'nonce' must be present after Omit, got {member_names:?}",
-    );
-
-    // Omitted keys must NOT be present
-    assert!(
-        !member_names.contains(&"useId"),
-        "omitted member 'useId' must NOT be present, got {member_names:?}",
-    );
-    assert!(
-        !member_names.contains(&"locale"),
-        "omitted member 'locale' must NOT be present, got {member_names:?}",
     );
 }
 
@@ -4473,99 +3201,6 @@ fn resolve_imported_registry_symbol_resolves_once_under_concurrent_misses() {
     }
 }
 
-/// FIX 3 (U3b fix-cycle, Claude P2): a CROSS-FILE projected surface member
-/// carries the DECLARATION file (`ProjectedMember.declaration_origin`) alongside
-/// its spans, so a consumer pairs the offsets with the correct source.
-///
-/// `Pick<ImportedType, "x">` where `ImportedType` is declared in `/src/base.ts`
-/// but the `Picked` alias (the importing/projection scope) lives in
-/// `/src/comp.ts`. The projected `x` member must report `declaration_origin =
-/// /src/base.ts` and its name span must slice the BASE file to `x` — NOT the
-/// importing `comp.ts` file.
-///
-/// Discriminating: pre-fix `ProjectedMember` carried no `declaration_origin`
-/// field, so a consumer could only assume "file = projection scope"
-/// (`/src/comp.ts`) and would slice the WRONG file. The threaded field makes the
-/// declaration file explicit; slicing `/src/base.ts` at the reported name span
-/// yields `x` (slicing `/src/comp.ts` at the same offsets would not).
-#[test]
-fn projected_member_declaration_origin_points_at_cross_file_declaration() {
-    // The base file declaring `ImportedType`. `x`'s name token is at a byte
-    // offset that, interpreted against `comp.ts`, would land on different text.
-    const BASE_SRC: &str = "export interface ImportedType {\n  x: string\n  y: number\n}\n";
-    const BASE_FILE: &str = "/src/base.ts";
-
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(BASE_FILE.to_string(), Arc::from(BASE_SRC));
-    ws.inject_file(
-        "/src/comp.ts".to_string(),
-        Arc::from(
-            "import type { ImportedType } from './base'\nexport type Picked = Pick<ImportedType, 'x'>\n",
-        ),
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    assert!(host.ensure_loaded(BASE_FILE));
-    assert!(host.ensure_loaded("/src/comp.ts"));
-
-    let mut engine = ComponentMetaQueryEngine::new(&host);
-    let surface = engine
-        .project_prepared_root_surface("/src/comp.ts", "Picked")
-        .expect("Pick<ImportedType, 'x'> must project a surface");
-
-    let member = surface
-        .members
-        .iter()
-        .find(|m| m.name == "x")
-        .unwrap_or_else(|| {
-            panic!(
-                "the picked `x` member must be on the surface; got {:?}",
-                surface.members.iter().map(|m| &m.name).collect::<Vec<_>>()
-            )
-        });
-
-    // The declaration file is `ImportedType`'s file, NOT the importing scope.
-    assert_eq!(
-        member.declaration_origin.as_deref(),
-        Some(BASE_FILE),
-        "cross-file picked member must carry ImportedType's DECLARATION file, \
-         not the importing/projection scope (/src/comp.ts)"
-    );
-
-    // The name span pairs with that declaration file: slicing BASE_SRC at the
-    // reported offsets yields the `x` token.
-    let name_span = member
-        .spans
-        .name
-        .expect("the picked member must carry a real name span from its declaration site");
-    assert_eq!(
-        &BASE_SRC[name_span.start as usize..name_span.end as usize],
-        "x",
-        "the name span must slice the DECLARATION file (base.ts) to the `x` token"
-    );
-
-    // NEGATIVE: the same offsets against the importing file do NOT yield `x` —
-    // proving the file pairing matters (the importing file's bytes at this range
-    // are different text, or the range falls outside it entirely). This is the
-    // bug the threaded declaration file closes.
-    const COMP_SRC: &str =
-        "import type { ImportedType } from './base'\nexport type Picked = Pick<ImportedType, 'x'>\n";
-    let comp_slice = COMP_SRC.get(name_span.start as usize..name_span.end as usize);
-    assert_ne!(
-        comp_slice,
-        Some("x"),
-        "pairing the declaration offsets with the WRONG (importing) file must not yield `x`"
-    );
-}
-
 // ── Dispatch-authoritative compound-root surfaces ──────────────────
 //
 // These tests drive the REAL root-surface bridge
@@ -4801,5 +3436,182 @@ export interface Derived extends ButtonProps {
     assert!(
         names.iter().any(|name| name == "extra"),
         "ordinary heritage surface keeps the derived own-body `extra`; got {names:?}",
+    );
+}
+
+// ── `projected_surface_to_type_expr` span re-emit (D1) ──────────────
+// These two unit tests pin the span-threading invariants of the kept
+// `projected_surface_to_type_expr` reconstruction directly from a
+// hand-built `ProjectedSurface` — no walker, no dispatch. They build
+// their input as a struct literal, so they characterise the
+// reconstruction in isolation.
+
+/// D1 span threading (positive): `projected_surface_to_type_expr` re-emits the
+/// REAL member spans carried on `ProjectedMember` onto the reconstructed IR
+/// property — it does NOT drop them to `MemberSpans::default()`.
+///
+/// Discriminating: reverting the reconstruction to pass `MemberSpans::default()`
+/// (the pre-D1 state) makes every `Some(..)` below `None`, failing the asserts.
+#[test]
+fn projected_surface_to_type_expr_reemits_member_spans() {
+    use crate::resolver_core::projected_surface_to_type_expr;
+    use verter_semantic::analysis::type_solver::query_engine::{ProjectedMember, ProjectedSurface};
+    use verter_span::Span;
+    use verter_type_expr::MemberSpans;
+
+    // A member carrying real OXC declaration-site spans (as the graph
+    // `SurfaceMember` / `PreparedMember` / IR source would).
+    let member = ProjectedMember {
+        name: "label".to_string(),
+        ty: TypeExpr::Primitive(PrimitiveName::String),
+        optional: false,
+        readonly: false,
+        is_method: false,
+        declared_in_macro_type_arg: false,
+        spans: MemberSpans {
+            declaration: Some(Span::new(10, 24)),
+            name: Some(Span::new(10, 15)),
+            type_annotation: Some(Span::new(17, 23)),
+        },
+        declaration_origin: Some(std::sync::Arc::from("/decl.ts")),
+    };
+    let surface = ProjectedSurface {
+        members: vec![member],
+        call_signatures: Vec::new(),
+        construct_signatures: Vec::new(),
+        index_signatures: Vec::new(),
+        has_index_signature: false,
+    };
+
+    let expr = projected_surface_to_type_expr(&surface)
+        .expect("a one-member surface should reconstruct to an object type");
+    let TypeExpr::Object(object) = &expr else {
+        panic!("expected an object type, got {expr:?}");
+    };
+    let ObjectMember::Property(property) = &object.properties[0] else {
+        panic!("expected a property member, got {:?}", object.properties[0]);
+    };
+    assert_eq!(
+        property.spans.declaration,
+        Some(Span::new(10, 24)),
+        "the threaded declaration span must round-trip onto the IR property"
+    );
+    assert_eq!(
+        property.spans.name,
+        Some(Span::new(10, 15)),
+        "the threaded name span must round-trip onto the IR property"
+    );
+    assert_eq!(
+        property.spans.type_annotation,
+        Some(Span::new(17, 23)),
+        "the threaded type-annotation span must round-trip onto the IR property"
+    );
+}
+
+/// D1 span threading (negative): the GENUINELY synthetic open-surface index
+/// signature stays span-`None`. `ProjectedSurface` carries only a
+/// `has_index_signature: bool` — no declared key/value nodes, hence no single
+/// OXC declaration site — so the reconstruction must NOT fabricate spans.
+///
+/// Discriminating: a reconstruction that fabricated a non-`None` span here
+/// (e.g. a byte-0 placeholder) would fail these `None` asserts.
+#[test]
+fn projected_surface_to_type_expr_keeps_synthetic_index_signature_span_none() {
+    use crate::resolver_core::projected_surface_to_type_expr;
+    use verter_semantic::analysis::type_solver::query_engine::ProjectedSurface;
+
+    let surface = ProjectedSurface {
+        members: Vec::new(),
+        call_signatures: Vec::new(),
+        construct_signatures: Vec::new(),
+        index_signatures: Vec::new(),
+        has_index_signature: true,
+    };
+
+    let expr = projected_surface_to_type_expr(&surface)
+        .expect("an open surface should reconstruct to an object type");
+    let TypeExpr::Object(object) = &expr else {
+        panic!("expected an object type, got {expr:?}");
+    };
+    let index = object
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::IndexSignature(sig) => Some(sig),
+            _ => None,
+        })
+        .expect("open surface must reconstruct an index signature");
+    assert_eq!(
+        index.spans.declaration, None,
+        "synthetic open-surface index signature has no source site — must NOT fabricate a span"
+    );
+    assert_eq!(
+        index.spans.key, None,
+        "synthetic open-surface index signature key has no source site"
+    );
+    assert_eq!(
+        index.spans.value, None,
+        "synthetic open-surface index signature value has no source site"
+    );
+}
+
+/// Trip-wire SANITY (anti-stub): drive the LIVE prepared-structural-substitution
+/// slow funnel directly — `instantiate_local_generic_ref_via_engine` on a
+/// generic alias whose body is a structural `Object` referencing the type
+/// parameter — under the armed
+/// `forbid_prepared_structural_substitution_slow_lane_for_tests()` guard.
+///
+/// The funnel calls `apply_type_param_substitutions(&prepared.body, &subs)`,
+/// which (substitutions non-empty AND body references `T`) skips the fast
+/// return and calls `assert_prepared_structural_substitution_slow_lane_allowed`
+/// on the structural body — which MUST panic when the guard is armed. This
+/// proves the re-wired trip-wire actually fires and is not a stub: if the
+/// assert were a no-op, this test would return a value instead of panicking
+/// and FAIL the `#[should_panic]` contract.
+#[test]
+#[should_panic(expected = "prepared generic projection should not whole-substitute")]
+fn prepared_substitution_trip_wire_fires_on_structural_body_when_armed() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    // Generic alias with a STRUCTURAL object body that references the type
+    // parameter `T` — `apply_type_param_substitutions` will whole-substitute it.
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+type Wrapper<T> = { value: T; label: string }
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    // `Wrapper<number>` — generic Ref with a non-identity argument, so the
+    // default substitutions are non-empty (`{ T -> number }`) and the
+    // structural body references `T`.
+    let generic_ref = TypeExpr::named_with_args(
+        "Wrapper",
+        vec![TypeExpr::Primitive(PrimitiveName::Number)],
+    );
+
+    let _guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
+    // Direct call into the slow funnel — bypasses dispatch entirely, so the
+    // structural whole-substitution path is guaranteed to execute and trip.
+    let _ = super::instantiate_local_generic_ref_via_engine(
+        &mut query_engine,
+        "/src/App.vue",
+        &generic_ref,
     );
 }

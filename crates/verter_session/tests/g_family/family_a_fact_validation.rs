@@ -1,0 +1,488 @@
+//! R3/R26/R28 arch guard for the Family A inner caches that
+//! migrated from `dep_signature: DepSignature` to
+//! `fact_dep_signature: Arc<[FactVersionRef]>` in Stage 7C.A1b.
+//!
+//! Live Family A `fact_dep_signature` caches (post walker-cluster
+//! deletion — the prepared-surface / prepared-member / prepared-target
+//! / routed-expr caches and their entries are DELETED):
+//!   - `ImportedRegistryEntry` / `ImportedRegistryDb`
+//!   - `DeclarationLookupEntry` / `DeclarationLookupDb`
+//!   - `ResolvabilityEntry` / `ResolvabilityDb`
+//!   - `OwnerCollectionEntry` / `OwnerCollectionDb`
+//!   - `ShapeCacheEntry` / `ShapeCacheDb` (the Block 6.i unification of
+//!     the former `MaterializeMemoEntry` + `MemberShapeCacheEntry`)
+//!
+//! Each entry MUST carry `fact_dep_signature: Arc<[FactVersionRef]>`
+//! and MUST NOT carry the legacy `dep_signature: DepSignature`. The
+//! warm-read validator routes through
+//! [`crate::fact_signature_helpers::validate_fact_signature_with_self_roots`]
+//! — the strict self-root validator, passing the entry's keyed
+//! canonical(s) as the self-root set — and the producer through the
+//! live engine wrappers [`engine_fact_signature_for_exported_type`] /
+//! [`engine_fact_signature_for_materialize_memo`] (and the central
+//! [`crate::fact_signature_helpers::fact_signature_for_canonical_member`]
+//! builder for single-member-keyed scopes) on cold compute.
+//!
+//! ## Source-grep arch guards
+//!
+//! The first test scans `component_meta_caches.rs` for the migrated
+//! field name shape; the second confirms the legacy field name is
+//! gone. The third pair confirms the producer call-sites use the
+//! new `engine_fact_signature_*` helpers (not the legacy
+//! `engine_dep_signature_for_canonical`).
+
+use std::fs;
+use std::path::PathBuf;
+
+fn read_session_source(relative: &str) -> String {
+    let cargo_manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let mut path = PathBuf::from(cargo_manifest_dir);
+    path.push("src");
+    path.push(relative);
+    fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
+}
+
+/// `ImportedRegistryEntry` — the one remaining bespoke Family A carrier
+/// (the `QueryNode`-bound imported-registry cache, migrated separately) —
+/// carries `fact_dep_signature: Arc<[FactVersionRef]>` and never the
+/// legacy `dep_signature: DepSignature`. Source-grep arch guard.
+#[test]
+fn imported_registry_entry_carries_fact_dep_signature() {
+    let src = read_session_source("component_meta_caches.rs");
+    // The live Family A `fact_dep_signature` entry set. The walker
+    // cluster's `PreparedTargetEntry` / `PreparedSurfaceEntry` /
+    // `PreparedMemberEntry` / `RoutedExprSurfaceEntry` are DELETED; their
+    // absence is guarded by `no_legacy_walker.rs::RETIRED_SYMBOLS`.
+    const ENTRIES: &[&str] = &[
+        "ImportedRegistryEntry",
+        "DeclarationLookupEntry",
+        "ResolvabilityEntry",
+        "OwnerCollectionEntry",
+        // Block 6.i — `MaterializeMemoEntry` + `MemberShapeCacheEntry`
+        // unified into `ShapeCacheEntry` under the new `ShapeCacheDb`.
+        "ShapeCacheEntry",
+    ];
+    for (db, value_type) in MIGRATED {
+        assert!(
+            src.contains(value_type),
+            "{db} must store `{value_type}` (the shared cache-runtime carrier) in its \
+             `entries` map. A bespoke per-cache `*Entry` carrier violates the cutover."
+        );
+    }
+    // None of the eight migrated caches define a bespoke carrier struct.
+    for retired in [
+        "pub struct DeclarationLookupEntry",
+        "pub struct ResolvabilityEntry",
+        "pub struct OwnerCollectionEntry",
+        "pub struct PreparedTargetEntry",
+        "pub struct ShapeCacheEntry",
+        "pub struct PreparedSurfaceEntry",
+        "pub struct PreparedMemberEntry",
+        "pub struct RoutedExprSurfaceEntry",
+    ] {
+        assert!(
+            !src.contains(retired),
+            "the bespoke carrier `{retired}` MUST be retired — the migrated single-entry \
+             caches store `cache_runtime::CacheEntry<Value>`."
+        );
+    }
+}
+
+/// The legacy `engine_dep_signature_for_canonical` helper is no
+/// longer called by Family A producers. Per the R28 path-precise
+/// contract, callers select one of:
+/// - `engine_fact_signature_for_canonical_member` — for caches
+///   keyed on a single member of an exporter type
+///   (`MemberPresence + Member`).
+/// - `engine_fact_signature_for_exported_type` — for caches keyed
+///   on a top-level type identity
+///   (`Export + LocalDecl + MemberShape`).
+/// - `engine_fact_signature_for_materialize_memo` — for the
+///   `MaterializeMemoDb` producer; provenance-pure, it roots the
+///   keyed scope on the observed materialisation-time content hash
+///   plus the observed-version `SyntacticExportSet` parse fact.
+#[test]
+fn family_a_producers_call_new_fact_helpers() {
+    let registry =
+        read_session_source("resolver_core/component_meta_query_engine/registry_decl.rs");
+    assert!(
+        !registry.contains("engine_dep_signature_for_canonical("),
+        "registry_decl.rs must NOT call engine_dep_signature_for_canonical after the R28 \
+         migration — use engine_fact_signature_for_exported_type instead."
+    );
+    assert!(
+        registry.contains("engine_fact_signature_for_exported_type("),
+        "registry_decl.rs must call engine_fact_signature_for_exported_type for its 4 \
+         (canonical, name)-keyed cache producers (imported_registry_db, declaration_lookup_db, \
+         resolvability_db, owner_collection_db) — these track top-level type identity."
+    );
+
+    let materialize = read_session_source("meta_resolve/materialize/field_types.rs");
+    assert!(
+        !materialize.contains("engine_dep_signature_for_canonical("),
+        "meta_resolve/materialize/field_types.rs must NOT call \
+         engine_dep_signature_for_canonical after the R28 migration — use \
+         engine_fact_signature_for_materialize_memo for the materialize_memo_db producer."
+    );
+    assert!(
+        materialize.contains("engine_fact_signature_for_materialize_memo("),
+        "meta_resolve/materialize/field_types.rs must call \
+         engine_fact_signature_for_materialize_memo for the materialize_memo_db \
+         producer — it roots the keyed scope canonical AND merges every canonical \
+         observed during materialization as a cross-file dependency fact."
+    );
+}
+
+/// A single Family A `fact_dep_signature` cache and the exact set of
+/// validation/bubble SITES its live read/compute path carries.
+///
+/// The site set is NOT uniform across caches: `ImportedRegistryDb` and
+/// `ShapeCacheDb` expose a separate compute-once `peek` entry point (an
+/// extra warm-read validator + bubble) on top of the cooperative
+/// `get_or_compute`(`_admit`) closures, whereas
+/// `DeclarationLookupDb` / `ResolvabilityDb` / `OwnerCollectionDb` have
+/// only the cooperative method. The guard asserts EACH cache's ACTUAL
+/// required sites, derived structurally from
+/// `component_meta_caches.rs`, never a uniform `>= N` count.
+struct FamilyACacheSpec {
+    /// The `impl XDb {` anchor that opens the cache's primary impl block.
+    impl_anchor: &'static str,
+    /// `Some("pub(crate) fn peek(")` for the two caches that expose a
+    /// compute-once `peek` entry point; `None` otherwise. When present,
+    /// the `peek` body MUST carry exactly one strict warm-read validator
+    /// and exactly one bubble.
+    peek_sig: Option<&'static str>,
+    /// The cooperative cold-compute method signature
+    /// (`get_or_compute`(`_admit`)). Its body MUST carry exactly two
+    /// strict validators (the warm-hit predicate + the post-compute
+    /// revalidator) and exactly two bubbles (the warm-hit bubble + the
+    /// cold-return bubble), partitioned so dropping ANY single one of
+    /// those four atomic sites flips the guard RED.
+    compute_sig: &'static str,
+}
+
+/// The authoritative live inventory of Family A `fact_dep_signature`
+/// caches and their per-cache validation site sets. The
+/// prepared-surface / prepared-member / prepared-target / routed-expr
+/// DBs are DELETED (their absence is guarded by
+/// `no_legacy_walker.rs::RETIRED_SYMBOLS`).
+const FAMILY_A_CACHES: &[FamilyACacheSpec] = &[
+    FamilyACacheSpec {
+        impl_anchor: "impl ImportedRegistryDb {",
+        peek_sig: Some("pub(crate) fn peek("),
+        compute_sig: "pub(crate) fn get_or_compute_admit<F>(",
+    },
+    FamilyACacheSpec {
+        impl_anchor: "impl DeclarationLookupDb {",
+        peek_sig: None,
+        compute_sig: "pub(crate) fn get_or_compute<F>(",
+    },
+    FamilyACacheSpec {
+        impl_anchor: "impl ResolvabilityDb {",
+        peek_sig: None,
+        compute_sig: "pub(crate) fn get_or_compute<F>(",
+    },
+    FamilyACacheSpec {
+        impl_anchor: "impl OwnerCollectionDb {",
+        peek_sig: None,
+        compute_sig: "pub(crate) fn get_or_compute<F>(",
+    },
+    FamilyACacheSpec {
+        impl_anchor: "impl ShapeCacheDb {",
+        peek_sig: Some("pub(crate) fn peek("),
+        compute_sig: "pub(crate) fn get_or_compute<F>(",
+    },
+];
+
+const STRICT_VALIDATOR: &str = "validate_fact_signature_with_self_roots(";
+const BUBBLE: &str = "bubble_fact_signature(ctx,";
+
+/// Extract the primary `impl XDb { … }` window — from `anchor` up to
+/// the next top-level `\nimpl ` or `\npub struct ` (whichever comes
+/// first), exclusive. The validation/bubble call sites for a cache all
+/// live in its primary impl block, so this window is the exact scope to
+/// resolve the cache's methods within.
+fn extract_db_impl_window<'a>(src: &'a str, anchor: &str) -> &'a str {
+    let start = src
+        .find(anchor)
+        .unwrap_or_else(|| panic!("expected `{anchor}` in component_meta_caches.rs"));
+    let body = &src[start..];
+    let after = &body[anchor.len()..];
+    let rel_end = ["\nimpl ", "\npub struct "]
+        .iter()
+        .filter_map(|m| after.find(m))
+        .min()
+        .unwrap_or(after.len());
+    &body[..anchor.len() + rel_end]
+}
+
+/// Byte index (within `haystack`) of the start of the `n`-th (1-based)
+/// occurrence of `needle`, or `None` if there are fewer than `n`.
+fn nth_occurrence(haystack: &str, needle: &str, n: usize) -> Option<usize> {
+    haystack.match_indices(needle).nth(n - 1).map(|(idx, _)| idx)
+}
+
+/// Assert that `region` (a named code site) carries EXACTLY one strict
+/// validator and EXACTLY one bubble — a binary present/absent check at
+/// that single site, not an aggregate `>= N` count. `site` and `cache`
+/// name the failing site in the panic.
+fn assert_one_validator_one_bubble(region: &str, site: &str, cache: &str) {
+    let validators = region.matches(STRICT_VALIDATOR).count();
+    assert_eq!(
+        validators, 1,
+        "{cache} {site} MUST carry EXACTLY one `{STRICT_VALIDATOR}...)` — dropping it leaves a \
+         stale-serve hole, duplicating it signals a mis-split. Observed {validators}. Region:\n{region}"
+    );
+    let bubbles = region.matches(BUBBLE).count();
+    assert_eq!(
+        bubbles, 1,
+        "{cache} {site} MUST carry EXACTLY one `{BUBBLE} ...)` so outer tracers see the inner \
+         observation set at this site. Observed {bubbles}. Region:\n{region}"
+    );
+}
+
+/// Every live Family A `fact_dep_signature` cache validates strictly
+/// through `validate_fact_signature_with_self_roots` — the strict
+/// self-root validator: the entry's keyed canonical(s) are passed as the
+/// self-root set, so the leading self-root `FileWholeHash` is validated
+/// strictly (a same-canonical edit, or a keyed canonical untracked by the
+/// live store view, rejects the entry) while cross-file dependency facts
+/// keep lazy permissiveness. The legacy lazy `validate_fact_signature`
+/// warm-hit validator is forbidden.
+///
+/// BINARY per-named-SITE guard (NOT an aggregate `>= N` count): each
+/// cache's required sites are derived structurally from the source and
+/// asserted individually, so dropping ANY single live site flips the
+/// guard RED — and a stray validator added to an unrelated cache/scope
+/// can never mask a cache that dropped one (the windows are
+/// method/closure-scoped, never file-wide). The required sites are:
+///
+/// - `peek` (only `ImportedRegistryDb` / `ShapeCacheDb`): exactly one
+///   warm-read validator + one bubble in the brace-balanced `peek` body.
+/// - `get_or_compute`(`_admit`) **warm-hit region** — the method body up
+///   to the cold-return bubble (the 2nd bubble token): exactly one
+///   warm-hit validator + one warm-hit bubble.
+/// - `get_or_compute`(`_admit`) **post-compute region** — from the
+///   cold-return bubble to the method end: exactly one post-compute
+///   revalidator + one cold-return bubble.
+///
+/// Because the two `get_or_compute` validators live in two disjoint
+/// regions partitioned at the cold-return bubble, dropping the warm-hit
+/// validator (warm region → 0) is detected INDEPENDENTLY of the
+/// post-compute revalidator (and vice versa); a drop-one-add-one swap
+/// within the method cannot keep the guard green.
+#[test]
+fn family_a_warm_hit_uses_fact_validation() {
+    let src = read_session_source("component_meta_caches.rs");
+
+    for spec in FAMILY_A_CACHES {
+        let cache = spec.impl_anchor;
+        let window = extract_db_impl_window(&src, cache);
+
+        // --- Site 1 (conditional): the compute-once `peek` entry point.
+        // Present only on the two caches that expose it. Exactly one
+        // warm-read validator + one bubble.
+        if let Some(peek_sig) = spec.peek_sig {
+            let peek_body = extract_fn_body(window, peek_sig);
+            assert_one_validator_one_bubble(peek_body, "peek", cache);
+        } else {
+            assert!(
+                !window.contains("pub(crate) fn peek("),
+                "{cache} unexpectedly grew a `peek` method — update FAMILY_A_CACHES to assert its \
+                 warm-read validator + bubble site instead of silently ignoring it."
+            );
+        }
+
+        // The cooperative cold-compute method body. It carries the
+        // warm-hit closure, the cold-return closure, and the post-compute
+        // revalidator closure (the `compute` builder carries neither
+        // token). Partition the body at the cold-return bubble — the 2nd
+        // `bubble_fact_signature(ctx, ...)` occurrence — so the warm-hit
+        // validator (before) and post-compute revalidator (after) land in
+        // disjoint regions.
+        let compute_body = extract_fn_body(window, spec.compute_sig);
+        let split = nth_occurrence(compute_body, BUBBLE, 2).unwrap_or_else(|| {
+            panic!(
+                "{cache} `{}` MUST carry two `{BUBBLE} ...)` sites (warm-hit + cold-return); fewer \
+                 than two means a bubble site was dropped. Body:\n{compute_body}",
+                spec.compute_sig
+            )
+        });
+        let (warm_region, post_region) = compute_body.split_at(split);
+
+        // --- Site 2: the warm-hit closure (validator + bubble before the
+        // cold-return bubble). The `compute` builder in this region
+        // carries neither token, so the region holds exactly the warm-hit
+        // pair.
+        assert_one_validator_one_bubble(warm_region, "get_or_compute warm-hit closure", cache);
+
+        // --- Sites 3 + 4: the cold-return bubble + the post-compute
+        // revalidator. Exactly one validator (revalidator) + one bubble
+        // (cold-return) from the split point onward.
+        assert_one_validator_one_bubble(
+            post_region,
+            "get_or_compute cold-return bubble + post-compute revalidator",
+            cache,
+        );
+
+        // The lazy `validate_fact_signature(ctx, …)` is forbidden inside
+        // a Family A cache impl: it routes a self-root `FileWholeHash`
+        // through the untracked-accept rule and would serve stale
+        // entries. Only the strict self-root variant is permitted.
+        assert!(
+            !window.contains("validate_fact_signature(ctx,"),
+            "{cache} MUST NOT call the lazy `validate_fact_signature(ctx, ...)` — the lazy \
+             validator routes a self-root FileWholeHash through the untracked-accept rule \
+             and serves stale entries. Use `validate_fact_signature_with_self_roots` with \
+             the entry's keyed canonical(s) as the self-root set."
+        );
+    }
+
+    // Belt-and-braces: the lazy validator must be absent file-wide for
+    // any Family A cache (no site outside the primary impl windows
+    // either).
+    assert!(
+        !src.contains("validate_fact_signature(ctx,"),
+        "component_meta_caches.rs must NOT call the lazy `validate_fact_signature(ctx, ...)` \
+         anywhere — only the strict self-root variant is permitted for Family A caches."
+    );
+}
+
+/// Extract the body of the function whose signature begins at
+/// `needle` in `src` — the brace-balanced span from the first `{`
+/// after the signature to its matching `}`.
+///
+/// Brace-counting is robust against a nested column-0 `}` (e.g. a
+/// `match`-arm block whose closing brace lands at column 0 inside the
+/// function), which a first-`\n}` delimiter would mis-truncate.
+/// String/char/comment literals containing stray braces are not a
+/// concern here: the scanned functions are signature builders that
+/// never embed `{`/`}` in a literal.
+fn extract_fn_body<'a>(src: &'a str, needle: &str) -> &'a str {
+    let start = src
+        .find(needle)
+        .unwrap_or_else(|| panic!("expected `{needle}` in source"));
+    let after_sig = &src[start..];
+    let open = after_sig
+        .find('{')
+        .unwrap_or_else(|| panic!("expected an opening brace for `{needle}`"));
+    let bytes = after_sig.as_bytes();
+    let mut depth = 0usize;
+    let mut idx = open;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &after_sig[open..=idx];
+                }
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    panic!("expected a brace-balanced body for `{needle}`");
+}
+
+/// The central fact-signature helpers AND the engine wrappers that
+/// delegate to them are **provenance-pure**: they root the keyed
+/// canonical on a caller-supplied observed content hash, never a
+/// current-content re-read. A current-content re-read inside a
+/// signature builder reopens the publish race — an `upsert` landing
+/// between a producer's value-compute and signature-build would root a
+/// stale value on post-edit content, which then validates on warm
+/// reads instead of missing.
+///
+/// This guard extracts each builder's brace-balanced function body and
+/// asserts it calls NONE of the current-content-reading primitives —
+/// any current-content re-read inside a signature builder MUST route
+/// through one of these:
+/// - `authoritative_current_content_hash` — the current-content
+///   whole-hash oracle (the source the deleted `self_root_fact`
+///   re-read helper used).
+/// - `current_file_facts` — the current-content parse-fact reader
+///   (the source the deleted `parse_fact_ref` re-read helper used).
+/// - `parse_fact_ref(` — the deleted current-content parse-fact
+///   builder (matched with its opening paren so it does not
+///   false-match the provenance-pure
+///   `parse_fact_ref_for_observed_current_content`).
+/// - `shallow_file_state` — the base-host-only shallow-state oracle: a
+///   producer that observes a self-root hash through it (a) re-reads
+///   content rather than threading a provenance-observed hash, and (b)
+///   under a `SessionResolverContext` reads the base file hash, not
+///   the overlay's. A signature builder must NEVER observe a hash; it
+///   takes the observed hash as a parameter.
+///
+/// The three central helpers live in `fact_signature_helpers.rs`; the
+/// four `engine_fact_signature_for_*` wrappers live in the engine's
+/// `mod.rs`. The producers (the observation point) are responsible for
+/// read-ordering — not token-checkable; the producer-level
+/// overlay-discrimination tests in `query_db_self_root_tests.rs` cover
+/// that. Re-introducing any forbidden token inside any builder below
+/// flips this guard RED.
+#[test]
+fn central_fact_signature_helpers_are_provenance_pure() {
+    // Each token, if present in a builder body, reopens the publish
+    // race. `parse_fact_ref(` is matched with its opening paren so it
+    // does not false-match `parse_fact_ref_for_observed_current_content`.
+    // `self_root_fact` is intentionally NOT listed: it is a deleted
+    // symbol, and any re-read in its shape MUST consult
+    // `authoritative_current_content_hash` — already banned below.
+    const FORBIDDEN: &[&str] = &[
+        "authoritative_current_content_hash",
+        "current_file_facts",
+        "parse_fact_ref(",
+        "shallow_file_state",
+    ];
+
+    // The three central helpers in `fact_signature_helpers.rs`.
+    let helpers_src = read_session_source("fact_signature_helpers.rs");
+    const HELPERS: &[&str] = &[
+        "pub(crate) fn fact_signature_for_exported_type(",
+        "pub(crate) fn fact_signature_for_canonical_member(",
+        "pub(crate) fn fact_signature_for_canonical_surface(",
+    ];
+    for helper in HELPERS {
+        let body = extract_fn_body(&helpers_src, helper);
+        for forbidden in FORBIDDEN {
+            assert!(
+                !body.contains(forbidden),
+                "`{helper}` MUST NOT call `{forbidden}` — it is a current-content read \
+                 and reopens the publish race the provenance-pure signature builders \
+                 close. Root the keyed canonical on the caller-supplied observed hash \
+                 and pin parse facts via `parse_fact_ref_for_observed_current_content` \
+                 instead. Body:\n{body}"
+            );
+        }
+    }
+
+    // The live engine wrappers in `component_meta_query_engine/mod.rs`.
+    // They delegate to the central helpers and must be provenance-pure
+    // for the same reason — a re-read inside a wrapper is the same
+    // publish-race hole as one inside the central helper. The
+    // walker-cluster's `engine_fact_signature_for_prepared_target`
+    // wrapper is DELETED (its `PreparedTargetDb` producer is gone), and
+    // `engine_fact_signature_for_canonical_member` had no surviving
+    // producer wrapper — the canonical-member signature builder lives in
+    // `fact_signature_helpers.rs::fact_signature_for_canonical_member`,
+    // already covered by the HELPERS list above.
+    let engine_src = read_session_source("resolver_core/component_meta_query_engine/mod.rs");
+    const ENGINE_WRAPPERS: &[&str] = &[
+        "pub(crate) fn engine_fact_signature_for_exported_type(",
+        "pub(crate) fn engine_fact_signature_for_materialize_memo(",
+    ];
+    for wrapper in ENGINE_WRAPPERS {
+        let body = extract_fn_body(&engine_src, wrapper);
+        for forbidden in FORBIDDEN {
+            assert!(
+                !body.contains(forbidden),
+                "`{wrapper}` MUST NOT call `{forbidden}` — an engine signature wrapper \
+                 must stay provenance-pure: it takes the observed content hash(es) as \
+                 parameter(s) and delegates to the central helper, never re-reading \
+                 current content. Body:\n{body}"
+            );
+        }
+    }
+}

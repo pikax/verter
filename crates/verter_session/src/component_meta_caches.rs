@@ -78,7 +78,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use verter_semantic::analysis::type_solver::query_engine::ProjectedMember;
 use verter_type_expr::TypeExpr;
 
 use crate::cache_runtime::admission::{CacheAdmission, CacheEntry, NonAdmissionReason};
@@ -86,10 +85,6 @@ use crate::cache_runtime::node::{lookup, ArtifactNode, ComputeCtx, QueryFlightKe
 use crate::cache_runtime::singleflight::InflightTable;
 use crate::fact_signature_helpers::ReadSetSignature;
 use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
-use crate::resolver_core::cache_keys::{
-    PreparedMemberCacheKey, PreparedSurfaceCacheKey, PreparedTargetCacheKey,
-    RoutedExprSurfaceCacheKey,
-};
 use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistrySymbol;
 use crate::resolver_core::{FactVersionRef, ResolvedTypeDeclaration, ResolverContext};
 use crate::semantic_query::{DepSignature, ProjectionMode};
@@ -993,204 +988,6 @@ impl Default for OwnerCollectionDb {
     }
 }
 
-// ===========================================================================
-// 5. PreparedTargetDb — `PreparedTargetCacheKey → Option<(Arc<str>, Arc<str>)>`
-// ===========================================================================
-
-/// The prepared-target value: the resolved `(canonical, symbol)` target
-/// pair, or `None` when the requested name has no prepared target.
-pub type PreparedTargetValue = Option<(Arc<str>, Arc<str>)>;
-
-pub struct PreparedTargetDb {
-    entries: DashMap<PreparedTargetCacheKey, Arc<CacheEntry<PreparedTargetValue>>>,
-    inflight: InflightTable<QueryFlightKey<PreparedTargetCacheKey>>,
-    live_counter: Arc<AtomicU64>,
-    /// Cache-cluster schema version this Db was constructed under. See
-    /// [`crate::cache_schema`] for the contract.
-    schema_version: u32,
-}
-
-impl PreparedTargetDb {
-    pub fn new() -> Self {
-        Self::with_counter(Arc::new(AtomicU64::new(0)))
-    }
-
-    pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
-        Self::with_counter_and_schema_version(
-            live_counter,
-            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
-        )
-    }
-
-    /// Test-only constructor that pins a specific schema version on the Db.
-    /// Used by `cache_invariant_migration` fixtures.
-    #[cfg(any(test, debug_assertions))]
-    pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
-        Self::with_counter_and_schema_version(Arc::new(AtomicU64::new(0)), schema_version)
-    }
-
-    fn with_counter_and_schema_version(live_counter: Arc<AtomicU64>, schema_version: u32) -> Self {
-        Self {
-            entries: DashMap::new(),
-            inflight: InflightTable::new(),
-            live_counter,
-            schema_version,
-        }
-    }
-
-    /// Peek-only lookup: returns the cached value only if its
-    /// fact_dep_signature is still valid against `ctx`.
-    ///
-    /// Validation uses the entry's OWN `self_root_canonicals` — the
-    /// active scope, the original declaring canonical, AND the final
-    /// routed declaring canonical (when the requested name re-exports
-    /// through an intermediate module). The cache key only encodes the
-    /// first two, so the entry carries the routed canonical explicitly;
-    /// validating from `key`-derived self-roots alone would leave a
-    /// content edit to the third declaring file undetected.
-    pub(crate) fn peek(
-        &self,
-        key: &PreparedTargetCacheKey,
-        ctx: &dyn ResolverContext,
-    ) -> Option<Option<(Arc<str>, Arc<str>)>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
-            return None;
-        }
-        // Validation uses the entry's OWN `self_root_canonicals` — the
-        // active scope, the original declaring canonical, AND the final
-        // routed declaring canonical (when the requested name re-exports
-        // through an intermediate module). The cache key only encodes the
-        // first two, so the entry carries the routed canonical
-        // explicitly; validating from `key`-derived self-roots alone
-        // would leave a content edit to the third declaring file
-        // undetected.
-        single_entry_peek(&self.entries, key, ctx)
-    }
-
-    pub(crate) fn get_or_compute<F>(
-        &self,
-        key: &PreparedTargetCacheKey,
-        ctx: &dyn ResolverContext,
-        compute: F,
-    ) -> Option<Option<(Arc<str>, Arc<str>)>>
-    where
-        F: FnOnce() -> Option<(
-            Option<(Arc<str>, Arc<str>)>,
-            Arc<[FactVersionRef]>,
-            Arc<[Arc<str>]>,
-        )>,
-    {
-        // The entry's `self_root_canonicals` (active scope + original
-        // declaring canonical + final routed declaring canonical) are
-        // supplied by `compute` itself — reading them from the cold build
-        // (not the key) covers the routed third declaring file the key
-        // never encodes. The adapter validates them strictly on every
-        // warm read and post-compute revalidation.
-        let node = SingleEntryArtifactNode {
-            entries: &self.entries,
-            inflight: &self.inflight,
-            live_counter: &self.live_counter,
-            compute: std::cell::RefCell::new(Some(compute)),
-        };
-        lookup(&node, key.clone(), ctx)
-    }
-
-    pub fn invalidate_canonical(&self, canonical_id: &str) {
-        // Match an entry when `canonical_id` is the active scope, the
-        // original declaring canonical, OR a routed declaring file in
-        // the entry's `self_root_canonicals`. The cache key encodes only
-        // the first two; a `PreparedTarget` whose requested name
-        // re-exports through an intermediate module carries the final
-        // routed declaring canonical in `self_root_canonicals` only.
-        // Editing that third file must invalidate the entry — scanning
-        // the entry's own self-roots makes this invalidation complete
-        // (an entry missed here would later be rejected lazily by the
-        // generic validator path, which does not decrement this DB's
-        // `live_counter`).
-        let keys: Vec<PreparedTargetCacheKey> = self
-            .entries
-            .iter()
-            .filter_map(|entry| {
-                let key = entry.key();
-                let matches = key.active_scope_canonical_id.as_ref() == canonical_id
-                    || key.decl_canonical_id.as_ref() == canonical_id
-                    || entry
-                        .value()
-                        .self_root_canonicals
-                        .iter()
-                        .any(|c| c.as_ref() == canonical_id);
-                if matches {
-                    Some(entry.key().clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for key in keys {
-            if self.entries.remove(&key).is_some() {
-                self.live_counter.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
-    }
-
-    pub fn invalidate_all(&self) {
-        let n = self.entries.len() as u64;
-        self.entries.clear();
-        self.live_counter.fetch_sub(
-            n.min(self.live_counter.load(Ordering::Relaxed)),
-            Ordering::Relaxed,
-        );
-    }
-
-    pub fn live_count(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Test-only synthetic-entry inserter used exclusively by
-    /// `cache_invariant_migration` fixtures to verify the cache-cluster
-    /// schema-version eviction invariant.
-    #[cfg(any(test, debug_assertions))]
-    pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
-        let key = PreparedTargetCacheKey {
-            active_scope_canonical_id: Arc::from(marker),
-            decl_canonical_id: Arc::from(marker),
-            decl_symbol_name: Arc::from("Synthetic"),
-            requested_name: Arc::from("Synthetic"),
-        };
-        let entry = Arc::new(CacheEntry {
-            value: None,
-            signature: ReadSetSignature::empty(),
-            self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
-            validated_at_generation: 0,
-        });
-        self.entries.insert(key, entry);
-        self.live_counter.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-impl Default for PreparedTargetDb {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl crate::cache_schema::CacheSchemaVersioned for PreparedTargetDb {
-    fn schema_version(&self) -> u32 {
-        self.schema_version
-    }
-
-    fn evict_if_schema_mismatch(&self, current: u32) -> usize {
-        if self.schema_version == current {
-            return 0;
-        }
-        let count = self.entries.len();
-        self.entries.clear();
-        if count > 0 {
-            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
-        }
-        count
-    }
-}
 
 // ===========================================================================
 // 6. ShapeCacheDb — `ShapeCacheKey → MaterializedTypeExpr`
@@ -1457,9 +1254,28 @@ impl ShapeCacheDb {
             return None;
         }
         // The subject's scope canonical is the entry's self-root —
-        // strict warm-read validation rejects a same-scope content edit.
-        // The entry carries its own self-roots, validated strictly.
-        let result = single_entry_peek(&self.entries, key, ctx);
+        // strict warm-read validation rejects a same-scope content
+        // edit.
+        let scope = key.subject.scope_canonical().clone();
+        let self_roots: [&str; 1] = [scope.as_ref()];
+        let result = (|| -> Option<MaterializedTypeExpr> {
+            let entry_arc = self.entries.get(key).map(|e| e.clone())?;
+            // The carrier validates only file-content whole-hashes; the
+            // generation gate is the project-shape counterpart.
+            if entry_arc.validated_at_generation
+                == ctx.project_type_store().current_project_generation()
+                && validate_fact_signature_with_self_roots(
+                    ctx,
+                    &entry_arc.fact_dep_signature,
+                    &self_roots,
+                )
+            {
+                bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
+                Some(entry_arc.value.clone())
+            } else {
+                None
+            }
+        })();
         if let Some(rctx) = crate::request_context::current_request_context() {
             let counter = match &key.subject {
                 ShapeSubject::TypeExpr { .. } => &rctx.cache_counters.materialize_memo,
@@ -1483,19 +1299,77 @@ impl ShapeCacheDb {
     where
         F: FnOnce() -> Option<(MaterializedTypeExpr, Arc<[FactVersionRef]>)>,
     {
+        // Publish-side counterpart: the live counter is bumped in the
+        // winner-only `post_publish` callback, NOT in `compute` — see
+        // `DeclarationLookupDb::get_or_compute` for the leak rationale.
+        let live_counter_for_publish = Arc::clone(&self.live_counter);
+        // Removal-side counterpart of the `post_publish` increment —
+        // decrements when the substrate removes an already-published
+        // entry so the live counter tracks live entries.
+        let live_counter_for_removal = Arc::clone(&self.live_counter);
         // The subject's scope canonical is the entry's self-root —
-        // strict warm-read validation rejects a same-scope content edit.
-        let self_roots: Arc<[Arc<str>]> =
-            Arc::from(vec![Arc::clone(key.subject.scope_canonical())]);
-        let node = SingleEntryArtifactNode {
-            entries: &self.entries,
-            inflight: &self.inflight,
-            live_counter: &self.live_counter,
-            compute: std::cell::RefCell::new(Some(move || {
-                compute().map(|(value, facts)| (value, facts, Arc::clone(&self_roots)))
-            })),
-        };
-        lookup(&node, key.clone(), ctx)
+        // strict warm-read validation.
+        let scope = key.subject.scope_canonical().clone();
+        // Snapshot the project generation BEFORE the cold compute
+        // dispatches any work — see `DeclarationLookupDb::get_or_compute`
+        // for the project-generation staleness rationale.
+        let generation_snapshot = ctx.project_type_store().current_project_generation();
+        let scope_for_validate = Arc::clone(&scope);
+        let scope_for_revalidate = Arc::clone(&scope);
+        cooperative_get_or_insert_with_post_publish(
+            &self.entries,
+            &self.inflight,
+            key.clone(),
+            move |entry: &ShapeCacheEntry| {
+                let self_roots: [&str; 1] = [scope_for_validate.as_ref()];
+                if entry.validated_at_generation
+                    == ctx.project_type_store().current_project_generation()
+                    && validate_fact_signature_with_self_roots(
+                        ctx,
+                        &entry.fact_dep_signature,
+                        &self_roots,
+                    )
+                {
+                    bubble_fact_signature(ctx, &entry.fact_dep_signature);
+                    Some(entry.value.clone())
+                } else {
+                    None
+                }
+            },
+            move || {
+                compute().map(|(value, fact_dep_signature)| ShapeCacheEntry {
+                    value,
+                    fact_dep_signature,
+                    validated_at_generation: generation_snapshot,
+                })
+            },
+            |entry: &ShapeCacheEntry| {
+                bubble_fact_signature(ctx, &entry.fact_dep_signature);
+                entry.value.clone()
+            },
+            move |entry: &ShapeCacheEntry| {
+                let self_roots: [&str; 1] = [scope_for_revalidate.as_ref()];
+                entry.validated_at_generation
+                    == ctx.project_type_store().current_project_generation()
+                    && validate_fact_signature_with_self_roots(
+                        ctx,
+                        &entry.fact_dep_signature,
+                        &self_roots,
+                    )
+            },
+            move |_key: &ShapeCacheKey, _entry: &Arc<ShapeCacheEntry>| {
+                live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
+            },
+            // post_publish — fires once on the cold winner's thread,
+            // AFTER `entries.insert` AND a successful
+            // `revalidate_after_compute`. The live-counter bump rides
+            // here so it is paired with the published map entry.
+            move |_entry_arc: &Arc<ShapeCacheEntry>, _key: &ShapeCacheKey| {
+                live_counter_for_publish.fetch_add(1, Ordering::Relaxed);
+            },
+            // No retention budget on this cache shape — no publish fence.
+            None,
+        )
     }
 
     /// Universal-caching admission helper. Admits an already-computed
@@ -1566,15 +1440,14 @@ impl ShapeCacheDb {
             Arc::new(TypeExpr::Unknown { raw: String::new() }),
             ProjectionMode::Shallow,
         );
-        let entry = Arc::new(CacheEntry {
+        let entry = Arc::new(ShapeCacheEntry {
             value: MaterializedTypeExpr {
                 node_id: None,
                 type_expr: TypeExpr::Unknown { raw: String::new() },
                 dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
                 cache_suppress: false,
             },
-            signature: ReadSetSignature::empty(),
-            self_root_canonicals: Arc::from(vec![Arc::clone(key.subject.scope_canonical())]),
+            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
             validated_at_generation: 0,
         });
         self.entries.insert(key, entry);
@@ -1634,15 +1507,14 @@ impl ShapeCacheDb {
             ShapeSubject::SemanticNode { node, .. } => Some(*node),
             ShapeSubject::TypeExpr { .. } => None,
         };
-        let entry = Arc::new(CacheEntry {
+        let entry = Arc::new(ShapeCacheEntry {
             value: MaterializedTypeExpr {
                 node_id: node_for_provenance,
                 type_expr: deep_type,
                 dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
                 cache_suppress: false,
             },
-            signature: ReadSetSignature::empty(),
-            self_root_canonicals: Arc::from(vec![Arc::clone(key.subject.scope_canonical())]),
+            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
             validated_at_generation: 0,
         });
         self.entries.insert(key, entry);
@@ -1696,528 +1568,6 @@ impl crate::cache_schema::CacheSchemaVersioned for ShapeCacheDb {
     }
 }
 
-// ===========================================================================
-// 8. PreparedSurfaceDb — `PreparedSurfaceCacheKey → PreparedSurfaceProjection`
-//
-// PreparedSurfaceProjection is private to the engine; we serialize the
-// concrete `Arc<ProjectedSurface>` payload through a public adapter.
-// ===========================================================================
-
-/// Public projection payload mirrored from the engine's
-/// `PreparedSurfaceProjection`. The engine adapter converts at the
-/// edges so consumers do not depend on the engine module's private
-/// enum.
-#[derive(Debug, Clone)]
-pub enum PreparedSurfacePayload {
-    Surface(Arc<verter_semantic::analysis::type_solver::query_engine::ProjectedSurface>),
-    Empty,
-    Unsupported,
-}
-
-pub struct PreparedSurfaceDb {
-    entries: DashMap<PreparedSurfaceCacheKey, Arc<CacheEntry<PreparedSurfacePayload>>>,
-    inflight: InflightTable<QueryFlightKey<PreparedSurfaceCacheKey>>,
-    live_counter: Arc<AtomicU64>,
-    /// Cache-cluster schema version this Db was constructed under. See
-    /// [`crate::cache_schema`] for the contract.
-    schema_version: u32,
-}
-
-impl PreparedSurfaceDb {
-    pub fn new() -> Self {
-        Self::with_counter(Arc::new(AtomicU64::new(0)))
-    }
-
-    pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
-        Self::with_counter_and_schema_version(
-            live_counter,
-            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
-        )
-    }
-
-    /// Test-only constructor that pins a specific schema version on the Db.
-    /// Used by `cache_invariant_migration` fixtures.
-    #[cfg(any(test, debug_assertions))]
-    pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
-        Self::with_counter_and_schema_version(Arc::new(AtomicU64::new(0)), schema_version)
-    }
-
-    fn with_counter_and_schema_version(live_counter: Arc<AtomicU64>, schema_version: u32) -> Self {
-        Self {
-            entries: DashMap::new(),
-            inflight: InflightTable::new(),
-            live_counter,
-            schema_version,
-        }
-    }
-
-    /// Peek-only lookup: returns the cached payload only if its
-    /// fact_dep_signature is still valid against `ctx`.
-    pub(crate) fn peek(
-        &self,
-        key: &PreparedSurfaceCacheKey,
-        ctx: &dyn ResolverContext,
-    ) -> Option<PreparedSurfacePayload> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
-            return None;
-        }
-        // The keyed canonical is the entry's self-root. The prepared
-        // surface encodes body-sensitive structure, so strict self-root
-        // validation is the correctness floor — any content edit to the
-        // keyed file rejects the cached projection.
-        let result = single_entry_peek(&self.entries, key, ctx);
-        if let Some(rctx) = crate::request_context::current_request_context() {
-            if result.is_some() {
-                rctx.cache_counters
-                    .prepared_surface
-                    .hits
-                    .fetch_add(1, Ordering::Relaxed);
-            } else {
-                rctx.cache_counters
-                    .prepared_surface
-                    .misses
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        result
-    }
-
-    pub(crate) fn get_or_compute<F>(
-        &self,
-        key: &PreparedSurfaceCacheKey,
-        ctx: &dyn ResolverContext,
-        compute: F,
-    ) -> Option<PreparedSurfacePayload>
-    where
-        F: FnOnce() -> Option<(PreparedSurfacePayload, Arc<[FactVersionRef]>)>,
-    {
-        // The keyed canonical is the entry's self-root — strict
-        // warm-read validation (body-sensitive surface).
-        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.canonical_id)]);
-        let node = SingleEntryArtifactNode {
-            entries: &self.entries,
-            inflight: &self.inflight,
-            live_counter: &self.live_counter,
-            compute: std::cell::RefCell::new(Some(move || {
-                compute().map(|(value, facts)| (value, facts, Arc::clone(&self_roots)))
-            })),
-        };
-        lookup(&node, key.clone(), ctx)
-    }
-
-    pub fn invalidate_canonical(&self, canonical_id: &str) {
-        let keys: Vec<PreparedSurfaceCacheKey> = self
-            .entries
-            .iter()
-            .filter_map(|entry| {
-                let key = entry.key();
-                if key.canonical_id.as_ref() == canonical_id {
-                    Some(entry.key().clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for key in keys {
-            if self.entries.remove(&key).is_some() {
-                self.live_counter.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
-    }
-
-    pub fn invalidate_all(&self) {
-        let n = self.entries.len() as u64;
-        self.entries.clear();
-        self.live_counter.fetch_sub(
-            n.min(self.live_counter.load(Ordering::Relaxed)),
-            Ordering::Relaxed,
-        );
-    }
-
-    pub fn live_count(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Test-only synthetic-entry inserter used exclusively by
-    /// `cache_invariant_migration` fixtures to verify the cache-cluster
-    /// schema-version eviction invariant.
-    #[cfg(any(test, debug_assertions))]
-    pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
-        use crate::resolver_core::cache_keys::PreparedSubstitutionKey;
-        let key = PreparedSurfaceCacheKey {
-            canonical_id: Arc::from(marker),
-            symbol_name: Arc::from("Synthetic"),
-            substitutions: PreparedSubstitutionKey::Empty,
-            from_root_body: true,
-        };
-        let entry = Arc::new(CacheEntry {
-            value: PreparedSurfacePayload::Empty,
-            signature: ReadSetSignature::empty(),
-            self_root_canonicals: Arc::from(vec![Arc::clone(&key.canonical_id)]),
-            validated_at_generation: 0,
-        });
-        self.entries.insert(key, entry);
-        self.live_counter.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-impl Default for PreparedSurfaceDb {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl crate::cache_schema::CacheSchemaVersioned for PreparedSurfaceDb {
-    fn schema_version(&self) -> u32 {
-        self.schema_version
-    }
-
-    fn evict_if_schema_mismatch(&self, current: u32) -> usize {
-        if self.schema_version == current {
-            return 0;
-        }
-        let count = self.entries.len();
-        self.entries.clear();
-        if count > 0 {
-            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
-        }
-        count
-    }
-}
-
-// ===========================================================================
-// 9. PreparedMemberDb — `PreparedMemberCacheKey → Option<ProjectedMember>`
-// ===========================================================================
-
-pub struct PreparedMemberDb {
-    entries: DashMap<PreparedMemberCacheKey, Arc<CacheEntry<Option<Arc<ProjectedMember>>>>>,
-    inflight: InflightTable<QueryFlightKey<PreparedMemberCacheKey>>,
-    live_counter: Arc<AtomicU64>,
-    /// Cache-cluster schema version this Db was constructed under. See
-    /// [`crate::cache_schema`] for the contract.
-    schema_version: u32,
-}
-
-impl PreparedMemberDb {
-    pub fn new() -> Self {
-        Self::with_counter(Arc::new(AtomicU64::new(0)))
-    }
-
-    pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
-        Self::with_counter_and_schema_version(
-            live_counter,
-            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
-        )
-    }
-
-    /// Test-only constructor that pins a specific schema version on the Db.
-    /// Used by `cache_invariant_migration` fixtures.
-    #[cfg(any(test, debug_assertions))]
-    pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
-        Self::with_counter_and_schema_version(Arc::new(AtomicU64::new(0)), schema_version)
-    }
-
-    fn with_counter_and_schema_version(live_counter: Arc<AtomicU64>, schema_version: u32) -> Self {
-        Self {
-            entries: DashMap::new(),
-            inflight: InflightTable::new(),
-            live_counter,
-            schema_version,
-        }
-    }
-
-    /// Peek-only lookup: returns the cached value only if its
-    /// fact_dep_signature is still valid against `ctx`.
-    pub(crate) fn peek(
-        &self,
-        key: &PreparedMemberCacheKey,
-        ctx: &dyn ResolverContext,
-    ) -> Option<Option<Arc<ProjectedMember>>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
-            return None;
-        }
-        // The keyed canonical is the entry's self-root — strict
-        // warm-read validation rejects a same-canonical content edit.
-        let result = single_entry_peek(&self.entries, key, ctx);
-        if let Some(rctx) = crate::request_context::current_request_context() {
-            if result.is_some() {
-                rctx.cache_counters
-                    .prepared_member
-                    .hits
-                    .fetch_add(1, Ordering::Relaxed);
-            } else {
-                rctx.cache_counters
-                    .prepared_member
-                    .misses
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        result
-    }
-
-    pub(crate) fn get_or_compute<F>(
-        &self,
-        key: &PreparedMemberCacheKey,
-        ctx: &dyn ResolverContext,
-        compute: F,
-    ) -> Option<Option<Arc<ProjectedMember>>>
-    where
-        F: FnOnce() -> Option<(Option<ProjectedMember>, Arc<[FactVersionRef]>)>,
-    {
-        // The keyed canonical is the entry's self-root — strict
-        // warm-read validation.
-        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.canonical_id)]);
-        let node = SingleEntryArtifactNode {
-            entries: &self.entries,
-            inflight: &self.inflight,
-            live_counter: &self.live_counter,
-            compute: std::cell::RefCell::new(Some(move || {
-                compute()
-                    .map(|(value, facts)| (value.map(Arc::new), facts, Arc::clone(&self_roots)))
-            })),
-        };
-        lookup(&node, key.clone(), ctx)
-    }
-
-    pub fn invalidate_canonical(&self, canonical_id: &str) {
-        let keys: Vec<PreparedMemberCacheKey> = self
-            .entries
-            .iter()
-            .filter_map(|entry| {
-                let key = entry.key();
-                if key.canonical_id.as_ref() == canonical_id {
-                    Some(entry.key().clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for key in keys {
-            if self.entries.remove(&key).is_some() {
-                self.live_counter.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
-    }
-
-    pub fn invalidate_all(&self) {
-        let n = self.entries.len() as u64;
-        self.entries.clear();
-        self.live_counter.fetch_sub(
-            n.min(self.live_counter.load(Ordering::Relaxed)),
-            Ordering::Relaxed,
-        );
-    }
-
-    pub fn live_count(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Test-only synthetic-entry inserter used exclusively by
-    /// `cache_invariant_migration` fixtures to verify the cache-cluster
-    /// schema-version eviction invariant.
-    #[cfg(any(test, debug_assertions))]
-    pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
-        use crate::resolver_core::cache_keys::{PreparedMemberCacheKind, PreparedSubstitutionKey};
-        let key = PreparedMemberCacheKey {
-            canonical_id: Arc::from(marker),
-            symbol_name: Arc::from("Synthetic"),
-            member_name: Arc::from("synthetic"),
-            kind: PreparedMemberCacheKind::Requested,
-            substitutions: PreparedSubstitutionKey::Empty,
-            from_root_body: true,
-        };
-        let entry = Arc::new(CacheEntry {
-            value: None,
-            signature: ReadSetSignature::empty(),
-            self_root_canonicals: Arc::from(vec![Arc::clone(&key.canonical_id)]),
-            validated_at_generation: 0,
-        });
-        self.entries.insert(key, entry);
-        self.live_counter.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-impl Default for PreparedMemberDb {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl crate::cache_schema::CacheSchemaVersioned for PreparedMemberDb {
-    fn schema_version(&self) -> u32 {
-        self.schema_version
-    }
-
-    fn evict_if_schema_mismatch(&self, current: u32) -> usize {
-        if self.schema_version == current {
-            return 0;
-        }
-        let count = self.entries.len();
-        self.entries.clear();
-        if count > 0 {
-            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
-        }
-        count
-    }
-}
-
-// ===========================================================================
-// 10. RoutedExprSurfaceDb — `RoutedExprSurfaceCacheKey → TypeExpr`
-// ===========================================================================
-
-pub struct RoutedExprSurfaceDb {
-    entries: DashMap<RoutedExprSurfaceCacheKey, Arc<CacheEntry<Arc<TypeExpr>>>>,
-    inflight: InflightTable<QueryFlightKey<RoutedExprSurfaceCacheKey>>,
-    live_counter: Arc<AtomicU64>,
-    /// Cache-cluster schema version this Db was constructed under. See
-    /// [`crate::cache_schema`] for the contract.
-    schema_version: u32,
-}
-
-impl RoutedExprSurfaceDb {
-    pub fn new() -> Self {
-        Self::with_counter(Arc::new(AtomicU64::new(0)))
-    }
-
-    pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
-        Self::with_counter_and_schema_version(
-            live_counter,
-            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
-        )
-    }
-
-    /// Test-only constructor that pins a specific schema version on the Db.
-    /// Used by `cache_invariant_migration` fixtures.
-    #[cfg(any(test, debug_assertions))]
-    pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
-        Self::with_counter_and_schema_version(Arc::new(AtomicU64::new(0)), schema_version)
-    }
-
-    fn with_counter_and_schema_version(live_counter: Arc<AtomicU64>, schema_version: u32) -> Self {
-        Self {
-            entries: DashMap::new(),
-            inflight: InflightTable::new(),
-            live_counter,
-            schema_version,
-        }
-    }
-
-    /// Peek-only lookup: returns the cached value only if its
-    /// fact_dep_signature is still valid against `ctx`.
-    pub(crate) fn peek(
-        &self,
-        key: &RoutedExprSurfaceCacheKey,
-        ctx: &dyn ResolverContext,
-    ) -> Option<Arc<TypeExpr>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
-            return None;
-        }
-        // The keyed scope canonical is the entry's self-root — strict
-        // warm-read validation rejects a same-scope content edit.
-        single_entry_peek(&self.entries, key, ctx)
-    }
-
-    pub(crate) fn get_or_compute<F>(
-        &self,
-        key: &RoutedExprSurfaceCacheKey,
-        ctx: &dyn ResolverContext,
-        compute: F,
-    ) -> Option<Arc<TypeExpr>>
-    where
-        F: FnOnce() -> Option<(TypeExpr, Arc<[FactVersionRef]>)>,
-    {
-        // The keyed scope canonical is the entry's self-root — strict
-        // warm-read validation.
-        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.scope_canonical_id)]);
-        let node = SingleEntryArtifactNode {
-            entries: &self.entries,
-            inflight: &self.inflight,
-            live_counter: &self.live_counter,
-            compute: std::cell::RefCell::new(Some(move || {
-                compute().map(|(value, facts)| (Arc::new(value), facts, Arc::clone(&self_roots)))
-            })),
-        };
-        lookup(&node, key.clone(), ctx)
-    }
-
-    pub fn invalidate_canonical(&self, canonical_id: &str) {
-        let keys: Vec<RoutedExprSurfaceCacheKey> = self
-            .entries
-            .iter()
-            .filter_map(|entry| {
-                let key = entry.key();
-                if key.scope_canonical_id.as_ref() == canonical_id {
-                    Some(entry.key().clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for key in keys {
-            if self.entries.remove(&key).is_some() {
-                self.live_counter.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
-    }
-
-    pub fn invalidate_all(&self) {
-        let n = self.entries.len() as u64;
-        self.entries.clear();
-        self.live_counter.fetch_sub(
-            n.min(self.live_counter.load(Ordering::Relaxed)),
-            Ordering::Relaxed,
-        );
-    }
-
-    pub fn live_count(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Test-only synthetic-entry inserter used exclusively by
-    /// `cache_invariant_migration` fixtures to verify the cache-cluster
-    /// schema-version eviction invariant.
-    #[cfg(any(test, debug_assertions))]
-    pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
-        use crate::resolver_core::RouteDemand;
-        let key = RoutedExprSurfaceCacheKey {
-            scope_canonical_id: Arc::from(marker),
-            root_symbol: Arc::from("Synthetic"),
-            route: RouteDemand::Whole,
-        };
-        let entry = Arc::new(CacheEntry {
-            value: Arc::new(TypeExpr::Unknown { raw: String::new() }),
-            signature: ReadSetSignature::empty(),
-            self_root_canonicals: Arc::from(vec![Arc::clone(&key.scope_canonical_id)]),
-            validated_at_generation: 0,
-        });
-        self.entries.insert(key, entry);
-        self.live_counter.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-impl Default for RoutedExprSurfaceDb {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl crate::cache_schema::CacheSchemaVersioned for RoutedExprSurfaceDb {
-    fn schema_version(&self) -> u32 {
-        self.schema_version
-    }
-
-    fn evict_if_schema_mismatch(&self, current: u32) -> usize {
-        if self.schema_version == current {
-            return 0;
-        }
-        let count = self.entries.len();
-        self.entries.clear();
-        if count > 0 {
-            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
-        }
-        count
-    }
-}
 
 // ===========================================================================
 //
@@ -3033,28 +2383,6 @@ impl crate::invalidation_domain::InvalidationByCanonical for OwnerCollectionDb {
     }
 }
 
-impl crate::invalidation_domain::ParticipatesInInvalidation for PreparedTargetDb {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
-        &[FileContent, ResolverState, ProjectGeneration]
-    }
-    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
-        use crate::invalidation_domain::InvalidationDomain::*;
-        if matches!(domain, ProjectGeneration) {
-            self.invalidate_all();
-        }
-    }
-}
-
-impl crate::invalidation_domain::InvalidationByCanonical for PreparedTargetDb {
-    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
-        let before = self.live_count();
-        self.invalidate_canonical(canonical_id);
-        let after = self.live_count();
-        before.saturating_sub(after)
-    }
-}
-
 impl crate::invalidation_domain::ParticipatesInInvalidation for ShapeCacheDb {
     fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
         use crate::invalidation_domain::InvalidationDomain::*;
@@ -3069,72 +2397,6 @@ impl crate::invalidation_domain::ParticipatesInInvalidation for ShapeCacheDb {
 }
 
 impl crate::invalidation_domain::InvalidationByCanonical for ShapeCacheDb {
-    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
-        let before = self.live_count();
-        self.invalidate_canonical(canonical_id);
-        let after = self.live_count();
-        before.saturating_sub(after)
-    }
-}
-
-impl crate::invalidation_domain::ParticipatesInInvalidation for PreparedSurfaceDb {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
-        &[FileContent, ResolverState, ProjectGeneration]
-    }
-    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
-        use crate::invalidation_domain::InvalidationDomain::*;
-        if matches!(domain, ProjectGeneration) {
-            self.invalidate_all();
-        }
-    }
-}
-
-impl crate::invalidation_domain::InvalidationByCanonical for PreparedSurfaceDb {
-    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
-        let before = self.live_count();
-        self.invalidate_canonical(canonical_id);
-        let after = self.live_count();
-        before.saturating_sub(after)
-    }
-}
-
-impl crate::invalidation_domain::ParticipatesInInvalidation for PreparedMemberDb {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
-        &[FileContent, ResolverState, ProjectGeneration]
-    }
-    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
-        use crate::invalidation_domain::InvalidationDomain::*;
-        if matches!(domain, ProjectGeneration) {
-            self.invalidate_all();
-        }
-    }
-}
-
-impl crate::invalidation_domain::InvalidationByCanonical for PreparedMemberDb {
-    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
-        let before = self.live_count();
-        self.invalidate_canonical(canonical_id);
-        let after = self.live_count();
-        before.saturating_sub(after)
-    }
-}
-
-impl crate::invalidation_domain::ParticipatesInInvalidation for RoutedExprSurfaceDb {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
-        &[FileContent, ResolverState, ProjectGeneration]
-    }
-    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
-        use crate::invalidation_domain::InvalidationDomain::*;
-        if matches!(domain, ProjectGeneration) {
-            self.invalidate_all();
-        }
-    }
-}
-
-impl crate::invalidation_domain::InvalidationByCanonical for RoutedExprSurfaceDb {
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
         let before = self.live_count();
         self.invalidate_canonical(canonical_id);

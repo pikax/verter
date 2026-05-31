@@ -45,12 +45,6 @@
 //! avoid recomputing the same projection within one request. These
 //! are scratch only:
 //!
-//! - `prepared_surface_cache` — read-through view of the ctx's
-//!   `prepared_surface_db`; mirrors the durable result for the current
-//!   request only.
-//! - `routed_expr_surface_cache` — same shape, for routed-expr surfaces.
-//! - `prepared_member_cache` — request-local memo of prepared-member
-//!   projections.
 //! - Type-param substitution maps and projection-chain scopes —
 //!   per-frame state for the current dispatch path.
 //!
@@ -84,11 +78,9 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
-use std::hash::Hash;
 
 use rustc_hash::FxHashMap;
 use verter_semantic::analysis::type_eval::DeclarationId;
-use verter_semantic::analysis::type_solver::query_engine::ProjectedMember;
 use verter_type_expr::TypeExpr;
 
 use super::declaration_metadata::{
@@ -106,27 +98,22 @@ use crate::semantic_query::SemanticNodeId;
 // existing public-API symbols so external `crate::resolver_core::component_meta_query_engine::<name>`
 // paths remain stable.
 mod helpers;
-mod prepared_surface;
 mod registry_decl;
 mod route_keys;
-mod routed_expr;
 mod shallow_preserve;
 mod surface;
 
 pub(crate) use surface::{
     projected_surface_from_semantic_node, projected_surface_to_expanded_shape,
     projected_surface_to_type_expr, semantic_query_error_raw, surface_view_to_projected_surface,
-    type_expr_contains_semantic_miss, type_expr_has_any_object_arm, type_expr_is_expanded_surface,
+    type_expr_contains_semantic_miss, type_expr_is_expanded_surface,
 };
 
 // Items needed inside this module (mod.rs) — engine impl methods and
 // supporting code. All `pub(super)` in surface.rs.
 #[cfg(test)]
 use surface::type_expr_references_substitutions;
-use surface::{
-    apply_type_param_substitutions, build_default_type_param_substitutions,
-    PreparedSurfaceProjection,
-};
+use surface::{apply_type_param_substitutions, build_default_type_param_substitutions};
 
 // Predicate/utility helpers (route-expr surface keys,
 // package-canonical predicates, prepared-decl shape predicates,
@@ -141,37 +128,6 @@ pub(crate) const SEMANTIC_MISS: &str = "semanticMiss";
 pub(crate) const SEMANTIC_OBJECT_SURFACE: &str = "semanticObjectSurface";
 pub(crate) const SEMANTIC_SURFACE_MEMBER: &str = "semanticSurfaceMember";
 
-/// Build an R28 path-precise `Arc<[FactVersionRef]>` for a cache
-/// whose validity depends on a single MEMBER of an exporter type.
-/// Observes `MemberPresence(exporter, member)` and `Member(exporter,
-/// member)` facts in the `Type` symbol space so the consumer
-/// invalidates ONLY when the named member's header or body changes;
-/// sibling-member edits in the same file keep the consumer warm.
-///
-/// The builder is **provenance-pure**: `observed_hash` is the keyed
-/// canonical's content version the producer's value was computed
-/// against, captured once at the value source. The self-root
-/// `FileWholeHash` and both parse facts are pinned to that observed
-/// version — the helper never re-reads current content. Returns
-/// [`crate::cache_runtime::SignatureAdmission::NonCacheable`] (refuse
-/// shared-cache admission) when the observed version's parse-fact
-/// registry cannot be recovered.
-pub(crate) fn engine_fact_signature_for_canonical_member(
-    ctx: &dyn ResolverContext,
-    canonical_id: &str,
-    exporter: &str,
-    member: &str,
-    observed_hash: crate::resolver_core::ResolverHash16,
-) -> crate::cache_runtime::SignatureAdmission {
-    crate::fact_signature_helpers::fact_signature_for_canonical_member(
-        ctx,
-        canonical_id,
-        exporter,
-        member,
-        verter_semantic::facts::registry::SymbolSpace::Type,
-        observed_hash,
-    )
-}
 
 /// Build an R28 signature for a cache whose validity depends on the
 /// IDENTITY of a top-level type at `(canonical, type_name)`. Observes
@@ -203,100 +159,6 @@ pub(crate) fn engine_fact_signature_for_exported_type(
     )
 }
 
-/// Build the fact signature for a `PreparedTargetDb` entry.
-///
-/// A `PreparedTargetDb` entry maps `(active_scope, target_name)` to a
-/// resolved `(canonical, symbol)` pair. The entry has up to THREE
-/// self-roots: the active scope, the original declaring canonical, AND
-/// — when the requested name re-exports through an intermediate module
-/// to a third file — the FINAL routed declaring canonical. The
-/// resolved target depends on the top-level identity of `target_name`
-/// in `active_scope`, on the original declaring `(decl_canonical,
-/// decl_symbol)`, and on the routed `(routed_canonical, routed_symbol)`.
-/// A content edit to ANY of the three files shifts its self-root
-/// `FileWholeHash` and rejects the entry.
-///
-/// The builder is **provenance-pure**: `observed_active_scope_hash`,
-/// `observed_decl_hash`, and (when present) the routed canonical's
-/// observed hash are the keyed/declaring canonicals' content versions
-/// the producer's value was resolved against, each captured once at
-/// the value source — the routed canonical's hash comes from the
-/// prepared-decl bundle actually used for the value
-/// ([`crate::resolver_core::prepared_decl::PreparedDeclBundle::owner_whole_hash`]),
-/// NOT a current-content re-read. Each
-/// `engine_fact_signature_for_exported_type` sub-signature is pinned
-/// to its own observed hash. Returns
-/// [`crate::cache_runtime::SignatureAdmission::NonCacheable`] (refuse
-/// shared-cache admission) when any observed version's parse-fact
-/// registry cannot be recovered — the non-cacheable reason from the
-/// failing sub-signature propagates through.
-///
-/// `routed_decl` is `Some((routed_canonical, routed_symbol,
-/// observed_routed_hash))` when the resolved declaring canonical
-/// differs from the original declaring canonical (a re-export hop);
-/// `None` when no re-route occurred (or the routed canonical equals
-/// the active scope / original declaring canonical, already rooted).
-pub(crate) fn engine_fact_signature_for_prepared_target(
-    ctx: &dyn ResolverContext,
-    active_scope: &str,
-    target_name: &str,
-    observed_active_scope_hash: crate::resolver_core::ResolverHash16,
-    decl_canonical: &str,
-    decl_symbol: &str,
-    observed_decl_hash: crate::resolver_core::ResolverHash16,
-    routed_decl: Option<(&str, &str, crate::resolver_core::ResolverHash16)>,
-) -> crate::cache_runtime::SignatureAdmission {
-    use crate::cache_runtime::SignatureAdmission;
-    let active_admission = engine_fact_signature_for_exported_type(
-        ctx,
-        active_scope,
-        target_name,
-        observed_active_scope_hash,
-    );
-    let mut entries: Vec<crate::resolver_core::FactVersionRef> = match active_admission {
-        SignatureAdmission::Cacheable(sig) => sig.facts.to_vec(),
-        SignatureAdmission::NonCacheable(reason) => {
-            return SignatureAdmission::NonCacheable(reason);
-        }
-    };
-    if decl_canonical != active_scope || decl_symbol != target_name {
-        let decl_admission = engine_fact_signature_for_exported_type(
-            ctx,
-            decl_canonical,
-            decl_symbol,
-            observed_decl_hash,
-        );
-        match decl_admission {
-            SignatureAdmission::Cacheable(sig) => entries.extend(sig.facts.iter().cloned()),
-            SignatureAdmission::NonCacheable(reason) => {
-                return SignatureAdmission::NonCacheable(reason);
-            }
-        }
-    }
-    // The FINAL routed declaring canonical — the third self-root the
-    // cache key never encodes. Root it only when it is a genuinely
-    // distinct file: a routed canonical equal to the active scope or
-    // the original declaring canonical is already rooted above.
-    if let Some((routed_canonical, routed_symbol, observed_routed_hash)) = routed_decl {
-        if routed_canonical != active_scope && routed_canonical != decl_canonical {
-            let routed_admission = engine_fact_signature_for_exported_type(
-                ctx,
-                routed_canonical,
-                routed_symbol,
-                observed_routed_hash,
-            );
-            match routed_admission {
-                SignatureAdmission::Cacheable(sig) => entries.extend(sig.facts.iter().cloned()),
-                SignatureAdmission::NonCacheable(reason) => {
-                    return SignatureAdmission::NonCacheable(reason);
-                }
-            }
-        }
-    }
-    SignatureAdmission::Cacheable(crate::fact_signature_helpers::ReadSetSignature::new(
-        std::sync::Arc::from(entries),
-    ))
-}
 
 /// A prepared type declaration bundled with the keyed canonical's
 /// observed content version.
@@ -531,7 +393,7 @@ pub(crate) fn engine_dep_signature_for_two_canonicals(
 use std::cell::Cell;
 
 /// Composite-scope context for prepared-member-path projection.
-/// Bundles the two scopes the prepared-route walker keeps live:
+/// Bundles the scopes the route-key leaf stabiliser keeps live:
 ///
 /// - `decl_scope`: the canonical id of the file where the prepared
 ///   declaration (e.g., `type Button = ComponentConfig<typeof theme>`)
@@ -542,22 +404,19 @@ use std::cell::Cell;
 ///   instantiated the prepared decl. `typeof value_ref` references and
 ///   type arguments passed at the call site resolve in this scope.
 ///
-/// See [`ComponentMetaQueryEngine::solve_or_project_leaf_expr_with_context`]
-/// for the per-TypeExpr dispatch rules.
-//
-// Retained `#[allow(dead_code)]` for diagnostic / future re-entry use;
-// the prepared-route walker now consumes the constituent scopes
-// directly via [`ProjectionChainScopes`] / the `chain_scopes` field
-// rather than through this composite.
-#[allow(dead_code)]
+/// Built and consumed by the route-key leaf stabilisers in
+/// `route_keys.rs`: `solve_or_project_prepared_member_leaf_expr`
+/// constructs it from the engine's live scope state and
+/// [`ComponentMetaQueryEngine::solve_or_project_leaf_expr_with_context`]
+/// reads its three scopes for the per-TypeExpr dispatch rules.
 #[derive(Debug, Clone)]
 struct PreparedProjectionContext {
     decl_scope: String,
     arg_scope: String,
-    /// Scopes from outer levels of a declaration-chain projection.
-    /// Populated as the recursion descends from
-    /// `project_prepared_member_path_route_projection_from_*` so a
-    /// `TypeOf(value)` reference inside an inner helper body (e.g.,
+    /// Scopes from outer levels of a declaration-chain projection,
+    /// snapshotted from the engine's `projection_chain_scopes` when
+    /// `solve_or_project_prepared_member_leaf_expr` builds this context,
+    /// so a `TypeOf(value)` reference inside an inner helper body (e.g.,
     /// the lowered `ComponentUI<typeof theme>` inside
     /// `ComponentConfig`'s body, where the original `Button` alias
     /// lives in `button-types.ts`) can fall back through the chain
@@ -576,62 +435,6 @@ pub struct ResolvedImportedRegistrySymbol {
     pub exported_name: String,
     pub body: TypeExpr,
     pub canonical_dependencies: BTreeSet<String>,
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-enum PreparedSubstitutionKey {
-    Empty,
-    Entries(Vec<(String, TypeExpr)>),
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct PreparedSurfaceCacheKey {
-    canonical_id: String,
-    symbol_name: String,
-    substitutions: PreparedSubstitutionKey,
-    /// See
-    /// [`crate::resolver_core::cache_keys::PreparedSurfaceCacheKey::from_root_body`].
-    /// The engine-internal `RefCell`-backed read-through view mirrors
-    /// the ctx-owned key shape exactly, so two distinct entry contexts
-    /// share NO scratch state inside one request.
-    from_root_body: bool,
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct PreparedMemberCacheKey {
-    canonical_id: String,
-    symbol_name: String,
-    member_name: String,
-    kind: PreparedMemberCacheKind,
-    substitutions: PreparedSubstitutionKey,
-    /// See
-    /// [`crate::resolver_core::cache_keys::PreparedMemberCacheKey::from_root_body`].
-    from_root_body: bool,
-}
-
-// `InheritedRoute` is no longer
-// constructed after trampoline conversion. Variant
-// §F call-graph closure.
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-enum PreparedMemberCacheKind {
-    Requested,
-    #[allow(dead_code)]
-    InheritedRoute,
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct PreparedTargetCacheKey {
-    active_scope_canonical_id: String,
-    decl_canonical_id: String,
-    decl_symbol_name: String,
-    requested_name: String,
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct RoutedExprSurfaceCacheKey {
-    scope_canonical_id: String,
-    root_symbol: String,
-    route: super::RouteDemand,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -676,7 +479,6 @@ pub(crate) struct FastShallowFieldExpr {
 /// | `imported_registry_symbols` | (b) | Caches `(canonical, name) → ResolvedImportedRegistrySymbol` at TypeExpr level. Dispatch's `ResolveDecl` memo operates on `SemanticNodeId`s; cannot subsume the pre-lowering identity. |
 /// | `declarations` / `resolvable` / `owner_collection_exprs` | (b) | Same kind — pre-lowering memos keyed on `(canonical, name)` strings. |
 /// | `scope_payloads` | (a) | Per-request `Arc<DeclarationScopePayload>` clones; the bundle is ctx-owned, this just reuses the Arc within one request. |
-/// | `prepared_surface_cache` / `prepared_member_cache` / `prepared_target_cache` / `routed_expr_surface_cache` | (b) | All four are pre-lowering route projections — same justification as above. |
 /// | `prepared_type_decls` | (a) | Arc-cache for `Arc<PreparedTypeDecl>` from ctx; no semantic computation — only refcount avoidance. |
 /// | `prepared_*_query_count`, `prepared_*_hit_count` | (a) | `#[cfg(test)]` instrumentation counters. |
 /// | `fuse_budgets` / `fuse_state` | (a) | Engine-construction-scoped fuse rails (§1.4). |
@@ -693,8 +495,7 @@ pub(crate) struct FastShallowFieldExpr {
 /// follow-up plan.
 pub struct ComponentMetaQueryEngine<'a> {
     pub(crate) ctx: &'a dyn ResolverContext,
-    current_prepared_request_root: Option<String>,
-    // The 10 caches below are read-through views over the host-owned
+    // The caches below are read-through views over the host-owned
     // typed DBs on `ProjectTypeStore` (see `crate::component_meta_caches`).
     // Each engine field is a per-request **non-authoritative read-through
     // view** that mirrors the ctx DB result for repeated lookups within
@@ -718,28 +519,6 @@ pub struct ComponentMetaQueryEngine<'a> {
     /// bundle-derived names/bindings within one request so repeated projections
     /// do not keep recloning them.
     scope_payloads: FxHashMap<String, Option<std::sync::Arc<DeclarationScopePayload>>>,
-    /// Read-through view; authority is
-    /// `ProjectTypeStore::prepared_surface_db()`.
-    ///
-    /// Unread after trampoline
-    /// conversion of retired surface methods. Field
-    /// §F call-graph closure.
-    #[allow(dead_code)]
-    prepared_surface_cache: RefCell<FxHashMap<PreparedSurfaceCacheKey, PreparedSurfaceProjection>>,
-    /// Read-through view; authority is
-    /// `ProjectTypeStore::prepared_member_db()`.
-    prepared_member_cache: RefCell<FxHashMap<PreparedMemberCacheKey, Option<ProjectedMember>>>,
-    /// Read-through view; authority is
-    /// `ProjectTypeStore::prepared_target_db()`.
-    prepared_target_cache: RefCell<FxHashMap<PreparedTargetCacheKey, Option<(String, String)>>>,
-    /// Read-through view; authority is
-    /// `ProjectTypeStore::routed_expr_surface_db()`.
-    ///
-    /// Unread after trampoline
-    /// conversion of retired surface methods. Field
-    /// §F call-graph closure.
-    #[allow(dead_code)]
-    routed_expr_surface_cache: RefCell<FxHashMap<RoutedExprSurfaceCacheKey, TypeExpr>>,
     /// Request-local memoization for prepared declaration lookups.
     prepared_type_decls: FxHashMap<
         (String, String),
@@ -772,50 +551,7 @@ pub struct ComponentMetaQueryEngine<'a> {
 
 #[cfg(test)]
 thread_local! {
-    static FORBID_STRUCTURAL_SLOW_LANE: Cell<usize> = const { Cell::new(0) };
-    static FORBID_DIRECT_PICK_ROUTED_EXPR_SLOW_LANE: Cell<usize> = const { Cell::new(0) };
     static FORBID_PREPARED_STRUCTURAL_SUBSTITUTION_SLOW_LANE: Cell<usize> = const { Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) struct StructuralSlowLaneGuard;
-
-#[cfg(test)]
-impl Drop for StructuralSlowLaneGuard {
-    fn drop(&mut self) {
-        FORBID_STRUCTURAL_SLOW_LANE.with(|depth| {
-            depth.set(depth.get().saturating_sub(1));
-        });
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn forbid_structural_slow_lane_for_tests() -> StructuralSlowLaneGuard {
-    FORBID_STRUCTURAL_SLOW_LANE.with(|depth| {
-        depth.set(depth.get().saturating_add(1));
-    });
-    StructuralSlowLaneGuard
-}
-
-#[cfg(test)]
-pub(crate) struct DirectPickRoutedExprSlowLaneGuard;
-
-#[cfg(test)]
-impl Drop for DirectPickRoutedExprSlowLaneGuard {
-    fn drop(&mut self) {
-        FORBID_DIRECT_PICK_ROUTED_EXPR_SLOW_LANE.with(|depth| {
-            depth.set(depth.get().saturating_sub(1));
-        });
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn forbid_direct_pick_routed_expr_slow_lane_for_tests(
-) -> DirectPickRoutedExprSlowLaneGuard {
-    FORBID_DIRECT_PICK_ROUTED_EXPR_SLOW_LANE.with(|depth| {
-        depth.set(depth.get().saturating_add(1));
-    });
-    DirectPickRoutedExprSlowLaneGuard
 }
 
 #[cfg(test)]
@@ -839,56 +575,43 @@ pub(crate) fn forbid_prepared_structural_substitution_slow_lane_for_tests(
     PreparedStructuralSubstitutionSlowLaneGuard
 }
 
-// Unused after trampoline
-// conversion of `project_route_surface_expr`. Helper.
-#[cfg(test)]
-#[allow(dead_code)]
-fn assert_direct_pick_routed_expr_slow_lane_allowed() {
-    assert!(
-        !direct_pick_routed_expr_slow_lane_forbidden_for_current_thread(),
-        "direct routed-expr pick slow lane should not be used when member projection can satisfy the route",
-    );
-}
-
-#[cfg(not(test))]
-#[allow(dead_code)]
-fn assert_direct_pick_routed_expr_slow_lane_allowed() {}
-
-#[cfg(test)]
-fn assert_prepared_structural_substitution_slow_lane_allowed(expr: &TypeExpr) {
-    let is_structural = matches!(
-        expr,
-        TypeExpr::Object(_)
-            | TypeExpr::Intersection(_)
-            | TypeExpr::Union(_)
-            | TypeExpr::Function(_)
-            | TypeExpr::Parenthesized(_),
-    );
-    if is_structural {
-        assert!(
-            !prepared_structural_substitution_slow_lane_forbidden_for_current_thread(),
-            "prepared generic projection should not whole-substitute structural bodies when shallow member-local substitution can satisfy the route",
-        );
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn structural_slow_lane_forbidden_for_current_thread() -> bool {
-    FORBID_STRUCTURAL_SLOW_LANE.with(|depth| depth.get() > 0)
-}
-
-#[cfg(test)]
-pub(crate) fn direct_pick_routed_expr_slow_lane_forbidden_for_current_thread() -> bool {
-    FORBID_DIRECT_PICK_ROUTED_EXPR_SLOW_LANE.with(|depth| depth.get() > 0)
-}
-
 #[cfg(test)]
 pub(crate) fn prepared_structural_substitution_slow_lane_forbidden_for_current_thread() -> bool {
     FORBID_PREPARED_STRUCTURAL_SUBSTITUTION_SLOW_LANE.with(|depth| depth.get() > 0)
 }
 
+/// Trip-wire for the live prepared-structural-substitution slow lane.
+///
+/// `apply_type_param_substitutions` (`surface.rs`) calls this immediately
+/// before whole-body `substitute_type_expr`, AFTER the empty/no-reference
+/// fast-return — so it only fires when a real substitution is about to run.
+/// When the body being substituted is a structural shape
+/// (`Object`/`Intersection`/`Union`/`Function`/`Parenthesized`) and a test
+/// has armed `forbid_prepared_structural_substitution_slow_lane_for_tests()`,
+/// this panics: such routes are expected to be satisfied by the dispatch
+/// fast lane via shallow member-local projection rather than by cloning and
+/// whole-substituting the structural body.
+#[cfg(test)]
+pub(super) fn assert_prepared_structural_substitution_slow_lane_allowed(expr: &TypeExpr) {
+    if matches!(
+        expr,
+        TypeExpr::Object(..)
+            | TypeExpr::Intersection(..)
+            | TypeExpr::Union(..)
+            | TypeExpr::Function(..)
+            | TypeExpr::Parenthesized(..)
+    ) {
+        assert!(
+            !prepared_structural_substitution_slow_lane_forbidden_for_current_thread(),
+            "prepared generic projection should not whole-substitute structural bodies when \
+             shallow member-local substitution can satisfy the route",
+        );
+    }
+}
+
 #[cfg(not(test))]
-fn assert_prepared_structural_substitution_slow_lane_allowed(_expr: &TypeExpr) {}
+#[inline]
+pub(super) fn assert_prepared_structural_substitution_slow_lane_allowed(_expr: &TypeExpr) {}
 
 #[cfg(test)]
 thread_local! {
@@ -920,16 +643,6 @@ thread_local! {
     /// value.
     static INJECT_IMPORTED_REGISTRY_CONCURRENT_PUBLISH:
         RefCell<Option<ResolvedImportedRegistrySymbol>> = const { RefCell::new(None) };
-    /// When `Some`, `project_routed_expr_surface_expr` invokes this
-    /// callback exactly ONCE — at the seam between the routed-expression
-    /// projection and the `cache_routed_expr_surface_expr`
-    /// write-through. It deterministically reproduces a racing `upsert`
-    /// of the scope file landing in that window: a torn-read producer
-    /// observes the post-edit hash here and roots the pre-edit value on
-    /// it; a producer that captured the observed hash before the
-    /// projection roots on the pre-edit hash and refuses admission.
-    static INJECT_ROUTED_EXPR_PROJECTION_SEAM_EDIT:
-        RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
 }
 
 /// Reset the imported-registry resolver invocation counter and read its
@@ -992,47 +705,6 @@ pub(crate) fn inject_imported_registry_concurrent_publish_for_tests(
 ) -> InjectImportedRegistryConcurrentPublishGuard {
     INJECT_IMPORTED_REGISTRY_CONCURRENT_PUBLISH.with(|slot| *slot.borrow_mut() = Some(symbol));
     InjectImportedRegistryConcurrentPublishGuard
-}
-
-/// RAII guard that clears the routed-expr projection-seam edit
-/// injection for the current thread on drop.
-#[cfg(test)]
-pub(crate) struct InjectRoutedExprProjectionSeamEditGuard;
-
-#[cfg(test)]
-impl Drop for InjectRoutedExprProjectionSeamEditGuard {
-    fn drop(&mut self) {
-        INJECT_ROUTED_EXPR_PROJECTION_SEAM_EDIT.with(|slot| *slot.borrow_mut() = None);
-    }
-}
-
-/// Arrange for `project_routed_expr_surface_expr` to run `seam_edit`
-/// exactly once, at the seam between the routed-expression projection
-/// and the `cache_routed_expr_surface_expr` write-through. Reproduces —
-/// deterministically, single-threaded — a racing `upsert` of the scope
-/// file landing between the value compute and the cache write-through.
-#[cfg(test)]
-pub(crate) fn inject_routed_expr_projection_seam_edit_for_tests<F>(
-    seam_edit: F,
-) -> InjectRoutedExprProjectionSeamEditGuard
-where
-    F: Fn() + 'static,
-{
-    INJECT_ROUTED_EXPR_PROJECTION_SEAM_EDIT
-        .with(|slot| *slot.borrow_mut() = Some(Box::new(seam_edit)));
-    InjectRoutedExprProjectionSeamEditGuard
-}
-
-/// Fire the routed-expr projection-seam edit hook, if installed, then
-/// clear it so it runs at most once per `project_routed_expr_surface_expr`
-/// call. Invoked by `routed_expr.rs` at the projection / write-through
-/// seam.
-#[cfg(test)]
-pub(crate) fn fire_routed_expr_projection_seam_edit_for_tests() {
-    let hook = INJECT_ROUTED_EXPR_PROJECTION_SEAM_EDIT.with(|slot| slot.borrow_mut().take());
-    if let Some(hook) = hook {
-        hook();
-    }
 }
 
 /// Process-global rendezvous barrier for the imported-registry
@@ -1267,16 +939,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
         Self {
             ctx,
-            current_prepared_request_root: None,
             imported_registry_symbols: RefCell::new(FxHashMap::default()),
             declarations: RefCell::new(FxHashMap::default()),
             resolvable: RefCell::new(FxHashMap::default()),
             owner_collection_exprs: RefCell::new(FxHashMap::default()),
             scope_payloads: FxHashMap::default(),
-            prepared_surface_cache: RefCell::new(FxHashMap::default()),
-            prepared_member_cache: RefCell::new(FxHashMap::default()),
-            prepared_target_cache: RefCell::new(FxHashMap::default()),
-            routed_expr_surface_cache: RefCell::new(FxHashMap::default()),
             prepared_type_decls: FxHashMap::default(),
             #[cfg(test)]
             prepared_type_decl_query_count: 0,
@@ -1395,26 +1062,6 @@ impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
 
 fn empty_semantic_args() -> std::sync::Arc<[SemanticNodeId]> {
     std::sync::Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice())
-}
-
-/// Engine-internal helper: dispatch the single-member projection through
-/// the SOLE query-time resolver. Used by `project_routed_expr_surface_expr`
-/// and friends.
-///
-/// There is NO prepared-decl-walker fallback: the macro-object materialiser
-/// and its prepared-member rescue path are retired, so a dispatch miss is an
-/// authoritative miss (`None`). Any member the route demands resolves through
-/// `dispatch_projected_member` (the five-mode dispatch) or it does not resolve.
-fn dispatch_member_for_root_symbol(
-    engine: &mut ComponentMetaQueryEngine<'_>,
-    scope_canonical_id: &str,
-    symbol_name: &str,
-    member_name: &str,
-) -> Option<ProjectedMember> {
-    if engine.projection_op_budget_exhausted() {
-        return None;
-    }
-    engine.dispatch_projected_member(scope_canonical_id, symbol_name, member_name)
 }
 
 /// Engine-internal substitution helper that mirrors the

@@ -458,8 +458,16 @@ fn observed_self_root_fact(canonical_id: &str, observed_hash: Hash16) -> FactVer
 /// forgoes the shared cache.
 ///
 /// Use this helper for caches keyed on `(canonical, exporter,
-/// member, space)` — e.g. `PreparedMemberDb`, slot-binding member
-/// reads, fallthrough member projection.
+/// member, space)` — slot-binding member reads and member-keyed
+/// dispatch member projection.
+///
+/// Test-only: no production producer composes a member-keyed signature
+/// this way (its former dedicated walker-DB consumer was deleted). The
+/// `query_identity_self_root_substrate_tests` substrate suite exercises
+/// this helper to characterise the observed-hash self-root prepend for
+/// member-keyed scopes, matching the `fact_signature_for_canonical_surface`
+/// precedent.
+#[cfg(test)]
 pub(crate) fn fact_signature_for_canonical_member(
     ctx: &dyn ResolverContext,
     canonical_id: &str,

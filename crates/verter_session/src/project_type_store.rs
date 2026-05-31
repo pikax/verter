@@ -28,8 +28,7 @@ use rustc_hash::FxHashMap;
 use verter_semantic::analysis::{AnalysisScope, Hash16};
 
 use crate::component_meta_caches::{
-    DeclarationLookupDb, ImportedRegistryDb, OwnerCollectionDb, PreparedMemberDb,
-    PreparedSurfaceDb, PreparedTargetDb, ResolvabilityDb, RoutedExprSurfaceDb, ShapeCacheDb,
+    DeclarationLookupDb, ImportedRegistryDb, OwnerCollectionDb, ResolvabilityDb, ShapeCacheDb,
 };
 use crate::component_meta_result_db::ComponentMetaResultDb;
 use crate::file_artifact_store::FileArtifactStore;
@@ -1691,7 +1690,6 @@ pub struct ProjectTypeStore {
     declaration_lookup_db: DeclarationLookupDb,
     resolvability_db: ResolvabilityDb,
     owner_collection_db: OwnerCollectionDb,
-    prepared_target_db: PreparedTargetDb,
     /// Universal shape cache. Replaces the previously-split
     /// `MaterializeMemoDb` (TypeExpr-keyed) and `MemberShapeCacheDb`
     /// (SemanticNode-keyed) with a single store keyed on
@@ -1713,9 +1711,6 @@ pub struct ProjectTypeStore {
     /// results stored as `(DeclIdentity → bool)` with reverse-index
     /// invalidation matching `MaterializeStructureDb`.
     ref_cycle_db: crate::component_meta_caches::RefCycleResultDb,
-    prepared_surface_db: PreparedSurfaceDb,
-    prepared_member_db: PreparedMemberDb,
-    routed_expr_surface_db: RoutedExprSurfaceDb,
     /// Route-only shallow cache. Canonical-keyed (`Arc<str>`) with
     /// `whole_hash` validated INSIDE the entry; mirrors
     /// [`FileArtifactStore`] exactly. Per-canonical eviction goes through
@@ -1871,8 +1866,6 @@ impl ProjectTypeStore {
             ResolvabilityDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
         let owner_collection_db =
             OwnerCollectionDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
-        let prepared_target_db =
-            PreparedTargetDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
         let shape_cache_db =
             ShapeCacheDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
         let materialize_structure_db =
@@ -1882,12 +1875,6 @@ impl ProjectTypeStore {
         let ref_cycle_db = crate::component_meta_caches::RefCycleResultDb::with_counter(
             Arc::clone(&counters.component_meta_cache_live),
         );
-        let prepared_surface_db =
-            PreparedSurfaceDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
-        let prepared_member_db =
-            PreparedMemberDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
-        let routed_expr_surface_db =
-            RoutedExprSurfaceDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
         let route_owned_shallow = RouteOwnedShallowDb::with_counters(
             Arc::clone(&counters.route_owned_shallow_live),
             Arc::clone(&counters.route_owned_shallow_stale_sweeps),
@@ -1910,13 +1897,9 @@ impl ProjectTypeStore {
             declaration_lookup_db,
             resolvability_db,
             owner_collection_db,
-            prepared_target_db,
             shape_cache_db,
             materialize_structure_db,
             ref_cycle_db,
-            prepared_surface_db,
-            prepared_member_db,
-            routed_expr_surface_db,
             route_owned_shallow,
             app_config_no_override_proof,
             type_resolution_context_db: TypeResolutionContextDb::new(),
@@ -2129,10 +2112,6 @@ impl ProjectTypeStore {
         &self.owner_collection_db
     }
 
-    pub fn prepared_target_db(&self) -> &PreparedTargetDb {
-        &self.prepared_target_db
-    }
-
     /// Universal shape cache. Replaces
     /// `MaterializeMemoDb` + `MemberShapeCacheDb`. The `ShapeSubject`
     /// enum on the key discriminates TypeExpr-start vs
@@ -2157,18 +2136,6 @@ impl ProjectTypeStore {
     /// `meta_resolve::ref_root_reaches_transitive_cycle_node`.
     pub fn ref_cycle_db(&self) -> &crate::component_meta_caches::RefCycleResultDb {
         &self.ref_cycle_db
-    }
-
-    pub fn prepared_surface_db(&self) -> &PreparedSurfaceDb {
-        &self.prepared_surface_db
-    }
-
-    pub fn prepared_member_db(&self) -> &PreparedMemberDb {
-        &self.prepared_member_db
-    }
-
-    pub fn routed_expr_surface_db(&self) -> &RoutedExprSurfaceDb {
-        &self.routed_expr_surface_db
     }
 
     /// Resolve-domain authoritative store for resolved import /
@@ -2283,7 +2250,6 @@ impl ProjectTypeStore {
             .invalidate_canonical(canonical_id);
         self.resolvability_db.invalidate_canonical(canonical_id);
         self.owner_collection_db.invalidate_canonical(canonical_id);
-        self.prepared_target_db.invalidate_canonical(canonical_id);
         // The universal shape cache joins the per-canonical
         // eviction cascade. Replaces the previously-split
         // `materialize_memo_db` + `member_shape_cache_db`.
@@ -2295,10 +2261,6 @@ impl ProjectTypeStore {
         // R — same per-canonical reverse-index drain
         // for the BFS cycle-result cache.
         self.ref_cycle_db.invalidate_for_canonical(canonical_id);
-        self.prepared_surface_db.invalidate_canonical(canonical_id);
-        self.prepared_member_db.invalidate_canonical(canonical_id);
-        self.routed_expr_surface_db
-            .invalidate_canonical(canonical_id);
         // F6/F7 destination DB participates in the
         // per-canonical eviction cascade.
         self.route_owned_shallow.remove(canonical_id);
@@ -2496,7 +2458,6 @@ impl ProjectTypeStore {
         self.declaration_lookup_db.invalidate_all();
         self.resolvability_db.invalidate_all();
         self.owner_collection_db.invalidate_all();
-        self.prepared_target_db.invalidate_all();
         // The universal shape cache joins the project-generation
         // invalidation cascade. Replaces `materialize_memo_db` +
         // `member_shape_cache_db`.
@@ -2506,9 +2467,6 @@ impl ProjectTypeStore {
         // BFS cycle-result cache (entries depend on the same routes /
         // intrinsics that change at the project-generation boundary).
         self.ref_cycle_db.invalidate_all();
-        self.prepared_surface_db.invalidate_all();
-        self.prepared_member_db.invalidate_all();
-        self.routed_expr_surface_db.invalidate_all();
         // Issue #6 / project-shape change invalidates every
         // proof entry; the proof's dep signature includes routes and
         // workspace-level interface-merging state.
@@ -2573,13 +2531,9 @@ pub const PROJECT_TYPE_STORE_DB_INVENTORY: &[&str] = &[
     "declaration_lookup_db",
     "resolvability_db",
     "owner_collection_db",
-    "prepared_target_db",
     "shape_cache_db",
     "materialize_structure_db",
     "ref_cycle_db",
-    "prepared_surface_db",
-    "prepared_member_db",
-    "routed_expr_surface_db",
     "route_owned_shallow",
     "app_config_no_override_proof",
     // Tier 1A typed-DB shapes (introduced empty; consumer migration in 1C-α).
@@ -2618,13 +2572,9 @@ impl ProjectTypeStore {
             &self.declaration_lookup_db,
             &self.resolvability_db,
             &self.owner_collection_db,
-            &self.prepared_target_db,
             &self.shape_cache_db,
             &self.materialize_structure_db,
             &self.ref_cycle_db,
-            &self.prepared_surface_db,
-            &self.prepared_member_db,
-            &self.routed_expr_surface_db,
             &self.route_owned_shallow,
             &self.app_config_no_override_proof,
             // Tier 1A typed-DB shapes (introduced empty; consumer migration in 1C-α).
@@ -2698,28 +2648,12 @@ impl ProjectTypeStore {
             self.owner_collection_db
                 .invalidate_canonical_for(canonical_id),
         );
-        total = total.saturating_add(
-            self.prepared_target_db
-                .invalidate_canonical_for(canonical_id),
-        );
         total = total.saturating_add(self.shape_cache_db.invalidate_canonical_for(canonical_id));
         total = total.saturating_add(
             self.materialize_structure_db
                 .invalidate_canonical_for(canonical_id),
         );
         total = total.saturating_add(self.ref_cycle_db.invalidate_canonical_for(canonical_id));
-        total = total.saturating_add(
-            self.prepared_surface_db
-                .invalidate_canonical_for(canonical_id),
-        );
-        total = total.saturating_add(
-            self.prepared_member_db
-                .invalidate_canonical_for(canonical_id),
-        );
-        total = total.saturating_add(
-            self.routed_expr_surface_db
-                .invalidate_canonical_for(canonical_id),
-        );
         total = total.saturating_add(
             self.route_owned_shallow
                 .invalidate_canonical_for(canonical_id),

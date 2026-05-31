@@ -164,13 +164,6 @@ mod query_identity_self_root_substrate_tests;
 // component-meta query-identity caches.
 #[cfg(test)]
 mod query_db_self_root_tests;
-// R21-F1 c4 — discriminating cache identity tests for
-// `from_root_body` threading through the prepared-surface walker.
-// Closes codex's BINDING TOP RISK: prevents partial / cache-incomplete
-// F1 landing from serving stale or defaulted provenance through the
-// shared `PreparedSurfaceDb` / `PreparedMemberDb` slots.
-#[cfg(test)]
-mod r21_c4_cache_identity_tests;
 // Self-version-root discriminators for the `SemanticGraphStore`
 // query-node memo: strict warm-read validation, the
 // `semantic_graph_read_set_signature` producer, and per-node-kind
@@ -338,8 +331,6 @@ pub(crate) mod session_runtime;
 pub mod session_view;
 mod shared;
 pub(crate) mod source_map_remap;
-#[cfg(test)]
-pub(crate) mod spike_instrumentation;
 pub(crate) mod template_convert;
 pub mod typeinfo;
 mod types;

@@ -15,7 +15,7 @@
 //!   `pub fn can_resolve_registry_symbol`, `pub fn owner_collection_expr`,
 //!   `pub fn named_decl_body`, `pub fn prepared_member_raw_type`,
 //!   `pub fn enter_member_surface`, `pub fn exit_member_surface`,
-//!   `pub fn allow_structural_slow_lane`, `pub fn allow_wildcard_route`,
+//!   `pub fn allow_wildcard_route`,
 //!   `pub fn allow_imported_root`, `pub fn allow_registry_deepening`,
 //!   `pub fn allow_union_member`, `pub fn reset_union_members`,
 //!   `pub fn has_fuse_tripped`, `pub fn fuse_trips` — all `pub` on the
@@ -27,17 +27,13 @@
 //!   `pub(crate) fn debug_*`, `pub(crate) fn prepared_type_decl`,
 //!   `pub(crate) fn ctx`,
 //!   `pub(crate) fn dispatch_projected_surface`,
-//!   `pub(crate) fn dispatch_projected_member`,
-//!   `pub(crate) fn dispatch_projected_keyspace`,
 //!   `pub(crate) fn dispatch_routed_expr_surface_expr` — crate-visible
 //!   helpers used by `meta_resolve` and other engine impl methods.
 //! - Private methods (`semantic_dispatch`, `dispatch_root_instantiated`)
 //!   stay private and are visible inside the
 //!   `component_meta_query_engine` folder via parent-private locality.
 
-use verter_semantic::analysis::type_solver::query_engine::{
-    ProjectedKeyspace, ProjectedMember, ProjectedSurface,
-};
+use verter_semantic::analysis::type_solver::query_engine::ProjectedSurface;
 use verter_type_expr::TypeExpr;
 
 use super::helpers::{is_builtin_name, resolve_imported_registry_symbol_with_budget};
@@ -64,8 +60,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         exported_name: &str,
     ) -> Option<ResolvedImportedRegistrySymbol> {
         let key = (canonical_id.to_string(), exported_name.to_string());
-        #[cfg(test)]
-        crate::spike_instrumentation::record_cache_read("imported_registry_symbols");
         if let Some(cached) = self.imported_registry_symbols.borrow().get(&key).cloned() {
             return cached;
         }
@@ -431,8 +425,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         requested_name: &str,
     ) -> ResolvedTypeDeclaration {
         let key = (canonical_source.to_string(), requested_name.to_string());
-        #[cfg(test)]
-        crate::spike_instrumentation::record_cache_read("declarations");
         if let Some(cached) = self.declarations.borrow().get(&key).cloned() {
             return cached;
         }
@@ -526,8 +518,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .filter(|s| !s.is_empty())
             .unwrap_or(owner_canonical);
         let key = (source_key.to_string(), exported_name.to_string());
-        #[cfg(test)]
-        crate::spike_instrumentation::record_cache_read("resolvable");
         if let Some(cached) = self.resolvable.borrow().get(&key).copied() {
             return cached;
         }
@@ -593,8 +583,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         owner_canonical: &str,
         name: &str,
     ) -> Option<verter_type_expr::TypeExpr> {
-        #[cfg(test)]
-        crate::spike_instrumentation::record_cache_read("owner_collection_exprs");
         if let Some(cached) = self.owner_collection_exprs.borrow().get(name).cloned() {
             return cached;
         }
@@ -678,12 +666,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
     pub fn exit_member_surface(&mut self) {
         self.fuse_state.pop_member_recursion();
-    }
-
-    pub fn allow_structural_slow_lane(&mut self) -> bool {
-        !self
-            .fuse_state
-            .check_structural_slow_lane(&self.fuse_budgets)
     }
 
     /// `pub(crate)` accessor for the projection-op fuse
@@ -774,7 +756,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     }
 
     /// The corresponding test assertions migrated to behavior
-    /// assertions / ctx `prepared_surface_db().live_count()` checks.
+    /// assertions / ctx `materialize_structure_db().live_count()` checks.
     /// Field + accessor retained until the broader counter cleanup.
     #[cfg(test)]
     #[allow(dead_code)]
@@ -1002,45 +984,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // the composed surface is empty.
         let anchor = self.dispatch_decl_anchor(scope_canonical_id, symbol_name)?;
         projected_compound_root_surface_via_dispatch(self.ctx, anchor)
-    }
-
-    pub(crate) fn dispatch_projected_member(
-        &mut self,
-        scope_canonical_id: &str,
-        symbol_name: &str,
-        member_name: &str,
-    ) -> Option<ProjectedMember> {
-        self.dispatch_projected_surface(scope_canonical_id, symbol_name)?
-            .members
-            .into_iter()
-            .find(|member| member.name == member_name)
-    }
-
-    /// Clippy cleanup — paired with `dispatch_projected_member`
-    /// and `dispatch_projected_surface` as part of the ComponentMetaQueryEngine
-    /// surface contract. No call site in the landed tree, but the helper is
-    /// retained for symmetry with the projection/keyspace surface API; the
-    /// dispatch path uses keyspace shape directly via `surface.members`
-    /// elsewhere. `#[allow(dead_code)]` keeps the API symmetry without
-    /// triggering the unused-method lint.
-    #[allow(dead_code)]
-    pub(crate) fn dispatch_projected_keyspace(
-        &mut self,
-        scope_canonical_id: &str,
-        symbol_name: &str,
-    ) -> Option<ProjectedKeyspace> {
-        let surface = self.dispatch_projected_surface(scope_canonical_id, symbol_name)?;
-        let mut members = surface
-            .members
-            .iter()
-            .map(|member| member.name.clone())
-            .collect::<Vec<_>>();
-        members.sort();
-        members.dedup();
-        Some(ProjectedKeyspace {
-            members,
-            has_index_signature: surface.has_index_signature,
-        })
     }
 
     pub(crate) fn dispatch_routed_expr_surface_expr(

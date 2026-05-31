@@ -49,3 +49,13 @@ strip = "none"
 
 [profile.dev]
 opt-level = 0
+# Dev/test builds emit minimal debug info. `line-tables-only` keeps
+# panic/backtrace file:line (test failures stay debuggable) while dropping
+# the variable/type debug info that can dominate compile + link time.
+# Measured: large win on Windows/MSVC (recompiling the verter_session rlib
+# ~76s -> ~5s; rlib 433MB -> 72MB; test-binary relink ~4s -> ~2s — MSVC PDB
+# generation is the bottleneck there) and ~neutral on Linux (DWARF is
+# cheaper). Kept because it is free on Linux/macOS and keeps backtraces.
+# For an interactive debugger that needs locals, override per run with
+# `CARGO_PROFILE_DEV_DEBUG=2 cargo ...`.
+debug = "line-tables-only"

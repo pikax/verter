@@ -42,10 +42,6 @@
 //! | `ComponentMetaResultDb`    | `component_meta_result_db.rs`   |
 //! | `OwnerImportSurfaceDb`     | `owner_import_surface.rs`       |
 //! | `ImportedRegistryDb`       | `component_meta_caches.rs`      |
-//! | `PreparedSurfaceDb`        | `component_meta_caches.rs`      |
-//! | `PreparedMemberDb`         | `component_meta_caches.rs`      |
-//! | `PreparedTargetDb`         | `component_meta_caches.rs`      |
-//! | `RoutedExprSurfaceDb`      | `component_meta_caches.rs`      |
 //! | `ShapeCacheDb`             | `component_meta_caches.rs`      |
 //! | `MaterializeStructureDb`   | `component_meta_caches.rs`      |
 //!

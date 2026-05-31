@@ -530,15 +530,6 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
     }
 
     #[inline]
-    fn resolve_route_type_edge(
-        &self,
-        owner_canonical: &str,
-        source_specifier: &str,
-    ) -> Option<String> {
-        ResolverContext::resolve_route_type_edge(self.inner, owner_canonical, source_specifier)
-    }
-
-    #[inline]
     fn route_owned_shallow_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>> {
         ResolverContext::route_owned_shallow_state(self.inner, canonical_id)
     }

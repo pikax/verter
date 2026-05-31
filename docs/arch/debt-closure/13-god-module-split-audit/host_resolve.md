@@ -37,15 +37,11 @@ Frontier-engine BFS uncached path (`*_uncached`) calls back into the cached shim
 
 ## 4. Public-surface edges
 
-`pub fn` count: 47.
+`pub fn` count: 43 (4 import-route-shadow guard members retired as born-dead).
 
 - `pub(crate) fn from_entry` — line 303 (span 303-316)
 - `pub(crate) fn forbid_route_frontier_for_tests` — line 434 (span 434-439)
-- `pub(crate) fn forbid_import_route_shadow_for_tests` — line 442 (span 442-447)
-- `pub(crate) fn assert_import_route_shadow_allowed` — line 459 (span 459-464)
 - `pub(crate) fn route_frontier_forbidden_for_current_thread` — line 467 (span 467-469)
-- `pub(crate) fn import_route_shadow_forbidden_for_current_thread` — line 472 (span 472-474)
-- `pub(crate) fn assert_import_route_shadow_allowed` — line 481 (span 481-481)
 - `pub(crate) fn invalidate_route_owned_shallow_cache` — line 573 (span 573-577)
 - `pub(crate) fn snapshot_route_owned_shallow_cache_entries` — line 585 (span 585-593)
 - `pub fn expand_relative_candidates` — line 601 (span 601-615)

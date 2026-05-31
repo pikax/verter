@@ -45,21 +45,6 @@ pub const HOT_PATH_DENYLIST: &[(&str, &str)] = &[
         "verter_compiler",
         "compile::template_data::walk_node_for_extraction",
     ),
-    // Resolver-side per-expression projection — invoked per
-    // navigation hop in the prepared-surface drill-down. Hot loop for
-    // type-resolution requests. (Inherent method on
-    // `ComponentMetaQueryEngine<'a>`; the path includes the receiver
-    // type segment.)
-    (
-        "verter_session",
-        "resolver_core::component_meta_query_engine::prepared_surface::ComponentMetaQueryEngine::project_prepared_surface_from_expr",
-    ),
-    // Resolver-side member-route per-expression projection —
-    // sibling hot loop to `project_prepared_surface_from_expr`.
-    (
-        "verter_session",
-        "resolver_core::component_meta_query_engine::prepared_surface::ComponentMetaQueryEngine::project_prepared_requested_member_from_expr",
-    ),
     // Semantic-graph cooperative dispatch loop — every memoized
     // semantic subquery fans out through this method and each
     // dispatch is a hot iteration.
