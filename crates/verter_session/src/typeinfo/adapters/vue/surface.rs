@@ -49,7 +49,6 @@ use verter_semantic::analysis::types::{
 };
 use verter_type_expr::{LiteralValue, TypeExpr, TypeExprScope};
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::surface_projector::render_type_expr_display;
 use crate::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, SurfaceProvenanceContext,
@@ -360,59 +359,62 @@ impl VerterHost {
         vue_macro_dtos_with_ctx(&host_ctx, request)
     }
 
-    /// Navigate a `TypeExpr` to its one-level object [`TypeInfoSurface`] through
-    /// the SHARED resolver, lowering it in `scope_canonical` then projecting the
-    /// empty-path `Shallow` surface — the SAME machinery
-    /// [`Self::resolve_shallow_surface_for`] uses for a named declaration.
-    ///
-    /// Used by the slot-binding extractor to resolve a slot's first-parameter
-    /// type (`Pick<RowApi, 'name'>` / a named alias / a parenthesized form) to
-    /// the binding object WITHOUT a nominal shape-sniff: `Pick` is navigated,
-    /// `Parenthesized` is unwrapped, and an alias `Ref` is resolved by the one
-    /// shared resolver rather than a per-utility special case. Returns `None`
-    /// when the scope file is not loaded or the type does not project to an
-    /// object surface (a primitive / union first param has no binding object).
-    #[must_use]
-    pub(crate) fn navigate_param_to_object_surface(
-        &self,
-        scope_canonical: &str,
-        param_ty: &TypeExpr,
-    ) -> Option<TypeInfoSurface> {
-        let store_view = self.resolver_store_view();
-        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
-        let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+}
 
-        // Lower the parameter type in its scope under structural-transit
-        // Navigate (member values stay shallow); the empty-path Shallow
-        // projection then synthesises the one-level object surface.
-        let base = dispatch.lower_type_expr_in_scope_with_context(
-            scope_canonical,
-            param_ty,
-            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
-        )?;
-        // Open-generic gate: a slot-param root that is symbolic-only (an open
-        // Conditional whose check carries a free `TypeParam`, an unresolved
-        // `IndexedAccess` / `Mapped`, …) must NOT be materialised into a
-        // committed object surface — doing so would invent phantom bindings from
-        // an undetermined generic context. This is the SAME gate the
-        // graph-native slot-binding synthesis applies; routing both binding
-        // paths through it keeps them in agreement (a `generic="M"` component's
-        // `(props: SlotProps<M>)` slot resolves to NO bindings on both paths,
-        // not a branch-committed guess).
-        if crate::meta_resolve::slot_binding_graph::slot_param_root_is_symbolic_only(
-            &dispatch, base, 0,
-        ) {
-            return None;
-        }
-        self.project_shallow_surface_from_base(
-            &host_ctx,
-            &dispatch,
-            base,
-            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-            ProjectionReductionContext::published(ProjectionMode::Shallow),
-        )
+/// Navigate a `TypeExpr` to its one-level object [`TypeInfoSurface`] through the
+/// SHARED resolver bound to the ACTIVE `ctx`, lowering it in `scope_canonical`
+/// then projecting the empty-path `Shallow` surface — the SAME machinery
+/// [`VerterHost::resolve_shallow_surface_for`] uses for a named declaration.
+///
+/// Used by the slot-binding extractor to resolve a slot's first-parameter type
+/// (`Pick<RowApi, 'name'>` / a named alias / a parenthesized form) to the
+/// binding object WITHOUT a nominal shape-sniff: `Pick` is navigated,
+/// `Parenthesized` is unwrapped, and an alias `Ref` is resolved by the one
+/// shared resolver rather than a per-utility special case. Returns `None` when
+/// the scope file is not loaded or the type does not project to an object
+/// surface (a primitive / union first param has no binding object).
+///
+/// Bound to `ctx` (`ctx.dispatch()`), NOT a fresh base `HostResolverContext`, so
+/// an overlay session resolves the slot-param object against its OVERLAY content
+/// — a `defineSlots<Slots>()` whose `Slots` alias is overlaid reads the overlay
+/// bindings, not the base.
+#[must_use]
+pub(crate) fn navigate_param_to_object_surface(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    scope_canonical: &str,
+    param_ty: &TypeExpr,
+) -> Option<TypeInfoSurface> {
+    let dispatch = ctx.dispatch();
+
+    // Lower the parameter type in its scope under structural-transit
+    // Navigate (member values stay shallow); the empty-path Shallow
+    // projection then synthesises the one-level object surface.
+    let base = dispatch.lower_type_expr_in_scope_with_context(
+        scope_canonical,
+        param_ty,
+        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+    )?;
+    // Open-generic gate: a slot-param root that is symbolic-only (an open
+    // Conditional whose check carries a free `TypeParam`, an unresolved
+    // `IndexedAccess` / `Mapped`, …) must NOT be materialised into a
+    // committed object surface — doing so would invent phantom bindings from
+    // an undetermined generic context. This is the SAME gate the
+    // graph-native slot-binding synthesis applies; routing both binding
+    // paths through it keeps them in agreement (a `generic="M"` component's
+    // `(props: SlotProps<M>)` slot resolves to NO bindings on both paths,
+    // not a branch-committed guess).
+    if crate::meta_resolve::slot_binding_graph::slot_param_root_is_symbolic_only(
+        &dispatch, base, 0,
+    ) {
+        return None;
     }
+    ctx.host_for_fact_tracer_install().project_shallow_surface_from_base(
+        ctx,
+        &dispatch,
+        base,
+        Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        ProjectionReductionContext::published(ProjectionMode::Shallow),
+    )
 }
 
 /// Slice a member's leading-JSDoc DESCRIPTION + TAG spans into owned text for
@@ -533,14 +535,15 @@ fn signature_jsdoc_from_spans(
 }
 
 /// Raise a member's value node to a [`TypeExpr`] through the shared structural
-/// raiser. `None` when the node has no raisable shape (the caller substitutes
-/// the eager rail's missing-`type_expr` fallback).
-fn raise_member_value(host: &VerterHost, member: &TypeInfoSurfaceMember) -> Option<TypeExpr> {
-    let store_view = host.resolver_store_view();
-    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
-    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-    dispatch.raise_node_to_type_expr(member.value)
+/// raiser bound to the ACTIVE `ctx` (`ctx.dispatch()`), so an overlay session
+/// raises against overlay content rather than a fresh base host view. `None`
+/// when the node has no raisable shape (the caller substitutes the eager rail's
+/// missing-`type_expr` fallback).
+fn raise_member_value(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    member: &TypeInfoSurfaceMember,
+) -> Option<TypeExpr> {
+    ctx.dispatch().raise_node_to_type_expr(member.value)
 }
 
 /// Realize a slot member's value to its underlying callable through the SHARED
@@ -552,13 +555,10 @@ fn raise_member_value(host: &VerterHost, member: &TypeInfoSurfaceMember) -> Opti
 /// `slot_binding_graph::compute_bindings_via_graph`, which realizes the same
 /// member value before reading `Function.params`.
 fn raise_realized_callable_member_value(
-    host: &VerterHost,
+    ctx: &dyn crate::resolver_core::ResolverContext,
     member: &TypeInfoSurfaceMember,
 ) -> Option<TypeExpr> {
-    let store_view = host.resolver_store_view();
-    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
-    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let dispatch = ctx.dispatch();
     let realized = crate::meta_resolve::dispatch_helpers::realize_callable_member(
         &dispatch,
         member.value,
@@ -667,15 +667,15 @@ pub(crate) fn vue_macro_dtos_with_ctx(
         match host.resolve_vue_macro_surface_with_ctx(ctx, &validated_request) {
             Some(macro_surface) => match macro_kind {
                 AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::DefineModel => VueMacroDtos {
-                    props: props_from_typeinfo_surface(host, &macro_surface),
+                    props: props_from_typeinfo_surface(ctx, &macro_surface),
                     ..VueMacroDtos::default()
                 },
                 AnalyzedMacroKind::DefineEmits => VueMacroDtos {
-                    emits: emits_from_typeinfo_surface(host, &macro_surface),
+                    emits: emits_from_typeinfo_surface(ctx, &macro_surface),
                     ..VueMacroDtos::default()
                 },
                 AnalyzedMacroKind::DefineSlots => VueMacroDtos {
-                    slots: slots_from_typeinfo_surface(host, &macro_surface),
+                    slots: slots_from_typeinfo_surface(ctx, &macro_surface),
                     ..VueMacroDtos::default()
                 },
                 // `WithDefaults` is not a props-surface source on this path: the
@@ -735,10 +735,15 @@ pub(crate) fn vue_macro_dtos_with_ctx(
 /// `has_default`), NOT on `AnalyzedPropField`, so the field's `is_optional`
 /// here stays the RAW type-argument optionality — matching the eager rail.
 #[must_use]
-pub fn props_from_typeinfo_surface(
-    host: &VerterHost,
+pub(crate) fn props_from_typeinfo_surface(
+    ctx: &dyn crate::resolver_core::ResolverContext,
     macro_surface: &VueMacroSurface,
 ) -> Vec<AnalyzedPropField> {
+    // Host-level reads (graph node scope, JSDoc source slicing) go through the
+    // host the active `ctx` is installed against; the view-sensitive type
+    // resolution (`raise_member_value`) flows through `ctx` so an overlay
+    // session raises member values against overlay content.
+    let host = ctx.host_for_fact_tracer_install();
     // `defineModel` contributes its synthesized model prop directly from the
     // analyzer facts (the type argument is the model VALUE type, not a props
     // object). Source from `AnalyzedMacro.prop_fields` (populated by the
@@ -753,7 +758,7 @@ pub fn props_from_typeinfo_surface(
         .members
         .iter()
         .map(|member| {
-            let type_expr = raise_member_value(host, member);
+            let type_expr = raise_member_value(ctx, member);
             let type_expr_scope = type_expr
                 .as_ref()
                 .map(|_| macro_surface.member_expr_scope(host, member));
@@ -841,14 +846,17 @@ fn model_prop_fields(host: &VerterHost, macro_surface: &VueMacroSurface) -> Vec<
 /// 3. **De-duplicate by event name, first-writer-wins** (matching the eager
 ///    projector's `retain`).
 #[must_use]
-pub fn emits_from_typeinfo_surface(
-    host: &VerterHost,
+pub(crate) fn emits_from_typeinfo_surface(
+    ctx: &dyn crate::resolver_core::ResolverContext,
     macro_surface: &VueMacroSurface,
 ) -> Vec<AnalyzedEmitField> {
-    let store_view = host.resolver_store_view();
-    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
-    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    // View-sensitive type resolution flows through the active `ctx`
+    // (`ctx.dispatch()`), NOT a fresh base `HostResolverContext`, so an overlay
+    // session raises emit call-signatures / property payloads against overlay
+    // content. Host-level reads (JSDoc source slicing, node scope) use the host
+    // the `ctx` is installed against.
+    let host = ctx.host_for_fact_tracer_install();
+    let dispatch = ctx.dispatch();
 
     let mut emits: Vec<AnalyzedEmitField> = Vec::new();
 
@@ -931,7 +939,7 @@ pub fn emits_from_typeinfo_surface(
     // (2) Property-style emits — fallback only when no call-signature emit fired.
     if emits.is_empty() {
         for member in macro_surface.surface.members.iter() {
-            let payload_expr = raise_member_value(host, member);
+            let payload_expr = raise_member_value(ctx, member);
             let payload_expr_scope = payload_expr
                 .as_ref()
                 .map(|_| macro_surface.member_expr_scope(host, member));
@@ -1042,10 +1050,16 @@ fn slot_callable_param_and_return(
 /// from the function's return type. Bindings + return are scoped to the slot
 /// member's VALUE-NODE file (see [`VueMacroSurface::member_expr_scope`]).
 #[must_use]
-pub fn slots_from_typeinfo_surface(
-    host: &VerterHost,
+pub(crate) fn slots_from_typeinfo_surface(
+    ctx: &dyn crate::resolver_core::ResolverContext,
     macro_surface: &VueMacroSurface,
 ) -> Vec<AnalyzedSlotField> {
+    // View-sensitive slot type resolution (callable realization, first-param
+    // object navigation) flows through the active `ctx`, NOT a fresh base
+    // `HostResolverContext`, so an overlay session resolves slot bindings
+    // against overlay content. Host-level reads (JSDoc / return-type source
+    // slicing, node scope) use the host the `ctx` is installed against.
+    let host = ctx.host_for_fact_tracer_install();
     macro_surface
         .surface
         .members
@@ -1062,15 +1076,16 @@ pub fn slots_from_typeinfo_surface(
             // function-like filter — otherwise the generic slot is silently
             // dropped from the published slot surface (a one-engine divergence
             // between the DTO slot path and the slot-binding-graph).
-            let value = raise_realized_callable_member_value(host, member)?;
+            let value = raise_realized_callable_member_value(ctx, member)?;
             // A slot member is function-like: a single `Function`, or an
-            // `Intersection` of functions (`(SlotA & SlotB)['default']`). A
-            // non-callable member is not a slot.
+            // `Intersection` of functions (`(SlotA & SlotB)['default']`), or a
+            // `Union` of functions (`SlotA | SlotB`). A non-callable member is
+            // not a slot.
             let (first_param, return_expr, return_span) = slot_callable_param_and_return(&value)?;
             let scope = macro_surface.member_expr_scope(host, member);
             let bindings = first_param
                 .as_ref()
-                .map(|param_ty| binding_fields_from_param_ty(host, param_ty, &scope))
+                .map(|param_ty| binding_fields_from_param_ty(ctx, param_ty, &scope))
                 .unwrap_or_default();
             let return_expr_scope = return_expr.as_ref().map(|_| scope.clone());
             // Display `return_type`: prefer the EXACT source text sliced from the
@@ -1131,10 +1146,13 @@ pub fn slots_from_typeinfo_surface(
 /// A first parameter that does not resolve to an object surface yields no
 /// bindings — matching the eager rail's non-object outcome.
 fn binding_fields_from_param_ty(
-    host: &VerterHost,
+    ctx: &dyn crate::resolver_core::ResolverContext,
     param_ty: &TypeExpr,
     scope: &TypeExprScope,
 ) -> Vec<AnalyzedSlotFieldBinding> {
+    // View-sensitive navigation / raising flows through `ctx`; host-level node
+    // scope reads use the host the `ctx` is installed against.
+    let host = ctx.host_for_fact_tracer_install();
     // Literal object: read its properties directly (structural typed-IR match).
     if let TypeExpr::Object(obj) = param_ty {
         return obj
@@ -1158,7 +1176,7 @@ fn binding_fields_from_param_ty(
     // the resolved members. Each member's `binding_expr` is its raised value
     // type, scoped to that value's own file (so a `Pick<RowApi,'k'>` whose
     // picked member is a cross-file `Ref` resolves in the right file).
-    let Some(surface) = host.navigate_param_to_object_surface(scope.as_str(), param_ty) else {
+    let Some(surface) = navigate_param_to_object_surface(ctx, scope.as_str(), param_ty) else {
         return Vec::new();
     };
     // Shallow-by-default Pick member publication: when the slot param is a
@@ -1191,7 +1209,7 @@ fn binding_fields_from_param_ty(
                     span: verter_span::Span::default(),
                 };
             }
-            let binding_expr = raise_member_value(host, member);
+            let binding_expr = raise_member_value(ctx, member);
             let binding_expr_scope = binding_expr
                 .as_ref()
                 .map(|_| macro_member_value_scope(host, member, scope));
