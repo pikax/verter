@@ -854,6 +854,149 @@ fn open_conditional_props_root_enumerates_both_branches() {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// 7. `Pick<Target, KeyAlias>` — the Pick key set is an ALIASED string-
+//    literal union (`type AlphaKeys = 'a' | 'b'`), not an inline
+//    `'a' | 'b'`. The dispatch projector must resolve the alias to its
+//    union BEFORE enumerating the picked keys, so only the aliased keys
+//    survive and the un-picked key is absent. Re-homes the deleted spike
+//    fixture E (alias-keyed Pick) as a discriminating dispatch test.
+// ─────────────────────────────────────────────────────────────────────
+
+const PICK_THROUGH_ALIAS_VUE: &str = r#"<script setup lang="ts">
+export type AlphaKeys = 'a' | 'b';
+interface AlphaTarget {
+  a: string;
+  b: number;
+  c: boolean;
+}
+defineProps<Pick<AlphaTarget, AlphaKeys>>();
+</script>
+<template><div></div></template>
+"#;
+
+#[test]
+fn dispatch_only_pick_through_aliased_key_union_define_shape() {
+    let host = harness::build_hermetic_host_with_lib(
+        &[("/PickThroughAlias.vue", PICK_THROUGH_ALIAS_VUE)],
+        &[("lib.es5.d.ts", harness::STUB_LIB_ES5)],
+    );
+
+    let evaluated = host
+        .evaluate_types("/PickThroughAlias.vue")
+        .expect("evaluate_types must resolve");
+    let define_names = define_props_member_names(&evaluated);
+
+    // The aliased keys `a` and `b` must be picked — the dispatch
+    // projector must expand `AlphaKeys` to `'a' | 'b'` before
+    // enumerating, NOT treat the alias as an opaque single key.
+    for required in ["a", "b"] {
+        assert!(
+            define_names.iter().any(|n| n == required),
+            "`Pick<AlphaTarget, AlphaKeys>` (AlphaKeys = 'a' | 'b') define_props mirror MUST \
+             carry picked member `{required}` via alias-resolved key enumeration. \
+             Got define_props: {define_names:?}"
+        );
+    }
+    // The un-picked key `c` must be absent.
+    assert!(
+        !define_names.iter().any(|n| n == "c"),
+        "`Pick<AlphaTarget, AlphaKeys>` MUST exclude the un-picked member `c` from the \
+         define_props mirror. Got: {define_names:?}"
+    );
+
+    // Final component meta must agree.
+    let meta = host
+        .get_component_meta("/PickThroughAlias.vue")
+        .expect("get_component_meta must resolve");
+    let prop_names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    for required in ["a", "b"] {
+        assert!(
+            prop_names.contains(&required),
+            "final meta MUST keep alias-picked prop `{required}`. Got: {prop_names:?}"
+        );
+    }
+    assert!(
+        !prop_names.contains(&"c"),
+        "final meta MUST exclude the un-picked prop `c`. Got: {prop_names:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 8. `Omit<RecursiveTarget, K>` — the Omit target is SELF-RECURSIVE
+//    (`parent: ExtendedNode`, `children: ExtendedNode[]`), and the omit
+//    keys are exactly the self-referential members. The dispatch
+//    projector must drop the recursive members without diverging on the
+//    self-reference, keeping the scalar members. Re-homes the deleted
+//    spike fixture F (recursive target under Omit) as a discriminating
+//    dispatch test — recursion AND Omit together, not the two axes
+//    separately.
+// ─────────────────────────────────────────────────────────────────────
+
+const OMIT_RECURSIVE_VUE: &str = r#"<script setup lang="ts">
+interface ExtendedNode {
+  id: string;
+  label: number;
+  extra: boolean;
+  parent: ExtendedNode;
+  children: ExtendedNode[];
+}
+defineProps<Omit<ExtendedNode, 'parent' | 'children'>>();
+</script>
+<template><div></div></template>
+"#;
+
+#[test]
+fn dispatch_only_omit_recursive_target_self_reference_define_shape() {
+    let host = harness::build_hermetic_host_with_lib(
+        &[("/OmitRecursive.vue", OMIT_RECURSIVE_VUE)],
+        &[("lib.es5.d.ts", harness::STUB_LIB_ES5)],
+    );
+
+    let evaluated = host
+        .evaluate_types("/OmitRecursive.vue")
+        .expect("evaluate_types must resolve");
+    let define_names = define_props_member_names(&evaluated);
+
+    // The scalar members survive the Omit and the recursion does not
+    // cause divergence or member loss.
+    for required in ["id", "label", "extra"] {
+        assert!(
+            define_names.iter().any(|n| n == required),
+            "`Omit<ExtendedNode, 'parent' | 'children'>` define_props mirror MUST carry scalar \
+             member `{required}` — the self-recursive `parent`/`children` members must not \
+             derail enumeration of the surviving members. Got define_props: {define_names:?}"
+        );
+    }
+    // The self-referential omitted keys must be absent.
+    for omitted in ["parent", "children"] {
+        assert!(
+            !define_names.iter().any(|n| n == omitted),
+            "`Omit<ExtendedNode, 'parent' | 'children'>` MUST exclude the self-referential \
+             member `{omitted}` from the define_props mirror. Got: {define_names:?}"
+        );
+    }
+
+    // Final component meta must agree.
+    let meta = host
+        .get_component_meta("/OmitRecursive.vue")
+        .expect("get_component_meta must resolve");
+    let prop_names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    for required in ["id", "label", "extra"] {
+        assert!(
+            prop_names.contains(&required),
+            "final meta MUST keep scalar prop `{required}`. Got: {prop_names:?}"
+        );
+    }
+    for omitted in ["parent", "children"] {
+        assert!(
+            !prop_names.contains(&omitted),
+            "final meta MUST exclude self-referential omitted prop `{omitted}`. \
+             Got: {prop_names:?}"
+        );
+    }
+}
+
 // The JSX intrinsic projection regression test lives in-crate
 // (`meta_resolve_tests.rs::reexported_intrinsic_shape_resolves_via_dispatch_only`)
 // because it must call the `pub(crate)`
