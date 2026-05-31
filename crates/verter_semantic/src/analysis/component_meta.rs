@@ -3216,7 +3216,11 @@ fn add_top_level_undefined_to_type_expr(type_expr: TypeExpr) -> TypeExpr {
 }
 
 fn add_top_level_undefined_to_model_event_payload(payload: TypeExpr) -> TypeExpr {
-    match payload {
+    // `TypeExpr` implements `Drop`, so a field cannot be moved out of an
+    // owned `payload` by a by-value match arm. Match on a borrow and clone
+    // the (refcounted) children; the non-tuple case forwards `payload`
+    // whole (a full-value move, which `Drop` permits).
+    match &payload {
         TypeExpr::Tuple { elements, readonly } => {
             let updated = elements
                 .iter()
@@ -3234,10 +3238,10 @@ fn add_top_level_undefined_to_model_event_payload(payload: TypeExpr) -> TypeExpr
                 .collect::<Vec<_>>();
             TypeExpr::Tuple {
                 elements: std::sync::Arc::from(updated),
-                readonly,
+                readonly: *readonly,
             }
         }
-        other => add_top_level_undefined_to_type_expr(other),
+        _ => add_top_level_undefined_to_type_expr(payload),
     }
 }
 

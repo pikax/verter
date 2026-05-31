@@ -122,7 +122,7 @@ fn template_literal_union_key_projects_static_slot_union() {
         ProjectionMode::Expanded,
     );
 
-    let TypeExpr::Union(arms) = expr else {
+    let TypeExpr::Union(arms) = &expr else {
         panic!("expected union of cell renderers, got {expr:?}");
     };
     assert_eq!(arms.len(), 2);

@@ -98,15 +98,15 @@ mod tests {
 
     #[test]
     fn lowers_primitive_number() {
-        match parse_checker_text_to_type_expr("number") {
-            TypeExpr::Primitive(p) => assert_eq!(p, PrimitiveName::Number),
+        match &parse_checker_text_to_type_expr("number") {
+            TypeExpr::Primitive(p) => assert_eq!(*p, PrimitiveName::Number),
             other => panic!("expected Primitive(Number), got: {other:?}"),
         }
     }
 
     #[test]
     fn lowers_union() {
-        match parse_checker_text_to_type_expr("string | number | undefined") {
+        match &parse_checker_text_to_type_expr("string | number | undefined") {
             TypeExpr::Union(arms) => {
                 assert_eq!(arms.len(), 3, "union should have 3 arms, got: {arms:?}");
             }
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn lowers_object_literal() {
-        match parse_checker_text_to_type_expr("{ x: number; y: string }") {
+        match &parse_checker_text_to_type_expr("{ x: number; y: string }") {
             TypeExpr::Object(obj) => {
                 assert_eq!(obj.properties.len(), 2);
                 if let ObjectMember::Property(p) = &obj.properties[0] {
@@ -134,14 +134,14 @@ mod tests {
 
     #[test]
     fn lowers_indexed_access() {
-        match parse_checker_text_to_type_expr(r#"Foo["bar"]"#) {
+        match &parse_checker_text_to_type_expr(r#"Foo["bar"]"#) {
             TypeExpr::IndexedAccess { object, index } => {
                 assert!(
-                    matches!(&*object, TypeExpr::Ref { name, .. } if name.as_ref() == "Foo"),
+                    matches!(&**object, TypeExpr::Ref { name, .. } if name.as_ref() == "Foo"),
                     "unexpected object: {object:?}"
                 );
                 assert!(
-                    matches!(&*index, TypeExpr::Literal(LiteralValue::String(s)) if s == "bar"),
+                    matches!(&**index, TypeExpr::Literal(LiteralValue::String(s)) if s == "bar"),
                     "unexpected index: {index:?}"
                 );
             }

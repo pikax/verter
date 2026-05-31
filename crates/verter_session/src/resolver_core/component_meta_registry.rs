@@ -2661,7 +2661,7 @@ mod tests {
 
         let merged = merge_component_meta_registry_candidates(Some(left), Some(right))
             .expect("partial route candidates should merge");
-        let TypeExpr::Object(shape) = merged else {
+        let TypeExpr::Object(shape) = &merged else {
             panic!("merged partial route candidates should stay object-shaped");
         };
 
@@ -3015,7 +3015,7 @@ export interface AvatarProps {
         let projected = component_meta_registry_raw_member_path_surface(&raw, &["ui".to_string()])
             .expect("explicit object surface should project the requested member path");
 
-        let TypeExpr::Object(shape) = projected else {
+        let TypeExpr::Object(shape) = &projected else {
             panic!("member path projection should stay object-shaped, got {projected:?}");
         };
         let member_names: Vec<_> = shape

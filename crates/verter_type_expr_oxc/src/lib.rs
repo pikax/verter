@@ -143,16 +143,20 @@ pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
             }
             TSTypeOperatorOperator::Readonly => {
                 let inner = lower_ts_type(&op.type_annotation, source);
-                match inner {
+                // `TypeExpr` implements `Drop` (iterative deep-drop), so we
+                // cannot move `element` / `elements` out of `inner` by
+                // value. Clone the (cheap, refcounted) `Arc` child instead
+                // and let the old `inner` drop normally.
+                match &inner {
                     TypeExpr::Array { element, .. } => TypeExpr::Array {
-                        element,
+                        element: Arc::clone(element),
                         readonly: true,
                     },
                     TypeExpr::Tuple { elements, .. } => TypeExpr::Tuple {
-                        elements,
+                        elements: Arc::clone(elements),
                         readonly: true,
                     },
-                    other => other,
+                    _ => inner,
                 }
             }
             TSTypeOperatorOperator::Unique => lower_ts_type(&op.type_annotation, source),

@@ -1406,7 +1406,10 @@ impl VerterHost {
                     if !imported_generic_alias_root {
                         return candidate;
                     }
-                    let TypeExpr::Object(object) = candidate else {
+                    // `TypeExpr` implements `Drop`, so `object` cannot be
+                    // moved out of `candidate`; borrow it and return the
+                    // whole `candidate` by move when it is not an object.
+                    let TypeExpr::Object(object) = &candidate else {
                         return candidate;
                     };
                     let properties = object
@@ -2106,7 +2109,9 @@ impl VerterHost {
                         raw_body,
                         prefer_explicit_raw_surface,
                     )?;
-                    Some(match materialized {
+                    // `TypeExpr` implements `Drop`; borrow `materialized` to
+                    // filter the object surface and return it whole otherwise.
+                    Some(match &materialized {
                         TypeExpr::Object(object) => {
                             let omitted: rustc_hash::FxHashSet<_> =
                                 omitted.iter().map(String::as_str).collect();
@@ -2124,7 +2129,7 @@ impl VerterHost {
                                     .collect(),
                             }))
                         }
-                        other => other,
+                        _ => materialized,
                     })
                 }
             }

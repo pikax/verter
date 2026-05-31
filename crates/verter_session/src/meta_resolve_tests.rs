@@ -315,21 +315,21 @@ defineProps<{ modelValue?: ModelValue<R> }>()
         true_type,
         false_type,
         ..
-    } = materialized
+    } = &materialized
     else {
         panic!("local routed helper should stay conditional instead of flattening the wrapper");
     };
 
     assert_eq!(
         true_type,
-        Arc::new(verter_type_expr::TypeExpr::Primitive(
+        &Arc::new(verter_type_expr::TypeExpr::Primitive(
             verter_type_expr::PrimitiveName::Number,
         )),
         "the true branch should materialize through the routed imported member surface",
     );
     assert_eq!(
         false_type,
-        Arc::new(verter_type_expr::TypeExpr::Primitive(
+        &Arc::new(verter_type_expr::TypeExpr::Primitive(
             verter_type_expr::PrimitiveName::String,
         )),
         "the false branch should materialize through the routed imported member surface",
@@ -6115,7 +6115,7 @@ defineProps<Props<T>>()
         ),
     };
 
-    match raised {
+    match &raised {
         TypeExpr::Array { element, .. } => match element.as_ref() {
             TypeExpr::TypeParameter(param) => {
                 assert_eq!(

@@ -475,9 +475,9 @@ fn parse_jsdoc_tag_type_payload_lowers_array_with_element_type() {
     // not a `Ref<Array, [number]>`. The lowering is canonical: any
     // `Array<T>` / `T[]` / `ReadonlyArray<T>` collapses into `Array`.
     let expr = parse_jsdoc_tag_type_payload("Array<number>", None);
-    match expr {
+    match &expr {
         TypeExpr::Array { element, .. } => {
-            assert_eq!(&*element, &TypeExpr::Primitive(PrimitiveName::Number));
+            assert_eq!(&**element, &TypeExpr::Primitive(PrimitiveName::Number));
         }
         other => panic!("expected Array<number>, got {other:?}"),
     }
@@ -486,7 +486,7 @@ fn parse_jsdoc_tag_type_payload_lowers_array_with_element_type() {
 #[test]
 fn parse_jsdoc_tag_type_payload_lowers_union() {
     let expr = parse_jsdoc_tag_type_payload("string | number", None);
-    match expr {
+    match &expr {
         TypeExpr::Union(members) => {
             assert_eq!(members.len(), 2, "union must lower with two members");
             assert!(members
@@ -503,8 +503,8 @@ fn parse_jsdoc_tag_type_payload_lowers_union() {
 #[test]
 fn parse_jsdoc_tag_type_payload_unknown_for_empty_input() {
     let expr = parse_jsdoc_tag_type_payload("", None);
-    match expr {
-        TypeExpr::Unknown { raw } => assert_eq!(raw, "", "empty input keeps empty raw"),
+    match &expr {
+        TypeExpr::Unknown { raw } => assert_eq!(raw.as_str(), "", "empty input keeps empty raw"),
         other => panic!("expected Unknown for empty payload, got {other:?}"),
     }
 }

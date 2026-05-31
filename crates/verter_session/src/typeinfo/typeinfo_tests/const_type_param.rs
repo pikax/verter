@@ -30,7 +30,7 @@ fn const_type_param_route_call_preserves_readonly_tuple_with_literal_paths() {
         ProjectionMode::Expanded,
     );
 
-    let TypeExpr::Tuple { elements, readonly } = expr else {
+    let TypeExpr::Tuple { elements, readonly } = &expr else {
         panic!("expected readonly tuple, got {expr:?}");
     };
     assert!(readonly);
@@ -66,7 +66,7 @@ fn const_type_param_string_call_preserves_readonly_literal_string_tuple() {
         ProjectionMode::Expanded,
     );
 
-    let TypeExpr::Tuple { elements, readonly } = expr else {
+    let TypeExpr::Tuple { elements, readonly } = &expr else {
         panic!("expected readonly tuple, got {expr:?}");
     };
     assert!(readonly);

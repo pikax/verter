@@ -759,7 +759,7 @@ pub(crate) fn preserve_registry_callable_param_member_routes(
                         }
                         ObjectMember::Method(method) => {
                             if let Some(raw_method) = raw_methods.get(method.name.as_str()) {
-                                method.function = match inner(
+                                method.function = match &inner(
                                     &TypeExpr::Function(std::sync::Arc::new(
                                         method.function.clone(),
                                     )),
@@ -774,7 +774,7 @@ pub(crate) fn preserve_registry_callable_param_member_routes(
                             } else if let Some(raw_callable) =
                                 raw_callables.get(method.name.as_str())
                             {
-                                method.function = match inner(
+                                method.function = match &inner(
                                     &TypeExpr::Function(std::sync::Arc::new(
                                         method.function.clone(),
                                     )),

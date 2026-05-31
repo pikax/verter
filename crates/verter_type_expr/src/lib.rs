@@ -222,6 +222,229 @@ pub enum TypeExpr {
 }
 
 // ---------------------------------------------------------------------------
+// Iterative drop — depth-safe deconstruction
+// ---------------------------------------------------------------------------
+//
+// `TypeExpr` is a recursively-`Arc`-linked tree. Real-world TypeScript
+// produces deeply-nested annotations (`Array<Array<...>>`, long
+// `extends ? : extends ? : ...` chains, deeply-parenthesised unions),
+// which lower into `TypeExpr` chains thousands of levels deep. The
+// compiler-generated drop glue is recursive — dropping the outermost
+// node drops its `Arc<TypeExpr>` child, which drops *its* child, and so
+// on — so a sufficiently deep tree overflows the thread stack during
+// drop alone, before any consumer touches it.
+//
+// This manual `Drop` flattens the recursion onto the heap: it drains
+// every directly-owned child `TypeExpr` into an explicit worklist,
+// leaving each visited node SHALLOW (its recursive children replaced by
+// cheap leaves) so the subsequent compiler drop glue has nothing deep to
+// chase. The worklist is processed iteratively, so the call stack stays
+// flat regardless of tree depth.
+//
+// `Arc` sharing is respected exactly: a child is only stolen (and thus
+// flattened) when this node is its SOLE strong owner. When the child is
+// shared, dropping this node merely decrements the strong count and the
+// child's own storage is left intact for the final owner to flatten
+// later — so no node is ever dropped twice and shared subtrees are never
+// mutated out from under another owner.
+
+/// Cheap terminal leaf used to replace stolen recursive children. It owns
+/// no further `TypeExpr`, so the structure that retains it drops in O(1).
+const fn drop_leaf() -> TypeExpr {
+    TypeExpr::Primitive(PrimitiveName::Unknown)
+}
+
+/// Steal the inner `TypeExpr` out of a sized `Arc<TypeExpr>` field into
+/// `worklist`, leaving a shared empty placeholder behind. Only flattens
+/// when this is the sole strong owner; a shared child is left for its
+/// final owner (the `Arc` swapped out here just decrements the count).
+fn drain_arc(field: &mut Arc<TypeExpr>, worklist: &mut Vec<TypeExpr>) {
+    let owned = std::mem::replace(field, drop_leaf_arc());
+    if let Some(inner) = Arc::into_inner(owned) {
+        worklist.push(inner);
+    }
+}
+
+/// As [`drain_arc`] but for an `Option<Arc<TypeExpr>>` field.
+fn drain_opt_arc(field: &mut Option<Arc<TypeExpr>>, worklist: &mut Vec<TypeExpr>) {
+    if let Some(owned) = field.take() {
+        if let Some(inner) = Arc::into_inner(owned) {
+            worklist.push(inner);
+        }
+    }
+}
+
+/// Steal every element of an `Arc<[TypeExpr]>` field into `worklist`,
+/// leaving a shared empty slice behind. Only flattens when this is the
+/// sole strong owner (otherwise `make_mut` would deep-clone the shared
+/// slice, which is exactly the recursion we are avoiding).
+fn drain_slice(field: &mut Arc<[TypeExpr]>, worklist: &mut Vec<TypeExpr>) {
+    let mut owned = std::mem::replace(field, empty_type_args());
+    if Arc::strong_count(&owned) == 1 {
+        for el in Arc::make_mut(&mut owned).iter_mut() {
+            worklist.push(std::mem::replace(el, drop_leaf()));
+        }
+    }
+}
+
+/// Shared cheap `Arc<TypeExpr>` placeholder, allocated once.
+fn drop_leaf_arc() -> Arc<TypeExpr> {
+    static LEAF: LazyLock<Arc<TypeExpr>> = LazyLock::new(|| Arc::new(drop_leaf()));
+    Arc::clone(&LEAF)
+}
+
+impl Drop for TypeExpr {
+    fn drop(&mut self) {
+        // Worklist of stolen children to flatten. `self`'s own (now
+        // shallow) fields are dropped by the compiler glue when this
+        // function returns; every node placed on the worklist is itself
+        // drained to shallow before it drops, so the chain never recurses.
+        let mut worklist: Vec<TypeExpr> = Vec::new();
+        drain_children(self, &mut worklist);
+        while let Some(mut node) = worklist.pop() {
+            drain_children(&mut node, &mut worklist);
+            // `node` drops here — shallow, O(1) — as it leaves scope.
+        }
+    }
+}
+
+/// Move every directly-owned recursive `TypeExpr` child of `node` onto
+/// `worklist`, leaving `node` shallow. Leaf variants do nothing.
+fn drain_children(node: &mut TypeExpr, worklist: &mut Vec<TypeExpr>) {
+    match node {
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::TypeOf(_)
+        | TypeExpr::Infer { .. }
+        | TypeExpr::SyntheticSlotBinding(_)
+        | TypeExpr::Unknown { .. } => {}
+
+        TypeExpr::Union(items) | TypeExpr::Intersection(items) => drain_slice(items, worklist),
+
+        TypeExpr::Array { element, .. } => drain_arc(element, worklist),
+
+        TypeExpr::Tuple { elements, .. } => {
+            let mut owned = std::mem::replace(elements, Arc::from(Vec::<TupleElement>::new()));
+            if Arc::strong_count(&owned) == 1 {
+                for el in Arc::make_mut(&mut owned).iter_mut() {
+                    worklist.push(std::mem::replace(&mut el.ty, drop_leaf()));
+                }
+            }
+        }
+
+        TypeExpr::Object(obj) => {
+            if let Some(obj) = Arc::into_inner(std::mem::replace(
+                obj,
+                Arc::new(ObjectExpr { properties: Vec::new() }),
+            )) {
+                for member in obj.properties {
+                    drain_object_member(member, worklist);
+                }
+            }
+        }
+
+        TypeExpr::Function(func) => {
+            if let Some(func) = Arc::into_inner(std::mem::replace(
+                func,
+                Arc::new(FunctionExpr::synthetic(Vec::new(), None, Vec::new())),
+            )) {
+                drain_function_expr(func, worklist);
+            }
+        }
+
+        TypeExpr::Ref { type_arguments, .. } => drain_slice(type_arguments, worklist),
+
+        TypeExpr::TypeParameter(tp) => {
+            drain_opt_arc(&mut tp.constraint, worklist);
+            drain_opt_arc(&mut tp.default, worklist);
+        }
+
+        TypeExpr::KeyOf(inner) | TypeExpr::Rest(inner) | TypeExpr::Parenthesized(inner) => {
+            drain_arc(inner, worklist);
+        }
+
+        TypeExpr::IndexedAccess { object, index } => {
+            drain_arc(object, worklist);
+            drain_arc(index, worklist);
+        }
+
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => {
+            drain_arc(check, worklist);
+            drain_arc(extends, worklist);
+            drain_arc(true_type, worklist);
+            drain_arc(false_type, worklist);
+        }
+
+        TypeExpr::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            drain_arc(source, worklist);
+            drain_arc(value, worklist);
+            drain_opt_arc(name_type, worklist);
+        }
+
+        TypeExpr::TemplateLiteral { expressions, .. } => drain_slice(expressions, worklist),
+
+        TypeExpr::RecursiveRef {
+            type_arguments,
+            conditional_context,
+            ..
+        } => {
+            drain_slice(type_arguments, worklist);
+            let mut owned = std::mem::replace(
+                conditional_context,
+                Arc::from(Vec::<RecursiveConditionalFrame>::new()),
+            );
+            if Arc::strong_count(&owned) == 1 {
+                for frame in Arc::make_mut(&mut owned).iter_mut() {
+                    drain_arc(&mut frame.check, worklist);
+                    drain_arc(&mut frame.extends, worklist);
+                }
+            }
+        }
+    }
+}
+
+/// Steal the inline `TypeExpr` children of an owned `ObjectMember`.
+fn drain_object_member(member: ObjectMember, worklist: &mut Vec<TypeExpr>) {
+    match member {
+        ObjectMember::Property(mut p) => worklist.push(std::mem::replace(&mut p.ty, drop_leaf())),
+        ObjectMember::IndexSignature(mut s) => {
+            worklist.push(std::mem::replace(&mut s.key_type, drop_leaf()));
+            worklist.push(std::mem::replace(&mut s.value_type, drop_leaf()));
+        }
+        ObjectMember::CallSignature(f) | ObjectMember::ConstructSignature(f) => {
+            drain_function_expr(f, worklist);
+        }
+        ObjectMember::Method(m) => drain_function_expr(m.function, worklist),
+    }
+}
+
+/// Steal the recursive `TypeExpr` children of an owned `FunctionExpr`.
+fn drain_function_expr(func: FunctionExpr, worklist: &mut Vec<TypeExpr>) {
+    for mut p in func.parameters {
+        worklist.push(std::mem::replace(&mut p.ty, drop_leaf()));
+    }
+    if let Some(ret) = func.return_type {
+        if let Some(inner) = Arc::into_inner(ret) {
+            worklist.push(inner);
+        }
+    }
+    for mut tp in func.type_parameters {
+        drain_opt_arc(&mut tp.constraint, worklist);
+        drain_opt_arc(&mut tp.default, worklist);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Recursive conditional context types
 // ---------------------------------------------------------------------------
 
