@@ -263,7 +263,11 @@ fn define_emits_shape(
     Some(ExpansionResult {
         value: ExpandedObjectShape {
             properties,
-            index_signatures: Vec::new(),
+            // An emits object is `events + index signatures`: publish the DTO's
+            // emit index signatures (`defineEmits<{ [event: string]: [v: number]
+            // }>()`) so an index-signature-only emits surface is not dropped (the
+            // retired materialiser surfaced it).
+            index_signatures: dtos.emit_index_signatures.clone(),
             call_signatures: Vec::new(),
         },
         exactness,

@@ -674,11 +674,18 @@ pub(crate) fn vue_macro_dtos_with_ctx(
                     // surface's index signatures (key/value raised through `ctx`)
                     // for `define_props_shape` to publish. `DefineModel`'s surface
                     // is empty, so this is an empty vec for it.
-                    prop_index_signatures: prop_index_signatures_from_surface(ctx, &macro_surface),
+                    prop_index_signatures: index_signatures_from_surface(ctx, &macro_surface),
                     ..VueMacroDtos::default()
                 },
                 AnalyzedMacroKind::DefineEmits => VueMacroDtos {
                     emits: emits_from_typeinfo_surface(ctx, &macro_surface),
+                    // The emits object is `events + index signatures`: a
+                    // `defineEmits<{ [event: string]: [v: number] }>()` surface
+                    // carries an index signature with no named event, so capture
+                    // it (key/value raised through `ctx`) for `define_emits_shape`
+                    // to publish — the retired materialiser surfaced this, so
+                    // dropping it on the dispatch path was a regression.
+                    emit_index_signatures: index_signatures_from_surface(ctx, &macro_surface),
                     ..VueMacroDtos::default()
                 },
                 AnalyzedMacroKind::DefineSlots => VueMacroDtos {
@@ -804,14 +811,16 @@ pub(crate) fn props_from_typeinfo_surface(
         .collect()
 }
 
-/// Normalize a props macro surface's INDEX SIGNATURES into the published
+/// Normalize a macro surface's INDEX SIGNATURES into the published
 /// [`ExpandedIndexSignature`] set. A props member is `properties + index
-/// signatures`, so `defineProps<{ [k: string]: string }>()` (which has NO named
-/// property member) still contributes its index signature to the published
-/// props surface. Each signature's `key_type` / `value_type` graph node is
-/// raised to a `TypeExpr` through the ACTIVE `ctx` (overlay-aware); a node that
-/// does not raise is skipped (no phantom signature).
-fn prop_index_signatures_from_surface(
+/// signatures` and an emits object is `events + index signatures`, so
+/// `defineProps<{ [k: string]: string }>()` / `defineEmits<{ [event: string]:
+/// [v: number] }>()` (which have NO named member) still contribute their index
+/// signature to the published surface. Kind-neutral: it raises whatever index
+/// signatures the surface carries. Each signature's `key_type` / `value_type`
+/// graph node is raised to a `TypeExpr` through the ACTIVE `ctx` (overlay-aware);
+/// a node that does not raise is skipped (no phantom signature).
+fn index_signatures_from_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
     macro_surface: &VueMacroSurface,
 ) -> Vec<verter_semantic::analysis::type_expand::ExpandedIndexSignature> {

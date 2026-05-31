@@ -108,6 +108,14 @@ pub struct VueMacroDtos {
     /// `define_props_shape` to publish. Empty for emits / slots and for a props
     /// surface with no index signature.
     pub prop_index_signatures: Vec<ExpandedIndexSignature>,
+    /// Index signatures on the emits macro's type-argument surface
+    /// (`defineEmits<{ [event: string]: [v: number] }>()`). The emits object is
+    /// `properties (events) + index signatures`; an index-signature-only emits
+    /// surface has no named events but still carries its index signature, which
+    /// `define_emits_shape` publishes (the retired materialiser surfaced it, so
+    /// dropping it on the dispatch path was a regression). Empty for props /
+    /// slots and for an emits surface with no index signature.
+    pub emit_index_signatures: Vec<ExpandedIndexSignature>,
 }
 
 /// A cached [`VueMacroDtos`] bundle plus the cross-file dependency facts the
