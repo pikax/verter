@@ -1663,6 +1663,91 @@ import theme from './theme'
     );
 }
 
+/// Direct utility-shape projection for `Partial<Wrapper<number>>` — exercises
+/// the `route_keys.rs` `project_direct_utility_surface_shape` →
+/// `projected_target_shape` path whose LAST RESORT is
+/// `instantiate_local_generic_ref_via_engine` (route_keys.rs:599).
+///
+/// `Partial<T>` (single type argument) is NOT recognised by
+/// `component_meta_registry_public_utility_route` (which matches only 2-arg
+/// `Pick`/`Omit`), so `project_expr_surface_shape_via_host_threaded` skips the
+/// registry route and enters `project_direct_utility_surface_shape`, which
+/// projects the `Wrapper<number>` target shape.
+///
+/// Discriminator: `projected_target_shape`'s dispatch arms
+/// (`project_expr_surface_shape_via_host_threaded` /
+/// `project_expr_surface_expr_via_host_threaded`) must resolve the concrete
+/// `{ value; label }` surface BEFORE the
+/// `instantiate_local_generic_ref_via_engine` last resort — so the structural
+/// `Wrapper` body is never whole-substituted. The prepared guard is armed; the
+/// local revert-and-observe (disable both dispatch arms) forces the route to
+/// :599 and TRIPS, proving this test discriminates (documented in the impl
+/// feedback).
+#[test]
+fn project_direct_utility_partial_generic_stays_off_substitution_slow_lane() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+type Wrapper<T> = { value: T; label: string }
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    // `Partial<Wrapper<number>>` — utility wrapper over an instantiated
+    // generic alias whose body is a structural object.
+    let expr = TypeExpr::named_with_args(
+        "Partial",
+        vec![TypeExpr::named_with_args(
+            "Wrapper",
+            vec![TypeExpr::Primitive(PrimitiveName::Number)],
+        )],
+    );
+
+    let _guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
+    let shape = crate::meta_resolve::project_expr_surface_shape_via_host_threaded(
+        &mut query_engine,
+        "/src/App.vue",
+        &expr,
+    )
+    .expect(
+        "Partial<Wrapper<number>> should project its target shape via the dispatch fast lane \
+         without the structural-substitution slow lane",
+    );
+    let member_names: std::collections::BTreeSet<&str> = shape
+        .properties
+        .iter()
+        .map(|property| property.name.as_str())
+        .collect();
+    assert_eq!(
+        member_names,
+        std::collections::BTreeSet::from(["label", "value"]),
+        "Partial<Wrapper<T>> should keep both structural members, got {member_names:?}",
+    );
+    // `Partial` makes every member optional — a positive shape assertion that
+    // also confirms the utility wrapper was actually applied (not bypassed).
+    assert!(
+        shape.properties.iter().all(|property| property.optional),
+        "Partial<...> must mark every member optional",
+    );
+}
+
 #[test]
 fn type_expr_references_type_params_detects_nested_member_routes() {
     let expr = TypeExpr::IndexedAccess {
@@ -3301,14 +3386,6 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
     let _store_view = host.resolver_store_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
-    // Arm the prepared-structural-substitution trip-wire: this
-    // `Omit<SelectMenuProps<Item[]>, 'items'>` heritage route exercises the
-    // `route_keys.rs` `project_direct_utility_surface_shape` fallback whose
-    // last resort is `instantiate_local_generic_ref_via_engine`. Dispatch must
-    // compose the surface BEFORE that fallback so the structural body is never
-    // whole-substituted (proven discriminating by the local revert-and-observe
-    // in the impl feedback).
-    let _guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
     let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
         &mut query_engine,
         "/src/App.vue",
