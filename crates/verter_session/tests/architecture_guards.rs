@@ -1092,6 +1092,126 @@ fn root_surface_bridges_carry_no_prepared_decl_fallback() {
     }
 }
 
+/// The component-meta RESOLUTION PATH never re-introduces the retired eager
+/// macro-object materialiser nor the prepared-decl member rescue.
+///
+/// Stage 4a routed `define_props` / `define_emits` / `define_slots` through the
+/// dispatch projector (`projectors::define_shapes::project_define_macro_shapes`)
+/// and deleted both the eager materialiser call and the root-symbol member
+/// fallback. This guard asserts they STAY deleted from the production resolution
+/// entry points, by SYMBOL USAGE (any path reference — direct, qualified, OR
+/// expanded from a `macro_rules!` — to the forbidden symbol within the named
+/// function body trips the guard, closing the textual-`.or_else`-spelling
+/// evasion the older string scan allowed):
+///
+/// - `compute_component_meta_state_inner` (the cold resolution orchestrator)
+///   must NOT reference `produce_macro_object_shapes_for_purpose` — macro shapes
+///   are owned by `project_define_macro_shapes` now.
+/// - `dispatch_member_for_root_symbol` (the routed single-member projector) must
+///   NOT reference `project_prepared_requested_member_from_symbol` — a dispatch
+///   miss is an authoritative miss; the prepared-decl rescue is gone. (The
+///   symbol survives for the prepared-surface engine's OWN recursive member
+///   projection in `prepared_surface.rs`; this guard scopes to the routed-member
+///   body, not the whole crate.)
+#[test]
+fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback() {
+    use syn::visit::Visit;
+    use syn::{ImplItemFn, Item, ItemFn, ItemImpl};
+
+    /// Walks one function body counting references to a forbidden symbol via
+    /// ANY path segment (direct call, qualified path, or a segment produced by
+    /// macro expansion that `syn` parses as a path) AND any method-call name
+    /// (`receiver.forbidden(...)`). Method calls are `ExprMethodCall`, NOT path
+    /// segments, so both visitors are required — a `.or_else(|| engine.
+    /// project_prepared_requested_member_from_symbol(...))` rescue is a method
+    /// call and would be invisible to a path-only scan.
+    struct ForbiddenSymbolCounter<'a> {
+        forbidden: &'a str,
+        hits: usize,
+    }
+    impl<'ast, 'a> Visit<'ast> for ForbiddenSymbolCounter<'a> {
+        fn visit_path_segment(&mut self, seg: &'ast syn::PathSegment) {
+            if seg.ident == self.forbidden {
+                self.hits += 1;
+            }
+            syn::visit::visit_path_segment(self, seg);
+        }
+        fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+            if mc.method == self.forbidden {
+                self.hits += 1;
+            }
+            syn::visit::visit_expr_method_call(self, mc);
+        }
+    }
+
+    /// Find a free fn OR an impl method named `fn_name` in `file` and count
+    /// `forbidden`-symbol references in its body. Panics if the function is not
+    /// found (the guard's anchor moved).
+    fn forbidden_hits_in_fn(file: &syn::File, fn_name: &str, forbidden: &str) -> usize {
+        let mut counter = ForbiddenSymbolCounter { forbidden, hits: 0 };
+        let mut found = false;
+        for item in &file.items {
+            match item {
+                Item::Fn(ItemFn { sig, block, .. }) if sig.ident == fn_name => {
+                    counter.visit_block(block);
+                    found = true;
+                }
+                Item::Impl(ItemImpl { items, .. }) => {
+                    for impl_item in items {
+                        if let syn::ImplItem::Fn(ImplItemFn { sig, block, .. }) = impl_item {
+                            if sig.ident == fn_name {
+                                counter.visit_block(block);
+                                found = true;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            found,
+            "guard anchor moved: fn `{fn_name}` not found — re-point the guard at \
+             the renamed component-meta resolution entry point"
+        );
+        counter.hits
+    }
+
+    let methods_src =
+        read_workspace_file("crates/verter_session/src/host_manage/component_meta_methods.rs");
+    let methods_file = syn::parse_file(&methods_src).expect("parse component_meta_methods.rs");
+    let materializer_hits = forbidden_hits_in_fn(
+        &methods_file,
+        "compute_component_meta_state_inner",
+        "produce_macro_object_shapes_for_purpose",
+    );
+    assert_eq!(
+        materializer_hits, 0,
+        "Stage 4a: `compute_component_meta_state_inner` references \
+         `produce_macro_object_shapes_for_purpose` — the eager macro-object \
+         materialiser was retired from the production resolution path. Macro \
+         shapes are owned by `projectors::define_shapes::project_define_macro_shapes`; \
+         do NOT re-introduce the materialiser (directly OR through a macro)."
+    );
+
+    let engine_src = read_workspace_file(
+        "crates/verter_session/src/resolver_core/component_meta_query_engine/mod.rs",
+    );
+    let engine_file = syn::parse_file(&engine_src).expect("parse component_meta_query_engine/mod.rs");
+    let fallback_hits = forbidden_hits_in_fn(
+        &engine_file,
+        "dispatch_member_for_root_symbol",
+        "project_prepared_requested_member_from_symbol",
+    );
+    assert_eq!(
+        fallback_hits, 0,
+        "Stage 4a: `dispatch_member_for_root_symbol` references \
+         `project_prepared_requested_member_from_symbol` — the prepared-decl \
+         member rescue was removed; a dispatch miss is an authoritative miss. Do \
+         NOT re-add the `.or_else(...)` fallback (directly OR through a macro)."
+    );
+}
+
 // ===========================================================================
 // Phase 5l-supplement — `no_unbounded_recursion_in_resolver_core`
 // ===========================================================================
