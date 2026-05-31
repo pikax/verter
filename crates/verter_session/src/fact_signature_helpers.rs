@@ -458,10 +458,10 @@ fn observed_self_root_fact(canonical_id: &str, observed_hash: Hash16) -> FactVer
 /// Use this helper for caches keyed on `(canonical, exporter,
 /// member, space)` — slot-binding member reads and member-keyed
 /// dispatch member projection. Its former dedicated walker-DB consumer
-/// was retired in the Stage 4b walker-cluster deletion; the builder
-/// remains the canonical provenance-pure primitive (exercised by
-/// `query_identity_self_root_substrate_tests`) for member-keyed scopes.
-#[allow(dead_code)] // provenance-pure member-keyed primitive; sole prod consumer retired in 4b; covered by query_identity_self_root_substrate_tests
+/// has been removed; the builder remains the canonical provenance-pure
+/// primitive (exercised by `query_identity_self_root_substrate_tests`)
+/// for member-keyed scopes.
+#[allow(dead_code)] // provenance-pure member-keyed primitive; no production consumer remains; covered by query_identity_self_root_substrate_tests
 pub(crate) fn fact_signature_for_canonical_member(
     ctx: &dyn ResolverContext,
     canonical_id: &str,
