@@ -179,7 +179,10 @@ fn define_props_shape(
     Some(ExpansionResult {
         value: ExpandedObjectShape {
             properties,
-            index_signatures: Vec::new(),
+            // A props member is `properties + index signatures`: publish the
+            // DTO's index signatures (`defineProps<{ [k: string]: string }>()`)
+            // so an index-signature-only props surface is not dropped.
+            index_signatures: dtos.prop_index_signatures.clone(),
             call_signatures: Vec::new(),
         },
         exactness,

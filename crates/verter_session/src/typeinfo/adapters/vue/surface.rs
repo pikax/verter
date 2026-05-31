@@ -668,6 +668,13 @@ pub(crate) fn vue_macro_dtos_with_ctx(
             Some(macro_surface) => match macro_kind {
                 AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::DefineModel => VueMacroDtos {
                     props: props_from_typeinfo_surface(ctx, &macro_surface),
+                    // A props member is `properties + index signatures`: a
+                    // `defineProps<{ [k: string]: string }>()` surface carries an
+                    // index signature with no named property, so capture the
+                    // surface's index signatures (key/value raised through `ctx`)
+                    // for `define_props_shape` to publish. `DefineModel`'s surface
+                    // is empty, so this is an empty vec for it.
+                    prop_index_signatures: prop_index_signatures_from_surface(ctx, &macro_surface),
                     ..VueMacroDtos::default()
                 },
                 AnalyzedMacroKind::DefineEmits => VueMacroDtos {
@@ -793,6 +800,34 @@ pub(crate) fn props_from_typeinfo_surface(
                 resolution_error: None,
                 declared_in_macro_type_arg,
             }
+        })
+        .collect()
+}
+
+/// Normalize a props macro surface's INDEX SIGNATURES into the published
+/// [`ExpandedIndexSignature`] set. A props member is `properties + index
+/// signatures`, so `defineProps<{ [k: string]: string }>()` (which has NO named
+/// property member) still contributes its index signature to the published
+/// props surface. Each signature's `key_type` / `value_type` graph node is
+/// raised to a `TypeExpr` through the ACTIVE `ctx` (overlay-aware); a node that
+/// does not raise is skipped (no phantom signature).
+fn prop_index_signatures_from_surface(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    macro_surface: &VueMacroSurface,
+) -> Vec<verter_semantic::analysis::type_expand::ExpandedIndexSignature> {
+    let dispatch = ctx.dispatch();
+    macro_surface
+        .surface
+        .index_signatures
+        .iter()
+        .filter_map(|sig| {
+            let key_type = dispatch.raise_node_to_type_expr(sig.key_type)?;
+            let value_type = dispatch.raise_node_to_type_expr(sig.value_type)?;
+            Some(verter_semantic::analysis::type_expand::ExpandedIndexSignature {
+                key_type,
+                value_type,
+                readonly: sig.readonly,
+            })
         })
         .collect()
 }

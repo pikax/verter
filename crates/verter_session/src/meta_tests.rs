@@ -2411,6 +2411,175 @@ defineProps<Props<T>>()
     }
 }
 
+/// `defineProps<{ [k: string]: string }>()` — a props type argument that is an
+/// index-signature-only object literal. A props member is `properties + index
+/// signatures`, so the published `define_props` shape MUST carry the index
+/// signature even though there is NO named property member.
+///
+/// Discriminating: the pre-fix `define_props_shape` hardcoded
+/// `index_signatures: Vec::new()`, so the published shape dropped the
+/// signature and this test FAILS (empty `index_signatures`); the fix preserves
+/// the DTO's `prop_index_signatures` so the `[k: string]: string` signature
+/// surfaces. (The `properties` list legitimately stays empty — the surface has
+/// no named member.)
+#[test]
+fn evaluate_types_define_props_preserves_index_signature_only_surface() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/IndexProps.vue",
+            r#"<script setup lang="ts">
+defineProps<{ [key: string]: string }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session.evaluate_types("/IndexProps.vue").unwrap().unwrap();
+
+    let shape = evaluated
+        .define_props
+        .iter()
+        .map(|entry| &entry.result.value)
+        .next()
+        .expect("an index-signature-only defineProps must still publish a define_props shape");
+
+    assert_eq!(
+        shape.index_signatures.len(),
+        1,
+        "defineProps<{{ [k: string]: string }}> must publish exactly its index \
+         signature, got {} index signatures (a `Vec::new()` here means the \
+         index signature was dropped — props = properties + index signatures)",
+        shape.index_signatures.len(),
+    );
+    let sig = &shape.index_signatures[0];
+    assert!(
+        matches!(sig.key_type, TypeExpr::Primitive(PrimitiveName::String)),
+        "index signature key type is `string`, got {:?}",
+        sig.key_type,
+    );
+    assert!(
+        matches!(sig.value_type, TypeExpr::Primitive(PrimitiveName::String)),
+        "index signature value type is `string`, got {:?}",
+        sig.value_type,
+    );
+    assert!(
+        !sig.readonly,
+        "the `[key: string]: string` signature is not readonly",
+    );
+}
+
+/// `type Props = { [k: string]: string }; defineProps<Props>()` — an
+/// OWNER-LOCAL NAMED props root whose body is index-signature-only. This
+/// exercises a DISTINCT lowering from the inline-literal case
+/// (`evaluate_types_define_props_preserves_index_signature_only_surface`): the
+/// macro type argument is a `Ref` to a named alias resolved through
+/// `ResolveDecl`, not an inline `Object`. The published `define_props` shape
+/// MUST still carry the named root's index signature.
+///
+/// Discriminating: pre-fix `define_props_shape` hardcoded `index_signatures:
+/// Vec::new()`, dropping the named root's index signature too; post-fix the
+/// DTO's `prop_index_signatures` (raised from the resolved-alias surface)
+/// surfaces. Proves the index-sig publication is not specific to the inline
+/// object shape.
+#[test]
+fn evaluate_types_owner_local_index_signature_only_props_root_resolves() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/OwnerLocalIndex.vue",
+            r#"<script setup lang="ts">
+type Props = { [key: string]: number }
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session
+        .evaluate_types("/OwnerLocalIndex.vue")
+        .unwrap()
+        .unwrap();
+
+    let shape = evaluated
+        .define_props
+        .iter()
+        .map(|entry| &entry.result.value)
+        .next()
+        .expect("an owner-local index-signature-only props root must publish a define_props shape");
+
+    assert_eq!(
+        shape.index_signatures.len(),
+        1,
+        "owner-local `type Props = {{ [k: string]: number }}` must publish its \
+         index signature, got {} (a dropped index-sig-only root means the \
+         surface-shape projector gated it out before the owner-local gate)",
+        shape.index_signatures.len(),
+    );
+    let sig = &shape.index_signatures[0];
+    assert!(
+        matches!(sig.value_type, TypeExpr::Primitive(PrimitiveName::Number)),
+        "index signature value type is `number`, got {:?}",
+        sig.value_type,
+    );
+}
+
+/// Directly discriminates the surface-shape projector gate fix: the cold
+/// resolver's owner-local authority gate (`owner_local_macro_root_has_surface`)
+/// resolves the named root through `project_expr_surface_shape_via_host_threaded`
+/// and returns `false` when that projector yields no shape. The projector
+/// previously gated on `properties / call_signatures` only and returned `None`
+/// for an index-signature-only surface, so the gate reported "no surface" for
+/// an index-sig-only owner-local props root — dropping its authoritative
+/// `ResolvedMacroMeta` entry (slot-binding / Rule-5 PublishedField provenance).
+///
+/// Discriminating: with the projector gating on index signatures too, the gate
+/// returns `true` for `type Props = { [k: string]: string }`; reverting that
+/// `|| !shape.index_signatures.is_empty()` admission makes this assertion fail
+/// (the gate reports no surface and the authoritative entry is skipped).
+#[test]
+fn owner_local_index_signature_only_props_root_passes_authority_gate() {
+    use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
+    use crate::resolver_core::component_meta::ComponentMetaResolverHost;
+    use verter_semantic::analysis::AnalyzedMacroKind;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/GateIndex.vue",
+            r#"<script setup lang="ts">
+type Props = { [key: string]: string }
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    // Prime the SFC's IndexedReady so the owner-local lowering can resolve the
+    // local `Props` alias.
+    let _ = project
+        .open_session_batch()
+        .unwrap()
+        .evaluate_types("/GateIndex.vue")
+        .unwrap()
+        .unwrap();
+
+    let host = project.host();
+    let resolver_host = HostComponentMetaResolver { host, ctx: host };
+    assert!(
+        resolver_host.owner_local_macro_root_has_surface(
+            "/GateIndex.vue",
+            "Props",
+            AnalyzedMacroKind::DefineProps,
+        ),
+        "the owner-local authority gate MUST report a surface for an \
+         index-signature-only props root `type Props = {{ [k: string]: string }}`; \
+         a `false` here means the surface-shape projector dropped the \
+         index-sig-only shape before the gate counted its index signatures",
+    );
+}
+
 #[test]
 fn get_component_meta_uses_default_type_parameters_when_generic_args_are_omitted() {
     let project = make_project();

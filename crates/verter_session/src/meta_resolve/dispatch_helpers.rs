@@ -1125,7 +1125,15 @@ pub(crate) fn project_expr_surface_shape_via_host_threaded<'ctx>(
     };
     let surface = projected_surface_from_semantic_node(ctx, node)?;
     let shape = projected_surface_to_expanded_shape(&surface);
-    (!shape.properties.is_empty() || !shape.call_signatures.is_empty()).then_some(shape)
+    // An index-signature-only surface (`{ [k: string]: string }`) is a
+    // genuine props surface — `defineProps<{ [k: string]: string }>()` admits
+    // every string key. Admitting it here lets the owner-local root gate (which
+    // already counts index signatures) see a non-empty shape; gating on
+    // properties / call-signatures alone would drop an index-sig-only root.
+    (!shape.properties.is_empty()
+        || !shape.call_signatures.is_empty()
+        || !shape.index_signatures.is_empty())
+    .then_some(shape)
 }
 
 pub(crate) fn project_route_surface_expr_via_host_threaded<'ctx>(
