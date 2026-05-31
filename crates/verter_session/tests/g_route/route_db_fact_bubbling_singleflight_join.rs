@@ -165,19 +165,37 @@ fn follower_bubbles_leader_facts_and_advances_coalesced_counter() {
             tx_leader_in_closure
                 .send(())
                 .expect("leader: signal in-closure");
-            rx_release_leader
-                .recv()
-                .expect("leader: released by driver");
+            // Bounded wait for the driver's release. A bare `recv()` would
+            // hang forever if the driver stalled before releasing; the
+            // deadline makes a genuine stall PANIC within ~10s instead.
+            match rx_release_leader.recv_timeout(Duration::from_secs(10)) {
+                Ok(()) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("leader: timed out waiting for driver release (10s)")
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("leader: driver dropped the release channel before releasing")
+                }
+            }
             Some((resolved_route(), vec![leader_fact()]))
         })
     });
 
     // Wait until the leader is inside its resolve closure. This
     // guarantees the follower reaches the singleflight condvar-wait
-    // branch rather than executing its own cold resolve.
-    rx_leader_in_closure
-        .recv()
-        .expect("leader entered resolve closure");
+    // branch rather than executing its own cold resolve. Bounded: a bare
+    // `recv()` would hang forever if the leader deadlocked while claiming
+    // the singleflight slot (before signalling); the deadline makes that
+    // stall PANIC within ~10s instead of blocking the suite.
+    match rx_leader_in_closure.recv_timeout(Duration::from_secs(10)) {
+        Ok(()) => {}
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            panic!("timed out waiting for the leader to enter its resolve closure (10s)")
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("leader thread dropped the in-closure channel before signalling")
+        }
+    }
 
     // Spawn the follower. It installs its own outer tracer BEFORE
     // entering the observing entry-point so the post-admission

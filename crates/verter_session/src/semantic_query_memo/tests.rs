@@ -29,6 +29,55 @@ fn scope(canonical: &str) -> ScopeId {
     }
 }
 
+/// Join `handle` and return its value, panicking if it does not complete
+/// within ~10s.
+///
+/// These cooperative-join tests reach their post-rendezvous joins only
+/// after the winner has been released and the joiner woken by the
+/// winner's publish, so on the happy path they complete promptly. They
+/// would block forever only on a genuine `execute_cooperative`
+/// singleflight deadlock — exactly the hang class this suite must surface
+/// loudly rather than hanging the whole `--lib` run. A bare
+/// `handle.join()` would itself hang on such a deadlock; this helper runs
+/// the join on a watchdog thread that reports the joined value through a
+/// rendezvous channel, and the caller PANICs if `recv_timeout` elapses.
+fn join_within<T: Send + 'static>(handle: std::thread::JoinHandle<T>, label: &str) -> T {
+    use std::sync::mpsc;
+    let (tx, rx) = mpsc::sync_channel::<std::thread::Result<T>>(1);
+    std::thread::spawn(move || {
+        // `send` fails only if the receiver was dropped (caller already
+        // panicked on timeout); ignore the benign disconnect.
+        let _ = tx.send(handle.join());
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(Ok(value)) => value,
+        Ok(Err(_)) => panic!("{label} panicked"),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            panic!("{label} deadlocked (join did not complete within 10s)")
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("{label} watchdog channel disconnected before reporting")
+        }
+    }
+}
+
+/// Receive one signal from `rx`, panicking if it does not arrive within
+/// ~10s. Replaces a bare `recv()` in the cooperative-join rendezvous
+/// channels so a producer that stalls/deadlocks before signalling fails
+/// loudly within the deadline instead of hanging the suite forever.
+fn recv_signal_within(rx: &std::sync::mpsc::Receiver<()>, label: &str) {
+    use std::sync::mpsc::RecvTimeoutError;
+    match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(()) => {}
+        Err(RecvTimeoutError::Timeout) => {
+            panic!("{label}: timed out waiting for signal (10s)")
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            panic!("{label}: signal channel disconnected before the producer signalled")
+        }
+    }
+}
+
 #[test]
 fn interning_returns_unique_stable_ids() {
     let store = SemanticGraphStore::new();
@@ -2878,10 +2927,14 @@ fn cross_thread_joiner_waits_on_winner_publish() {
         name: Arc::from("Shared"),
     });
 
-    let start_barrier = Arc::new(std::sync::Barrier::new(2));
+    // Bounded entry rendezvous: the winner sends one signal as the first
+    // act of its build closure, and the driver receives it with a 10s
+    // deadline. A 2-party `Barrier` here would hang the driver forever if
+    // the winner panicked before reaching the barrier; the channel +
+    // `recv_signal_within` makes that a loud panic instead.
+    let (tx_winner_in_build, rx_winner_in_build) = std::sync::mpsc::channel::<()>();
     let store_owner = Arc::clone(&store);
     let key_owner = key.clone();
-    let barrier_owner = Arc::clone(&start_barrier);
 
     let winner = thread::spawn(move || {
         let host = ctx_host();
@@ -2890,7 +2943,9 @@ fn cross_thread_joiner_waits_on_winner_publish() {
             key_owner,
             || store_owner.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || {
-                barrier_owner.wait();
+                tx_winner_in_build
+                    .send(())
+                    .expect("winner: signal entered build");
                 // Hold the build open until the joiner has PROVABLY
                 // suspended on the per-entry condvar — not merely been
                 // admitted onto the in-flight entry. This test's stated
@@ -2916,8 +2971,8 @@ fn cross_thread_joiner_waits_on_winner_publish() {
     });
 
     // Let the winner claim first, then the joiner waits on the
-    // condvar.
-    start_barrier.wait();
+    // condvar. Bounded: panics if the winner never enters its build.
+    recv_signal_within(&rx_winner_in_build, "winner entered build");
     let joiner = thread::spawn({
         let store = Arc::clone(&store);
         let key = key.clone();
@@ -2934,8 +2989,8 @@ fn cross_thread_joiner_waits_on_winner_publish() {
         }
     });
 
-    let winner_result = winner.join().unwrap();
-    let joiner_result = joiner.join().unwrap();
+    let winner_result = join_within(winner, "winner");
+    let joiner_result = join_within(joiner, "joiner");
 
     // Both must see the winner's node id.
     match (winner_result.value, joiner_result.value) {
@@ -4498,7 +4553,8 @@ fn semantic_graph_stats_joined_waits_increments_on_cooperative_join() {
             || winner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || {
                 tx_in_build.send(()).expect("winner signal in_build");
-                rx_finish_build.recv().expect("winner signal finish");
+                // Bounded wait for the driver's release — panics on stall.
+                recv_signal_within(&rx_finish_build, "winner signal finish");
                 let id =
                     winner_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
                 (QueryResult::Value(id), empty_signature())
@@ -4508,8 +4564,8 @@ fn semantic_graph_stats_joined_waits_increments_on_cooperative_join() {
 
     // Wait until the winner is inside the build — this guarantees
     // the in-flight entry is registered + claimed when the joiner
-    // arrives.
-    rx_in_build.recv().expect("winner entered build");
+    // arrives. Bounded: panics if the winner never enters its build.
+    recv_signal_within(&rx_in_build, "winner entered build");
 
     let joiner_store = Arc::clone(&store);
     let joiner_key = key.clone();
@@ -4533,8 +4589,8 @@ fn semantic_graph_stats_joined_waits_increments_on_cooperative_join() {
     wait_for_joiner_admitted(&store, &key);
     tx_finish_build.send(()).expect("release winner");
 
-    let _ = winner.join().expect("winner joined");
-    let joiner_result = joiner.join().expect("joiner joined");
+    let _ = join_within(winner, "winner");
+    let joiner_result = join_within(joiner, "joiner");
     assert!(
         matches!(joiner_result.value, QueryResult::Value(_)),
         "joiner must observe the winner's published result"

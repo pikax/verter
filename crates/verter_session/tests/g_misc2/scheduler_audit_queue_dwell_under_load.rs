@@ -7,9 +7,12 @@
 //! site, so the assertion reflects real SCHEDULER-PRIORITY-QUEUE dwell
 //! — not pool-channel time:
 //!
-//! 1. An ALL-SUBMITTED barrier guarantees every submitter has returned
-//!    from `submit_request` (so all 16 submissions are at least in the
-//!    inbox channel) before the test inspects anything.
+//! 1. A bounded ALL-SUBMITTED rendezvous (an mpsc signal channel)
+//!    guarantees every submitter has returned from `submit_request` (so
+//!    all 16 submissions are at least in the inbox channel) before the
+//!    test inspects anything. The driver receives exactly `REQUESTS`
+//!    signals via `recv_timeout`, so a submitter that stalls before
+//!    signalling fails the test loudly instead of hanging it.
 //! 2. The scheduler's test-only dispatch pause (armed at
 //!    `POOL_THREADS`) parks the driver after exactly `POOL_THREADS`
 //!    source dispatches, BEFORE the next dequeue. While parked, the
@@ -38,7 +41,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -239,12 +242,15 @@ fn at_least_one_concurrent_request_observes_non_zero_queue_dwell_ms() {
     // scheduler-queue dwell.
     sched.test_arm_dispatch_pause(POOL_THREADS);
 
-    // All-submitted barrier: REQUESTS submitter threads + this driver
-    // thread. Every submitter signals after `submit_request` returns, so
-    // once the barrier trips all REQUESTS submissions are at least in the
-    // inbox channel — the re-drain inside the dispatch pause is then
-    // guaranteed to pull every one of them into `job_index`.
-    let all_submitted = Arc::new(Barrier::new(REQUESTS + 1));
+    // All-submitted rendezvous via a bounded mpsc signal channel. Each
+    // submitter sends one signal AFTER `submit_request` returns, so once
+    // the driver has received all REQUESTS signals every submission is at
+    // least in the inbox channel — the re-drain inside the dispatch pause
+    // is then guaranteed to pull every one of them into `job_index`. The
+    // driver receives via `recv_timeout`, so a submitter that panics or
+    // stalls before signalling makes the test fail loudly within the
+    // deadline instead of an unbounded `Barrier::wait` hanging forever.
+    let (submitted_tx, submitted_rx) = std::sync::mpsc::channel::<()>();
 
     // Submit ALL requests in parallel. Each uses a fresh session
     // context so the `scheduler_audit` slot is independently observable.
@@ -252,7 +258,7 @@ fn at_least_one_concurrent_request_observes_non_zero_queue_dwell_ms() {
         .map(|i| {
             let sched = Arc::clone(&sched);
             let ctx = Arc::clone(&contexts[i]);
-            let all_submitted = Arc::clone(&all_submitted);
+            let submitted_tx = submitted_tx.clone();
             thread::spawn(move || {
                 let opaque = OpaqueRequestContext(ctx as Arc<dyn RequestContextLike>);
                 let h = sched.submit_request(Request {
@@ -265,16 +271,37 @@ fn at_least_one_concurrent_request_observes_non_zero_queue_dwell_ms() {
                 });
                 // Signal that this submission has entered the inbox, then
                 // block on completion (which only happens after the test
-                // releases the dispatch pause + the source gate).
-                all_submitted.wait();
+                // releases the dispatch pause + the source gate). A send
+                // failure only means the driver already gave up (timed out
+                // and dropped the receiver); ignore it so this submitter
+                // does not panic on a benign disconnect.
+                let _ = submitted_tx.send(());
                 h.wait();
             })
         })
         .collect();
+    // Drop the driver's spare sender so only the submitter clones keep the
+    // channel alive.
+    drop(submitted_tx);
 
     // Step 1: wait until every submitter has returned from
-    // `submit_request`.
-    all_submitted.wait();
+    // `submit_request`. Receive exactly REQUESTS signals, each bounded by a
+    // 10s deadline — a submitter that never signals PANICS here instead of
+    // hanging the suite.
+    for n in 0..REQUESTS {
+        match submitted_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
+                "timed out waiting for all {REQUESTS} submitters to return from \
+                 submit_request (only {n} signalled); a submitter stalled before \
+                 entering the inbox"
+            ),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!(
+                "submitted-signal channel disconnected after {n}/{REQUESTS} signals; \
+                 a submitter thread panicked before signalling"
+            ),
+        }
+    }
 
     // Step 2: confirm POOL_THREADS source jobs were actually dispatched
     // (their workers entered the gate) — a cross-check that the pause
