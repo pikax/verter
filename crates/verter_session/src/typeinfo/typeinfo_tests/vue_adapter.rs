@@ -683,6 +683,68 @@ fn define_slots_normalizer_publishes_union_of_function_slots() {
 }
 
 // ---------------------------------------------------------------------------
+// (4a-union-noparam) defineSlots normalizer — a UNION slot where one arm is a
+//      NO-PARAM callable (`default: A | B`, `A = () => any`, `B = (props: { a })
+//      => any`). The slot still PUBLISHES (a union of callables is slot-like),
+//      but a template destructuring `<template #default="{ a }">` runs for
+//      WHICHEVER arm the slot is — and when it is the `A` arm there are no slot
+//      props. So `a` is NOT a guaranteed binding: the published `bindings` set
+//      must be EMPTY (a no-param arm guarantees nothing).
+//
+//      Discriminating: pre-fix `slot_callable_param_and_return_from_arms` pushed
+//      only the first params of arms that HAD one, then intersected the present
+//      params — so `B`'s `{ a }` became the slot param and `a` was wrongly
+//      published. Post-fix `all_arms_have_first_param` is false (the `A` arm has
+//      no param), so the param drops to `None` and no binding surfaces.
+// ---------------------------------------------------------------------------
+
+const VUE_SLOTS_UNION_NOPARAM: &str = r#"<script setup lang="ts">
+type A = () => any;
+type B = (props: { a: string }) => any;
+type Slots = { default: A | B };
+defineSlots<Slots>();
+</script>
+"#;
+
+#[test]
+fn define_slots_normalizer_drops_union_bindings_when_an_arm_has_no_param() {
+    const FILE: &str = "/w/SlotsUnionNoParam.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_SLOTS_UNION_NOPARAM);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("defineSlots must resolve a surface");
+    let slots = slots_from_typeinfo_surface(&*host, &surface);
+
+    // The union-of-callables slot is still PUBLISHED (positive): one arm having
+    // no param does not make the member non-slot-like.
+    let default_slot = slots
+        .iter()
+        .find(|s| s.name == "default")
+        .expect("a `default: A | B` union slot must still publish");
+
+    // SOUNDNESS (the fix): `a` comes only from the `B` arm; the `A` arm is a
+    // no-param callable, so `a` is NOT guaranteed and must NOT be published.
+    let binding_names: Vec<&str> = default_slot
+        .bindings
+        .iter()
+        .map(|b| b.name.as_str())
+        .collect();
+    assert!(
+        !default_slot.bindings.iter().any(|b| b.name == "a"),
+        "a no-param union arm guarantees no bindings: `a` (present only in the \
+         `(props: {{ a }}) => any` arm) MUST NOT be published, got {binding_names:?}"
+    );
+    assert!(
+        default_slot.bindings.is_empty(),
+        "a union slot with a no-param arm publishes NO guaranteed bindings, got \
+         {binding_names:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // (4b) defineSlots normalizer — a `Pick<T,'k'>` first parameter yields the
 //      picked bindings (matching the eager local-SFC rail). The new path must
 //      navigate the first-param type through the SHARED resolver to its object
