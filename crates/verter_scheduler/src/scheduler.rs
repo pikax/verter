@@ -3567,6 +3567,23 @@ mod tests {
     /// observed `current_request_id()` separately via a
     /// canonical-dispatched probe. Both must equal the parent request's
     /// id.
+    ///
+    /// Determinism barrier: the request targets `Artifact`, NOT
+    /// `Analysis`. The blocker the scheduler registers for the
+    /// auto-ingested dep gates the PARENT's **Artifact** stage on the
+    /// dep reaching **Analysis** (see `blockers_gate_artifact_until_dep_analyzed`
+    /// and the `has_pending_blockers` gate in `submit_request`). The
+    /// dep cannot reach Analysis without its Source job running first,
+    /// so by the time `handle.wait()` returns `Ready(Artifact)` the
+    /// dep-source job has provably already executed (and stored its
+    /// observed TLS request_id). Had we targeted `Analysis`, the
+    /// PARENT analysis is NOT gated by the dep blocker (the blocker
+    /// only gates artifacts), so `wait()` could return before the
+    /// auto-ingested dep-source worker ran — the inherited-context
+    /// observation would race. Targeting Artifact turns the
+    /// completion fence into a structural happens-before: dep-source
+    /// observed ⇒ dep analyzed ⇒ blocker cleared ⇒ parent artifact ⇒
+    /// wait() returns. No timing/sleep is involved.
     #[test]
     fn auto_ingested_dep_source_job_inherits_parent_request_context_as_tls() {
         use crate::executor::ExtractedDeps;
@@ -3634,9 +3651,17 @@ mod tests {
         let ctx = TestContext::new(PARENT_REQ_ID, true);
         let opaque = OpaqueRequestContext(Arc::clone(&ctx) as Arc<dyn RequestContextLike>);
 
+        // Target Artifact (not Analysis): the dep blocker gates the
+        // parent's Artifact stage, so completion structurally forces
+        // the dep-source job to have run first (see the doc-comment's
+        // determinism barrier rationale).
+        // Target Artifact (not Analysis): the dep blocker gates the
+        // parent's Artifact stage, so completion structurally forces
+        // the dep-source job to have run first (see the doc-comment's
+        // determinism barrier rationale).
         let handle = sched.submit_request(Request {
             file_id: PARENT.to_string(),
-            target: TargetStage::Analysis,
+            target: TargetStage::Artifact { profile_hash: 0 },
             priority: Priority::Interactive,
             source: None,
             file_kind: None,
