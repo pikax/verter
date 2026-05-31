@@ -1545,6 +1545,124 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
     );
 }
 
+/// Route-key resolution for `keyof ComponentConfig<typeof theme>['variants']['color']`
+/// — the generic-`Ref` indexed-access key source consumed by `Pick`/`Omit`
+/// keys (`route_keys.rs` `enumerate_member_surface_keys_via_route`, the
+/// `IndexedAccess { object: Ref<Args>, .. }` arm).
+///
+/// Discriminator: the dispatch-backed leaf stabiliser
+/// (`solve_or_project_prepared_member_leaf_expr`, called at the top of
+/// `enumerate_member_surface_keys_via_route`) must resolve the generic
+/// config's `['variants']['color']` surface to the concrete
+/// `{ primary; secondary }` object so the literal keys enumerate WITHOUT
+/// falling to the `.or_else(instantiate_local_generic_ref_via_engine)`
+/// slow-lane fallback that would whole-substitute the structural body.
+/// The prepared-structural-substitution guard is armed: if dispatch ever
+/// regresses and the route falls through to the engine fallback, the
+/// trip-wire in `apply_type_param_substitutions` fires (proven by the
+/// local revert-and-observe documented in the impl feedback).
+#[test]
+fn enumerate_route_literal_keys_generic_ref_indexed_access_stays_off_substitution_slow_lane() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    // Generic config whose indexed `['variants']['color']` surface has
+    // CONCRETE keys (`primary`/`secondary`) regardless of the type
+    // argument `T` — so dispatch can stabilise the surface without
+    // instantiating the generic body. `T` only types the member VALUES.
+    ws.inject_file(
+        "/src/cfg.ts".to_string(),
+        Arc::from(
+            r#"
+export interface ComponentConfig<T> {
+  variants: {
+    color: {
+      primary: T
+      secondary: T
+    }
+  }
+}
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/src/theme.ts".to_string(),
+        Arc::from(
+            r#"
+export default {
+  spacing: 4
+} as const
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+import type { ComponentConfig } from './cfg'
+import theme from './theme'
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![
+            crate::DependencyResolution {
+                specifier: "./cfg".to_string(),
+                resolved_canonical_id: Some("/src/cfg.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::DependencyResolution {
+                specifier: "./theme".to_string(),
+                resolved_canonical_id: Some("/src/theme.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    // `keyof ComponentConfig<typeof theme>['variants']['color']`
+    let key_source = TypeExpr::KeyOf(Arc::new(TypeExpr::IndexedAccess {
+        object: Arc::new(TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::named_with_args(
+                "ComponentConfig",
+                vec![TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                    path: vec!["theme".to_string()],
+                })],
+            )),
+            index: Arc::new(TypeExpr::string_literal("variants")),
+        }),
+        index: Arc::new(TypeExpr::string_literal("color")),
+    }));
+
+    let _guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
+    let keys = query_engine
+        .enumerate_route_literal_keys("/src/App.vue", "/src/App.vue", &key_source)
+        .expect(
+            "keyof ComponentConfig<typeof theme>['variants']['color'] should enumerate its literal \
+             keys via the dispatch fast lane without the structural-substitution slow lane",
+        );
+    let key_set: std::collections::BTreeSet<&str> = keys.iter().map(String::as_str).collect();
+    assert_eq!(
+        key_set,
+        std::collections::BTreeSet::from(["primary", "secondary"]),
+        "generic-Ref indexed-access key source should yield exactly the concrete color keys, \
+         got {key_set:?}",
+    );
+}
+
 #[test]
 fn type_expr_references_type_params_detects_nested_member_routes() {
     let expr = TypeExpr::IndexedAccess {
@@ -3183,6 +3301,14 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
     let _store_view = host.resolver_store_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
+    // Arm the prepared-structural-substitution trip-wire: this
+    // `Omit<SelectMenuProps<Item[]>, 'items'>` heritage route exercises the
+    // `route_keys.rs` `project_direct_utility_surface_shape` fallback whose
+    // last resort is `instantiate_local_generic_ref_via_engine`. Dispatch must
+    // compose the surface BEFORE that fallback so the structural body is never
+    // whole-substituted (proven discriminating by the local revert-and-observe
+    // in the impl feedback).
+    let _guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
     let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
         &mut query_engine,
         "/src/App.vue",
@@ -3375,5 +3501,66 @@ fn projected_surface_to_type_expr_keeps_synthetic_index_signature_span_none() {
     assert_eq!(
         index.spans.value, None,
         "synthetic open-surface index signature value has no source site"
+    );
+}
+
+/// Trip-wire SANITY (anti-stub): drive the LIVE prepared-structural-substitution
+/// slow funnel directly — `instantiate_local_generic_ref_via_engine` on a
+/// generic alias whose body is a structural `Object` referencing the type
+/// parameter — under the armed
+/// `forbid_prepared_structural_substitution_slow_lane_for_tests()` guard.
+///
+/// The funnel calls `apply_type_param_substitutions(&prepared.body, &subs)`,
+/// which (substitutions non-empty AND body references `T`) skips the fast
+/// return and calls `assert_prepared_structural_substitution_slow_lane_allowed`
+/// on the structural body — which MUST panic when the guard is armed. This
+/// proves the re-wired trip-wire actually fires and is not a stub: if the
+/// assert were a no-op, this test would return a value instead of panicking
+/// and FAIL the `#[should_panic]` contract.
+#[test]
+#[should_panic(expected = "prepared generic projection should not whole-substitute")]
+fn prepared_substitution_trip_wire_fires_on_structural_body_when_armed() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    // Generic alias with a STRUCTURAL object body that references the type
+    // parameter `T` — `apply_type_param_substitutions` will whole-substitute it.
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+type Wrapper<T> = { value: T; label: string }
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    // `Wrapper<number>` — generic Ref with a non-identity argument, so the
+    // default substitutions are non-empty (`{ T -> number }`) and the
+    // structural body references `T`.
+    let generic_ref = TypeExpr::named_with_args(
+        "Wrapper",
+        vec![TypeExpr::Primitive(PrimitiveName::Number)],
+    );
+
+    let _guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
+    // Direct call into the slow funnel — bypasses dispatch entirely, so the
+    // structural whole-substitution path is guaranteed to execute and trip.
+    let _ = super::instantiate_local_generic_ref_via_engine(
+        &mut query_engine,
+        "/src/App.vue",
+        &generic_ref,
     );
 }
