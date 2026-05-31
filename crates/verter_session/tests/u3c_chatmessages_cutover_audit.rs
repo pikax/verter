@@ -112,16 +112,16 @@ const CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING: u64 = 0;
 ///     isolated empirically and the result is committed here as a reproducible
 ///     discriminator:
 ///
-///       Reverting ONLY the `slot_bindings` reducer back to Expanded
-///       (`field.r#type = reduce_field_type_expr(query_engine,
-///       scope_canonical_id, raised);` in `reduce_published_field_types`, with
-///       the materialiser removal LEFT in place) and re-running this gate keeps
-///       `expanded_instantiate_calls == 3` — the count is INVARIANT under the
-///       reducer mode for this fixture (ChatMessages' published `slot_bindings`
-///       reduce to carrier `IndexedAccess` shells that issue no Expanded
-///       `Instantiate` in either mode). Therefore the reducer demotion
-///       contributes ZERO to the 4 -> 3 drop; the entire delta is the removed
-///       materialiser pre-pass.
+///     Reverting ONLY the `slot_bindings` reducer back to Expanded
+///     (`field.r#type = reduce_field_type_expr(query_engine,
+///     scope_canonical_id, raised);` in `reduce_published_field_types`, with
+///     the materialiser removal LEFT in place) and re-running this gate keeps
+///     `expanded_instantiate_calls == 3` — the count is INVARIANT under the
+///     reducer mode for this fixture (ChatMessages' published `slot_bindings`
+///     reduce to carrier `IndexedAccess` shells that issue no Expanded
+///     `Instantiate` in either mode). Therefore the reducer demotion
+///     contributes ZERO to the 4 -> 3 drop; the entire delta is the removed
+///     materialiser pre-pass.
 ///
 ///     This is corroborated structurally by the committed
 ///     `synthesis_expanded_instantiate_calls == 0` assertion below: the removed
