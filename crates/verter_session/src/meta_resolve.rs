@@ -23,7 +23,7 @@
 // of this shell — bare-name references in tests need the imports in
 // scope here.
 #[cfg(test)]
-use crate::types::{FileAnalysisSnapshot, ProjectionMode};
+use crate::types::ProjectionMode;
 
 pub(crate) const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 

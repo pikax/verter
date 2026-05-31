@@ -677,16 +677,6 @@ thread_local! {
     /// value.
     static INJECT_IMPORTED_REGISTRY_CONCURRENT_PUBLISH:
         RefCell<Option<ResolvedImportedRegistrySymbol>> = const { RefCell::new(None) };
-    /// When `Some`, `project_routed_expr_surface_expr` invokes this
-    /// callback exactly ONCE — at the seam between the routed-expression
-    /// projection and the `cache_routed_expr_surface_expr`
-    /// write-through. It deterministically reproduces a racing `upsert`
-    /// of the scope file landing in that window: a torn-read producer
-    /// observes the post-edit hash here and roots the pre-edit value on
-    /// it; a producer that captured the observed hash before the
-    /// projection roots on the pre-edit hash and refuses admission.
-    static INJECT_ROUTED_EXPR_PROJECTION_SEAM_EDIT:
-        RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
 }
 
 /// Reset the imported-registry resolver invocation counter and read its
@@ -749,47 +739,6 @@ pub(crate) fn inject_imported_registry_concurrent_publish_for_tests(
 ) -> InjectImportedRegistryConcurrentPublishGuard {
     INJECT_IMPORTED_REGISTRY_CONCURRENT_PUBLISH.with(|slot| *slot.borrow_mut() = Some(symbol));
     InjectImportedRegistryConcurrentPublishGuard
-}
-
-/// RAII guard that clears the routed-expr projection-seam edit
-/// injection for the current thread on drop.
-#[cfg(test)]
-pub(crate) struct InjectRoutedExprProjectionSeamEditGuard;
-
-#[cfg(test)]
-impl Drop for InjectRoutedExprProjectionSeamEditGuard {
-    fn drop(&mut self) {
-        INJECT_ROUTED_EXPR_PROJECTION_SEAM_EDIT.with(|slot| *slot.borrow_mut() = None);
-    }
-}
-
-/// Arrange for `project_routed_expr_surface_expr` to run `seam_edit`
-/// exactly once, at the seam between the routed-expression projection
-/// and the `cache_routed_expr_surface_expr` write-through. Reproduces —
-/// deterministically, single-threaded — a racing `upsert` of the scope
-/// file landing between the value compute and the cache write-through.
-#[cfg(test)]
-pub(crate) fn inject_routed_expr_projection_seam_edit_for_tests<F>(
-    seam_edit: F,
-) -> InjectRoutedExprProjectionSeamEditGuard
-where
-    F: Fn() + 'static,
-{
-    INJECT_ROUTED_EXPR_PROJECTION_SEAM_EDIT
-        .with(|slot| *slot.borrow_mut() = Some(Box::new(seam_edit)));
-    InjectRoutedExprProjectionSeamEditGuard
-}
-
-/// Fire the routed-expr projection-seam edit hook, if installed, then
-/// clear it so it runs at most once per `project_routed_expr_surface_expr`
-/// call. Invoked by `routed_expr.rs` at the projection / write-through
-/// seam.
-#[cfg(test)]
-pub(crate) fn fire_routed_expr_projection_seam_edit_for_tests() {
-    let hook = INJECT_ROUTED_EXPR_PROJECTION_SEAM_EDIT.with(|slot| slot.borrow_mut().take());
-    if let Some(hook) = hook {
-        hook();
-    }
 }
 
 /// Process-global rendezvous barrier for the imported-registry

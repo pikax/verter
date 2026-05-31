@@ -19,9 +19,7 @@ mod direct_macro;
 mod tests;
 
 pub use cold_resolver::resolve_component_meta_parts;
-pub(crate) use direct_macro::{
-    imported_declaration_surface_is_authoritative, imported_registry_seed_can_skip_refresh,
-};
+pub(crate) use direct_macro::imported_registry_seed_can_skip_refresh;
 
 /// Collect the set of binding names exposed by macros (e.g., `defineExpose` fields).
 /// Used as a filter for which `env.value_symbols` entries to expand as bindings

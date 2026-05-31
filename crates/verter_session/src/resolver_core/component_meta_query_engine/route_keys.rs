@@ -12,7 +12,6 @@
 //! - All other methods stay private and are visible inside the
 //!   `component_meta_query_engine` folder via parent-private locality.
 
-use rustc_hash::FxHashSet;
 use verter_type_expr::TypeExpr;
 
 use super::helpers::{is_builtin_name, projected_surface_member_names, strip_parens_expr};
