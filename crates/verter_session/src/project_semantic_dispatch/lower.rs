@@ -1659,9 +1659,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // NOT substitute into this function's params / return /
                 // type-param constraints+defaults. Strip the
                 // function-local type-param names from `env` for the
-                // duration of lowering this signature (mirrors the
-                // legacy `substitute_function_expr`'s
-                // `scoped_substitutions.remove(type_parameter.name)`).
+                // duration of lowering this signature, so a function's
+                // own `<T>` shadows the outer instantiation argument.
                 // The storage binding lives for the whole arm; `env` is
                 // re-bound to it only when the function declares its own
                 // type parameters (functions with none pay nothing —

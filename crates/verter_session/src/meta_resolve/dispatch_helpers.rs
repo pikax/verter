@@ -668,9 +668,8 @@ pub(crate) fn pick_via_dispatch_pick_helper(
 /// `SemanticQueryKey::Instantiate { base, args, body_mode: Expanded }`
 /// internally — the dispatcher's `build_instantiate` binds the explicit
 /// / default type arguments into the lowering env and substitutes them
-/// while lowering the prepared-decl body. This is now the sole
-/// generic-Ref instantiation path; the prepared-structural-substitution
-/// slow lane it once mirrored has been deleted.
+/// while lowering the prepared-decl body. This is the sole generic-Ref
+/// instantiation path for component-meta type resolution.
 ///
 /// Returns `Some(reduced)` only when:
 /// - `expr` is a generic `Ref` (else returns `None`, matching the

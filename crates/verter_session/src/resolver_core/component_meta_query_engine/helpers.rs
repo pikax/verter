@@ -63,8 +63,7 @@ pub(super) fn routed_expr_surface_key_expr(
     }
 }
 
-/// Thin `Option<&str>` wrapper over [`is_package_canonical`]. After the
-/// prepared-structural-substitution slow-lane deletion its only remaining
+/// Thin `Option<&str>` wrapper over [`is_package_canonical`]. Its only
 /// consumer is the workspace-classification guard test, so it is gated to
 /// test builds (the production path uses [`is_package_canonical`] on a
 /// concrete `&str`).
