@@ -34,9 +34,7 @@ use crate::instant::Instant;
 use crate::host_manage::component_meta_request_impl::{
     CapturedComponentMetaInputs, ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedTypeDeclaration,
 };
-use crate::meta_resolve::{
-    project_expr_class_a_via_dispatch, project_prepared_type_surface_shape_via_host_threaded,
-};
+use crate::meta_resolve::project_expr_class_a_via_dispatch;
 
 pub(crate) struct HostComponentMetaResolver<'a> {
     pub(crate) host: &'a VerterHost,
@@ -308,22 +306,37 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
             return Vec::new();
         }
 
-        // bridge via per-engine helper.
+        // Projectability is decided through the SOLE query-time resolver: each
+        // candidate root name lowers to a bare `TypeExpr::Ref` and projects
+        // through `project_expr_surface_shape_via_host_threaded` (dispatch
+        // `lower_type_expr_in_scope` + empty-path `Published(Shallow)`
+        // `ProjectPath`), the SAME dispatch surface route as the owner-local
+        // authority gate `owner_local_macro_root_has_surface`. The retired
+        // prepared-decl walker is NOT used here — a surviving production walker
+        // path would violate the one-engine / no-production-walker seal.
         let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self.ctx);
 
         candidate_roots
             .into_iter()
             .filter(|root_name| {
-                project_prepared_type_surface_shape_via_host_threaded(
+                let root_ref = verter_type_expr::TypeExpr::Ref {
+                    name: std::sync::Arc::from(*root_name),
+                    type_arguments: std::sync::Arc::from(Vec::<verter_type_expr::TypeExpr>::new()),
+                };
+                crate::meta_resolve::project_expr_surface_shape_via_host_threaded(
                     &mut query_engine,
                     owner_canonical,
-                    root_name,
+                    &root_ref,
                 )
                 .is_some_and(|shape| match mac.kind {
                     verter_semantic::analysis::AnalyzedMacroKind::DefineProps
                     | verter_semantic::analysis::AnalyzedMacroKind::WithDefaults
                     | verter_semantic::analysis::AnalyzedMacroKind::DefineModel
-                    | verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => true,
+                    | verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
+                        !shape.properties.is_empty()
+                            || !shape.call_signatures.is_empty()
+                            || !shape.index_signatures.is_empty()
+                    }
                     verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
                         !shape.properties.is_empty() || !shape.call_signatures.is_empty()
                     }

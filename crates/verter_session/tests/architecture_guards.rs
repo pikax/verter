@@ -1316,37 +1316,52 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
          through a macro).",
     );
 
-    // Owner-local AUTHORITY gate retarget guard: `owner_local_macro_root_has_surface`
-    // (jsdoc_resolve.rs) was retargeted from the prepared-decl walker
-    // (`cached_prepared_root_surface` via `project_prepared_type_surface_*`) to
-    // the shared dispatch surface projector
-    // (`project_expr_surface_shape_via_host_threaded`). It must STAY on dispatch
-    // — re-introducing the prepared-decl walker here is a second-resolver
-    // (Typed-IR-Only) violation. (The projectable-roots PRE-FILTER
-    // `projectable_owner_local_macro_roots` is a separate, coarser pass and is
-    // out of scope for this gate.)
+    // Owner-local dispatch-seal guard: BOTH owner-local macro-root entry points
+    // in jsdoc_resolve.rs resolve their root surface through the SOLE query-time
+    // resolver (the shared dispatch surface projector
+    // `project_expr_surface_shape_via_host_threaded`), NOT the retired
+    // prepared-decl walker (`cached_prepared_root_surface` via
+    // `project_prepared_type_surface_*`):
+    //
+    // - `owner_local_macro_root_has_surface` is the cold resolver's owner-local
+    //   AUTHORITY gate (presence check).
+    // - `projectable_owner_local_macro_roots` is the upstream projectable-roots
+    //   PRE-FILTER. It runs BEFORE the authority gate and decides whether a
+    //   macro root is considered projectable at all, so a surviving prepared
+    //   walker there is still a production walker path — it MUST route through
+    //   dispatch too (one-engine / no-production-walker seal).
+    //
+    // Re-introducing the prepared-decl walker in EITHER function is a
+    // second-resolver (Typed-IR-Only) violation.
     let jsdoc_src =
         read_workspace_file("crates/verter_session/src/host_manage/jsdoc_resolve.rs");
     let jsdoc_file = syn::parse_file(&jsdoc_src).expect("parse jsdoc_resolve.rs");
-    for prepared_walker_symbol in [
-        "cached_prepared_root_surface",
-        "project_prepared_type_surface_shape_via_host_threaded",
-        "project_prepared_type_surface_expr_via_host_threaded",
-        "project_prepared_requested_member_from_symbol",
+    for owner_local_fn in [
+        "owner_local_macro_root_has_surface",
+        "projectable_owner_local_macro_roots",
     ] {
-        assert_fn_free_of_symbol(
-            &jsdoc_file,
-            "owner_local_macro_root_has_surface",
-            prepared_walker_symbol,
-            &format!(
-                "Stage 4a: the owner-local AUTHORITY gate \
-                 `owner_local_macro_root_has_surface` references the prepared-decl \
-                 walker `{prepared_walker_symbol}` — it was retargeted to the shared \
-                 dispatch surface projector `project_expr_surface_shape_via_host_threaded` \
-                 and must stay there (one resolver). Do NOT route the authority \
-                 gate back through the prepared-surface walker."
-            ),
-        );
+        for prepared_walker_symbol in [
+            "cached_prepared_root_surface",
+            "project_prepared_type_surface_shape_via_host_threaded",
+            "project_prepared_type_surface_expr_via_host_threaded",
+            "project_prepared_requested_member_from_symbol",
+        ] {
+            assert_fn_free_of_symbol(
+                &jsdoc_file,
+                owner_local_fn,
+                prepared_walker_symbol,
+                &format!(
+                    "Stage 4a: the owner-local entry point `{owner_local_fn}` \
+                     references the prepared-decl walker `{prepared_walker_symbol}` \
+                     — both owner-local macro-root entry points were retargeted to \
+                     the shared dispatch surface projector \
+                     `project_expr_surface_shape_via_host_threaded` and must stay \
+                     there (one resolver). Do NOT route the owner-local \
+                     projectable/authority decision back through the prepared-surface \
+                     walker."
+                ),
+            );
+        }
     }
 }
 

@@ -75,15 +75,19 @@ pub(crate) use dispatch_helpers::{
     instantiate_local_generic_ref_via_dispatch, lower_and_project_to_expanded_via_host_threaded,
     pick_via_dispatch_pick_helper, project_expr_class_a_via_dispatch,
     project_expr_class_a_via_dispatch_threaded, project_expr_surface_expr_via_host_threaded,
-    project_expr_surface_shape_via_host_threaded,
-    project_prepared_type_surface_shape_via_host_threaded,
-    project_type_surface_expr_via_host_threaded,
+    project_expr_surface_shape_via_host_threaded, project_type_surface_expr_via_host_threaded,
 };
 // Test-only re-exports — exercised by parity tests for the
-// dispatch-route-helper coverage matrix.
+// dispatch-route-helper coverage matrix. The prepared-decl surface
+// projector is no longer a PRODUCTION re-export here: the owner-local
+// macro-root entry points were retargeted to the shared dispatch surface
+// projector (`project_expr_surface_shape_via_host_threaded`), so the
+// prepared walker survives only for its own materialiser-module callers
+// (which import it directly from `dispatch_helpers`) and these parity tests.
 #[cfg(test)]
 pub(crate) use dispatch_helpers::{
     project_prepared_type_surface_expr_via_host_threaded,
+    project_prepared_type_surface_shape_via_host_threaded,
     project_route_surface_expr_via_host_threaded,
 };
 pub(crate) use graph_predicates::{
