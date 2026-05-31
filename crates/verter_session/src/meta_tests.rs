@@ -2580,6 +2580,72 @@ defineProps<Props>()
     );
 }
 
+/// The owner-local projectable-roots PRE-FILTER
+/// (`projectable_owner_local_macro_roots`) resolves each candidate root through
+/// the SOLE query-time resolver — the shared dispatch surface projector
+/// `project_expr_surface_shape_via_host_threaded` — NOT the retired prepared-decl
+/// walker. This pass runs UPSTREAM of the owner-local authority gate, so it is a
+/// production resolution path in its own right; it must agree with the authority
+/// gate on what "projectable" means.
+///
+/// An index-signature-only owner-local props root (`type Props = { [k: string]:
+/// string }`) projects through dispatch to a shape whose only surface is an index
+/// signature. The pre-filter MUST return `Props` as projectable.
+///
+/// Discriminating: the retargeted per-kind predicate admits props/model/slots
+/// roots whose dispatch shape has members OR call-signatures OR index-signatures
+/// (`|| !shape.index_signatures.is_empty()`). Reverting that index-signature
+/// admission clause drops this index-sig-only root, so the pre-filter returns
+/// `[]` and this assertion fails. (Proven by mutation: removing the
+/// `index_signatures` clause makes the returned roots empty.)
+#[test]
+fn projectable_owner_local_pre_filter_admits_index_signature_only_props_root() {
+    use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
+    use crate::resolver_core::component_meta::ComponentMetaResolverHost;
+    use verter_semantic::analysis::AnalyzedMacroKind;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/PreFilterIndex.vue",
+            r#"<script setup lang="ts">
+type Props = { [key: string]: string }
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    // Prime the SFC's IndexedReady (and pull the resolved `AnalyzedMacro` the
+    // production cold resolver feeds the pre-filter) through a real session.
+    let session = project.open_session_batch().unwrap();
+    let _ = session.evaluate_types("/PreFilterIndex.vue").unwrap().unwrap();
+    let analysis = session
+        .get_analysis("/PreFilterIndex.vue")
+        .unwrap()
+        .expect("analysis should exist");
+    let define_props = analysis
+        .macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+        .expect("defineProps macro should exist");
+
+    let host = project.host();
+    let resolver_host = HostComponentMetaResolver { host, ctx: host };
+    let roots =
+        resolver_host.projectable_owner_local_macro_roots("/PreFilterIndex.vue", define_props);
+    assert_eq!(
+        roots,
+        vec!["Props".to_string()],
+        "the owner-local projectable pre-filter MUST admit an index-signature-only \
+         props root `type Props = {{ [k: string]: string }}` through the dispatch \
+         surface route; an empty result means the retargeted predicate dropped the \
+         index-sig-only dispatch shape (the `|| !shape.index_signatures.is_empty()` \
+         admission was removed) or the pre-filter regressed to the prepared walker, \
+         got {roots:?}",
+    );
+}
+
 /// `define_props_shape` distinguishes a RESOLVED-but-empty surface from a
 /// genuinely UNRESOLVED macro via `macro_surface_resolves`
 /// (`resolve_vue_macro_surface_with_ctx().is_some()`):
