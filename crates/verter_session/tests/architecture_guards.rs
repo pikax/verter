@@ -1499,15 +1499,16 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
     // The routed single-member projector `dispatch_member_for_root_symbol` was a
     // thin wrapper whose only callers were inside the deleted routed walker; it is
     // retired. ABSENCE guard: it must not reappear in the engine module. A dispatch
-    // miss is an authoritative miss — route members through `dispatch_projected_member`
-    // (the five-mode dispatch), never a re-added prepared-decl member rescue.
+    // miss is an authoritative miss — route members through `dispatch_projected_surface`
+    // with a `SemanticQueryKey::ProjectPath` member route, never a re-added
+    // prepared-decl member rescue.
     let _ = &engine_file;
     assert!(
         !engine_src.contains("dispatch_member_for_root_symbol"),
         "retired symbol `dispatch_member_for_root_symbol` reappeared in \
          component_meta_query_engine/mod.rs — it was the routed walker's single-member \
-         projector; resolve members through `dispatch_projected_member`, never by \
-         re-adding the routed walker wrapper."
+         projector; resolve members through `dispatch_projected_surface` + a \
+         `ProjectPath` member route, never by re-adding the routed walker wrapper."
     );
 
     // Owner-local dispatch-seal guard: BOTH owner-local macro-root entry points

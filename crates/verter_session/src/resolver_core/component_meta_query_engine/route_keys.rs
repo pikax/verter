@@ -706,7 +706,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             _ => None,
         }
     }
-    // ---- moved from routed_expr.rs: solve_or_project_prepared_member_leaf_expr ----
+    /// Route-key leaf stabiliser: project a single prepared-member-path
+    /// leaf `TypeExpr` against its resolution + active scopes, returning
+    /// the stabilised expression (or `None` when no scope can advance it).
     pub(super) fn solve_or_project_prepared_member_leaf_expr(
         &mut self,
         resolution_scope_canonical_id: &str,
@@ -721,7 +723,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.solve_or_project_leaf_expr_with_context(&context, expr)
     }
 
-    // ---- moved from routed_expr.rs: solve_or_project_leaf_expr_with_context ----
     /// Per-TypeExpr-shape scope dispatch for the prepared-member-path
     /// projection.
     ///
@@ -915,7 +916,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    // ---- moved from routed_expr.rs: solve_or_project_leaf_expr_until_stable ----
+    /// Fixed-point driver: repeatedly stabilise a leaf `TypeExpr` in
+    /// `scope_canonical_id` until it stops advancing (or the iteration
+    /// budget is exhausted), returning the final stabilised expression.
     fn solve_or_project_leaf_expr_until_stable(
         &mut self,
         scope_canonical_id: &str,
@@ -969,7 +972,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         last
     }
 
-    // ---- moved from routed_expr.rs: expr_references_prepared_scope_symbol ----
+    /// Predicate: does `expr` reference a prepared symbol that resolves
+    /// within `scope_canonical_id`? Gates whether the resolution scope is
+    /// the right one to stabilise a leaf against.
     fn expr_references_prepared_scope_symbol(
         &mut self,
         scope_canonical_id: &str,

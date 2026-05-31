@@ -378,7 +378,7 @@ pub(crate) fn engine_dep_signature_for_two_canonicals(
 use std::cell::Cell;
 
 /// Composite-scope context for prepared-member-path projection.
-/// Bundles the two scopes the prepared-route walker keeps live:
+/// Bundles the scopes the route-key leaf stabiliser keeps live:
 ///
 /// - `decl_scope`: the canonical id of the file where the prepared
 ///   declaration (e.g., `type Button = ComponentConfig<typeof theme>`)
@@ -389,22 +389,19 @@ use std::cell::Cell;
 ///   instantiated the prepared decl. `typeof value_ref` references and
 ///   type arguments passed at the call site resolve in this scope.
 ///
-/// See [`ComponentMetaQueryEngine::solve_or_project_leaf_expr_with_context`]
-/// for the per-TypeExpr dispatch rules.
-//
-// Retained `#[allow(dead_code)]` for diagnostic / future re-entry use;
-// the prepared-route walker now consumes the constituent scopes
-// directly via [`ProjectionChainScopes`] / the `chain_scopes` field
-// rather than through this composite.
-#[allow(dead_code)]
+/// Built and consumed by the route-key leaf stabilisers in
+/// `route_keys.rs`: `solve_or_project_prepared_member_leaf_expr`
+/// constructs it from the engine's live scope state and
+/// [`ComponentMetaQueryEngine::solve_or_project_leaf_expr_with_context`]
+/// reads its three scopes for the per-TypeExpr dispatch rules.
 #[derive(Debug, Clone)]
 struct PreparedProjectionContext {
     decl_scope: String,
     arg_scope: String,
-    /// Scopes from outer levels of a declaration-chain projection.
-    /// Populated as the recursion descends from
-    /// `project_prepared_member_path_route_projection_from_*` so a
-    /// `TypeOf(value)` reference inside an inner helper body (e.g.,
+    /// Scopes from outer levels of a declaration-chain projection,
+    /// snapshotted from the engine's `projection_chain_scopes` when
+    /// `solve_or_project_prepared_member_leaf_expr` builds this context,
+    /// so a `TypeOf(value)` reference inside an inner helper body (e.g.,
     /// the lowered `ComponentUI<typeof theme>` inside
     /// `ComponentConfig`'s body, where the original `Button` alias
     /// lives in `button-types.ts`) can fall back through the chain
