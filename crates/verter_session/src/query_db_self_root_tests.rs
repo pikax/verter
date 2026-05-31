@@ -49,15 +49,14 @@
 //! recomputed (not the stale) value surfaced — discriminating against
 //! any tree whose self-root validation is lazy.
 //!
-//! The two secondary-canonical tests at the end cover the producer
-//! widening for `PreparedTargetDb` (the declaring canonical is a
-//! second self-root) and `MaterializeMemoDb` (every canonical observed
-//! during materialization is a dependency fact): they prime a warm
-//! entry, edit a *secondary* (non-keyed-scope) canonical through the
-//! production [`crate::VerterHost::upsert`] — which performs no
-//! own-canonical drain, so the entry physically survives — and assert
-//! the warm read misses. A producer that recorded no fact for the
-//! secondary canonical would validate the entry stale.
+//! The secondary-canonical test at the end covers the `MaterializeMemoDb`
+//! producer (every canonical observed during materialization is a
+//! dependency fact): it primes a warm entry, edits a *secondary*
+//! (non-keyed-scope) canonical through the production
+//! [`crate::VerterHost::upsert`] — which performs no own-canonical
+//! drain, so the entry physically survives — and asserts the warm read
+//! misses. A producer that recorded no fact for the secondary canonical
+//! would validate the entry stale.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -110,10 +109,10 @@ fn host_with_unrelated_file() -> VerterHost {
 }
 
 /// The self-root canonical set for a [`planted_self_root`] signature —
-/// the single keyed canonical it roots. `PreparedTargetDb` entries
-/// carry an explicit `self_root_canonicals` set (the cache key omits
-/// the routed declaring canonical); a synthetic prime passes this so
-/// the entry's strict-validation set matches the planted fact.
+/// the single keyed canonical it roots. The planted `MaterializeStructureDb`
+/// / `RefCycleResultDb` entries carry an explicit `self_root_canonicals`
+/// set; a synthetic prime passes this so the entry's strict-validation
+/// set matches the planted fact.
 fn planted_self_root_canonicals(canonical: &str) -> Arc<[Arc<str>]> {
     Arc::from(vec![Arc::<str>::from(canonical)])
 }
@@ -711,8 +710,7 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
 //  2. Cold-publishes a query-identity entry whose signature is built by
 //     the EXACT production producer helper the cache's real producer
 //     calls (`engine_fact_signature_for_exported_type` /
-//     `_for_canonical_member` / `_for_prepared_target` /
-//     `_for_materialize_memo`).
+//     `_for_canonical_member` / `_for_materialize_memo`).
 //  3. Edits the keyed canonical through the production
 //     [`crate::VerterHost::upsert`] — which performs no own-canonical
 //     drain, so the entry physically survives — with an

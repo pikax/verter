@@ -1127,10 +1127,10 @@ fn root_surface_bridges_carry_no_prepared_decl_fallback() {
 ///   are owned by `project_define_macro_shapes` now.
 /// - `dispatch_member_for_root_symbol` (the routed single-member projector) must
 ///   NOT reference `project_prepared_requested_member_from_symbol` — a dispatch
-///   miss is an authoritative miss; the prepared-decl rescue is gone. (The
-///   symbol survives for the prepared-surface engine's OWN recursive member
-///   projection in `prepared_surface.rs`; this guard scopes to the routed-member
-///   body, not the whole crate.)
+///   miss is an authoritative miss; the prepared-decl rescue is gone. The symbol
+///   was fully retired in the Stage 4b walker-cluster deletion (its sole
+///   former home, `prepared_surface.rs`, was deleted), so this guard is now an
+///   absence check: it must not reappear in the routed-member body.
 #[test]
 fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback() {
     use syn::visit::Visit;
