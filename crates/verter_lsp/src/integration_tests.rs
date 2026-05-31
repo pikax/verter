@@ -3078,14 +3078,33 @@ const stress{i} = 'v{version}'
     // count), then signal readers to stop. All threads must join without
     // deadlock — a 10s hard watchdog per thread turns any deadlock into a
     // loud panic rather than a silent hang.
+    //
+    // The join itself runs on a separate thread that reports the join
+    // outcome through a rendezvous channel; the main side blocks on
+    // `recv_timeout(10s)`. A genuinely deadlocked thread never produces an
+    // outcome, so the `recv_timeout` elapses and we PANIC with the
+    // deadlock message — the watchdog therefore surfaces a hang as a loud
+    // failure within ~10s instead of blocking the suite forever (the old
+    // `watchdog.join()` was itself unbounded and would hang on a real
+    // deadlock, so the assertion below it was never reached).
     let join_with_watchdog = |handle: std::thread::JoinHandle<()>, idx: usize| {
-        let watchdog = std::thread::spawn(move || {
-            handle
-                .join()
-                .unwrap_or_else(|_| panic!("thread {idx} panicked"));
+        let (tx, rx) = std::sync::mpsc::sync_channel::<std::thread::Result<()>>(1);
+        std::thread::spawn(move || {
+            // `send` fails only if the receiver was dropped (the main side
+            // already panicked on timeout); ignore that so this joiner
+            // thread does not itself panic on a benign disconnect.
+            let _ = tx.send(handle.join());
         });
-        let result = watchdog.join();
-        assert!(result.is_ok(), "thread {idx} deadlocked or panicked");
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => panic!("thread {idx} panicked"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("thread {idx} deadlocked (join did not complete within 10s)")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("thread {idx} watchdog channel disconnected before reporting")
+            }
+        }
     };
 
     for (i, handle) in writer_handles.into_iter().enumerate() {
@@ -3640,8 +3659,14 @@ async fn debounced_sync_only_syncs_latest() {
     // sync), then assert on the settled call set. Joining the spawned
     // tasks replaces a fixed 300ms "hope they're done" sleep — under
     // load a task could outlast the window and the call count would race.
+    // Each join is bounded by a 10s timeout: a stuck debounce task PANICS
+    // loudly instead of hanging the test (the join was previously
+    // unbounded).
     for h in handles {
-        h.await.expect("debounced task joined");
+        tokio::time::timeout(std::time::Duration::from_secs(10), h)
+            .await
+            .expect("debounced task did not complete within 10s (stuck)")
+            .expect("debounced task joined");
     }
 
     let calls = mock.file_sync_calls();
@@ -3705,8 +3730,13 @@ async fn debounced_sync_skipped_when_superseded() {
 
     // Deterministically wait for the superseded task to run to
     // completion, then assert no sync fired. Joining the task replaces a
-    // fixed 300ms sleep that could race the task under load.
-    handle.await.expect("debounced task joined");
+    // fixed 300ms sleep that could race the task under load. The join is
+    // bounded by a 10s timeout so a stuck task PANICS loudly instead of
+    // hanging the test (the join was previously unbounded).
+    tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+        .await
+        .expect("debounced task did not complete within 10s (stuck)")
+        .expect("debounced task joined");
 
     let calls = mock.file_sync_calls();
     assert!(
@@ -3822,9 +3852,14 @@ async fn rapid_changes_then_completion_triggers_one_sync() {
 
     // Deterministically wait for every debounced task to resolve, then
     // assert on the settled call set. Joining the tasks replaces a fixed
-    // 300ms sleep that could race the tasks under load.
+    // 300ms sleep that could race the tasks under load. Each join is
+    // bounded by a 10s timeout so a stuck task PANICS loudly instead of
+    // hanging the test (the join was previously unbounded).
     for h in handles {
-        h.await.expect("debounced task joined");
+        tokio::time::timeout(std::time::Duration::from_secs(10), h)
+            .await
+            .expect("debounced task did not complete within 10s (stuck)")
+            .expect("debounced task joined");
     }
 
     let calls = mock.file_sync_calls();
@@ -4590,30 +4625,44 @@ const msg = "hello"
 
     let completion_done = Arc::new(AtomicBool::new(false));
     let change_done = Arc::new(AtomicBool::new(false));
-    // Set by task A once it has extracted its context AND dropped every
-    // DashMap guard — i.e. the moment it enters its `.await`. Task B
-    // waits for this so its write provably overlaps task A's await
-    // window (where a guard leaked across `.await` would deadlock),
-    // replacing a 50ms "hope task A started" sleep.
-    let task_a_at_await = Arc::new(AtomicBool::new(false));
+    // READY+RELEASE handshake that makes task B's write provably overlap
+    // task A's actual await window. A flag set *before* an `.await` does
+    // NOT prove A is suspended at the await — A could be pre-empted before
+    // reaching it, letting B's write complete before the await even
+    // begins. Instead:
+    //   * `task_a_ready` (A → B): A drops every DashMap guard, signals
+    //     READY, then `await`s `task_a_release` — A is now genuinely
+    //     suspended at the await (the point where a guard leaked across
+    //     `.await` would deadlock).
+    //   * `task_a_release` (B → A): B waits for READY, performs its
+    //     `did_change` write *while A is suspended at the await*, then
+    //     signals RELEASE to wake A.
+    // The write therefore happens strictly inside A's await window.
+    let task_a_ready = Arc::new(tokio::sync::Notify::new());
+    let task_a_release = Arc::new(tokio::sync::Notify::new());
 
     // Task A: simulates a handler that extracted context, then awaits a type provider call
     let reg_a = Arc::clone(&registry);
     let uri_a = uri.clone();
     let mock_a = mock.clone();
     let comp_flag = Arc::clone(&completion_done);
-    let at_await_a = Arc::clone(&task_a_at_await);
+    let ready_a = Arc::clone(&task_a_ready);
+    let release_a = Arc::clone(&task_a_release);
     let task_a = tokio::spawn(async move {
         // Extract context synchronously (mirrors type_provider_context pattern)
         let _tsx_resp = reg_a.get_ide(&uri_a).unwrap();
         let _mapper = reg_a.get_position_mapper(&uri_a).unwrap();
         let _vue_li = reg_a.get(&uri_a).unwrap().line_index.clone();
-        // Guards dropped here ^ — signal task B that it may now race its
-        // write against task A's await window.
-        at_await_a.store(true, Ordering::SeqCst);
+        // Guards dropped here ^ — signal task B that A is about to enter
+        // (and remain suspended at) its await window.
+        ready_a.notify_one();
 
-        // Simulate slow type provider call (the await point where deadlock happened)
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // Suspend at the await window where the deadlock historically
+        // happened. A guard leaked across THIS `.await` would block task
+        // B's `get_mut` write below and deadlock. A stays parked here
+        // until task B has performed its overlapping write and signalled
+        // RELEASE, so the overlap is guaranteed rather than timed.
+        release_a.notified().await;
 
         // Use mock type provider (would deadlock if guards were still held)
         let result = mock_a.get_completions("test", 0, None).await;
@@ -4625,19 +4674,16 @@ const msg = "hello"
     let reg_b = Arc::clone(&registry);
     let uri_b = uri.clone();
     let change_flag = Arc::clone(&change_done);
-    let at_await_b = Arc::clone(&task_a_at_await);
+    let ready_b = Arc::clone(&task_a_ready);
+    let release_b = Arc::clone(&task_a_release);
     let task_b = tokio::spawn(async move {
-        // Wait (bounded) until task A has dropped its guards and entered
-        // its await, so this write overlaps that window deterministically
-        // instead of guessing with a fixed delay.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !at_await_b.load(Ordering::SeqCst) {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "task A never reached its await window"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        }
+        // Wait for task A's READY signal: A has dropped its guards and is
+        // now suspended at its await window. This write therefore lands
+        // strictly inside that window (where a guard leaked across A's
+        // `.await` would deadlock) — a guaranteed overlap, not a timed
+        // guess. `Notify` stores a permit if A signalled first, so this
+        // cannot miss the wakeup.
+        ready_b.notified().await;
 
         // Simulate did_change: update the document (needs write lock)
         let new_source = r#"<script setup lang="ts">
@@ -4650,6 +4696,10 @@ const msg = "world"
 "#;
         let _ = reg_b.did_change(&uri_b, 2, new_source);
         change_flag.store(true, Ordering::SeqCst);
+
+        // Release task A from its await window now that the overlapping
+        // write has completed.
+        release_b.notify_one();
     });
 
     // Both tasks must complete within 2 seconds — timeout indicates deadlock
