@@ -1653,6 +1653,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // `Unknown` remain scratch-only per §7.14.
             TypeExpr::Function(func) => {
                 use crate::semantic_query::{FunctionParam, TypeParamDecl};
+                // Function generic shadowing: a function type's OWN
+                // `<T>` shadows an identically-named outer generic
+                // parameter, so the outer instantiation argument must
+                // NOT substitute into this function's params / return /
+                // type-param constraints+defaults. Strip the
+                // function-local type-param names from `env` for the
+                // duration of lowering this signature (mirrors the
+                // legacy `substitute_function_expr`'s
+                // `scoped_substitutions.remove(type_parameter.name)`).
+                // The storage binding lives for the whole arm; `env` is
+                // re-bound to it only when the function declares its own
+                // type parameters (functions with none pay nothing —
+                // they keep the outer `env` by reference).
+                let scoped_env_storage;
+                let env: &FxHashMap<String, SemanticNodeId> = if func.type_parameters.is_empty() {
+                    env
+                } else {
+                    let mut scoped = env.clone();
+                    for tp in &func.type_parameters {
+                        scoped.remove(tp.name.as_str());
+                    }
+                    scoped_env_storage = scoped;
+                    &scoped_env_storage
+                };
                 let params: Vec<FunctionParam> = func
                     .parameters
                     .iter()
