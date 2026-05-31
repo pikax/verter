@@ -12090,6 +12090,137 @@ fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
     );
 }
 
+/// Overlay/base SLOT-BINDING isolation through context-aware `vue_macro_dtos`.
+///
+/// The slot binding object lives in a CROSS-FILE carrier (`/slots.ts`). An
+/// overlay session that rewrites `/slots.ts`'s slot-prop object from `{ old }`
+/// to `{ fresh }` MUST see the slot binding `fresh` — the slot normalizer's
+/// callable realization + first-parameter object navigation
+/// (`slots_from_typeinfo_surface` → `navigate_param_to_object_surface`) flow
+/// through the active session `ctx`, so they read the OVERLAY `/slots.ts`, not
+/// the base host view. A base-view read MUST see only `old`, and the overlay
+/// binding MUST NOT leak into the base read.
+///
+/// Discrimination: the pre-fix slot path built a FRESH base `HostResolverContext`
+/// inside `raise_realized_callable_member_value` / `navigate_param_to_object_surface`,
+/// so the overlay session's slot bindings were resolved against the BASE
+/// `/slots.ts` and surfaced `old`, not `fresh`. Routing those reads through
+/// `ctx.dispatch()` fixes the leak. Verified by mutation (reverting the slot
+/// helpers to a base context surfaces `old` for the overlay session).
+#[test]
+fn overlay_session_vue_macro_slot_bindings_read_overlay_carrier_without_leaking_to_base() {
+    use crate::resolver_core::ResolverContext;
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    }));
+
+    const SFC: &str = "/Comp.vue";
+    const SLOTS_TS: &str = "/slots.ts";
+    // Base `/slots.ts`: the slot-prop object carries `old`.
+    let base_slots = "export type SlotProps = { old: string };\n\
+         export type SlotFn = (props: SlotProps) => any;\n\
+         export type Slots = { default: SlotFn };\n";
+    let sfc_src = "<script setup lang=\"ts\">\n\
+         import type { Slots } from './slots';\n\
+         defineSlots<Slots>()\n\
+         </script>";
+    for (id, src) in [(SLOTS_TS, base_slots), (SFC, sfc_src)] {
+        let kind = if id.ends_with(".vue") {
+            crate::FileKind::VueSfc
+        } else {
+            crate::FileKind::NonSfc
+        };
+        host.upsert(crate::UpsertRequest {
+            canonical_id: None,
+            input_id: id.to_string(),
+            source: Arc::from(src),
+            file_kind: kind,
+            aliases: Vec::new(),
+        })
+        .expect("upsert succeeds");
+    }
+
+    let indexed = host.ensure_indexed_ready(SFC).expect("SFC must index ready");
+    let define_slots_index = indexed
+        .snapshot
+        .macros
+        .iter()
+        .position(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
+        .expect("the SFC declares a defineSlots macro");
+
+    let request_for = |root_identity: [u8; 16]| crate::typeinfo::types::VueMacroSurfaceRequest {
+        owner_canonical: std::sync::Arc::from(SFC),
+        macro_index: define_slots_index,
+        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineSlots,
+        root_identity,
+        level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+    };
+    // Binding names on the `default` slot.
+    let default_binding_names =
+        |dtos: &crate::typeinfo::adapters::vue::store::VueMacroDtos| -> Vec<String> {
+            dtos.slots
+                .iter()
+                .find(|s| s.name == "default")
+                .map(|s| s.bindings.iter().map(|b| b.name.clone()).collect())
+                .unwrap_or_default()
+        };
+
+    // Base-view read: the slot binding is `old`.
+    let base_dtos = host
+        .vue_macro_dtos(&request_for(host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16])));
+    assert_eq!(
+        default_binding_names(&base_dtos),
+        vec!["old".to_string()],
+        "base-view defineSlots `default` binding must be exactly [old]"
+    );
+
+    // Overlay session: rewrite `/slots.ts`'s slot-prop object to `{ fresh }`.
+    let overlay_slots = "export type SlotProps = { fresh: boolean };\n\
+         export type SlotFn = (props: SlotProps) => any;\n\
+         export type Slots = { default: SlotFn };\n";
+    let mut overlays: rustc_hash::FxHashMap<String, Arc<str>> = rustc_hash::FxHashMap::default();
+    overlays.insert(SLOTS_TS.to_string(), Arc::from(overlay_slots));
+    let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
+    let store_view = host.resolver_store_view().with_session_overlay(&host, &view);
+    let session_ctx = crate::resolver_core::SessionResolverContext::new(
+        &host,
+        &view,
+        &store_view,
+        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
+
+    // The SFC's own whole-hash is UNCHANGED (only the carrier `/slots.ts` was
+    // overlaid), so the overlay read keys on the same SFC hash — the binding
+    // must still reflect the OVERLAY carrier through the ctx-bound resolution.
+    let overlay_hash = ResolverContext::get_whole_hash(&session_ctx, SFC).unwrap_or([0u8; 16]);
+    let overlay_dtos = crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(
+        &session_ctx,
+        &request_for(overlay_hash),
+    );
+    let overlay_bindings = default_binding_names(&overlay_dtos);
+    assert_eq!(
+        overlay_bindings,
+        vec!["fresh".to_string()],
+        "the overlay session's defineSlots `default` binding MUST reflect the \
+         OVERLAY `/slots.ts` (`fresh`), NOT the base carrier (`old`) — the slot \
+         callable realization + first-param navigation read through the session \
+         ctx: {overlay_bindings:?}"
+    );
+
+    // No leak: a fresh base-view read still sees only `old`.
+    let base_dtos_after = host
+        .vue_macro_dtos(&request_for(host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16])));
+    assert_eq!(
+        default_binding_names(&base_dtos_after),
+        vec!["old".to_string()],
+        "the overlay session's `fresh` slot binding must NOT leak into the \
+         base-view defineSlots surface: {:?}",
+        default_binding_names(&base_dtos_after)
+    );
+}
+
 /// Graph-native generic slot-alias bindings under a CONCRETE substitution.
 ///
 /// `defineSlots<TabsSlots<{ id: string }>>()` where the slot's binding
