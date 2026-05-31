@@ -932,8 +932,10 @@ fn root_surface_bridges_carry_no_prepared_decl_fallback() {
     // `projection_op_budget_exhausted` is the cooperative budget guard. Any
     // OTHER method call (`.or_else(...)`, `engine.cached_prepared_root_surface(...)`,
     // an `engine.<other>()` rescue, …) is a structural deviation and FAILS.
-    const ALLOWED_METHOD_CALLS: [&str; 2] =
-        ["dispatch_projected_surface", "projection_op_budget_exhausted"];
+    const ALLOWED_METHOD_CALLS: [&str; 2] = [
+        "dispatch_projected_surface",
+        "projection_op_budget_exhausted",
+    ];
     // The ONLY free-function / variant-constructor calls a bridge body may
     // make: the two thin surface→shape/expr converters, plus the std enum
     // constructors (`Some` / `Ok` / `Err`) that wrap the converter result.
@@ -956,8 +958,7 @@ fn root_surface_bridges_carry_no_prepared_decl_fallback() {
     // Index every free `fn` in the file by name so a body's one-level local
     // callees can be inspected (approach (b): a helper reachable from a bridge
     // body must not itself reference the forbidden rescue).
-    let mut free_fns: std::collections::HashMap<String, &ItemFn> =
-        std::collections::HashMap::new();
+    let mut free_fns: std::collections::HashMap<String, &ItemFn> = std::collections::HashMap::new();
     for item in &file.items {
         if let Item::Fn(f) = item {
             free_fns.insert(f.sig.ident.to_string(), f);
@@ -1241,11 +1242,7 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
         }
         /// Pull `pub`/`pub(crate)` re-export renames whose original ident is in
         /// `known` from one parsed file.
-        fn reexport_renames_in_file(
-            file: &syn::File,
-            known: &[String],
-            out: &mut Vec<String>,
-        ) {
+        fn reexport_renames_in_file(file: &syn::File, known: &[String], out: &mut Vec<String>) {
             fn walk(tree: &UseTree, known: &[String], out: &mut Vec<String>) {
                 match tree {
                     UseTree::Path(p) => walk(&p.tree, known, out),
@@ -1477,7 +1474,8 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
     let engine_src = read_workspace_file(
         "crates/verter_session/src/resolver_core/component_meta_query_engine/mod.rs",
     );
-    let engine_file = syn::parse_file(&engine_src).expect("parse component_meta_query_engine/mod.rs");
+    let engine_file =
+        syn::parse_file(&engine_src).expect("parse component_meta_query_engine/mod.rs");
     assert_fn_free_of_symbol(
         &engine_file,
         "dispatch_member_for_root_symbol",
@@ -1506,8 +1504,7 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
     //
     // Re-introducing the prepared-decl walker in EITHER function is a
     // second-resolver (Typed-IR-Only) violation.
-    let jsdoc_src =
-        read_workspace_file("crates/verter_session/src/host_manage/jsdoc_resolve.rs");
+    let jsdoc_src = read_workspace_file("crates/verter_session/src/host_manage/jsdoc_resolve.rs");
     let jsdoc_file = syn::parse_file(&jsdoc_src).expect("parse jsdoc_resolve.rs");
     for owner_local_fn in [
         "owner_local_macro_root_has_surface",

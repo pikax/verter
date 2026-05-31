@@ -224,8 +224,7 @@ fn synthesize_macro_object_surface_shape(
         crate::meta_resolve::projectors::macro_payload_surface_provenance(macro_kind),
         &mut discard_diag,
     )?;
-    let surface =
-        crate::resolver_core::projected_surface_from_semantic_node(ctx, surface_node)?;
+    let surface = crate::resolver_core::projected_surface_from_semantic_node(ctx, surface_node)?;
     let shape = crate::resolver_core::projected_surface_to_expanded_shape(&surface);
     (!shape.properties.is_empty() || !shape.call_signatures.is_empty())
         .then(|| verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape))

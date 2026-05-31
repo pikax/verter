@@ -8251,7 +8251,9 @@ fn multi_level_omit_heritage_carriers_compose_through_all_levels() {
 
     let dispatch = ProjectSemanticDispatch::new(&host);
 
-    let a = match dispatch.execute(SemanticQueryKey::ResolveDecl(resolve_decl_key("/a.ts", "A"))) {
+    let a = match dispatch.execute(SemanticQueryKey::ResolveDecl(resolve_decl_key(
+        "/a.ts", "A",
+    ))) {
         QueryResult::Value(node) => node,
         other => panic!("ResolveDecl(A) failed: {other:?}"),
     };
