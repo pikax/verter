@@ -45,12 +45,6 @@
 //! avoid recomputing the same projection within one request. These
 //! are scratch only:
 //!
-//! - `prepared_surface_cache` — read-through view of the ctx's
-//!   `prepared_surface_db`; mirrors the durable result for the current
-//!   request only.
-//! - `routed_expr_surface_cache` — same shape, for routed-expr surfaces.
-//! - `prepared_member_cache` — request-local memo of prepared-member
-//!   projections.
 //! - Type-param substitution maps and projection-chain scopes —
 //!   per-frame state for the current dispatch path.
 //!
@@ -473,7 +467,6 @@ pub(crate) struct FastShallowFieldExpr {
 /// | `imported_registry_symbols` | (b) | Caches `(canonical, name) → ResolvedImportedRegistrySymbol` at TypeExpr level. Dispatch's `ResolveDecl` memo operates on `SemanticNodeId`s; cannot subsume the pre-lowering identity. |
 /// | `declarations` / `resolvable` / `owner_collection_exprs` | (b) | Same kind — pre-lowering memos keyed on `(canonical, name)` strings. |
 /// | `scope_payloads` | (a) | Per-request `Arc<DeclarationScopePayload>` clones; the bundle is ctx-owned, this just reuses the Arc within one request. |
-/// | `prepared_surface_cache` / `prepared_member_cache` / `prepared_target_cache` / `routed_expr_surface_cache` | (b) | All four are pre-lowering route projections — same justification as above. |
 /// | `prepared_type_decls` | (a) | Arc-cache for `Arc<PreparedTypeDecl>` from ctx; no semantic computation — only refcount avoidance. |
 /// | `prepared_*_query_count`, `prepared_*_hit_count` | (a) | `#[cfg(test)]` instrumentation counters. |
 /// | `fuse_budgets` / `fuse_state` | (a) | Engine-construction-scoped fuse rails (§1.4). |

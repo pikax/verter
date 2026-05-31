@@ -177,9 +177,13 @@ pub struct PerRequestCacheCounters {
     /// SemanticNode subject. Counter retained under the legacy name
     /// to preserve audit-harness JSON schema compatibility.
     pub member_shape_cache: HitMiss,
-    /// `PreparedSurfaceDb` — prepared-surface cache.
+    /// Retired: `PreparedSurfaceDb` was removed in the Stage 4b
+    /// walker-cluster deletion. This counter is now always zero and is
+    /// retained only to preserve audit-harness JSON schema compatibility.
     pub prepared_surface: HitMiss,
-    /// `PreparedMemberDb` — prepared-member cache.
+    /// Retired: `PreparedMemberDb` was removed in the Stage 4b
+    /// walker-cluster deletion. This counter is now always zero and is
+    /// retained only to preserve audit-harness JSON schema compatibility.
     pub prepared_member: HitMiss,
     /// Rule-compliance diagnostic counters. Empirical instrumentation
     /// that quantifies the bypass surfaces identified as the
