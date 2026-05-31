@@ -393,6 +393,20 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "build_default_type_param_substitutions",
     "is_identity_type_param_binding",
     "type_expr_references_substitutions",
+    // Owner-local generic-alias registry substitution slow lane — the
+    // second raw-`TypeExpr` substitution engine. DELETED: the registry
+    // candidate path
+    // (`owner_local_generic_alias_substituted_body_via_dispatch` in
+    // `host_manage/component_meta_methods.rs`) lowers the owner-local
+    // generic ref to the graph's `InstantiationRef` carrier and runs the
+    // shared `SemanticQueryKey::Instantiate` query (Navigate mode) — the
+    // ONE type-resolution engine — instead of cloning and rewriting the
+    // prepared body's `TypeExpr` in place. Re-introducing any of these
+    // names would resurrect the parallel structure-preserving substitution
+    // walker this cutover eliminated.
+    "component_meta_owner_local_shallow_substituted_alias_body",
+    "walk_substitute_typeexpr",
+    "component_meta_substitute_typeexpr",
 ];
 
 /// File names whose presence at the head of the path should make us
