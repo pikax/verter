@@ -164,3 +164,48 @@ fn deeply_nested_mixed_variant_chain_drops_without_stack_overflow() {
     }
     drop(current);
 }
+
+/// A deep subtree SHARED between two owners (`Arc` strong count > 1) must
+/// drop safely: the first owner to drop only decrements the shared
+/// child's strong count (it does NOT flatten or free the shared subtree),
+/// and the LAST owner flattens it iteratively. Neither drop overflows,
+/// and the shared subtree is freed exactly once (a double-free would
+/// abort the process).
+///
+/// This pins the `Arc::strong_count == 1` / `Arc::into_inner` sole-owner
+/// guard in the iterative `Drop`.
+#[test]
+fn shared_deep_subtree_drops_exactly_once_without_overflow() {
+    // Build a deep chain owned by a single `Arc` (strong count 1).
+    let mut deep = leaf();
+    for _ in 0..DEEP {
+        deep = Arc::new(TypeExpr::Array {
+            element: deep,
+            readonly: false,
+        });
+    }
+    assert_eq!(Arc::strong_count(&deep), 1, "premise: deep starts unique");
+
+    // Two distinct outer owners, each holding a CLONE of the same deep
+    // `Arc` (so the shared chain now has strong count 2).
+    let owner_a = TypeExpr::Parenthesized(Arc::clone(&deep));
+    let owner_b = TypeExpr::KeyOf(Arc::clone(&deep));
+    assert_eq!(
+        Arc::strong_count(&deep),
+        3,
+        "premise: deep is shared by `deep`, owner_a, owner_b",
+    );
+
+    // Drop our own handle first → strong count 2 (still shared by the
+    // two owners). No flatten happens here for the shared chain.
+    drop(deep);
+
+    // Drop the first owner → its clone decrements the shared chain to
+    // count 1 WITHOUT flattening (the guard sees count > 1 at steal time
+    // and leaves it intact). Must not overflow.
+    drop(owner_a);
+
+    // Drop the last owner → now the sole owner of the deep chain, which
+    // it flattens iteratively. Must not overflow, must not double-free.
+    drop(owner_b);
+}
