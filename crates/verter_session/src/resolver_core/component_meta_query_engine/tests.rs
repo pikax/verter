@@ -1738,6 +1738,131 @@ type Wrapper<T> = { value: T; label: string }
     );
 }
 
+/// PHASE-1A — function generic shadowing through the dispatch
+/// instantiation path (`instantiate_local_generic_ref_via_dispatch`),
+/// the route that survives the prepared-substitution slow-lane deletion.
+///
+/// Legacy `substitute_function_expr` (surface.rs) removed the function's
+/// OWN type parameters from the substitution map before substituting the
+/// params/return, so an inner `<T>` that SHADOWS the outer generic `T`
+/// was preserved (not replaced by the outer argument). codex flagged
+/// dispatch's function-lowering (`lower.rs` `TypeExpr::Function`) as a
+/// possible gap because it lowers params/return with the OUTER `env`
+/// unchanged.
+///
+/// Fixture: `type F<T> = <T>(x: T) => T` instantiated as `F<string>`.
+/// The instantiation binds the OUTER `T -> string`, but the function
+/// body's own `<T>` must shadow that binding — so the parameter type and
+/// return type must REMAIN the inner type parameter `T`, NOT collapse to
+/// `string`.
+///
+/// Discriminator: if function-lower used the outer env unchanged the
+/// param/return would lower to `Primitive(String)` (the negative
+/// assertions below would flip RED); shadowing keeps them as the inner
+/// type parameter named `T`.
+#[test]
+fn instantiate_generic_function_alias_preserves_shadowing_inner_type_param_via_dispatch() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+type F<T> = <T>(x: T) => T
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+
+    let _store_view = host.resolver_store_view();
+    let query_engine = ComponentMetaQueryEngine::new(&host);
+
+    // `F<string>` — instantiate the generic function-typed alias with the
+    // outer `T` bound to `string`.
+    let expr = TypeExpr::named_with_args(
+        "F",
+        vec![TypeExpr::Primitive(PrimitiveName::String)],
+    );
+
+    let instantiated = crate::meta_resolve::instantiate_local_generic_ref_via_dispatch(
+        query_engine.ctx,
+        "/src/App.vue",
+        &expr,
+    )
+    .expect(
+        "F<string> over a function-typed generic alias should instantiate to the function body \
+         via the dispatch instantiation path",
+    );
+
+    // The instantiated body is the function type. Its OWN `<T>` shadows
+    // the outer `T`, so neither the parameter type nor the return type
+    // may be substituted to the outer `string` argument.
+    let TypeExpr::Function(function) = &instantiated else {
+        panic!("F<string> should instantiate to a Function body, got {instantiated:?}");
+    };
+
+    let param_ty = &function
+        .parameters
+        .first()
+        .expect("the shadowing function takes one parameter `x`")
+        .ty;
+    let return_ty = function
+        .return_type
+        .as_deref()
+        .expect("the shadowing function declares a return type");
+
+    // Helper: does this expr resolve to the inner type parameter named `T`?
+    fn is_inner_type_param_t(expr: &TypeExpr) -> bool {
+        match expr {
+            TypeExpr::TypeParameter(param) => param.name == "T",
+            // Top-level alias bodies keep bare `T` as a zero-arg Ref;
+            // accept either spelling so the test is robust to the
+            // function-param normalisation pass.
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => type_arguments.is_empty() && name.as_ref() == "T",
+            _ => false,
+        }
+    }
+
+    // NEGATIVE: the outer `string` argument must NOT have leaked into the
+    // shadowed function body. (This is the assertion that flips RED if
+    // function-lower substitutes with the outer env unchanged.)
+    assert!(
+        !matches!(param_ty, TypeExpr::Primitive(PrimitiveName::String)),
+        "inner <T> shadows the outer T: parameter type must NOT be substituted to the outer \
+         string argument, got {param_ty:?}",
+    );
+    assert!(
+        !matches!(return_ty, TypeExpr::Primitive(PrimitiveName::String)),
+        "inner <T> shadows the outer T: return type must NOT be substituted to the outer \
+         string argument, got {return_ty:?}",
+    );
+
+    // POSITIVE: the param/return must REMAIN the inner type parameter `T`.
+    assert!(
+        is_inner_type_param_t(param_ty),
+        "inner <T> shadows the outer T: parameter type must remain the inner type parameter T, \
+         got {param_ty:?}",
+    );
+    assert!(
+        is_inner_type_param_t(return_ty),
+        "inner <T> shadows the outer T: return type must remain the inner type parameter T, \
+         got {return_ty:?}",
+    );
+}
+
 #[test]
 fn type_expr_references_type_params_detects_nested_member_routes() {
     let expr = TypeExpr::IndexedAccess {
