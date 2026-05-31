@@ -4,7 +4,7 @@ use crate::resolver_core::ComponentMetaRequestHost;
 use crate::types::{HostConfig, ProjectionMode};
 use crate::VerterHost;
 use std::sync::Arc;
-use verter_type_expr::{PrimitiveName, TypeExpr};
+use verter_type_expr::TypeExpr;
 
 // ===========================================================================
 // Test helpers

@@ -644,9 +644,6 @@ pub(crate) fn prepared_structural_substitution_slow_lane_forbidden_for_current_t
     FORBID_PREPARED_STRUCTURAL_SUBSTITUTION_SLOW_LANE.with(|depth| depth.get() > 0)
 }
 
-#[cfg(not(test))]
-fn assert_prepared_structural_substitution_slow_lane_allowed(_expr: &TypeExpr) {}
-
 #[cfg(test)]
 thread_local! {
     /// Counts how many times `resolve_imported_registry_symbol`'s
