@@ -642,8 +642,11 @@ fn extract_component_meta_from_resolved_with_evaluated(
     evaluated_types: Option<&ExpandedComponentTypes>,
     include_fallthrough: bool,
 ) -> ComponentMetaAnalysis {
+    // Macro-DTO surface read runs under the request-bound `ctx` (not the
+    // bare host) — mirrors the production
+    // `extract_component_meta_from_resolved` path.
     let resolved_macros = resolver_component_meta_resolved_macros(
-        host,
+        ctx,
         canonical_id,
         resolved.snapshot.macros.as_ref(),
         &resolved.resolved_macros,

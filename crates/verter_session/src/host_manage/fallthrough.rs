@@ -222,8 +222,12 @@ impl VerterHost {
     ) -> Option<crate::types::FallthroughResolution> {
         let fallthrough_fact_versions = resolved.fact_versions.clone();
 
+        // Macro-DTO surface read runs under the request-bound `ctx` (not
+        // `self`, the bare host) — `vue_macro_dtos_with_ctx` ->
+        // `ctx.store_view()` panics on the bare-host rail in a release
+        // build. See `tests/session_meta_store_view_regression.rs`.
         let resolved_macros = resolver_component_meta_resolved_macros(
-            self,
+            ctx,
             canonical_id,
             resolved.snapshot.macros.as_ref(),
             &resolved.resolved_macros,
