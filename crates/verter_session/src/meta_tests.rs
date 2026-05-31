@@ -2470,6 +2470,68 @@ defineProps<{ [key: string]: string }>()
     );
 }
 
+/// `defineEmits<{ [event: string]: [v: number] }>()` — an emits type argument
+/// that is an index-signature-only object literal. The emits object is `events +
+/// index signatures`, so the published `define_emits` shape MUST carry the index
+/// signature even though there is NO named event.
+///
+/// PARITY: the retired materialiser surfaced this index signature; the dispatch
+/// `define_emits_shape` hardcoded `index_signatures: Vec::new()`, dropping it —
+/// a reroute REGRESSION.
+///
+/// Discriminating: reverting `define_emits_shape` to `index_signatures:
+/// Vec::new()` (or dropping the DTO `emit_index_signatures` capture) makes the
+/// published shape carry zero index signatures and this test FAILS; the fix
+/// publishes the DTO's `emit_index_signatures` so the `[event: string]: [v:
+/// number]` signature surfaces. (The `properties` list legitimately stays empty
+/// — the surface has no named event.)
+#[test]
+fn evaluate_types_define_emits_preserves_index_signature_only_surface() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/IndexEmits.vue",
+            r#"<script setup lang="ts">
+defineEmits<{ [event: string]: [v: number] }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session.evaluate_types("/IndexEmits.vue").unwrap().unwrap();
+
+    let shape = evaluated
+        .define_emits
+        .iter()
+        .map(|entry| &entry.result.value)
+        .next()
+        .expect("an index-signature-only defineEmits must still publish a define_emits shape");
+
+    assert_eq!(
+        shape.index_signatures.len(),
+        1,
+        "defineEmits<{{ [event: string]: [v: number] }}> must publish exactly its \
+         index signature, got {} index signatures (a `Vec::new()` here means the \
+         emit index signature was dropped — emits = events + index signatures; the \
+         retired materialiser surfaced it)",
+        shape.index_signatures.len(),
+    );
+    let sig = &shape.index_signatures[0];
+    assert!(
+        matches!(sig.key_type, TypeExpr::Primitive(PrimitiveName::String)),
+        "emit index signature key type is `string`, got {:?}",
+        sig.key_type,
+    );
+    // The value `[v: number]` is the emit payload tuple — a concrete typed form,
+    // not an opaque/unknown carrier.
+    assert!(
+        matches!(sig.value_type, TypeExpr::Tuple { .. }),
+        "emit index signature value type is the `[v: number]` payload tuple, got {:?}",
+        sig.value_type,
+    );
+}
+
 /// `type Props = { [k: string]: string }; defineProps<Props>()` — an
 /// OWNER-LOCAL NAMED props root whose body is index-signature-only. This
 /// exercises a DISTINCT lowering from the inline-literal case
