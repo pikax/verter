@@ -662,8 +662,7 @@ pub(crate) struct FastShallowFieldExpr {
 /// follow-up plan.
 pub struct ComponentMetaQueryEngine<'a> {
     pub(crate) ctx: &'a dyn ResolverContext,
-    current_prepared_request_root: Option<String>,
-    // The 10 caches below are read-through views over the host-owned
+    // The caches below are read-through views over the host-owned
     // typed DBs on `ProjectTypeStore` (see `crate::component_meta_caches`).
     // Each engine field is a per-request **non-authoritative read-through
     // view** that mirrors the ctx DB result for repeated lookups within
@@ -687,28 +686,6 @@ pub struct ComponentMetaQueryEngine<'a> {
     /// bundle-derived names/bindings within one request so repeated projections
     /// do not keep recloning them.
     scope_payloads: FxHashMap<String, Option<std::sync::Arc<DeclarationScopePayload>>>,
-    /// Read-through view; authority is
-    /// `ProjectTypeStore::prepared_surface_db()`.
-    ///
-    /// Unread after trampoline
-    /// conversion of retired surface methods. Field
-    /// §F call-graph closure.
-    #[allow(dead_code)]
-    prepared_surface_cache: RefCell<FxHashMap<PreparedSurfaceCacheKey, PreparedSurfaceProjection>>,
-    /// Read-through view; authority is
-    /// `ProjectTypeStore::prepared_member_db()`.
-    prepared_member_cache: RefCell<FxHashMap<PreparedMemberCacheKey, Option<ProjectedMember>>>,
-    /// Read-through view; authority is
-    /// `ProjectTypeStore::prepared_target_db()`.
-    prepared_target_cache: RefCell<FxHashMap<PreparedTargetCacheKey, Option<(String, String)>>>,
-    /// Read-through view; authority is
-    /// `ProjectTypeStore::routed_expr_surface_db()`.
-    ///
-    /// Unread after trampoline
-    /// conversion of retired surface methods. Field
-    /// §F call-graph closure.
-    #[allow(dead_code)]
-    routed_expr_surface_cache: RefCell<FxHashMap<RoutedExprSurfaceCacheKey, TypeExpr>>,
     /// Request-local memoization for prepared declaration lookups.
     prepared_type_decls: FxHashMap<
         (String, String),
@@ -1236,16 +1213,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
         Self {
             ctx,
-            current_prepared_request_root: None,
             imported_registry_symbols: RefCell::new(FxHashMap::default()),
             declarations: RefCell::new(FxHashMap::default()),
             resolvable: RefCell::new(FxHashMap::default()),
             owner_collection_exprs: RefCell::new(FxHashMap::default()),
             scope_payloads: FxHashMap::default(),
-            prepared_surface_cache: RefCell::new(FxHashMap::default()),
-            prepared_member_cache: RefCell::new(FxHashMap::default()),
-            prepared_target_cache: RefCell::new(FxHashMap::default()),
-            routed_expr_surface_cache: RefCell::new(FxHashMap::default()),
             prepared_type_decls: FxHashMap::default(),
             #[cfg(test)]
             prepared_type_decl_query_count: 0,
