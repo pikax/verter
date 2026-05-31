@@ -333,11 +333,15 @@ materialize_memo: CacheLayerHitMiss,
  */
 member_shape_cache: CacheLayerHitMiss, 
 /**
- * `PreparedSurfaceDb` — prepared-surface cache.
+ * Always-zero counter for the removed prepared-surface walker DB.
+ * Retained under the legacy name to preserve audit-harness JSON
+ * schema compatibility.
  */
 prepared_surface: CacheLayerHitMiss, 
 /**
- * `PreparedMemberDb` — prepared-member cache.
+ * Always-zero counter for the removed prepared-member walker DB.
+ * Retained under the legacy name to preserve audit-harness JSON
+ * schema compatibility.
  */
 prepared_member: CacheLayerHitMiss, };
 
