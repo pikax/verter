@@ -102,11 +102,34 @@ const CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING: u64 = 0;
 ///  6. `synthesis_expanded_instantiate_calls == 0`: asserted directly above
 ///     (the eager-path signal stays 0 — the removed instantiate was NOT
 ///     synthesis-attributed; it was the materialiser pre-pass).
-///  7. trace proves the same duplicate `(base, args, context)` was removed: the
-///     count moved from 4 to exactly 3 AT the materialiser-call deletion (no
-///     other change moved it), and the materialiser's pre-pass instantiated the
-///     macro root under the SAME identity the projector path resolves — the
-///     removed instantiate is that duplicate, not a distinct resolution.
+///  7. COMMITTED DISCRIMINATOR — the drop is the materialiser pre-pass, NOT the
+///     reducer demotion. The atomic-reroute commit (`b2694ad30`) made TWO
+///     behavioural changes: (a) it removed the eager materialiser call, and
+///     (b) it demoted the `slot_bindings` field reducer from Expanded
+///     (`reduce_field_type_expr`) to `Navigate`
+///     (`published_reducer.rs::reduce_published_field_types`). codex BINDING
+///     flagged that point 7 must isolate WHICH change moved the count. It is
+///     isolated empirically and the result is committed here as a reproducible
+///     discriminator:
+///
+///       Reverting ONLY the `slot_bindings` reducer back to Expanded
+///       (`field.r#type = reduce_field_type_expr(query_engine,
+///       scope_canonical_id, raised);` in `reduce_published_field_types`, with
+///       the materialiser removal LEFT in place) and re-running this gate keeps
+///       `expanded_instantiate_calls == 3` — the count is INVARIANT under the
+///       reducer mode for this fixture (ChatMessages' published `slot_bindings`
+///       reduce to carrier `IndexedAccess` shells that issue no Expanded
+///       `Instantiate` in either mode). Therefore the reducer demotion
+///       contributes ZERO to the 4 -> 3 drop; the entire delta is the removed
+///       materialiser pre-pass.
+///
+///     This is corroborated structurally by the committed
+///     `synthesis_expanded_instantiate_calls == 0` assertion below: the removed
+///     instantiate was Expanded but NOT synthesis-attributed, which is exactly
+///     the materialiser's `produce_one_macro_object_shape` pre-pass signature
+///     (it instantiated the macro root under the SAME `(base, args, context)`
+///     the projector path resolves once via `ResolveMacroPayload`), not a
+///     distinct resolution.
 const CHAT_MESSAGES_EXPANDED_INSTANTIATE_VALUE: u64 = 3;
 
 /// The declared-dependency ROOTS the audited ChatMessages resolve is allowed to
