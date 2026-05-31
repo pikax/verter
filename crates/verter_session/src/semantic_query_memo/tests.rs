@@ -2881,10 +2881,6 @@ fn cross_thread_joiner_waits_on_winner_publish() {
     let start_barrier = Arc::new(std::sync::Barrier::new(2));
     let store_owner = Arc::clone(&store);
     let key_owner = key.clone();
-    // A second key clone so the winner's build closure can observe the
-    // in-flight strong count (`key_owner` is consumed as the second arg
-    // to `execute_cooperative`).
-    let key_for_wait = key.clone();
     let barrier_owner = Arc::clone(&start_barrier);
 
     let winner = thread::spawn(move || {
@@ -2895,16 +2891,23 @@ fn cross_thread_joiner_waits_on_winner_publish() {
             || store_owner.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || {
                 barrier_owner.wait();
-                // Hold the build open until the joiner has been admitted
-                // onto this in-flight entry (its `Arc` clone raises the
-                // strong count above the winner-only baseline), so the
-                // joiner is guaranteed to reach the condvar wait before
-                // the winner publishes. Deterministic alternative to a
-                // wall-clock sleep, which races the joiner under parallel
-                // test load. This is a read-only strong-count poll, not a
-                // re-entrant `execute_cooperative` call, so the winner
-                // does not self-await its own in-flight entry.
-                wait_for_joiner_admitted(&store_owner, &key_for_wait);
+                // Hold the build open until the joiner has PROVABLY
+                // suspended on the per-entry condvar — not merely been
+                // admitted onto the in-flight entry. This test's stated
+                // intent is the condvar PAIRING: the joiner must be parked
+                // on the condvar when the winner publishes, so the
+                // publish's `notify_all` is what wakes it. The in-flight
+                // strong count (used by the 8 same-flight tests) rises one
+                // step EARLIER, when the joiner clones the entry's `Arc`
+                // BEFORE reaching `wait_while`, so it does NOT prove the
+                // joiner is on the condvar. `joiner_on_condvar_count` is
+                // incremented immediately before `wait_while`, so observing
+                // it proves the real invariant. The probe is bounded
+                // (~10 s) and panics on a genuine hang. This is a read-only
+                // counter poll, not a re-entrant `execute_cooperative`
+                // call, so the winner does not self-await its own in-flight
+                // entry.
+                wait_for_joiner_on_condvar(&store_owner);
                 let id =
                     store_owner.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
                 (QueryResult::Value(id), empty_signature())
@@ -4434,6 +4437,34 @@ fn wait_for_joiner_admitted(store: &SemanticGraphStore, key: &SemanticQueryKey) 
             Instant::now() < deadline,
             "timed out waiting for a joiner to be admitted onto the \
              in-flight entry (strong count never exceeded {WINNER_ONLY_INFLIGHT_REFS})",
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Block the calling (test) thread until at least one cooperative
+/// joiner has SUSPENDED on a per-entry `ready` condvar on `store`.
+///
+/// This is strictly stronger than [`wait_for_joiner_admitted`]: that
+/// probe returns once a joiner has cloned the in-flight `Arc` (step 3
+/// of the dispatch loop), which happens one statement BEFORE the
+/// joiner reaches `wait_while`. For a condvar-PAIRING test — one whose
+/// stated intent is that the joiner is genuinely parked on the condvar
+/// when the winner publishes — admitted-count is insufficient. This
+/// probe instead polls the store's `joiner_on_condvar_count`, which is
+/// incremented immediately before `wait_while`, so a return proves the
+/// joiner is committed to the condvar wait.
+///
+/// The poll is bounded: it spins for at most ~10 s, then panics so a
+/// genuine hang fails loudly rather than blocking the suite forever.
+fn wait_for_joiner_on_condvar(store: &SemanticGraphStore) {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while store.test_joiner_on_condvar_count() == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for a joiner to suspend on the per-entry \
+             condvar (joiner_on_condvar_count never rose above 0)",
         );
         std::thread::sleep(Duration::from_millis(1));
     }

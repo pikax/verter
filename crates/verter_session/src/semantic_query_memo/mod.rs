@@ -337,6 +337,23 @@ pub struct SemanticGraphStore {
     /// `debug_assertions`.
     #[cfg(any(test, debug_assertions))]
     invalidate_canonical_inflight_abort_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+    /// Per-store test-only counter: incremented by one IMMEDIATELY before
+    /// a cooperative joiner blocks on the per-entry `ready` condvar via
+    /// `wait_while` in [`Self::execute_cooperative`]. Unlike the in-flight
+    /// `Arc` strong count (which rises when a joiner merely *clones* the
+    /// entry, one step BEFORE it reaches the condvar), this counter proves
+    /// the joiner is genuinely SUSPENDED on the condvar — the precise
+    /// invariant a condvar-pairing test asserts. Read via
+    /// [`Self::test_joiner_on_condvar_count`].
+    ///
+    /// **Per-store scope (test hermeticity).** Like every other gate on
+    /// this store, the counter is per-store, never a process-global, so a
+    /// condvar-pairing test on one store cannot observe an unrelated
+    /// concurrent test's joiners. `cfg`-gated to `test` / `debug_assertions`;
+    /// the increment and the field are both absent from release builds, so
+    /// the production cooperative-wait path is unchanged.
+    #[cfg(any(test, debug_assertions))]
+    joiner_on_condvar_count: std::sync::atomic::AtomicUsize,
     /// Γ.B reverse index. For each canonical id,
     /// holds the set of `(family, slot)` pairs whose published
     /// dep_signature references it, paired with the dep_signature
@@ -2419,6 +2436,17 @@ impl SemanticGraphStore {
                 // Account wait time on the stats surface so the F3 corpus
                 // benchmark surfaces non-zero `waits_ms`.
                 let wait_start = Instant::now();
+                // Test-only: record that this joiner is about to SUSPEND on
+                // the condvar (it already holds `state` and is one statement
+                // from `wait_while`, which atomically releases `state` and
+                // parks). A condvar-pairing test polls this count to observe
+                // the joiner genuinely on the condvar — a stronger signal
+                // than the in-flight strong count, which rises one step
+                // earlier when the joiner merely clones the entry. No
+                // production behaviour change (gated out of release builds).
+                #[cfg(any(test, debug_assertions))]
+                self.joiner_on_condvar_count
+                    .fetch_add(1, Ordering::SeqCst);
                 inflight
                     .ready
                     .wait_while(&mut state, |s| s.completed.is_none() && !s.aborted);
@@ -3788,6 +3816,27 @@ impl SemanticGraphStore {
     pub fn test_inflight_strong_count(&self, key: &SemanticQueryKey) -> usize {
         let table = self.inflight.lock();
         table.get(key).map_or(0, Arc::strong_count)
+    }
+
+    /// Test-only observability accessor: the number of cooperative
+    /// joiners that have reached the point of suspending on a per-entry
+    /// `ready` condvar (the increment fires immediately before
+    /// `wait_while` in [`Self::execute_cooperative`]).
+    ///
+    /// A condvar-pairing test polls this to `>= 1` to observe a joiner
+    /// genuinely PARKED on the condvar — strictly stronger than
+    /// [`Self::test_inflight_strong_count`], which rises one step earlier
+    /// when the joiner merely clones the in-flight `Arc` (before it
+    /// reaches the condvar). It never touches the entry's `state`, so it
+    /// cannot perturb the build it observes. The accessor and the counter
+    /// it reads are both `cfg`-gated to `test` / `debug_assertions` and
+    /// are absent from release builds.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_joiner_on_condvar_count(&self) -> usize {
+        self.joiner_on_condvar_count
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Test-only probe: `true` when the `inflight` table `Mutex` can be
