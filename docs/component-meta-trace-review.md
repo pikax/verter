@@ -902,10 +902,10 @@
 
 5. Negative tests exist for several forbidden legacy paths, but the active batch still lacks batch-specific negative validation.
    - Existing negative coverage observed:
-     - `prepared_type_decl_in_view_does_not_require_import_route_shadow_materialization`
      - `route_and_root_resolution_do_not_fall_back_through_frontier`
      - `component_meta_queries_do_not_populate_legacy_resolved_type_cache`
-     - the route-shadow guard path in `meta_tests.rs` using `forbid_import_route_shadow_for_tests()`, and the prepared-structural-substitution slow-lane forbid-tests in `component_meta_query_engine/tests.rs` using `forbid_prepared_structural_substitution_slow_lane_for_tests()`
+     - the route-frontier forbid guard (`forbid_route_frontier_for_tests()`, wired at `frontier_engine.rs:102`), and the prepared-structural-substitution slow-lane forbid-tests in `component_meta_query_engine/tests.rs` using `forbid_prepared_structural_substitution_slow_lane_for_tests()`
+     - note: the import-route-shadow forbid guard was retired as a born-dead trip-wire (`assert_import_route_shadow_allowed` was never wired to any production read site); no legacy import-route shadow-map path survived to guard
    - Missing for Batch 1:
      - committed forbidden trace assertions proving legacy fallback is absent
      - committed forbidden trace assertions proving raw snapshot / repeated `current_eval_state` reopening is absent where published facts should suffice
