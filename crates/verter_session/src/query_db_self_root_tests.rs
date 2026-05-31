@@ -65,13 +65,9 @@ use std::sync::Arc;
 use verter_semantic::analysis::type_solver::query_engine::ProjectedMember;
 use verter_type_expr::TypeExpr;
 
-use crate::component_meta_caches::PreparedSurfacePayload;
 use crate::fact_signature_helpers::empty_fact_signature;
 use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
-use crate::resolver_core::cache_keys::{
-    PreparedMemberCacheKey, PreparedMemberCacheKind, PreparedSubstitutionKey,
-    PreparedSurfaceCacheKey, PreparedTargetCacheKey, RoutedExprSurfaceCacheKey,
-};
+use crate::resolver_core::cache_keys::PreparedTargetCacheKey;
 use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistrySymbol;
 use crate::resolver_core::{
     FactVersionRef, MaterializeScopeObservation, ResolvedDeclarationKind, ResolvedTypeDeclaration,
@@ -573,205 +569,6 @@ fn prepared_target_db_declaring_canonical_edit_rejects_warm_entry() {
         warm.map(|(_, n)| n.as_ref().to_string()),
         Some("recomputed".to_string()),
         "the rejected warm entry must not bubble its stale resolved target",
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Item 7 — PreparedSurfaceDb.
-// ---------------------------------------------------------------------------
-
-fn prepared_surface_key(canonical: &str) -> PreparedSurfaceCacheKey {
-    PreparedSurfaceCacheKey {
-        canonical_id: Arc::from(canonical),
-        symbol_name: Arc::from("Probe"),
-        substitutions: PreparedSubstitutionKey::Empty,
-        // R21-F1 c4: top-level synthetic probe enters at body
-        // position. Tests that exercise the heritage-descent path
-        // construct their own key explicitly.
-        from_root_body: true,
-    }
-}
-
-/// `PreparedSurfaceDb` validates the keyed canonical's self-root
-/// strictly (warm-hit `validate` AND post-compute revalidation). The
-/// prepared surface encodes body-sensitive structure, so strict
-/// self-root validation is the correctness floor.
-///
-/// Discriminating property: the prime attempt's payload is `Empty`,
-/// the recompute produces `Unsupported`. A lazy validator admits the
-/// `Empty` entry and the second `get_or_compute` returns it stale; the
-/// strict validator rejects admission, so the recompute runs and
-/// `Unsupported` surfaces.
-#[test]
-fn prepared_surface_db_untracked_self_root_rejects_warm_entry() {
-    use crate::component_meta_caches::PreparedSurfacePayload;
-
-    let host = host_with_unrelated_file();
-    let c = "/self_root_qdb/psurf_never_loaded.ts";
-    assert_untracked(&host, c);
-    let ctx: &dyn ResolverContext = &host;
-    let db = host.project_type_store().prepared_surface_db();
-    let key = prepared_surface_key(c);
-
-    let _ = db.get_or_compute(&key, ctx, || {
-        Some((PreparedSurfacePayload::Empty, planted_self_root(c)))
-    });
-
-    let mut cold_ran = false;
-    let warm = db
-        .get_or_compute(&key, ctx, || {
-            cold_ran = true;
-            Some((PreparedSurfacePayload::Unsupported, empty_fact_signature()))
-        })
-        .expect("warm path produces a value");
-
-    assert!(
-        cold_ran,
-        "PreparedSurfaceDb MUST NOT serve a warm entry whose self-root names an \
-         untracked keyed canonical",
-    );
-    assert!(
-        matches!(warm, PreparedSurfacePayload::Unsupported),
-        "the rejected entry must not bubble its stale `Empty` payload",
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Item 8 — PreparedMemberDb.
-// ---------------------------------------------------------------------------
-
-fn prepared_member_key(canonical: &str) -> PreparedMemberCacheKey {
-    PreparedMemberCacheKey {
-        canonical_id: Arc::from(canonical),
-        symbol_name: Arc::from("Probe"),
-        member_name: Arc::from("field"),
-        kind: PreparedMemberCacheKind::Requested,
-        substitutions: PreparedSubstitutionKey::Empty,
-        // R21-F1 c4: top-level synthetic probe enters at body
-        // position. Heritage-descent-keyed tests construct their key
-        // explicitly with `from_root_body: false`.
-        from_root_body: true,
-    }
-}
-
-fn projected_member(marker: &str) -> ProjectedMember {
-    ProjectedMember {
-        name: "field".to_string(),
-        ty: TypeExpr::Unknown {
-            raw: marker.to_string(),
-        },
-        optional: false,
-        readonly: false,
-        is_method: false,
-        declared_in_macro_type_arg: false,
-        // Synthetic test probe with no OXC declaration site — no spans/origin.
-        spans: verter_type_expr::MemberSpans::default(),
-        declaration_origin: None,
-    }
-}
-
-/// `PreparedMemberDb` validates the keyed canonical's self-root
-/// strictly.
-///
-/// Discriminating property: the prime attempt's projected member
-/// carries the marker `"stale"`; the recompute carries `"recomputed"`.
-/// A lazy validator admits the stale member and the second
-/// `get_or_compute` returns it; the strict validator rejects
-/// admission.
-#[test]
-fn prepared_member_db_untracked_self_root_rejects_warm_entry() {
-    let host = host_with_unrelated_file();
-    let c = "/self_root_qdb/pmem_never_loaded.ts";
-    assert_untracked(&host, c);
-    let ctx: &dyn ResolverContext = &host;
-    let db = host.project_type_store().prepared_member_db();
-    let key = prepared_member_key(c);
-
-    let _ = db.get_or_compute(&key, ctx, || {
-        Some((Some(projected_member("stale")), planted_self_root(c)))
-    });
-
-    let mut cold_ran = false;
-    let warm = db
-        .get_or_compute(&key, ctx, || {
-            cold_ran = true;
-            Some((Some(projected_member("recomputed")), empty_fact_signature()))
-        })
-        .expect("warm path produces a value");
-
-    assert!(
-        cold_ran,
-        "PreparedMemberDb MUST NOT serve a warm entry whose self-root names an \
-         untracked keyed canonical",
-    );
-    assert!(
-        matches!(
-            warm.as_deref().map(|m| &m.ty),
-            Some(TypeExpr::Unknown { raw }) if raw == "recomputed"
-        ),
-        "the rejected entry must not bubble its stale projected member",
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Item 9 — RoutedExprSurfaceDb.
-// ---------------------------------------------------------------------------
-
-fn routed_expr_key(scope: &str) -> RoutedExprSurfaceCacheKey {
-    RoutedExprSurfaceCacheKey {
-        scope_canonical_id: Arc::from(scope),
-        root_symbol: Arc::from("Probe"),
-        route: RouteDemand::Whole,
-    }
-}
-
-/// `RoutedExprSurfaceDb` validates the keyed scope canonical's
-/// self-root strictly.
-///
-/// Discriminating property: the prime attempt's expression carries the
-/// marker `"stale"`; the recompute carries `"recomputed"`. A lazy
-/// validator admits the stale expression and the second
-/// `get_or_compute` returns it; the strict validator rejects
-/// admission.
-#[test]
-fn routed_expr_surface_db_untracked_self_root_rejects_warm_entry() {
-    let host = host_with_unrelated_file();
-    let c = "/self_root_qdb/routed_never_loaded.ts";
-    assert_untracked(&host, c);
-    let ctx: &dyn ResolverContext = &host;
-    let db = host.project_type_store().routed_expr_surface_db();
-    let key = routed_expr_key(c);
-
-    let _ = db.get_or_compute(&key, ctx, || {
-        Some((
-            TypeExpr::Unknown {
-                raw: "stale".to_string(),
-            },
-            planted_self_root(c),
-        ))
-    });
-
-    let mut cold_ran = false;
-    let warm = db
-        .get_or_compute(&key, ctx, || {
-            cold_ran = true;
-            Some((
-                TypeExpr::Unknown {
-                    raw: "recomputed".to_string(),
-                },
-                empty_fact_signature(),
-            ))
-        })
-        .expect("warm path produces a value");
-
-    assert!(
-        cold_ran,
-        "RoutedExprSurfaceDb MUST NOT serve a warm entry whose self-root names an \
-         untracked keyed canonical",
-    );
-    assert!(
-        matches!(warm.as_ref(), TypeExpr::Unknown { raw } if raw == "recomputed"),
-        "the rejected entry must not bubble its stale routed expression",
     );
 }
 
@@ -1465,273 +1262,6 @@ fn owner_collection_db_self_root_sibling_edit_rejects_warm_entry() {
     );
 }
 
-/// `PreparedSurfaceDb` — producer-level self-root canary. The
-/// production producer is [`engine_fact_signature_for_exported_type`]
-/// (called by `publish_prepared_surface_to_host_db`); the prepared
-/// surface encodes body-sensitive structure, so the self-root
-/// `FileWholeHash` is the correctness floor. An unrelated-sibling edit
-/// shifts only the self-root. Verified: neutering `self_root_fact`
-/// flips this canary RED.
-#[test]
-fn prepared_surface_db_self_root_sibling_edit_rejects_warm_entry() {
-    use crate::component_meta_caches::PreparedSurfacePayload;
-    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_exported_type;
-
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let c = "/self_root_e2e/psurf.ts";
-    load_tracked_keyed(&host, c);
-    let ctx: &dyn ResolverContext = &host;
-    let db = host.project_type_store().prepared_surface_db();
-    let key = prepared_surface_key(c);
-
-    // Observe the keyed canonical's content version at cold-publish
-    // time, exactly as the production producer does.
-    let observed_keyed_hash = observed_whole_hash(ctx, c);
-    let owned = c.to_string();
-    let _ = db
-        .get_or_compute(&key, ctx, || {
-            let sig = engine_fact_signature_for_exported_type(
-                ctx,
-                owned.as_str(),
-                "Probe",
-                observed_keyed_hash,
-            )
-            .expect("provenance-pure signature builds — observed artifact present");
-            Some((PreparedSurfacePayload::Empty, sig))
-        })
-        .expect("cold publish succeeds");
-
-    sibling_body_edit(&host, c);
-
-    let ctx2: &dyn ResolverContext = &host;
-    let mut cold_ran = false;
-    let warm = db
-        .get_or_compute(&key, ctx2, || {
-            cold_ran = true;
-            Some((PreparedSurfacePayload::Unsupported, empty_fact_signature()))
-        })
-        .expect("warm path produces a value");
-
-    assert!(
-        cold_ran,
-        "PreparedSurfaceDb warm read MUST reject the entry after an unrelated-sibling \
-         edit to its keyed canonical — only the producer's self-root FileWholeHash \
-         catches it. Reverting the self_root_fact prepend serves stale.",
-    );
-    assert!(
-        matches!(warm, PreparedSurfacePayload::Unsupported),
-        "the rejected warm entry must not bubble its stale `Empty` payload",
-    );
-}
-
-/// `RoutedExprSurfaceDb` — producer-level self-root canary. The
-/// production producer is [`engine_fact_signature_for_exported_type`]
-/// (called by `cache_routed_expr_surface_expr`); an unrelated-sibling
-/// edit shifts only the self-root `FileWholeHash`. Verified: neutering
-/// `self_root_fact` flips this canary RED.
-#[test]
-fn routed_expr_surface_db_self_root_sibling_edit_rejects_warm_entry() {
-    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_exported_type;
-
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let c = "/self_root_e2e/routed.ts";
-    load_tracked_keyed(&host, c);
-    let ctx: &dyn ResolverContext = &host;
-    let db = host.project_type_store().routed_expr_surface_db();
-    let key = routed_expr_key(c);
-
-    // Observe the keyed canonical's content version at cold-publish
-    // time, exactly as the production producer does.
-    let observed_keyed_hash = observed_whole_hash(ctx, c);
-    let owned = c.to_string();
-    let _ = db
-        .get_or_compute(&key, ctx, || {
-            let sig = engine_fact_signature_for_exported_type(
-                ctx,
-                owned.as_str(),
-                "Probe",
-                observed_keyed_hash,
-            )
-            .expect("provenance-pure signature builds — observed artifact present");
-            Some((
-                TypeExpr::Unknown {
-                    raw: "stale".to_string(),
-                },
-                sig,
-            ))
-        })
-        .expect("cold publish succeeds");
-
-    sibling_body_edit(&host, c);
-
-    let ctx2: &dyn ResolverContext = &host;
-    let mut cold_ran = false;
-    let warm = db
-        .get_or_compute(&key, ctx2, || {
-            cold_ran = true;
-            Some((
-                TypeExpr::Unknown {
-                    raw: "recomputed".to_string(),
-                },
-                empty_fact_signature(),
-            ))
-        })
-        .expect("warm path produces a value");
-
-    assert!(
-        cold_ran,
-        "RoutedExprSurfaceDb warm read MUST reject the entry after an unrelated-sibling \
-         edit to its keyed canonical — only the producer's self-root FileWholeHash \
-         catches it. Reverting the self_root_fact prepend serves stale.",
-    );
-    assert!(
-        matches!(warm.as_ref(), TypeExpr::Unknown { raw } if raw == "recomputed"),
-        "the rejected warm entry must not bubble its stale routed expression",
-    );
-}
-
-/// Count the named object-property members of a routed-expression
-/// surface `TypeExpr`. Used to fingerprint which content version a
-/// cached routed surface was projected from.
-fn routed_surface_member_names(expr: &TypeExpr) -> Vec<String> {
-    use verter_type_expr::ObjectMember;
-    let mut names = Vec::new();
-    if let TypeExpr::Object(object) = expr {
-        for member in object.properties.iter() {
-            match member {
-                ObjectMember::Property(property) => names.push(property.name.clone()),
-                ObjectMember::Method(method) => names.push(method.name.clone()),
-                _ => {}
-            }
-        }
-    }
-    names.sort();
-    names
-}
-
-/// `RoutedExprSurfaceDb` — producer-ordering canary for the
-/// routed-expression observed-hash capture.
-///
-/// `project_routed_expr_surface_expr` projects the routed surface and
-/// THEN calls `cache_routed_expr_surface_expr` to write it through. The
-/// observed self-root content hash must be captured BEFORE the
-/// projection, not inside the cache helper after it: capturing it after
-/// the projection is a torn read — the projected value comes from one
-/// content version, the self-root hash from a later one.
-///
-/// The fixture drives the race deterministically. A projection-seam
-/// hook fires an `upsert` of the keyed scope file EXACTLY between the
-/// projection and the `cache_routed_expr_surface_expr` write-through —
-/// the precise window the torn read opens. `Probe`'s
-/// own member is renamed across the edit (`staleField` → `freshField`)
-/// so the v1 routed surface and the v2 routed surface are
-/// distinguishable, and the v1 value is provably stale once v2 lands.
-///
-/// Discrimination property — FAILS pre-fix, PASSES post-fix:
-///
-///  - Pre-fix (`cache_routed_expr_surface_expr` reads
-///    `authoritative_current_content_hash` itself, after the projection
-///    AND after the seam edit): the helper observes the POST-edit (v2)
-///    hash, so the entry's self-root `FileWholeHash` is v2. Post-compute
-///    revalidation against the (post-edit) v2 host validates that v2
-///    self-root, so the entry is ADMITTED — carrying the stale v1
-///    `projected_expr`. A warm `peek` against the v2 host then serves it.
-///  - Post-fix (the caller captures the observed hash before the
-///    projection and threads it in): the entry's self-root is the
-///    PRE-edit (v1) hash; revalidation against the v2 host rejects it,
-///    so the torn entry is NOT admitted. The warm `peek` misses and a
-///    fresh request recomputes the v2 surface.
-#[test]
-fn routed_expr_surface_db_observed_hash_captured_before_projection_rejects_torn_entry() {
-    use crate::resolver_core::component_meta_query_engine::{
-        inject_routed_expr_projection_seam_edit_for_tests, ComponentMetaQueryEngine,
-    };
-
-    let probe_v1 = "export interface Probe { staleField: string; }\n";
-    let probe_v2 = "export interface Probe { freshField: string; }\n";
-    let c = "/routed_seam/probe.ts";
-
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
-    upsert(&host, c, probe_v1);
-    assert!(
-        host.ensure_indexed_ready(c).is_some(),
-        "fixture invariant: IndexedReady must materialise for {c}",
-    );
-
-    // The projection-seam hook: upsert v2 of the keyed scope file. The
-    // upsert performs no own-canonical drain, so the entry the producer
-    // is about to publish physically survives — the staleness must be
-    // caught by the producer's self-root hash alone. The hook fires
-    // exactly between the routed-expression projection and the
-    // `cache_routed_expr_surface_expr` write-through.
-    let seam_host = Arc::clone(&host);
-    let seam_path = c.to_string();
-    let _seam = inject_routed_expr_projection_seam_edit_for_tests(move || {
-        upsert(&seam_host, &seam_path, probe_v2);
-        // Materialise v2's IndexedReady so the post-edit content-version
-        // is a recoverable content-addressed artifact. The torn-read
-        // producer roots the entry on this v2 hash and its signature
-        // builds (and revalidates) against v2 — exactly the
-        // "post-compute revalidation then passes" defect. Without a
-        // recoverable v2 artifact the v2-rooted signature could not
-        // build at all and the bug would be masked.
-        assert!(
-            seam_host.ensure_indexed_ready(&seam_path).is_some(),
-            "seam-edit invariant: v2 IndexedReady must materialise",
-        );
-    });
-
-    let route = RouteDemand::Whole;
-    let projected = {
-        let mut engine = ComponentMetaQueryEngine::new(&*host);
-        engine
-            .project_routed_expr_surface_expr(c, "Probe", &route)
-            .expect("the routed-expression `Whole` surface of `Probe` projects")
-    };
-    // The producer projected v1 (the seam edit lands AFTER the
-    // projection), so the returned value is the v1 surface regardless
-    // of the fix — the discriminating fact is what the SHARED DB holds.
-    assert_eq!(
-        routed_surface_member_names(&projected),
-        vec!["staleField".to_string()],
-        "fixture invariant: the projection ran against v1 of `Probe`",
-    );
-
-    // The discriminating assertion: a warm `peek` of the shared
-    // `RoutedExprSurfaceDb` against the POST-edit (v2) host. The key is
-    // the same `(scope, root_symbol, route)` the producer wrote under.
-    let ctx: &dyn ResolverContext = &*host;
-    let db = host.project_type_store().routed_expr_surface_db();
-    let arc_key = RoutedExprSurfaceCacheKey {
-        scope_canonical_id: Arc::from(c),
-        root_symbol: Arc::from("Probe"),
-        route: route.clone(),
-    };
-    let warm = db.peek(&arc_key, ctx);
-    assert!(
-        warm.is_none(),
-        "RoutedExprSurfaceDb MUST NOT hold a warm entry after the projection-seam edit: \
-         the torn-read producer roots the entry's self-root on the POST-edit hash, so it \
-         validates against the post-edit host and serves the stale v1 routed surface. \
-         Capturing the observed hash before the projection roots it on the pre-edit hash, \
-         so the torn entry is refused admission. warm = {:?}",
-        warm.as_deref(),
-    );
-
-    // A fresh request (new engine — request-local scratch is per-engine)
-    // recomputes the v2 surface.
-    let mut fresh_engine = ComponentMetaQueryEngine::new(&*host);
-    let fresh = fresh_engine
-        .project_routed_expr_surface_expr(c, "Probe", &route)
-        .expect("the routed-expression `Whole` surface of `Probe` re-projects against v2");
-    assert_eq!(
-        routed_surface_member_names(&fresh),
-        vec!["freshField".to_string()],
-        "the recomputed routed surface must reflect the v2 content (`freshField`), \
-         not the stale v1 `staleField`",
-    );
-}
-
 /// `PreparedTargetDb` — producer-level self-root canary. The production
 /// producer is [`engine_fact_signature_for_prepared_target`] (called by
 /// `resolve_prepared_surface_target`), which roots BOTH the active
@@ -2122,110 +1652,6 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
     assert!(
         matches!(&warm.type_expr, TypeExpr::Unknown { raw } if raw == "recomputed"),
         "the rejected warm entry must not bubble its stale materialized expression",
-    );
-}
-
-/// `PreparedMemberDb` — producer-level self-root canary. The production
-/// producer is [`engine_fact_signature_for_canonical_member`] (called
-/// by `publish_prepared_member_to_host_db`), which records the keyed
-/// member's `MemberPresence` + `Member` parse facts PLUS the keyed
-/// canonical's self-root `FileWholeHash`.
-///
-/// Discriminating property: the canary edits an unrelated `Sibling`
-/// declaration's member body, NOT the keyed `Probe.field` member. The
-/// keyed member's `MemberPresence(Probe, field)` and `Member(Probe,
-/// field)` parse facts are path-precise (R28) and stay unchanged by an
-/// edit `Probe.field`'s declaration graph does not reach — only the
-/// keyed canonical's self-root `FileWholeHash` shifts. The warm read
-/// therefore misses iff the producer recorded the self-root; reverting
-/// the `self_root_fact` prepend leaves the entry valid and serves the
-/// stale projected member. Verified: neutering `self_root_fact` flips
-/// this canary RED.
-#[test]
-fn prepared_member_db_self_root_sibling_edit_rejects_warm_entry() {
-    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_canonical_member;
-
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let c = "/self_root_e2e/pmem.ts";
-    // `Probe` carries the keyed member `field`; `Sibling` is the
-    // unrelated declaration the canary edits.
-    upsert(
-        &host,
-        c,
-        "export interface Probe { field: number; }\n\
-         export interface Sibling { x: number; }\n",
-    );
-    assert!(
-        host.ensure_indexed_ready(c).is_some(),
-        "IndexedReady must materialise for {c}",
-    );
-    let ctx: &dyn ResolverContext = &host;
-    {
-        let view = ctx.resolver_store_view();
-        assert!(
-            StoreView::tracks_file(&view, c),
-            "fixture invariant: {c} must be TRACKED",
-        );
-    }
-    let db = host.project_type_store().prepared_member_db();
-    let key = prepared_member_key(c);
-
-    // Observe the keyed canonical's content version at cold-publish
-    // time, exactly as the production producer does.
-    let observed_keyed_hash = observed_whole_hash(ctx, c);
-    let owned = c.to_string();
-    let _ = db
-        .get_or_compute(&key, ctx, || {
-            let sig = engine_fact_signature_for_canonical_member(
-                ctx,
-                owned.as_str(),
-                "Probe",
-                "field",
-                observed_keyed_hash,
-            )
-            .expect("provenance-pure signature builds — observed artifact present");
-            Some((Some(projected_member("stale")), sig))
-        })
-        .expect("cold publish succeeds");
-
-    // Unrelated-sibling body edit: `Sibling.x` changes type; the keyed
-    // member `Probe.field` is untouched, so `MemberPresence(Probe,
-    // field)` and `Member(Probe, field)` are unchanged — only the
-    // self-root `FileWholeHash` shifts.
-    upsert(
-        &host,
-        c,
-        "export interface Probe { field: number; }\n\
-         export interface Sibling { x: string; }\n",
-    );
-    assert!(
-        host.ensure_indexed_ready(c).is_some(),
-        "IndexedReady must re-materialise for {c}",
-    );
-
-    let ctx2: &dyn ResolverContext = &host;
-    let mut cold_ran = false;
-    let warm = db
-        .get_or_compute(&key, ctx2, || {
-            cold_ran = true;
-            Some((Some(projected_member("recomputed")), empty_fact_signature()))
-        })
-        .expect("warm path produces a value");
-
-    assert!(
-        cold_ran,
-        "PreparedMemberDb warm read MUST reject the entry after an unrelated-sibling \
-         edit to its keyed canonical — the keyed member's MemberPresence/Member parse \
-         facts are path-precise and do not shift on an edit Probe.field's declaration \
-         graph does not reach, so only the producer's self-root FileWholeHash catches \
-         it. Reverting the self_root_fact prepend serves the stale projected member.",
-    );
-    assert!(
-        matches!(
-            warm.as_deref().map(|m| &m.ty),
-            Some(TypeExpr::Unknown { raw }) if raw == "recomputed"
-        ),
-        "the rejected warm entry must not bubble its stale projected member",
     );
 }
 
@@ -3464,55 +2890,6 @@ fn owner_collection_db_signature_builder_is_provenance_pure() {
     );
 }
 
-/// `PreparedMemberDb`'s producer signature builder is provenance-pure:
-/// `project_prepared_requested_member_from_symbol` observes the keyed
-/// canonical's content version once at the value source and threads it
-/// (via `publish_prepared_member_to_host_db`) into
-/// `engine_fact_signature_for_canonical_member`. A STALE observed hash
-/// yields `None` — the `MemberPresence` / `Member` parse facts cannot
-/// be recovered for the drained content version.
-#[test]
-fn prepared_member_db_signature_builder_is_provenance_pure() {
-    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_canonical_member;
-
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let c = "/provenance_qdb/pmem.ts";
-    let observed_h1 = load_and_observe_keyed(&host, c);
-    let ctx: &dyn ResolverContext = &host;
-
-    // The keyed member is `Probe.a` — `keyed_source_with_sibling`
-    // declares `interface Probe { a: number; b: string; }`.
-    let anchored = engine_fact_signature_for_canonical_member(ctx, c, "Probe", "a", observed_h1)
-        .expect("observed-current signature builds");
-    assert!(
-        signature_roots_whole_hash(&anchored, c, observed_h1),
-        "anchor: the signature for the observed-current case must root on H1",
-    );
-
-    upsert(&host, c, &keyed_source_with_sibling("string"));
-    let current_h2 = host.ensure_indexed_ready(c).expect("re-indexed").whole_hash;
-    assert_ne!(
-        observed_h1, current_h2,
-        "the edit must shift the whole hash"
-    );
-
-    let ctx2: &dyn ResolverContext = &host;
-    assert!(
-        engine_fact_signature_for_canonical_member(ctx2, c, "Probe", "a", observed_h1).is_none(),
-        "PreparedMemberDb's signature builder MUST return None for the STALE observed \
-         hash H1 after the keyed canonical was edited to H2 — the H1 MemberPresence / \
-         Member parse-fact registry is drained. A pre-fix builder re-reads current \
-         content via parse_fact_ref and returns Some rooted on H2.",
-    );
-
-    let current_sig = engine_fact_signature_for_canonical_member(ctx2, c, "Probe", "a", current_h2)
-        .expect("current-observed signature still builds");
-    assert!(
-        signature_roots_whole_hash(&current_sig, c, current_h2),
-        "the current-observed signature must root on H2",
-    );
-}
-
 /// `PreparedTargetDb`'s producer signature builder is provenance-pure:
 /// `resolve_prepared_surface_target` observes BOTH keyed canonicals'
 /// content versions at the value source and threads them into
@@ -3615,23 +2992,23 @@ fn prepared_target_db_signature_builder_is_provenance_pure() {
 // `Probe` carries a `baseMember` field in the base source and an
 // `overlayMember` field in the overlay source).
 //
-// Cache coverage. The three producer tests below cover the query caches whose
-// producer is externally callable, whose cold value-compute is sourced from
-// the prepared-decl bundle (view-isolated), AND whose producer admits a
-// torn/base-rooted entry pre-fix so the leak is observable: `ResolvabilityDb`,
-// `PreparedSurfaceDb`, `PreparedMemberDb`. The fourth test pins
-// `observed_prepared_type_decl` itself — the single-artifact observation point
-// shared by the `OwnerCollectionDb` producer. The remaining caches' producers
-// are not amenable to a producer-level overlay test: `DeclarationLookupDb` /
-// `RoutedExprSurfaceDb` (and the imported-registry resolver) recover their
-// value through shallow-metadata / dispatch reads that consult the
-// non-content-pinned `FileArtifactStore::get_any`, which itself returns the
-// overlay candidate to a base recompute (a separate pre-existing
-// content-pinning gap — see this file's earlier `[debt]` note), so a
-// producer-level test cannot isolate the self-root fix; `OwnerCollectionDb`'s
-// producer refuses admission of the torn entry pre-fix (see the note above the
-// `ResolvabilityDb` test); `PreparedTargetDb`'s producer is `pub(super)` and
-// not reachable from this module. Their producer-side hash-source
+// Cache coverage. The producer test below covers the `ResolvabilityDb`
+// query cache, whose producer is externally callable, whose cold
+// value-compute is sourced from the prepared-decl bundle (view-isolated),
+// AND whose producer admits a torn/base-rooted entry pre-fix so the leak
+// is observable. A second test pins `observed_prepared_type_decl` itself —
+// the single-artifact observation point shared by the `OwnerCollectionDb`
+// producer. The remaining caches' producers are not amenable to a
+// producer-level overlay test: `DeclarationLookupDb` and the
+// imported-registry resolver recover their value through shallow-metadata
+// / dispatch reads that consult the non-content-pinned
+// `FileArtifactStore::get_any`, which itself returns the overlay candidate
+// to a base recompute (a separate pre-existing content-pinning gap — see
+// this file's earlier `[debt]` note), so a producer-level test cannot
+// isolate the self-root fix; `OwnerCollectionDb`'s producer refuses
+// admission of the torn entry pre-fix (see the note above the
+// `ResolvabilityDb` test); `PreparedTargetDb`'s producer is `pub(super)`
+// and not reachable from this module. Their producer-side hash-source
 // (base-only `shallow_file_state` → view-aware
 // `authoritative_current_content_hash`) is covered by the
 // `*_signature_builder_is_provenance_pure` builder tests above and the
@@ -3771,159 +3148,6 @@ fn resolvability_db_producer_overlay_discrimination() {
          request mismatches it. A producer reading the base-only `shallow_file_state` \
          roots the entry on the base hash; the base request then warm-hits the \
          overlay `false` even though the base source declares `Probe`.",
-    );
-}
-
-/// `PreparedSurfaceDb` — producer-level overlay discrimination (P1-A).
-///
-/// Drives `cached_prepared_root_surface`; the value is the projected
-/// `ProjectedSurface` of `Probe`, whose member set is the discriminator.
-#[test]
-fn prepared_surface_db_producer_overlay_discrimination() {
-    use crate::resolver_core::component_meta_query_engine::ComponentMetaQueryEngine;
-    use crate::resolver_core::SessionResolverContext;
-
-    let canonical = "/overlay_disc/prepared_surface.ts";
-    let (host, view, _base_hash, _overlay_hash) = overlay_disc_fixture(canonical);
-
-    let overlay_store_view = host
-        .resolver_store_view()
-        .with_session_overlay(&host, &view);
-    let overlay_ctx = SessionResolverContext::new(
-        &host,
-        &view,
-        &overlay_store_view,
-        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
-    );
-    let mut overlay_engine = ComponentMetaQueryEngine::new(&overlay_ctx);
-    let overlay_surface = overlay_engine
-        .cached_prepared_root_surface(canonical, "Probe")
-        .expect("the overlay producer projects Probe's surface");
-    assert!(
-        overlay_surface
-            .members
-            .iter()
-            .any(|m| m.name == "overlayMember"),
-        "fixture invariant: the overlay producer must project the overlay source's \
-         `overlayMember` field",
-    );
-
-    let base_ctx: &dyn ResolverContext = host.as_ref();
-    let mut base_engine = ComponentMetaQueryEngine::new(base_ctx);
-    let base_surface = base_engine
-        .cached_prepared_root_surface(canonical, "Probe")
-        .expect("the base producer projects Probe's surface");
-    assert!(
-        base_surface.members.iter().any(|m| m.name == "baseMember"),
-        "PreparedSurfaceDb LEAKED an overlay-session entry to a base request. \
-         `project_prepared_surface_from_symbol` must observe the scope canonical's \
-         content version through the view-aware `authoritative_current_content_hash`, \
-         so the overlay surface roots on the overlay hash and a base request \
-         mismatches it. A producer reading the base-only `shallow_file_state` roots \
-         the entry on the base hash; the base request warm-hits the overlay surface.",
-    );
-    assert!(
-        !base_surface
-            .members
-            .iter()
-            .any(|m| m.name == "overlayMember"),
-        "the base producer must not surface the overlay `overlayMember` field",
-    );
-}
-
-/// `PreparedMemberDb` — producer-level overlay discrimination (P1-A).
-///
-/// Drives `project_prepared_requested_member_from_symbol`. The base
-/// source declares `Probe.shared` as `number`; the overlay declares it
-/// as `string` — the projected member type is the discriminator.
-#[test]
-fn prepared_member_db_producer_overlay_discrimination() {
-    use crate::resolver_core::component_meta_query_engine::ComponentMetaQueryEngine;
-    use crate::resolver_core::SessionResolverContext;
-    use crate::session_view::SessionView;
-    use rustc_hash::{FxHashMap, FxHashSet};
-
-    let canonical = "/overlay_disc/prepared_member.ts";
-    let host = VerterHost::new_standalone(HostConfig::default());
-    upsert(
-        &host,
-        canonical,
-        "export interface Probe { shared: number; }\n",
-    );
-    host.ensure_indexed_ready(canonical)
-        .expect("base IndexedReady materialises");
-    let host = Arc::new(host);
-
-    // The overlay declares `Probe.shared` with a different type.
-    let overlay_source: Arc<str> = Arc::from("export interface Probe { shared: string; }\n");
-    let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
-    overlays.insert(canonical.to_string(), Arc::clone(&overlay_source));
-    let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
-    assert!(
-        view.overlay_content_hash_for(canonical).is_some(),
-        "fixture invariant: the overlay covers the canonical",
-    );
-    host.materialize_overlay_indexed_ready_with_view(canonical, &view)
-        .expect("overlay IndexedReady materialises");
-
-    let overlay_store_view = host
-        .resolver_store_view()
-        .with_session_overlay(&host, &view);
-    let overlay_ctx = SessionResolverContext::new(
-        &host,
-        &view,
-        &overlay_store_view,
-        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
-    );
-    let mut overlay_engine = ComponentMetaQueryEngine::new(&overlay_ctx);
-    let mut active: FxHashSet<(String, String)> = FxHashSet::default();
-    let overlay_member = overlay_engine
-        .project_prepared_requested_member_from_symbol(
-            canonical,
-            "Probe",
-            "shared",
-            &FxHashMap::default(),
-            true,
-            &mut active,
-        )
-        .expect("the overlay producer projects Probe.shared");
-    assert!(
-        matches!(
-            &overlay_member.ty,
-            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
-        ),
-        "fixture invariant: the overlay producer must see `Probe.shared` as `string`, \
-         got {:?}",
-        overlay_member.ty,
-    );
-
-    let base_ctx: &dyn ResolverContext = host.as_ref();
-    let mut base_engine = ComponentMetaQueryEngine::new(base_ctx);
-    let mut base_active: FxHashSet<(String, String)> = FxHashSet::default();
-    let base_member = base_engine
-        .project_prepared_requested_member_from_symbol(
-            canonical,
-            "Probe",
-            "shared",
-            &FxHashMap::default(),
-            true,
-            &mut base_active,
-        )
-        .expect("the base producer projects Probe.shared");
-    assert!(
-        matches!(
-            &base_member.ty,
-            TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
-        ),
-        "PreparedMemberDb LEAKED an overlay-session entry to a base request. \
-         `project_prepared_requested_member_from_symbol` must observe the scope \
-         canonical's content version through the view-aware \
-         `authoritative_current_content_hash`, so the overlay member roots on the \
-         overlay hash and a base request mismatches it. A producer reading the \
-         base-only `shallow_file_state` roots the entry on the base hash; the base \
-         request warm-hits the overlay `string` even though the base source \
-         declares `Probe.shared` as `number`. Base member type was {:?}.",
-        base_member.ty,
     );
 }
 
@@ -6160,18 +5384,6 @@ const IN_SCOPE_QUERY_IDENTITY_SELF_ROOT_COVERAGE: &[(&str, &str)] = &[
         "prepared_target_db",
         "prepared_target_db_untracked_self_root_rejects_warm_entry",
     ),
-    (
-        "prepared_surface_db",
-        "prepared_surface_db_untracked_self_root_rejects_warm_entry",
-    ),
-    (
-        "prepared_member_db",
-        "prepared_member_db_untracked_self_root_rejects_warm_entry",
-    ),
-    (
-        "routed_expr_surface_db",
-        "routed_expr_surface_db_untracked_self_root_rejects_warm_entry",
-    ),
     // Universal `ShapeCacheDb` — replaces the previously-
     // split `materialize_memo_db` (TypeExpr subject) +
     // `member_shape_cache_db` (SemanticNode subject). Both subjects
@@ -6632,79 +5844,6 @@ fn imported_registry_peek_rejects_entry_from_superseded_generation() {
     );
 }
 
-/// `PreparedMemberDb::peek` rejects an entry computed under a superseded
-/// project generation — covers the fence-less `cooperative_get_or_insert`
-/// engine-DB path (the `ImportedRegistryDb` test covers the
-/// `cooperative_admit_with_post_publish` path).
-#[test]
-fn prepared_member_peek_rejects_entry_from_superseded_generation() {
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let canonical = "/superseded_gen/prepared_member.ts";
-    upsert(
-        &host,
-        canonical,
-        "export interface Holder { value: number; }\n",
-    );
-    assert!(
-        host.ensure_indexed_ready(canonical).is_some(),
-        "fixture invariant: canonical IndexedReady materialises",
-    );
-
-    let ctx: &dyn ResolverContext = &host;
-    let db = host.project_type_store().prepared_member_db();
-    let key = PreparedMemberCacheKey {
-        canonical_id: Arc::from(canonical),
-        symbol_name: Arc::from("Holder"),
-        member_name: Arc::from("value"),
-        kind: PreparedMemberCacheKind::Requested,
-        substitutions: PreparedSubstitutionKey::Empty,
-        from_root_body: true,
-    };
-
-    // Prime the cache through the production cold path — the cold
-    // `compute` stamps `validated_at_generation` with the pre-dispatch
-    // project generation.
-    let g_before = host.project_type_store().current_project_generation();
-    let primed = db.get_or_compute(&key, ctx, || Some((None, empty_fact_signature())));
-    assert!(
-        primed.is_some(),
-        "fixture invariant: the cold cooperative compute publishes the entry",
-    );
-    assert_eq!(
-        db.live_count(),
-        1,
-        "fixture invariant: the primed entry is admitted to PreparedMemberDb",
-    );
-    assert!(
-        db.peek(&key, ctx).is_some(),
-        "fixture invariant: the primed entry is a warm peek hit before the generation bump",
-    );
-
-    // Advance the project generation WITHOUT evicting any cache.
-    let g_after = host.project_type_store().bump_project_generation();
-    assert!(
-        g_after > g_before,
-        "fixture invariant: the project generation advanced past the stamped value",
-    );
-    assert_eq!(
-        db.live_count(),
-        1,
-        "fixture invariant: bump_project_generation does NOT evict the entry — the \
-         peek must reject it on the generation tag alone",
-    );
-
-    assert!(
-        db.peek(&key, ctx).is_none(),
-        "PROJECT-GENERATION STALENESS: `PreparedMemberDb::peek` served an \
-         entry computed under a superseded project generation. A \
-         `ProjectGeneration` reset bumps no file content, so the entry's \
-         file-content-only `fact_dep_signature` validates the stale entry \
-         vacuously forever. `peek` must additionally reject the entry when \
-         its `validated_at_generation` no longer equals the live project \
-         generation.",
-    );
-}
-
 /// `ImportedRegistryDb`'s cooperative warm-hit reject driven by a
 /// project-generation mismatch routes through the cache's COMPLETE
 /// removal cleanup — the substrate's `removal_cleanup` closure
@@ -6844,7 +5983,7 @@ fn imported_registry_cooperative_generation_reject_cleans_reverse_index() {
 // construction: an entry contributes `+1` exactly while it is live in the
 // map, paired with the `removal_cleanup` decrement.
 //
-// Each test below drives one of the 8 `cooperative_get_or_insert` engine
+// Each test below drives one of the `cooperative_get_or_insert` engine
 // DBs through its production `get_or_compute`. The `compute` closure bumps
 // the project generation INSIDE itself: `get_or_compute` snapshots the
 // generation as `G` before the cooperative call, the closure advances it
@@ -7078,137 +6217,7 @@ fn materialize_memo_failed_revalidation_does_not_leak_live_counter() {
     );
 }
 
-/// `PreparedSurfaceDb` — failed-revalidation cold compute must not leak the
-/// shared live counter. See
-/// [`declaration_lookup_failed_revalidation_does_not_leak_live_counter`].
-#[test]
-fn prepared_surface_failed_revalidation_does_not_leak_live_counter() {
-    let host = host_with_unrelated_file();
-    let c = "/live_counter_qdb/prepared_surface.ts";
-    let ctx: &dyn ResolverContext = &host;
-    let db = host.project_type_store().prepared_surface_db();
-    let key = PreparedSurfaceCacheKey {
-        canonical_id: Arc::from(c),
-        symbol_name: Arc::from("Probe"),
-        substitutions: PreparedSubstitutionKey::Empty,
-        from_root_body: true,
-    };
-
-    let counter_before = component_meta_cache_live(&host);
-    let map_before = db.live_count();
-
-    let outcome = db.get_or_compute(&key, ctx, || {
-        host.project_type_store().bump_project_generation();
-        Some((PreparedSurfacePayload::Empty, empty_fact_signature()))
-    });
-    assert!(
-        outcome.is_none(),
-        "fixture invariant: the cold compute's `revalidate_after_compute` must \
-         reject the entry, so `get_or_compute` returns `None`",
-    );
-    assert_eq!(
-        db.live_count(),
-        map_before,
-        "fixture invariant: a rejected cold compute publishes NO map entry",
-    );
-    assert_eq!(
-        component_meta_cache_live(&host),
-        counter_before,
-        "LIVE-COUNTER LEAK: `PreparedSurfaceDb`'s cold `cooperative_get_or_insert` \
-         compute leaked the shared `component_meta_cache_live` counter on a \
-         `revalidate_after_compute` rejection. The bump must ride `post_publish`.",
-    );
-}
-
-/// `PreparedMemberDb` — failed-revalidation cold compute must not leak the
-/// shared live counter. See
-/// [`declaration_lookup_failed_revalidation_does_not_leak_live_counter`].
-#[test]
-fn prepared_member_failed_revalidation_does_not_leak_live_counter() {
-    let host = host_with_unrelated_file();
-    let c = "/live_counter_qdb/prepared_member.ts";
-    let ctx: &dyn ResolverContext = &host;
-    let db = host.project_type_store().prepared_member_db();
-    let key = PreparedMemberCacheKey {
-        canonical_id: Arc::from(c),
-        symbol_name: Arc::from("Probe"),
-        member_name: Arc::from("value"),
-        kind: PreparedMemberCacheKind::Requested,
-        substitutions: PreparedSubstitutionKey::Empty,
-        from_root_body: true,
-    };
-
-    let counter_before = component_meta_cache_live(&host);
-    let map_before = db.live_count();
-
-    let outcome = db.get_or_compute(&key, ctx, || {
-        host.project_type_store().bump_project_generation();
-        Some((None, empty_fact_signature()))
-    });
-    assert!(
-        outcome.is_none(),
-        "fixture invariant: the cold compute's `revalidate_after_compute` must \
-         reject the entry, so `get_or_compute` returns `None`",
-    );
-    assert_eq!(
-        db.live_count(),
-        map_before,
-        "fixture invariant: a rejected cold compute publishes NO map entry",
-    );
-    assert_eq!(
-        component_meta_cache_live(&host),
-        counter_before,
-        "LIVE-COUNTER LEAK: `PreparedMemberDb`'s cold `cooperative_get_or_insert` \
-         compute leaked the shared `component_meta_cache_live` counter on a \
-         `revalidate_after_compute` rejection. The bump must ride `post_publish`.",
-    );
-}
-
-/// `RoutedExprSurfaceDb` — failed-revalidation cold compute must not leak
-/// the shared live counter. See
-/// [`declaration_lookup_failed_revalidation_does_not_leak_live_counter`].
-#[test]
-fn routed_expr_surface_failed_revalidation_does_not_leak_live_counter() {
-    let host = host_with_unrelated_file();
-    let c = "/live_counter_qdb/routed_expr_surface.ts";
-    let ctx: &dyn ResolverContext = &host;
-    let db = host.project_type_store().routed_expr_surface_db();
-    let key = RoutedExprSurfaceCacheKey {
-        scope_canonical_id: Arc::from(c),
-        root_symbol: Arc::from("Probe"),
-        route: RouteDemand::Whole,
-    };
-
-    let counter_before = component_meta_cache_live(&host);
-    let map_before = db.live_count();
-
-    let outcome = db.get_or_compute(&key, ctx, || {
-        host.project_type_store().bump_project_generation();
-        Some((
-            TypeExpr::Unknown { raw: String::new() },
-            empty_fact_signature(),
-        ))
-    });
-    assert!(
-        outcome.is_none(),
-        "fixture invariant: the cold compute's `revalidate_after_compute` must \
-         reject the entry, so `get_or_compute` returns `None`",
-    );
-    assert_eq!(
-        db.live_count(),
-        map_before,
-        "fixture invariant: a rejected cold compute publishes NO map entry",
-    );
-    assert_eq!(
-        component_meta_cache_live(&host),
-        counter_before,
-        "LIVE-COUNTER LEAK: `RoutedExprSurfaceDb`'s cold `cooperative_get_or_insert` \
-         compute leaked the shared `component_meta_cache_live` counter on a \
-         `revalidate_after_compute` rejection. The bump must ride `post_publish`.",
-    );
-}
-
-/// Class-level invariant: after the 8 `cooperative_get_or_insert` engine
+/// Class-level invariant: after the `cooperative_get_or_insert` engine
 /// DBs each absorb a failed-revalidation cold compute, the shared
 /// `component_meta_cache_live` counter still equals the TOTAL number of
 /// entries live across every component-meta cache map. This is the
@@ -7234,14 +6243,11 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
             + store.owner_collection_db().live_count()
             + store.prepared_target_db().live_count()
             + store.shape_cache_db().live_count()
-            + store.prepared_surface_db().live_count()
-            + store.prepared_member_db().live_count()
-            + store.routed_expr_surface_db().live_count()
             + store.materialize_structure_db().live_count()
             + store.ref_cycle_db().entries().len()
     };
 
-    // Drive a failed-revalidation cold compute through each of the 8
+    // Drive a failed-revalidation cold compute through each of the
     // `cooperative_get_or_insert` engine DBs.
     let bump = || {
         host.project_type_store().bump_project_generation();
@@ -7312,55 +6318,12 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
             ))
         },
     );
-    let _ = store.prepared_surface_db().get_or_compute(
-        &PreparedSurfaceCacheKey {
-            canonical_id: Arc::from("/lc_total/psurface.ts"),
-            symbol_name: Arc::from("P"),
-            substitutions: PreparedSubstitutionKey::Empty,
-            from_root_body: true,
-        },
-        ctx,
-        || {
-            bump();
-            Some((PreparedSurfacePayload::Empty, empty_fact_signature()))
-        },
-    );
-    let _ = store.prepared_member_db().get_or_compute(
-        &PreparedMemberCacheKey {
-            canonical_id: Arc::from("/lc_total/pmember.ts"),
-            symbol_name: Arc::from("P"),
-            member_name: Arc::from("v"),
-            kind: PreparedMemberCacheKind::Requested,
-            substitutions: PreparedSubstitutionKey::Empty,
-            from_root_body: true,
-        },
-        ctx,
-        || {
-            bump();
-            Some((None, empty_fact_signature()))
-        },
-    );
-    let _ = store.routed_expr_surface_db().get_or_compute(
-        &RoutedExprSurfaceCacheKey {
-            scope_canonical_id: Arc::from("/lc_total/routed.ts"),
-            root_symbol: Arc::from("P"),
-            route: RouteDemand::Whole,
-        },
-        ctx,
-        || {
-            bump();
-            Some((
-                TypeExpr::Unknown { raw: String::new() },
-                empty_fact_signature(),
-            ))
-        },
-    );
 
     assert_eq!(
         component_meta_cache_live(&host) as usize,
         live_map_total(store),
         "LIVE-COUNTER CLASS LEAK: after driving a failed-revalidation cold compute \
-         through all 8 `cooperative_get_or_insert` engine DBs, the shared \
+         through all 5 `cooperative_get_or_insert` engine DBs, the shared \
          `component_meta_cache_live` counter no longer equals the total number of \
          entries live across the component-meta cache maps. Each failed cold compute \
          that bumped the counter inside its `compute` closure (before the \
