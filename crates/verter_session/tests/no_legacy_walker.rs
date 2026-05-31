@@ -348,6 +348,11 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "synthesize_define_slots_shape_from_known_surface",
     "synthesize_macro_shape_from_registry_lowered_root",
     "synthesize_macro_object_surface_shape",
+    // The macro-shape cursor finaliser that the materialiser subgraph
+    // drove (introduced in the block-6.i AX-WIP substrate, deleted with
+    // the rest of the subgraph in `af3b6c324`). define_* finalisation
+    // now lives in the dispatch projectors.
+    "finalize_macro_shape_through_cursor",
     "project_named_ref_prepared_surface_shape",
     "expr_needs_projection_rescue",
     "MacroShapeSource",
