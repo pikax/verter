@@ -456,8 +456,12 @@ fn observed_self_root_fact(canonical_id: &str, observed_hash: Hash16) -> FactVer
 /// freshly-computed value, it only forgoes the shared cache.
 ///
 /// Use this helper for caches keyed on `(canonical, exporter,
-/// member, space)` — e.g. `PreparedMemberDb`, slot-binding member
-/// reads, fallthrough member projection.
+/// member, space)` — slot-binding member reads and fallthrough member
+/// projection. Its former `PreparedMemberDb` consumer was retired in the
+/// Stage 4b walker-cluster deletion; the builder remains the canonical
+/// provenance-pure primitive (exercised by
+/// `query_identity_self_root_substrate_tests`) for member-keyed scopes.
+#[allow(dead_code)] // provenance-pure member-keyed primitive; sole prod consumer (PreparedMemberDb) retired in 4b; covered by query_identity_self_root_substrate_tests
 pub(crate) fn fact_signature_for_canonical_member(
     ctx: &dyn ResolverContext,
     canonical_id: &str,
