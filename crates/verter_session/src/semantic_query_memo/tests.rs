@@ -4635,7 +4635,7 @@ fn semantic_graph_stats_inflight_aborted_retries_increments_on_retry_loop() {
             || winner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || {
                 tx_in_build.send(()).expect("winner signal in_build");
-                rx_finish_build.recv().expect("winner signal finish");
+                recv_signal_within(&rx_finish_build, "winner finish-build signal");
                 let id =
                     winner_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
                 (QueryResult::Value(id), empty_signature())
@@ -4643,7 +4643,7 @@ fn semantic_graph_stats_inflight_aborted_retries_increments_on_retry_loop() {
         )
     });
 
-    rx_in_build.recv().expect("winner entered build");
+    recv_signal_within(&rx_in_build, "winner entered build");
 
     let joiner_store = Arc::clone(&store);
     let joiner_key = key.clone();
@@ -4681,8 +4681,8 @@ fn semantic_graph_stats_inflight_aborted_retries_increments_on_retry_loop() {
     // publish will hit the aborted re-check and be skipped.
     tx_finish_build.send(()).expect("release winner");
 
-    let _ = winner.join().expect("winner joined");
-    let joiner_result = joiner.join().expect("joiner joined");
+    let _ = join_within(winner, "winner");
+    let joiner_result = join_within(joiner, "joiner");
     // Joiner either became the fresh cold winner (Value) or, if the
     // winner's aborted-publish-skip raced with joiner's retry, the
     // joiner ran its own cold build (also Value). Either way the
