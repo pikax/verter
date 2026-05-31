@@ -17,7 +17,7 @@
 
 #![allow(clippy::needless_lifetimes)]
 
-use crate::snapshot_view::*;
+use super::snapshot_view::*;
 
 const COMPONENT_NAME: &str = "C";
 

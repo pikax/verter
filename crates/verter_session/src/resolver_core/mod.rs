@@ -66,13 +66,13 @@ pub use route_db::{
 };
 
 pub type ResolverHash16 = verter_semantic::analysis::Hash16;
+pub(crate) use component_meta::component_meta_resolved_macros;
 pub use component_meta::{
     collect_requested_binding_names, component_meta_type_registry, resolve_component_meta_parts,
     ComponentMetaEvalOutputs, ComponentMetaResolutionPurpose, ComponentMetaResolverHost,
     ResolvedComponentMetaParts, ResolvedImportedMacroSurface, ResolvedJsdocBlock, ResolvedJsdocTag,
     ResolvedMacroMeta, ResolvedTypeRegistryMeta,
 };
-pub(crate) use component_meta::component_meta_resolved_macros;
 pub use component_meta_query_engine::ComponentMetaQueryEngine;
 pub(crate) use component_meta_query_engine::{
     projected_surface_from_semantic_node, projected_surface_to_expanded_shape,

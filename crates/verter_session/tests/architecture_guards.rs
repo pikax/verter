@@ -936,8 +936,10 @@ fn root_surface_bridges_carry_no_prepared_decl_fallback() {
     // `projection_op_budget_exhausted` is the cooperative budget guard. Any
     // OTHER method call (`.or_else(...)`, `engine.cached_prepared_root_surface(...)`,
     // an `engine.<other>()` rescue, …) is a structural deviation and FAILS.
-    const ALLOWED_METHOD_CALLS: [&str; 2] =
-        ["dispatch_projected_surface", "projection_op_budget_exhausted"];
+    const ALLOWED_METHOD_CALLS: [&str; 2] = [
+        "dispatch_projected_surface",
+        "projection_op_budget_exhausted",
+    ];
     // The ONLY free-function / variant-constructor calls a bridge body may
     // make: the two thin surface→shape/expr converters, plus the std enum
     // constructors (`Some` / `Ok` / `Err`) that wrap the converter result.
@@ -960,8 +962,7 @@ fn root_surface_bridges_carry_no_prepared_decl_fallback() {
     // Index every free `fn` in the file by name so a body's one-level local
     // callees can be inspected (approach (b): a helper reachable from a bridge
     // body must not itself reference the forbidden rescue).
-    let mut free_fns: std::collections::HashMap<String, &ItemFn> =
-        std::collections::HashMap::new();
+    let mut free_fns: std::collections::HashMap<String, &ItemFn> = std::collections::HashMap::new();
     for item in &file.items {
         if let Item::Fn(f) = item {
             free_fns.insert(f.sig.ident.to_string(), f);
@@ -1259,11 +1260,7 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
         }
         /// Pull `pub`/`pub(crate)` re-export renames whose original ident is in
         /// `known` from one parsed file.
-        fn reexport_renames_in_file(
-            file: &syn::File,
-            known: &[String],
-            out: &mut Vec<String>,
-        ) {
+        fn reexport_renames_in_file(file: &syn::File, known: &[String], out: &mut Vec<String>) {
             fn walk(tree: &UseTree, known: &[String], out: &mut Vec<String>) {
                 match tree {
                     UseTree::Path(p) => walk(&p.tree, known, out),
@@ -1528,8 +1525,7 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
     //
     // Re-introducing the prepared-decl walker in EITHER function is a
     // second-resolver (Typed-IR-Only) violation.
-    let jsdoc_src =
-        read_workspace_file("crates/verter_session/src/host_manage/jsdoc_resolve.rs");
+    let jsdoc_src = read_workspace_file("crates/verter_session/src/host_manage/jsdoc_resolve.rs");
     let jsdoc_file = syn::parse_file(&jsdoc_src).expect("parse jsdoc_resolve.rs");
     for owner_local_fn in [
         "owner_local_macro_root_has_surface",
@@ -8606,16 +8602,47 @@ fn wave_3_entry_points_propagate_tls() {
     // Step 1: every entry-point with a paired test must have at
     // least one test that references both the entry-point symbol
     // and `assert_observer_reaches`.
+    // Resolve a pinned candidate path to a real file. Test files
+    // consolidated into group binaries move to a subdirectory
+    // (tests/g_<group>/<name>.rs), so a pinned top-level path may be
+    // stale; fall back to locating the file by basename under the
+    // crate's tests/ tree. The guard validates CONTENT (the entry-point
+    // symbol plus `assert_observer_reaches`), not the exact path, so a
+    // relocated file remains a valid pin.
+    let resolve_pinned = |rel: &str| -> Option<std::path::PathBuf> {
+        let direct = workspace.join(rel);
+        if direct.exists() {
+            return Some(direct);
+        }
+        let p = std::path::Path::new(rel);
+        let base = p.file_name()?;
+        let mut comps = p.components();
+        let c0 = comps.next()?; // crates
+        let c1 = comps.next()?; // <crate>
+        let c2 = comps.next()?; // tests
+        let tests_root = workspace
+            .join(c0.as_os_str())
+            .join(c1.as_os_str())
+            .join(c2.as_os_str());
+        walkdir::WalkDir::new(&tests_root)
+            .into_iter()
+            .flatten()
+            .find(|e| e.file_name() == base)
+            .map(|e| e.path().to_path_buf())
+    };
+
     let mut missing: Vec<String> = Vec::new();
     let mut wrong_path: Vec<String> = Vec::new();
     for (symbol, candidate_files) in WAVE_3_ENTRY_POINTS {
         let mut any_match = false;
         for rel in *candidate_files {
-            let abs = workspace.join(rel);
-            if !abs.exists() {
-                wrong_path.push(format!("  - {symbol} → {rel} (file does not exist)"));
-                continue;
-            }
+            let abs = match resolve_pinned(rel) {
+                Some(a) => a,
+                None => {
+                    wrong_path.push(format!("  - {symbol} → {rel} (file does not exist)"));
+                    continue;
+                }
+            };
             let src = std::fs::read_to_string(&abs).unwrap_or_else(|e| {
                 panic!("wave_3_entry_points_propagate_tls: cannot read `{rel}`: {e}")
             });

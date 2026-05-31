@@ -303,36 +303,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // through the shared dispatch (`Instantiate`) and recurse. This is
             // path-precise (the demanded key set), not a breadth walk.
             SemanticNodeData::DeclRef { identity } => {
-                let instantiated = match self.execute(
-                    crate::semantic_query::SemanticQueryKey::Instantiate {
+                let instantiated =
+                    match self.execute(crate::semantic_query::SemanticQueryKey::Instantiate {
                         base: identity.clone(),
                         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                         context: crate::semantic_query::ProjectionReductionContext::published(
                             crate::semantic_query::ProjectionMode::Expanded,
                         ),
-                    },
-                ) {
-                    crate::semantic_query::QueryResult::Value(id) => id,
-                    _ => return self.key_names_from_base_node(resolved),
-                };
+                    }) {
+                        crate::semantic_query::QueryResult::Value(id) => id,
+                        _ => return self.key_names_from_base_node(resolved),
+                    };
                 if instantiated == resolved {
                     return self.key_names_from_base_node(resolved);
                 }
                 self.key_names_from_keyspace_node(instantiated)
             }
             SemanticNodeData::InstantiationRef { base, args } => {
-                let instantiated = match self.execute(
-                    crate::semantic_query::SemanticQueryKey::Instantiate {
+                let instantiated =
+                    match self.execute(crate::semantic_query::SemanticQueryKey::Instantiate {
                         base: base.clone(),
                         args: Arc::clone(args),
                         context: crate::semantic_query::ProjectionReductionContext::published(
                             crate::semantic_query::ProjectionMode::Expanded,
                         ),
-                    },
-                ) {
-                    crate::semantic_query::QueryResult::Value(id) => id,
-                    _ => return self.key_names_from_base_node(resolved),
-                };
+                    }) {
+                        crate::semantic_query::QueryResult::Value(id) => id,
+                        _ => return self.key_names_from_base_node(resolved),
+                    };
                 if instantiated == resolved {
                     return self.key_names_from_base_node(resolved);
                 }

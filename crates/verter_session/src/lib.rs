@@ -86,8 +86,6 @@ mod component_meta_canonical_reuse_tests;
 mod component_meta_component_config_fast_path_tests;
 #[cfg(test)]
 mod component_meta_concurrency_tests;
-#[cfg(test)]
-mod component_meta_warm_invalidation_oracle_tests;
 pub mod component_meta_host;
 #[cfg(test)]
 mod component_meta_indexed_access_early_out_tests;
@@ -112,6 +110,8 @@ pub mod component_meta_result_db;
 mod component_meta_slot_binding_skip_tests;
 #[cfg(test)]
 mod component_meta_terminal_mode_tests;
+#[cfg(test)]
+mod component_meta_warm_invalidation_oracle_tests;
 pub mod cooperative_admission;
 pub mod cross_file;
 pub mod fact_emission;

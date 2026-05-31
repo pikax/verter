@@ -238,7 +238,9 @@ fn realize_callable_member_inner(
             drop(data);
             let read = dispatch.execute_read(SemanticQueryKey::Instantiate {
                 base: identity,
-                args: Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+                args: Arc::from(
+                    Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
+                ),
                 context: ProjectionReductionContext::structural_transit_with_mode(
                     ProjectionMode::Navigate,
                 ),
@@ -287,7 +289,13 @@ fn realize_callable_member_inner(
             } else {
                 SemanticNodeData::Intersection(boxed)
             };
-            Some(dispatch.ctx.project_type_store().semantic_graph().intern_node(rebuilt))
+            Some(
+                dispatch
+                    .ctx
+                    .project_type_store()
+                    .semantic_graph()
+                    .intern_node(rebuilt),
+            )
         }
 
         // Any other shape (Object, Primitive, Mapped, KeyOf, IndexedAccess,

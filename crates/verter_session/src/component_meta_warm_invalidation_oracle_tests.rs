@@ -80,10 +80,11 @@ defineProps<Props>()
         .get_component_meta("/Owner.vue")
         .expect("cold component meta resolves");
 
-    let dep_canonicals = crate::component_meta_result_db::ComponentMetaResultDb::dep_signature_for_owner_in_test(
-        &host,
-        "/Owner.vue",
-    );
+    let dep_canonicals =
+        crate::component_meta_result_db::ComponentMetaResultDb::dep_signature_for_owner_in_test(
+            &host,
+            "/Owner.vue",
+        );
     assert!(
         dep_canonicals.iter().any(|c| c.as_ref() == "/types.ts"),
         "the published component-meta entry's dep-signature MUST include the \

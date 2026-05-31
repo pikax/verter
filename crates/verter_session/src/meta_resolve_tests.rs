@@ -8642,14 +8642,14 @@ fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
         root_identity,
         level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
     };
-    let prop_names =
-        |dtos: &crate::typeinfo::adapters::vue::store::VueMacroDtos| -> Vec<String> {
-            dtos.props.iter().map(|p| p.name.clone()).collect()
-        };
+    let prop_names = |dtos: &crate::typeinfo::adapters::vue::store::VueMacroDtos| -> Vec<String> {
+        dtos.props.iter().map(|p| p.name.clone()).collect()
+    };
 
     // Base-view read (no overlay): only the base prop `a`.
-    let base_dtos =
-        host.vue_macro_dtos(&request_for(host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16])));
+    let base_dtos = host.vue_macro_dtos(&request_for(
+        host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16]),
+    ));
     assert_eq!(
         prop_names(&base_dtos),
         vec!["a".to_string()],
@@ -8664,7 +8664,9 @@ fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
     let mut overlays: rustc_hash::FxHashMap<String, Arc<str>> = rustc_hash::FxHashMap::default();
     overlays.insert(SFC.to_string(), Arc::from(overlay_src));
     let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
-    let store_view = host.resolver_store_view().with_session_overlay(&host, &view);
+    let store_view = host
+        .resolver_store_view()
+        .with_session_overlay(&host, &view);
     let session_ctx = crate::resolver_core::SessionResolverContext::new(
         &host,
         &view,
@@ -8693,8 +8695,9 @@ fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
 
     // No leak: a fresh base-view read still sees only `[a]`. The overlay surface
     // was keyed on a distinct `whole_hash`, so the base slot is untouched.
-    let base_dtos_after =
-        host.vue_macro_dtos(&request_for(host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16])));
+    let base_dtos_after = host.vue_macro_dtos(&request_for(
+        host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16]),
+    ));
     assert_eq!(
         prop_names(&base_dtos_after),
         vec!["a".to_string()],
@@ -8763,14 +8766,14 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
         root_identity,
         level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
     };
-    let prop_names =
-        |dtos: &crate::typeinfo::adapters::vue::store::VueMacroDtos| -> Vec<String> {
-            dtos.props.iter().map(|p| p.name.clone()).collect()
-        };
+    let prop_names = |dtos: &crate::typeinfo::adapters::vue::store::VueMacroDtos| -> Vec<String> {
+        dtos.props.iter().map(|p| p.name.clone()).collect()
+    };
 
     // Base-view read (no overlay): only the base model prop `old`.
-    let base_dtos =
-        host.vue_macro_dtos(&request_for(host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16])));
+    let base_dtos = host.vue_macro_dtos(&request_for(
+        host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16]),
+    ));
     assert_eq!(
         prop_names(&base_dtos),
         vec!["old".to_string()],
@@ -8784,7 +8787,9 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
     let mut overlays: rustc_hash::FxHashMap<String, Arc<str>> = rustc_hash::FxHashMap::default();
     overlays.insert(SFC.to_string(), Arc::from(overlay_src));
     let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
-    let store_view = host.resolver_store_view().with_session_overlay(&host, &view);
+    let store_view = host
+        .resolver_store_view()
+        .with_session_overlay(&host, &view);
     let session_ctx = crate::resolver_core::SessionResolverContext::new(
         &host,
         &view,
@@ -8812,8 +8817,9 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
     );
 
     // No leak: a fresh base-view read still sees only `[old]`.
-    let base_dtos_after =
-        host.vue_macro_dtos(&request_for(host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16])));
+    let base_dtos_after = host.vue_macro_dtos(&request_for(
+        host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16]),
+    ));
     assert_eq!(
         prop_names(&base_dtos_after),
         vec!["old".to_string()],
@@ -8876,7 +8882,9 @@ fn overlay_session_vue_macro_slot_bindings_read_overlay_carrier_without_leaking_
             .expect("upsert succeeds");
     }
 
-    let indexed = host.ensure_indexed_ready(SFC).expect("SFC must index ready");
+    let indexed = host
+        .ensure_indexed_ready(SFC)
+        .expect("SFC must index ready");
     let define_slots_index = indexed
         .snapshot
         .macros
@@ -8902,8 +8910,9 @@ fn overlay_session_vue_macro_slot_bindings_read_overlay_carrier_without_leaking_
         };
 
     // Base-view read: the slot binding is `old`.
-    let base_dtos = host
-        .vue_macro_dtos(&request_for(host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16])));
+    let base_dtos = host.vue_macro_dtos(&request_for(
+        host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16]),
+    ));
     assert_eq!(
         default_binding_names(&base_dtos),
         vec!["old".to_string()],
@@ -8917,7 +8926,9 @@ fn overlay_session_vue_macro_slot_bindings_read_overlay_carrier_without_leaking_
     let mut overlays: rustc_hash::FxHashMap<String, Arc<str>> = rustc_hash::FxHashMap::default();
     overlays.insert(SLOTS_TS.to_string(), Arc::from(overlay_slots));
     let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
-    let store_view = host.resolver_store_view().with_session_overlay(&host, &view);
+    let store_view = host
+        .resolver_store_view()
+        .with_session_overlay(&host, &view);
     let session_ctx = crate::resolver_core::SessionResolverContext::new(
         &host,
         &view,
@@ -8944,8 +8955,9 @@ fn overlay_session_vue_macro_slot_bindings_read_overlay_carrier_without_leaking_
     );
 
     // No leak: a fresh base-view read still sees only `old`.
-    let base_dtos_after = host
-        .vue_macro_dtos(&request_for(host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16])));
+    let base_dtos_after = host.vue_macro_dtos(&request_for(
+        host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16]),
+    ));
     assert_eq!(
         default_binding_names(&base_dtos_after),
         vec!["old".to_string()],

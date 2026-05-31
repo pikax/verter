@@ -85,24 +85,31 @@ pub(crate) fn project_define_macro_shapes(
         }
         match mac.kind {
             AnalyzedMacroKind::DefineProps => {
-                if let Some(result) = define_props_shape(ctx, owner_canonical, macro_index, evaluated_types) {
-                    evaluated_types
-                        .define_props
-                        .push(ExpandedMacroProps { macro_index, result });
+                if let Some(result) =
+                    define_props_shape(ctx, owner_canonical, macro_index, evaluated_types)
+                {
+                    evaluated_types.define_props.push(ExpandedMacroProps {
+                        macro_index,
+                        result,
+                    });
                 }
             }
             AnalyzedMacroKind::DefineEmits => {
-                if let Some(result) = define_emits_shape(ctx, owner_canonical, macro_index, evaluated_types) {
-                    evaluated_types
-                        .define_emits
-                        .push(ExpandedMacroObjectShape { macro_index, result });
+                if let Some(result) =
+                    define_emits_shape(ctx, owner_canonical, macro_index, evaluated_types)
+                {
+                    evaluated_types.define_emits.push(ExpandedMacroObjectShape {
+                        macro_index,
+                        result,
+                    });
                 }
             }
             AnalyzedMacroKind::DefineSlots => {
                 if let Some(result) = define_slots_shape(ctx, owner_canonical, macro_index) {
-                    evaluated_types
-                        .define_slots
-                        .push(ExpandedMacroObjectShape { macro_index, result });
+                    evaluated_types.define_slots.push(ExpandedMacroObjectShape {
+                        macro_index,
+                        result,
+                    });
                 }
             }
             // `WithDefaults` is never `is_type_based` (the type parameter lives
@@ -132,7 +139,12 @@ fn define_props_shape(
     macro_index: usize,
     evaluated_types: &ExpandedComponentTypes,
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
-    if !macro_surface_resolves(ctx, owner_canonical, macro_index, AnalyzedMacroKind::DefineProps) {
+    if !macro_surface_resolves(
+        ctx,
+        owner_canonical,
+        macro_index,
+        AnalyzedMacroKind::DefineProps,
+    ) {
         return None;
     }
     let dtos = crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(
@@ -209,7 +221,12 @@ fn define_emits_shape(
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
     // Unresolved emits macro → no shape (see `define_props_shape`). A resolved
     // emits surface with no events is `Some(empty)`.
-    if !macro_surface_resolves(ctx, owner_canonical, macro_index, AnalyzedMacroKind::DefineEmits) {
+    if !macro_surface_resolves(
+        ctx,
+        owner_canonical,
+        macro_index,
+        AnalyzedMacroKind::DefineEmits,
+    ) {
         return None;
     }
     let dtos = crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(
@@ -286,7 +303,12 @@ fn define_slots_shape(
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
     // Unresolved slots macro → no shape (see `define_props_shape`). A resolved
     // slots surface with no slot members is `Some(empty)`.
-    if !macro_surface_resolves(ctx, owner_canonical, macro_index, AnalyzedMacroKind::DefineSlots) {
+    if !macro_surface_resolves(
+        ctx,
+        owner_canonical,
+        macro_index,
+        AnalyzedMacroKind::DefineSlots,
+    ) {
         return None;
     }
     let dtos = crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(

@@ -2681,7 +2681,10 @@ defineProps<Props>()
     // Prime the SFC's IndexedReady (and pull the resolved `AnalyzedMacro` the
     // production cold resolver feeds the pre-filter) through a real session.
     let session = project.open_session_batch().unwrap();
-    let _ = session.evaluate_types("/PreFilterIndex.vue").unwrap().unwrap();
+    let _ = session
+        .evaluate_types("/PreFilterIndex.vue")
+        .unwrap()
+        .unwrap();
     let analysis = session
         .get_analysis("/PreFilterIndex.vue")
         .unwrap()
@@ -2774,7 +2777,9 @@ defineProps<{ (): void }>()
     // (the genuinely-no-surface case the gate returns `None` for) resolves to
     // `None`.
     let host = project.host();
-    let wh = host.get_whole_hash("/CallSigProps.vue").unwrap_or([0u8; 16]);
+    let wh = host
+        .get_whole_hash("/CallSigProps.vue")
+        .unwrap_or([0u8; 16]);
     let valid = crate::typeinfo::types::VueMacroSurfaceRequest {
         owner_canonical: std::sync::Arc::from("/CallSigProps.vue"),
         macro_index: 0,

@@ -358,7 +358,6 @@ impl VerterHost {
         let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
         vue_macro_dtos_with_ctx(&host_ctx, request)
     }
-
 }
 
 /// Navigate a `TypeExpr` to its one-level object [`TypeInfoSurface`] through the
@@ -403,18 +402,18 @@ pub(crate) fn navigate_param_to_object_surface(
     // paths through it keeps them in agreement (a `generic="M"` component's
     // `(props: SlotProps<M>)` slot resolves to NO bindings on both paths,
     // not a branch-committed guess).
-    if crate::meta_resolve::slot_binding_graph::slot_param_root_is_symbolic_only(
-        &dispatch, base, 0,
-    ) {
+    if crate::meta_resolve::slot_binding_graph::slot_param_root_is_symbolic_only(&dispatch, base, 0)
+    {
         return None;
     }
-    ctx.host_for_fact_tracer_install().project_shallow_surface_from_base(
-        ctx,
-        &dispatch,
-        base,
-        Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        ProjectionReductionContext::published(ProjectionMode::Shallow),
-    )
+    ctx.host_for_fact_tracer_install()
+        .project_shallow_surface_from_base(
+            ctx,
+            &dispatch,
+            base,
+            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+            ProjectionReductionContext::published(ProjectionMode::Shallow),
+        )
 }
 
 /// Slice a member's leading-JSDoc DESCRIPTION + TAG spans into owned text for
@@ -832,11 +831,13 @@ fn index_signatures_from_surface(
         .filter_map(|sig| {
             let key_type = dispatch.raise_node_to_type_expr(sig.key_type)?;
             let value_type = dispatch.raise_node_to_type_expr(sig.value_type)?;
-            Some(verter_semantic::analysis::type_expand::ExpandedIndexSignature {
-                key_type,
-                value_type,
-                readonly: sig.readonly,
-            })
+            Some(
+                verter_semantic::analysis::type_expand::ExpandedIndexSignature {
+                    key_type,
+                    value_type,
+                    readonly: sig.readonly,
+                },
+            )
         })
         .collect()
 }
@@ -1065,9 +1066,7 @@ fn slot_callable_param_and_return(
         // must be present in every arm — contravariant param), but the return
         // is the UNION of the arms' return types (covariant). Without this arm
         // a union-of-functions slot was silently dropped.
-        TypeExpr::Union(arms) => {
-            slot_callable_param_and_return_from_arms(arms, ArmCombine::Union)
-        }
+        TypeExpr::Union(arms) => slot_callable_param_and_return_from_arms(arms, ArmCombine::Union),
         _ => None,
     }
 }

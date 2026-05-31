@@ -294,23 +294,19 @@ pub(crate) fn resolve_emit_payload_to_conditional_root(
         // the prepared declaration's body `TypeExpr` directly — the same
         // mechanism the structural `named_decl_body` walker used.
         Some(SemanticNodeData::DeclRef { identity }) => {
-            lower_decl_body_to_node(dispatch, &identity.canonical_id, &identity.decl_name)
-                .and_then(|resolved| {
-                    resolve_emit_payload_to_conditional_root(
-                        dispatch,
-                        resolved,
-                        depth + 1,
-                        visited,
-                    )
-                })
+            lower_decl_body_to_node(dispatch, &identity.canonical_id, &identity.decl_name).and_then(
+                |resolved| {
+                    resolve_emit_payload_to_conditional_root(dispatch, resolved, depth + 1, visited)
+                },
+            )
         }
         // A `DeclPlaceholder` deferral (e.g. surfaced by an upstream
         // `ResolveDecl`). Reach its body the same way.
-        Some(SemanticNodeData::Opaque(
-            crate::semantic_query::QueryError::DeclPlaceholder {
-                canonical_id, name, ..
-            },
-        )) => lower_decl_body_to_node(dispatch, canonical_id, name).and_then(|resolved| {
+        Some(SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder {
+            canonical_id,
+            name,
+            ..
+        })) => lower_decl_body_to_node(dispatch, canonical_id, name).and_then(|resolved| {
             resolve_emit_payload_to_conditional_root(dispatch, resolved, depth + 1, visited)
         }),
         _ => None,
@@ -407,32 +403,30 @@ pub(crate) fn resolve_payload_surface_with_scope(
     // Conditional payload under emit-class scope. Project both
     // branches under `Published(Shallow)` and merge their top-level
     // Object members.
-    let (true_branch, false_branch) = match crate::project_semantic_dispatch::node_data_for(
-        dispatch.ctx,
-        conditional_node,
-    )
-    .as_deref()
-    {
-        Some(SemanticNodeData::Conditional {
-            true_branch_ref,
-            false_branch_ref,
-            ..
-        }) => (*true_branch_ref, *false_branch_ref),
-        _ => {
-            // Unreachable per the resolution above, but fall through
-            // safely.
-            return super::resolve_payload_surface(
-                dispatch,
-                payload_node,
-                macro_index,
-                expansion_kind,
-                // Emit-class payloads are structural (props-axis bit is
-                // always false for emits).
-                crate::semantic_query::SurfaceProvenanceContext::Structural,
-                diag_sink,
-            );
-        }
-    };
+    let (true_branch, false_branch) =
+        match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, conditional_node)
+            .as_deref()
+        {
+            Some(SemanticNodeData::Conditional {
+                true_branch_ref,
+                false_branch_ref,
+                ..
+            }) => (*true_branch_ref, *false_branch_ref),
+            _ => {
+                // Unreachable per the resolution above, but fall through
+                // safely.
+                return super::resolve_payload_surface(
+                    dispatch,
+                    payload_node,
+                    macro_index,
+                    expansion_kind,
+                    // Emit-class payloads are structural (props-axis bit is
+                    // always false for emits).
+                    crate::semantic_query::SurfaceProvenanceContext::Structural,
+                    diag_sink,
+                );
+            }
+        };
 
     let mut project_branch = |branch_node: SemanticNodeId| -> Option<SemanticNodeId> {
         let branch_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
