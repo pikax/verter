@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 /// MCP tool request payload.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct McpToolPayload {
     /// Tool name (matches `RequestKind::Mcp.tool`).
     pub tool_name: String,

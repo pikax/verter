@@ -8,7 +8,7 @@ use crate::payloads::tags::LspMethodTag;
 
 /// LSP request payload.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct LspRequestPayload {
     /// LSP method name.
     pub method: LspMethodTag,
@@ -36,7 +36,7 @@ pub struct LspRequestPayload {
 /// Editor position carried by LSP-method payloads. Producers
 /// populate from the LSP request.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct PositionInfo {
     /// Canonical id of the file.
     pub canonical_id: String,

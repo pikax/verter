@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// to zero (default) and the request driver fills the matching block
 /// at each phase boundary.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct RequestTimingAudit {
     /// End-to-end wall-clock for the request.
     pub total_ms: f64,

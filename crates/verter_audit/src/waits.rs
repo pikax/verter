@@ -29,7 +29,7 @@ use crate::record::u64_as_decimal_string;
 /// [`crate::record::RequestAuditRecord::waits`] field is `None`
 /// regardless of the timing flag.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct WaitAudit {
     /// Cumulative wall-clock spent acquiring per-cache shard / canonical
     /// mutexes during the audited window, in nanoseconds. Producers

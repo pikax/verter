@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// Compile target — mirror of `verter_compiler::CompileTarget`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum CompileTargetTag {
     /// VDOM render-function backend.
     Vdom,
@@ -22,7 +22,7 @@ pub enum CompileTargetTag {
 /// Projection mode — mirror of
 /// `verter_session::semantic_query::ProjectionMode`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum ProjectionModeTag {
     /// Identity — pass-through, no projection. Default for
     /// data-only construction sites.
@@ -49,7 +49,7 @@ pub enum ProjectionModeTag {
 /// optional fields of the audit-event variants that carry this tag,
 /// keeping the tag itself `Copy + Hash + Eq`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum AugmentationTargetKindTag {
     /// `declare module "vue" {}` — bare specifier resolved through
     /// the project's module resolver under the resolve env. Default
@@ -75,7 +75,7 @@ pub enum AugmentationTargetKindTag {
 /// `Copy` + `Hash` + `Eq` because audit consumers may aggregate
 /// refusal counts per reason.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum AdmissionRefusalReason {
     /// The producer observed zero facts during cold compute, but the
     /// cache requires at least one observed fact to admit. Default
@@ -93,7 +93,7 @@ pub enum AdmissionRefusalReason {
 /// Bundler kind — mirror of the unplugin's bundler discriminator.
 /// Not `Copy` because the `Other` variant carries an owned name.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum BundlerKindTag {
     /// Vite — default bundler for the unplugin path.
     #[default]
@@ -114,7 +114,7 @@ pub enum BundlerKindTag {
 /// `verter_lsp::handlers`. Not `Copy` because the `Other` variant
 /// carries an owned method name.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum LspMethodTag {
     /// `textDocument/hover`. Default — most audited LSP paths
     /// originate from hover.
@@ -150,7 +150,7 @@ pub enum LspMethodTag {
 ///
 /// [`FileArtifactStore`]: ../../../../verter_session/src/file_artifact_store.rs.html
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum FileArtifactCacheAction {
     /// A fresh `FileArtifacts` payload was admitted to the store —
     /// either a brand-new canonical or a new content-hash variant
@@ -176,7 +176,7 @@ pub enum FileArtifactCacheAction {
 /// facts use the parallel `ResolvedImportFacts` / `RouteDb`
 /// admission paths and emit their own typed events.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum FactKeyKindTag {
     /// `FactKey::Export` — exported binding. Default because exports
     /// dominate the registry on the steady-state baseline.
@@ -218,7 +218,7 @@ pub enum FactKeyKindTag {
 /// translate the session-side enum to this tag at emission time so
 /// the substrate stays leaf.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum FactLaneTag {
     /// Semantic lane — type-checker-relevant content. Default.
     #[default]

@@ -20,7 +20,7 @@ use crate::record::{u64_as_decimal_string, Hash16};
 #[derive(
     Debug, Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, ts_rs::TS,
 )]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct NodeId(
     /// Index in the canonicalised node list.
     pub u32,
@@ -32,7 +32,7 @@ pub struct NodeId(
 #[derive(
     Debug, Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, ts_rs::TS,
 )]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct EdgeId(
     /// Index in the canonicalised edge list.
     pub u32,
@@ -42,7 +42,7 @@ pub struct EdgeId(
 /// assigned stable opaque ids by the miner. Field docs name the sort
 /// keys.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct DerivationSubgraph {
     /// Sorted by `(kind, structural_hash, named_identity)`; `NodeId`
     /// is the index in this sorted list.
@@ -56,7 +56,7 @@ pub struct DerivationSubgraph {
 /// (`kind`, `named_identity`, `structural_hash`) participate in the
 /// deterministic NodeId assignment.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct NodeRecord {
     /// Structural kind (union / intersection / alias / instantiated /
     /// etc.). See [`SemanticNodeKind`].
@@ -75,7 +75,7 @@ pub struct NodeRecord {
 /// Named-type identity projection — `(canonical, symbol, args)` triple
 /// used to key instantiation equality.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct NamedIdentity {
     /// Canonical id of the file declaring the type symbol.
     pub canonical_id: Arc<str>,
@@ -88,7 +88,7 @@ pub struct NamedIdentity {
 /// `#[non_exhaustive]` + `Other` catchall future-proofs against new
 /// semantic-node-data variants without breaking the audit.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 #[non_exhaustive]
 pub enum SemanticNodeKind {
     /// Anchor node for a declaration — used as the root of a
@@ -144,7 +144,7 @@ pub enum SemanticNodeKind {
 /// One derivation edge. `result` is the node produced; `sources` are
 /// the nodes consumed; `meta` carries kind-specific payload.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct DerivationEdgeRecord {
     /// NodeId of the node produced by this edge.
     pub result: NodeId,
@@ -162,7 +162,7 @@ pub struct DerivationEdgeRecord {
 /// [`NodeId`]/[`EdgeId`] indices. Identity fields are interned via
 /// `Arc<str>` and `Hash16` so the accumulator stays cheap.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct DerivationEdgeRaw {
     /// Display label for the result node.
     pub result_label: Arc<str>,
@@ -189,7 +189,7 @@ pub struct DerivationEdgeRaw {
 #[derive(
     Debug, Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, ts_rs::TS,
 )]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum OriginEdgeKind {
     /// Instantiation of a generic with concrete arguments.
     Instantiate,
@@ -217,7 +217,7 @@ pub enum OriginEdgeKind {
 
 /// Kind-specific payload attached to a [`DerivationEdgeRecord`].
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum OriginEdgeMetaDto {
     /// Instantiation — carries the names of the generic's type
     /// parameters, in declaration order, to aid display rendering.
@@ -292,7 +292,7 @@ pub enum OriginEdgeMetaDto {
 #[derive(
     Debug, Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, ts_rs::TS,
 )]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum ConditionalBranch {
     /// The `extends U` clause was proved true — `X` was selected.
     True,
@@ -305,7 +305,7 @@ pub enum ConditionalBranch {
 
 /// One step in a projection path (member / index / keyof).
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum ProjectPathSegment {
     /// `.<name>` member access.
     Member {
@@ -340,7 +340,7 @@ pub enum ProjectPathSegment {
 #[derive(
     Debug, Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, ts_rs::TS,
 )]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum MemberEdgeProvenance {
     /// Final published surface field — direct emission onto the
     /// user-visible surface (a published prop / emit / slot / exposed).
@@ -367,7 +367,7 @@ pub enum MemberEdgeProvenance {
 /// Kind of normalization performed (union-flatten, intersection-
 /// flatten, or a simplification pass).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum NormalizeKind {
     /// Union flattening / dedup pass.
     Union,
@@ -380,7 +380,7 @@ pub enum NormalizeKind {
 /// Subject of a materialization envelope — which owner+member
 /// (or other identity) the envelope covers.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum MaterializationSubject {
     /// Member-route materialization (owner's public member lookup).
     MemberRoute {
@@ -445,7 +445,7 @@ pub enum MaterializationSubject {
 /// Audit consumers (TS bindings, harness) do not depend on the
 /// materialiser type so the substrate carries this mirror.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq, Hash)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum MaterializationScopeAudit {
     /// Top-level entry — input came from a caller's first
     /// `materialize_component_meta_structure` invocation.
@@ -459,7 +459,7 @@ pub enum MaterializationScopeAudit {
 /// Same rationale as [`MaterializationScopeAudit`] — keeps audit
 /// consumers independent of the dispatch types.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq, Hash)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum ProjectionModeAudit {
     /// Identity — pass-through, no projection.
     Identity,
@@ -476,7 +476,7 @@ pub enum ProjectionModeAudit {
 /// Reason a `MaterializeStructurePolicySkip` event fired — captures
 /// the policy-table arm that bailed before dispatch.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq, Hash)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum MaterializeSkipReason {
     /// Object-property lookup hit a function-typed property at
     /// `Nested` depth — function bodies are not materialised through
@@ -507,7 +507,7 @@ pub enum MaterializeSkipReason {
 
 /// Dispatch key kind — semantic-query cache key discriminator.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum DispatchKeyKind {
     /// Resolve a declaration (`typeof …`, `type A = …`).
     ResolveDecl,
@@ -528,7 +528,7 @@ pub enum DispatchKeyKind {
 /// Which VFS layer served the read — mirrored from the workspace's
 /// own `VfsAuditLayer`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum VfsLayer {
     /// Overlay (active editor buffer).
     Overlay,

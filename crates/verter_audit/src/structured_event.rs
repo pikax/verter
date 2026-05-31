@@ -61,7 +61,7 @@ use crate::record::{u64_as_decimal_string, Hash16};
 /// to the TLS accumulator's event log and, later, to the footprint
 /// miner's output without a trip through a format string.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum StructuredAuditEvent {
     /// Emitted at the entry of `get_component_meta_with_resolution`.
     RequestStart {

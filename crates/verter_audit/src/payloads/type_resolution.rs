@@ -20,7 +20,7 @@ use crate::payloads::tags::ProjectionModeTag;
 /// side. Producers populate them at the typeinfo audit-emission
 /// boundary in `verter_session`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct TypeResolutionPayload {
     /// Projection mode the resolver ran with.
     pub query_mode: ProjectionModeTag,

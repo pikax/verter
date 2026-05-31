@@ -9,7 +9,7 @@ use crate::record::{i64_as_decimal_string, u64_as_decimal_string};
 /// Memory snapshots — process RSS before/after, plus host and
 /// workspace cache footprints. All values in bytes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct RequestMemoryAudit {
     /// Process RSS before request start (bytes).
     #[serde(with = "u64_as_decimal_string")]

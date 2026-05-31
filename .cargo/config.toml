@@ -9,9 +9,15 @@ xtask = "run --package xtask --"
 # requires this for wasm builds.
 rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]
 
-# ts-rs writes audit record TS bindings here (relative to this config
-# file's location, i.e. the workspace root). All `#[ts(export_to = "...")]`
-# attributes on verter_session audit types resolve under this base path.
-# Plan §1.4.
-[env]
-TS_RS_EXPORT_DIR = { value = "packages/types", relative = true }
+# NOTE: `TS_RS_EXPORT_DIR` is deliberately NOT set here. The audit DTOs
+# carry `#[ts(export_to = "audit.generated.ts")]` (no `export` keyword),
+# so a normal `cargo test` does NOT auto-write any tracked file. The
+# committed `packages/types/audit.generated.ts` is the single source of
+# truth, regenerated explicitly only via
+# `crates/verter_session/tests/g_misc1/ts_bindings.rs` under
+# `VERTER_UPDATE_TS_BINDINGS=1` (which writes into a tempdir then
+# atomic-renames over the tracked file). Re-adding a global
+# `TS_RS_EXPORT_DIR = packages/types` here would resurrect the
+# concurrent-truncation bug that tore the bindings file during
+# `cargo test --workspace`; the guard test
+# `audit_types_have_no_ts_export_auto_export` enforces this.

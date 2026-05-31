@@ -13,7 +13,7 @@ use crate::record::u64_as_decimal_string;
 /// (parallel to how `LspRequestPayload::method` mirrors the
 /// `RequestKind::Lsp { method }` tag).
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq, Hash)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum WorkspaceOp {
     /// `resolve(specifier, from)` — module specifier resolution.
     AuditResolve {
@@ -38,7 +38,7 @@ pub enum WorkspaceOp {
 
 /// Workspace request payload.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct WorkspacePayload {
     /// Operation discriminator. Mirrors `RequestKind::Workspace { op }`
     /// on the envelope; carried inside the payload so consumers that

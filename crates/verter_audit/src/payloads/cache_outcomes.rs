@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 /// Cache-outcome discriminator for per-event tallies.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum CacheOutcomeKind {
     /// Warm cache hit.
     Hit,

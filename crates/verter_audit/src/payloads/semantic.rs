@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 /// Semantic-analysis request payload.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct SemanticAnalysisPayload {
     /// Number of imports recorded by the analysis.
     pub num_imports: u32,
