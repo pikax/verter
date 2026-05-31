@@ -12132,14 +12132,15 @@ fn overlay_session_vue_macro_slot_bindings_read_overlay_carrier_without_leaking_
         } else {
             crate::FileKind::NonSfc
         };
-        host.upsert(crate::UpsertRequest {
-            canonical_id: None,
-            input_id: id.to_string(),
-            source: Arc::from(src),
-            file_kind: kind,
-            aliases: Vec::new(),
-        })
-        .expect("upsert succeeds");
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: None,
+                input_id: id.to_string(),
+                source: Arc::from(src),
+                file_kind: kind,
+                aliases: Vec::new(),
+            })
+            .expect("upsert succeeds");
     }
 
     let indexed = host.ensure_indexed_ready(SFC).expect("SFC must index ready");
