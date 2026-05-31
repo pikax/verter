@@ -209,24 +209,33 @@ fn audit_warm_path_finalizes_footprint_some_with_per_request_isolation() {
         warm_record.from_cache,
     );
     // THE discriminating assertion: the warm record carries a footprint.
+    // Pre-fix the warm path synthesized `footprint: None`, leaving audited
+    // warm-cache requests with no footprint coverage at all.
     assert!(
         warm_record.footprint.is_some(),
-        "warm-cache audited request must finalise a footprint (Some), not None — \
-         pre-fix this is None and the 16-thread isolation test panics on \
-         footprint.expect(...)",
+        "warm-cache audited request must finalise a footprint (Some), not None",
     );
 
-    // Per-request isolation: every VFS read attributed in the warm
-    // footprint must belong to THIS request, never the cold warm-up
-    // request (`first.request_id`). The warm path drains only this
-    // request's per-request accumulator (the SessionVfsSink filters by
-    // request_id), so cross-request attribution is structurally
-    // impossible — assert it explicitly so a future regression that
-    // leaks the cold request's reads into the warm record fails here.
+    // A warm cache hit performs ZERO VFS READS, so the footprint's read lane
+    // must be EMPTY. Asserting emptiness — not merely per-read attribution —
+    // is what makes a regression that leaks the cold warm-up request's reads
+    // into the warm footprint fail here: an attribution-only loop is vacuous
+    // when the read lane is empty. (The record's `files` lane is the
+    // STRUCTURAL direct-import list, legitimately non-empty for a warm hit,
+    // so it is not a read-leak vector and is intentionally not asserted empty.)
     let footprint = warm_record
         .footprint
         .as_ref()
         .expect("footprint asserted Some above");
+    assert!(
+        footprint.vfs_reads.is_empty(),
+        "warm-cache hit must perform zero VFS reads; got {}: {:?}",
+        footprint.vfs_reads.len(),
+        footprint.vfs_reads,
+    );
+    // Defense-in-depth: should a future warm path legitimately perform
+    // reads, every read must still attribute to THIS request, never the
+    // cold warm-up request (`first.request_id`), so a leak fails here too.
     for r in &footprint.vfs_reads {
         assert_eq!(
             r.request_id, second.request_id,

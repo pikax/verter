@@ -3655,10 +3655,6 @@ mod tests {
         // parent's Artifact stage, so completion structurally forces
         // the dep-source job to have run first (see the doc-comment's
         // determinism barrier rationale).
-        // Target Artifact (not Analysis): the dep blocker gates the
-        // parent's Artifact stage, so completion structurally forces
-        // the dep-source job to have run first (see the doc-comment's
-        // determinism barrier rationale).
         let handle = sched.submit_request(Request {
             file_id: PARENT.to_string(),
             target: TargetStage::Artifact { profile_hash: 0 },
