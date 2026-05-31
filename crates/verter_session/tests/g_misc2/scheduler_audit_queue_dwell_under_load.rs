@@ -3,13 +3,31 @@
 //!
 //! Drives 16 concurrent submissions through the real scheduler with
 //! a session-side [`verter_session::request_context::RequestContext`]
-//! attached to each. A source-stage gate ([`SourceGate`]) holds all
-//! source-capable workers until the surplus requests are provably
-//! parked in the priority queue, so those entries SIT between enqueue
-//! and dispatch deterministically (not by timing luck). The dispatch
-//! site captures `(dequeue_at - entry.enqueue_time)` and publishes it
-//! via `AuditObserver::record_scheduler_dispatch`. At least one
-//! captured `queue_dwell_ms` must be strictly positive.
+//! attached to each. The rendezvous lives at the scheduler DISPATCH
+//! site, so the assertion reflects real SCHEDULER-PRIORITY-QUEUE dwell
+//! — not pool-channel time:
+//!
+//! 1. An ALL-SUBMITTED barrier guarantees every submitter has returned
+//!    from `submit_request` (so all 16 submissions are at least in the
+//!    inbox channel) before the test inspects anything.
+//! 2. The scheduler's test-only dispatch pause (armed at
+//!    `POOL_THREADS`) parks the driver after exactly `POOL_THREADS`
+//!    source dispatches, BEFORE the next dequeue. While parked, the
+//!    driver re-drains the inbox so every surplus submission provably
+//!    lands in `job_index`.
+//! 3. The test waits until the driver is parked, then polls
+//!    `Scheduler::test_job_queue_depth` until the surplus
+//!    (`REQUESTS - POOL_THREADS`) is provably SITTING in the scheduler
+//!    queue, and only THEN releases both the dispatch pause and the
+//!    source gate (which held the two dispatched workers stable during
+//!    inspection).
+//!
+//! The surplus entries are dequeued only after the test held them in
+//! the queue, so their first-dispatch (source-stage)
+//! `queue_dwell_ms = dequeue_at - entry.enqueue_time` is strictly
+//! positive BY CONSTRUCTION, not by timing luck. The dispatch site
+//! captures that value and publishes it via
+//! `AuditObserver::record_scheduler_dispatch`.
 //!
 //! Discriminating: pre-Slice-2.3 the `record_scheduler_dispatch`
 //! observer hook does not exist; the per-request scheduler_audit
@@ -20,7 +38,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Barrier, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -41,18 +59,21 @@ const REQUESTS: usize = 16;
 /// request is provably parked in the priority queue.
 const POOL_THREADS: usize = 2;
 
-/// Deterministic rendezvous between the test driver and the
-/// source-stage workers. Replaces the old fixed per-stage `sleep`s,
-/// which only *probabilistically* created queue contention.
+/// Holds the source-stage workers that the driver dispatches before it
+/// parks at the dispatch pause, so the scheduler state stays stable
+/// while the test inspects the priority-queue depth.
 ///
 /// Each source execution increments `entered` and then blocks until the
-/// driver flips `released`. The driver holds the gate closed until
-/// [`POOL_THREADS`] workers are parked inside it — at which point all
-/// source-capable workers are occupied and the surplus requests
-/// ([`REQUESTS`] − [`POOL_THREADS`]) are guaranteed to be sitting in the
-/// queue, accumulating real dwell. Releasing the gate then dispatches
-/// the queued entries whose first-dispatch (source-stage) `queue_dwell_ms`
-/// is therefore strictly positive *by construction*, not by timing luck.
+/// driver flips `released`. Crucially, this gate does NOT prove dwell on
+/// its own — entering `execute_source` only proves a worker left the
+/// queue, not that the surplus is parked IN the queue. The dwell
+/// guarantee comes from the scheduler dispatch pause (see the module
+/// doc): the gate's only remaining job is to keep the [`POOL_THREADS`]
+/// dispatched workers from completing (and enqueuing follow-on analysis
+/// jobs) while the test observes that the surplus
+/// ([`REQUESTS`] − [`POOL_THREADS`]) is sitting in `job_index`. The gate
+/// is released together with the dispatch pause once that observation is
+/// made.
 struct SourceGate {
     entered: AtomicUsize,
     released: Mutex<bool>,
@@ -150,6 +171,34 @@ impl StageExecutor for GatedSourceExecutor {
     }
 }
 
+/// Join `handle`, panicking if it does not complete within `timeout`.
+///
+/// The join runs on a helper thread that reports its outcome through a
+/// rendezvous channel; the caller blocks on `recv_timeout`. A genuinely
+/// stuck worker never reports, so the `recv_timeout` elapses and we
+/// PANIC with `label` — a hang surfaces as a loud failure within the
+/// deadline instead of blocking the suite forever (a bare
+/// `handle.join()` would itself hang on a real deadlock).
+fn join_within(handle: thread::JoinHandle<()>, timeout: Duration, label: &str) {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<thread::Result<()>>(1);
+    thread::spawn(move || {
+        // `send` fails only if the receiver was dropped (caller already
+        // panicked on timeout); ignore so this helper thread does not
+        // itself panic on a benign disconnect.
+        let _ = tx.send(handle.join());
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => panic!("{label} panicked"),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("{label} deadlocked (join did not complete within {timeout:?})")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("{label} watchdog channel disconnected before reporting")
+        }
+    }
+}
+
 #[test]
 fn at_least_one_concurrent_request_observes_non_zero_queue_dwell_ms() {
     let loader = Arc::new(MemorySourceLoader::new());
@@ -184,12 +233,26 @@ fn at_least_one_concurrent_request_observes_non_zero_queue_dwell_ms() {
             .collect(),
     );
 
+    // Arm the dispatch pause BEFORE submitting: the driver will park
+    // after exactly POOL_THREADS source dispatches, before the next
+    // dequeue, and re-drain the inbox so the surplus accrues real
+    // scheduler-queue dwell.
+    sched.test_arm_dispatch_pause(POOL_THREADS);
+
+    // All-submitted barrier: REQUESTS submitter threads + this driver
+    // thread. Every submitter signals after `submit_request` returns, so
+    // once the barrier trips all REQUESTS submissions are at least in the
+    // inbox channel — the re-drain inside the dispatch pause is then
+    // guaranteed to pull every one of them into `job_index`.
+    let all_submitted = Arc::new(Barrier::new(REQUESTS + 1));
+
     // Submit ALL requests in parallel. Each uses a fresh session
     // context so the `scheduler_audit` slot is independently observable.
     let handles: Vec<_> = (0..REQUESTS)
         .map(|i| {
             let sched = Arc::clone(&sched);
             let ctx = Arc::clone(&contexts[i]);
+            let all_submitted = Arc::clone(&all_submitted);
             thread::spawn(move || {
                 let opaque = OpaqueRequestContext(ctx as Arc<dyn RequestContextLike>);
                 let h = sched.submit_request(Request {
@@ -200,23 +263,66 @@ fn at_least_one_concurrent_request_observes_non_zero_queue_dwell_ms() {
                     file_kind: None,
                     request_context: Some(opaque),
                 });
+                // Signal that this submission has entered the inbox, then
+                // block on completion (which only happens after the test
+                // releases the dispatch pause + the source gate).
+                all_submitted.wait();
                 h.wait();
             })
         })
         .collect();
 
-    // Deterministically force the queue-dwell window: block until
-    // POOL_THREADS source workers are parked inside the gate. At that
-    // point every source-capable worker is occupied, so the remaining
-    // REQUESTS - POOL_THREADS submissions are provably sitting in the
-    // priority queue, accumulating real dwell. Only then release the
-    // gate so those queued entries dispatch with a strictly-positive
-    // source-stage `queue_dwell_ms`.
-    gate.wait_until_entered(POOL_THREADS);
-    gate.release();
+    // Step 1: wait until every submitter has returned from
+    // `submit_request`.
+    all_submitted.wait();
 
-    for h in handles {
-        h.join().expect("worker joined");
+    // Step 2: confirm POOL_THREADS source jobs were actually dispatched
+    // (their workers entered the gate) — a cross-check that the pause
+    // fired after real source dispatches, not before any.
+    gate.wait_until_entered(POOL_THREADS);
+
+    // Step 3: wait until the driver has parked at the dispatch pause
+    // (after POOL_THREADS dispatches, before the next dequeue). While
+    // parked it re-drains the inbox so the surplus lands in `job_index`.
+    sched.test_wait_until_dispatch_paused();
+
+    // Step 4: confirm the surplus (REQUESTS - POOL_THREADS) is PROVABLY
+    // sitting in the scheduler priority queue before releasing. Bounded
+    // poll; panic on stall so a logic error fails loudly. This is the
+    // soundness core: the assertion later only holds because these
+    // entries demonstrably accrued scheduler-queue dwell during the
+    // pause window.
+    let want_surplus = REQUESTS - POOL_THREADS;
+    let depth_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let depth = sched.test_job_queue_depth();
+        if depth >= want_surplus {
+            break;
+        }
+        assert!(
+            Instant::now() < depth_deadline,
+            "surplus never reached the scheduler priority queue: observed \
+             depth {depth}, want >= {want_surplus} (REQUESTS {REQUESTS} - \
+             POOL_THREADS {POOL_THREADS})",
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    // Step 5: release the gate FIRST (so the dispatched + surplus source
+    // workers can run freely), then release the dispatch pause so the
+    // driver dequeues the surplus — each with a strictly-positive
+    // source-stage `queue_dwell_ms` because it sat in the queue for the
+    // whole pause window.
+    gate.release();
+    sched.test_release_dispatch_pause();
+
+    // Bounded join: each submitter completes once its request finishes
+    // (which requires the pause + gate to have been released). A genuine
+    // deadlock PANICS within ~10s rather than hanging the suite — this is
+    // also what makes the FIX-2 bound provable: with the release removed,
+    // the submitters never complete and this join surfaces the stall.
+    for (idx, h) in handles.into_iter().enumerate() {
+        join_within(h, std::time::Duration::from_secs(10), &format!("submitter {idx}"));
     }
 
     // EVERY context's scheduler_audit slot must be populated.
@@ -230,9 +336,10 @@ fn at_least_one_concurrent_request_observes_non_zero_queue_dwell_ms() {
         );
     }
 
-    // At LEAST ONE captured dwell must be strictly positive. The gate
-    // held all source-capable workers until the surplus requests were
-    // provably queued, so their first-dispatch (source-stage)
+    // At LEAST ONE captured dwell must be strictly positive. The
+    // dispatch pause held the surplus requests in the scheduler priority
+    // queue (confirmed via test_job_queue_depth) for the whole pause
+    // window before releasing, so their first-dispatch (source-stage)
     // queue_dwell_ms is positive by construction — not by timing luck.
     let max_dwell = contexts
         .iter()
