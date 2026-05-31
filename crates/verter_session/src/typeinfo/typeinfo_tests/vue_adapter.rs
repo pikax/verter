@@ -611,6 +611,78 @@ fn define_slots_normalizer_filters_non_function_members_and_preserves_return() {
 }
 
 // ---------------------------------------------------------------------------
+// (4a-union) defineSlots normalizer — a slot typed as a UNION of function
+//      aliases (`default: SlotA | SlotB`). The slot member resolves to a
+//      `Union` of two `Function` carriers; the normalizer must publish it as a
+//      slot. Vue invokes `$slots.default`, whose type is `SlotA | SlotB`, so the
+//      child must pass an argument assignable to BOTH arms' params — i.e.
+//      `PA & PB`. As object types `{ shared, a } & { shared, b }` carries all
+//      three members, so the consumer's template can destructure `shared`, `a`,
+//      AND `b`. The param is therefore the INTERSECTION of the arms' first
+//      params (TS-correct contravariant merge) and the return is the UNION of
+//      the arms' returns.
+//
+//      Discriminating: pre-fix `slot_callable_param_and_return` matched only
+//      `Function` + `Intersection` (and `realize_callable_member` did not
+//      descend `Union` arms or unwrap an alias `DeclPlaceholder`), so a `Union`
+//      of function-alias slots returned `None` and the slot was DROPPED
+//      entirely. Post-fix the slot publishes and its bindings surface.
+// ---------------------------------------------------------------------------
+
+const VUE_SLOTS_UNION: &str = r#"<script setup lang="ts">
+type SlotA = (props: { shared: string; a: string }) => any;
+type SlotB = (props: { shared: string; b: number }) => any;
+type Slots = { default: SlotA | SlotB };
+defineSlots<Slots>();
+</script>
+"#;
+
+#[test]
+fn define_slots_normalizer_publishes_union_of_function_slots() {
+    const FILE: &str = "/w/SlotsUnion.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_SLOTS_UNION);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("defineSlots must resolve a surface");
+    let slots = slots_from_typeinfo_surface(&*host, &surface);
+
+    // The union-of-functions slot must be PUBLISHED (pre-fix it was dropped).
+    let names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["default"],
+        "a `default: SlotA | SlotB` union-of-functions slot must publish \
+         (pre-fix the union arm was unhandled and the slot was dropped)"
+    );
+
+    let default_slot = slots.iter().find(|s| s.name == "default").unwrap();
+    let binding_names: std::collections::BTreeSet<&str> = default_slot
+        .bindings
+        .iter()
+        .map(|b| b.name.as_str())
+        .collect();
+    // Param = `PA & PB` (the contravariant intersection of the arms' first
+    // params). As object types that carries every member, so `shared`, `a`, and
+    // `b` all surface as bindings the consumer's template can destructure.
+    assert_eq!(
+        binding_names,
+        std::collections::BTreeSet::from(["a", "b", "shared"]),
+        "a union slot's bindings are the intersection of the arms' params \
+         (`PA & PB`), which carries every member; got {binding_names:?}"
+    );
+    assert!(
+        default_slot
+            .bindings
+            .iter()
+            .all(|b| b.binding_expr.is_some()),
+        "each union-slot binding carries its typed binding_expr"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // (4b) defineSlots normalizer — a `Pick<T,'k'>` first parameter yields the
 //      picked bindings (matching the eager local-SFC rail). The new path must
 //      navigate the first-param type through the SHARED resolver to its object

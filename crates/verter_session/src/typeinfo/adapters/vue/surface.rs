@@ -999,20 +999,26 @@ pub(crate) fn emits_from_typeinfo_surface(
 }
 
 /// Extract a slot callable's first-parameter type + return type from a slot
-/// member value, handling an INTERSECTION of function types.
+/// member value, handling an INTERSECTION or a UNION of function types.
 ///
 /// A slot typed via an intersection of interfaces
 /// (`defineSlots<SlotA & SlotB>()`) has its `default` member resolve to
 /// `SlotA['default'] & SlotB['default']` — an `Intersection` of two function
 /// types (the TS-correct meaning of indexing an intersection), NOT a single
-/// pre-merged `Function`. Returns:
+/// pre-merged `Function`. A slot typed as a union of function aliases
+/// (`defineSlots<{ default: SlotA | SlotB }>()`) resolves its `default` member
+/// to a `Union` of two function types. Both are slot-callable. Returns:
 ///
 /// - `Function(f)` → `f`'s first-param type + return type directly.
-/// - `Intersection(arms)` where EVERY resolvable arm is a function → the
-///   INTERSECTION of the arms' first-param types (so `{ value?: string } &
-///   { value: string }` flows into [`binding_fields_from_param_ty`], whose
-///   resolver-navigation merges it required-wins) plus the intersection of the
-///   arms' return types. A non-function arm makes the member not slot-like.
+/// - `Intersection(arms)` / `Union(arms)` where EVERY resolvable arm is a
+///   function → the INTERSECTION of the arms' first-param types (so
+///   `{ value?: string } & { value: string }` flows into
+///   [`binding_fields_from_param_ty`], whose resolver-navigation merges it
+///   required-wins; for a UNION the param is contravariant, so the bindings a
+///   template can SAFELY destructure are those present across all arms — again
+///   the intersection merge) plus the combined return type (intersection of
+///   returns for an intersection, union of returns for a union). A non-function
+///   arm makes the member not slot-like.
 /// - Anything else → `None` (the member is not a slot).
 fn slot_callable_param_and_return(
     value: &TypeExpr,
@@ -1032,45 +1038,87 @@ fn slot_callable_param_and_return(
             // `render_type_expr_display` cannot surface.
             func.spans.return_type,
         )),
+        // Intersection of slot-callable arms: param = intersection of first
+        // params (required-wins merge), return = intersection of returns.
         TypeExpr::Intersection(arms) => {
-            let mut first_params: Vec<TypeExpr> = Vec::new();
-            let mut returns: Vec<TypeExpr> = Vec::new();
-            for arm in arms.iter() {
-                let TypeExpr::Function(func) = arm else {
-                    // A non-function arm means the member is not purely
-                    // slot-callable; fall out (not a slot).
-                    return None;
-                };
-                if let Some(p) = func.parameters.first() {
-                    first_params.push(p.ty.clone());
-                }
-                if let Some(rt) = func.return_type.as_ref() {
-                    returns.push((**rt).clone());
-                }
-            }
-            if first_params.is_empty() && returns.is_empty() {
-                return None;
-            }
-            let first_param = match first_params.len() {
-                0 => None,
-                1 => Some(first_params.into_iter().next().unwrap()),
-                _ => Some(TypeExpr::Intersection(std::sync::Arc::from(
-                    first_params.into_boxed_slice(),
-                ))),
-            };
-            let return_ty = match returns.len() {
-                0 => None,
-                1 => Some(returns.into_iter().next().unwrap()),
-                _ => Some(TypeExpr::Intersection(std::sync::Arc::from(
-                    returns.into_boxed_slice(),
-                ))),
-            };
-            // An intersection of function arms has no single return-type span;
-            // the caller renders the composed return from the typed form.
-            Some((first_param, return_ty, None))
+            slot_callable_param_and_return_from_arms(arms, ArmCombine::Intersection)
+        }
+        // Union of slot-callable arms (`SlotA | SlotB`): param stays the
+        // INTERSECTION of first params (a slot prop the template can rely on
+        // must be present in every arm — contravariant param), but the return
+        // is the UNION of the arms' return types (covariant). Without this arm
+        // a union-of-functions slot was silently dropped.
+        TypeExpr::Union(arms) => {
+            slot_callable_param_and_return_from_arms(arms, ArmCombine::Union)
         }
         _ => None,
     }
+}
+
+/// How to combine the RETURN types of a multi-arm slot callable. The first
+/// params are ALWAYS intersected (the bindings a template can rely on must hold
+/// across every arm); only the return-type combiner differs.
+#[derive(Clone, Copy)]
+enum ArmCombine {
+    Intersection,
+    Union,
+}
+
+/// Shared multi-arm slot-callable extractor for `Intersection` / `Union` of
+/// function types. Every arm MUST be a `Function` (a non-function arm makes the
+/// member not slot-like → `None`). The first params are intersected; the
+/// returns are combined per `combine`.
+fn slot_callable_param_and_return_from_arms(
+    arms: &[TypeExpr],
+    combine: ArmCombine,
+) -> Option<(
+    Option<TypeExpr>,
+    Option<TypeExpr>,
+    Option<verter_span::Span>,
+)> {
+    let mut first_params: Vec<TypeExpr> = Vec::new();
+    let mut returns: Vec<TypeExpr> = Vec::new();
+    for arm in arms.iter() {
+        let TypeExpr::Function(func) = arm else {
+            // A non-function arm means the member is not purely slot-callable;
+            // fall out (not a slot).
+            return None;
+        };
+        if let Some(p) = func.parameters.first() {
+            first_params.push(p.ty.clone());
+        }
+        if let Some(rt) = func.return_type.as_ref() {
+            returns.push((**rt).clone());
+        }
+    }
+    if first_params.is_empty() && returns.is_empty() {
+        return None;
+    }
+    // First params: always the INTERSECTION (the slot prop object a template
+    // can destructure must be guaranteed across every arm).
+    let first_param = match first_params.len() {
+        0 => None,
+        1 => Some(first_params.into_iter().next().unwrap()),
+        _ => Some(TypeExpr::Intersection(std::sync::Arc::from(
+            first_params.into_boxed_slice(),
+        ))),
+    };
+    // Returns: combine per the arm kind (intersection of returns for an
+    // intersection of functions; union of returns for a union of functions).
+    let return_ty = match returns.len() {
+        0 => None,
+        1 => Some(returns.into_iter().next().unwrap()),
+        _ => {
+            let boxed = std::sync::Arc::from(returns.into_boxed_slice());
+            Some(match combine {
+                ArmCombine::Intersection => TypeExpr::Intersection(boxed),
+                ArmCombine::Union => TypeExpr::Union(boxed),
+            })
+        }
+    };
+    // A composed multi-arm callable has no single return-type span; the caller
+    // renders the composed return from the typed form.
+    Some((first_param, return_ty, None))
 }
 
 /// Normalize a `.vue` slots macro surface into the published

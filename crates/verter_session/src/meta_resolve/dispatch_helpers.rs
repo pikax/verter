@@ -216,9 +216,83 @@ fn realize_callable_member_inner(
             realize_callable_member_inner(dispatch, resolved, context, depth + 1)
         }
 
-        // Any other shape (Object, Union, Intersection, Primitive,
-        // Mapped, KeyOf, IndexedAccess, TypeOf, TypeParam, Literal,
-        // Tuple, Array, TemplateLiteral, Opaque) — not callable.
+        // (5b) DeclPlaceholder — the shallow ResolveDecl of an alias / interface
+        // declaration returns this carrier rather than the eagerly-resolved
+        // body (a `type SlotA = (props) => any` resolves to
+        // `Opaque(DeclPlaceholder { name: "SlotA" })` under Navigate). Instantiate
+        // the placeholder to obtain the declaration body (the Function), then
+        // recurse. Without this arm a slot member typed as an ALIAS to a function
+        // (`default: SlotFn` / a `Union` / `Intersection` of such aliases) never
+        // realizes to a callable. Mirrors the `expand_empty_path_terminal`
+        // DeclPlaceholder expansion in the dispatch walker.
+        SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder {
+            canonical_id,
+            name,
+            whole_hash,
+        }) => {
+            let identity = crate::semantic_query::DeclIdentity {
+                canonical_id: Arc::clone(canonical_id),
+                whole_hash: *whole_hash,
+                decl_name: Arc::clone(name),
+            };
+            drop(data);
+            let read = dispatch.execute_read(SemanticQueryKey::Instantiate {
+                base: identity,
+                args: Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+                context: ProjectionReductionContext::structural_transit_with_mode(
+                    ProjectionMode::Navigate,
+                ),
+            });
+            emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
+            let body = match read.value {
+                QueryResult::Value(id) if id != node => id,
+                // `Value(id) where id == node` means the instantiate returned the
+                // placeholder unchanged (unresolved declaration) — nothing to
+                // realize.
+                _ => return None,
+            };
+            realize_callable_member_inner(dispatch, body, context, depth + 1)
+        }
+
+        // (6) Union / Intersection — a composite of slot-callable arms
+        // (`default: SlotA | SlotB` raises to `Union(Ref(SlotA), Ref(SlotB))`;
+        // `(SlotA & SlotB)['default']` to an `Intersection`). Realize EACH arm
+        // to its callable Function and rebuild the composite of realized arms,
+        // so the slot normalizer's `slot_callable_param_and_return` sees
+        // `Union(Function, Function)` / `Intersection(Function, Function)`
+        // rather than a composite of unresolved alias `Ref`s. If ANY arm does
+        // not realize to a callable the whole composite is not slot-callable
+        // (`None`) — the slot normalizer then classifies the member non-slot.
+        SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+            let is_union = matches!(data.as_ref(), SemanticNodeData::Union(_));
+            let arms = Arc::clone(arms);
+            drop(data);
+            let mut realized_arms: Vec<crate::semantic_query::SemanticNodeId> =
+                Vec::with_capacity(arms.len());
+            for arm in arms.iter() {
+                let realized = realize_callable_member_inner(dispatch, *arm, context, depth + 1)?;
+                realized_arms.push(realized);
+            }
+            if realized_arms.is_empty() {
+                return None;
+            }
+            // If realization left every arm unchanged, return the original node
+            // (avoid interning an identical composite).
+            if realized_arms.iter().zip(arms.iter()).all(|(a, b)| a == b) {
+                return Some(node);
+            }
+            let boxed = Arc::from(realized_arms.into_boxed_slice());
+            let rebuilt = if is_union {
+                SemanticNodeData::Union(boxed)
+            } else {
+                SemanticNodeData::Intersection(boxed)
+            };
+            Some(dispatch.ctx.project_type_store().semantic_graph().intern_node(rebuilt))
+        }
+
+        // Any other shape (Object, Primitive, Mapped, KeyOf, IndexedAccess,
+        // TypeOf, TypeParam, Literal, Tuple, Array, TemplateLiteral, Opaque) —
+        // not callable.
         _ => None,
     }
 }
