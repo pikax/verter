@@ -723,7 +723,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     }
 
     /// The corresponding test assertions migrated to behavior
-    /// assertions / ctx `prepared_surface_db().live_count()` checks.
+    /// assertions / ctx `materialize_structure_db().live_count()` checks.
     /// Field + accessor retained until the broader counter cleanup.
     #[cfg(test)]
     #[allow(dead_code)]

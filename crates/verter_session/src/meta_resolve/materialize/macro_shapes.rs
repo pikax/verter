@@ -1,4 +1,5 @@
-//! Type-reference name collection for materialised macro shapes.
+//! `TypeExpr` reference-name collector (the surviving remnant of the
+//! retired macro-shape materialiser).
 //!
 //! The macro-object materialiser (`produce_macro_object_shapes` and its
 //! `synthesize_define_*` / `produce_one_*` / `project_named_ref_*` helper

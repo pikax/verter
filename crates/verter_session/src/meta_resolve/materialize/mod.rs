@@ -1,4 +1,4 @@
-//! Materialization core: TypeExpr stabilizer + macro-shape producers.
+//! Materialization core: TypeExpr stabilizer + macro-shape ref-name collector.
 //!
 //! Module split:
 //!
