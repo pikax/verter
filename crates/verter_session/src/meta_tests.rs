@@ -8852,23 +8852,17 @@ defineProps<{
         })
     };
     let TypeExpr::Object(ui_gap_obj) = ui_gap else {
-        panic!(
-            "ui.gap must be the concrete `typeof theme` object surface, got {ui_gap:?}",
-        );
+        panic!("ui.gap must be the concrete `typeof theme` object surface, got {ui_gap:?}",);
     };
     let ui_gap_variants = find_prop(&ui_gap_obj.properties, "variants")
         .expect("`typeof theme` must expose a `variants` member; ui.gap is the theme surface");
     let TypeExpr::Object(ui_gap_variants_obj) = &ui_gap_variants else {
-        panic!(
-            "`typeof theme`.variants must be an object, got {ui_gap_variants:?}",
-        );
+        panic!("`typeof theme`.variants must be an object, got {ui_gap_variants:?}",);
     };
     let ui_gap_color = find_prop(&ui_gap_variants_obj.properties, "color")
         .expect("`typeof theme`.variants must expose a `color` member");
     let TypeExpr::Object(ui_gap_color_obj) = &ui_gap_color else {
-        panic!(
-            "`typeof theme`.variants.color must be an object, got {ui_gap_color:?}",
-        );
+        panic!("`typeof theme`.variants.color must be an object, got {ui_gap_color:?}",);
     };
     // The terminal `color` members are EXACTLY the fixture's
     // `primary`/`secondary` const string-literal keys — no more, no
@@ -8940,13 +8934,15 @@ fn assert_concrete_theme_surface(ty: &TypeExpr, label: &str) {
     let TypeExpr::Object(obj) = ty else {
         panic!("{label} must be the concrete `typeof theme` object surface, got {ty:?}");
     };
-    let variants = find_prop(&obj.properties, "variants")
-        .unwrap_or_else(|| panic!("{label} (`typeof theme`) must expose a `variants` member, got {obj:?}"));
+    let variants = find_prop(&obj.properties, "variants").unwrap_or_else(|| {
+        panic!("{label} (`typeof theme`) must expose a `variants` member, got {obj:?}")
+    });
     let TypeExpr::Object(variants_obj) = &variants else {
         panic!("{label} `typeof theme`.variants must be an object, got {variants:?}");
     };
-    let color = find_prop(&variants_obj.properties, "color")
-        .unwrap_or_else(|| panic!("{label} `typeof theme`.variants must expose a `color` member, got {variants_obj:?}"));
+    let color = find_prop(&variants_obj.properties, "color").unwrap_or_else(|| {
+        panic!("{label} `typeof theme`.variants must expose a `color` member, got {variants_obj:?}")
+    });
     let TypeExpr::Object(color_obj) = &color else {
         panic!("{label} `typeof theme`.variants.color must be an object, got {color:?}");
     };
@@ -9188,9 +9184,7 @@ defineProps<{
         type_arguments: fallback_args,
     } = &fallback
     else {
-        panic!(
-            "Button.fallback should be the default `DefaultTheme` ref, got {fallback:?}",
-        );
+        panic!("Button.fallback should be the default `DefaultTheme` ref, got {fallback:?}",);
     };
     assert_eq!(
         fallback_name.as_ref(),
