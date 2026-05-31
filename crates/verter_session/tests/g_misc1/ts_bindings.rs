@@ -324,35 +324,10 @@ fn audit_ts_bindings_are_in_sync_actually_regenerates_and_diffs() {
     // output, run the same diff, and verify we detect the
     // mismatch. If this test ever passes trivially, the parent sync
     // test has regressed into a compare-to-itself stub.
-    use ts_rs::TS;
-
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    // Same root list as `audit_ts_bindings_are_in_sync` — keep them
-    // in lock-step so this meta-test actually validates the same
-    // regeneration path.
-    RequestAuditRecord::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate RequestAuditRecord");
-    StructuredAuditEvent::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate StructuredAuditEvent");
-    ProvenanceChain::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate ProvenanceChain");
-    ChainTermination::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate ChainTermination");
-    ProvenanceStep::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate ProvenanceStep");
-    RequestPhaseAudit::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate RequestPhaseAudit");
-    verter_audit::PublishedSurfacePolicy::export_all(
-        &ts_rs::Config::new().with_out_dir(tempdir.path()),
-    )
-    .expect("regenerate PublishedSurfacePolicy");
-    verter_audit::AnalyzedSurface::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate AnalyzedSurface");
-    verter_audit::PolicyNamesResult::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate PolicyNamesResult");
-    let regenerated_raw =
-        fs::read_to_string(tempdir.path().join("audit.generated.ts")).expect("read regenerated");
-    let regenerated = normalize_lf(&regenerated_raw);
+    // Use the SAME regeneration path as `audit_ts_bindings_are_in_sync`
+    // (the canonical root list incl. `DerivationEdgeRaw`) so this meta-test
+    // validates the real sync path instead of a drifting duplicate list.
+    let regenerated = normalize_lf(&regenerate_audit_bindings_into_tempdir());
 
     // A trivially altered "committed" file — adds a marker line.
     let altered = format!(
@@ -858,32 +833,72 @@ fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Return true if `line` carries a bare `#[ts(export ...)]` flag — i.e.
-/// the `export` keyword used as a ts-rs attribute argument, as opposed
-/// to `export_to`. The bare flag is what makes ts-rs emit a hidden
-/// `#[test]` that writes the configured output dir during `cargo test`.
+/// True for ASCII identifier bytes, so `export_to` reads as one token and
+/// `reexport` is not mistaken for a bare `export`.
+fn is_ident_byte(b: u8) -> bool {
+    b == b'_' || b.is_ascii_alphanumeric()
+}
+
+/// Scan the FULL file `content` for any `#[ts(...)]` attribute — INCLUDING
+/// multi-line attributes — that carries a bare `export` flag (as opposed to
+/// `export_to`). Returns the 1-based line number of each offending `export`
+/// token. A per-line scan is insufficient: ts-rs accepts the bare flag split
+/// across lines, e.g.
 ///
-/// Discriminates `export,` / `export)` / `export ` (forbidden) from
-/// `export_to` (allowed) by requiring the matched `export` NOT be
-/// immediately followed by `_`.
-fn line_has_bare_ts_export_flag(line: &str) -> bool {
-    let Some(attr_start) = line.find("#[ts(") else {
-        return false;
-    };
-    let attr = &line[attr_start..];
-    let bytes = attr.as_bytes();
-    let mut idx = 0;
-    while let Some(rel) = attr[idx..].find("export") {
-        let pos = idx + rel;
-        let after = pos + "export".len();
-        // `export_to` (followed by `_`) is the allowed path attribute.
-        let is_export_to = bytes.get(after) == Some(&b'_');
-        if !is_export_to {
-            return true;
+/// ```ignore
+/// #[ts(
+///     export,
+///     export_to = "audit.generated.ts"
+/// )]
+/// ```
+///
+/// The bare flag is what makes ts-rs emit a hidden `#[test]` that writes the
+/// configured output dir during `cargo test`. `export_to` (the path attribute)
+/// is allowed; a standalone `export` token is not.
+fn bare_ts_export_offenders(content: &str) -> Vec<usize> {
+    let cb = content.as_bytes();
+    let mut offenders = Vec::new();
+    let mut base = 0usize;
+    while let Some(rel) = content[base..].find("#[ts(") {
+        let open = base + rel + "#[ts(".len();
+        // Find the matching close paren of `#[ts( ... )`, tracking depth so a
+        // multi-line body is captured in full.
+        let mut depth = 1usize;
+        let mut i = open;
+        while i < cb.len() && depth > 0 {
+            match cb[i] {
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 {
+                break;
+            }
+            i += 1;
         }
-        idx = after;
+        let body = &content[open..i.min(content.len())];
+        let bb = body.as_bytes();
+        let mut j = 0;
+        while let Some(k) = body[j..].find("export") {
+            let pos = j + k;
+            let before_ok = pos == 0 || !is_ident_byte(bb[pos - 1]);
+            // A standalone `export`: the next byte is absent or a non-identifier
+            // char. This EXCLUDES `export_to` (next byte `_`).
+            let after = pos + "export".len();
+            let after_ok = bb.get(after).map_or(true, |&c| !is_ident_byte(c));
+            if before_ok && after_ok {
+                let abs = open + pos;
+                let line = content[..abs].bytes().filter(|&b| b == b'\n').count() + 1;
+                offenders.push(line);
+            }
+            j = after;
+        }
+        base = i + 1;
+        if base >= content.len() {
+            break;
+        }
     }
-    false
+    offenders
 }
 
 #[test]
@@ -912,11 +927,10 @@ fn audit_types_have_no_ts_export_auto_export() {
         for file in files {
             let contents =
                 fs::read_to_string(&file).unwrap_or_else(|e| panic!("read `{file:?}`: {e}"));
-            for (i, line) in contents.lines().enumerate() {
-                if line_has_bare_ts_export_flag(line) {
-                    let rel = file.strip_prefix(&root).unwrap_or(&file);
-                    offenders.push(format!("{}:{}: {}", rel.display(), i + 1, line.trim()));
-                }
+            for line_no in bare_ts_export_offenders(&contents) {
+                let rel = file.strip_prefix(&root).unwrap_or(&file);
+                let text = contents.lines().nth(line_no - 1).unwrap_or("").trim();
+                offenders.push(format!("{}:{}: {}", rel.display(), line_no, text));
             }
         }
     }
@@ -928,6 +942,42 @@ fn audit_types_have_no_ts_export_auto_export() {
          `packages/types/audit.generated.ts` during `cargo test`. \
          Offending lines:\n{}",
         offenders.join("\n")
+    );
+}
+
+#[test]
+fn bare_ts_export_scanner_flags_multiline_export() {
+    // The whole-file scanner must catch a bare `export` split onto its own
+    // line inside a multi-line `#[ts(...)]` — the prior per-line scan missed
+    // this legal Rust attribute form and let the regression through.
+    let src =
+        "#[derive(TS)]\n#[ts(\n    export,\n    export_to = \"audit.generated.ts\"\n)]\nstruct X;\n";
+    assert_eq!(
+        bare_ts_export_offenders(src),
+        vec![3],
+        "multi-line bare `export` must be flagged at its source line"
+    );
+}
+
+#[test]
+fn bare_ts_export_scanner_allows_multiline_export_to_only() {
+    let src = "#[derive(TS)]\n#[ts(\n    export_to = \"audit.generated.ts\"\n)]\nstruct X;\n";
+    assert!(
+        bare_ts_export_offenders(src).is_empty(),
+        "multi-line `export_to`-only must NOT be flagged"
+    );
+}
+
+#[test]
+fn bare_ts_export_scanner_flags_singleline_and_allows_export_to() {
+    assert_eq!(
+        bare_ts_export_offenders("#[ts(export, export_to = \"x\")]\n"),
+        vec![1],
+        "single-line bare `export` must still be flagged"
+    );
+    assert!(
+        bare_ts_export_offenders("#[ts(export_to = \"x\")]\n").is_empty(),
+        "single-line `export_to`-only must be allowed"
     );
 }
 
