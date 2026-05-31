@@ -43,12 +43,10 @@ fn read_session_source(relative: &str) -> String {
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
 }
 
-/// `ImportedRegistryEntry` — the one remaining bespoke Family A carrier
-/// (the `QueryNode`-bound imported-registry cache, migrated separately) —
-/// carries `fact_dep_signature: Arc<[FactVersionRef]>` and never the
-/// legacy `dep_signature: DepSignature`. Source-grep arch guard.
+/// Every Family A entry struct carries `fact_dep_signature:
+/// Arc<[FactVersionRef]>`. Source-grep arch guard.
 #[test]
-fn imported_registry_entry_carries_fact_dep_signature() {
+fn family_a_entries_carry_fact_dep_signature() {
     let src = read_session_source("component_meta_caches.rs");
     // The live Family A `fact_dep_signature` entry set. The walker
     // cluster's `PreparedTargetEntry` / `PreparedSurfaceEntry` /
@@ -63,28 +61,27 @@ fn imported_registry_entry_carries_fact_dep_signature() {
         // unified into `ShapeCacheEntry` under the new `ShapeCacheDb`.
         "ShapeCacheEntry",
     ];
-    for (db, value_type) in MIGRATED {
+    for entry in ENTRIES {
+        let struct_decl = format!("pub struct {entry} {{");
+        let idx = src
+            .find(&struct_decl)
+            .unwrap_or_else(|| panic!("expected `{struct_decl}` in component_meta_caches.rs"));
+        // Window from struct start to the next `}` at column 0
+        // (struct close).
+        let after = &src[idx..];
+        let end = after
+            .find("\n}")
+            .unwrap_or_else(|| panic!("expected struct close for {entry}"));
+        let window = &after[..end];
         assert!(
-            src.contains(value_type),
-            "{db} must store `{value_type}` (the shared cache-runtime carrier) in its \
-             `entries` map. A bespoke per-cache `*Entry` carrier violates the cutover."
+            window.contains("fact_dep_signature: Arc<[FactVersionRef]>"),
+            "{entry} must carry `fact_dep_signature: Arc<[FactVersionRef]>` (R28 migration), \
+             but the struct body did not contain that field. Window:\n{window}"
         );
-    }
-    // None of the eight migrated caches define a bespoke carrier struct.
-    for retired in [
-        "pub struct DeclarationLookupEntry",
-        "pub struct ResolvabilityEntry",
-        "pub struct OwnerCollectionEntry",
-        "pub struct PreparedTargetEntry",
-        "pub struct ShapeCacheEntry",
-        "pub struct PreparedSurfaceEntry",
-        "pub struct PreparedMemberEntry",
-        "pub struct RoutedExprSurfaceEntry",
-    ] {
         assert!(
-            !src.contains(retired),
-            "the bespoke carrier `{retired}` MUST be retired — the migrated single-entry \
-             caches store `cache_runtime::CacheEntry<Value>`."
+            !window.contains("dep_signature: DepSignature"),
+            "{entry} must NOT carry the legacy `dep_signature: DepSignature` field after the \
+             R28 migration. Both fields coexisting would violate the clean cutover. Window:\n{window}"
         );
     }
 }

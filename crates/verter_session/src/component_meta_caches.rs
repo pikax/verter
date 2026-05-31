@@ -61,9 +61,8 @@
 //!
 //! ## D3.5 — `Arc<str>` / `Arc<TypeExpr>` keys
 //!
-//! Keys live in [`crate::resolver_core::cache_keys`] with the wide-string
-//! fields migrated to `Arc<str>` per D3.5. Cloning a key is a cheap
-//! refcount bump rather than a heap allocation + copy.
+//! Cache keys use `Arc<str>` for wide-string fields per D3.5. Cloning a
+//! key is a cheap refcount bump rather than a heap allocation + copy.
 //!
 //! ## Engine read-through views
 //!
@@ -94,8 +93,7 @@ use crate::semantic_query::{DepSignature, ProjectionMode};
 // ===========================================================================
 //
 // The single-entry caches below (`DeclarationLookupDb`, `ResolvabilityDb`,
-// `OwnerCollectionDb`, `PreparedTargetDb`, `ShapeCacheDb`,
-// `PreparedSurfaceDb`, `PreparedMemberDb`, `RoutedExprSurfaceDb`) all
+// `OwnerCollectionDb`, `ShapeCacheDb`) all
 // store one entry per key validated by a path-precise fact signature
 // plus a generation gate, and all bump a shared live counter on publish
 // / decrement it on removal. They are identical modulo the key type, the
@@ -988,7 +986,6 @@ impl Default for OwnerCollectionDb {
     }
 }
 
-
 // ===========================================================================
 // 6. ShapeCacheDb — `ShapeCacheKey → MaterializedTypeExpr`
 //
@@ -1254,28 +1251,9 @@ impl ShapeCacheDb {
             return None;
         }
         // The subject's scope canonical is the entry's self-root —
-        // strict warm-read validation rejects a same-scope content
-        // edit.
-        let scope = key.subject.scope_canonical().clone();
-        let self_roots: [&str; 1] = [scope.as_ref()];
-        let result = (|| -> Option<MaterializedTypeExpr> {
-            let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-            // The carrier validates only file-content whole-hashes; the
-            // generation gate is the project-shape counterpart.
-            if entry_arc.validated_at_generation
-                == ctx.project_type_store().current_project_generation()
-                && validate_fact_signature_with_self_roots(
-                    ctx,
-                    &entry_arc.fact_dep_signature,
-                    &self_roots,
-                )
-            {
-                bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
-                Some(entry_arc.value.clone())
-            } else {
-                None
-            }
-        })();
+        // strict warm-read validation rejects a same-scope content edit.
+        // The entry carries its own self-roots, validated strictly.
+        let result = single_entry_peek(&self.entries, key, ctx);
         if let Some(rctx) = crate::request_context::current_request_context() {
             let counter = match &key.subject {
                 ShapeSubject::TypeExpr { .. } => &rctx.cache_counters.materialize_memo,
@@ -1299,77 +1277,19 @@ impl ShapeCacheDb {
     where
         F: FnOnce() -> Option<(MaterializedTypeExpr, Arc<[FactVersionRef]>)>,
     {
-        // Publish-side counterpart: the live counter is bumped in the
-        // winner-only `post_publish` callback, NOT in `compute` — see
-        // `DeclarationLookupDb::get_or_compute` for the leak rationale.
-        let live_counter_for_publish = Arc::clone(&self.live_counter);
-        // Removal-side counterpart of the `post_publish` increment —
-        // decrements when the substrate removes an already-published
-        // entry so the live counter tracks live entries.
-        let live_counter_for_removal = Arc::clone(&self.live_counter);
         // The subject's scope canonical is the entry's self-root —
-        // strict warm-read validation.
-        let scope = key.subject.scope_canonical().clone();
-        // Snapshot the project generation BEFORE the cold compute
-        // dispatches any work — see `DeclarationLookupDb::get_or_compute`
-        // for the project-generation staleness rationale.
-        let generation_snapshot = ctx.project_type_store().current_project_generation();
-        let scope_for_validate = Arc::clone(&scope);
-        let scope_for_revalidate = Arc::clone(&scope);
-        cooperative_get_or_insert_with_post_publish(
-            &self.entries,
-            &self.inflight,
-            key.clone(),
-            move |entry: &ShapeCacheEntry| {
-                let self_roots: [&str; 1] = [scope_for_validate.as_ref()];
-                if entry.validated_at_generation
-                    == ctx.project_type_store().current_project_generation()
-                    && validate_fact_signature_with_self_roots(
-                        ctx,
-                        &entry.fact_dep_signature,
-                        &self_roots,
-                    )
-                {
-                    bubble_fact_signature(ctx, &entry.fact_dep_signature);
-                    Some(entry.value.clone())
-                } else {
-                    None
-                }
-            },
-            move || {
-                compute().map(|(value, fact_dep_signature)| ShapeCacheEntry {
-                    value,
-                    fact_dep_signature,
-                    validated_at_generation: generation_snapshot,
-                })
-            },
-            |entry: &ShapeCacheEntry| {
-                bubble_fact_signature(ctx, &entry.fact_dep_signature);
-                entry.value.clone()
-            },
-            move |entry: &ShapeCacheEntry| {
-                let self_roots: [&str; 1] = [scope_for_revalidate.as_ref()];
-                entry.validated_at_generation
-                    == ctx.project_type_store().current_project_generation()
-                    && validate_fact_signature_with_self_roots(
-                        ctx,
-                        &entry.fact_dep_signature,
-                        &self_roots,
-                    )
-            },
-            move |_key: &ShapeCacheKey, _entry: &Arc<ShapeCacheEntry>| {
-                live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
-            },
-            // post_publish — fires once on the cold winner's thread,
-            // AFTER `entries.insert` AND a successful
-            // `revalidate_after_compute`. The live-counter bump rides
-            // here so it is paired with the published map entry.
-            move |_entry_arc: &Arc<ShapeCacheEntry>, _key: &ShapeCacheKey| {
-                live_counter_for_publish.fetch_add(1, Ordering::Relaxed);
-            },
-            // No retention budget on this cache shape — no publish fence.
-            None,
-        )
+        // strict warm-read validation rejects a same-scope content edit.
+        let self_roots: Arc<[Arc<str>]> =
+            Arc::from(vec![Arc::clone(key.subject.scope_canonical())]);
+        let node = SingleEntryArtifactNode {
+            entries: &self.entries,
+            inflight: &self.inflight,
+            live_counter: &self.live_counter,
+            compute: std::cell::RefCell::new(Some(move || {
+                compute().map(|(value, facts)| (value, facts, Arc::clone(&self_roots)))
+            })),
+        };
+        lookup(&node, key.clone(), ctx)
     }
 
     /// Universal-caching admission helper. Admits an already-computed
@@ -1440,14 +1360,15 @@ impl ShapeCacheDb {
             Arc::new(TypeExpr::Unknown { raw: String::new() }),
             ProjectionMode::Shallow,
         );
-        let entry = Arc::new(ShapeCacheEntry {
+        let entry = Arc::new(CacheEntry {
             value: MaterializedTypeExpr {
                 node_id: None,
                 type_expr: TypeExpr::Unknown { raw: String::new() },
                 dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
                 cache_suppress: false,
             },
-            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+            signature: ReadSetSignature::empty(),
+            self_root_canonicals: Arc::from(vec![Arc::clone(key.subject.scope_canonical())]),
             validated_at_generation: 0,
         });
         self.entries.insert(key, entry);
@@ -1507,14 +1428,15 @@ impl ShapeCacheDb {
             ShapeSubject::SemanticNode { node, .. } => Some(*node),
             ShapeSubject::TypeExpr { .. } => None,
         };
-        let entry = Arc::new(ShapeCacheEntry {
+        let entry = Arc::new(CacheEntry {
             value: MaterializedTypeExpr {
                 node_id: node_for_provenance,
                 type_expr: deep_type,
                 dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
                 cache_suppress: false,
             },
-            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+            signature: ReadSetSignature::empty(),
+            self_root_canonicals: Arc::from(vec![Arc::clone(key.subject.scope_canonical())]),
             validated_at_generation: 0,
         });
         self.entries.insert(key, entry);
@@ -1567,7 +1489,6 @@ impl crate::cache_schema::CacheSchemaVersioned for ShapeCacheDb {
         count
     }
 }
-
 
 // ===========================================================================
 //
