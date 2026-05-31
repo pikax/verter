@@ -2871,7 +2871,6 @@ fn recursive_sentinel_does_not_promote_to_warm_memo() {
 #[test]
 fn cross_thread_joiner_waits_on_winner_publish() {
     use std::thread;
-    use std::time::Duration;
 
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
@@ -2882,6 +2881,10 @@ fn cross_thread_joiner_waits_on_winner_publish() {
     let start_barrier = Arc::new(std::sync::Barrier::new(2));
     let store_owner = Arc::clone(&store);
     let key_owner = key.clone();
+    // A second key clone so the winner's build closure can observe the
+    // in-flight strong count (`key_owner` is consumed as the second arg
+    // to `execute_cooperative`).
+    let key_for_wait = key.clone();
     let barrier_owner = Arc::clone(&start_barrier);
 
     let winner = thread::spawn(move || {
@@ -2892,9 +2895,16 @@ fn cross_thread_joiner_waits_on_winner_publish() {
             || store_owner.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || {
                 barrier_owner.wait();
-                // Hold the build open briefly so the joiner reaches
-                // the condvar wait.
-                thread::sleep(Duration::from_millis(25));
+                // Hold the build open until the joiner has been admitted
+                // onto this in-flight entry (its `Arc` clone raises the
+                // strong count above the winner-only baseline), so the
+                // joiner is guaranteed to reach the condvar wait before
+                // the winner publishes. Deterministic alternative to a
+                // wall-clock sleep, which races the joiner under parallel
+                // test load. This is a read-only strong-count poll, not a
+                // re-entrant `execute_cooperative` call, so the winner
+                // does not self-await its own in-flight entry.
+                wait_for_joiner_admitted(&store_owner, &key_for_wait);
                 let id =
                     store_owner.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
                 (QueryResult::Value(id), empty_signature())
@@ -4484,10 +4494,12 @@ fn semantic_graph_stats_joined_waits_increments_on_cooperative_join() {
         )
     });
 
-    // Joiner blocks on the condvar. Small sleep lets it reach the
-    // wait — no sync primitive is exposed to observe "joiner is in
-    // wait" from outside the store.
-    thread::sleep(std::time::Duration::from_millis(50));
+    // Block until the joiner has been admitted onto the in-flight
+    // entry (its `Arc` clone raises the strong count above the
+    // winner-only baseline). This deterministically guarantees the
+    // joiner reached the cooperative wait branch before the winner is
+    // released to publish — no wall-clock race.
+    wait_for_joiner_admitted(&store, &key);
     tx_finish_build.send(()).expect("release winner");
 
     let _ = winner.join().expect("winner joined");
@@ -5393,7 +5405,6 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
     use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
     use std::sync::mpsc;
     use std::thread;
-    use std::time::Duration;
 
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
@@ -5480,7 +5491,10 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
         finalise
     });
 
-    thread::sleep(Duration::from_millis(50));
+    // Block until the joiner has joined the winner's in-flight entry
+    // (deterministic admission probe — no wall-clock race) before the
+    // winner is released to publish.
+    wait_for_joiner_admitted(&store, &key);
     tx_release_winner.send(()).expect("release winner");
 
     let _winner_read = winner.join().expect("winner joined");
@@ -5558,7 +5572,6 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
     use crate::{FileKind, UpsertRequest};
     use std::sync::mpsc;
     use std::thread;
-    use std::time::Duration;
 
     // A real keyed file gives the carrier a tracked self-root the
     // follower's view can strictly validate — the winner therefore
@@ -5675,7 +5688,10 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
         (joiner_suppress, finalise)
     });
 
-    thread::sleep(Duration::from_millis(50));
+    // Block until the joiner has joined the winner's in-flight entry
+    // (deterministic admission probe — no wall-clock race) before the
+    // winner is released to publish.
+    wait_for_joiner_admitted(&store, &key);
     tx_release_winner.send(()).expect("release winner");
 
     let _winner_read = winner.join().expect("winner joined");
@@ -5801,7 +5817,6 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
-    use std::time::Duration;
 
     let keyed_canonical = "/p2_1/keyed.ts";
     let host = ctx_host();
@@ -5936,9 +5951,12 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
         (cache_read.value, recompute_id)
     });
 
-    // Give the follower time to reach the cooperative wait branch
-    // BEFORE the winner publishes — this forces a real coalesce.
-    thread::sleep(Duration::from_millis(80));
+    // Block until the follower has been admitted onto the winner's
+    // in-flight entry — it is now guaranteed to be inside the
+    // cooperative wait branch BEFORE the winner publishes, forcing a
+    // real coalesce. Deterministic alternative to a wall-clock sleep,
+    // which races the follower under parallel test load.
+    wait_for_joiner_admitted(&store, &key);
     tx_release_winner.send(()).expect("release winner");
 
     let winner_read = winner.join().expect("winner joined");
@@ -6011,7 +6029,6 @@ fn same_view_joiner_still_coalesces_onto_winner() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
-    use std::time::Duration;
 
     let keyed_canonical = "/p2_1_same/keyed.ts";
     let host = ctx_host();
@@ -6105,7 +6122,10 @@ fn same_view_joiner_still_coalesces_onto_winner() {
         cache_read.value
     });
 
-    thread::sleep(Duration::from_millis(80));
+    // Block until the follower has joined the winner's in-flight entry
+    // (deterministic admission probe — no wall-clock race) before the
+    // winner is released to publish.
+    wait_for_joiner_admitted(&store, &key);
     tx_release_winner.send(()).expect("release winner");
 
     let _winner_read = winner.join().expect("winner joined");
@@ -6188,7 +6208,6 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
-    use std::time::Duration;
 
     let keyed_canonical = "/p2_8_overflow/keyed.ts";
     let host = ctx_host();
@@ -6313,7 +6332,10 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
         (cache_read.value, recompute_id)
     });
 
-    thread::sleep(Duration::from_millis(80));
+    // Block until the follower has joined the winner's in-flight entry
+    // (deterministic admission probe — no wall-clock race) before the
+    // winner is released to publish.
+    wait_for_joiner_admitted(&store, &key);
     tx_release_winner.send(()).expect("release winner");
 
     let _winner_read = winner.join().expect("winner joined");
@@ -6433,7 +6455,6 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
-    use std::time::Duration;
 
     let keyed_canonical = "/p2_8_unrootable/keyed.ts";
     let host = ctx_host();
@@ -6566,7 +6587,10 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
         (cache_read.value, recompute_id)
     });
 
-    thread::sleep(Duration::from_millis(80));
+    // Block until the follower has joined the winner's in-flight entry
+    // (deterministic admission probe — no wall-clock race) before the
+    // winner is released to publish.
+    wait_for_joiner_admitted(&store, &key);
     tx_release_winner.send(()).expect("release winner");
 
     let _winner_read = winner.join().expect("winner joined");
@@ -6706,7 +6730,6 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
-    use std::time::Duration;
 
     let keyed_canonical = "/p2_9_nonsuppressed_miss/keyed.ts";
     let host = ctx_host();
@@ -6847,7 +6870,10 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
         (cache_read.value, recompute_id)
     });
 
-    thread::sleep(Duration::from_millis(80));
+    // Block until the follower has joined the winner's in-flight entry
+    // (deterministic admission probe — no wall-clock race) before the
+    // winner is released to publish.
+    wait_for_joiner_admitted(&store, &key);
     tx_release_winner.send(()).expect("release winner");
 
     let winner_read = winner.join().expect("winner joined");
