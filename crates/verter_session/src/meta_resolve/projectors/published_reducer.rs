@@ -108,7 +108,18 @@ pub(crate) fn reduce_published_field_types(
             continue;
         }
         let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
-        field.r#type = reduce_field_type_expr(query_engine, scope_canonical_id, raised);
+        // Navigate (shallow-by-default), matching the props / emits reducers
+        // above: an explicit selector operator (`IndexedAccess`, finite
+        // `Pick`/`Omit`, closed conditional) still reduces path-precisely, but a
+        // symbolic `AppProps['avatar']` whose property body resolves through an
+        // open `[k: string]: any` index signature STAYS the indexed-access
+        // carrier rather than widening through the index signature to `any`.
+        field.r#type = reduce_field_type_expr_with_mode(
+            query_engine,
+            scope_canonical_id,
+            raised,
+            ProjectionMode::Navigate,
+        );
     }
     for field in evaluated_types.bindings.iter_mut() {
         if matches!(&field.r#type, TypeExpr::SyntheticSlotBinding(_)) {

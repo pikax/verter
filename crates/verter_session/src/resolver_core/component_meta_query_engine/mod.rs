@@ -86,7 +86,7 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::hash::Hash;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use verter_semantic::analysis::type_eval::DeclarationId;
 use verter_semantic::analysis::type_solver::query_engine::ProjectedMember;
 use verter_type_expr::TypeExpr;
@@ -1227,11 +1227,14 @@ fn empty_semantic_args() -> std::sync::Arc<[SemanticNodeId]> {
     std::sync::Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice())
 }
 
-/// Engine-internal helper that mirrors the deprecated
-/// `project_type_member` entry: dispatch the single-member projection,
-/// falling back to the prepared-decl walker when dispatch misses.
-/// Used by `project_routed_expr_surface_expr` and friends after the
-/// deprecated engine method's deletion.
+/// Engine-internal helper: dispatch the single-member projection through
+/// the SOLE query-time resolver. Used by `project_routed_expr_surface_expr`
+/// and friends.
+///
+/// There is NO prepared-decl-walker fallback: the macro-object materialiser
+/// and its prepared-member rescue path are retired, so a dispatch miss is an
+/// authoritative miss (`None`). Any member the route demands resolves through
+/// `dispatch_projected_member` (the five-mode dispatch) or it does not resolve.
 fn dispatch_member_for_root_symbol(
     engine: &mut ComponentMetaQueryEngine<'_>,
     scope_canonical_id: &str,
@@ -1241,26 +1244,7 @@ fn dispatch_member_for_root_symbol(
     if engine.projection_op_budget_exhausted() {
         return None;
     }
-    engine
-        .dispatch_projected_member(scope_canonical_id, symbol_name, member_name)
-        .or_else(|| {
-            let mut active = FxHashSet::default();
-            // Top-level dispatch fallback for a route's single-member
-            // projection. The route was constructed at the consumer's
-            // macro-T position, so the member is queried AS A BODY
-            // MEMBER of the rooted symbol — `from_root_body = true`.
-            // The recursive `from_expr` path narrows the flag (e.g.
-            // heritage utility-type descent) and the leaf branch
-            // carries it on the projected member.
-            engine.project_prepared_requested_member_from_symbol(
-                scope_canonical_id,
-                symbol_name,
-                member_name,
-                &FxHashMap::default(),
-                true,
-                &mut active,
-            )
-        })
+    engine.dispatch_projected_member(scope_canonical_id, symbol_name, member_name)
 }
 
 /// Engine-internal substitution helper that mirrors the

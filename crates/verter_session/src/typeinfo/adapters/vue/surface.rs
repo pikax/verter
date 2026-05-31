@@ -373,6 +373,20 @@ impl VerterHost {
             param_ty,
             ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
         )?;
+        // Open-generic gate: a slot-param root that is symbolic-only (an open
+        // Conditional whose check carries a free `TypeParam`, an unresolved
+        // `IndexedAccess` / `Mapped`, …) must NOT be materialised into a
+        // committed object surface — doing so would invent phantom bindings from
+        // an undetermined generic context. This is the SAME gate the
+        // graph-native slot-binding synthesis applies; routing both binding
+        // paths through it keeps them in agreement (a `generic="M"` component's
+        // `(props: SlotProps<M>)` slot resolves to NO bindings on both paths,
+        // not a branch-committed guess).
+        if crate::meta_resolve::slot_binding_graph::slot_param_root_is_symbolic_only(
+            &dispatch, base, 0,
+        ) {
+            return None;
+        }
         self.project_shallow_surface_from_base(
             &host_ctx,
             &dispatch,
@@ -508,6 +522,33 @@ fn raise_member_value(host: &VerterHost, member: &TypeInfoSurfaceMember) -> Opti
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     dispatch.raise_node_to_type_expr(member.value)
+}
+
+/// Realize a slot member's value to its underlying callable through the SHARED
+/// `realize_callable_member` substrate (Alias / Conditional / InstantiationRef /
+/// DeclRef carrier normalization), then raise the realized node to a
+/// [`TypeExpr`]. Falls back to the un-realized value when realization finds no
+/// callable (the member is then classified non-function by the caller). This
+/// keeps the DTO slot surface in agreement with
+/// `slot_binding_graph::compute_bindings_via_graph`, which realizes the same
+/// member value before reading `Function.params`.
+fn raise_realized_callable_member_value(
+    host: &VerterHost,
+    member: &TypeInfoSurfaceMember,
+) -> Option<TypeExpr> {
+    let store_view = host.resolver_store_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let realized = crate::meta_resolve::dispatch_helpers::realize_callable_member(
+        &dispatch,
+        member.value,
+        crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Shallow,
+        ),
+    )
+    .unwrap_or(member.value);
+    dispatch.raise_node_to_type_expr(realized)
 }
 
 /// Resolve a `.vue` macro's NORMALIZED component-meta DTOs
@@ -991,7 +1032,18 @@ pub fn slots_from_typeinfo_surface(
         .members
         .iter()
         .filter_map(|member| {
-            let value = raise_member_value(host, member)?;
+            // A slot member's value may be a non-`Function` carrier shell under
+            // the transit-shallow macro surface — most notably a generic slot
+            // alias (`default: SlotFn<T>` where `type SlotFn<T> = (props:
+            // SlotProps<T>) => any`) that lowers to an `InstantiationRef` / alias
+            // carrier rather than a reduced `Function`. Realize the value through
+            // the SHARED callable-realization substrate (the SAME primitive
+            // `slot_binding_graph::compute_bindings_via_graph` uses) so a
+            // decidable callable surfaces as a `Function` BEFORE the
+            // function-like filter — otherwise the generic slot is silently
+            // dropped from the published slot surface (a one-engine divergence
+            // between the DTO slot path and the slot-binding-graph).
+            let value = raise_realized_callable_member_value(host, member)?;
             // A slot member is function-like: a single `Function`, or an
             // `Intersection` of functions (`(SlotA & SlotB)['default']`). A
             // non-callable member is not a slot.

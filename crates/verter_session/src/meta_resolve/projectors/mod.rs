@@ -60,6 +60,7 @@ use super::dep_signature::emit_dispatch_dep_signature_facts;
 use super::diagnostic_convert::shallow_diagnostics_to_macro_expansion;
 use super::exactness::classify_node;
 
+pub(crate) mod define_shapes;
 pub(crate) mod emits;
 pub(crate) mod exposed;
 pub(crate) mod macro_payload_substrate;
@@ -83,6 +84,7 @@ pub(crate) use macro_payload_substrate::{
     resolve_payload_surface_with_scope, MemberValueRole, PayloadSurfaceScope,
 };
 
+pub(crate) use define_shapes::project_define_macro_shapes;
 pub(crate) use emits::project_emits;
 pub(crate) use exposed::project_exposed;
 pub(crate) use model::project_model;

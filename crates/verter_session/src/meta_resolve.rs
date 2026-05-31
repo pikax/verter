@@ -32,7 +32,7 @@ pub(crate) const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 // `crate::meta_resolve::*` paths keep working without callsite churn.
 mod dep_signature;
 pub(crate) mod diagnostic_convert;
-mod dispatch_helpers;
+pub(crate) mod dispatch_helpers;
 pub(crate) mod exactness;
 mod graph_predicates;
 mod macro_member_walk;
@@ -123,7 +123,7 @@ pub(crate) use macro_member_walk::{
 };
 pub(crate) use materialize::{
     collect_type_expr_ref_names, lowered_preserve_package_backed_symbolic_refs,
-    materialize_component_meta_type_expr_until_stable, produce_macro_object_shapes_for_purpose,
+    materialize_component_meta_type_expr_until_stable,
 };
 // Test-only re-export — `meta_resolve_tests.rs` exercises this helper
 // via `super::*` glob to characterise the BFS cycle-guard's effect on

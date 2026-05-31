@@ -341,21 +341,32 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         root_name: &str,
         macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind,
     ) -> bool {
-        // Project the owner-local root's prepared shape and report whether it
-        // is a non-empty macro surface. The actual props/emits/slots are NOT
-        // materialised here — they are owned by the typeinfo macro-surface
-        // path (`vue_macro_dtos`); this is purely the authority gate the cold
-        // resolver uses to decide whether to push an owner-local entry.
+        // Authority gate for the cold resolver's owner-local arm: does the
+        // owner-local type `root_name` resolve to a non-empty macro surface?
+        // The actual props/emits/slots are NOT materialised here — they are
+        // owned by the typeinfo macro-surface path (`vue_macro_dtos`); this is
+        // purely a presence gate.
+        //
+        // Resolution routes through the SOLE query-time resolver: the root name
+        // lowers to a bare `TypeExpr::Ref` and projects through
+        // `project_expr_surface_shape_via_host_threaded` (dispatch
+        // `lower_type_expr_in_scope` + empty-path `Published(Shallow)`
+        // `ProjectPath`), NOT the retired prepared-decl walker.
         let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self.ctx);
-        let Some(shape) = project_prepared_type_surface_shape_via_host_threaded(
+        let root_ref = verter_type_expr::TypeExpr::Ref {
+            name: std::sync::Arc::from(root_name),
+            type_arguments: std::sync::Arc::from(Vec::<verter_type_expr::TypeExpr>::new()),
+        };
+        let Some(shape) = crate::meta_resolve::project_expr_surface_shape_via_host_threaded(
             &mut query_engine,
             owner_canonical,
-            root_name,
+            &root_ref,
         ) else {
             return false;
         };
         match macro_kind {
-            // Props / model / slots gate on any member surface.
+            // Props / model / slots gate on any member surface (named members,
+            // call signatures, or an index signature).
             verter_semantic::analysis::AnalyzedMacroKind::DefineProps
             | verter_semantic::analysis::AnalyzedMacroKind::WithDefaults
             | verter_semantic::analysis::AnalyzedMacroKind::DefineModel

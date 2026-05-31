@@ -45,7 +45,7 @@ use crate::meta_resolve::{
 };
 use crate::meta_resolve::{
     collect_type_expr_ref_names, lowered_preserve_package_backed_symbolic_refs,
-    materialize_component_meta_type_expr_until_stable, produce_macro_object_shapes_for_purpose,
+    materialize_component_meta_type_expr_until_stable,
 };
 use crate::meta_resolve::{
     drain_dispatch_dep_signature_accumulator, reset_dispatch_dep_signature_accumulator,
@@ -935,109 +935,88 @@ impl VerterHost {
                 );
             }
             if should_produce_macro_object_shapes {
-                if let Some(eval_source) = captured
-                    .and_then(|captured| captured.owner_eval_source.as_deref())
-                    .map(str::to_string)
-                    .or_else(|| {
-                        ctx.ensure_indexed_ready(canonical).map(|facts| {
-                            VerterHost::build_eval_script_source(
-                                &facts.raw_source,
-                                facts.cached_parse.as_deref(),
-                            )
-                        })
-                    })
+                let mut evaluated_types = parts.evaluated_types.take().unwrap_or_default();
                 {
-                    let mut evaluated_types = parts.evaluated_types.take().unwrap_or_default();
-                    {
-                        component_meta_trace_custom!(
-                            "produce_macro_object_shapes_for_purpose",
-                            format!(
-                                "owner={} resolved_macros={} registry={} purpose={:?}",
-                                canonical,
-                                parts.resolved_macros.len(),
-                                parts.resolved_type_registry.len(),
-                                purpose,
-                            ),
-                        );
-                        produce_macro_object_shapes_for_purpose(
+                    component_meta_trace_custom!(
+                        "project_evaluated_types",
+                        format!(
+                            "owner={} props={} slot_bindings={} define_props={} define_slots={}",
                             canonical,
-                            &snapshot,
-                            &parts.resolved_macros,
-                            &parts.resolved_type_registry,
-                            &parts.resolved_type_registry_meta,
-                            &eval_source,
-                            &mut evaluated_types,
-                            &mut query_engine,
-                            purpose,
-                        );
-                    }
-                    {
-                        component_meta_trace_custom!(
-                            "project_evaluated_types",
-                            format!(
-                                "owner={} props={} slot_bindings={} define_props={} define_slots={}",
-                                canonical,
-                                evaluated_types.props.len(),
-                                evaluated_types.slot_bindings.len(),
-                                evaluated_types.define_props.len(),
-                                evaluated_types.define_slots.len(),
-                            ),
-                        );
-                        // Per-macro projectors are the sole component-meta
-                        // resolution path. Each projector dispatches
-                        // `ResolveMacroPayload` + empty-path Shallow
-                        // `ProjectPath`, raises surface members, runs the
-                        // bounded fixed-point reducer
-                        // (`materialize_component_meta_type_expr_until_stable`)
-                        // so nested operator chains collapse to concrete
-                        // leaves before publication, and writes
-                        // `Vec<ExpandedField>` into `evaluated_types`.
-                        // Recursive / Error branches emit diagnostics into
-                        // `synthesis_diagnostics` (silent-miss prevention:
-                        // they surface as macro-expansion diagnostics on
-                        // the published analysis rather than collapsing
-                        // to an empty success).
-                        crate::meta_resolve::projectors::project_evaluated_types(
-                            &mut query_engine,
-                            canonical,
-                            &snapshot,
-                            &mut evaluated_types,
-                            &mut synthesis_diagnostics,
-                        );
-                    }
-                    // Slot-binding-graph synthesis + final field-type
-                    // reduction are only meaningful when the projector
-                    // produced at least one surface — skip both passes
-                    // on empty surfaces to avoid no-op work. Publication
-                    // is unconditional: a resolved component meta query
-                    // must yield a coherent `parts.evaluated_types`
-                    // through both APIs (`get_component_meta` +
-                    // `evaluate_types`), so even an empty surface set
-                    // gets published. Returning `None` from
-                    // `parts.evaluated_types` here would make
-                    // `evaluate_types` report "no resolution occurred"
-                    // while `get_component_meta` simultaneously
-                    // publishes a populated payload through the
-                    // alternative projector path — the two APIs MUST
-                    // agree on whether resolution produced a result.
-                    if !evaluated_types.is_empty() {
-                        let result = slot_binding_graph::resolve_slot_bindings_graph_native(
-                            &mut query_engine,
-                            canonical,
-                            &snapshot,
-                            &parts.resolved_macros,
-                            &mut evaluated_types,
-                            &mut synthesis_diagnostics,
-                        );
-                        synthesis_should_suppress |= result.should_suppress;
-                        crate::meta_resolve::projectors::reduce_published_field_types(
-                            canonical,
-                            &mut evaluated_types,
-                            &mut query_engine,
-                        );
-                    }
-                    parts.evaluated_types = Some(evaluated_types);
+                            evaluated_types.props.len(),
+                            evaluated_types.slot_bindings.len(),
+                            evaluated_types.define_props.len(),
+                            evaluated_types.define_slots.len(),
+                        ),
+                    );
+                    // Per-macro projectors are the sole component-meta
+                    // resolution path. Each projector dispatches
+                    // `ResolveMacroPayload` + empty-path Shallow
+                    // `ProjectPath`, raises surface members, runs the
+                    // bounded fixed-point reducer
+                    // (`materialize_component_meta_type_expr_until_stable`)
+                    // so nested operator chains collapse to concrete
+                    // leaves before publication, and writes
+                    // `Vec<ExpandedField>` into `evaluated_types.props` /
+                    // `.emits`. Recursive / Error branches emit diagnostics
+                    // into `synthesis_diagnostics` (silent-miss prevention).
+                    crate::meta_resolve::projectors::project_evaluated_types(
+                        &mut query_engine,
+                        canonical,
+                        &snapshot,
+                        &mut evaluated_types,
+                        &mut synthesis_diagnostics,
+                    );
                 }
+                {
+                    component_meta_trace_custom!(
+                        "project_define_macro_shapes",
+                        format!(
+                            "owner={} props={} emits={}",
+                            canonical,
+                            evaluated_types.props.len(),
+                            evaluated_types.emits.len(),
+                        ),
+                    );
+                    // Macro-shape publication (`define_props` / `define_emits` /
+                    // `define_slots`) is owned by the dispatch projector — the
+                    // eager macro-object materialiser is retired. Each shape is
+                    // built from the context-aware `vue_macro_dtos` member
+                    // authority + the flat fields `project_evaluated_types` just
+                    // projected, with NO solver / reparse / eval_source fallback.
+                    crate::meta_resolve::projectors::project_define_macro_shapes(
+                        &mut query_engine,
+                        canonical,
+                        &snapshot,
+                        &mut evaluated_types,
+                        &mut synthesis_diagnostics,
+                        purpose,
+                    );
+                }
+                // Slot-binding-graph synthesis + final field-type reduction are
+                // only meaningful when a surface was produced — skip both passes
+                // on empty surfaces to avoid no-op work. Publication is
+                // unconditional: a resolved component-meta query must yield a
+                // coherent `parts.evaluated_types` through both APIs
+                // (`get_component_meta` + `evaluate_types`), so even an empty
+                // surface set gets published — the two APIs MUST agree on whether
+                // resolution produced a result.
+                if !evaluated_types.is_empty() {
+                    let result = slot_binding_graph::resolve_slot_bindings_graph_native(
+                        &mut query_engine,
+                        canonical,
+                        &snapshot,
+                        &parts.resolved_macros,
+                        &mut evaluated_types,
+                        &mut synthesis_diagnostics,
+                    );
+                    synthesis_should_suppress |= result.should_suppress;
+                    crate::meta_resolve::projectors::reduce_published_field_types(
+                        canonical,
+                        &mut evaluated_types,
+                        &mut query_engine,
+                    );
+                }
+                parts.evaluated_types = Some(evaluated_types);
             }
             {
                 crate::host_manage::component_meta_trace_custom!(
