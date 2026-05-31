@@ -433,37 +433,104 @@ fn slot_param_root_is_symbolic_only(
         SemanticNodeData::Alias(inner) => {
             slot_param_root_is_symbolic_only(dispatch, *inner, depth + 1)
         }
-        SemanticNodeData::Conditional { .. }
-        | SemanticNodeData::IndexedAccess { .. }
+        // A Conditional is symbolic-only ONLY when it is genuinely OPEN
+        // (undecidable check). When the slot-param alias was instantiated
+        // under a concrete substitution (the `InstantiationRef` arm below
+        // preserves `(base, args)`), the conditional's check becomes
+        // decidable and the relation engine reduces it to one branch — that
+        // branch may be a concrete `Object` the synthesis must enumerate.
+        // Dispatch the conditional through the relation engine (its own
+        // decidability gate, independent of the parent demand); recurse on the
+        // reduced node when it differs from the input, and only classify it as
+        // symbolic-only when it stays the deferred shell. This mirrors
+        // `dispatch_helpers::realize_callable_member_inner`'s Conditional arm.
+        SemanticNodeData::Conditional {
+            check,
+            extends,
+            true_branch_ref,
+            false_branch_ref,
+            distributive,
+        } => {
+            use crate::semantic_query::{QueryResult, SemanticQueryKey};
+            let check = *check;
+            let extends = *extends;
+            let true_branch = *true_branch_ref;
+            let false_branch = *false_branch_ref;
+            let distributive = *distributive;
+            drop(data);
+            let read = dispatch.execute_read(SemanticQueryKey::Conditional {
+                check,
+                extends,
+                true_branch,
+                false_branch,
+                distributive,
+            });
+            // Dual-emit: legacy accumulator + fact-tracer fan-out.
+            emit_slot_binding_graph_dispatch_facts(dispatch.ctx, &read.dep_signature);
+            match read.value {
+                // Decidable: the engine reduced to a different node — recurse
+                // on it (a concrete branch root is enumerable, not symbolic).
+                QueryResult::Value(reduced) if reduced != node => {
+                    slot_param_root_is_symbolic_only(dispatch, reduced, depth + 1)
+                }
+                // Returned the deferred Conditional shell unchanged (open /
+                // undecidable) — genuinely symbolic-only.
+                _ => true,
+            }
+        }
+        SemanticNodeData::IndexedAccess { .. }
         | SemanticNodeData::Mapped { .. }
         | SemanticNodeData::KeyOf { .. }
         | SemanticNodeData::TemplateLiteral { .. }
         | SemanticNodeData::TypeParam { .. }
         | SemanticNodeData::Infer { .. } => true,
-        SemanticNodeData::InstantiationRef { base, .. } => {
-            // Resolve the body via Skeleton-instantiation so unbound
-            // type parameters become TypeParam shells (preserving
-            // Conditional branches that would otherwise collapse to
-            // `never`). This predicate only inspects symbolic shape,
-            // so use StructuralTransit demand rather than publishing
-            // mapped/keyof members while walking the skeleton.
+        SemanticNodeData::InstantiationRef { .. } => {
+            // Project the carrier's ONE-LEVEL Shallow surface terminal through
+            // the SAME `ProjectPath { [], Published(Shallow) }` reduction the
+            // binding-surface read uses, then classify THAT terminal. This is
+            // the one-engine way to decide "is the instantiated root symbolic?":
+            //
+            // - A CONCRETE substitution (`SlotProps<{ id: string }>` where
+            //   `type SlotProps<T> = T extends { id: infer U } ? { row: U } : …`)
+            //   reduces its decidable Conditional / Mapped body to a concrete
+            //   `Object` terminal — non-symbolic, so the synthesis enumerates the
+            //   binding rows. The earlier empty-args instantiation erased the
+            //   substitution and left the body an OPEN Conditional, so every such
+            //   root looked symbolic-only and the rows were silently dropped.
+            // - A TRULY-OPEN generic (`SlotProps<T>` with `T` an unbound
+            //   `TypeParam`, or an `IndexedAccess` / `Mapped` root that never
+            //   resolves) projects to a symbolic terminal (the deferred shell or
+            //   a Mapped/IndexedAccess node), which the recursion below classifies
+            //   as symbolic — declining to invent bindings from an undetermined
+            //   generic context.
+            //
+            // Routing through `ProjectPath` (not a bare `Instantiate`) is
+            // essential: the projection walker applies inference-binding +
+            // decidable-conditional reduction that a bare `Instantiate` /
+            // `Conditional` dispatch leaves deferred for an `infer`-bearing body.
             use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
-            let key = SemanticQueryKey::Instantiate {
-                base: base.clone(),
-                args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                context:
-                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                        ProjectionMode::Skeleton,
-                    ),
-            };
-            let read = dispatch.execute_read(key);
+            let empty_path: Arc<[crate::semantic_query::PathSegment]> =
+                Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice());
+            let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+                base: node,
+                path: empty_path,
+                context: crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Shallow,
+                ),
+            });
             // Dual-emit: legacy accumulator + fact-tracer fan-out.
             emit_slot_binding_graph_dispatch_facts(dispatch.ctx, &read.dep_signature);
             match read.value {
-                QueryResult::Value(body_id) => {
-                    slot_param_root_is_symbolic_only(dispatch, body_id, depth + 1)
+                // Reduced to a different terminal — classify it. A concrete
+                // Object terminal is non-symbolic; a symbolic terminal recurses
+                // back into the symbolic arms above.
+                QueryResult::Value(terminal) if terminal != node => {
+                    slot_param_root_is_symbolic_only(dispatch, terminal, depth + 1)
                 }
-                _ => false,
+                // Did not reduce past the carrier (still the InstantiationRef
+                // shell) or errored — treat as symbolic-only (an unresolvable
+                // carrier has no concrete enumerable root).
+                _ => true,
             }
         }
         _ => false,

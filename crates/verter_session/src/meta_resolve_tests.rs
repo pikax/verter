@@ -12089,3 +12089,146 @@ fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
         prop_names(&base_dtos_after)
     );
 }
+
+/// Graph-native generic slot-alias bindings under a CONCRETE substitution.
+///
+/// `defineSlots<TabsSlots<{ id: string }>>()` where the slot's binding
+/// parameter is a generic alias whose BODY ROOT is a Conditional that is OPEN
+/// when the type parameter is unbound but REDUCES to a concrete object once the
+/// parameter is substituted:
+/// `type SlotProps<T> = T extends { id: infer U } ? { row: U } : { row: never }`.
+/// At `T = { id: string }` the conditional reduces to `{ row: string }`, so the
+/// graph-native synthesis MUST realize the callable slot member under the
+/// substitution, find the first parameter, and publish the binding row `row`.
+///
+/// Discrimination: the pre-fix `slot_param_root_is_symbolic_only` instantiated
+/// the `InstantiationRef` carrier with EMPTY args, so `SlotProps<T>`'s body
+/// stayed an OPEN Conditional (`T` an unbound `TypeParam`) and the predicate
+/// returned `true` (symbolic-only) — the synthesis SKIPPED the slot and
+/// published NO binding row. With `(base, args, context)` preserved, the body
+/// reduces to the concrete `{ row: string }` object (non-symbolic) and the
+/// `default.row` binding is published. Verified pre-fail / post-pass.
+#[test]
+fn graph_native_generic_slot_alias_publishes_bindings_under_concrete_substitution() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/slots.ts",
+            r#"
+export type SlotProps<T> = T extends { id: infer U } ? { row: U } : { row: never }
+export type SlotFn<T> = (props: SlotProps<T>) => any
+export type TabsSlots<T> = { default: SlotFn<T> }
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { TabsSlots } from './slots'
+
+defineSlots<TabsSlots<{ id: string }>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("should resolve expanded component meta");
+    let evaluated = resolved
+        .evaluated_types
+        .as_ref()
+        .expect("expanded component meta should carry evaluated types");
+
+    let slot_names: std::collections::BTreeSet<_> = evaluated
+        .define_slots
+        .iter()
+        .flat_map(|entry| entry.result.value.properties.iter())
+        .map(|slot| slot.name.as_str())
+        .collect();
+    assert!(
+        slot_names.contains("default"),
+        "the `default` slot must be present on the resolved slot shape: {slot_names:?}"
+    );
+
+    let default_bindings: std::collections::BTreeSet<_> = evaluated
+        .slot_bindings
+        .iter()
+        .filter_map(|binding| binding.name.strip_prefix("default.").map(str::to_string))
+        .collect();
+    assert!(
+        default_bindings.contains("row"),
+        "the generic slot alias `SlotProps<{{ id: string }}>` must publish the \
+         binding row `row` under the concrete substitution T = {{ id: string }} \
+         (the pre-fix empty-args InstantiationRef instantiation dropped it): \
+         {default_bindings:?}"
+    );
+}
+
+/// Graph-native OPEN generic slot alias does NOT invent bindings.
+///
+/// When the slot parameter's root shape stays SYMBOLIC (here an
+/// `IndexedAccess` `T['missing']` that never resolves to a concrete object),
+/// the synthesis must DECLINE to publish a binding row — preserving the
+/// shallow-until-resolved contract. Inventing a row here would materialise a
+/// guess from an undetermined generic context.
+///
+/// Discrimination: a synthesis that enumerates the symbolic param root anyway
+/// (e.g. committing to a mapped/indexed surface) would publish a phantom
+/// binding; the `slot_param_root_is_symbolic_only` gate keeps `IndexedAccess`
+/// roots symbolic so NO binding is published. (Paired with the positive test
+/// above: the fix must publish for the CONCRETE case while still declining the
+/// OPEN case — preserving an empty-args instantiation would fail the positive
+/// test; removing the symbolic gate entirely would fail this one.)
+#[test]
+fn graph_native_open_generic_slot_alias_does_not_invent_bindings() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/slots.ts",
+            r#"
+// The slot param root is an indexed access on an open type parameter; it
+// never resolves to a concrete object surface, so it stays symbolic.
+export type OpenSlots<T> = { default: (props: T['missing']) => any }
+export type Wrapper<T> = OpenSlots<T>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Wrapper } from './slots'
+
+defineSlots<Wrapper<{ id: string }>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("should resolve expanded component meta");
+    let evaluated = resolved
+        .evaluated_types
+        .as_ref()
+        .expect("expanded component meta should carry evaluated types");
+
+    // `{ id: string }['missing']` is an indexed access whose key is not present;
+    // the param root never resolves to a concrete object, so NO `default.*`
+    // binding row is invented.
+    let default_bindings: Vec<&str> = evaluated
+        .slot_bindings
+        .iter()
+        .filter(|binding| binding.name.starts_with("default."))
+        .map(|binding| binding.name.as_str())
+        .collect();
+    assert!(
+        default_bindings.is_empty(),
+        "an open / unresolved indexed-access slot param root must NOT invent \
+         binding rows: {default_bindings:?}"
+    );
+}
