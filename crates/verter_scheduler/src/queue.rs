@@ -919,8 +919,9 @@ mod tests {
         fn on_dedup_joiner(&self, _c: Arc<str>, _w: u64, _a: bool) {}
         fn record_cache_event(&self, _event: CacheEventKind) {}
         fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
-            let guard =
-                OpaqueContextGuard::install(OpaqueRequestContext(self as Arc<dyn RequestContextLike>));
+            let guard = OpaqueContextGuard::install(OpaqueRequestContext(
+                self as Arc<dyn RequestContextLike>,
+            ));
             Box::new(FakeGuard(guard))
         }
     }
