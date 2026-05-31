@@ -974,12 +974,64 @@ impl VerterHost {
             // a few lines above this branch). The same context lookup
             // also surfaces the per-request peak-RSS slot.
             let mut memory = crate::component_meta_audit::RequestMemoryAudit::default();
-            let (parent_request_id, scheduler_audit, waits, trace_id) =
+            let (parent_request_id, scheduler_audit, waits, trace_id, footprint, files) =
                 match crate::request_context::current_request_context() {
                     Some(ctx) if ctx.request_id == request_id => {
                         memory.process_rss_peak_bytes = ctx
                             .process_rss_peak_bytes
                             .load(std::sync::atomic::Ordering::Relaxed);
+                        // Finalise the footprint through the SAME path
+                        // the cold resolver uses
+                        // (`compute_and_record_component_meta`): drain
+                        // THIS request's accumulator, build the per-file
+                        // audit vector off the drained state, then feed
+                        // the rest through the deterministic miner. A
+                        // warm hit performs little/no VFS work, so the
+                        // mined footprint is typically empty — but it is
+                        // always `Some(..)`, never `None`, so every
+                        // audited request (warm or cold) carries a
+                        // footprint. The accumulator is per-request and
+                        // the `SessionVfsSink` filters by `request_id`,
+                        // so the drained state attributes ONLY this
+                        // request's reads — the strict per-request
+                        // isolation the cold path relies on is
+                        // preserved. Footprint is `Some` exactly when
+                        // the cold path would produce one (i.e. when
+                        // `footprint_capture` is on and an accumulator is
+                        // attached); when capture is off it stays `None`,
+                        // matching the cold contract.
+                        let (footprint, files) = if ctx.footprint_capture {
+                            if let Some(acc) = ctx.audit_accumulator.as_ref() {
+                                let state = acc.drain();
+                                let direct_imports: rustc_hash::FxHashSet<String> = self
+                                    .shallow_file_state(ctx.canonical_id.as_ref())
+                                    .map(|sfs| {
+                                        sfs.import_targets
+                                            .values()
+                                            .map(|t| t.canonical_id.clone())
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                let files = crate::component_meta_audit::build_file_audit_vec(
+                                    &state,
+                                    ctx.canonical_id.as_ref(),
+                                    &direct_imports,
+                                    self.config.audit_timing_capture && self.config.audit_enabled,
+                                );
+                                let footprint = crate::component_meta_audit::mine_footprint(
+                                    self.project_type_store().semantic_graph(),
+                                    state,
+                                    &ctx,
+                                    self.config.max_derivation_edges,
+                                    &self.config.audit_caps,
+                                );
+                                (Some(footprint), files)
+                            } else {
+                                (None, Vec::new())
+                            }
+                        } else {
+                            (None, Vec::new())
+                        };
                         // Surface `WaitAudit` only when the host's
                         // `audit_timing_capture` flag is on (mirrored on
                         // `RequestContext::timing_capture`). The warm
@@ -1007,9 +1059,11 @@ impl VerterHost {
                             ctx.scheduler_audit.lock().clone(),
                             waits,
                             ctx.trace_id.clone(),
+                            footprint,
+                            files,
                         )
                     }
-                    _ => (None, None, None, String::new()),
+                    _ => (None, None, None, String::new(), None, Vec::new()),
                 };
             let synthesized = crate::component_meta_audit::RequestAuditRecord {
                 request_id,
@@ -1019,9 +1073,9 @@ impl VerterHost {
                 timings: crate::component_meta_audit::RequestTimingAudit::default(),
                 store,
                 memory,
-                footprint: None,
+                footprint,
                 scheduler: scheduler_audit,
-                files: Vec::new(),
+                files,
                 waits,
                 from_cache: true,
                 kind_payload: crate::component_meta_audit::RequestKindPayload::ComponentMeta(

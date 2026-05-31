@@ -149,3 +149,90 @@ fn audit_warm_path_dep_change_invalidates_cache() {
         "after dep change the cache entry is stale; from_cache must be false"
     );
 }
+
+/// Like [`make_audit_enabled_project`] but with `footprint_capture`
+/// on, so audited requests mine a `RequestFootprintAudit`.
+fn make_footprint_capturing_project() -> Arc<MetaProject> {
+    let host = VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        audit_enabled: true,
+        footprint_capture: true,
+        ..HostConfig::default()
+    });
+    MetaProject::new(host)
+}
+
+#[test]
+fn audit_warm_path_finalizes_footprint_some_with_per_request_isolation() {
+    // Discriminating test for the warm-cache footprint gap. A warm
+    // cache hit (`try_with_resolution_cache_hit`) must finalise a
+    // footprint through the SAME path the cold resolver uses — the
+    // synthesized record's `footprint` must be `Some(..)`, not `None`.
+    //
+    // Discrimination contract:
+    // - Pre-fix tree: the warm-path synthesized record hardcoded
+    //   `footprint: None`, so `warm_record.footprint.is_some()` FAILS
+    //   (and the 16-thread isolation test panics on
+    //   `record.footprint.expect(...)`).
+    // - Post-fix tree: the warm path drains THIS request's accumulator
+    //   and mines a footprint → `Some(..)` (typically empty, because a
+    //   warm hit does little/no VFS work) → PASSES.
+    let project = make_footprint_capturing_project();
+    upsert_basic_owner(&project);
+
+    let host = project.host();
+
+    // First call: cold; warms the cache. Drain its record so the
+    // store doesn't hand the cold record back by mistake later.
+    let (_, first) = host
+        .get_component_meta_with_resolution("/Owner.vue")
+        .expect("first (cold) call must succeed");
+    let first_record = host
+        .take_audit_record(first.request_id)
+        .expect("first audit record must publish");
+    assert!(
+        !first_record.from_cache,
+        "first call must be cold (sanity: confirms the second is the warm hit)"
+    );
+
+    // Second call: warm cache hit.
+    let (_, second) = host
+        .get_component_meta_with_resolution("/Owner.vue")
+        .expect("second (warm) call must succeed");
+    let warm_record = host
+        .take_audit_record(second.request_id)
+        .expect("warm audit record must publish");
+
+    assert!(
+        warm_record.from_cache,
+        "second call must be the warm cache hit (from_cache == true); got {}",
+        warm_record.from_cache,
+    );
+    // THE discriminating assertion: the warm record carries a footprint.
+    assert!(
+        warm_record.footprint.is_some(),
+        "warm-cache audited request must finalise a footprint (Some), not None — \
+         pre-fix this is None and the 16-thread isolation test panics on \
+         footprint.expect(...)",
+    );
+
+    // Per-request isolation: every VFS read attributed in the warm
+    // footprint must belong to THIS request, never the cold warm-up
+    // request (`first.request_id`). The warm path drains only this
+    // request's per-request accumulator (the SessionVfsSink filters by
+    // request_id), so cross-request attribution is structurally
+    // impossible — assert it explicitly so a future regression that
+    // leaks the cold request's reads into the warm record fails here.
+    let footprint = warm_record
+        .footprint
+        .as_ref()
+        .expect("footprint asserted Some above");
+    for r in &footprint.vfs_reads {
+        assert_eq!(
+            r.request_id, second.request_id,
+            "warm footprint must attribute only THIS request's reads ({}), \
+             never the cold warm-up request's ({})",
+            second.request_id, first.request_id,
+        );
+    }
+}
