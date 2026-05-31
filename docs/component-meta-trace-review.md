@@ -895,7 +895,7 @@
    - Because the same artifact path now represents a different trace surface, this is a trace-trust problem until the batch is rerun, normalized, and validated against committed specs.
 
 4. New fuse gates create a fake-win risk that is not yet covered by correctness tests.
-   - `crates/verter_session/src/resolver_core/fuses.rs` now introduces default budgets for wildcard-route, imported-root, registry-deepening, projection, structural slow-lane, and union-member work.
+   - `crates/verter_session/src/resolver_core/fuses.rs` now introduces default budgets for wildcard-route, imported-root, registry-deepening, projection, and union-member work.
    - `crates/verter_session/src/meta_resolve.rs` now breaks or skips work when `allow_registry_deepening()`, `allow_imported_root()`, or `allow_union_member()` refuses more work.
    - Existing tests prove fuse accounting and some cache behavior, but I did not find Batch-1-level component-meta correctness tests showing that these bailouts preserve the published metadata shape when they trip.
    - Faster traces are not sufficient evidence while this gap remains.
@@ -905,7 +905,7 @@
      - `prepared_type_decl_in_view_does_not_require_import_route_shadow_materialization`
      - `route_and_root_resolution_do_not_fall_back_through_frontier`
      - `component_meta_queries_do_not_populate_legacy_resolved_type_cache`
-     - the slow-lane guard path in `meta_tests.rs` using `forbid_import_route_shadow_for_tests()` and `forbid_structural_slow_lane_for_tests()`
+     - the route-shadow guard path in `meta_tests.rs` using `forbid_import_route_shadow_for_tests()`, and the prepared-structural-substitution slow-lane forbid-tests in `component_meta_query_engine/tests.rs` using `forbid_prepared_structural_substitution_slow_lane_for_tests()`
    - Missing for Batch 1:
      - committed forbidden trace assertions proving legacy fallback is absent
      - committed forbidden trace assertions proving raw snapshot / repeated `current_eval_state` reopening is absent where published facts should suffice

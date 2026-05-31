@@ -8896,8 +8896,6 @@ defineSlots<ButtonSlots>()
         .unwrap();
 
     let _route_shadow_guard = crate::host_resolve::forbid_import_route_shadow_for_tests();
-    let _guard =
-        crate::resolver_core::component_meta_query_engine::forbid_structural_slow_lane_for_tests();
     let resolved = project
         .host()
         .resolve_component_meta("/src/Button.vue", crate::types::ProjectionMode::Expanded)
@@ -8998,8 +8996,6 @@ defineSlots<ButtonSlots>()
         .unwrap();
 
     let _route_shadow_guard = crate::host_resolve::forbid_import_route_shadow_for_tests();
-    let _guard =
-        crate::resolver_core::component_meta_query_engine::forbid_structural_slow_lane_for_tests();
     let resolved = project
         .host()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
@@ -9103,8 +9099,6 @@ defineSlots<ButtonSlots>()
         .unwrap();
 
     let _route_shadow_guard = crate::host_resolve::forbid_import_route_shadow_for_tests();
-    let _guard =
-        crate::resolver_core::component_meta_query_engine::forbid_structural_slow_lane_for_tests();
     let resolved = project
         .host()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)

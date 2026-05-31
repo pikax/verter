@@ -536,50 +536,7 @@ pub struct ComponentMetaQueryEngine<'a> {
 
 #[cfg(test)]
 thread_local! {
-    static FORBID_STRUCTURAL_SLOW_LANE: Cell<usize> = const { Cell::new(0) };
-    static FORBID_DIRECT_PICK_ROUTED_EXPR_SLOW_LANE: Cell<usize> = const { Cell::new(0) };
     static FORBID_PREPARED_STRUCTURAL_SUBSTITUTION_SLOW_LANE: Cell<usize> = const { Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) struct StructuralSlowLaneGuard;
-
-#[cfg(test)]
-impl Drop for StructuralSlowLaneGuard {
-    fn drop(&mut self) {
-        FORBID_STRUCTURAL_SLOW_LANE.with(|depth| {
-            depth.set(depth.get().saturating_sub(1));
-        });
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn forbid_structural_slow_lane_for_tests() -> StructuralSlowLaneGuard {
-    FORBID_STRUCTURAL_SLOW_LANE.with(|depth| {
-        depth.set(depth.get().saturating_add(1));
-    });
-    StructuralSlowLaneGuard
-}
-
-#[cfg(test)]
-pub(crate) struct DirectPickRoutedExprSlowLaneGuard;
-
-#[cfg(test)]
-impl Drop for DirectPickRoutedExprSlowLaneGuard {
-    fn drop(&mut self) {
-        FORBID_DIRECT_PICK_ROUTED_EXPR_SLOW_LANE.with(|depth| {
-            depth.set(depth.get().saturating_sub(1));
-        });
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn forbid_direct_pick_routed_expr_slow_lane_for_tests(
-) -> DirectPickRoutedExprSlowLaneGuard {
-    FORBID_DIRECT_PICK_ROUTED_EXPR_SLOW_LANE.with(|depth| {
-        depth.set(depth.get().saturating_add(1));
-    });
-    DirectPickRoutedExprSlowLaneGuard
 }
 
 #[cfg(test)]
@@ -601,32 +558,6 @@ pub(crate) fn forbid_prepared_structural_substitution_slow_lane_for_tests(
         depth.set(depth.get().saturating_add(1));
     });
     PreparedStructuralSubstitutionSlowLaneGuard
-}
-
-// Unused after trampoline
-// conversion of `project_route_surface_expr`. Helper.
-#[cfg(test)]
-#[allow(dead_code)]
-fn assert_direct_pick_routed_expr_slow_lane_allowed() {
-    assert!(
-        !direct_pick_routed_expr_slow_lane_forbidden_for_current_thread(),
-        "direct routed-expr pick slow lane should not be used when member projection can satisfy the route",
-    );
-}
-
-#[cfg(not(test))]
-#[allow(dead_code)]
-fn assert_direct_pick_routed_expr_slow_lane_allowed() {}
-
-
-#[cfg(test)]
-pub(crate) fn structural_slow_lane_forbidden_for_current_thread() -> bool {
-    FORBID_STRUCTURAL_SLOW_LANE.with(|depth| depth.get() > 0)
-}
-
-#[cfg(test)]
-pub(crate) fn direct_pick_routed_expr_slow_lane_forbidden_for_current_thread() -> bool {
-    FORBID_DIRECT_PICK_ROUTED_EXPR_SLOW_LANE.with(|depth| depth.get() > 0)
 }
 
 #[cfg(test)]

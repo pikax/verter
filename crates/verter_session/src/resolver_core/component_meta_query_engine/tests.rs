@@ -7,14 +7,11 @@
 //! engine-impl methods as `pub(super)` from sibling modules so the
 //! tests resolve symmetrically regardless of which sibling
 //! `impl<'a> ComponentMetaQueryEngine<'a>` block defined the method.
-use super::forbid_direct_pick_routed_expr_slow_lane_for_tests;
-use super::forbid_structural_slow_lane_for_tests;
 use super::ComponentMetaQueryEngine;
 use super::{
-    direct_pick_routed_expr_slow_lane_forbidden_for_current_thread,
     forbid_prepared_structural_substitution_slow_lane_for_tests,
     prepared_structural_substitution_slow_lane_forbidden_for_current_thread,
-    structural_slow_lane_forbidden_for_current_thread, type_expr_references_type_params,
+    type_expr_references_type_params,
 };
 use crate::types::{AnalysisLevel, HostConfig};
 use crate::VerterHost;
@@ -685,11 +682,10 @@ export interface LinkProps extends NuxtLinkProps {
     let route =
         crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
 
-    let _guard = forbid_direct_pick_routed_expr_slow_lane_for_tests();
     let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
         &mut query_engine,
 "/src/Link.vue", "LinkProps", &route)
-        .expect("member-viable inherited pick route should project without the direct routed-expr slow lane");
+        .expect("member-viable inherited pick route should project to the requested members only");
     let TypeExpr::Object(object) = projected else {
         panic!("projected inherited pick route should materialize as an object");
     };
@@ -863,7 +859,6 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
     let route =
         crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
 
-    let _guard = forbid_direct_pick_routed_expr_slow_lane_for_tests();
     let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
         &mut query_engine,
         "/src/Link.vue",
@@ -993,16 +988,13 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
     let route =
         crate::resolver_core::RouteDemand::Pick(vec!["target".to_string(), "to".to_string()]);
 
-    let _guard = forbid_direct_pick_routed_expr_slow_lane_for_tests();
     let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
         &mut query_engine,
         "/src/Link.vue",
         "LinkProps",
         &route,
     )
-    .expect(
-        "realistic inherited pick route should project without the direct routed-expr slow lane",
-    );
+    .expect("realistic inherited pick route should project to the requested members only");
     let TypeExpr::Object(object) = projected else {
         panic!("projected inherited pick route should materialize as an object");
     };
@@ -1126,11 +1118,10 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
     let route =
         crate::resolver_core::RouteDemand::Pick(vec!["target".to_string(), "to".to_string()]);
 
-    let _guard = forbid_direct_pick_routed_expr_slow_lane_for_tests();
     let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
         &mut query_engine,
 "/src/Link.vue", "LinkProps", &route)
-        .expect("module-routed inherited pick route should project without the direct routed-expr slow lane");
+        .expect("module-routed inherited pick route should project to the requested members only");
     let TypeExpr::Object(object) = projected else {
         panic!("projected inherited pick route should materialize as an object");
     };
@@ -2618,33 +2609,18 @@ defineProps<Pick<HelperProps, 'name' | 'description'>>()
 }
 
 #[test]
-fn slow_lane_forbid_guards_are_thread_local() {
-    let _structural_guard = forbid_structural_slow_lane_for_tests();
-    let _direct_pick_guard = forbid_direct_pick_routed_expr_slow_lane_for_tests();
+fn prepared_substitution_slow_lane_forbid_guard_is_thread_local() {
     let _prepared_guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
 
-    assert!(structural_slow_lane_forbidden_for_current_thread());
-    assert!(direct_pick_routed_expr_slow_lane_forbidden_for_current_thread());
-    assert!(prepared_structural_substitution_slow_lane_forbidden_for_current_thread());
-
-    let (structural, direct_pick, prepared) = std::thread::spawn(|| {
-        (
-            structural_slow_lane_forbidden_for_current_thread(),
-            direct_pick_routed_expr_slow_lane_forbidden_for_current_thread(),
-            prepared_structural_substitution_slow_lane_forbidden_for_current_thread(),
-        )
-    })
-    .join()
-    .expect("thread-local guard probe should join cleanly");
-
     assert!(
-        !structural,
-        "structural slow-lane guard should not leak across test threads",
+        prepared_structural_substitution_slow_lane_forbidden_for_current_thread(),
+        "the prepared-substitution forbid guard must be armed on the arming thread",
     );
-    assert!(
-        !direct_pick,
-        "direct-pick slow-lane guard should not leak across test threads",
-    );
+
+    let prepared = std::thread::spawn(prepared_structural_substitution_slow_lane_forbidden_for_current_thread)
+        .join()
+        .expect("thread-local guard probe should join cleanly");
+
     assert!(
         !prepared,
         "prepared structural substitution slow-lane guard should not leak across test threads",

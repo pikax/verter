@@ -15,7 +15,7 @@
 //!   `pub fn can_resolve_registry_symbol`, `pub fn owner_collection_expr`,
 //!   `pub fn named_decl_body`, `pub fn prepared_member_raw_type`,
 //!   `pub fn enter_member_surface`, `pub fn exit_member_surface`,
-//!   `pub fn allow_structural_slow_lane`, `pub fn allow_wildcard_route`,
+//!   `pub fn allow_wildcard_route`,
 //!   `pub fn allow_imported_root`, `pub fn allow_registry_deepening`,
 //!   `pub fn allow_union_member`, `pub fn reset_union_members`,
 //!   `pub fn has_fuse_tripped`, `pub fn fuse_trips` — all `pub` on the
@@ -627,12 +627,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
     pub fn exit_member_surface(&mut self) {
         self.fuse_state.pop_member_recursion();
-    }
-
-    pub fn allow_structural_slow_lane(&mut self) -> bool {
-        !self
-            .fuse_state
-            .check_structural_slow_lane(&self.fuse_budgets)
     }
 
     /// `pub(crate)` accessor for the projection-op fuse
