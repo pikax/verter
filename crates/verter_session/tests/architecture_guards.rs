@@ -1779,11 +1779,6 @@ mod resolver_core_recursion {
         ),
         (
             "surface",
-            "substitute_type_expr",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth (substitution rewriter).",
-        ),
-        (
-            "surface",
             "type_expr_has_any_object_arm",
             "Phase 5l-supplement: bounded by TypeExpr Parenthesized/Union/Intersection chain depth.",
         ),

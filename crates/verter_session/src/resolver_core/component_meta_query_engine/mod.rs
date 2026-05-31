@@ -109,18 +109,11 @@ pub(crate) use surface::{
     type_expr_contains_semantic_miss, type_expr_is_expanded_surface,
 };
 
-// Items needed inside this module (mod.rs) — engine impl methods and
-// supporting code. All `pub(super)` in surface.rs.
-#[cfg(test)]
-use surface::type_expr_references_substitutions;
-use surface::{apply_type_param_substitutions, build_default_type_param_substitutions};
-
 // Predicate/utility helpers (route-expr surface keys,
 // package-canonical predicates, prepared-decl shape predicates,
 // registry-symbol resolution with budget) live in the private
-// `helpers` child module. All entries are `pub(super)` and used only
-// from the engine impl in this file plus the inline test module.
-use helpers::is_package_source;
+// `helpers` child module. All entries are `pub(super)` and used from
+// the engine impl in sibling modules plus the inline test module.
 #[cfg(test)]
 use helpers::type_expr_references_type_params;
 
@@ -546,70 +539,6 @@ pub struct ComponentMetaQueryEngine<'a> {
     #[allow(dead_code)]
     projection_chain_scopes: Vec<String>,
 }
-
-#[cfg(test)]
-thread_local! {
-    static FORBID_PREPARED_STRUCTURAL_SUBSTITUTION_SLOW_LANE: Cell<usize> = const { Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) struct PreparedStructuralSubstitutionSlowLaneGuard;
-
-#[cfg(test)]
-impl Drop for PreparedStructuralSubstitutionSlowLaneGuard {
-    fn drop(&mut self) {
-        FORBID_PREPARED_STRUCTURAL_SUBSTITUTION_SLOW_LANE.with(|depth| {
-            depth.set(depth.get().saturating_sub(1));
-        });
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn forbid_prepared_structural_substitution_slow_lane_for_tests(
-) -> PreparedStructuralSubstitutionSlowLaneGuard {
-    FORBID_PREPARED_STRUCTURAL_SUBSTITUTION_SLOW_LANE.with(|depth| {
-        depth.set(depth.get().saturating_add(1));
-    });
-    PreparedStructuralSubstitutionSlowLaneGuard
-}
-
-#[cfg(test)]
-pub(crate) fn prepared_structural_substitution_slow_lane_forbidden_for_current_thread() -> bool {
-    FORBID_PREPARED_STRUCTURAL_SUBSTITUTION_SLOW_LANE.with(|depth| depth.get() > 0)
-}
-
-/// Trip-wire for the live prepared-structural-substitution slow lane.
-///
-/// `apply_type_param_substitutions` (`surface.rs`) calls this immediately
-/// before whole-body `substitute_type_expr`, AFTER the empty/no-reference
-/// fast-return — so it only fires when a real substitution is about to run.
-/// When the body being substituted is a structural shape
-/// (`Object`/`Intersection`/`Union`/`Function`/`Parenthesized`) and a test
-/// has armed `forbid_prepared_structural_substitution_slow_lane_for_tests()`,
-/// this panics: such routes are expected to be satisfied by the dispatch
-/// fast lane via shallow member-local projection rather than by cloning and
-/// whole-substituting the structural body.
-#[cfg(test)]
-pub(super) fn assert_prepared_structural_substitution_slow_lane_allowed(expr: &TypeExpr) {
-    if matches!(
-        expr,
-        TypeExpr::Object(..)
-            | TypeExpr::Intersection(..)
-            | TypeExpr::Union(..)
-            | TypeExpr::Function(..)
-            | TypeExpr::Parenthesized(..)
-    ) {
-        assert!(
-            !prepared_structural_substitution_slow_lane_forbidden_for_current_thread(),
-            "prepared generic projection should not whole-substitute structural bodies when \
-             shallow member-local substitution can satisfy the route",
-        );
-    }
-}
-
-#[cfg(not(test))]
-#[inline]
-pub(super) fn assert_prepared_structural_substitution_slow_lane_allowed(_expr: &TypeExpr) {}
 
 #[cfg(test)]
 thread_local! {
@@ -1060,55 +989,6 @@ impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
 
 fn empty_semantic_args() -> std::sync::Arc<[SemanticNodeId]> {
     std::sync::Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice())
-}
-
-/// Engine-internal substitution helper that mirrors the
-/// deleted `instantiate_local_generic_ref` engine method body. Unlike
-/// the dispatch-only `instantiate_local_generic_ref_via_dispatch`, this
-/// helper walks the re-export chain via
-/// `resolve_final_prepared_type_target` before looking up the prepared
-/// decl — preserving the cross-file type-alias substitution semantics
-/// the engine method's call sites depended on.
-fn instantiate_local_generic_ref_via_engine(
-    engine: &mut ComponentMetaQueryEngine<'_>,
-    scope_canonical_id: &str,
-    expr: &TypeExpr,
-) -> Option<TypeExpr> {
-    let TypeExpr::Ref {
-        name,
-        type_arguments,
-    } = expr
-    else {
-        return None;
-    };
-    if type_arguments.is_empty() {
-        return None;
-    }
-
-    let declaration = engine.resolve_type_declaration(scope_canonical_id, name.as_ref());
-    let declared_canonical_id = if declaration.canonical_source.is_empty() {
-        scope_canonical_id.to_string()
-    } else {
-        declaration.canonical_source.clone()
-    };
-    let declared_symbol_name = if declaration.resolved_name.is_empty() {
-        name.as_ref().to_string()
-    } else {
-        declaration.resolved_name.clone()
-    };
-    let (target_canonical_id, target_symbol_name) = engine.resolve_final_prepared_type_target(
-        declared_canonical_id.as_str(),
-        declared_symbol_name.as_str(),
-    );
-    if is_package_source(engine.ctx, Some(target_canonical_id.as_str())) {
-        return None;
-    }
-    let prepared = engine.prepared_type_decl(&target_canonical_id, &target_symbol_name)?;
-    let substitutions = build_default_type_param_substitutions(prepared.as_ref(), type_arguments)?;
-    Some(apply_type_param_substitutions(
-        &prepared.body,
-        &substitutions,
-    ))
 }
 
 #[cfg(test)]

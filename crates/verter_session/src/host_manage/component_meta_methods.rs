@@ -39,9 +39,8 @@ use crate::meta_resolve::component_meta_registry_prefers_structural_materializat
 use crate::meta_resolve::slot_binding_graph;
 use crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS;
 use crate::meta_resolve::{
-    collect_define_props_root_names, component_meta_owner_local_shallow_substituted_alias_body,
-    select_imported_materialization_scope, slot_binding_targets_define_props_root,
-    RegistryMaterialization, ResolvedComponentMetaState,
+    collect_define_props_root_names, select_imported_materialization_scope,
+    slot_binding_targets_define_props_root, RegistryMaterialization, ResolvedComponentMetaState,
 };
 use crate::meta_resolve::{
     collect_type_expr_ref_names, lowered_preserve_package_backed_symbolic_refs,
@@ -1225,6 +1224,124 @@ impl VerterHost {
                 _ => false,
             }
         }
+        /// Owner-local generic-alias registry substitution via the shared
+        /// dispatch `Instantiate` query (Navigate mode).
+        ///
+        /// When a registry candidate's raw body is an owner-local generic
+        /// alias ref (`Button = ComponentConfig<typeof theme>`, where
+        /// `ComponentConfig` is declared in the SAME canonical file), the
+        /// registry publishes Button as the SHALLOW substituted body —
+        /// helper-ref members (`variants: ComponentVariants<T>`) stay as
+        /// carrier Refs with their `T` argument substituted, rather than
+        /// recursively expanding them. This keeps the registry consumer's
+        /// Ref-to-helper navigation path queryable.
+        ///
+        /// This is the SOLE owner-local generic-alias substitution path:
+        /// it lowers the generic ref to the graph's `InstantiationRef`
+        /// carrier, gates on owner-local identity + the prepared-decl reach
+        /// constraints, then runs the shared `SemanticQueryKey::Instantiate`
+        /// query and raises the instantiated body. Both the lowering and
+        /// the instantiation run in `structural_transit_with_mode(Navigate)`
+        /// so nested helper refs (e.g. `ComponentVariants<T>`) stay as
+        /// `Ref` carriers (Navigate) without publication-demand operator
+        /// reification (StructuralTransit) and without over-materializing
+        /// helpers (which Expanded would do, breaking the
+        /// `expanded_instantiate_calls` audit invariant).
+        ///
+        /// Returns `None` (caller falls through to the non-early-return
+        /// path) when the raw body is not a generic Ref, the lowering does
+        /// not yield an `InstantiationRef`, the base is cross-file, the
+        /// prepared decl is missing / has fewer type parameters than bound
+        /// arguments / has a non-Object body, or the instantiated body does
+        /// not raise to an Object.
+        fn owner_local_generic_alias_substituted_body_via_dispatch(
+            query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+            scope_canonical_id: &str,
+            raw_body: Option<&verter_type_expr::TypeExpr>,
+        ) -> Option<verter_type_expr::TypeExpr> {
+            use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
+            use crate::semantic_query::{
+                ProjectionMode, ProjectionReductionContext, SemanticNodeData, SemanticQueryApi,
+                SemanticQueryKey,
+            };
+            use verter_type_expr::TypeExpr;
+
+            // Step 2: require a generic Ref with non-empty type arguments.
+            let raw = raw_body?;
+            let TypeExpr::Ref { type_arguments, .. } = raw else {
+                return None;
+            };
+            if type_arguments.is_empty() {
+                return None;
+            }
+
+            // The shared `&dyn ResolverContext` reference is copied out so
+            // the dispatch (which only borrows the context) and the
+            // mutable `prepared_type_decl` read on `query_engine` are
+            // independent borrows.
+            let ctx = query_engine.ctx;
+            let dispatch = ProjectSemanticDispatch::new(ctx);
+
+            // Step 3: lower the generic ref in Navigate mode. A generic
+            // `Ref` lowers to the graph's `InstantiationRef` carrier
+            // (base + lowered/substituted args).
+            let navigate_context =
+                ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
+            let lowered = dispatch.lower_type_expr_in_scope_with_context(
+                scope_canonical_id,
+                raw,
+                navigate_context,
+            )?;
+
+            // Step 4: require an `InstantiationRef`. Anything else (a bare
+            // DeclRef, a reduced Object, a miss shell, ...) is NOT an
+            // owner-local generic instantiation — fall through.
+            let lowered_data = node_data_for(ctx, lowered)?;
+            let SemanticNodeData::InstantiationRef { base, args } = lowered_data.as_ref() else {
+                return None;
+            };
+
+            // Step 5: owner-local guard — the instantiated declaration must
+            // live in the requesting scope's file.
+            if base.canonical_id.as_ref() != scope_canonical_id {
+                return None;
+            }
+
+            // Step 6: preserve the old reach constraints — the prepared
+            // decl must exist, declare at least as many type parameters as
+            // the bound arguments, and have an Object body. (Reading the
+            // prepared decl here mirrors the slow lane's gate; the
+            // dispatch's `Instantiate` substitution operates on the same
+            // prepared body.)
+            let prepared = query_engine
+                .prepared_type_decl(base.canonical_id.as_ref(), base.decl_name.as_ref())?;
+            if prepared.type_parameters.len() < args.len() {
+                return None;
+            }
+            if !matches!(prepared.body, TypeExpr::Object(_)) {
+                return None;
+            }
+
+            // Step 7: execute the shared `Instantiate` query in the same
+            // Navigate transit context so the substituted body materializes
+            // through the one engine.
+            let instantiate_context =
+                ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
+            let node = match dispatch.execute(SemanticQueryKey::Instantiate {
+                base: base.to_decl_key(),
+                args: std::sync::Arc::clone(args),
+                context: instantiate_context,
+            }) {
+                crate::semantic_query::QueryResult::Value(node) => node,
+                crate::semantic_query::QueryResult::Recursive(_)
+                | crate::semantic_query::QueryResult::Error(_) => return None,
+            };
+
+            // Step 8: raise the instantiated body; publish only when it is
+            // an Object (the shallow substituted surface).
+            let raised = dispatch.raise_node_to_type_expr(node)?;
+            matches!(raised, TypeExpr::Object(_)).then_some(raised)
+        }
         fn materialize_component_meta_registry_candidate(
             query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
             scope_canonical_id: &str,
@@ -1274,7 +1391,7 @@ impl VerterHost {
             // can't follow Refs to a cross-file helper through the
             // registry directly).
             if !imported_generic_alias_root {
-                if let Some(shallow) = component_meta_owner_local_shallow_substituted_alias_body(
+                if let Some(shallow) = owner_local_generic_alias_substituted_body_via_dispatch(
                     query_engine,
                     scope_canonical_id,
                     raw_body,

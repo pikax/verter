@@ -63,6 +63,11 @@ pub(super) fn routed_expr_surface_key_expr(
     }
 }
 
+/// Thin `Option<&str>` wrapper over [`is_package_canonical`]. Its only
+/// consumer is the workspace-classification guard test, so it is gated to
+/// test builds (the production path uses [`is_package_canonical`] on a
+/// concrete `&str`).
+#[cfg(test)]
 pub(super) fn is_package_source(ctx: &dyn ResolverContext, source: Option<&str>) -> bool {
     source.is_some_and(|s| ctx.workspace_is_package_backed(s))
 }

@@ -375,6 +375,38 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "resolve_prepared_surface_target",
     "prepared_string_literal_keys",
     "engine_fact_signature_for_prepared_target",
+    // Prepared-structural-substitution slow-lane cutover. The engine-side
+    // generic-Ref instantiation helper + the 6 whole-body substitution
+    // rewriters are DELETED: generic-Ref instantiation now goes through
+    // the dispatch `build_instantiate` path
+    // (`instantiate_local_generic_ref_via_dispatch`), which binds args
+    // into the lowering env and substitutes while lowering. Re-introducing
+    // any of these names would resurrect the structural whole-substitution
+    // slow lane this cutover eliminated. (`type_expr_references_names` —
+    // the surviving general-purpose name predicate — is NOT retired; only
+    // its substitution-keyed wrapper `type_expr_references_substitutions`
+    // is.)
+    "instantiate_local_generic_ref_via_engine",
+    "apply_type_param_substitutions",
+    "substitute_type_expr",
+    "substitute_function_expr",
+    "build_default_type_param_substitutions",
+    "is_identity_type_param_binding",
+    "type_expr_references_substitutions",
+    // Owner-local generic-alias registry substitution slow lane — the
+    // second raw-`TypeExpr` substitution engine. DELETED: the registry
+    // candidate path
+    // (`owner_local_generic_alias_substituted_body_via_dispatch` in
+    // `host_manage/component_meta_methods.rs`) lowers the owner-local
+    // generic ref to the graph's `InstantiationRef` carrier and runs the
+    // shared `SemanticQueryKey::Instantiate` query (Navigate mode) — the
+    // ONE type-resolution engine — instead of cloning and rewriting the
+    // prepared body's `TypeExpr` in place. Re-introducing any of these
+    // names would resurrect the parallel structure-preserving substitution
+    // walker this cutover eliminated.
+    "component_meta_owner_local_shallow_substituted_alias_body",
+    "walk_substitute_typeexpr",
+    "component_meta_substitute_typeexpr",
 ];
 
 /// File names whose presence at the head of the path should make us

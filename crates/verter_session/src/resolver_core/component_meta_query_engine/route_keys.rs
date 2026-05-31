@@ -15,9 +15,7 @@
 use verter_type_expr::TypeExpr;
 
 use super::helpers::{is_builtin_name, projected_surface_member_names, strip_parens_expr};
-use super::{
-    instantiate_local_generic_ref_via_engine, ComponentMetaQueryEngine, PreparedProjectionContext,
-};
+use super::{ComponentMetaQueryEngine, PreparedProjectionContext};
 
 impl<'a> ComponentMetaQueryEngine<'a> {
     /// Enumerate the literal string keys named by a `Pick`/`Omit`
@@ -207,30 +205,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 expr,
             )
             .unwrap_or_else(|| expr.clone());
-        if matches!(projected_expr, TypeExpr::Unknown { .. }) {
-            // preserve the re-export chain walk that the
-            // deleted `instantiate_local_generic_ref` engine method
-            // performed via `resolve_final_prepared_type_target`.
-            if let Some(expanded) =
-                instantiate_local_generic_ref_via_engine(self, resolution_scope_canonical_id, expr)
-                    .or_else(|| {
-                        instantiate_local_generic_ref_via_engine(
-                            self,
-                            active_scope_canonical_id,
-                            expr,
-                        )
-                    })
-                    .filter(|expanded| expanded != expr)
-            {
-                return self.enumerate_member_surface_keys_via_route(
-                    resolution_scope_canonical_id,
-                    active_scope_canonical_id,
-                    &expanded,
-                    member_name,
-                    depth + 1,
-                );
-            }
-        }
+        // A leaf that the dispatch stabiliser left as `Unknown` is a clean
+        // miss: the `match &projected_expr` below falls through to its
+        // `_ => None` arm. (Generic-Ref instantiation of the route object
+        // is owned by the dispatch leaf stabiliser + the `IndexedAccess`
+        // arm's dispatch instantiation, not a structural-substitution
+        // fallback.)
 
         match &projected_expr {
             TypeExpr::Object(object) => {
@@ -458,18 +438,22 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     } => {
                         // Try expanding the alias's body (substituting
                         // type arguments), then retry the indexed access
-                        // against the substituted body.
-                        // preserve the engine method's
-                        // re-export chain walk via the engine helper.
+                        // against the substituted body. Generic-Ref
+                        // instantiation goes through the dispatch
+                        // instantiation bridge (`build_instantiate` binds
+                        // args into the env and lowers the body); the
+                        // dispatcher resolves re-export / barrel routes
+                        // via `resolve_bare_name_in_scope` +
+                        // `resolve_imported_type_root`.
                         let expanded = if !type_arguments.is_empty() {
-                            instantiate_local_generic_ref_via_engine(
-                                self,
+                            crate::meta_resolve::instantiate_local_generic_ref_via_dispatch(
+                                self.ctx,
                                 resolution_scope_canonical_id,
                                 object,
                             )
                             .or_else(|| {
-                                instantiate_local_generic_ref_via_engine(
-                                    self,
+                                crate::meta_resolve::instantiate_local_generic_ref_via_dispatch(
+                                    self.ctx,
                                     active_scope_canonical_id,
                                     object,
                                 )
@@ -592,52 +576,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     return Some(shape);
                 }
             }
-            // preserve the engine method's re-export chain
-            // walk by routing through the engine helper rather than
-            // the dispatch-only variant.
-            let expanded_ref_opt =
-                instantiate_local_generic_ref_via_engine(query_engine, scope_canonical_id, target);
-            if let Some(expanded_ref) = expanded_ref_opt {
-                if let Some(shape) =
-                    crate::meta_resolve::project_expr_surface_shape_via_host_threaded(
-                        query_engine,
-                        scope_canonical_id,
-                        &expanded_ref,
-                    )
-                {
-                    if shape_has_surface(&shape) {
-                        return Some(shape);
-                    }
-                }
-                if let Some(projected) =
-                    // Leak-close-2 — same disposition as the
-                    // first fallback arm (Navigate+Shallow+Published);
-                    // applied to the `expanded_ref` instantiation
-                    // result so both arms stay symmetric with the
-                    // sister-helper shape.
-                    crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
-                            query_engine,
-                            scope_canonical_id,
-                            &expanded_ref,
-                            crate::semantic_query::ProjectionMode::Navigate,
-                            crate::semantic_query::ProjectionMode::Shallow,
-                            crate::semantic_query::ReductionDemand::Published,
-                        )
-                {
-                    let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(
-                        &projected,
-                    );
-                    if shape_has_surface(&shape) {
-                        return Some(shape);
-                    }
-                }
-                let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(
-                    &expanded_ref,
-                );
-                if shape_has_surface(&shape) {
-                    return Some(shape);
-                }
-            }
+            // No structural-substitution fallback: the dispatch surface
+            // bridges above (Navigate+Shallow+Published) are the sole
+            // authority for the utility-route target shape, including
+            // generic-alias instantiation. A miss here is a clean `None`.
             None
         }
 

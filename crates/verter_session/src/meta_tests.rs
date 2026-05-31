@@ -8622,6 +8622,591 @@ defineProps<{
     );
 }
 
+/// Owner-local generic-alias registry substitution: `Button =
+/// ComponentConfig<typeof theme>` where `ComponentConfig`,
+/// `ComponentVariants`, and `theme` all live in the SAME file. The
+/// registry publishes `Button` as the SHALLOW substituted body —
+/// helper-ref members (`variants: ComponentVariants<T>`) stay as
+/// carrier Refs whose `T` argument is concretely substituted to the
+/// `typeof theme` argument, while an inline object member
+/// (`ui: { gap: T }`) carries the substituted argument in a concrete
+/// leaf. This is the behaviour the owner-local generic-alias
+/// substitution path owns (rewired from the deleted prepared-TypeExpr
+/// slow lane onto the shared dispatch `Instantiate` query in Navigate
+/// mode).
+///
+/// The assertions pin the CONCRETELY SUBSTITUTED member TYPE, not just
+/// member names:
+/// - `Button` is an Object (not a bare `Ref<ComponentConfig<...>>` —
+///   discriminates the wrong "raise the lowered InstantiationRef
+///   directly" port that never runs the `Instantiate` query).
+/// - `variants` is a `Ref` named `ComponentVariants` (NOT expanded to
+///   an object, NOT bare `T`).
+/// - `variants`' first type argument is concretely substituted — NOT
+///   `TypeParameter("T")` and NOT bare `Ref("T")`.
+/// - `ui.gap` (an inline-object leaf) is the SAME concretely
+///   substituted argument type as `variants`' argument, and is NOT
+///   `TypeParameter("T")` / `Ref("T")` / `Unknown` / `Never` (the
+///   no-substitution and miss-placeholder regressions).
+#[test]
+fn resolve_component_meta_substitutes_owner_local_generic_registry_alias_arg() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
+  [K in keyof T['variants']]: keyof T['variants'][K]
+}
+
+type ComponentConfig<T extends Record<string, any>> = {
+  variants: ComponentVariants<T>,
+  ui: { gap: T }
+}
+
+const theme = {
+  variants: {
+    color: { primary: '', secondary: '' }
+  }
+} as const
+
+type Button = ComponentConfig<typeof theme>
+
+defineProps<{
+  activeColor?: Button['variants']['color']
+  uiGap?: Button['ui']['gap']
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let button_entry = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "Button")
+        .expect("Button helper should be published in the resolved type registry");
+
+    // POSITIVE: the registry entry is the substituted Object (NOT a
+    // bare `Ref<ComponentConfig<typeof theme>>`). This is the
+    // load-bearing discriminator against the wrong Shape-A port that
+    // raises the lowered `InstantiationRef` carrier directly without
+    // executing the `Instantiate` query.
+    let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+        panic!(
+            "owner-local Button registry alias should materialize as an object, got {:?}",
+            button_entry.type_expr
+        );
+    };
+
+    // POSITIVE: `variants` stays a carrier `Ref` named
+    // `ComponentVariants` — a helper ref preserved shallow, NOT an
+    // expanded `{ color: ... }` object.
+    let variants_member = button_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "variants" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Button helper should keep a variants member");
+    let TypeExpr::Ref {
+        name: variants_name,
+        type_arguments: variants_args,
+    } = variants_member
+    else {
+        panic!(
+            "Button.variants should stay a ComponentVariants ref, got {:?}",
+            variants_member
+        );
+    };
+    assert_eq!(
+        variants_name.as_ref(),
+        "ComponentVariants",
+        "Button.variants should remain the ComponentVariants helper ref, got {variants_name}",
+    );
+    // NEGATIVE: NOT expanded to `{ color: ... }`. (Object/non-Ref
+    // already excluded by the `let-else` above; assert the property
+    // type is specifically not an Object for clarity.)
+    assert!(
+        !matches!(variants_member, TypeExpr::Object(_)),
+        "Button.variants must NOT be expanded to an object surface, got {variants_member:?}",
+    );
+
+    // The `ComponentVariants<T>` ref carries EXACTLY ONE substituted
+    // argument (the single `T` bound to `typeof theme`). Pinning the
+    // arity discriminates a port that fans the carrier ref out to >1
+    // argument (or drops it to 0) — `.first()` alone would silently
+    // accept either.
+    assert_eq!(
+        variants_args.len(),
+        1,
+        "ComponentVariants<T> should carry exactly one substituted type argument, got {variants_args:?}",
+    );
+
+    // The substituted argument carried by the `variants` helper ref.
+    let variants_arg = variants_args
+        .first()
+        .expect("ComponentVariants<T> should keep its substituted type argument");
+
+    // NEGATIVE: the carried argument is concretely substituted — NOT
+    // the unbound type parameter `T` (the no-substitution regression).
+    assert!(
+        !matches!(variants_arg, TypeExpr::TypeParameter(param) if param.name == "T"),
+        "variants arg must be the substituted typeof-theme type, not bare TypeParameter(\"T\"), \
+         got {variants_arg:?}",
+    );
+    assert!(
+        !matches!(variants_arg, TypeExpr::Ref { name, type_arguments }
+            if name.as_ref() == "T" && type_arguments.is_empty()),
+        "variants arg must be the substituted typeof-theme type, not bare Ref(\"T\"), \
+         got {variants_arg:?}",
+    );
+
+    // The inline-object `ui` member keeps `gap`, whose type is the
+    // substituted argument in a concrete leaf position.
+    let ui_member = button_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Button helper should keep a ui member");
+    let TypeExpr::Object(ui_shape) = ui_member else {
+        panic!(
+            "Button.ui is an inline object literal and should stay an object, got {ui_member:?}",
+        );
+    };
+    let ui_gap = ui_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "gap" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Button.ui should keep a gap member");
+
+    // NEGATIVE: `ui.gap` is concretely substituted — NOT the unbound
+    // type parameter `T`, NOT a bare `Ref("T")`, and NOT a
+    // miss/unknown placeholder. When substitution is neutralized
+    // (no args bound into `T`), `T['theme']`-style member values
+    // collapse to `TypeExpr::Unknown { raw: "semanticMiss" }` (a
+    // DISTINCT variant from `Primitive(Unknown)`); excluding that
+    // carrier is the load-bearing no-substitution discriminator.
+    assert!(
+        !matches!(ui_gap, TypeExpr::TypeParameter(param) if param.name == "T"),
+        "ui.gap must be the substituted typeof-theme type, not bare TypeParameter(\"T\"), \
+         got {ui_gap:?}",
+    );
+    assert!(
+        !matches!(ui_gap, TypeExpr::Ref { name, type_arguments }
+            if name.as_ref() == "T" && type_arguments.is_empty()),
+        "ui.gap must be the substituted typeof-theme type, not bare Ref(\"T\"), got {ui_gap:?}",
+    );
+    assert!(
+        !matches!(ui_gap, TypeExpr::Unknown { .. }),
+        "ui.gap must be the substituted typeof-theme type, not an Unknown/semanticMiss \
+         placeholder, got {ui_gap:?}",
+    );
+    assert!(
+        !matches!(
+            ui_gap,
+            TypeExpr::Primitive(PrimitiveName::Unknown) | TypeExpr::Primitive(PrimitiveName::Never)
+        ),
+        "ui.gap must be the substituted typeof-theme type, not an Unknown/Never primitive, \
+         got {ui_gap:?}",
+    );
+
+    // NEGATIVE (mirror the miss exclusion on the variants argument):
+    // the helper ref's substituted argument must likewise be concrete,
+    // never the `semanticMiss` carrier produced when no arg is bound.
+    assert!(
+        !matches!(variants_arg, TypeExpr::Unknown { .. }),
+        "variants arg must be the substituted typeof-theme type, not an Unknown/semanticMiss \
+         placeholder, got {variants_arg:?}",
+    );
+
+    // POSITIVE (strongest CONCRETE-VALUE pin): `ui.gap` is not merely
+    // "some non-miss object" — it is the ACTUAL `typeof theme` surface.
+    // The fixture's `theme` (and ONLY `theme`) has the nested shape
+    // `{ variants: { color: { primary: ''; secondary: '' } } }`. We
+    // walk that exact path and pin every hop + the terminal literal
+    // members. This is the load-bearing discriminator the prior
+    // `assert_eq!(ui_gap, variants_arg)` (consistency only) missed: a
+    // wrong-but-consistent port that bound `T` to a DIFFERENT in-scope
+    // type (a const with a different member shape) would satisfy the
+    // equality below yet FAIL here, because its top-level member is not
+    // `variants → color → {primary, secondary}`.
+    let find_prop = |members: &[ObjectMember], prop_name: &str| -> Option<TypeExpr> {
+        members.iter().find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == prop_name => {
+                Some(property.ty.clone())
+            }
+            _ => None,
+        })
+    };
+    let TypeExpr::Object(ui_gap_obj) = ui_gap else {
+        panic!("ui.gap must be the concrete `typeof theme` object surface, got {ui_gap:?}",);
+    };
+    let ui_gap_variants = find_prop(&ui_gap_obj.properties, "variants")
+        .expect("`typeof theme` must expose a `variants` member; ui.gap is the theme surface");
+    let TypeExpr::Object(ui_gap_variants_obj) = &ui_gap_variants else {
+        panic!("`typeof theme`.variants must be an object, got {ui_gap_variants:?}",);
+    };
+    let ui_gap_color = find_prop(&ui_gap_variants_obj.properties, "color")
+        .expect("`typeof theme`.variants must expose a `color` member");
+    let TypeExpr::Object(ui_gap_color_obj) = &ui_gap_color else {
+        panic!("`typeof theme`.variants.color must be an object, got {ui_gap_color:?}",);
+    };
+    // The terminal `color` members are EXACTLY the fixture's
+    // `primary`/`secondary` const string-literal keys — no more, no
+    // fewer, and each is the `''` literal from `as const`. A different
+    // in-scope const (different member names / values) cannot satisfy
+    // this set.
+    let mut ui_gap_color_keys: Vec<&str> = ui_gap_color_obj
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(property) => Some(property.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    ui_gap_color_keys.sort_unstable();
+    assert_eq!(
+        ui_gap_color_keys,
+        ["primary", "secondary"],
+        "`typeof theme`.variants.color must expose exactly the fixture's \
+         primary/secondary keys, got {ui_gap_color_obj:?}",
+    );
+    assert_eq!(
+        find_prop(&ui_gap_color_obj.properties, "primary").as_ref(),
+        Some(&TypeExpr::string_literal("")),
+        "`typeof theme`.variants.color.primary must be the `''` const literal, \
+         got {ui_gap_color_obj:?}",
+    );
+    assert_eq!(
+        find_prop(&ui_gap_color_obj.properties, "secondary").as_ref(),
+        Some(&TypeExpr::string_literal("")),
+        "`typeof theme`.variants.color.secondary must be the `''` const literal, \
+         got {ui_gap_color_obj:?}",
+    );
+
+    // POSITIVE (corroborating): `ui.gap` and the `variants` helper ref's
+    // argument are the SAME substituted type — both are the single
+    // `typeof theme` argument bound into `T`. Now that `ui.gap` is
+    // pinned to the concrete theme surface above, this equality also
+    // pins `variants_arg` to that same concrete surface (not just
+    // "consistent with ui.gap"). If substitution diverged per-site they
+    // would differ; if the arg were dropped both would be the
+    // `semanticMiss` carrier (excluded above).
+    assert_eq!(
+        ui_gap, variants_arg,
+        "ui.gap and the variants helper argument must be the identical substituted \
+         typeof-theme type (both bind the single `T` arg); ui.gap={ui_gap:?} \
+         variants_arg={variants_arg:?}",
+    );
+}
+
+/// Assert `ty` is the CONCRETE `typeof theme` object surface used by
+/// the owner-local registry fixtures:
+/// `{ variants: { color: { primary: ''; secondary: '' } } }`, pinned
+/// all the way to the `as const` string-literal leaves. `label`
+/// identifies the asserting site in panic messages. A DIFFERENT
+/// in-scope const (different member names / values) cannot satisfy
+/// this — the assertion discriminates a wrong-but-consistent
+/// substitution that bound the type parameter to another same-file
+/// type.
+fn assert_concrete_theme_surface(ty: &TypeExpr, label: &str) {
+    let find_prop = |members: &[ObjectMember], prop_name: &str| -> Option<TypeExpr> {
+        members.iter().find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == prop_name => {
+                Some(property.ty.clone())
+            }
+            _ => None,
+        })
+    };
+    let TypeExpr::Object(obj) = ty else {
+        panic!("{label} must be the concrete `typeof theme` object surface, got {ty:?}");
+    };
+    let variants = find_prop(&obj.properties, "variants").unwrap_or_else(|| {
+        panic!("{label} (`typeof theme`) must expose a `variants` member, got {obj:?}")
+    });
+    let TypeExpr::Object(variants_obj) = &variants else {
+        panic!("{label} `typeof theme`.variants must be an object, got {variants:?}");
+    };
+    let color = find_prop(&variants_obj.properties, "color").unwrap_or_else(|| {
+        panic!("{label} `typeof theme`.variants must expose a `color` member, got {variants_obj:?}")
+    });
+    let TypeExpr::Object(color_obj) = &color else {
+        panic!("{label} `typeof theme`.variants.color must be an object, got {color:?}");
+    };
+    let mut color_keys: Vec<&str> = color_obj
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(property) => Some(property.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    color_keys.sort_unstable();
+    assert_eq!(
+        color_keys,
+        ["primary", "secondary"],
+        "{label} `typeof theme`.variants.color must expose exactly the fixture's \
+         primary/secondary keys, got {color_obj:?}",
+    );
+    assert_eq!(
+        find_prop(&color_obj.properties, "primary").as_ref(),
+        Some(&TypeExpr::string_literal("")),
+        "{label} `typeof theme`.variants.color.primary must be the `''` const literal, \
+         got {color_obj:?}",
+    );
+    assert_eq!(
+        find_prop(&color_obj.properties, "secondary").as_ref(),
+        Some(&TypeExpr::string_literal("")),
+        "{label} `typeof theme`.variants.color.secondary must be the `''` const literal, \
+         got {color_obj:?}",
+    );
+}
+
+/// Owner-local (same-file) registry alias with MULTIPLE type
+/// arguments: `ComponentConfig<typeof theme, AppConfig, 'button'>`.
+/// Pins that EACH of the three direct leaf members substitutes to its
+/// CONCRETE argument — `primary` = the `typeof theme` object surface,
+/// `cfg` = the same-file `AppConfig` interface surface, `name` = the
+/// `'button'` string literal — never a bare `T`/`U`/`K` param nor a
+/// miss placeholder. The deleted slow-lane walker covered multi-arg
+/// only via the imported/cross-file path; this exercises the
+/// owner-local dispatch route.
+#[test]
+fn resolve_component_meta_substitutes_owner_local_multi_arg_registry_alias() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+type ComponentConfig<T, U, K> = {
+  primary: T,
+  cfg: U,
+  name: K
+}
+
+interface AppConfig {
+  mode: 'light' | 'dark'
+}
+
+const theme = {
+  variants: {
+    color: { primary: '', secondary: '' }
+  }
+} as const
+
+type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
+
+defineProps<{
+  primary?: Button['primary']
+  cfg?: Button['cfg']
+  name?: Button['name']
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let button_entry = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "Button")
+        .expect("Button helper should be published in the resolved type registry");
+    let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+        panic!(
+            "owner-local multi-arg Button alias should materialize as an object, got {:?}",
+            button_entry.type_expr
+        );
+    };
+
+    let member_ty = |name: &str| -> TypeExpr {
+        button_shape
+            .properties
+            .iter()
+            .find_map(|member| match member {
+                ObjectMember::Property(property) if property.name == name => {
+                    Some(property.ty.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("Button should keep a `{name}` member, got {button_shape:?}"))
+    };
+
+    // `primary` (= the first arg `typeof theme`) is the CONCRETE theme
+    // object surface: `{ variants: { color: { primary; secondary } } }`,
+    // pinned all the way to the const string-literal leaves. NOT a bare
+    // `T` param, NOT a miss placeholder, NOT one of the other args'
+    // shapes.
+    assert_concrete_theme_surface(&member_ty("primary"), "Button.primary");
+
+    // `cfg` (= the second arg `AppConfig`) substitutes to the same-file
+    // `AppConfig` interface, kept SHALLOW as a `Ref` per the
+    // shallow-by-default rule (an interface alias ref, NOT eagerly
+    // expanded). The discriminator: it is `Ref("AppConfig")`, NOT bare
+    // `U`, NOT `T`/`typeof theme`, NOT a miss.
+    let cfg = member_ty("cfg");
+    let TypeExpr::Ref {
+        name: cfg_name,
+        type_arguments: cfg_args,
+    } = &cfg
+    else {
+        panic!("Button.cfg should be the substituted AppConfig ref, got {cfg:?}");
+    };
+    assert_eq!(
+        cfg_name.as_ref(),
+        "AppConfig",
+        "Button.cfg must substitute the second arg `AppConfig`, not a bare `U` param or other \
+         type, got {cfg:?}",
+    );
+    assert!(
+        cfg_args.is_empty(),
+        "Button.cfg AppConfig ref should carry no type arguments, got {cfg:?}",
+    );
+    assert!(
+        !matches!(&cfg, TypeExpr::TypeParameter(param) if param.name == "U"),
+        "Button.cfg must NOT be the unbound parameter `U`, got {cfg:?}",
+    );
+
+    // `name` (= the third arg `'button'`) substitutes to the CONCRETE
+    // string literal. NOT a bare `K` param, NOT `string`.
+    let name = member_ty("name");
+    assert_eq!(
+        name,
+        TypeExpr::string_literal("button"),
+        "Button.name must substitute the third arg literal `'button'`, not a bare `K` param or \
+         widened `string`, got {name:?}",
+    );
+}
+
+/// Owner-local (same-file) registry alias exercising a DEFAULT type
+/// parameter: `ComponentConfig<T, U = DefaultTheme>` instantiated as
+/// `ComponentConfig<typeof theme>` (the second arg omitted). Pins that
+/// `primary` substitutes to the concrete `typeof theme` surface AND
+/// `fallback` falls back to the CONCRETE `DefaultTheme` surface — the
+/// `args[i].or(param.default)` behaviour the deleted slow-lane helper
+/// owned, now served by dispatch (`build.rs:960`). A regression that
+/// dropped the default would leave `fallback` a bare `U` param or a
+/// miss placeholder.
+#[test]
+fn resolve_component_meta_substitutes_owner_local_default_param_registry_alias() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+interface DefaultTheme {
+  spacing: 'tight' | 'loose'
+}
+
+type ComponentConfig<T, U = DefaultTheme> = {
+  primary: T,
+  fallback: U
+}
+
+const theme = {
+  variants: {
+    color: { primary: '', secondary: '' }
+  }
+} as const
+
+type Button = ComponentConfig<typeof theme>
+
+defineProps<{
+  primary?: Button['primary']
+  fallback?: Button['fallback']
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let button_entry = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "Button")
+        .expect("Button helper should be published in the resolved type registry");
+    let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+        panic!(
+            "owner-local default-param Button alias should materialize as an object, got {:?}",
+            button_entry.type_expr
+        );
+    };
+
+    let member_ty = |name: &str| -> TypeExpr {
+        button_shape
+            .properties
+            .iter()
+            .find_map(|member| match member {
+                ObjectMember::Property(property) if property.name == name => {
+                    Some(property.ty.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("Button should keep a `{name}` member, got {button_shape:?}"))
+    };
+
+    // `primary` (= the supplied arg `typeof theme`) is the CONCRETE
+    // theme object surface — same pin as the multi-arg test.
+    assert_concrete_theme_surface(&member_ty("primary"), "Button.primary");
+
+    // `fallback` (= the OMITTED second arg) must fall back to the
+    // parameter default `DefaultTheme`. This is the load-bearing
+    // discriminator for the `args[i].or(param.default)` behaviour now
+    // served by dispatch: a regression that dropped the default would
+    // leave `fallback` a bare `U` param or a miss placeholder. The
+    // same-file `DefaultTheme` interface stays SHALLOW as a `Ref` per
+    // the shallow-by-default rule.
+    let fallback = member_ty("fallback");
+    let TypeExpr::Ref {
+        name: fallback_name,
+        type_arguments: fallback_args,
+    } = &fallback
+    else {
+        panic!("Button.fallback should be the default `DefaultTheme` ref, got {fallback:?}",);
+    };
+    assert_eq!(
+        fallback_name.as_ref(),
+        "DefaultTheme",
+        "Button.fallback must fall back to the parameter default `DefaultTheme`, not a bare `U` \
+         param or miss placeholder, got {fallback:?}",
+    );
+    assert!(
+        fallback_args.is_empty(),
+        "Button.fallback DefaultTheme ref should carry no type arguments, got {fallback:?}",
+    );
+    assert!(
+        !matches!(&fallback, TypeExpr::TypeParameter(param) if param.name == "U"),
+        "Button.fallback must NOT be the unbound parameter `U` (default must be bound), \
+         got {fallback:?}",
+    );
+    assert!(
+        !matches!(&fallback, TypeExpr::Unknown { .. }),
+        "Button.fallback must NOT be a miss/semanticMiss placeholder, got {fallback:?}",
+    );
+}
+
 #[test]
 fn resolve_component_meta_materializes_imported_component_config_registry_helpers() {
     let project = make_project();

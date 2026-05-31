@@ -663,9 +663,10 @@ pub(crate) fn pick_via_dispatch_pick_helper(
 /// The dispatch path goes through `lower_type_expr_in_scope` which
 /// routes a generic `Ref` through
 /// `SemanticQueryKey::Instantiate { base, args, body_mode: Expanded }`
-/// internally — the dispatcher's `build_instantiate` performs the
-/// same substitution logic (`build_default_type_param_substitutions`
-/// + `apply_type_param_substitutions`) the engine method called.
+/// internally — the dispatcher's `build_instantiate` binds the explicit
+/// / default type arguments into the lowering env and substitutes them
+/// while lowering the prepared-decl body. This is the sole generic-Ref
+/// instantiation path for component-meta type resolution.
 ///
 /// Returns `Some(reduced)` only when:
 /// - `expr` is a generic `Ref` (else returns `None`, matching the
@@ -702,11 +703,12 @@ pub(crate) fn instantiate_local_generic_ref_via_dispatch(
         ProjectionMode::Expanded,
     )?;
     let raised = dispatch.raise_node_to_type_expr(lowered)?;
-    // Engine-method parity: callers use `.unwrap_or_else(|| original.clone())`,
-    // so a no-op (raised == expr) must surface as `None` to preserve the
-    // fallback path. A miss-shaped raise (Unknown/Opaque) likewise surfaces
-    // as `None` — mirrors the engine method's `prepared_type_decl?` /
-    // `build_default_type_param_substitutions(...)?` early-return rules.
+    // Callers use `.unwrap_or_else(|| original.clone())`, so a no-op
+    // (raised == expr) must surface as `None` to preserve the caller's
+    // own fallback path. A miss-shaped raise (Unknown/Opaque) likewise
+    // surfaces as `None` (unresolved decl / package-backed /
+    // substitution-failure all collapse to the dispatcher's miss
+    // sentinel).
     if raised == *expr {
         return None;
     }
