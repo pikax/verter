@@ -118,17 +118,23 @@ pub(crate) fn project_define_macro_shapes(
 /// shared-dispatch result) and falling back to the DTO field's own lowered
 /// `type_expr` for any prop the flat projection did not surface.
 ///
-/// Returns `None` only when the macro contributes no DTO surface at all (no
-/// shape to publish). An empty DTO `props` (a call-signature-only
-/// `defineProps<{ (): void }>()`) returns an EMPTY shape — present but with no
-/// properties — so the consumer observes "the macro resolved to no props"
-/// rather than "no macro".
+/// Returns `None` when the macro's type-argument surface does NOT resolve at
+/// all (a genuinely unresolved / missing macro — see [`macro_surface_resolves`]:
+/// SFC not loaded, macro index out of range, type argument that does not project
+/// to an object surface). A RESOLVED surface with no property members (a
+/// call-signature-only `defineProps<{ (): void }>()`) returns `Some(empty
+/// shape)` — present but with no properties — so the consumer observes "the
+/// macro resolved to no props" rather than "no macro". This distinguishes
+/// resolved-but-empty from unresolved/missing.
 fn define_props_shape(
     ctx: &dyn ResolverContext,
     owner_canonical: &str,
     macro_index: usize,
     evaluated_types: &ExpandedComponentTypes,
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
+    if !macro_surface_resolves(ctx, owner_canonical, macro_index, AnalyzedMacroKind::DefineProps) {
+        return None;
+    }
     let dtos = crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(
         ctx,
         &dto_request(owner_canonical, macro_index, AnalyzedMacroKind::DefineProps),
@@ -201,6 +207,11 @@ fn define_emits_shape(
     macro_index: usize,
     evaluated_types: &ExpandedComponentTypes,
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
+    // Unresolved emits macro → no shape (see `define_props_shape`). A resolved
+    // emits surface with no events is `Some(empty)`.
+    if !macro_surface_resolves(ctx, owner_canonical, macro_index, AnalyzedMacroKind::DefineEmits) {
+        return None;
+    }
     let dtos = crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(
         ctx,
         &dto_request(owner_canonical, macro_index, AnalyzedMacroKind::DefineEmits),
@@ -269,6 +280,11 @@ fn define_slots_shape(
     owner_canonical: &str,
     macro_index: usize,
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
+    // Unresolved slots macro → no shape (see `define_props_shape`). A resolved
+    // slots surface with no slot members is `Some(empty)`.
+    if !macro_surface_resolves(ctx, owner_canonical, macro_index, AnalyzedMacroKind::DefineSlots) {
+        return None;
+    }
     let dtos = crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(
         ctx,
         &dto_request(owner_canonical, macro_index, AnalyzedMacroKind::DefineSlots),
@@ -291,6 +307,31 @@ fn define_slots_shape(
         index_signatures: Vec::new(),
         call_signatures: Vec::new(),
     }))
+}
+
+/// Does the macro's type-argument surface RESOLVE under the active `ctx`?
+///
+/// The "resolved vs unresolved/missing" discriminator the `define_*_shape`
+/// helpers use: `resolve_vue_macro_surface_with_ctx` returns `None` exactly for
+/// the genuinely-unresolved cases (SFC not loaded, macro index out of range,
+/// macro not type-based, or a type argument that does not project to an object
+/// surface). A RESOLVED surface — even one with no members (a call-signature-
+/// only `defineProps<{ (): void }>()`) — returns `Some(..)`, so the helper
+/// publishes `Some(empty)` rather than conflating it with "no macro". Resolution
+/// flows through `ctx`, and the underlying dispatch queries are memoised in the
+/// shared `SemanticGraphStore`, so this shares the DTO path's reduction work.
+fn macro_surface_resolves(
+    ctx: &dyn ResolverContext,
+    owner_canonical: &str,
+    macro_index: usize,
+    macro_kind: AnalyzedMacroKind,
+) -> bool {
+    ctx.host_for_fact_tracer_install()
+        .resolve_vue_macro_surface_with_ctx(
+            ctx,
+            &dto_request(owner_canonical, macro_index, macro_kind),
+        )
+        .is_some()
 }
 
 /// FullMetadata DTO request for `(owner, macro_index, kind)`.

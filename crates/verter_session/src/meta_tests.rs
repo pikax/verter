@@ -2580,6 +2580,95 @@ defineProps<Props>()
     );
 }
 
+/// `define_props_shape` distinguishes a RESOLVED-but-empty surface from a
+/// genuinely UNRESOLVED macro via `macro_surface_resolves`
+/// (`resolve_vue_macro_surface_with_ctx().is_some()`):
+///
+/// - (a) A call-signature-only `defineProps<{ (): void }>()` RESOLVES to an
+///   object surface that has a call signature but no property members. The
+///   helper publishes a `define_props` shape with empty `properties` — present,
+///   not absent — preserving the "macro resolved to no props" behavior.
+/// - (b) The "unresolved" discriminator (`resolve_vue_macro_surface` returns
+///   `None`) is a REAL signal — an out-of-range macro index yields `None` while
+///   a valid in-range index yields `Some`. The gate keys on exactly this, so a
+///   genuinely-unresolved macro yields `None` (no shape) rather than a spurious
+///   `Some(empty)`.
+///
+/// Discriminating: part (a) FAILS if `define_props_shape` is gated to drop a
+/// resolved-but-empty (call-signature-only) surface; part (b) asserts the gate's
+/// `Some`/`None` discriminator branches on a real input.
+///
+/// NOTE (empirical): within the production driver `project_define_macro_shapes`
+/// every macro fed to the helpers is an in-range, type-based macro, and the
+/// shared resolver synthesises at least an EMPTY object surface for ANY such
+/// type argument (`number[]` / `() => void` / `string | number` / a tuple / an
+/// unresolved name all resolve to `Some((0,0,0))`). So the gate's `None` path
+/// fires only for the out-of-range / not-loaded cases the driver never passes;
+/// the gate is the contract-correct discriminator (and future-proofs a resolver
+/// change that could return `None`), exercised here at the surface-resolution
+/// level where the `None` input is reachable.
+#[test]
+fn evaluate_types_define_props_distinguishes_resolved_empty_from_unresolved() {
+    // (a) Call-signature-only props: RESOLVED but empty → shape PRESENT, empty.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/CallSigProps.vue",
+            r#"<script setup lang="ts">
+defineProps<{ (): void }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let evaluated = project
+        .open_session_batch()
+        .unwrap()
+        .evaluate_types("/CallSigProps.vue")
+        .unwrap()
+        .unwrap();
+    let shape = evaluated
+        .define_props
+        .iter()
+        .map(|e| &e.result.value)
+        .next()
+        .expect(
+            "a call-signature-only defineProps RESOLVES (object surface with a call \
+             signature) and must publish a define_props shape — Some(empty), not None",
+        );
+    assert!(
+        shape.properties.is_empty(),
+        "a call-signature-only props surface has no property members, got {:?}",
+        shape.properties,
+    );
+
+    // (b) The gate's resolved-vs-unresolved discriminator is a real signal: a
+    // valid in-range macro index resolves to `Some`; an out-of-range index
+    // (the genuinely-no-surface case the gate returns `None` for) resolves to
+    // `None`.
+    let host = project.host();
+    let wh = host.get_whole_hash("/CallSigProps.vue").unwrap_or([0u8; 16]);
+    let valid = crate::typeinfo::types::VueMacroSurfaceRequest {
+        owner_canonical: std::sync::Arc::from("/CallSigProps.vue"),
+        macro_index: 0,
+        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+        root_identity: wh,
+        level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+    };
+    assert!(
+        host.resolve_vue_macro_surface(&valid).is_some(),
+        "a valid in-range defineProps macro resolves its surface (gate admits it)"
+    );
+    let out_of_range = crate::typeinfo::types::VueMacroSurfaceRequest {
+        macro_index: 99,
+        ..valid
+    };
+    assert!(
+        host.resolve_vue_macro_surface(&out_of_range).is_none(),
+        "an out-of-range macro index does NOT resolve a surface — the gate's \
+         `None` path (no shape published) keys on exactly this real signal"
+    );
+}
+
 #[test]
 fn get_component_meta_uses_default_type_parameters_when_generic_args_are_omitted() {
     let project = make_project();
