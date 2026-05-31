@@ -8622,6 +8622,201 @@ defineProps<{
     );
 }
 
+/// Owner-local generic-alias registry substitution: `Button =
+/// ComponentConfig<typeof theme>` where `ComponentConfig`,
+/// `ComponentVariants`, and `theme` all live in the SAME file. The
+/// registry publishes `Button` as the SHALLOW substituted body —
+/// helper-ref members (`variants: ComponentVariants<T>`) stay as
+/// carrier Refs whose `T` argument is concretely substituted to the
+/// `typeof theme` argument, while an inline object member
+/// (`ui: { gap: T }`) carries the substituted argument in a concrete
+/// leaf. This is the behaviour the owner-local generic-alias
+/// substitution path owns (rewired from the deleted prepared-TypeExpr
+/// slow lane onto the shared dispatch `Instantiate` query in Navigate
+/// mode).
+///
+/// The assertions pin the CONCRETELY SUBSTITUTED member TYPE, not just
+/// member names:
+/// - `Button` is an Object (not a bare `Ref<ComponentConfig<...>>` —
+///   discriminates the wrong "raise the lowered InstantiationRef
+///   directly" port that never runs the `Instantiate` query).
+/// - `variants` is a `Ref` named `ComponentVariants` (NOT expanded to
+///   an object, NOT bare `T`).
+/// - `variants`' first type argument is concretely substituted — NOT
+///   `TypeParameter("T")` and NOT bare `Ref("T")`.
+/// - `ui.gap` (an inline-object leaf) is the SAME concretely
+///   substituted argument type as `variants`' argument, and is NOT
+///   `TypeParameter("T")` / `Ref("T")` / `Unknown` / `Never` (the
+///   no-substitution and miss-placeholder regressions).
+#[test]
+fn resolve_component_meta_substitutes_owner_local_generic_registry_alias_arg() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
+  [K in keyof T['variants']]: keyof T['variants'][K]
+}
+
+type ComponentConfig<T extends Record<string, any>> = {
+  variants: ComponentVariants<T>,
+  ui: { gap: T }
+}
+
+const theme = {
+  variants: {
+    color: { primary: '', secondary: '' }
+  }
+} as const
+
+type Button = ComponentConfig<typeof theme>
+
+defineProps<{
+  activeColor?: Button['variants']['color']
+  uiGap?: Button['ui']['gap']
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let button_entry = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "Button")
+        .expect("Button helper should be published in the resolved type registry");
+
+    // POSITIVE: the registry entry is the substituted Object (NOT a
+    // bare `Ref<ComponentConfig<typeof theme>>`). This is the
+    // load-bearing discriminator against the wrong Shape-A port that
+    // raises the lowered `InstantiationRef` carrier directly without
+    // executing the `Instantiate` query.
+    let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+        panic!(
+            "owner-local Button registry alias should materialize as an object, got {:?}",
+            button_entry.type_expr
+        );
+    };
+
+    // POSITIVE: `variants` stays a carrier `Ref` named
+    // `ComponentVariants` — a helper ref preserved shallow, NOT an
+    // expanded `{ color: ... }` object.
+    let variants_member = button_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "variants" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Button helper should keep a variants member");
+    let TypeExpr::Ref {
+        name: variants_name,
+        type_arguments: variants_args,
+    } = variants_member
+    else {
+        panic!(
+            "Button.variants should stay a ComponentVariants ref, got {:?}",
+            variants_member
+        );
+    };
+    assert_eq!(
+        variants_name.as_ref(),
+        "ComponentVariants",
+        "Button.variants should remain the ComponentVariants helper ref, got {variants_name}",
+    );
+    // NEGATIVE: NOT expanded to `{ color: ... }`. (Object/non-Ref
+    // already excluded by the `let-else` above; assert the property
+    // type is specifically not an Object for clarity.)
+    assert!(
+        !matches!(variants_member, TypeExpr::Object(_)),
+        "Button.variants must NOT be expanded to an object surface, got {variants_member:?}",
+    );
+
+    // The substituted argument carried by the `variants` helper ref.
+    let variants_arg = variants_args
+        .first()
+        .expect("ComponentVariants<T> should keep its substituted type argument");
+
+    // NEGATIVE: the carried argument is concretely substituted — NOT
+    // the unbound type parameter `T` (the no-substitution regression).
+    assert!(
+        !matches!(variants_arg, TypeExpr::TypeParameter(param) if param.name == "T"),
+        "variants arg must be the substituted typeof-theme type, not bare TypeParameter(\"T\"), \
+         got {variants_arg:?}",
+    );
+    assert!(
+        !matches!(variants_arg, TypeExpr::Ref { name, type_arguments }
+            if name.as_ref() == "T" && type_arguments.is_empty()),
+        "variants arg must be the substituted typeof-theme type, not bare Ref(\"T\"), \
+         got {variants_arg:?}",
+    );
+
+    // The inline-object `ui` member keeps `gap`, whose type is the
+    // substituted argument in a concrete leaf position.
+    let ui_member = button_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Button helper should keep a ui member");
+    let TypeExpr::Object(ui_shape) = ui_member else {
+        panic!(
+            "Button.ui is an inline object literal and should stay an object, got {ui_member:?}",
+        );
+    };
+    let ui_gap = ui_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "gap" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Button.ui should keep a gap member");
+
+    // NEGATIVE: `ui.gap` is concretely substituted — NOT the unbound
+    // type parameter `T`, NOT a bare `Ref("T")`, and NOT an
+    // unknown/never miss placeholder.
+    assert!(
+        !matches!(ui_gap, TypeExpr::TypeParameter(param) if param.name == "T"),
+        "ui.gap must be the substituted typeof-theme type, not bare TypeParameter(\"T\"), \
+         got {ui_gap:?}",
+    );
+    assert!(
+        !matches!(ui_gap, TypeExpr::Ref { name, type_arguments }
+            if name.as_ref() == "T" && type_arguments.is_empty()),
+        "ui.gap must be the substituted typeof-theme type, not bare Ref(\"T\"), got {ui_gap:?}",
+    );
+    assert!(
+        !matches!(
+            ui_gap,
+            TypeExpr::Primitive(PrimitiveName::Unknown) | TypeExpr::Primitive(PrimitiveName::Never)
+        ),
+        "ui.gap must be the substituted typeof-theme type, not an Unknown/Never miss placeholder, \
+         got {ui_gap:?}",
+    );
+
+    // POSITIVE (strongest concrete-type assertion): `ui.gap` and the
+    // `variants` helper ref's argument are the SAME substituted type —
+    // both are the single `typeof theme` argument bound into `T`. This
+    // pins the concretely substituted TYPE, not a name string: if the
+    // arg were dropped, both would be bare `T` (already excluded
+    // above); if substitution diverged per-site, they would differ.
+    assert_eq!(
+        ui_gap, variants_arg,
+        "ui.gap and the variants helper argument must be the identical substituted \
+         typeof-theme type (both bind the single `T` arg); ui.gap={ui_gap:?} \
+         variants_arg={variants_arg:?}",
+    );
+}
+
 #[test]
 fn resolve_component_meta_materializes_imported_component_config_registry_helpers() {
     let project = make_project();
