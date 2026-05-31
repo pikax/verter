@@ -176,3 +176,75 @@ fn each_host_sampler_attributes_peak_only_to_its_own_request() {
         record_b.memory.process_rss_peak_bytes,
     );
 }
+
+/// Deterministic discriminator for the registration-time peak-RSS
+/// seed.
+///
+/// The sampler thread is the only OTHER writer of
+/// `process_rss_peak_bytes`, and it spawns lazily ONLY when
+/// `audit_timing_capture` is on (`ensure_sampler_started` returns
+/// early otherwise). Here we deliberately leave `audit_timing_capture
+/// = false`, so NO sampler thread is ever created for this host. The
+/// request finalises synchronously on the calling thread. Therefore
+/// the per-request peak slot can be non-zero only because
+/// `register_active_request` seeded it with one immediate
+/// `current_process_rss()` sample.
+///
+/// Discrimination contract (race-free — there is no sampler to win or
+/// lose a tick against):
+/// - Pre-change tree (no registration-time seed): the slot stays at
+///   exactly `0` for the whole in-flight window → the `> 0` assertion
+///   FAILS.
+/// - Post-change tree (seed at registration): the slot holds the RSS
+///   sampled at request start → `> 0` PASSES.
+#[test]
+fn registration_seeds_peak_rss_even_without_sampler() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        audit_enabled: true,
+        // Sampler thread is gated OFF — no concurrent writer of the
+        // peak slot. The only writer left is the registration seed.
+        audit_timing_capture: false,
+        footprint_capture: true,
+        ..HostConfig::default()
+    }));
+
+    let canon = "/SeedOnly.vue";
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canon.to_string()),
+        input_id: canon.to_string(),
+        source: Arc::from(SLOW_SFC),
+        file_kind: verter_session::FileKind::from_path(canon),
+        aliases: Vec::new(),
+    });
+
+    // No sampler thread exists for this host, so this request gets no
+    // sampler tick regardless of how fast it completes.
+    let (_analysis, resolution) = host
+        .get_component_meta_with_resolution(canon)
+        .expect("request must succeed");
+
+    let record = host
+        .host_audit_runtime()
+        .take_record(resolution.request_id)
+        .expect("audited request must publish a record");
+
+    assert!(
+        record.memory.process_rss_peak_bytes > 0,
+        "with the sampler thread disabled, the per-request peak slot can be \
+         non-zero ONLY because register_active_request seeded an immediate RSS \
+         sample; got {} (pre-fix this is 0 because nothing wrote the slot)",
+        record.memory.process_rss_peak_bytes,
+    );
+
+    // Sanity floor identical to the sampler-driven test: the seed reads
+    // a real process RSS, so it must land in a realistic range for a
+    // debug test process (> 1 MB, < 16 GB), not some sentinel.
+    const ONE_MB: u64 = 1024 * 1024;
+    const SIXTEEN_GB: u64 = 16u64 * 1024 * 1024 * 1024;
+    assert!(
+        record.memory.process_rss_peak_bytes > ONE_MB
+            && record.memory.process_rss_peak_bytes < SIXTEEN_GB,
+        "seeded peak {} must fall in the realistic RSS range (1 MB .. 16 GB)",
+        record.memory.process_rss_peak_bytes,
+    );
+}

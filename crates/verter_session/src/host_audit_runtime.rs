@@ -199,6 +199,23 @@ impl HostAuditRuntime {
     /// `audit_request_registration_lifecycle` enforces the single
     /// in-tree call site.
     pub(crate) fn register_active_request(&self, request_id: u64, ctx: &Arc<RequestContext>) {
+        // Seed the per-request peak-RSS slot with one immediate sample
+        // at registration. The 50ms-cadence sampler thread (see
+        // `sampler_loop`) only RAISES the slot via `fetch_max`, so a
+        // trivial request that finishes inside a sampler gap would
+        // otherwise report a peak of `0`. Seeding here initializes the
+        // slot to the RSS at the request's start; the sampler later
+        // raises it if memory grows. We reuse the SAME RSS primitive
+        // the sampler uses and the SAME `fetch_max` write, so there is
+        // no double-count and no cross-request misattribution — the
+        // slot is per-request and `fetch_max` is idempotent under
+        // re-sampling. On `wasm32` (and other unsupported targets)
+        // `current_process_rss()` returns `0`, so the seed is a no-op
+        // and the documented "peak stays 0 on wasm" contract holds.
+        ctx.process_rss_peak_bytes.fetch_max(
+            verter_audit::current_process_rss(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let mut map = self.active_requests.write();
         map.insert(request_id, Arc::downgrade(ctx));
     }
