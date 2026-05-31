@@ -1,5 +1,12 @@
 //! Consolidated integration-test group `misc2`: each module below was
 //! a separate top-level tests/*.rs binary, merged to cut test-link count.
+//!
+//! Consolidation intentionally pulls sibling submodules that each
+//! `#[path = "../<shared-dir>/harness.rs"]`-include the same harness file
+//! into one binary, so `clippy::duplicate_mod` fires at every load after
+//! the first. The duplication is an intentional consequence of merging
+//! formerly-independent test binaries to amortise link cost.
+#![allow(clippy::duplicate_mod)]
 #[path = "g_misc2/corpus_regression_capture_harness.rs"]
 mod corpus_regression_capture_harness;
 #[path = "g_misc2/cross_file_provenance_fixtures_tests.rs"]
