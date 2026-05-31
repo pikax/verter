@@ -831,3 +831,141 @@ fn audit_generated_ts_uses_string_for_every_u64_field() {
         );
     }
 }
+
+/// Directories whose `.rs` files carry the audit-DTO `ts_rs::TS`
+/// derives. The guard below scans these for any re-introduction of the
+/// `#[ts(export)]` auto-export flag.
+const AUDIT_DTO_DIRS: &[&str] = &[
+    "crates/verter_audit/src",
+    "crates/verter_session/src/component_meta_audit",
+];
+
+/// Collect every `*.rs` file under `dir` (recursively) into `out`.
+fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => panic!("read_dir `{dir:?}`: {e}"),
+    };
+    for entry in entries {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rs_files(&path, out);
+        } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// Return true if `line` carries a bare `#[ts(export ...)]` flag — i.e.
+/// the `export` keyword used as a ts-rs attribute argument, as opposed
+/// to `export_to`. The bare flag is what makes ts-rs emit a hidden
+/// `#[test]` that writes the configured output dir during `cargo test`.
+///
+/// Discriminates `export,` / `export)` / `export ` (forbidden) from
+/// `export_to` (allowed) by requiring the matched `export` NOT be
+/// immediately followed by `_`.
+fn line_has_bare_ts_export_flag(line: &str) -> bool {
+    let Some(attr_start) = line.find("#[ts(") else {
+        return false;
+    };
+    let attr = &line[attr_start..];
+    let bytes = attr.as_bytes();
+    let mut idx = 0;
+    while let Some(rel) = attr[idx..].find("export") {
+        let pos = idx + rel;
+        let after = pos + "export".len();
+        // `export_to` (followed by `_`) is the allowed path attribute.
+        let is_export_to = bytes.get(after) == Some(&b'_');
+        if !is_export_to {
+            return true;
+        }
+        idx = after;
+    }
+    false
+}
+
+#[test]
+fn audit_types_have_no_ts_export_auto_export() {
+    // Guard against re-introducing the tracked-path ts-rs auto-export.
+    //
+    // The audit DTOs must derive `ts_rs::TS` with
+    // `#[ts(export_to = "audit.generated.ts")]` but WITHOUT the bare
+    // `export` flag. The bare flag makes ts-rs emit a hidden `#[test]`
+    // that writes `$TS_RS_EXPORT_DIR/audit.generated.ts` during a
+    // normal `cargo test`; combined with multiple test binaries
+    // (separate processes) that concurrently truncate+merge the same
+    // tracked file, it tears `packages/types/audit.generated.ts` and
+    // breaks `pnpm build`. The committed file is regenerated EXPLICITLY
+    // and read-only-checked by `audit_ts_bindings_are_in_sync`.
+    //
+    // Discriminating: re-add `#[ts(export, export_to = "...")]` (or a
+    // bare `#[ts(export)]`) to any audit DTO and this test FAILS,
+    // naming the file + line.
+    let root = workspace_root();
+    let mut offenders: Vec<String> = Vec::new();
+    for dir in AUDIT_DTO_DIRS {
+        let abs = root.join(dir);
+        let mut files = Vec::new();
+        collect_rs_files(&abs, &mut files);
+        for file in files {
+            let contents = fs::read_to_string(&file)
+                .unwrap_or_else(|e| panic!("read `{file:?}`: {e}"));
+            for (i, line) in contents.lines().enumerate() {
+                if line_has_bare_ts_export_flag(line) {
+                    let rel = file.strip_prefix(&root).unwrap_or(&file);
+                    offenders.push(format!("{}:{}: {}", rel.display(), i + 1, line.trim()));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "audit DTOs must NOT carry the bare `#[ts(export)]` flag (use \
+         `#[ts(export_to = \"audit.generated.ts\")]` only). The bare flag \
+         resurrects the concurrent-truncation bug that tears \
+         `packages/types/audit.generated.ts` during `cargo test`. \
+         Offending lines:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn cargo_config_does_not_set_ts_rs_export_dir() {
+    // Guard the OTHER half of the regression: even without a bare
+    // `export` flag, setting `TS_RS_EXPORT_DIR = packages/types` in
+    // `.cargo/config.toml` would (if any `export` flag returned) point
+    // the auto-export at the tracked tree. Forbid any *active*
+    // (uncommented) `TS_RS_EXPORT_DIR` assignment in the workspace
+    // cargo config.
+    //
+    // Discriminating: uncomment / re-add
+    // `TS_RS_EXPORT_DIR = { value = "packages/types", relative = true }`
+    // and this test FAILS.
+    let root = workspace_root();
+    let config_path = root.join(".cargo/config.toml");
+    let contents = fs::read_to_string(&config_path)
+        .unwrap_or_else(|e| panic!("read `{config_path:?}`: {e}"));
+    let active: Vec<(usize, &str)> = contents
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            let trimmed = line.trim_start();
+            !trimmed.starts_with('#') && trimmed.contains("TS_RS_EXPORT_DIR")
+        })
+        .map(|(i, line)| (i + 1, line.trim()))
+        .collect();
+    assert!(
+        active.is_empty(),
+        "`.cargo/config.toml` must NOT set `TS_RS_EXPORT_DIR` (it would aim the \
+         ts-rs auto-export at the tracked tree and re-tear \
+         `packages/types/audit.generated.ts` during `cargo test`). The committed \
+         bindings are refreshed explicitly via `VERTER_UPDATE_TS_BINDINGS=1`. \
+         Active assignment(s):\n{}",
+        active
+            .iter()
+            .map(|(ln, l)| format!("  line {ln}: {l}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
