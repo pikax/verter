@@ -824,23 +824,21 @@ impl Scheduler {
     /// records blockers that the file's downstream Artifact admissions
     /// must wait on. Also auto-ingests deps not yet in the scheduler.
     ///
-    /// Late-blocker contract: a dispatched Analysis node's incoming
-    /// edges are immutable. If Analysis is already dispatched or
-    /// already complete when a new blocker arrives, the blocker
-    /// cannot be attached to that in-flight node. Instead the
-    /// blocker `DepKey`s are recorded in the DAG's typed Artifact
+    /// Blocker contract: owner Analysis is admitted ungated — the
+    /// scheduler never gates Analysis on macro_type_deps. Analysis is
+    /// recoverable from the source alone (templates, defineSlots,
+    /// script-level diagnostics derive from the parsed source
+    /// independently of resolved type shapes), so blockers gate
+    /// Artifact, not Analysis. The blocker `DepKey`s and any failed
+    /// records are persisted to the DAG's per-canonical Artifact
     /// blocker registry (see [`SchedulerDag::record_artifact_blockers`])
-    /// and ride on every subsequent Artifact admission at this
+    /// and consumed on every subsequent Artifact admission at this
     /// `(file_id, generation)` via
-    /// [`Self::admit_artifact_with_blockers`]. The original Analysis
-    /// node never depends on anything discovered after its dispatch.
-    ///
-    /// In the pre-dispatch case (Analysis identity admitted but not
-    /// yet picked by `next_ready`), the dep_keys also merge into the
-    /// pending Analysis node so the file-level Analysis gate engages
-    /// for any same-generation Artifact request that arrives before
-    /// Analysis completes (see [`Self::handle_new_request`]'s
-    /// `has_pending_deps(&analysis_gate)` check).
+    /// [`Self::admit_artifact_with_blockers`], which drains the
+    /// registry, re-classifies persisted deps against the live DAG
+    /// state, and attaches any current failure records to the
+    /// just-submitted Artifact so `execute_stage_on_worker` surfaces
+    /// a typed `DependencyFailed` before codegen runs.
     pub fn register_resolved_deps(
         &self,
         file_id: &str,
@@ -994,13 +992,15 @@ impl Scheduler {
         let mut dag = self.dag.lock();
         let mut dep_keys: Vec<DepKey> = Vec::new();
         // Failed-dep records collected from the 3-state matrix. These
-        // attach to the Analysis identity we submit below so the
-        // pre-dispatch short-circuit in `execute_stage_on_worker`
-        // surfaces a typed `DependencyFailed` instead of letting the
-        // Analysis executor run over a dead prerequisite — the
-        // Analysis-on-failed-Analysis-dep gap that the chokepoint
-        // closes uniformly for every task kind that can wait on a
-        // `DepKey`.
+        // ride together with the live `dep_keys` inside the
+        // per-canonical `PendingBlockerSet` persisted to the Artifact
+        // blocker registry below. They surface as a typed
+        // `DependencyFailed` on the owner's first Artifact admission
+        // via `admit_artifact_with_blockers`, which drains the
+        // registry, attaches the failure record to the just-submitted
+        // Artifact, and lets the pre-dispatch chokepoint in
+        // `execute_stage_on_worker` short-circuit codegen over a dead
+        // prerequisite. Owner Analysis itself remains ungated.
         let mut failed_records: Vec<crate::dag::FailedDepRecord> = Vec::new();
         for dep_id in &blocker_dep_ids {
             if self.tombstones.contains_key(dep_id) {
@@ -1010,13 +1010,16 @@ impl Scheduler {
             let dep_gen = self.nodes.get(dep_id).map(|n| n.generation()).unwrap_or(0);
             // Run the shared 3-state matrix:
             //
-            // - `Gating`     → record the DepKey and gate Analysis.
+            // - `Gating`     → record the DepKey for the Artifact
+            //                  blocker registry (owner Analysis stays
+            //                  ungated; the dep only gates codegen).
             // - `Satisfied`  → drop silently (producer is moot).
             // - `Failed(r)`  → drop from `dep_keys` AND collect the
-            //                  record for attachment below — the
-            //                  owner's Analysis short-circuits with a
-            //                  typed `DependencyFailed` instead of
-            //                  running over a dead prerequisite.
+            //                  record for the same registry entry —
+            //                  the owner's first Artifact admission
+            //                  drains the registry and surfaces a
+            //                  typed `DependencyFailed` before codegen
+            //                  runs over a dead prerequisite.
             let status = if auto_ingested.contains(dep_id.as_str()) {
                 // Just-ingested: grace the dep — its Source request
                 // is in the inbox waiting to be dispatched. The
@@ -1052,13 +1055,14 @@ impl Scheduler {
         // direct mutual A↔B cycle, or transitive A→B→C→A). The
         // semantic dispatch's same-key Instantiate sentinel still
         // bounds the type recursion, but the scheduler must not
-        // gate the Analysis itself on a dep that transitively waits
-        // on it. The filter runs UNDER the same DAG lock guard
-        // (`dag`) the caller already holds — no lock release
-        // between this check and the `dag.submit` below — closing
-        // the TOCTOU window where two concurrent completions could
-        // each see the other as not-yet-gating and both submit
-        // mutually-blocking dep edges.
+        // persist a registry entry for a dep that transitively
+        // waits on this owner. The filter runs UNDER the same DAG
+        // lock guard (`dag`) the caller already holds — no lock
+        // release between this check and the
+        // `record_artifact_blockers` call below — closing the
+        // TOCTOU window where two concurrent completions could
+        // each see the other as not-yet-gating and both register
+        // mutually-blocking blocker entries.
         let (filtered_dep_keys, _dropped_dep_keys) =
             Self::filter_macro_cycle_deps(&dag, &canonical_arc, generation, dep_keys);
         let dep_keys = filtered_dep_keys;
@@ -1079,62 +1083,23 @@ impl Scheduler {
         //
         // Both the live gating `dep_keys` AND the collected
         // `failed_records` ride together inside a
-        // [`crate::dag::PendingBlockerSet`]. The owner's Analysis
-        // may already be complete (the already-complete arm below
-        // skips the Analysis submit), in which case the late
-        // failure records would otherwise be dropped on the floor —
-        // a subsequent Artifact admission would drain an empty set
-        // and silently resolve `Ready` over the dead prerequisite.
-        // Persisting `failed_records` here makes the Artifact
-        // admission's drain → attach cycle pick up the same
-        // markers via [`Self::admit_artifact_with_blockers`].
+        // [`crate::dag::PendingBlockerSet`]. The owner's Analysis is
+        // UNGATED — analysis is recoverable from the source alone
+        // (templates, defineSlots, script-level diagnostics all derive
+        // from the parsed source independently of resolved type
+        // shapes). Codegen, however, needs the resolved type shapes,
+        // so the gate fires at Artifact admission via
+        // [`Self::admit_artifact_with_blockers`]: it drains this
+        // registry entry, re-classifies every persisted live + failed
+        // dep against the live DAG state, and attaches any current
+        // failure records to the just-submitted Artifact node so
+        // `execute_stage_on_worker` surfaces a typed `DependencyFailed`
+        // before codegen runs.
         let pending_set = crate::dag::PendingBlockerSet {
-            deps: dep_keys.iter().cloned().collect(),
-            failed: failed_records.clone(),
+            deps: dep_keys.into_iter().collect(),
+            failed: failed_records,
         };
         dag.record_artifact_blockers(&canonical_arc, generation, pending_set);
-
-        // Pre-dispatch case: if the Analysis identity is admitted but
-        // not yet dispatched, merging dep_keys into its
-        // `deps_remaining` keeps the file-level Analysis gate engaged
-        // so [`Self::handle_new_request`]'s `has_pending_deps` check
-        // defers any same-generation Artifact request that arrives
-        // before Analysis completes. On the dispatched arm this call
-        // is a no-op by contract: the dispatched node's incoming
-        // edges are immutable (see [`SchedulerDag::submit`]).
-        //
-        // Skip-on-already-complete: if the owner's Analysis has
-        // already committed (i.e., `node.current_analysis()` is
-        // `Some`), do NOT submit a fresh Analysis identity. The
-        // pre-strip behaviour unconditionally submitted, which
-        // re-admitted Analysis on already-analyzed source — the
-        // executor would then re-run `execute_analysis`, defeating
-        // the cache. The blocker dep set is still recorded above;
-        // downstream Artifact admissions consume it (deps AND
-        // failed records together) via `drain_artifact_blockers`.
-        if node.current_analysis().is_none() {
-            let analysis_identity = WorkNodeIdentity::FileStage {
-                canonical: Arc::clone(&canonical_arc),
-                generation,
-                stage: FileStageKey::Analysis,
-            };
-            dag.submit(
-                analysis_identity.clone(),
-                WorkKind::Analysis,
-                inherited_priority,
-                dep_keys,
-                None,
-            );
-            // Attach any failed-dep records to the just-submitted
-            // Analysis node so the pre-dispatch short-circuit fires
-            // before the Analysis executor runs. The attach is a
-            // no-op on a dispatched node (the dedup arm preserved
-            // the in-flight node's existing marker; see
-            // `SchedulerDag::submit` in-flight dedup branch).
-            for record in failed_records {
-                dag.attach_failed_dep(&analysis_identity, record);
-            }
-        }
     }
 
     /// Drop any dep whose Analysis transitively waits on the
@@ -1155,8 +1120,9 @@ impl Scheduler {
     /// - Transitive: `A → B → C → A` (bounded BFS).
     ///
     /// The caller MUST hold the DAG lock through this call and the
-    /// subsequent `dag.submit` so two concurrent completions cannot
-    /// race past the filter into a mutually-blocking submit.
+    /// subsequent `record_artifact_blockers` so two concurrent
+    /// completions cannot race past the filter into mutually-blocking
+    /// registry entries.
     ///
     /// Returns the `(kept, dropped)` split for traceability. The
     /// `dropped` half is currently unused at the call-site but
@@ -1896,13 +1862,15 @@ impl Scheduler {
             return;
         }
 
-        // Artifact admissions must inherit any late-discovered
-        // blockers recorded by `register_resolved_deps` at this
-        // `(file_id, generation)`. The pre-dispatch Analysis gate
-        // above handles the early-blocker case; the helper below
-        // handles the case where Analysis was already dispatched (or
-        // completed) before the blocker arrived, so the gate is gone
-        // but the Artifact still must wait on the blocker's Analysis.
+        // Artifact admissions must inherit any blockers persisted
+        // by `register_resolved_deps` to the per-canonical Artifact
+        // blocker registry at this `(file_id, generation)`. Owner
+        // Analysis is admitted ungated for macro_type_deps; the
+        // helper below drains the registry, re-classifies persisted
+        // deps against the live DAG state, and attaches the
+        // resulting gating deps + failure records to the
+        // just-submitted Artifact so codegen waits on (or short-
+        // circuits over) the blocker's Analysis.
         if let TaskKind::Artifact { profile_hash } = first_missing {
             self.admit_artifact_with_blockers(
                 &mut dag,
@@ -2408,18 +2376,21 @@ impl Scheduler {
                     if !all_blocker_ids.is_empty() {
                         let mut dep_keys: Vec<DepKey> = Vec::new();
                         // Failed-dep records collected from the 3-state
-                        // matrix below. These attach to the Analysis
-                        // identity submitted at the end of this block so
-                        // the pre-dispatch short-circuit in
-                        // `execute_stage_on_worker` surfaces a typed
-                        // `DependencyFailed` instead of letting the
-                        // Analysis executor run over a dead prerequisite
-                        // (Source-completion admission path: a blocker
-                        // whose producer terminalized BEFORE the owner
-                        // Source committed would otherwise be recorded
-                        // as a live `DepKey::FileStage{Analysis}` here,
-                        // pinning the owner's Analysis forever on a dep
-                        // that cannot make progress).
+                        // matrix below. These ride together with
+                        // `dep_keys` inside the per-canonical
+                        // `PendingBlockerSet` recorded for the owner's
+                        // Artifact admission. They surface as a typed
+                        // `DependencyFailed` on the FIRST Artifact
+                        // dispatch (via the drain + `attach_failed_dep`
+                        // sequence in
+                        // [`Self::admit_artifact_with_blockers`]),
+                        // matching the scheduler contract that missing
+                        // macro_type_deps gate the owner's Artifact
+                        // (codegen consumes resolved type shapes) and
+                        // never the owner's Analysis (the template /
+                        // script analysis must publish for diagnostics,
+                        // hover, and `defineSlots` consumers even when
+                        // the type dep is unresolved).
                         let mut failed_records: Vec<crate::dag::FailedDepRecord> = Vec::new();
                         for dep_id in &all_blocker_ids {
                             if self.tombstones.contains_key(dep_id) {
@@ -2453,19 +2424,23 @@ impl Scheduler {
                             // Route the blocker through the shared 3-state
                             // classifier:
                             //
-                            // - `Gating`    → record the DepKey and gate
-                            //                 the owner Analysis on the
-                            //                 dep's Analysis.
+                            // - `Gating`    → record the DepKey for the
+                            //                 owner's Artifact registry
+                            //                 (gates Artifact admission
+                            //                 only, never Analysis).
                             // - `Satisfied` → drop silently (producer is
                             //                 moot or already committed).
                             // - `Failed(r)` → drop from `dep_keys` AND
                             //                 collect the record for
-                            //                 attachment below so the
-                            //                 owner's Analysis short-
-                            //                 circuits with a typed
-                            //                 `DependencyFailed` instead
-                            //                 of recording a DepKey on a
-                            //                 dead prerequisite.
+                            //                 the registry's
+                            //                 [`crate::dag::PendingBlockerSet::failed`]
+                            //                 list. The Artifact
+                            //                 admission re-classifies
+                            //                 every persisted failure
+                            //                 against the live state on
+                            //                 each drain, so a same-gen
+                            //                 recovery still re-promotes
+                            //                 the dep to gating.
                             let dep_canonical: Arc<str> = Arc::from(dep_id.as_str());
                             let dep_gen =
                                 self.nodes.get(dep_id).map(|n| n.generation()).unwrap_or(0);
@@ -2493,24 +2468,27 @@ impl Scheduler {
                         }
 
                         if !dep_keys.is_empty() || !failed_records.is_empty() {
-                            // The Analysis identity carries macro
-                            // type-dep gating: dep_keys gate Analysis
-                            // (so a failed dep can surface a typed
-                            // DependencyFailed on the chokepoint
-                            // before the Analysis executor runs).
+                            // Record the macro_type_dep blocker set on
+                            // the per-canonical Artifact registry. The
+                            // owner's Analysis stays UNGATED — analysis
+                            // is recoverable from the source alone
+                            // (templates, defineSlots, script-level
+                            // diagnostics all derive from the parsed
+                            // source independently of resolved type
+                            // shapes). Codegen, however, needs the
+                            // resolved type shapes, so the gate fires
+                            // at Artifact admission via
+                            // [`Self::admit_artifact_with_blockers`].
                             //
-                            // Macro-type cycle filter + submit run
+                            // Macro-type cycle filter + record run
                             // under a single DAG lock guard so the
                             // filter's bounded reachability check
-                            // and the subsequent `submit` are atomic
-                            // — no other thread can race between
-                            // them and observe a state where two
-                            // mutually-cyclic deps both pass the
+                            // and the subsequent registry write are
+                            // atomic — no other thread can race
+                            // between them and observe a state where
+                            // two mutually-cyclic deps both pass the
                             // filter. The chokepoint lives in
-                            // [`Self::filter_macro_cycle_deps`];
-                            // the lock acquisition is hoisted above
-                            // the check so the TOCTOU window between
-                            // filter and submit cannot reopen.
+                            // [`Self::filter_macro_cycle_deps`].
                             let mut dag = self.dag.lock();
                             let (filtered_deps, _dropped_deps) = Self::filter_macro_cycle_deps(
                                 &dag,
@@ -2518,34 +2496,23 @@ impl Scheduler {
                                 generation,
                                 dep_keys,
                             );
-                            let analysis_identity = WorkNodeIdentity::FileStage {
-                                canonical: Arc::clone(&canonical_arc),
-                                generation,
-                                stage: FileStageKey::Analysis,
+                            let pending_set = crate::dag::PendingBlockerSet {
+                                deps: filtered_deps.into_iter().collect(),
+                                failed: failed_records,
                             };
-                            dag.submit(
-                                analysis_identity.clone(),
-                                WorkKind::Analysis,
-                                inherited_priority,
-                                filtered_deps,
-                                None,
-                            );
-                            // Attach failed-dep records to the just-
-                            // submitted Analysis node so the pre-dispatch
-                            // short-circuit fires before the Analysis
-                            // executor runs. Symmetric with the
-                            // `register_resolved_deps` path that performs
-                            // the same attach for late blockers.
-                            for record in failed_records {
-                                dag.attach_failed_dep(&analysis_identity, record);
-                            }
+                            dag.record_artifact_blockers(&canonical_arc, generation, pending_set);
                         }
                     }
                 }
 
-                // Source → Analysis transition. The Analysis identity may
-                // already be admitted (with deps) from the blocker-gate
-                // step above; this admission is a dedup-merge.
+                // Source → Analysis transition. Owner Analysis is
+                // admitted ungated — `admit_work` is the single
+                // admission chokepoint, and this is the first and
+                // only Analysis admission for this canonical at this
+                // generation. Blockers discovered during this
+                // completion are persisted to the per-canonical
+                // Artifact blocker registry, not attached to this
+                // Analysis node.
                 let mut dag = self.dag.lock();
                 admit_work(
                     &mut dag,
@@ -10279,36 +10246,38 @@ mod tests {
     }
 
     /// Source-completion blocker admission race: a producer that
-    /// terminalized BEFORE the owner Source completed must still be
-    /// classified as `Failed` by the matrix, not silently dropped or
-    /// recorded as a live `DepKey`. The Source-completion path in
-    /// `handle_stage_complete(Source)` calls `extract_deps` and
-    /// admits a file-level Analysis gate with the blocker DepKeys.
-    /// Without classifier-routed admission, the gate path checks
-    /// `current_analysis().is_none()` and unconditionally records
-    /// the dep's Analysis DepKey, pinning the owner Analysis
-    /// forever when the dep has already terminalized (no completion
-    /// fan-out left to wake the waiter since
-    /// `fanout_source_failure_to_analysis_waiters` ran at
-    /// terminalize time, before this new waiter joined).
+    /// terminalized BEFORE the owner Source completed is classified
+    /// as `Failed` by the matrix, recorded onto the per-canonical
+    /// Artifact blocker registry, and surfaces as a typed
+    /// `DependencyFailed` on the FIRST Artifact admission.
     ///
-    /// With classifier-routed admission, the Source-completion path
-    /// routes every blocker through `file_stage_analysis_blocker_status`:
-    /// `Failed(record)` admits the owner Analysis with no gating dep
-    /// on the dead producer AND attaches the `FailedDepRecord` so
-    /// the pre-dispatch chokepoint surfaces a typed
-    /// `DependencyFailed`.
+    /// The owner's ANALYSIS must remain ungated: missing macro_type_dep
+    /// shapes only affect codegen (the Artifact stage). Templates,
+    /// `defineSlots`, and script-level diagnostics derive from the
+    /// parsed source independently of resolved type shapes, so an
+    /// unresolved type dep must not block the Analysis publication
+    /// the way it does for an Artifact (see
+    /// `host_manage_tests::template_slots_with_unresolved_type_deps`
+    /// for the matching session-level contract).
+    ///
+    /// The Source-completion path in `handle_stage_complete(Source)`
+    /// calls `extract_deps`, routes each blocker through
+    /// `file_stage_analysis_blocker_status`, and records the live +
+    /// failed dep pair via `record_artifact_blockers`. The Analysis
+    /// admit at the end of the arm completes normally with no deps.
+    /// When the owner's Artifact is later admitted,
+    /// `admit_artifact_with_blockers` drains the registry, attaches
+    /// `FailedDepRecord` to the Artifact node, and the pre-dispatch
+    /// chokepoint surfaces `DependencyFailed`.
     ///
     /// Discriminator: drive `/dep.ts` Source to FileNotFound failure
     /// FIRST so `terminal_dep_failures` carries the record. Then
     /// submit `/a.vue` Analysis with a custom executor whose
     /// `extract_deps('/a.vue')` returns `/dep.ts` as a blocker. The
-    /// `/a.vue` Source completion handler enters the classifier-
-    /// routed path and the matrix must reclassify the dep. Without
-    /// the routing: owner Analysis handle hangs forever (DepKey is
-    /// recorded but no completion fan-out remains). With the
-    /// routing: handle resolves `Failed(DependencyFailed)` citing
-    /// `/dep.ts`.
+    /// `/a.vue` Source completion handler records the failure on
+    /// the Artifact registry and the Analysis resolves `Ready`.
+    /// Submit the Artifact, and the chokepoint surfaces
+    /// `Failed(DependencyFailed)` citing `/dep.ts`.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn source_completion_routes_failed_blocker_through_classifier() {
@@ -10392,8 +10361,11 @@ mod tests {
         // the custom executor's default execute_source path; the
         // Source-completion handler then runs extract_deps which
         // returns /dep.ts as a blocker. The classifier-routed
-        // admission sees the persistent failure record and admits
-        // the /a.vue Analysis with an attached FailedDepRecord.
+        // admission sees the persistent failure record, records it
+        // on the per-canonical Artifact blocker registry, and the
+        // Analysis is admitted ungated (analysis is recoverable from
+        // the source alone — codegen consumes the resolved type
+        // shapes, not analysis).
         let owner_handle = sched.submit_request(Request {
             file_id: "/a.vue".to_string(),
             target: TargetStage::Analysis,
@@ -10403,13 +10375,9 @@ mod tests {
             request_context: None,
         });
 
-        // Without classifier-routed admission: the owner Analysis
-        // would record a fresh DepKey on /dep.ts's Analysis (DepKey
-        // unresolved — fan-out already ran at /dep.ts terminalize
-        // time, before this waiter joined). The handle would hang.
-        // With the routing: the classifier returns Failed(record);
-        // the chokepoint surfaces DependencyFailed.
-        let state = {
+        // Analysis must resolve `Ready` — the missing dep is recorded
+        // on the Artifact registry, not gating Analysis.
+        let analysis_state = {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             loop {
                 if let Some(s) = owner_handle.try_get() {
@@ -10421,36 +10389,79 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(25));
             }
         };
-        let state = state.unwrap_or_else(|| {
+        let analysis_state = analysis_state.unwrap_or_else(|| {
             panic!(
-                "owner Analysis must resolve within 5s after the Source-completion \
-                 path classifies the dead-producer dep as Failed; without classifier-routed \
-                 admission the path would record a DepKey that no fan-out satisfies and the \
-                 handle would hang. dep_gen_observed={dep_gen_observed}",
+                "owner Analysis must resolve within 5s — analysis is ungated by macro_type_dep \
+                 status; the Source-completion path records dep failures on the per-canonical \
+                 Artifact blocker registry, leaving Analysis to publish normally. \
+                 dep_gen_observed={dep_gen_observed}",
             )
         });
-        match &state {
+        assert!(
+            analysis_state.is_ready(),
+            "owner Analysis must succeed when its macro_type_dep is missing; the dep failure \
+             is gated at Artifact admission, not Analysis. got: {analysis_state:?}",
+        );
+
+        // Step 3: submit /a.vue Artifact. The Artifact admission
+        // drains the per-canonical blocker registry, reclassifies
+        // every persisted failure against the live state, and
+        // attaches a `FailedDepRecord` to the Artifact node. The
+        // pre-dispatch chokepoint in `execute_stage_on_worker`
+        // surfaces a typed `DependencyFailed` citing /dep.ts before
+        // the Artifact executor runs.
+        let artifact_handle = sched.submit_request(Request {
+            file_id: "/a.vue".to_string(),
+            target: TargetStage::Artifact { profile_hash: 42 },
+            priority: Priority::Interactive,
+            source: None,
+            file_kind: None,
+            request_context: None,
+        });
+        let artifact_state = {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(s) = artifact_handle.try_get() {
+                    break Some(s);
+                }
+                if std::time::Instant::now() >= deadline {
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        };
+        let artifact_state = artifact_state.unwrap_or_else(|| {
+            panic!(
+                "owner Artifact must resolve within 5s — the Source-completion path persisted \
+                 the dead-producer dep on the Artifact registry, so `admit_artifact_with_blockers` \
+                 must surface DependencyFailed on the chokepoint. \
+                 dep_gen_observed={dep_gen_observed}",
+            )
+        });
+        match &artifact_state {
             CompletionState::Failed(crate::job::SchedulerError::DependencyFailed {
                 dep_key,
                 cause,
             }) => {
                 match dep_key {
-                    crate::dag::DepKey::FileStage { canonical, stage, .. } => {
+                    crate::dag::DepKey::FileStage {
+                        canonical, stage, ..
+                    } => {
                         assert_eq!(
                             canonical.as_ref(),
                             "/dep.ts",
                             "DependencyFailed must cite /dep.ts (the failed prerequisite). \
-                             state={state:?}",
+                             state={artifact_state:?}",
                         );
                         assert_eq!(
                             *stage,
                             crate::dag::FileStageKey::Analysis,
-                            "failed DepKey stage must be Analysis. state={state:?}",
+                            "failed DepKey stage must be Analysis. state={artifact_state:?}",
                         );
                     }
                     other_key => panic!(
-                        "expected FileStage DepKey on Source-completion fan-out, got {other_key:?}. \
-                         state={state:?}",
+                        "expected FileStage DepKey on Artifact admission, got {other_key:?}. \
+                         state={artifact_state:?}",
                     ),
                 }
                 // Cause must be FileNotFound (the producer was missing).
@@ -10458,20 +10469,19 @@ mod tests {
                     crate::job::SchedulerError::FileNotFound { file_id } => {
                         assert_eq!(
                             file_id, "/dep.ts",
-                            "carried cause must cite /dep.ts. state={state:?}",
+                            "carried cause must cite /dep.ts. state={artifact_state:?}",
                         );
                     }
                     other_cause => panic!(
                         "DependencyFailed.cause must carry FileNotFound for /dep.ts, \
-                         got {other_cause:?}. state={state:?}",
+                         got {other_cause:?}. state={artifact_state:?}",
                     ),
                 }
             }
             other => panic!(
-                "expected Failed(DependencyFailed citing /dep.ts) on owner Analysis after \
-                 Source-completion path classifies the dead-producer dep. got {other:?}. \
-                 Without classifier-routed admission the Source-completion path recorded a \
-                 live DepKey on the dead producer and the handle hung. \
+                "expected Failed(DependencyFailed citing /dep.ts) on owner Artifact after \
+                 the Source-completion path persisted the dead-producer dep on the \
+                 Artifact registry. got {other:?}. \
                  dep_gen_observed={dep_gen_observed}",
             ),
         }

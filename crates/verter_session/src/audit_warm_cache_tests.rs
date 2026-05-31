@@ -110,6 +110,87 @@ fn audit_warm_path_second_call_short_circuits_with_from_cache_true() {
     );
 }
 
+/// Discriminating regression for F91 (warm-cache footprint synthesis)
+/// + F93 (warm-cache file_audit_vec symmetry).
+///
+/// Before F91 the warm-cache short-circuit emitted
+/// `RequestAuditRecord { footprint: None, ... }` even when the host
+/// was configured with `footprint_capture = true`. Before F93 the
+/// same short-circuit emitted `files: Vec::new()` regardless of
+/// footprint capture. Both regressions were invisible in single-shot
+/// runs because the only other warm-cache test
+/// (`audit_warm_path_second_call_short_circuits_with_from_cache_true`)
+/// constructed a host with `footprint_capture = false` and asserted
+/// nothing about `footprint` / `files`.
+///
+/// This test pins both invariants on the warm path with
+/// `footprint_capture = true` and `audit_timing_capture = true`,
+/// and asserts the cold-record establishes the baseline (both fields
+/// populated). Reverting either F91 or F93 fails this assertion.
+#[test]
+fn audit_warm_path_second_call_synthesizes_footprint_and_files_when_footprint_capture_enabled() {
+    let host = VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        audit_enabled: true,
+        footprint_capture: true,
+        audit_timing_capture: true,
+        ..HostConfig::default()
+    });
+    let project = MetaProject::new(host);
+    upsert_basic_owner(&project);
+
+    let host = project.host();
+
+    // First call: cold. The cold path runs `build_file_audit_vec`
+    // before `mine_footprint`, so both fields must be populated.
+    let (_, first) = host
+        .get_component_meta_with_resolution("/Owner.vue")
+        .expect("first (cold) call must succeed");
+    let first_record = host
+        .take_audit_record(first.request_id)
+        .expect("first (cold) audit record must publish");
+
+    assert!(
+        !first_record.from_cache,
+        "first call is cold; from_cache must be false"
+    );
+    assert!(
+        first_record.footprint.is_some(),
+        "cold record must carry Some(_) footprint when footprint_capture=true"
+    );
+    assert!(
+        !first_record.files.is_empty(),
+        "cold record must carry non-empty files when the entry has direct imports \
+         (here /Owner.vue imports /types.ts)"
+    );
+
+    // Second call: warm. The synthesised record must mirror the cold
+    // path's footprint+files symmetry — both fields populated, not
+    // just one. A regression that re-introduces `footprint: None` OR
+    // `files: Vec::new()` on the warm path fails here.
+    let (_, second) = host
+        .get_component_meta_with_resolution("/Owner.vue")
+        .expect("second (warm) call must succeed");
+    let second_record = host
+        .take_audit_record(second.request_id)
+        .expect("second (warm) audit record must publish (synthesised from_cache)");
+
+    assert!(
+        second_record.from_cache,
+        "second call is a warm cache hit; from_cache must be true"
+    );
+    assert!(
+        second_record.footprint.is_some(),
+        "warm record must carry Some(_) footprint when footprint_capture=true \
+         (F91: drain the per-request accumulator and mine on the synthesised path)"
+    );
+    assert!(
+        !second_record.files.is_empty(),
+        "warm record must carry non-empty files when the entry has direct imports \
+         (F93: mirror cold-path build_file_audit_vec before mine_footprint consumes state)"
+    );
+}
+
 #[test]
 fn audit_warm_path_dep_change_invalidates_cache() {
     let project = make_audit_enabled_project();
