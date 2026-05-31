@@ -15,9 +15,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::type_solver::query_engine::{ProjectedMember, ProjectedSurface};
 use verter_type_expr::TypeExpr;
 
-use super::{
-    PreparedSubstitutionKey, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE, SEMANTIC_SURFACE_MEMBER,
-};
+use super::{SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE, SEMANTIC_SURFACE_MEMBER};
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{QueryError, SemanticNodeData, SemanticNodeId, SurfaceView};
 
@@ -330,46 +328,6 @@ pub(crate) fn semantic_query_error_raw(err: &QueryError) -> String {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(super) enum PreparedSurfaceProjection {
-    Surface(std::sync::Arc<ProjectedSurface>),
-    Empty,
-    Unsupported,
-}
-
-pub(super) fn prepared_substitution_key(
-    substitutions: &FxHashMap<String, TypeExpr>,
-) -> PreparedSubstitutionKey {
-    if substitutions.is_empty() {
-        return PreparedSubstitutionKey::Empty;
-    }
-
-    let mut entries = substitutions
-        .iter()
-        .map(|(name, ty)| (name.clone(), ty.clone()))
-        .collect::<Vec<_>>();
-    entries.sort_by(|left, right| left.0.cmp(&right.0));
-    PreparedSubstitutionKey::Entries(entries)
-}
-
-
-
-
-
-
-#[allow(dead_code)]
-pub(super) fn prepared_substitution_instantiation_hash(
-    substitutions: &FxHashMap<String, TypeExpr>,
-) -> u64 {
-    use std::hash::{Hash, Hasher};
-    if substitutions.is_empty() {
-        return 0;
-    }
-
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    prepared_substitution_key(substitutions).hash(&mut hasher);
-    hasher.finish()
-}
 
 pub(super) fn projected_surface_is_empty(surface: &ProjectedSurface) -> bool {
     surface.members.is_empty()

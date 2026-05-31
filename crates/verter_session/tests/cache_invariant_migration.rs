@@ -674,66 +674,6 @@ fn schema_bump_evicts_imported_registry_db_stale_entries() {
 }
 
 #[test]
-fn schema_bump_evicts_prepared_surface_db_stale_entries() {
-    use verter_session::component_meta_caches::PreparedSurfaceDb;
-
-    let db = PreparedSurfaceDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
-    db.insert_synthetic_for_schema_test("/workspace/synthetic-prepared-surface.ts");
-
-    assert_eq!(db.live_count(), 1, "PreparedSurfaceDb pre-evict count");
-    assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
-
-    let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
-    assert_eq!(evicted, 1, "PreparedSurfaceDb: must drain stale");
-    assert_eq!(db.live_count(), 0, "PreparedSurfaceDb: empty after evict");
-}
-
-#[test]
-fn schema_bump_evicts_prepared_member_db_stale_entries() {
-    use verter_session::component_meta_caches::PreparedMemberDb;
-
-    let db = PreparedMemberDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
-    db.insert_synthetic_for_schema_test("/workspace/synthetic-prepared-member.ts");
-
-    assert_eq!(db.live_count(), 1, "PreparedMemberDb pre-evict count");
-    assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
-
-    let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
-    assert_eq!(evicted, 1, "PreparedMemberDb: must drain stale");
-    assert_eq!(db.live_count(), 0, "PreparedMemberDb: empty after evict");
-}
-
-#[test]
-fn schema_bump_evicts_prepared_target_db_stale_entries() {
-    use verter_session::component_meta_caches::PreparedTargetDb;
-
-    let db = PreparedTargetDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
-    db.insert_synthetic_for_schema_test("/workspace/synthetic-prepared-target.ts");
-
-    assert_eq!(db.live_count(), 1, "PreparedTargetDb pre-evict count");
-    assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
-
-    let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
-    assert_eq!(evicted, 1, "PreparedTargetDb: must drain stale");
-    assert_eq!(db.live_count(), 0, "PreparedTargetDb: empty after evict");
-}
-
-#[test]
-fn schema_bump_evicts_routed_expr_surface_db_stale_entries() {
-    use verter_session::component_meta_caches::RoutedExprSurfaceDb;
-
-    let db = RoutedExprSurfaceDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
-    db.insert_synthetic_for_schema_test("/workspace/synthetic-routed-expr.ts");
-
-    assert_eq!(db.live_count(), 1, "RoutedExprSurfaceDb pre-evict count");
-    assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
-
-    let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
-    assert_eq!(evicted, 1, "RoutedExprSurfaceDb: must drain stale");
-    assert_eq!(db.live_count(), 0, "RoutedExprSurfaceDb: empty after evict");
-}
-
-#[test]
 fn schema_bump_evicts_shape_cache_db_stale_entries() {
     use verter_session::component_meta_caches::ShapeCacheDb;
 

@@ -84,11 +84,9 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
-use std::hash::Hash;
 
 use rustc_hash::FxHashMap;
 use verter_semantic::analysis::type_eval::DeclarationId;
-use verter_semantic::analysis::type_solver::query_engine::ProjectedMember;
 use verter_type_expr::TypeExpr;
 
 use super::declaration_metadata::{
@@ -121,10 +119,7 @@ pub(crate) use surface::{
 // supporting code. All `pub(super)` in surface.rs.
 #[cfg(test)]
 use surface::type_expr_references_substitutions;
-use surface::{
-    apply_type_param_substitutions, build_default_type_param_substitutions,
-    PreparedSurfaceProjection,
-};
+use surface::{apply_type_param_substitutions, build_default_type_param_substitutions};
 
 // Predicate/utility helpers (route-expr surface keys,
 // package-canonical predicates, prepared-decl shape predicates,
@@ -545,62 +540,6 @@ pub struct ResolvedImportedRegistrySymbol {
     pub exported_name: String,
     pub body: TypeExpr,
     pub canonical_dependencies: BTreeSet<String>,
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-enum PreparedSubstitutionKey {
-    Empty,
-    Entries(Vec<(String, TypeExpr)>),
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct PreparedSurfaceCacheKey {
-    canonical_id: String,
-    symbol_name: String,
-    substitutions: PreparedSubstitutionKey,
-    /// See
-    /// [`crate::resolver_core::cache_keys::PreparedSurfaceCacheKey::from_root_body`].
-    /// The engine-internal `RefCell`-backed read-through view mirrors
-    /// the ctx-owned key shape exactly, so two distinct entry contexts
-    /// share NO scratch state inside one request.
-    from_root_body: bool,
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct PreparedMemberCacheKey {
-    canonical_id: String,
-    symbol_name: String,
-    member_name: String,
-    kind: PreparedMemberCacheKind,
-    substitutions: PreparedSubstitutionKey,
-    /// See
-    /// [`crate::resolver_core::cache_keys::PreparedMemberCacheKey::from_root_body`].
-    from_root_body: bool,
-}
-
-// `InheritedRoute` is no longer
-// constructed after trampoline conversion. Variant
-// §F call-graph closure.
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-enum PreparedMemberCacheKind {
-    Requested,
-    #[allow(dead_code)]
-    InheritedRoute,
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct PreparedTargetCacheKey {
-    active_scope_canonical_id: String,
-    decl_canonical_id: String,
-    decl_symbol_name: String,
-    requested_name: String,
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct RoutedExprSurfaceCacheKey {
-    scope_canonical_id: String,
-    root_symbol: String,
-    route: super::RouteDemand,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
