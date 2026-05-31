@@ -28,9 +28,9 @@
 //! `ComponentMetaQueryEngine` resolver methods. Each helper inlines the
 //! same trampoline body the deprecated method had — a thin composition of
 //! the engine's surviving `pub(crate)` cycle-protected dispatch helpers
-//! (`dispatch_projected_surface`, `cached_prepared_root_surface`,
-//! `project_routed_expr_surface_expr`, `project_direct_utility_surface_shape`,
-//! etc.) plus the surface→expr / surface→shape raises.
+//! (`dispatch_projected_surface`, `dispatch_routed_expr_surface_expr`,
+//! `project_direct_utility_surface_shape`, etc.) plus the surface→expr
+//! / surface→shape raises.
 
 use crate::resolver_core::ResolverContext;
 use crate::types::ProjectionMode;
@@ -1169,7 +1169,7 @@ pub(crate) fn project_expr_surface_shape_via_host_threaded<'ctx>(
         .or_else(|| component_meta_registry_public_utility_route(expr))
     {
         if let Some(projected) =
-            engine.project_routed_expr_surface_expr(scope_canonical_id, &root_symbol, &route)
+            engine.dispatch_routed_expr_surface_expr(scope_canonical_id, &root_symbol, &route)
         {
             return Some(
                 verter_semantic::analysis::type_expand::type_expr_to_object_shape(&projected),
@@ -1219,7 +1219,7 @@ pub(crate) fn project_route_surface_expr_via_host_threaded<'ctx>(
     if engine.projection_op_budget_exhausted() {
         return None;
     }
-    engine.project_routed_expr_surface_expr(scope_canonical_id, root_symbol, route)
+    engine.dispatch_routed_expr_surface_expr(scope_canonical_id, root_symbol, route)
 }
 
 pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'ctx>(
@@ -1274,7 +1274,7 @@ pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'ctx>(
 /// Behaviour:
 /// 1. **Registry-route fast-path** — `Pick<…>` / `Omit<…>` /
 ///    `Button['ui']` shapes route through the engine's
-///    `project_routed_expr_surface_expr` / `lower_and_project_to_expanded`
+///    `dispatch_routed_expr_surface_expr` / `lower_and_project_to_expanded`
 ///    helpers. The fast-path returns the registry's pre-computed
 ///    Expanded shape regardless of caller mode; downstream caches store
 ///    one canonical entry per route, so reusing it on a Shallow request
