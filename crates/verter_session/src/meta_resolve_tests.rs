@@ -6459,11 +6459,12 @@ defineProps<AliasOfInner & WrappedAlias>()
     let _ = session.get_component_meta("/AliasOwner.vue").unwrap();
 }
 
-/// Fixture H — direct prepared-route API coverage for the two caches
-/// that the public `get_component_meta` fixtures do not currently
-/// hit. These are live engine APIs with production call sites, so the
-/// spike must characterize them instead of treating a public-fixture
-/// miss as dead code.
+/// Fixture H — direct routed-surface API coverage for the
+/// `project_route_surface_expr_via_host_threaded` Pick-over-heritage
+/// path (now dispatch-backed) that the public `get_component_meta`
+/// fixtures do not currently hit. A live engine API with production
+/// call sites, so the spike characterizes it instead of treating a
+/// public-fixture miss as dead code.
 fn run_classification_fixture_direct_prepared_route_caches() {
     let project = make_project();
     project
@@ -6514,13 +6515,6 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
 
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-
-    let _ = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
-        &mut query_engine,
-        "/src/App.vue",
-        "ColorModeSelectProps",
-    )
-    .expect("generic inherited omit surface should project");
 
     let route = crate::resolver_core::RouteDemand::Pick(vec![
         "open".to_string(),

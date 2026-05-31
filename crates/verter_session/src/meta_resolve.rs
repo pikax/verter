@@ -77,19 +77,13 @@ pub(crate) use dispatch_helpers::{
     project_expr_class_a_via_dispatch_threaded, project_expr_surface_expr_via_host_threaded,
     project_expr_surface_shape_via_host_threaded, project_type_surface_expr_via_host_threaded,
 };
-// Test-only re-exports — exercised by parity tests for the
-// dispatch-route-helper coverage matrix. The prepared-decl surface
-// projector is no longer a PRODUCTION re-export here: the owner-local
-// macro-root entry points were retargeted to the shared dispatch surface
-// projector (`project_expr_surface_shape_via_host_threaded`), so the
-// prepared walker survives only for its own materialiser-module callers
-// (which import it directly from `dispatch_helpers`) and these parity tests.
+// Test-only re-export — exercised by the kept dispatch-route-helper
+// coverage tests (`project_route_surface_expr_pick_*` in the engine
+// tests + the routed-surface classification fixture). This is the
+// surviving routed-surface bridge; it routes through the dispatch
+// keeper `dispatch_routed_expr_surface_expr`.
 #[cfg(test)]
-pub(crate) use dispatch_helpers::{
-    project_prepared_type_surface_expr_via_host_threaded,
-    project_prepared_type_surface_shape_via_host_threaded,
-    project_route_surface_expr_via_host_threaded,
-};
+pub(crate) use dispatch_helpers::project_route_surface_expr_via_host_threaded;
 pub(crate) use graph_predicates::{
     build_keys_union_node, component_meta_ref_resolves_to_package_node,
     extract_route_root_identity_node, ref_root_reaches_transitive_cycle_node,

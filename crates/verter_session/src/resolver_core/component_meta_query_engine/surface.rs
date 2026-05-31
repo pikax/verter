@@ -317,22 +317,6 @@ pub(crate) fn type_expr_is_expanded_surface(expr: &TypeExpr) -> bool {
     }
 }
 
-/// Returns `true` when `expr` contains at least one Object arm at any
-/// nesting depth (top-level, or inside `Parenthesized` /
-/// `Intersection` / `Union`). Used by the slot-shape producer to
-/// decide whether a partially-deferred compound shape is still useful
-/// for extracting explicit slot members.
-pub(crate) fn type_expr_has_any_object_arm(expr: &TypeExpr) -> bool {
-    match expr {
-        TypeExpr::Object(_) => true,
-        TypeExpr::Parenthesized(inner) => type_expr_has_any_object_arm(inner),
-        TypeExpr::Intersection(members) | TypeExpr::Union(members) => {
-            members.iter().any(type_expr_has_any_object_arm)
-        }
-        _ => false,
-    }
-}
-
 pub(crate) fn semantic_query_error_raw(err: &QueryError) -> String {
     match err {
         QueryError::Miss => SEMANTIC_MISS.to_string(),
