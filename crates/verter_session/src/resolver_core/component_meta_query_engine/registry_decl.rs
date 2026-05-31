@@ -27,17 +27,13 @@
 //!   `pub(crate) fn debug_*`, `pub(crate) fn prepared_type_decl`,
 //!   `pub(crate) fn ctx`,
 //!   `pub(crate) fn dispatch_projected_surface`,
-//!   `pub(crate) fn dispatch_projected_member`,
-//!   `pub(crate) fn dispatch_projected_keyspace`,
 //!   `pub(crate) fn dispatch_routed_expr_surface_expr` — crate-visible
 //!   helpers used by `meta_resolve` and other engine impl methods.
 //! - Private methods (`semantic_dispatch`, `dispatch_root_instantiated`)
 //!   stay private and are visible inside the
 //!   `component_meta_query_engine` folder via parent-private locality.
 
-use verter_semantic::analysis::type_solver::query_engine::{
-    ProjectedKeyspace, ProjectedMember, ProjectedSurface,
-};
+use verter_semantic::analysis::type_solver::query_engine::ProjectedSurface;
 use verter_type_expr::TypeExpr;
 
 use super::helpers::{is_builtin_name, resolve_imported_registry_symbol_with_budget};
@@ -960,45 +956,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // the composed surface is empty.
         let anchor = self.dispatch_decl_anchor(scope_canonical_id, symbol_name)?;
         projected_compound_root_surface_via_dispatch(self.ctx, anchor)
-    }
-
-    pub(crate) fn dispatch_projected_member(
-        &mut self,
-        scope_canonical_id: &str,
-        symbol_name: &str,
-        member_name: &str,
-    ) -> Option<ProjectedMember> {
-        self.dispatch_projected_surface(scope_canonical_id, symbol_name)?
-            .members
-            .into_iter()
-            .find(|member| member.name == member_name)
-    }
-
-    /// Clippy cleanup — paired with `dispatch_projected_member`
-    /// and `dispatch_projected_surface` as part of the ComponentMetaQueryEngine
-    /// surface contract. No call site in the landed tree, but the helper is
-    /// retained for symmetry with the projection/keyspace surface API; the
-    /// dispatch path uses keyspace shape directly via `surface.members`
-    /// elsewhere. `#[allow(dead_code)]` keeps the API symmetry without
-    /// triggering the unused-method lint.
-    #[allow(dead_code)]
-    pub(crate) fn dispatch_projected_keyspace(
-        &mut self,
-        scope_canonical_id: &str,
-        symbol_name: &str,
-    ) -> Option<ProjectedKeyspace> {
-        let surface = self.dispatch_projected_surface(scope_canonical_id, symbol_name)?;
-        let mut members = surface
-            .members
-            .iter()
-            .map(|member| member.name.clone())
-            .collect::<Vec<_>>();
-        members.sort();
-        members.dedup();
-        Some(ProjectedKeyspace {
-            members,
-            has_index_signature: surface.has_index_signature,
-        })
     }
 
     pub(crate) fn dispatch_routed_expr_surface_expr(
