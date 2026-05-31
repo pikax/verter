@@ -708,11 +708,6 @@ export interface LinkProps extends NuxtLinkProps {
         "member-first pick projection should stay on the requested members only",
     );
     assert_eq!(
-        0u32,
-        0,
-        "same-file inherited pick members should stay on the prepared shallow declaration chain instead of invoking the generic solver",
-    );
-    assert_eq!(
         query_engine.imported_registry_symbol_cache_len(),
         0,
         "same-file inherited pick members that end on package-backed symbolic refs should not resolve imported registry bodies just to decide they stay shallow",
@@ -788,11 +783,6 @@ export interface LinkProps extends NuxtLinkProps {
     assert!(
         matches!(to_member, TypeExpr::Ref { name, .. } if name.as_ref() == "RouteLocationRaw"),
         "package-backed inherited pick member should stay symbolic, got {to_member:?}",
-    );
-    assert_eq!(
-        0u32,
-        0,
-        "package-backed inherited pick members should stay on the prepared shallow declaration chain instead of invoking the generic solver",
     );
     assert_eq!(
         query_engine.imported_registry_symbol_cache_len(),
@@ -913,11 +903,6 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         "package-backed inherited member should stay symbolic, got {to_member:?}",
     );
     assert_eq!(
-        0u32,
-        0,
-        "requesting locally inherited members should not invoke the generic solver just because unrelated imported utility bases exist",
-    );
-    assert_eq!(
         query_engine.imported_registry_symbol_cache_len(),
         0,
         "requesting locally inherited members should not resolve imported registry bodies for unrelated imported utility bases",
@@ -1034,11 +1019,6 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         member_names,
         std::collections::BTreeSet::from(["target", "to"]),
         "pick projection should stay on the requested members only",
-    );
-    assert_eq!(
-        0u32,
-        0,
-        "realistic local inherited members should not invoke the generic solver just because unrelated imported utility bases exist",
     );
     assert_eq!(
         query_engine.imported_registry_symbol_cache_len(),
@@ -1167,10 +1147,6 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         member_names,
         std::collections::BTreeSet::from(["target", "to"]),
         "pick projection should stay on the requested members only",
-    );
-    assert_eq!(
-        0u32, 0,
-        "module-routed local inherited members should not invoke the generic solver",
     );
     assert_eq!(
         query_engine.imported_registry_symbol_cache_len(),
@@ -1344,11 +1320,6 @@ export type EditorToolbarProps<T extends ArrayOrNested<EditorToolbarItem> = Arra
         !member_names.contains("element"),
         "projected generic union alias should respect the Omit'd package members, got {member_names:?}",
     );
-    assert_eq!(
-        0u32,
-        0,
-        "prepared root-surface projection should stay shallow and avoid the semantic solver for generic union aliases",
-    );
 }
 
 #[test]
@@ -1456,10 +1427,6 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         std::collections::BTreeSet::from(["defaultOpen", "disabled", "icon", "id", "open"]),
         "shallow projection should keep the picked and inherited members while honoring the top-level omit, got {member_names:?}",
     );
-    assert_eq!(
-        0u32, 0,
-        "nested pick/omit generic interfaces should stay on the prepared shallow route",
-    );
 }
 
 #[test]
@@ -1550,13 +1517,31 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
 "/src/App.vue", "ColorModeSelectProps")
         .expect("nested pick/omit generic interface should project without whole-body structural substitution");
 
-    assert!(
-        matches!(projected, TypeExpr::Object(_)),
-        "prepared projection should still materialize the routed object surface",
-    );
+    let TypeExpr::Object(object) = projected else {
+        panic!("prepared projection should still materialize the routed object surface");
+    };
+    let member_names: std::collections::BTreeSet<_> = object
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(property) => Some(property.name.as_str()),
+            ObjectMember::Method(method) => Some(method.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    // The structural-substitution fast path must reproduce the EXACT
+    // shallow member surface the standard route produces for this fixture
+    // (covered by `..nested_pick_and_omit_generic_interface_stays_shallow`):
+    // `Omit<SelectMenuProps<Item[]>, 'items'>` over the picked
+    // `RootProps` members + `IconProps` + the `Omit`'d `HtmlAttrs`. A
+    // structural-substitution regression that mangles the surface (drops
+    // an inherited member, leaks the `items`/`type`/`disabled`/`name`
+    // Omit'd members, or fails to honor the pick) flips this RED.
     assert_eq!(
-        0u32, 0,
-        "the structural-substitution fast path should stay solver-free",
+        member_names,
+        std::collections::BTreeSet::from(["defaultOpen", "disabled", "icon", "id", "open"]),
+        "structural-substitution fast path should keep the picked + inherited members while \
+         honoring the nested omits, got {member_names:?}",
     );
 }
 
