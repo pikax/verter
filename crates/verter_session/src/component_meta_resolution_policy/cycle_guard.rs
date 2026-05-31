@@ -95,9 +95,9 @@ impl NormalizedTypeArgs {
     ///   `Pick<X, 'a'>` and `Pick<X, 'b'>` produce distinct keys.
     /// * `Infer` / unknown-shape arguments produce
     ///   `AnonymousShape(structural_hash)` — a stable hash of the
-    ///   `TypeExpr` (which derives `Hash`) so structurally-identical
-    ///   inline shapes share an identity but distinct shapes do not
-    ///   collide.
+    ///   `TypeExpr` (via its shared depth-safe iterative `Hash`) so
+    ///   structurally-identical inline shapes share an identity but
+    ///   distinct shapes do not collide.
     ///
     /// The function is `&mut PolicyCtx` because resolving a `Ref`
     /// argument may consult the same declaration cache the cycle guard
@@ -138,10 +138,22 @@ impl Default for NormalizedTypeArgs {
     }
 }
 
+/// Peel off `Parenthesized` wrappers iteratively, returning the first
+/// non-parenthesised inner type. A deeply-parenthesised argument
+/// (`((((T))))`) would otherwise recurse once per layer in
+/// [`normalize_one_arg`] and overflow the stack on a pathological depth —
+/// the same hazard class the `TypeExpr` iterative `Drop`/`Hash` removed.
+fn strip_parentheses(mut arg: &TypeExpr) -> &TypeExpr {
+    while let TypeExpr::Parenthesized(inner) = arg {
+        arg = inner;
+    }
+    arg
+}
+
 /// Resolve one `TypeExpr` argument into its `NormalizedTypeArg` shape.
 fn normalize_one_arg(arg: &TypeExpr, ctx: &mut PolicyCtx<'_, '_>) -> NormalizedTypeArg {
+    let arg = strip_parentheses(arg);
     match arg {
-        TypeExpr::Parenthesized(inner) => normalize_one_arg(inner, ctx),
         TypeExpr::Ref { name, .. } => {
             // Try to resolve the ref to a declaration identity. When
             // the lookup succeeds the canonical source uniquely keys
@@ -163,10 +175,12 @@ fn normalize_one_arg(arg: &TypeExpr, ctx: &mut PolicyCtx<'_, '_>) -> NormalizedT
 }
 
 /// Compute a deterministic 64-bit hash of a `TypeExpr`. The structural
-/// `Hash` derivation on `TypeExpr` is stable across builds because all
-/// component hashers are deterministic; this function routes through
-/// `xxh3` so the digest is the same shape used elsewhere in the cycle
-/// guard's identity space.
+/// `Hash` impl on `TypeExpr` is stable across builds because all
+/// component hashers are deterministic; it is the shared, depth-safe
+/// continuation-frame iterative walker (NOT a recursive derive), so this
+/// routes a deeply-nested `TypeExpr` through `Hash` without risking stack
+/// overflow. The digest goes through `xxh3` to match the shape used
+/// elsewhere in the cycle guard's identity space.
 fn hash_type_expr(expr: &TypeExpr) -> ShapeHash {
     use std::hash::Hash;
     let mut hasher = xxhash_rust::xxh3::Xxh3::new();
@@ -196,5 +210,49 @@ impl<'a> std::hash::Hasher for LiteralHashBridge<'a> {
 
     fn write(&mut self, bytes: &[u8]) {
         self.0.update(bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// `strip_parentheses` peels a deeply-parenthesised argument
+    /// iteratively and MUST NOT overflow the stack on a pathological
+    /// depth.
+    ///
+    /// Discrimination: the former `normalize_one_arg` recursed on the
+    /// `Parenthesized` arm (`normalize_one_arg(inner, ctx)`); a chain
+    /// this deep overflowed the stack on a default thread stack. The
+    /// iterative `while let` peeling returns in O(1) stack.
+    ///
+    /// (The build/drop of this deep `TypeExpr` is itself depth-safe via
+    /// `TypeExpr`'s iterative `Drop`.)
+    #[test]
+    fn strip_parentheses_handles_deeply_nested_without_stack_overflow() {
+        const DEPTH: usize = 200_000;
+        let mut arg = TypeExpr::named("Inner");
+        for _ in 0..DEPTH {
+            arg = TypeExpr::Parenthesized(Arc::new(arg));
+        }
+
+        let stripped = strip_parentheses(&arg);
+        // The peeled result is the innermost non-parenthesised type.
+        assert!(
+            matches!(stripped, TypeExpr::Ref { name, .. } if name.as_ref() == "Inner"),
+            "strip_parentheses must return the innermost type, got {stripped:?}",
+        );
+    }
+
+    /// A non-parenthesised argument is returned unchanged.
+    #[test]
+    fn strip_parentheses_passes_through_non_parenthesised() {
+        let arg = TypeExpr::Primitive(verter_type_expr::PrimitiveName::String);
+        let stripped = strip_parentheses(&arg);
+        assert!(matches!(
+            stripped,
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        ));
     }
 }
