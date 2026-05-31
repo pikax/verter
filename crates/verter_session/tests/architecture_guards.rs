@@ -1674,18 +1674,8 @@ mod resolver_core_recursion {
         // -----------------------------------------------------------------
         (
             "helpers",
-            "prepared_decl_keeps_raw_symbolic_non_object_alias",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
-        ),
-        (
-            "helpers",
-            "prepared_member_body_stays_shallow",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
-        ),
-        (
-            "helpers",
             "projected_surface_member_names",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+            "bounded by TypeExpr AST depth.",
         ),
         (
             "helpers",

@@ -62,7 +62,6 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_solver::query_engine::ProjectedMember;
 use verter_type_expr::TypeExpr;
 
 use crate::fact_signature_helpers::empty_fact_signature;
@@ -70,7 +69,7 @@ use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
 use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistrySymbol;
 use crate::resolver_core::{
     FactVersionRef, MaterializeScopeObservation, ResolvedDeclarationKind, ResolvedTypeDeclaration,
-    ResolverContext, RouteDemand, StoreView,
+    ResolverContext, StoreView,
 };
 use crate::semantic_query::ProjectionMode;
 use crate::{HostConfig, UpsertRequest, VerterHost};
