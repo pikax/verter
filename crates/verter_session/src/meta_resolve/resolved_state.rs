@@ -1,8 +1,9 @@
-//! Resolved-state types + small TypeExpr substitution helpers.
+//! Resolved-state types + small scope-selection / cycle-reachability
+//! helpers.
 //!
-//! Domain 5 — `ResolvedComponentMetaState`,
-//! `SurfaceNodeIdentities`, type aliases, and 9 standalone TypeExpr
-//! substitution / scope-selection helpers.
+//! Domain 5 — `ResolvedComponentMetaState`, `SurfaceNodeIdentities`,
+//! type aliases, and a handful of standalone scope-selection and
+//! transitive-cycle-reachability helpers.
 
 use super::dep_signature::emit_dispatch_dep_signature_facts;
 use crate::types::{FileAnalysisSnapshot, Hash16, ProjectionMode};
