@@ -325,8 +325,6 @@ pub(crate) mod session_runtime;
 pub mod session_view;
 mod shared;
 pub(crate) mod source_map_remap;
-#[cfg(test)]
-pub(crate) mod spike_instrumentation;
 pub(crate) mod template_convert;
 pub mod typeinfo;
 mod types;

@@ -64,8 +64,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         exported_name: &str,
     ) -> Option<ResolvedImportedRegistrySymbol> {
         let key = (canonical_id.to_string(), exported_name.to_string());
-        #[cfg(test)]
-        crate::spike_instrumentation::record_cache_read("imported_registry_symbols");
         if let Some(cached) = self.imported_registry_symbols.borrow().get(&key).cloned() {
             return cached;
         }
@@ -406,8 +404,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         requested_name: &str,
     ) -> ResolvedTypeDeclaration {
         let key = (canonical_source.to_string(), requested_name.to_string());
-        #[cfg(test)]
-        crate::spike_instrumentation::record_cache_read("declarations");
         if let Some(cached) = self.declarations.borrow().get(&key).cloned() {
             return cached;
         }
@@ -496,8 +492,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .filter(|s| !s.is_empty())
             .unwrap_or(owner_canonical);
         let key = (source_key.to_string(), exported_name.to_string());
-        #[cfg(test)]
-        crate::spike_instrumentation::record_cache_read("resolvable");
         if let Some(cached) = self.resolvable.borrow().get(&key).copied() {
             return cached;
         }
@@ -558,8 +552,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         owner_canonical: &str,
         name: &str,
     ) -> Option<verter_type_expr::TypeExpr> {
-        #[cfg(test)]
-        crate::spike_instrumentation::record_cache_read("owner_collection_exprs");
         if let Some(cached) = self.owner_collection_exprs.borrow().get(name).cloned() {
             return cached;
         }

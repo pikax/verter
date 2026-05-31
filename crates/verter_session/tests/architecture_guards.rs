@@ -4414,7 +4414,6 @@ mod foundations_guards {
         // overlay-mutation machinery the trait replaces.
         "pub mod session_view",
         "pub(crate) mod source_map_remap",
-        "pub(crate) mod spike_instrumentation",
         "pub(crate) mod template_convert",
         "pub(crate) mod capture_token",
         // ─── test-only re-export shim ──────────────────────────────
