@@ -614,7 +614,19 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
 /// Walks Parenthesized wrappers transparently. Stops decomposition at
 /// the first non-string-literal index (returns the partial chain as
 /// path with the partial-chain root as base).
-fn decompose_indexed_access_chain(
+/// Decompose a string-literal-indexed access chain
+/// (`Root['a']['b']['c']`) into its `(base, [a, b, c])` path-precise
+/// form. The base is the innermost non-`IndexedAccess` carrier (a `Ref`,
+/// a generic instantiation, etc.) and the path is the ordered list of
+/// string-literal index hops. A non-string-literal index stops the
+/// descent (the whole expression becomes the base, empty path).
+///
+/// Shared by the transit-shallow Class-A projector and the Vue macro
+/// surface adapter so the deep-indexed-access macro type argument
+/// (`defineProps<DeepConfig['ui']['header']>()`) walks the SAME
+/// path-precise `ProjectPath` both paths use — intermediate hops in
+/// `Navigate`, terminal hop in the caller's mode (one engine).
+pub(crate) fn decompose_indexed_access_chain(
     expr: &verter_type_expr::TypeExpr,
 ) -> (
     &verter_type_expr::TypeExpr,

@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    ProjectionMode, ProjectionReductionContext, QueryResult, ResolveDeclKey, ScopeId,
+    PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, ResolveDeclKey, ScopeId,
     SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
 };
 use crate::typeinfo::surface::TypeInfoSurface;
@@ -96,29 +96,42 @@ impl VerterHost {
             &host_ctx,
             &dispatch,
             base,
+            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
             ProjectionReductionContext::published(ProjectionMode::Shallow),
         )
     }
 
     /// Project a resolved base node to its span-rich one-level
-    /// [`TypeInfoSurface`] via the empty-path `Shallow` synthesiser + JSDoc
+    /// [`TypeInfoSurface`] via a `Shallow` `ProjectPath` synthesiser + JSDoc
     /// enrichment. Shared by the named-declaration accessor
     /// ([`Self::resolve_shallow_surface_for`]) and the Vue-macro surface
     /// adapter, so both produce the surface through ONE code path.
     ///
-    /// `context` is the empty-path `ProjectPath` reduction context. The
-    /// named-declaration accessor passes `published(Shallow)` (structural
-    /// provenance). The Vue **props** macro normalizer passes
-    /// `published_macro_type_arg_body(Shallow)` so the macro type-argument's
-    /// own-body members surface with `declared_in_macro_type_arg = true` while
-    /// heritage-reached members stay `false` — the same own-body-vs-heritage
-    /// provenance the eager rail records. `mode` MUST stay `Shallow` so the
-    /// surface is one-level (member values stay reference-style).
+    /// `path` is the path-precise selector applied to `base` BEFORE the
+    /// one-level surface synthesis. Most callers pass the empty path (the base
+    /// IS the surface root). The Vue-macro adapter passes a non-empty path when
+    /// the macro type argument is a deep indexed access
+    /// (`defineProps<DeepConfig['ui']['header']>()`): the shared `ProjectPath`
+    /// walker runs the intermediate hops (`['ui']`) in `Navigate` and the
+    /// TERMINAL hop (`['header']`) in the caller's mode, so the leaf object's
+    /// members surface without the intermediate siblings leaking — the
+    /// path-precise rule. A bare empty-path synthesiser would instead see the
+    /// unreduced `IndexedAccess` carrier and yield NO members.
+    ///
+    /// `context` is the `ProjectPath` reduction context. The named-declaration
+    /// accessor passes `published(Shallow)` (structural provenance). The Vue
+    /// **props** macro normalizer passes `macro_object_surface(Shallow,
+    /// MacroTypeArgOwnBody)` so the macro type-argument's own-body members
+    /// surface with `declared_in_macro_type_arg = true` while heritage-reached
+    /// members stay `false` — the same own-body-vs-heritage provenance the eager
+    /// rail records. `mode` MUST stay `Shallow` so the surface is one-level
+    /// (member values stay reference-style).
     pub(crate) fn project_shallow_surface_from_base(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         dispatch: &ProjectSemanticDispatch<'_>,
         base: SemanticNodeId,
+        path: Arc<[PathSegment]>,
         context: ProjectionReductionContext,
     ) -> Option<TypeInfoSurface> {
         debug_assert_eq!(
@@ -126,14 +139,17 @@ impl VerterHost {
             ProjectionMode::Shallow,
             "project_shallow_surface_from_base synthesises a one-level surface; mode must be Shallow"
         );
-        // Empty-path Shallow projection synthesises the one-level surface
+        // Path-precise `Shallow` projection synthesises the one-level surface
         // (call / construct / index signatures + merged members) without
-        // expanding member bodies. This path PRESERVES call / construct
+        // expanding member bodies. An empty `path` projects `base`'s own
+        // one-level surface; a non-empty `path` walks the selector hops first
+        // (intermediate hops `Navigate`, terminal in the caller's mode) and
+        // synthesises the LEAF's surface. This path PRESERVES call / construct
         // signatures, so an emit interface's call signatures survive here (the
         // emit normalizer reads them).
         let terminal = match dispatch.execute(SemanticQueryKey::ProjectPath {
             base,
-            path: Arc::from(Vec::new().into_boxed_slice()),
+            path,
             context,
         }) {
             QueryResult::Value(node) | QueryResult::Recursive(node) => node,

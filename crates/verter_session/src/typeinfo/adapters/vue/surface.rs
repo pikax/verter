@@ -51,7 +51,9 @@ use verter_type_expr::{LiteralValue, TypeExpr, TypeExprScope};
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::surface_projector::render_type_expr_display;
-use crate::semantic_query::{ProjectionMode, ProjectionReductionContext, SurfaceProvenanceContext};
+use crate::semantic_query::{
+    PathSegment, ProjectionMode, ProjectionReductionContext, SurfaceProvenanceContext,
+};
 use crate::typeinfo::adapters::vue::store::{VueMacroDtoKey, VueMacroDtos};
 use crate::typeinfo::surface::{CanonicalSpan, TypeInfoSurface, TypeInfoSurfaceMember};
 use crate::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
@@ -290,18 +292,34 @@ impl VerterHost {
         // lowering and cross-file carrier projection below read overlay content.
         let dispatch = ctx.dispatch();
 
-        // Lower the macro type argument in the SFC scope. `Navigate` /
+        // Path-precise decomposition of a deep indexed-access type argument
+        // (`defineProps<DeepConfig['ui']['header']>()`). The SAME decomposition
+        // the transit-shallow Class-A projector uses: the base
+        // (`DeepConfig` / `WrappedConfig<Theme>`) is lowered as the carrier and
+        // the string-literal hops (`['ui']`, `['header']`) become the
+        // `ProjectPath` selector. The shared path walker then runs the
+        // intermediate hops in `Navigate` and the TERMINAL hop under
+        // `terminal_context` (Shallow), so the leaf object's members surface
+        // WITHOUT the intermediate siblings leaking. Lowering the WHOLE chain as
+        // a single node and projecting the empty path would instead leave an
+        // unreduced `IndexedAccess` carrier whose one-level surface is empty —
+        // the leaf would be lost. A non-indexed type argument decomposes to
+        // `(type_arg, [])`, preserving the prior empty-path behaviour exactly.
+        let (base_expr, path) =
+            crate::meta_resolve::dispatch_helpers::decompose_indexed_access_chain(type_arg);
+
+        // Lower the carrier base in the SFC scope. `Navigate` /
         // structural-transit lowering keeps member values shallow; the
-        // empty-path `Shallow` projection then synthesises the one-level surface
-        // under `terminal_context`.
+        // path-precise `Shallow` projection then synthesises the one-level
+        // surface of the terminal hop under `terminal_context`.
         let base = dispatch.lower_type_expr_in_scope_with_context(
             request.owner_canonical.as_ref(),
-            type_arg,
+            base_expr,
             ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
         )?;
 
         let surface =
-            self.project_shallow_surface_from_base(ctx, &dispatch, base, terminal_context)?;
+            self.project_shallow_surface_from_base(ctx, &dispatch, base, path, terminal_context)?;
 
         Some(VueMacroSurface {
             surface,
@@ -391,6 +409,7 @@ impl VerterHost {
             &host_ctx,
             &dispatch,
             base,
+            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
             ProjectionReductionContext::published(ProjectionMode::Shallow),
         )
     }
