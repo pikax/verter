@@ -1086,6 +1086,147 @@ pub(crate) fn await_imported_registry_post_peek_barrier_for_tests(canonical_id: 
     }
 }
 
+/// Process-global winner-park gate for the imported-registry
+/// singleflight discriminator — the SECOND phase of the deterministic
+/// rendezvous that [`IMPORTED_REGISTRY_POST_PEEK_BARRIER`] begins.
+///
+/// The post-peek barrier guarantees every contending thread is past its
+/// `peek` miss before any enters cooperative admission, but it does NOT
+/// bound the race INSIDE `cooperative_admit_with_post_publish` between a
+/// worker's loop-top `map.get` miss and that worker's claim of the
+/// in-flight slot. Under heavy load a worker descheduled in that window
+/// can wake to find the slot already retired (the winner published AND
+/// retired it), create a FRESH slot, and become a SECOND cold winner —
+/// running the fuse-consuming resolution again. That redundant compute
+/// is an accepted property of the singleflight primitive (it guarantees
+/// at most one ACTIVE compute per slot, not exactly one compute per key
+/// for all time), but it breaks the test's exactly-once fuse assertion.
+///
+/// This gate closes that window deterministically. When armed for the
+/// keyed canonical, the cold winner blocks inside its
+/// `get_or_compute_admit` compute closure — AFTER it has claimed the
+/// in-flight slot (so `claimed == true` is already published and every
+/// later arrival is forced onto the joiner branch) and BEFORE it runs
+/// the resolution / publishes / retires the slot. The test releases the
+/// winner only once it has PROVEN, via
+/// [`InflightTable::slot_strong_count`](crate::cooperative_admission::InflightTable::slot_strong_count),
+/// that all `WORKERS - 1` joiners have coalesced onto the winner's slot.
+/// No worker is then left mid-flight between its map miss and its slot
+/// claim, so no second winner can form: exactly one resolution runs and
+/// every joiner reuses its published value.
+///
+/// Keyed to a marker canonical, exactly like the post-peek barrier, so a
+/// concurrent unrelated test sails past untouched.
+#[cfg(test)]
+static IMPORTED_REGISTRY_WINNER_PARK: std::sync::Mutex<
+    Option<(String, std::sync::Arc<ImportedRegistryWinnerPark>)>,
+> = std::sync::Mutex::new(None);
+
+/// Condvar-backed release latch the parked winner blocks on. The
+/// `released` bool closes a lost-wakeup race: the test may set `released`
+/// before the winner reaches the park (e.g. the winner is slow to enter
+/// compute), in which case the winner observes `released == true` and
+/// proceeds without blocking. Either ordering preserves the invariant
+/// the discriminator relies on — `release()` is called only AFTER the
+/// test observed every joiner coalesce, so the winner can never publish
+/// before that point.
+#[cfg(test)]
+struct ImportedRegistryWinnerPark {
+    released: std::sync::Mutex<bool>,
+    ready: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl ImportedRegistryWinnerPark {
+    fn wait(&self) {
+        let mut released = self.released.lock().unwrap();
+        while !*released {
+            released = self.ready.wait(released).unwrap();
+        }
+    }
+
+    fn release(&self) {
+        *self.released.lock().unwrap() = true;
+        self.ready.notify_all();
+    }
+}
+
+/// Handle returned to the test for releasing the parked cold winner once
+/// the joiner-coalescing rendezvous has completed.
+#[cfg(test)]
+pub(crate) struct ImportedRegistryWinnerParkHandle(std::sync::Arc<ImportedRegistryWinnerPark>);
+
+#[cfg(test)]
+impl ImportedRegistryWinnerParkHandle {
+    /// Release the parked cold winner so it runs the resolution and
+    /// publishes its value. Idempotent.
+    pub(crate) fn release(&self) {
+        self.0.release();
+    }
+}
+
+/// RAII guard that disarms the winner-park gate on drop AND releases any
+/// still-parked winner, so a panicking test (e.g. a tripped rendezvous
+/// deadline) cannot leave a production thread blocked inside the compute
+/// closure or leave the gate armed for the next test.
+#[cfg(test)]
+pub(crate) struct ImportedRegistryWinnerParkGuard(std::sync::Arc<ImportedRegistryWinnerPark>);
+
+#[cfg(test)]
+impl Drop for ImportedRegistryWinnerParkGuard {
+    fn drop(&mut self) {
+        // Disarm first so no new winner can park, then release any winner
+        // already blocked on the gate.
+        *IMPORTED_REGISTRY_WINNER_PARK.lock().unwrap() = None;
+        self.0.release();
+    }
+}
+
+/// Arm the imported-registry winner-park gate for `marker_canonical`.
+/// The cold winner of a `resolve_imported_registry_symbol` whose keyed
+/// canonical equals `marker_canonical` blocks inside its cooperative
+/// admission compute closure until the returned handle's `release()` is
+/// called. The returned guard disarms the gate (and releases any parked
+/// winner) on drop.
+#[cfg(test)]
+pub(crate) fn arm_imported_registry_winner_park_for_tests(
+    marker_canonical: &str,
+) -> (
+    ImportedRegistryWinnerParkHandle,
+    ImportedRegistryWinnerParkGuard,
+) {
+    let park = std::sync::Arc::new(ImportedRegistryWinnerPark {
+        released: std::sync::Mutex::new(false),
+        ready: std::sync::Condvar::new(),
+    });
+    *IMPORTED_REGISTRY_WINNER_PARK.lock().unwrap() =
+        Some((marker_canonical.to_string(), std::sync::Arc::clone(&park)));
+    (
+        ImportedRegistryWinnerParkHandle(std::sync::Arc::clone(&park)),
+        ImportedRegistryWinnerParkGuard(park),
+    )
+}
+
+/// Block the cold winner on the imported-registry winner-park gate when
+/// it is armed for `canonical_id`. Invoked by the
+/// `resolve_imported_registry_symbol` cooperative-admission compute
+/// closure exactly once per cold compute, AFTER the in-flight slot is
+/// claimed and BEFORE the resolution runs. A no-op when the gate is
+/// unarmed or armed for a different canonical.
+#[cfg(test)]
+pub(crate) fn await_imported_registry_winner_park_for_tests(canonical_id: &str) {
+    let park = {
+        let slot = IMPORTED_REGISTRY_WINNER_PARK.lock().unwrap();
+        match slot.as_ref() {
+            Some((marker, park)) if marker == canonical_id => Some(std::sync::Arc::clone(park)),
+            _ => None,
+        }
+    };
+    if let Some(park) = park {
+        park.wait();
+    }
+}
+
 impl<'a> ComponentMetaQueryEngine<'a> {
     pub(crate) fn new(ctx: &'a dyn ResolverContext) -> Self {
         // Bump `bare_engine_constructions` whenever the engine is

@@ -211,6 +211,22 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let host_value = host_db.get_or_compute_admit(&arc_key, ctx, || {
             #[cfg(test)]
             super::IMPORTED_REGISTRY_RESOLVE_INVOCATIONS.with(|n| n.set(n.get().saturating_add(1)));
+            // Cross-thread singleflight slot-coalescing rendezvous seam:
+            // when the imported-registry winner-park gate is armed for
+            // this keyed canonical, the cold winner blocks here — AFTER
+            // it has claimed the in-flight slot (so `claimed == true` is
+            // already published and every later arrival is forced onto
+            // the joiner branch) and BEFORE it runs the fuse-consuming
+            // resolution / publishes / retires the slot. The test
+            // releases the winner only once it has proven every joiner
+            // has coalesced onto this slot, so no worker is left
+            // mid-flight between its `map.get` miss and its slot claim —
+            // closing the window in which a descheduled worker would
+            // form a second cold winner and tick the wildcard-route fuse
+            // again. A no-op in production and whenever the gate is
+            // unarmed.
+            #[cfg(test)]
+            super::await_imported_registry_winner_park_for_tests(canonical_id);
             // Per-request audit attribution: cold path running the
             // expensive `resolve_imported_registry_symbol_with_budget`
             // resolution. Joiners that block on this closure do NOT

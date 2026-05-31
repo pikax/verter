@@ -4270,6 +4270,25 @@ fn resolve_imported_registry_symbol_surfaces_concurrently_published_value() {
 ///    BOTH configurations: it removes the timing window in which an
 ///    early publisher could let a late worker warm-hit `peek` and skip
 ///    its resolution.
+///  - The process-global winner-park gate is armed for the same keyed
+///    canonical. It closes the SECOND timing window the post-peek
+///    barrier does not bound: the race INSIDE
+///    `cooperative_admit_with_post_publish` between a worker's loop-top
+///    `map.get` miss and its claim of the in-flight slot. Under load a
+///    worker descheduled there can wake to a retired slot (the winner
+///    already published AND retired it), fork a fresh slot, and become a
+///    SECOND cold winner that ticks the wildcard-route fuse again. The
+///    gate parks the cold winner inside its compute closure — after the
+///    slot is claimed (`claimed == true` is published, forcing every
+///    later arrival onto the joiner branch), before the resolution runs.
+///    The main thread releases the winner only once it has PROVEN, via
+///    the slot's `Arc` strong count (`3 + (WORKERS - 1) == WORKERS + 2`
+///    while the winner is parked), that every joiner has coalesced onto
+///    the winner's slot. No worker is then mid-flight between its miss
+///    and its claim, so no second winner can form — `total_fuse_consumed`
+///    is deterministically 1 even under the oversubscribed
+///    `cargo test --workspace` gate. This rendezvous is the means;
+///    weakening the exactly-once assertion is not.
 ///  - Each worker owns an independent `ComponentMetaQueryEngine` (hence
 ///    an independent wildcard-route fuse). After the join the test sums
 ///    each engine's observed fuse consumption.
@@ -4327,10 +4346,36 @@ fn resolve_imported_registry_symbol_resolves_once_under_concurrent_misses() {
         }],
     );
 
-    // Arm the post-peek rendezvous so all WORKERS workers pass `peek`
-    // (all missing) before any enters cooperative admission.
-    let (_barrier, _guard) =
+    // Two-part deterministic singleflight rendezvous.
+    //
+    // First, the post-peek barrier: all WORKERS workers pass their `peek`
+    // miss (nothing is published yet) before any enters cooperative
+    // admission, so the test genuinely exercises WORKERS concurrent cold
+    // misses on one key.
+    //
+    // Then, the winner park: the cold winner blocks inside the
+    // cooperative-admission compute closure (after it claims the
+    // in-flight slot, before it runs the fuse-consuming resolution). The
+    // main thread releases it only once it has PROVEN — via the slot's
+    // `Arc` strong count — that every other worker has coalesced onto the
+    // winner's slot as a joiner. This closes the load-only window in
+    // which a worker descheduled between its `map.get` miss and its slot
+    // claim wakes to find the slot retired, forks a fresh slot, and
+    // becomes a SECOND cold winner that ticks the wildcard-route fuse
+    // again (the redundant-compute property the singleflight primitive
+    // permits but this exactly-once discriminator must not observe).
+    let (_barrier, _barrier_guard) =
         super::arm_imported_registry_post_peek_barrier_for_tests("/singleflight/index.ts", WORKERS);
+    let (winner_release, _winner_park_guard) =
+        super::arm_imported_registry_winner_park_for_tests("/singleflight/index.ts");
+
+    // The keyed canonical the WORKERS cold misses contend on — used to
+    // observe the in-flight slot's `Arc` strong count during the
+    // coalescing rendezvous.
+    let inflight_key: crate::component_meta_caches::ImportedRegistryKey = (
+        std::sync::Arc::<str>::from("/singleflight/index.ts"),
+        std::sync::Arc::<str>::from("Wide"),
+    );
 
     let results: Vec<(usize, Option<super::ResolvedImportedRegistrySymbol>)> =
         std::thread::scope(|scope| {
@@ -4353,6 +4398,46 @@ fn resolve_imported_registry_symbol_resolves_once_under_concurrent_misses() {
                     })
                 })
                 .collect();
+
+            // Winner-park rendezvous — prove every joiner has coalesced
+            // onto the winner's in-flight slot BEFORE releasing the winner.
+            // While the winner is parked the substrate holds exactly
+            // three `Arc`s on the slot (the in-flight table entry, the
+            // winner's `slot` local, and the winner's `panic_guard.slot`);
+            // each of the WORKERS-1 joiners bumps the count by one the
+            // instant it clones its own `Arc` via the slot-acquisition
+            // `table.entry(key).or_insert_with(..).clone()`, past which it
+            // deterministically reaches the cooperative joiner wait branch
+            // (the winner has already published `claimed == true`). The
+            // target strong count is therefore 3 + (WORKERS - 1) ==
+            // WORKERS + 2. `yield_now` (not a busy spin) keeps the main
+            // thread from starving the very workers it is waiting on under
+            // the oversubscribed gate.
+            let db = host.project_type_store().imported_registry_db();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let mut coalesced = false;
+            while std::time::Instant::now() < deadline {
+                if db
+                    .inflight_table_for_test()
+                    .slot_strong_count(&inflight_key)
+                    .is_some_and(|count| count >= WORKERS + 2)
+                {
+                    coalesced = true;
+                    break;
+                }
+                std::thread::yield_now();
+            }
+            // Release the winner BEFORE joining so a coalescing timeout can
+            // never deadlock the scope's thread join on the parked winner;
+            // the `_winner_park_guard` is a drop-time backstop.
+            winner_release.release();
+            assert!(
+                coalesced,
+                "the {WORKERS} concurrent cold-miss workers failed to coalesce onto ONE \
+                 in-flight slot within 30s — the deterministic singleflight rendezvous is \
+                 broken (the winner-park / slot-strong-count contract no longer holds)",
+            );
+
             handles
                 .into_iter()
                 .map(|h| h.join().expect("worker thread joined"))
