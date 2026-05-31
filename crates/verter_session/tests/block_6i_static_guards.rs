@@ -448,28 +448,15 @@ fn extract_fn_body(src: &str, anchor: &str) -> String {
 
 /// The cursor-threaded production functions Commit AX must make
 /// load-bearing. `(label, rel_path, signature_anchor)`.
+///
+/// The retired macro-object materialiser cluster
+/// (`produce_one_macro_object_shape` / `project_named_ref_*_shape` in
+/// `materialize/macro_shapes.rs`) is DELETED — `define_*` shapes are
+/// produced by the dispatch projectors below. The surviving
+/// cursor-threading authority is the projector set; their absence is
+/// guarded by `no_legacy_walker.rs::RETIRED_SYMBOLS`.
 fn ax_cursor_target_set() -> Vec<(&'static str, &'static str, &'static str)> {
     vec![
-        (
-            "produce_one_macro_object_shape",
-            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
-            "pub(crate) fn produce_one_macro_object_shape(",
-        ),
-        (
-            "project_named_ref_prepared_surface_shape",
-            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
-            "pub(crate) fn project_named_ref_prepared_surface_shape(",
-        ),
-        (
-            "project_named_ref_surface_shape",
-            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
-            "pub(crate) fn project_named_ref_surface_shape(",
-        ),
-        (
-            "project_named_ref_imported_scope_shape",
-            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
-            "pub(crate) fn project_named_ref_imported_scope_shape(",
-        ),
         (
             "project_props",
             "crates/verter_session/src/meta_resolve/projectors/props.rs",
@@ -546,34 +533,70 @@ fn ax_cursor_is_consumed_not_discarded() {
 }
 
 // ---------------------------------------------------------------------------
-// Guard AX.2 — `macro_shapes.rs` gates published members through
-// `descend_published_member`.
+// Guard AX.2 — every macro projector gates published members through
+// `cursor.descend_published_member`.
 //
-// The macro-shape producer and the projector pipeline must agree on
-// the published-surface membership: every projected macro shape is
-// finalised through `cursor.descend_published_member` so a member
-// the cursor does not admit is dropped identically on both paths.
+// The retired macro-shape materialiser (`finalize_macro_shape_through_cursor`
+// in `materialize/macro_shapes.rs`) is DELETED; the per-member breadth
+// gate now lives ONLY in the dispatch projectors. Each projector
+// admits a surface member by descending the publication cursor
+// (`cursor.descend_published_member(name)`); a member the cursor does
+// not admit (`None`) is dropped from the surface. This is the live
+// Rule-5 per-member descent — if a projector stops calling
+// `descend_published_member`, the `outputSchema`/`execute` depth leak
+// re-opens. (Retired-materialiser ABSENCE is covered by
+// `no_legacy_walker.rs`; this guard covers projector PRESENCE.)
 // ---------------------------------------------------------------------------
 #[test]
-fn ax_macro_shapes_descends_published_member() {
-    let src =
-        read_workspace_file("crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs");
-    assert!(
-        src.contains("descend_published_member("),
-        "AX.2 guard: `macro_shapes.rs` MUST call \
-         `descend_published_member(` — the macro-shape producer's \
-         per-member breadth gate must match the projector pipeline's \
-         per-member descent."
-    );
-    // The finalizer must descend each property through the cursor.
-    let finalizer_body = extract_fn_body(&src, "fn finalize_macro_shape_through_cursor(");
-    assert!(
-        finalizer_body.contains("descend_published_member("),
-        "AX.2 guard: `finalize_macro_shape_through_cursor` MUST gate \
-         each published property through \
-         `cursor.descend_published_member` so a narrowed projection \
-         drops siblings identically to `project_props`."
-    );
+fn ax_projectors_descend_published_member() {
+    // Each surviving macro projector and the body anchor whose
+    // surface-member loop MUST descend the publication cursor.
+    let projector_set: &[(&str, &str, &str)] = &[
+        (
+            "project_props",
+            "crates/verter_session/src/meta_resolve/projectors/props.rs",
+            "pub(crate) fn project_props(",
+        ),
+        (
+            "project_emits",
+            "crates/verter_session/src/meta_resolve/projectors/emits.rs",
+            "pub(crate) fn project_emits(",
+        ),
+        (
+            "project_slots",
+            "crates/verter_session/src/meta_resolve/projectors/slots.rs",
+            "pub(crate) fn project_slots(",
+        ),
+        (
+            "project_exposed",
+            "crates/verter_session/src/meta_resolve/projectors/exposed.rs",
+            "pub(crate) fn project_exposed(",
+        ),
+        (
+            "project_options",
+            "crates/verter_session/src/meta_resolve/projectors/options.rs",
+            "pub(crate) fn project_options(",
+        ),
+        (
+            "project_model",
+            "crates/verter_session/src/meta_resolve/projectors/model.rs",
+            "pub(crate) fn project_model(",
+        ),
+    ];
+
+    for (label, rel, anchor) in projector_set {
+        let src = read_workspace_file(rel);
+        let body = extract_fn_body(&src, anchor);
+        assert!(
+            body.contains("cursor.descend_published_member("),
+            "AX.2 guard ({label}): the projector MUST descend each \
+             admitted surface member through \
+             `cursor.descend_published_member(` — that is the live \
+             per-member breadth gate. Dropping it re-opens the Rule-5 \
+             `outputSchema`/`execute` depth leak the macro-shape \
+             materialiser used to close."
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
